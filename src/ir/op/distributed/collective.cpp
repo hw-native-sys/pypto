@@ -26,13 +26,14 @@
  *   - pld.tensor.reduce_scatter(target, signal, op)                -> DistributedTensorType
  *   - pld.tensor.all_to_all(input, target, signal)                 -> DistributedTensorType
  *
- * The six builtin.tensor.* ops are internal chip-dispatch targets emitted by the
+ * The seven builtin.tensor.* ops are internal chip-dispatch targets emitted by the
  * host-orchestrator lowering pass (LowerHostTensorCollectives):
- * builtin.tensor.{allreduce,barrier,broadcast,reduce_scatter,allgather}.
+ * builtin.tensor.{allreduce,allreduce_ring,barrier,broadcast,reduce_scatter,allgather,all_to_all}.
  */
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -113,6 +114,63 @@ TypePtr DeduceBuiltinTensorAllReduceType(const std::vector<ExprPtr>& args,
   return args[0]->GetType();
 }
 
+TypePtr DeduceBuiltinTensorAllReduceRingType(const std::vector<ExprPtr>& args,
+                                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  constexpr const char* kOpName = "builtin.tensor.allreduce_ring";
+  CHECK(args.size() == 2) << kOpName << " requires exactly 2 positional arguments (src, signal), but got "
+                          << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
+  }
+
+  auto src_type = As<DistributedTensorType>(args[0]->GetType());
+  CHECK(src_type) << kOpName << " src must be a DistributedTensor, got " << args[0]->GetType()->TypeName();
+  auto signal_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(signal_type) << kOpName << " signal must be a DistributedTensor, got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << kOpName << " signal dtype must be INT32, got " << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 2)
+      << kOpName << " signal must be rank-2 [2*(NR-1) + 1, NR], got rank " << signal_type->shape_.size();
+
+  auto sig_shape0_const = As<ConstInt>(signal_type->shape_[0]);
+  auto sig_shape1_const = As<ConstInt>(signal_type->shape_[1]);
+  if (sig_shape0_const && sig_shape1_const && sig_shape1_const->value_ > 0) {
+    CHECK(sig_shape0_const->value_ == 2 * (sig_shape1_const->value_ - 1) + 1)
+        << kOpName << " signal shape[0] (" << sig_shape0_const->value_
+        << ") must equal 2*(NR-1) + 1 = " << 2 * (sig_shape1_const->value_ - 1) + 1
+        << " for NR = " << sig_shape1_const->value_;
+  }
+
+  // Compile-time divisibility check: the host builtin ring kernel partitions
+  // data into NR contiguous chunks.  A non-divisible numel would produce a
+  // trailing partial chunk the schedule cannot handle.
+  if (sig_shape1_const && sig_shape1_const->value_ > 0) {
+    int64_t src_numel = 1;
+    for (const auto& dim : src_type->shape_) {
+      auto extent = As<ConstInt>(dim);
+      if (!extent) {
+        src_numel = -1;
+        break;
+      }
+      src_numel *= extent->value_;
+    }
+    if (src_numel > 0) {
+      const int64_t nr = sig_shape1_const->value_;
+      CHECK(src_numel % nr == 0) << kOpName << " requires the src data size (product of shape = " << src_numel
+                                 << ") to be an exact multiple of the rank count (" << nr
+                                 << "); got a remainder of " << (src_numel % nr);
+    }
+  }
+
+  auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);
+  auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  CHECK(dtype == src_type->dtype_) << kOpName << " dtype kwarg (" << dtype.ToString()
+                                   << ") must match src dtype (" << src_type->dtype_.ToString() << ")";
+  CheckSupportedBuiltinVariant(op_value, dtype, kOpName);
+  return args[0]->GetType();
+}
+
 }  // namespace
 
 REGISTER_OP("builtin.tensor.allreduce")
@@ -126,6 +184,18 @@ REGISTER_OP("builtin.tensor.allreduce")
     .set_internal_only(true)
     .set_template_dir(":pypto.runtime.builtins.collectives.allreduce")
     .f_deduce_type(DeduceBuiltinTensorAllReduceType);
+
+REGISTER_OP("builtin.tensor.allreduce_ring")
+    .set_op_category("DistributedOp")
+    .set_description("Internal chip-dispatch builtin for pld.tensor.allreduce(mode=\"ring\").")
+    .add_argument("src", "Window-bound DistributedTensor to reduce in place")
+    .add_argument("signal", "Window-bound INT32 ring signal matrix [2*(NR-1) + 1, NR]")
+    .set_attr<int>("op")
+    .set_attr<DataType>("dtype")
+    .no_memory_spec()
+    .set_internal_only(true)
+    .set_template_dir(":pypto.runtime.builtins.collectives.allreduce_ring")
+    .f_deduce_type(DeduceBuiltinTensorAllReduceRingType);
 
 // ============================================================================
 // pld.tensor.barrier — cross-rank barrier (notify-all + wait-all)

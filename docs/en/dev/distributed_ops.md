@@ -310,11 +310,11 @@ dynamic physical target dimension is bound from that tensor parameter.
   `remote_load+accumulate`, then `AtomicAdd 1` / wait for its monotonic chunk
   counter before store-back, preventing write-after-read races.
 - **`"ring"`** — NCCL-style chunked reduce-scatter + allgather schedule with
-  O(1) HCCL windows.  Signal shape `[2 * (NR − 1), NR]` (one row per ring
-  round, one cell per rank).  2(P−1) ring steps with per-round barriers
+  O(1) HCCL windows.  Signal shape `[2 * (NR - 1) + 1, NR]` (one row per ring
+  round, plus one extra row for the return barrier; one cell per rank).  2(P-1) ring steps with per-round barriers
   (AtomicAdd 1 → Ge 1).  Chunk size = `SIZE // NR`, and `SIZE` must be an exact
-  multiple of `NR`; `LowerCompositeOps` constant-folds the chunk size when both
-  `SIZE` and `NR` are compile-time constants.
+  multiple of `NR`.  `LowerCompositeOps` constant-folds the chunk size when
+  both `SIZE` and `NR` are compile-time constants.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
 the [`SynthesizeAllReduceSignals`](passes/37-synthesize_allreduce_signals.md)
@@ -329,8 +329,11 @@ keeps the signal buffer in the same domain as `src`, even when it is not passed
 to a user chip kernel. The public op currently accepts `ReduceOp.Sum` and
 rejects the reserved reduce variants (`Max`, `Min`, `Prod`) until their
 lowerings land. The host builtin lowering path currently supports the `Sum` +
-FP32 variant and accepts either a rank-1 `[world_size]` signal or the
-synthesized rank-2 `[world_size, 1]` signal.
+FP32 variant. Mesh mode (`mode="mesh"`, default) lowers to
+`builtin.tensor.allreduce` and accepts either a rank-1 `[world_size]` signal or
+the synthesized rank-2 `[world_size, 1]` signal. Ring mode (`mode="ring"`)
+lowers to `builtin.tensor.allreduce_ring` and requires an explicit rank-2
+`[2 * (NR - 1) + 1, NR]` INT32 signal (same shape as the InCore ring composite, plus one extra row for the return barrier).
 
 ### `pld.system.notify` (TNOTIFY)
 
@@ -402,6 +405,7 @@ dispatches before the final `Simplify`.
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
+  `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
