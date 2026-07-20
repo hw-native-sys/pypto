@@ -167,7 +167,10 @@ void NoNestedCallVerifier::VisitExpr_(const CallPtr& op) {
 // — and strips the operand/indices that orchestration codegen decomposes.
 // FlattenCallExpr likewise leaves the field alone (it only walks ``args_``).
 //
-// Everything else on the Submit is still checked by delegating to the base.
+// Everything else on the Submit is still checked. NOTE: this walk is written by
+// hand rather than delegating to the base, so it enumerates args_/deps_/core_num_
+// explicitly — a new SSA-bearing field added to Submit would be walked by the
+// base visitor but silently skipped here. Extend this list when that happens.
 void NoNestedCallVerifier::VisitExpr_(const SubmitPtr& op) {
   if (!op) return;
   for (const auto& arg : op->args_) {

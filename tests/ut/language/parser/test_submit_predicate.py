@@ -98,7 +98,7 @@ def _pred_const(p) -> ir.ConstInt:
     return konst
 
 
-def _program(predicate_src: str, deps_src: str = "[g_tid]"):
+def _program(predicate_src: str, deps_src: str = "[g_tid]", rc_dtype: str = "pl.INT32"):
     """Build a two-kernel program whose expert submit carries ``predicate_src``.
 
     ``predicate_src`` is spliced verbatim as the ``predicate=`` argument text,
@@ -116,14 +116,18 @@ class Prog:
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
-    def gate(self, g: pl.Out[{_INT32_T}]) -> {_INT32_T}:
+    def gate(self, g: pl.Out[pl.Tensor[[512, 128], {rc_dtype}]]) -> pl.Tensor[[512, 128], {rc_dtype}]:
         t = pl.load(g, [0, 0], [128, 128])
         g = pl.store(t, [0, 0], g)
         return g
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(
-        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}], rc_in: {_INT32_T}
+        self,
+        x: {_FP32_T},
+        out: pl.Out[{_FP32_T}],
+        rc: pl.Out[pl.Tensor[[512, 128], {rc_dtype}]],
+        rc_in: {_INT32_T},
     ) -> {_FP32_T}:
         with pl.manual_scope():
             rc, g_tid = pl.spmd_submit(self.gate, rc, core_num=1)
@@ -292,3 +296,80 @@ def test_print_parse_round_trip():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# Runtime-ABI safety: operand dtype and index range
+# ---------------------------------------------------------------------------
+#
+# DispatchPredicate::pass() reads `elem_size` bytes and **sign-extends** to
+# int64 before comparing. An unsigned operand with the top bit set therefore
+# compares as negative and silently inverts the dispatch decision — a UINT32
+# row_count of 3_000_000_000 reads back as -1_294_967_296, so `row_count[e] > 0`
+# is false and the expert is skipped with no diagnostic at all. Sub-byte dtypes
+# have no addressable single-element read.
+
+
+@pytest.mark.parametrize("dtype", ["pl.UINT8", "pl.UINT16", "pl.UINT32", "pl.UINT64", "pl.INT4"])
+def test_unsigned_and_subbyte_operand_rejected(dtype):
+    with pytest.raises(ParserTypeError, match="signed 8/16/32/64-bit integer"):
+        _program("rc[0, 0] > 0", rc_dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", ["pl.INT8", "pl.INT16", "pl.INT32", "pl.INT64"])
+def test_signed_integer_operands_accepted(dtype):
+    prog = _program("rc[0, 0] > 0", rc_dtype=dtype)
+    assert isinstance(_main_submits(prog)[1].predicate, ir.Gt)
+
+
+def test_negative_constant_index_rejected():
+    # L0PredicateOperand::indices is uint32_t — a negative index wraps to a huge
+    # value and yields an out-of-bounds GM address read at the dispatch point.
+    with pytest.raises(ParserTypeError, match="index must be non-negative"):
+        _program("rc[-1, 0] > 0")
+
+
+def test_rebound_taskid_is_not_accepted_as_producer_dep():
+    """A rebound TaskId name must not certify an unrelated producer.
+
+    Strict SSA reuses one ``ir.Var`` object across same-named rebindings, so
+    object identity alone would match here even though ``deps=[tid]`` now refers
+    to the *second* gate submit and the predicate's producer is the first.
+    """
+    src = """
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def gate(
+        self, g: pl.Out[pl.Tensor[[512, 128], pl.INT32]]
+    ) -> pl.Tensor[[512, 128], pl.INT32]:
+        t = pl.load(g, [0, 0], [128, 128])
+        g = pl.store(t, [0, 0], g)
+        return g
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def expert(
+        self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        t = pl.load(x, [0, 0], [128, 128])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+        fb: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.manual_scope():
+            rc, tid = pl.spmd_submit(self.gate, rc, core_num=1)
+            fb, tid = pl.spmd_submit(self.gate, fb, core_num=1)
+            out, _ = pl.spmd_submit(
+                self.expert, x, out, core_num=1, deps=[tid], predicate=(rc[0, 0] > 0)
+            )
+        return out
+"""
+    with pytest.raises(ParserSyntaxError, match="not in deps="):
+        pl.parse_program(src)

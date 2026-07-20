@@ -1160,11 +1160,17 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
     attrs.emplace_back("allow_early_resolve", std::any(true));
   }
   // Dispatch predicate (pl.spmd_submit(..., predicate=(t[i] > 0))) — surface the
-  // comparison Expr as a transient Call-view attr so orchestration codegen can
-  // decompose it into ``Arg::set_predicate(...)``. Only present when the Submit
-  // carries a predicate; a plain submit's Call view is unchanged. This view Call
-  // is transient (codegen-only, never serialized/printed), so the std::any
-  // payload never reaches reflection.
+  // comparison Expr as a Call-view attr so orchestration codegen can decompose
+  // it into ``Arg::set_predicate(...)``. Only present when the Submit carries a
+  // predicate; a plain submit's Call view is unchanged.
+  //
+  // The view is *intended* to be transient (codegen-only), but a pass that
+  // rewrites a Submit through this view and rebuilds it must drop the keys
+  // synthesised here — otherwise the rebuilt Submit carries both the field and a
+  // stale attr copy, which the printer emits twice and structural_hash cannot
+  // encode (its attr codec has no ExprPtr branch). ``WindowExternalization``
+  // filters them explicitly; ``core_num`` / ``sync_start`` /
+  // ``allow_early_resolve`` need the same care.
   if (submit->predicate_.has_value()) {
     attrs.emplace_back("predicate", std::any(*submit->predicate_));
   }

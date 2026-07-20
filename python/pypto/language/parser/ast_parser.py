@@ -564,7 +564,15 @@ class ASTParser:
         # ``unique_id``, to the producer TaskId Var bound by that same submit.
         # Lets ``_validate_predicate_deps`` enforce the "predicate operand's
         # producer must be one of deps=" contract at the parser boundary.
-        self._submit_producer_tid: dict[int, ir.Var] = {}
+        self._submit_producer_tid: dict[int, tuple[ir.Var, int]] = {}
+        # How many times each TaskId Var object has been bound by a submit.
+        # Strict SSA reuses one ``ir.Var`` object across same-named rebindings
+        # (``_, tid = ...`` twice yields the same object), so object identity
+        # alone cannot tell *which* task a later ``deps=[tid]`` refers to.
+        # Recording the generation at producer time lets the contract check
+        # detect that the name was rebound in between, instead of matching on
+        # identity and falsely certifying the submit as compliant.
+        self._tid_binding_generation: dict[int, int] = {}
 
         # Forward-sticky ``pl.dump_tag`` set (per function, reset at function
         # entry). Holds the bound Vars whose subsequent kernel-call uses get a
@@ -1674,8 +1682,10 @@ class ASTParser:
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
         # Record this submit's result Vars against its producer TaskId so a
         # later submit's predicate= operand can be checked against its deps=.
+        gen = self._tid_binding_generation.get(tid_var.unique_id, 0) + 1
+        self._tid_binding_generation[tid_var.unique_id] = gen
         for out_var in produced:
-            self._submit_producer_tid[out_var.unique_id] = tid_var
+            self._submit_producer_tid[out_var.unique_id] = (tid_var, gen)
 
     def _build_submit_single_lhs_expr(self, call: ast.Call, *, is_spmd: bool = False) -> ir.Expr:
         """Build the ``ir.Submit`` expression for the single-LHS form
@@ -6236,9 +6246,15 @@ class ASTParser:
         hint = "Use predicate=(tensor[i0, ...] > 0) — one comparison against an integer literal."
         span = self.span_tracker.get_span(node)
         if not isinstance(predicate, self._PREDICATE_CMP_TYPES):
+            got = type(predicate).__name__
+            extra = (
+                " (to dispatch unconditionally, omit predicate= entirely)"
+                if isinstance(predicate, ir.Call) and predicate.op.name == "system.task_invalid"
+                else ""
+            )
             raise ParserSyntaxError(
                 f"'{method_name}' predicate must be a single comparison (==, !=, >, <, >=, <=); "
-                f"got {type(predicate).__name__}",
+                f"got {got}{extra}",
                 span=span,
                 hint=hint,
             )
@@ -6260,6 +6276,23 @@ class ASTParser:
                 span=span,
                 hint=hint,
             )
+        # The runtime reads `elem_size` bytes at the operand address and
+        # sign-extends to int64 before comparing. An unsigned operand whose top
+        # bit is set therefore compares as negative and silently inverts the
+        # dispatch decision (a UINT32 count of 3_000_000_000 reads as
+        # -1_294_967_296, so `count[e] > 0` is false and the task is skipped with
+        # no diagnostic). Sub-byte dtypes have no addressable single-element
+        # read. Reject both here for a source-level message; orchestration
+        # codegen re-checks as the backstop for IR built outside the DSL.
+        operand_dtype = operand_type.dtype
+        if not (operand_dtype.is_signed_int() and operand_dtype.get_bit() in (8, 16, 32, 64)):
+            raise ParserTypeError(
+                f"predicate operand must be a signed 8/16/32/64-bit integer tensor, got "
+                f"{operand_dtype}. The runtime sign-extends the value it reads, so an unsigned "
+                f"operand can compare as negative and silently invert the dispatch decision",
+                span=span,
+                hint=hint,
+            )
         # Each index renders as a scalar C++ expression into the runtime predicate
         # index array, so it must be an integer scalar — not, e.g., a tensor.
         indices = self._read_indices(read)
@@ -6268,6 +6301,15 @@ class ASTParser:
                 raise ParserTypeError(
                     "predicate indices must be integer scalars, got "
                     f"{python_print(idx_expr.type, format=False)}",
+                    span=span,
+                    hint=hint,
+                )
+            # The runtime index array is uint32_t, so a negative constant wraps
+            # to a huge value and yields an out-of-bounds GM address.
+            if isinstance(idx_expr, ir.ConstInt) and idx_expr.value < 0:
+                raise ParserTypeError(
+                    f"predicate index must be non-negative, got {idx_expr.value}; the runtime stores "
+                    f"indices as uint32_t, so a negative value wraps to an out-of-bounds address",
                     span=span,
                     hint=hint,
                 )
@@ -6305,12 +6347,18 @@ class ASTParser:
         operand = self._predicate_operand_tensor(predicate)
         if not isinstance(operand, ir.Var):
             return
-        producer_tid = self._submit_producer_tid.get(operand.unique_id)
-        if producer_tid is None:
+        recorded = self._submit_producer_tid.get(operand.unique_id)
+        if recorded is None:
             return
+        producer_tid, producer_gen = recorded
         if any(isinstance(d.type, ir.ArrayType) for d in dep_vars):
             return
-        if any(d is producer_tid for d in dep_vars):
+        # Identity match is necessary but not sufficient: if the TaskId name was
+        # rebound by a later submit, the same Var object now denotes a different
+        # task, so the dep does not actually order this submit after the
+        # producer.
+        current_gen = self._tid_binding_generation.get(producer_tid.unique_id, producer_gen)
+        if any(d is producer_tid for d in dep_vars) and current_gen == producer_gen:
             return
         tid_name = producer_tid.name_hint
         raise ParserSyntaxError(

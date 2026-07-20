@@ -2256,6 +2256,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  // Mirrors the runtime's ``MAX_TENSOR_DIMS`` — the capacity of the fixed
+  // ``uint32_t indices[]`` array in ``L0PredicateOperand``.
+  static constexpr size_t kRuntimeMaxTensorDims = 5;
+
   // Map an IR comparison node kind onto the runtime PredicateOp enumerator, and
   // the flipped form used when the constant sits on the left (``0 < t[i]``).
   // Returns nullptr for any other kind — the caller reports that as a user error.
@@ -2329,12 +2333,42 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // is the per-axis index list (a MakeTuple, or a single index expression for
     // a rank-1 read).
     const auto& operand = read->args_[0];
+
+    // The runtime reads `elem_size` bytes at the operand address and
+    // **sign-extends** to int64 before comparing (DispatchPredicate::pass()).
+    // An unsigned operand whose value has the top bit set therefore compares as
+    // negative and silently inverts the dispatch decision — e.g. a UINT32
+    // row_count of 3'000'000'000 sign-extends to -1'294'967'296, so
+    // `row_count[e] > 0` is false and the expert is skipped with no diagnostic.
+    // Sub-byte dtypes have no addressable single-element read at all. Both are
+    // rejected here: codegen owns the runtime ABI, so it is the backstop for IR
+    // that did not come through the DSL parser.
+    auto operand_tensor_type = AsTensorTypeLike(operand->GetType());
+    CHECK_SPAN(operand_tensor_type, operand->span_) << "Submit dispatch-predicate operand must be a tensor";
+    const DataType operand_dtype = operand_tensor_type->dtype_;
+    const size_t operand_bits = operand_dtype.GetBit();
+    CHECK_SPAN(operand_dtype.IsSignedInt() &&
+                   (operand_bits == 8 || operand_bits == 16 || operand_bits == 32 || operand_bits == 64),
+               operand->span_)
+        << "Submit dispatch-predicate operand must be a signed 8/16/32/64-bit integer tensor, got "
+        << operand_dtype.ToString()
+        << ". The runtime sign-extends the value it reads, so an unsigned operand can compare as "
+           "negative and silently invert the dispatch decision; sub-byte dtypes have no addressable "
+           "single-element read.";
+
     std::vector<ExprPtr> indices;
     if (auto idx_tuple = As<MakeTuple>(read->args_[1])) {
       indices = idx_tuple->elements_;
     } else {
       indices.push_back(read->args_[1]);
     }
+    // ``L0PredicateOperand::indices`` is a fixed ``uint32_t[MAX_TENSOR_DIMS]``;
+    // emitting more would write past it (the next field is ``op``, so an
+    // overflow corrupts the comparison itself).
+    CHECK_SPAN(indices.size() <= kRuntimeMaxTensorDims, read->span_)
+        << "Submit dispatch-predicate operand has rank " << indices.size()
+        << ", exceeding the runtime's maximum of " << kRuntimeMaxTensorDims
+        << " indices (L0PredicateOperand::indices is a fixed-size array)";
     const std::string var_name = TryGetVarName(operand);
     CHECK_SPAN(!var_name.empty(), operand->span_)
         << "Submit dispatch-predicate operand must be a named tensor (a function parameter or a variable "
@@ -2347,6 +2381,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine(pv + ".operand.tensor = &" + tname + ";");
     EmitIndentedLine(pv + ".operand.ndims = " + std::to_string(indices.size()) + ";");
     for (size_t i = 0; i < indices.size(); ++i) {
+      // The runtime index array is ``uint32_t``, so a negative constant would
+      // wrap to a huge value and compute an out-of-bounds GM address that the
+      // scheduler then reads. Reject the statically-known case; a negative
+      // *dynamic* index cannot be caught here and stays the author's
+      // responsibility, same as any other out-of-range index in the DSL.
+      if (auto const_idx = As<ConstInt>(indices[i])) {
+        CHECK_SPAN(const_idx->value_ >= 0, indices[i]->span_)
+            << "Submit dispatch-predicate index " << i << " is negative (" << const_idx->value_
+            << "); the runtime stores indices as uint32_t, so it would wrap to an out-of-bounds address";
+      }
       EmitIndentedLine(pv + ".operand.indices[" + std::to_string(i) +
                        "] = " + GenerateExprString(indices[i]) + ";");
     }

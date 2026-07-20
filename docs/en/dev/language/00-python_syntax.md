@@ -507,12 +507,23 @@ submit's `deps=`, so the dispatch-point read observes the current value. Omittin
 it lets the scheduler evaluate the predicate before the producer has written the
 tensor, deciding from stale data.
 
-The parser enforces this wherever it can prove a violation — when the operand is
-a variable bound from a prior `pl.submit(...)` result, its producer TaskId must
-appear in `deps=`. Two cases are accepted without proof and remain the author's
-responsibility: an operand with no tracked producer (a function parameter, say),
-and a `deps=` entry that is an `Array[N, TASK_ID]`, which does not name its
-producers individually.
+The parser makes a **best-effort spot check**, not a guarantee: it tracks the
+result variables a `pl.submit(...)` binds via tuple unpacking, and rejects a
+predicate whose operand is one of them when the producing TaskId is absent from
+`deps=`. Treat a clean parse as "no obvious mistake found", not as proof.
+
+It does **not** see through, and therefore silently accepts:
+
+| Not covered | Why |
+| ----------- | --- |
+| `rc2 = rc` then `rc2[0, 0]` | the alias is a fresh variable with no recorded producer |
+| a tensor passed as an `pl.Out` argument and rebound under a new name | only the returned binding is tracked, not the argument alias |
+| `rc3 = self.helper(rc)` | any intervening call launders the association |
+| `res = pl.spmd_submit(...)` (single-target form) | the single-target path records nothing |
+| any `deps=` list containing an `Array[N, TASK_ID]` entry — including the common `deps=[tids[i]]` | array entries do not name their producers individually, so the whole check is skipped for that submit |
+| a producer written **later** in the source, e.g. a loop-carried `rc` written by the previous iteration | the lookup happens while parsing the predicate, so producers that follow it are not yet recorded |
+
+Getting `deps=` right therefore remains the author's responsibility.
 
 **Expressiveness** is fixed to `tensor[indices] OP const` — one comparison,
 matching the runtime's single-comparison `DispatchPredicate`. Chained
