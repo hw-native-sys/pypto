@@ -276,6 +276,7 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
 // ``task_id_var`` / ``arg_direction_overrides_vars`` / ``dump_vars`` attrs.
 void IRVisitor::VisitScopeAttrs(const ScopeStmtPtr& op) {
   for (const auto& [k, v] : op->attrs_) {
+    if (!ShouldVisitScopeAttr(k)) continue;
     if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars || k == kAttrDumpVars) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (!edges) continue;
@@ -285,6 +286,13 @@ void IRVisitor::VisitScopeAttrs(const ScopeStmtPtr& op) {
     } else if (k == kAttrTaskIdVar) {
       const auto* var = std::any_cast<VarPtr>(&v);
       if (var && *var) VisitExpr(*var);
+    } else if (k == kAttrPredicate) {
+      // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — unlike the keys above
+      // this is a whole Expr tree (a comparison over ``tensor.read``), so
+      // recurse into it: the operand tensor and its index Vars are live SSA
+      // values the outliner later moves onto ``Submit::predicate_``.
+      const auto* pred = std::any_cast<ExprPtr>(&v);
+      if (pred && *pred) VisitExpr(*pred);
     }
   }
 }

@@ -974,7 +974,10 @@ class SSAConverter {
 
   /// Substitute Var-typed entries in a ScopeStmt's ``attrs_``
   /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars`` /
-  /// ``dump_vars``). Returns the rebuilt attrs and a flag indicating whether any
+  /// ``dump_vars``), plus the Expr-valued ``predicate`` attr (the
+  /// ``with pl.spmd(..., predicate=(t[i] > 0)):`` dispatch predicate, whose
+  /// operand tensor and index Vars must be versioned like any other use).
+  /// Returns the rebuilt attrs and a flag indicating whether any
   /// entry was rewritten — mirrors the per-Call ``SubstCallAttrs`` so SSA
   /// renaming propagates into scope-level attrs the same way it does for Call
   /// attrs. ``dump_vars`` rides here as the carrier from ``pl.dump_tag`` /
@@ -1020,6 +1023,22 @@ class SSAConverter {
           if (it != cur_.end() && it->second.get() != var->get()) {
             changed = true;
             out.emplace_back(k, std::any(it->second));
+            continue;
+          }
+        }
+      } else if (k == kAttrPredicate) {
+        // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — an ExprPtr, so
+        // substitute the whole subtree via SubstExpr rather than remapping a
+        // single Var (mirrors the kAttrDevice handling in SubstCallAttrs).
+        // Substituting here — before the body is converted, see ConvertScope —
+        // resolves the operand tensor to the SSA version visible at scope
+        // entry, which is the value the scheduler reads at the dispatch point.
+        const auto* pred = std::any_cast<ExprPtr>(&v);
+        if (pred && *pred) {
+          auto new_pred = SubstExpr(*pred);
+          if (new_pred.get() != pred->get()) {
+            changed = true;
+            out.emplace_back(k, std::any(std::move(new_pred)));
             continue;
           }
         }

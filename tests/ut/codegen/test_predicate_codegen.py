@@ -203,3 +203,106 @@ def test_set_predicate_precedes_task_submit():
     set_pred_at = code.index(".set_predicate(")
     submit_after = code.index("rt_submit_", set_pred_at)
     assert set_pred_at < submit_after, "set_predicate must be emitted before the task's rt_submit_*"
+
+
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.spmd(..., predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# The scope form reaches ``Submit::predicate_`` by a different route than
+# ``pl.spmd_submit``: the predicate rides on ``SpmdScopeStmt::attrs_`` from
+# parse until ``OutlineSpmdScopes`` moves it onto the synthesised Submit. In
+# between it must survive ``ConvertToSSA``, which versions the operand tensor
+# Var *inside* the attr Expr. These tests drive the whole pipeline so a break
+# anywhere on that path (attr walk, SSA substitution, outliner threading)
+# surfaces as missing or wrong orchestration output.
+
+_SCOPE_PREDICATE_SRC = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def expert(
+        self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        t = pl.load(x, [0, 0], [128, 128])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def gate(self, g: pl.Out[pl.Tensor[[512, 128], pl.INT32]]) -> pl.Tensor[[512, 128], pl.INT32]:
+        t = pl.load(g, [0, 0], [128, 128])
+        g = pl.store(t, [0, 0], g)
+        return g
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.spmd(1) as g_tid:
+            rc = self.gate(rc)
+        with pl.spmd(1, deps=[g_tid], predicate=({PRED})) as t:
+            out = self.expert(x, out)
+        return out
+"""
+
+
+def _emit_scope_predicate(predicate_src: str) -> str:
+    """Compile a program whose ``with pl.spmd(...)`` scope carries ``predicate_src``."""
+    return _generate_orch_full_pipeline(
+        pl.parse_program(_SCOPE_PREDICATE_SRC.replace("{PRED}", predicate_src))
+    )
+
+
+def test_scope_form_emits_set_predicate_block():
+    """The scope form lowers to the same runtime sequence as pl.spmd_submit."""
+    code = _emit_scope_predicate("rc[0, 0] > 0")
+    assert "L0TaskPredicate" in code, code
+    # The operand survived SSA versioning inside the scope attr and resolved to
+    # the orchestration ext_ reference — the whole point of the attr walk.
+    assert ".operand.tensor = &ext_rc;" in code, code
+    assert ".operand.ndims = 2;" in code, code
+    assert ".op = PredicateOp::GT;" in code, code
+    assert ".target = 0;" in code, code
+    # Exactly one predicated task (the expert scope), not the gate scope.
+    assert code.count("set_predicate(") == 1, code
+
+
+def test_scope_form_set_predicate_precedes_task_submit():
+    code = _emit_scope_predicate("rc[1, 2] > 0")
+    set_pred_at = code.index(".set_predicate(")
+    submit_after = code.index("rt_submit_", set_pred_at)
+    assert set_pred_at < submit_after, "set_predicate must be emitted before the task's rt_submit_*"
+
+
+def test_scope_form_index_order_is_preserved():
+    code = _emit_scope_predicate("rc[1, 2] > 0")
+    assert ".operand.indices[0] = 1;" in code, code
+    assert ".operand.indices[1] = 2;" in code, code
+
+
+@pytest.mark.parametrize(
+    "written,expected_op",
+    [
+        ("rc[1, 2] >= 3", "GE"),
+        ("rc[1, 2] != 3", "NE"),
+        # Constant on the left — codegen flips so the tensor is the operand.
+        ("3 < rc[1, 2]", "GT"),
+        ("3 >= rc[1, 2]", "LE"),
+    ],
+)
+def test_scope_form_operator_mapping(written, expected_op):
+    """Spot-check the operator/operand-order table through the scope route.
+
+    The flip table itself is exhaustively covered by the pl.spmd_submit
+    parametrisation above; this only proves the scope form feeds it the same
+    unmodified comparison Expr.
+    """
+    code = _emit_scope_predicate(written)
+    assert f".op = PredicateOp::{expected_op};" in code, code
+    assert ".target = 3;" in code, code

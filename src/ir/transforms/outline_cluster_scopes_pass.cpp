@@ -51,22 +51,25 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
           << "Only one pl.spmd() block is allowed per cluster scope";
       // A cluster-nested pl.spmd is unwrapped into the Group function and never
       // outlined to a Submit, so a captured producer TaskId (kAttrTaskIdVar), an
-      // explicit dependency fence (kAttrManualDepEdges), OR a speculative
-      // early-dispatch hint (allow_early_resolve) would be silently dropped. The
-      // parser rejects `with pl.spmd(...) as tid:` / `deps=` /
-      // `allow_early_resolve=True` inside pl.cluster() (see
+      // explicit dependency fence (kAttrManualDepEdges), a speculative
+      // early-dispatch hint (allow_early_resolve), OR a dispatch predicate
+      // (kAttrPredicate) would be silently dropped. The parser rejects
+      // `with pl.spmd(...) as tid:` / `deps=` / `allow_early_resolve=True` /
+      // `predicate=` inside pl.cluster() (see
       // ASTParser._parse_spmd_scope_with_tid and
-      // ASTParser._reject_spmd_early_resolve_in_cluster); guard here for
+      // ASTParser._reject_spmd_submit_only_kwargs_in_cluster); guard here for
       // hand-built / deserialized IR so the invalid case fails loudly instead of
       // miscompiling.
       INTERNAL_CHECK_SPAN(op->GetAttr<VarPtr>(kAttrTaskIdVar) == nullptr &&
                               !op->HasAttr(kAttrManualDepEdges) &&
-                              !op->GetAttr<bool>("allow_early_resolve", false),
+                              !op->GetAttr<bool>("allow_early_resolve", false) &&
+                              !op->HasAttr(kAttrPredicate),
                           op->span_)
           << "Internal error: a pl.spmd() nested inside pl.cluster() cannot carry a producer "
-             "TASK_ID (kAttrTaskIdVar), dependency edges (kAttrManualDepEdges), or an "
-             "allow_early_resolve hint; it is unwrapped into the Group function and never "
-             "outlined to a Submit. The parser must reject this at parse time.";
+             "TASK_ID (kAttrTaskIdVar), dependency edges (kAttrManualDepEdges), an "
+             "allow_early_resolve hint, or a dispatch predicate (kAttrPredicate); it is unwrapped "
+             "into the Group function and never outlined to a Submit. The parser must reject this "
+             "at parse time.";
       core_num = op->core_num_;
       sync_start = op->sync_start_;
       return VisitStmt(op->body_);

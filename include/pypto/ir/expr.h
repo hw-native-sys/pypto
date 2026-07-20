@@ -844,6 +844,32 @@ inline std::vector<std::pair<std::string, std::any>> WithDumpVarsAttr(
 inline constexpr const char* kAttrDevice = "device";
 
 /**
+ * @brief Reserved attr key for a dispatch predicate — ``predicate=(t[i] > 0)``.
+ *
+ * Value type: ``ExprPtr`` — the comparison Expr as written (e.g.
+ * ``Gt(Cast(tensor.read(rc, [0, 0])), 0)``). Unlike ``kAttrTaskIdVar`` /
+ * ``kAttrDumpVars`` (``VarPtr`` shapes), this attr holds a whole expression
+ * tree, so every attr walker must recurse into it rather than remap a Var.
+ *
+ * Two carriers, one meaning:
+ *
+ * * On a ``SpmdScopeStmt`` — written by the parser for
+ *   ``with pl.spmd(..., predicate=(...)):``. The scope outlines into a
+ *   ``Submit`` only at ``OutlineSpmdScopes``, so the predicate rides here
+ *   across ``ConvertToSSA``; ``ScopeOutliner`` then moves it into
+ *   ``Submit::predicate_`` and the attr disappears.
+ * * On a ``Call`` — only ever the transient ``SubmitToCallView``
+ *   projection of ``Submit::predicate_``, so orchestration codegen can read
+ *   the predicate off the Call view. On a ``Submit`` the *field* is the single
+ *   source of truth; the view drops any stray attr of this key.
+ *
+ * SSA passes MUST substitute ``Var`` references inside this attr's value —
+ * the operand tensor and its index Vars are live SSA values. See
+ * ``kAttrDevice`` for the same requirement on the Call side.
+ */
+inline constexpr const char* kAttrPredicate = "predicate";
+
+/**
  * @brief Task-launch expression — ``pl.submit(self.kernel, args, deps=[...])``
  *
  * Produced by ``pl.submit(...)`` inside a ``pl.manual_scope`` body.
@@ -1114,7 +1140,7 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
     // the same key so the field stays the single source of truth (Call::GetAttr
     // returns the first match, so a stale attr would otherwise shadow it).
     if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start" && k != "allow_early_resolve" &&
-        k != "predicate") {
+        k != kAttrPredicate) {
       attrs.emplace_back(k, v);
     }
   }
@@ -1172,7 +1198,7 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   // filters them explicitly; ``core_num`` / ``sync_start`` /
   // ``allow_early_resolve`` need the same care.
   if (submit->predicate_.has_value()) {
-    attrs.emplace_back("predicate", std::any(*submit->predicate_));
+    attrs.emplace_back(kAttrPredicate, std::any(*submit->predicate_));
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);

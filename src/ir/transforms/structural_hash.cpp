@@ -336,13 +336,21 @@ class StructuralHasher {
         // structural_equal compares it element-wise.
         const auto& idxs = AnyCast<std::vector<int32_t>>(value, "hashing kwarg: " + key);
         for (int32_t v : idxs) h = hash_combine(h, std::hash<int32_t>{}(v));
+      } else if (value.type() == typeid(VarPtr) || value.type() == typeid(std::vector<VarPtr>) ||
+                 value.type() == typeid(ExprPtr)) {
+        // Var-/Expr-valued attrs (task_id_var / manual_dep_edges / dump_vars /
+        // arg_direction_overrides_vars / device / predicate) are intentionally
+        // NOT hashed: hashing them via HashNode is auto-mapping-counter-order
+        // dependent, which would defeat the order-insensitivity this function
+        // guarantees. structural_equal still compares them, so skipping here
+        // only makes the hash coarser (a legal collision), never wrong.
+        //
+        // Skipped rather than thrown. The throw this replaced made
+        // structural_hash unusable on any scope carrying such an attr — every
+        // `with pl.spmd(...) as tid:` (task_id_var) and every
+        // `with pl.spmd(..., predicate=...)`, both perfectly valid IR.
+        continue;  // contributes nothing to `acc`
       } else {
-        // NOTE: Var-/Expr-valued attrs (dump_vars / manual_dep_edges /
-        // task_id_var / device) are intentionally not hashed here — hashing
-        // them via HashNode is auto-mapping-counter-order-dependent, which
-        // would defeat the order-insensitivity this function guarantees. They
-        // are compared by structural_equal but not currently part of the hash;
-        // this matches the pre-existing behaviour (a throw flags any attempt).
         throw TypeError("Unsupported kwarg type for key: " + key + ": " +
                         DemangleTypeName(value.type().name()));
       }

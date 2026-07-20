@@ -92,6 +92,7 @@ class NoNestedCallVerifier : public IRVisitor {
   void VisitExpr_(const BitNotPtr& op) override { VisitUnaryExpr(op); }
   void VisitExpr_(const CastPtr& op) override { VisitUnaryExpr(op); }
   void VisitExpr_(const SubmitPtr& op) override;
+  [[nodiscard]] bool ShouldVisitScopeAttr(const std::string& key) const override;
   void VisitStmt_(const IfStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
@@ -186,6 +187,20 @@ void NoNestedCallVerifier::VisitExpr_(const SubmitPtr& op) {
   if (op->core_num_.has_value() && *op->core_num_) {
     VisitExpr(*op->core_num_);
   }
+}
+
+// Same exemption, one stage earlier in the pipeline: a
+// ``with pl.spmd(..., predicate=(t[i] > 0)):`` scope carries the predicate on
+// ``ScopeStmt::attrs_`` until OutlineSpmdScopes moves it onto the synthesised
+// ``Submit::predicate_`` (exempted above). Between parse and that outline the
+// base ``VisitScopeAttrs`` walks the attr Expr — deliberately, so SSA and
+// use-def analyses see the operand Vars — which would otherwise report the
+// declarative ``Gt(Cast(tensor.read(..)), 0)`` as an illegal nested call.
+//
+// Opting out per key (rather than overriding the whole walk) keeps the base
+// the single source of truth: a scope attr added there stays covered here.
+bool NoNestedCallVerifier::ShouldVisitScopeAttr(const std::string& key) const {
+  return key != kAttrPredicate;
 }
 
 void NoNestedCallVerifier::VisitStmt_(const IfStmtPtr& op) {

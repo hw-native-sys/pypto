@@ -368,7 +368,7 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 | `result, tid = pl.submit(kernel, *args, deps=[...], allow_early_resolve=False)` | 单个 kernel 调用 | 尾部 `tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。`allow_early_resolve=True` 将该 task 标记为推测式 early-dispatch producer（让调度器提前预置其 consumer；lower 为 `Arg::set_allow_early_resolve(true)`）。同样接受 `predicate=(t[i] > 0)` —— 调度器在 dispatch 点求值的调度谓词（参见[调度谓词](#调度谓词predicate)）。 |
 | `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | 单个 SPMD task launch | `pl.submit` 的 SPMD 版本：将 kernel 在 `N` 个 block 上分发（一个 orchestration task → 一个 `tid`）。`core_num` 是必填关键字参数（正整数表达式）；`sync_start=True` 强制所有 block 原子启动。callee 可以是 InCore / AIC / AIV / Group。launch spec 记录在 `Submit.core_num` / `Submit.sync_start` 上。同样接受 `allow_early_resolve=True`（与 `pl.submit` 相同的 early-dispatch 选项）和 `predicate=(t[i] > 0)`（参见[调度谓词](#调度谓词predicate)）。 |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + `Submit`；`tid` 捕获被合成的 Submit 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。不写 `as tid` 时 outliner 会合成一个未使用的 TaskId Var——deps 始终走 `Submit::deps_`。同样接受 `allow_early_resolve=True`（与 `pl.submit` 相同的 early-dispatch 选项）；即使不写 `as tid` 也会强制走 `Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。 |
-| `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD 分发 | `pl.at ... as tid` 形式的 SPMD 版本。内联 body 自动外包成 InCore kernel 并在 `N` 个 block 上分发；`tid` 捕获 grid 级 producer TaskId。`deps=` 仅在带 `as tid` 时可用。`core_num` / `sync_start` 记录在外包出的 `Spmd` Function attrs 上（lower 出的 `Submit.core_num` 为 `None`）；codegen 通过 launch-function 回退读取。同样接受 `allow_early_resolve=True`（与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项；`pl.spmd` 三种形式均可用，即使不写 `as tid` 也会强制走 `Submit` 形态）。不能嵌套在 `pl.cluster()` 内。 |
+| `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD 分发 | `pl.at ... as tid` 形式的 SPMD 版本。内联 body 自动外包成 InCore kernel 并在 `N` 个 block 上分发；`tid` 捕获 grid 级 producer TaskId。`deps=` 仅在带 `as tid` 时可用。`core_num` / `sync_start` 记录在外包出的 `Spmd` Function attrs 上（lower 出的 `Submit.core_num` 为 `None`）；codegen 通过 launch-function 回退读取。同样接受 `allow_early_resolve=True`（与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项；`pl.spmd` 三种形式均可用，即使不写 `as tid` 也会强制走 `Submit` 形态）和 `predicate=(t[i] > 0)`（参见[调度谓词](#调度谓词predicate)；同样三种形式均可用，同样强制走 `Submit` 形态）。不能嵌套在 `pl.cluster()` 内。 |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | 不提交 kernel。返回的 TaskId 是一个紧凑的 fan-in 点，可供后续 `deps=[barrier]` 使用。 |
 | `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
 
@@ -510,9 +510,6 @@ parser 只做**尽力而为的抽查**，不是保证:它记录 `pl.submit(...)`
 （`a[0] > 0 and b[0] > 0`）、以及非字面量的右侧（`t[i] > u[i]`）都会在解析期被拒绝；
 请在前序 kernel 里把它们归约成一个 gate 值，再对该值做谓词。
 
-**范围：** `predicate=` 仅在 `pl.submit` / `pl.spmd_submit`（直接产 `Submit` 的形式）上。
-`with pl.spmd(predicate=...)` 作用域形式尚未支持。
-
 ```python
 with pl.manual_scope():
     rc, g_tid = pl.spmd_submit(self.gate, rc, core_num=1)       # rc 的 producer
@@ -522,6 +519,40 @@ with pl.manual_scope():
         predicate=(rc[0, 0] > 0),
     )
 ```
+
+**范围：** `predicate=` 可用于 `pl.submit` / `pl.spmd_submit`（直接产 `Submit` 的形式），
+以及 `with pl.spmd(...)` 作用域形式的全部三种写法（普通 `with`、`with ... as tid`、
+`for i in pl.spmd(...)`）。`pl.at(...)` 不接受该参数。
+
+##### 作用域形式
+
+作用域形式使用相同的表达式与相同的校验，区别只在于谓词进入 IR 的路径：它先挂在
+`SpmdScopeStmt.attrs` 上，直到该作用域被 outline 时才移动到 `Submit.predicate`。
+因此 lowering、codegen 产物与契约都完全一致。
+
+```python
+with pl.spmd(1) as g_tid:                                        # rc 的 producer
+    rc = self.gate(rc)
+
+with pl.spmd(4, deps=[g_tid], predicate=(rc[0, 0] > 0)) as tid:  # producer 是依赖
+    out = self.expert(x, out)
+```
+
+由这条路径引出两点：
+
+- **`deps=` 需要 `as tid` 形式。** `deps=` 只在 `with pl.spmd(...) as tid:` 上被接受。
+  因此，若谓词读取的张量由同一函数内的其他任务产出，就必须用该形式；普通 `with` 与
+  `for` 形式只能对没有函数内 producer 的张量（通常是函数参数）加谓词——这种情况契约
+  检查会放行。
+- **其余情况不要求 `as tid`。** 与 `allow_early_resolve=True` 一样，谓词会强制该作用域
+  lower 为 `Submit`；当作用域没有 `as tid` 时，outliner 会合成一个未被使用的 TaskId Var。
+
+嵌套在 `pl.cluster()` 内的 `pl.spmd` 会被展开进 Group 函数、永远不会产生 `Submit`，
+因此 `predicate=`（与 `allow_early_resolve=` 一样）会在解析期被拒绝，而不是被静默丢弃。
+
+契约检查同样覆盖作用域 producer：在 `with pl.spmd(...) as tid:` 体内被赋值的张量会被记录
+为该作用域的产物，所以后续 `deps=` 漏写它会被拒绝。上表中列出的 best-effort 限制
+（别名、中间调用、`Array[N, TASK_ID]` 依赖）依然适用。
 
 #### Manual scope 下的 `pl.parallel`：array-carry fence
 
