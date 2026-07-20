@@ -20,6 +20,8 @@ pins the full decomposed primitive tree so any change to the lowering surfaces
 as a structural diff.
 """
 
+import re
+
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -469,18 +471,21 @@ def test_cos_in_return_stmt_is_decomposed():
 
 _ALLREDUCE_SIZE = 16
 _ALLREDUCE_NRANKS = 2
+_ALLREDUCE_FP32_CHUNK = 4096
 
-# Ops the allreduce decomposition must emit (the 4-phase recipe).
+# Ops the chunked mesh decomposition must emit.
 _ALLREDUCE_REQUIRED_OPS = {
     "pld.system.get_comm_ctx",
     "pld.system.nranks",
     "pld.system.rank",
-    "pld.system.notify",  # Phase 2a
-    "pld.system.wait",  # Phase 2b
-    "pld.tile.remote_load",  # Phase 3 (peer slice load)
-    "tile.add",  # Phase 3 (accumulate)
-    "tile.load",  # Phase 3 (self slice load) + user-side load
-    "tile.store",  # Phase 4 + user-side store
+    "pld.system.notify",  # Ready and per-chunk read-complete barriers
+    "pld.system.wait",  # Ready and per-chunk read-complete barriers
+    "pld.tile.remote_load",  # Peer chunk load
+    "tile.fillpad_inplace",  # Zero ragged padding before accumulation
+    "tile.add",  # Accumulate peer chunks
+    "tile.load",  # Self chunk load + user-side load
+    "tile.set_validshape",  # Narrow the final ragged chunk
+    "tile.store",  # Per-chunk result + user-side store
 }
 
 
@@ -494,16 +499,29 @@ class _StmtKindCollector(ir.IRVisitor):
 
     def visit_for_stmt(self, op: ir.ForStmt) -> None:
         self.for_count += 1
-        super().visit_for_stmt(op)
+        self._walk_stmt(op.body)
 
     def visit_if_stmt(self, op: ir.IfStmt) -> None:
         self.if_count += 1
-        super().visit_if_stmt(op)
+        self._walk_stmt(op.then_body)
+        if op.else_body is not None:
+            self._walk_stmt(op.else_body)
+
+    def _walk_stmt(self, stmt: ir.Stmt) -> None:
+        # The nanobind trampoline's base implementation does not redispatch
+        # nested statement callbacks to Python overrides.
+        if isinstance(stmt, ir.SeqStmts):
+            for child in stmt.stmts:
+                self._walk_stmt(child)
+        elif isinstance(stmt, ir.ForStmt):
+            self.visit_for_stmt(stmt)
+        elif isinstance(stmt, ir.IfStmt):
+            self.visit_if_stmt(stmt)
 
 
-def _build_allreduce_before():
+def _build_allreduce_before(size: int = _ALLREDUCE_SIZE):
     """Build a minimal Before program that calls ``pld.tensor.allreduce``."""
-    SIZE = _ALLREDUCE_SIZE
+    SIZE = size
     nr = _ALLREDUCE_NRANKS
 
     @pl.program
@@ -526,8 +544,7 @@ def _build_allreduce_before():
 
 
 def test_allreduce_is_decomposed_to_primitives():
-    """The composite ``pld.tensor.allreduce`` Call is replaced by its 4-phase
-    decomposition; no occurrence survives the pass."""
+    """The composite call is replaced by its chunked mesh decomposition."""
     Before = _build_allreduce_before()
     After = passes.lower_composite_ops()(Before)
     op_names = set(_collect_op_names(After))
@@ -701,13 +718,14 @@ def test_allreduce_in_while_loop_is_rejected():
 
 
 def test_allreduce_emits_for_and_if_control_flow():
-    """The recipe emits five ForStmts and five IfStmts:
+    """The chunked recipe emits six ForStmts and five IfStmts:
 
     * Phase 2a (notify all peers) — for + if
     * Phase 2b (wait on all peers) — for + if
-    * Phase 3  (reduce-load from all peers) — for + if
-    * Phase 3.5a (post-reduce re-notify) — for + if
-    * Phase 3.5b (post-reduce re-wait) — for + if
+    * Phase 3 chunk traversal — one for loop
+    * Phase 3 peer reduction — for + if
+    * Per-chunk Phase 3.5 re-notify — for + if
+    * Per-chunk Phase 3.5 re-wait — for + if
 
     Phase 3.5 is a second cross-rank barrier inserted between Phase 3
     (read peers via ``pld.tile.remote_load``) and Phase 4 (write reduced
@@ -723,14 +741,14 @@ def test_allreduce_emits_for_and_if_control_flow():
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
-    assert collector.for_count == 5, (
-        f"expected 5 ForStmts (notify, wait, reduce, re-notify, re-wait), got {collector.for_count}"
+    assert collector.for_count == 6, (
+        f"expected 6 ForStmts (notify, wait, chunk, reduce, re-notify, re-wait), got {collector.for_count}"
     )
-    assert collector.if_count == 5, f"expected 5 IfStmts (one per ForStmt body), got {collector.if_count}"
+    assert collector.if_count == 5, f"expected 5 peer-filter IfStmts, got {collector.if_count}"
 
 
 def test_allreduce_flattens_target_to_2d_view_for_mesh_lowering():
-    """Mesh allreduce uses a 2D target view for tile load/remote/store codegen."""
+    """Fully-valid mesh allreduce treats packed ND storage as one linear stream."""
 
     @pl.program
     class Before:
@@ -761,7 +779,7 @@ def test_allreduce_flattens_target_to_2d_view_for_mesh_lowering():
     )
     view_type = view_stmt.var.type
     assert isinstance(view_type, ir.DistributedTensorType)
-    assert view_type.shape == [6, 4]
+    assert view_type.shape == [1, 24]
 
 
 def test_allreduce_mesh_lowering_preserves_partial_valid_shape():
@@ -830,6 +848,186 @@ def test_allreduce_mesh_lowering_preserves_partial_valid_shape():
     assert load_shape.elements == [3, 2]
     assert load_valid_shape.elements == [3, 2]
     assert remote_shape.elements == [3, 2]
+
+
+@pytest.mark.parametrize("size", [1, 3, 17, 4096, 4097, 65537])
+def test_allreduce_mesh_chunks_non_aligned_and_larger_than_ub(size):
+    """Chunk bounds, widths, and offsets cover every logical element exactly."""
+    Before = _build_allreduce_before(size)
+    After = passes.lower_composite_ops()(Before)
+    expected_chunk = min(_ALLREDUCE_FP32_CHUNK, ((size + 7) // 8) * 8)
+    assert expected_chunk * 4 % 32 == 0
+
+    class CallCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[ir.Call] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            self.calls.append(op)
+            super().visit_call(op)
+
+    collector = CallCollector()
+    collector.visit_program(After)
+    lowered_load = next(
+        call
+        for call in collector.calls
+        if call.op.name == ir.get_op("tile.load").name
+        and isinstance(call.args[0].type, ir.DistributedTensorType)
+        and isinstance(call.args[2], ir.MakeTuple)
+        and isinstance(call.args[2].elements[0], ir.ConstInt)
+        and call.args[2].elements[0].value == 1
+        and isinstance(call.args[2].elements[1], ir.ConstInt)
+        and call.args[2].elements[1].value == expected_chunk
+        and isinstance(call.args[3], ir.MakeTuple)
+        and isinstance(call.args[3].elements[1], ir.Min)
+    )
+    remote_load = next(
+        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.remote_load").name
+    )
+
+    loops: list[ir.ForStmt] = []
+
+    def collect_loops(stmt: ir.Stmt) -> None:
+        if isinstance(stmt, ir.SeqStmts):
+            for child in stmt.stmts:
+                collect_loops(child)
+        elif isinstance(stmt, ir.ForStmt):
+            loops.append(stmt)
+            collect_loops(stmt.body)
+        elif isinstance(stmt, ir.IfStmt):
+            collect_loops(stmt.then_body)
+            if stmt.else_body is not None:
+                collect_loops(stmt.else_body)
+
+    func = After.get_function("reduce_step")
+    assert func is not None
+    collect_loops(func.body)
+    chunk_loop = next(
+        loop for loop in loops if isinstance(loop.stop, ir.ConstInt) and loop.stop.value == size
+    )
+
+    assert len(remote_load.args) == 5
+    assert isinstance(chunk_loop.start, ir.ConstInt) and chunk_loop.start.value == 0
+    assert isinstance(chunk_loop.step, ir.ConstInt) and chunk_loop.step.value == expected_chunk
+    assert isinstance(lowered_load.args[3], ir.MakeTuple)
+    assert isinstance(remote_load.args[4], ir.MakeTuple)
+    assert isinstance(lowered_load.args[3].elements[1], ir.Min)
+    ir.assert_structural_equal(remote_load.args[4], lowered_load.args[3])
+    assert isinstance(lowered_load.args[1], ir.MakeTuple)
+    assert isinstance(remote_load.args[2], ir.MakeTuple)
+    ir.assert_structural_equal(remote_load.args[2], lowered_load.args[1])
+    assert isinstance(lowered_load.args[1].elements[0], ir.ConstInt)
+    assert lowered_load.args[1].elements[0].value == 0
+    ir.assert_structural_equal(lowered_load.args[1].elements[1], chunk_loop.loop_var)
+
+
+def test_allreduce_rejects_oversized_partial_valid_shape():
+    """A partial rectangle cannot use a single tile larger than the chunk budget."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[
+                pld.DistributedTensor[
+                    [2, 65537],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, 65537], stride=[], layout=pl.TensorLayout.ND),
+                ]
+            ],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[
+            [2, 65537],
+            pl.FP32,
+            pl.TensorView(valid_shape=[1, 65537], stride=[], layout=pl.TensorLayout.ND),
+        ]:
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    with pytest.raises(Exception, match="partial valid_shape must fit within one 16384-byte mesh chunk"):
+        passes.lower_composite_ops()(Before)
+
+
+def test_allreduce_dynamic_partial_valid_shape_uses_bounded_physical_rectangle(
+    default_pass_manager, ascend_backend
+):
+    """A symbolic valid extent reaches PTO with a bounded physical rectangle."""
+    m = pl.dynamic("ALLREDUCE_VALID_M")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[
+                pld.DistributedTensor[
+                    [64, 64],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, m], stride=[], layout=pl.TensorLayout.ND),
+                ]
+            ],
+            shape_anchor: pl.Tensor[[1, m], pl.FP32],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[
+            [64, 64],
+            pl.FP32,
+            pl.TensorView(valid_shape=[1, m], stride=[], layout=pl.TensorLayout.ND),
+        ]:
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    # First pin the LowerCompositeOps contract directly: the source rectangle
+    # stays statically bounded while only its valid width remains symbolic.
+    with passes.PassContext([]):
+        After = passes.lower_composite_ops()(Before)
+
+    class CallCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[ir.Call] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            self.calls.append(op)
+            super().visit_call(op)
+
+    collector = CallCollector()
+    collector.visit_program(After)
+    load = next(
+        call
+        for call in collector.calls
+        if call.op.name == ir.get_op("tile.load").name
+        and isinstance(call.args[0].type, ir.DistributedTensorType)
+    )
+    remote_load = next(
+        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.remote_load").name
+    )
+
+    assert isinstance(load.args[2], ir.MakeTuple)
+    assert load.args[2].elements == [64, 64]
+    assert isinstance(load.args[3], ir.MakeTuple)
+    assert load.args[3].elements[0] == 1
+    assert isinstance(load.args[3].elements[1], ir.Var)
+    assert load.args[3].elements[1].name_hint == "ALLREDUCE_VALID_M"
+    assert len(remote_load.args) == 5
+    ir.assert_structural_equal(remote_load.args[3], load.args[2])
+    ir.assert_structural_equal(remote_load.args[4], load.args[3])
+
+    # Also exercise the real default pass pipeline and PTO codegen. The
+    # shape_anchor parameter supplies the runtime binding for ``m``.
+    from pypto import codegen  # noqa: PLC0415
+
+    optimized = default_pass_manager.run_passes(Before)
+    func = optimized.get_function("reduce_step")
+    assert func is not None
+    single = ir.Program([func], func.name, optimized.span)
+    mlir = codegen.PTOCodegen().generate(single)
+    assert "pto.tload" in mlir
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
 
 
 def test_allreduce_mesh_lowering_rejects_noncontiguous_partial_valid_shape():
@@ -961,6 +1159,100 @@ def test_allreduce_flattened_mesh_lowering_reaches_pto_codegen(default_pass_mana
     single = ir.Program([func], func.name, optimized.span)
     mlir = codegen.PTOCodegen().generate(single)
     assert "tile.store tile valid_shape must be 2D" not in mlir
+
+
+def test_allreduce_large_ragged_mesh_lowering_reaches_pto_codegen(default_pass_manager, ascend_backend):
+    """A larger-than-UB ragged length emits dominance-safe PTO."""
+    from pypto import codegen  # noqa: PLC0415
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, 65537], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, 65537], pl.FP32]:
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    optimized = default_pass_manager.run_passes(Before)
+    func = optimized.get_function("reduce_step")
+    assert func is not None
+    single = ir.Program([func], func.name, optimized.span)
+    mlir = codegen.PTOCodegen().generate(single)
+
+    assert "scf.for" in mlir
+    assert "4096" in mlir
+    assert "pto.tload" in mlir
+    assert "pto.tfillpad" in mlir
+    assert "pto.set_validshape" in mlir
+    assert "pto.tstore" in mlir
+
+    # Regression: alloc_tile declarations are sometimes emitted outside the
+    # control-flow region that produced the corresponding tile. A dynamic
+    # valid_col from inside the chunk/peer loop must never leak into such a
+    # hoisted declaration (PTOAS reports "operand does not dominate this use").
+    definitions: dict[str, int] = {}
+    lines = mlir.splitlines()
+    for line_number, line in enumerate(lines):
+        for argument in re.findall(r"(%[A-Za-z0-9_.$]+)\s*:", line) if "func.func" in line else ():
+            definitions.setdefault(argument, line_number)
+        definition = re.search(r"(?:^\s*|scf\.for\s+)(%[A-Za-z0-9_.$]+)\s*=", line)
+        if definition:
+            definitions.setdefault(definition.group(1), line_number)
+
+    for line_number, line in enumerate(lines):
+        if "pto.alloc_tile" not in line:
+            continue
+        for operand in re.findall(r"valid_(?:row|col)\s*=\s*(%[A-Za-z0-9_.$]+)", line):
+            assert operand in definitions, f"missing definition for {operand}: {line}"
+            assert definitions[operand] < line_number, (
+                f"{operand} is defined at line {definitions[operand] + 1} after alloc_tile "
+                f"use at line {line_number + 1}: {line}"
+            )
+
+
+def test_allreduce_dynamic_mesh_lowering_reaches_pto_codegen(default_pass_manager, ascend_backend):
+    """A fully dynamic packed target is chunked by the real default pipeline."""
+    from pypto import codegen  # noqa: PLC0415
+
+    n = pl.dynamic("ALLREDUCE_DYNAMIC_N")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, n], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, n], pl.FP32]:
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    # A dynamic dimension that appears only on DistributedTensor is not yet
+    # self-contained in Python printer roundtrips. Keep pass verification, but
+    # skip the unrelated RoundtripInstrument limitation for this pipeline test.
+    from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        optimized = default_pass_manager.run_passes(Before)
+    func = optimized.get_function("reduce_step")
+    assert func is not None
+    single = ir.Program([func], func.name, optimized.span)
+    mlir = codegen.PTOCodegen().generate(single)
+
+    assert "scf.for" in mlir
+    assert "4096" in mlir
+    assert "arith.minsi" in mlir
+    assert "pto.tload" in mlir
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
 
 
 def test_allreduce_lowering_is_idempotent():
@@ -1408,20 +1700,17 @@ def test_ring_allreduce_is_decomposed_to_primitives():
 
 
 def test_ring_allreduce_emits_ring_control_flow():
-    """Ring lowering emits 2 ForStmts (reduce-scatter, allgather) with
-    4 IfStmts (notify+wait per phase step).  For P=2 the inner
-    notify/wait ForStmts are fused into the phase body as direct
-    IfStmts — the EmitFor creates a per-peer loop whose body is a single
-    IfStmt, which LoweringBuilder fuses into the parent body."""
+    """Ring lowering emits two phase loops plus notify/wait peer loops.
+
+    For P=2 each inner notify/wait peer loop has one direct IfStmt body."""
     Before = _build_ring_allreduce_before()
     After = passes.lower_composite_ops()(Before)
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
-    # P=2 → 1 RS step + 1 AG step = 2 ForStmts.
-    # Each step has notify (IfStmt) + wait (IfStmt) = 4 IfStmts total.
-    assert collector.for_count == 2, (
-        f"expected 2 ForStmts for P=2 ring (RS body + AG body), got {collector.for_count}"
+    # Each phase contains notify and wait peer loops: 2 + 2*2 = 6 loops.
+    assert collector.for_count == 6, (
+        f"expected 6 ForStmts for P=2 ring (2 phase + 4 peer loops), got {collector.for_count}"
     )
     assert collector.if_count == 4, (
         f"expected 4 IfStmts (RS notify+wait + AG notify+wait), got {collector.if_count}"
@@ -1472,12 +1761,11 @@ def test_ring_allreduce_mesh_default_unchanged():
     missing = _ALLREDUCE_REQUIRED_OPS - op_names
     assert not missing, f"mesh-lowered IR missing expected ops: {missing}"
 
-    # Mesh-specific: exactly 5 ForStmts (notify, wait, reduce, re-notify, re-wait)
+    # Mesh-specific: ready barrier + chunk traversal + peer reduction +
+    # per-chunk read-complete barrier.
     collector = _StmtKindCollector()
     collector.visit_program(After)
-    assert collector.for_count == 5, (
-        f"mesh allreduce must still produce 5 ForStmts, got {collector.for_count}"
-    )
+    assert collector.for_count == 6, f"mesh allreduce must produce 6 ForStmts, got {collector.for_count}"
 
 
 def test_ring_allreduce_deducer_rejects_unsupported_reduce_op():

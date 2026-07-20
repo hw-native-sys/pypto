@@ -134,8 +134,8 @@ std::vector<std::string> GetDimStrings(const std::vector<ir::ExprPtr>& exprs) {
   return dims;
 }
 
-// Convert expressions to MLIR size codes, using constants when available and
-// GetExprAsCode for dynamic values.
+// Convert expressions to MLIR size codes. partition_view sizes are index-typed,
+// so dynamic integer scalars need the same coercion as offsets.
 std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, codegen::PTOCodegen& codegen) {
   std::vector<std::string> codes;
   codes.reserve(exprs.size());
@@ -143,7 +143,7 @@ std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, cod
     if (auto c = As<ir::ConstInt>(expr)) {
       codes.push_back(codegen.GetOrEmitConstant(c->value_, DataType::INDEX));
     } else {
-      codes.push_back(codegen.GetExprAsCode(expr));
+      codes.push_back(codegen.EmitCastToIndex(expr, codegen.GetExprAsCode(expr)));
     }
   }
   return codes;

@@ -139,6 +139,34 @@ def test_remote_load_handles_multi_dim_shape():
     assert [int(d.value) for d in call.type.shape] == [16, 8]  # type: ignore[attr-defined]
 
 
+def test_remote_load_accepts_valid_shape_for_ragged_tail():
+    """The optional fifth argument becomes the result tile's valid_shape."""
+
+    @pl.program
+    class P:
+        @pl.function
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[1, 17], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[1, 17], pl.FP32]:
+            t = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 8192],
+                valid_shape=[1, 17],
+            )
+            return t  # type: ignore[return-value]
+
+    call = _find_call(_get_func(P, "kernel"), "pld.tile.remote_load")
+    assert len(call.args) == 5
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.shape == [1, 8192]
+    assert call.type.tile_view is not None
+    assert call.type.tile_view.valid_shape == [1, 17]
+
+
 # ---------------------------------------------------------------------------
 # Negative: positional / kwarg shape mistakes
 # ---------------------------------------------------------------------------
@@ -160,9 +188,8 @@ def test_remote_load_rejects_zero_positional():
 
 
 def test_remote_load_rejects_too_many_positional():
-    # remote_load(target, peer, offsets, shape) is positional-or-keyword (mirrors
-    # pl.tile.load) so the printed IR round-trips; a 5th positional arg is still
-    # rejected.
+    # The optional fifth argument is valid_shape; a sixth positional arg is
+    # still rejected.
     with pytest.raises(Exception, match="positional argument"):
 
         @pl.program
@@ -173,7 +200,7 @@ def test_remote_load_rejects_too_many_positional():
                 data: pld.DistributedTensor[[64], pl.FP32],
                 peer: pl.Scalar[pl.INT32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pld.tile.remote_load(data, peer, [0], [32], 99)  # type: ignore[call-arg]  # noqa: F841
+                t = pld.tile.remote_load(data, peer, [0], [32], [17], 99)  # type: ignore[call-arg]  # noqa: F841
                 return data  # type: ignore[return-value]
 
 

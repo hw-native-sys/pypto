@@ -45,6 +45,7 @@ def remote_load(
     peer: IntLike,
     offsets: Sequence[IntLike],
     shape: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
 ) -> Tile:
     """Load a region of ``peer`` rank's slice of a DistributedTensor into a local tile.
 
@@ -65,6 +66,12 @@ def remote_load(
         offsets: Offsets into the remote slice, one per ``target`` dimension.
         shape: Per-dimension shape of the tile to load. Determines the output
             :class:`pl.Tile` shape.
+        valid_shape: Optional valid extent inside ``shape``. This keeps the
+            physical tile fixed-size while a ragged tail reads only real data.
+            Every symbolic source or requested valid extent that survives
+            inference must be runtime-bound by a kernel scalar, loop variable,
+            or physical tensor-shape parameter; a type-metadata-only symbol is
+            rejected during PTO codegen.
 
     Returns:
         A local :class:`pl.Tile` of the requested shape, dtype equal to
@@ -79,8 +86,13 @@ def remote_load(
         )
         raise TypeError(f"pld.tile.remote_load expects a DistributedTensor target (window-bound); got {got}")
 
+    normalized_valid_shape = None if valid_shape is None else _normalize_intlike(valid_shape)
     call = _ir_tile.remote_load(
-        target_expr, _unwrap(peer), _normalize_intlike(offsets), _normalize_intlike(shape)
+        target_expr,
+        _unwrap(peer),
+        _normalize_intlike(offsets),
+        _normalize_intlike(shape),
+        normalized_valid_shape,
     )
     return Tile(expr=call)
 

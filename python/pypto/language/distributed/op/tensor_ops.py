@@ -520,8 +520,9 @@ def allreduce(
         pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum, mode="ring")
 
     LowerCompositeOps expands the explicit-signal InCore form into either:
-    (a) the 4-phase notify/wait/remote_load+accumulate/store decomposition
-    for ``mode="mesh"`` (default); or (b) the NCCL-style 2(P−1)-step
+    (a) a notify/wait ready barrier followed by UB-sized
+    remote_load+accumulate/store chunks for ``mode="mesh"`` (default); or
+    (b) the NCCL-style 2(P−1)-step
     chunked reduce-scatter + allgather ring schedule for ``mode="ring"``.
     In both modes the kernel sees only the lowered primitives.
     Host-orchestrator code can omit ``signal``
@@ -534,21 +535,35 @@ def allreduce(
     ``[2 * (NR − 1), NR]`` (one row per ring round). Both are single-shot
     per call.
 
-    Mesh lowering preserves a packed ND target ``TensorView.valid_shape`` when
+    Fully-valid packed mesh targets are viewed as one logical 1D stream and
+    processed in chunks of at most 16 KiB. For statically known smaller targets,
+    the physical chunk width shrinks to the smallest 32-byte-aligned width that
+    covers the target. The final chunk uses ``valid_shape`` so arbitrary element
+    counts do not read or store past the end. Mesh lowering
+    also preserves a packed ND target ``TensorView.valid_shape`` when
     its valid box can be represented by collapsing leading dimensions to one
-    2D rectangle, and reduces only that rectangle. Strided targets, DN partial
-    views, and non-representable partial boxes are rejected explicitly.
+    2D rectangle and fits within one 16-KiB chunk, and reduces only that
+    rectangle with the established single-rectangle path. Oversized partial
+    rectangles, strided targets, DN partial views, and
+    non-representable partial boxes are rejected explicitly.
+    Any symbolic target or partial-valid extent that survives lowering must be
+    runtime-bound by a kernel scalar, loop variable, or physical tensor-shape
+    parameter; a symbol that appears only in type metadata is rejected during
+    PTO codegen. A fully dynamic physical target dimension is bound from that
+    tensor parameter.
 
-    **Mesh barrier protocol:** two waves on the same cells —
-    ``Set(1) → WaitGe(1)`` for the first wave (Phases 2a/2b), then
-    ``AtomicAdd(1) → WaitGe(2)`` for the post-reduce WAR guard
-    (Phases 3.5a/3.5b). By the time the call returns every cell sits at
-    ``2`` rather than its initial ``0``.
+    **Mesh barrier protocol:** ``AtomicAdd(1) → WaitGe(1)`` is the ready wave.
+    Every reduced chunk then performs ``AtomicAdd(1)`` and waits for the
+    corresponding monotonic counter value before storing that chunk. By the
+    time a fully-valid call returns every non-self row sits at
+    ``1 + chunk_count``; the partial-valid rectangle path ends at ``2``.
+    The skipped self row remains zero.
 
     **Ring barrier protocol:** per-round ``AtomicAdd(0→1) → WaitGe(1)``
     monotonic on a ``[2*(NR−1), NR]`` signal — each ring step writes
-    a fresh row, so cells end at non-zero values but the monotonic
-    advance is per-row, not per-cell reuse.
+    a fresh row, so active non-self cells end at non-zero values while the
+    skipped self column remains zero. The monotonic advance is per-row, not
+    per-cell reuse.
 
     **Do not reuse the same signal buffer for a back-to-back allreduce**
     — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)

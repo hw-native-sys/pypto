@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -71,18 +72,47 @@ std::vector<ExprPtr> CollapseShapeTo2D(const std::vector<ExprPtr>& shape, const 
   return {rows, shape.back()};
 }
 
-CallPtr CreateAllReduceTargetView(const ExprPtr& target, const DistributedTensorTypePtr& target_type,
-                                  const std::vector<ExprPtr>& flat_shape,
-                                  const std::vector<ExprPtr>& flat_valid_shape, const Span& span) {
+std::vector<ExprPtr> CollapseShapeToLinear2D(const std::vector<ExprPtr>& shape, const Span& span) {
+  INTERNAL_CHECK_SPAN(!shape.empty(), span) << "Cannot flatten a rank-0 tensor shape";
+  ExprPtr elements = shape[0];
+  for (size_t i = 1; i < shape.size(); ++i) {
+    elements = tile_conversion_utils::MakeCanonicalIndexMul(elements, shape[i], span, "LowerCompositeOps");
+  }
+  return {std::make_shared<ConstInt>(1, DataType::INDEX, span), elements};
+}
+
+// The current memory planner assigns distinct storage to the loop-carried
+// accumulator and the branch/yield SSA aliases, so lowering can account for
+// up to nine physical tile buffers before reuse. At the maximum chunk width,
+// nine 16-KiB tiles stay below the smallest supported 184-KiB VEC UB budget
+// with room for scalar metadata; statically smaller inputs shrink this width.
+constexpr int64_t kMeshAllReduceChunkBytes = 16LL * 1024;
+constexpr int64_t kPTOTileAlignmentBytes = 32;
+
+const std::vector<ExprPtr>* GetPartialValidShape(const DistributedTensorTypePtr& target_type,
+                                                 const Span& span) {
+  if (!target_type->tensor_view_.has_value() || target_type->tensor_view_->valid_shape.empty()) {
+    return nullptr;
+  }
+
+  const auto& valid_shape = target_type->tensor_view_->valid_shape;
+  CHECK_SPAN(valid_shape.size() == target_type->shape_.size(), span)
+      << "pld.tensor.allreduce target valid_shape rank must match target rank";
+  // TensorType canonicalization removes an explicit valid_shape that exactly
+  // equals shape. Any remaining valid_shape is therefore a genuine partial
+  // region and must stay on the rectangular path below.
+  return &valid_shape;
+}
+
+CallPtr CreateAllReduceTargetView(const ExprPtr& target, const std::vector<ExprPtr>& flat_shape,
+                                  const std::vector<ExprPtr>& flat_valid_shape,
+                                  const std::vector<ExprPtr>* partial_valid_shape, const Span& span) {
   // Mesh allreduce owns this alias and reduces only flat_valid_shape. Public
   // tensor.view cannot infer a shape reinterpretation for partial validity.
   auto shape_tuple = tile_conversion_utils::MakeShapeTuple(flat_shape, span);
   std::vector<ExprPtr> view_args{target, shape_tuple};
-  if (target_type->tensor_view_.has_value() &&
-      (!target_type->tensor_view_->valid_shape.empty() || target_type->tensor_view_->pad != PadValue::null)) {
-    const auto& source_valid_shape = target_type->tensor_view_->valid_shape;
-    view_args.push_back(tile_conversion_utils::MakeShapeTuple(
-        source_valid_shape.empty() ? std::vector<ExprPtr>{} : flat_valid_shape, span));
+  if (partial_valid_shape != nullptr) {
+    view_args.push_back(tile_conversion_utils::MakeShapeTuple(flat_valid_shape, span));
   }
   return OpRegistry::GetInstance().Create("tensor.view", view_args, {}, span);
 }
@@ -555,24 +585,21 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 // ``pld.tensor.allreduce`` lowering rule
 //
 // In-place all-reduce of a window-bound DistributedTensor across every rank
-// of its comm group. Expands the single composite Call into the 4-phase
-// decomposition validated by the hand-written reference in
-// ``tests/st/distributed/collectives/test_l3_allreduce.py`` (``reduce_step``):
+// of its comm group. Expands the single composite Call into a ready barrier
+// followed by UB-sized reduction chunks, as exercised by
+// ``test_l3_tensor_allreduce_intrinsic.py``:
 //
-//   Phase 2a: for peer in 0..nranks:
+//   Ready 1: for peer in 0..nranks:
 //               if peer != my_rank:
 //                 pld.system.notify(signal, peer, [my_rank, 0], 1, op=AtomicAdd)
-//   Phase 2b: for src  in 0..nranks:
+//   Ready 2: for src  in 0..nranks:
 //               if src != my_rank:
 //                 pld.system.wait(signal, [src, 0], 1, cmp=Ge)
-//   Phase 3 : acc = tile.load(target, [0..], shape)
-//             for peer in 0..nranks:
-//               if peer != my_rank:
-//                 recv = pld.tile.remote_load(target, peer, [0..], shape)
-//                 acc = tile.add(acc, recv)
-//               else:
-//                 acc = acc
-//   Phase 4 : tile.store(acc, [0..], target)
+//   Chunks : for each UB-sized chunk:
+//              acc = tile.load(target, offsets, shape, valid_shape)
+//              remote_load and accumulate every peer's chunk
+//              AtomicAdd and wait for the monotonic value chunk_id + 2
+//              narrow the ragged tail and tile.store(acc, offsets, target)
 //
 // The loop bound ``nranks`` is read at runtime via
 // ``pld.system.nranks(pld.system.get_comm_ctx(target))`` so the lowering does
@@ -634,11 +661,13 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // and wait's `expected` are INT32 per the Python builder's int_dtype
   // override — keep separate constants for those distinct slots.
   //
-  // Signal scheme: hybrid Set / AtomicAdd, both waits use ``WaitCmp::kGe``.
-  // Phase 2a uses ``Set value=1`` (race-free: each cell has exactly one
-  // writer, the corresponding peer); Phase 2b waits for ``>= 1``. Phase 3.5
-  // uses ``AtomicAdd 1`` for the post-reduce barrier (cell 1 → 2) with wait
-  // for ``>= 2``.
+  // Signal scheme: monotonic AtomicAdd, with waits using ``WaitCmp::kGe``.
+  // Phase 2a adds ``1`` and Phase 2b waits for ``>= 1``.  Each chunk-complete
+  // barrier adds another ``1`` and waits for ``>= chunk_id + 2``.  Avoid
+  // mixing ``Set`` with later ``AtomicAdd`` on the same cells: a fast rank can
+  // issue both notifications for a tiny chunk before a slow peer observes the
+  // first barrier, and device-side visibility of set/add notifications is not
+  // guaranteed to preserve the final monotonic value.
   //
   // ``kGe`` (not ``kEq``) is load-bearing. The cell is monotonically
   // increasing within a single call, but the observer (the waiting rank)
@@ -646,14 +675,14 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // races ahead — e.g. rank A pauses between its own Phase 2a and 2b
   // while rank B completes 2a, 2b, the full Phase 3 (remote loads,
   // microseconds), and Phase 3.5a — then by the time A polls its
-  // cell[B], it has already been advanced from 1 (B's 2a Set) to 2
-  // (B's 3.5a AtomicAdd). ``kEq(==1)`` would never unblock; ``kGe(>=1)``
-  // does. The hand-written reference at
-  // ``tests/st/distributed/collectives/test_l3_allreduce.py`` uses ``Ge(1)`` for
-  // exactly this reason and survives the same race window.
+  // cell[B], it has already been advanced from 1 to 2. ``kEq(==1)`` would
+  // never unblock; ``kGe(>=1)`` does.
   //
-  // The cells end the call at 2, so the buffer is **not reusable** across
-  // multiple allreduce calls without per-call reallocation — a stale ``2``
+  // Every non-self row ends the call at ``1 + number_of_chunks`` for a
+  // fully-valid target (or ``2`` for the partial-valid rectangle). The self
+  // row is skipped and remains zero, but the non-self counters still make the
+  // buffer **non-reusable** across multiple allreduce calls without per-call
+  // reallocation — a stale positive value
   // would let the next call's ``Ge(1)`` Phase 2b pass before any peer
   // notifies, breaking the barrier. The symmetric ``Set value=0`` reset
   // path would let the buffer self-clear, but on-board ``TWAIT(==0)`` did
@@ -663,84 +692,188 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // buffer per call. The user-facing DSL docstring repeats this contract.
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto two_idx = std::make_shared<ConstInt>(2, DataType::INDEX, span);
   auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
   auto two_i32 = std::make_shared<ConstInt>(2, DataType::INT32, span);
-  auto flat_shape = CollapseShapeTo2D(target_type->shape_, span);
+  const int64_t element_bytes = static_cast<int64_t>(target_type->dtype_.GetByte());
+  INTERNAL_CHECK_SPAN(element_bytes > 0, span)
+      << "pld.tensor.allreduce target dtype has no storage width: " << target_type->dtype_.ToString();
+  const int64_t chunk_elements = kMeshAllReduceChunkBytes / element_bytes;
+  INTERNAL_CHECK_SPAN(chunk_elements > 0, span)
+      << "pld.tensor.allreduce dtype is wider than the mesh chunk byte budget";
+  INTERNAL_CHECK_SPAN(kPTOTileAlignmentBytes % element_bytes == 0, span)
+      << "pld.tensor.allreduce dtype width must divide the tile alignment";
+  const int64_t alignment_elements = kPTOTileAlignmentBytes / element_bytes;
+  auto max_chunk_cols = std::make_shared<ConstInt>(chunk_elements, DataType::INDEX, span);
+
+  const auto* partial_valid_shape = GetPartialValidShape(target_type, span);
+  // A fully-valid packed tensor is one logical 1D stream. Keep the view
+  // physically 2D as [1, N] because tile load/store codegen is 2D. A partial
+  // ND valid box may have row gaps after a full linear flatten, so preserve the
+  // existing [rows, cols] rectangle for that case.
+  auto flat_shape = partial_valid_shape != nullptr ? CollapseShapeTo2D(target_type->shape_, span)
+                                                   : CollapseShapeToLinear2D(target_type->shape_, span);
   auto flat_valid_shape = flat_shape;
-  if (target_type->tensor_view_.has_value() && !target_type->tensor_view_->valid_shape.empty()) {
-    const auto& valid_shape = target_type->tensor_view_->valid_shape;
-    CHECK_SPAN(valid_shape.size() == target_type->shape_.size(), span)
-        << "pld.tensor.allreduce target valid_shape rank must match target rank";
+  ExprPtr chunk_cols = max_chunk_cols;
+  std::vector<ExprPtr> rectangular_tile_shape;
+  if (partial_valid_shape != nullptr) {
+    const auto& valid_shape = *partial_valid_shape;
     CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(valid_shape, target_type->shape_), span)
         << "pld.tensor.allreduce target valid_shape cannot be represented by a single 2D view";
     flat_valid_shape = CollapseShapeTo2D(valid_shape, span);
+    bool valid_shape_is_static = true;
+    for (const auto& dim : flat_valid_shape) {
+      if (!As<ConstInt>(dim)) {
+        valid_shape_is_static = false;
+        break;
+      }
+    }
+    // Prefer the compact valid rectangle when it is statically allocatable.
+    // For symbolic validity, fall back to the source's fixed physical rectangle;
+    // this accepts e.g. shape=[64, 64], valid_shape=[1, m] without asking the UB
+    // allocator to size a tile from the runtime value of m.
+    rectangular_tile_shape = valid_shape_is_static ? flat_valid_shape : flat_shape;
+    auto rectangular_elements = tile_conversion_utils::MakeCanonicalIndexMul(
+        rectangular_tile_shape[0], rectangular_tile_shape[1], span, "LowerCompositeOps");
+    CHECK_SPAN(ProveValidExtentLessEqual(rectangular_elements, max_chunk_cols) == ProofResult::kTrue, span)
+        << "pld.tensor.allreduce partial valid_shape must fit within one " << kMeshAllReduceChunkBytes
+        << "-byte mesh chunk using a statically bounded tile; chunking a partial rectangle with row gaps "
+           "is not supported";
+  } else if (auto flat_extent = As<ConstInt>(flat_valid_shape[1]);
+             flat_extent && flat_extent->value_ > 0 && flat_extent->value_ < chunk_elements) {
+    // Do not reserve a full 16-KiB tile for a statically small allreduce. PTO
+    // tiles require a 32-byte-aligned row, so use the smallest legal physical
+    // width that covers the logical extent. Every chunk-local tile inherits
+    // this width, preserving the caller's remaining VEC UB budget.
+    const int64_t aligned_extent = ((flat_extent->value_ - 1) / alignment_elements + 1) * alignment_elements;
+    chunk_cols = std::make_shared<ConstInt>(aligned_extent, DataType::INDEX, span);
   }
-  auto flat_valid_shape_tuple = tile_conversion_utils::MakeShapeTuple(flat_valid_shape, span);
   auto flat_target = b.Bind(
-      "target_2d", CreateAllReduceTargetView(target, target_type, flat_shape, flat_valid_shape, span), span);
-  auto zero_offsets = tile_conversion_utils::MakeZeroOffsets(2, span);
+      "target_2d", CreateAllReduceTargetView(target, flat_shape, flat_valid_shape, partial_valid_shape, span),
+      span);
 
-  // ---- Phase 2a: notify all peers (Set cell[my_rank, 0] on each peer to 1) ----
-  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kSet, one_i32, "", span);
+  // ---- Phase 2a: notify all peers (AtomicAdd cell[my_rank, 0] on each peer by 1) ----
+  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "", span);
 
   // ---- Phase 2b: wait on every peer's signal slot (cell[src, 0] >= 1) ----
   b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, one_i32, "", span);
 
-  // ---- Phase 3: acc = load(target); for peer != my_rank: acc += remote_load(peer) ----
-  // tile.load needs the valid_shapes arg (same as shapes when omitted) plus
-  // target_memory / transpose kwargs — mirrors `pl.load(...)`.
-  auto acc_initial = b.Bind(
-      "acc_initial",
-      reg.Create("tile.load", {flat_target, zero_offsets, flat_valid_shape_tuple, flat_valid_shape_tuple},
-                 {{"target_memory", MemorySpace::Vec}}, span),
-      span);
+  // A partial ND valid box is not a contiguous linear stream: the physical
+  // rows can contain gaps after valid_cols. Keep the established single
+  // rectangular load for this rarer metadata case. The arbitrary-length
+  // chunk path below handles fully-valid packed tensors, which are safe to
+  // reinterpret as one contiguous stream.
+  if (partial_valid_shape != nullptr) {
+    auto zero_offsets = tile_conversion_utils::MakeZeroOffsets(2, span);
+    auto rectangular_shape_tuple = tile_conversion_utils::MakeShapeTuple(rectangular_tile_shape, span);
+    auto flat_valid_shape_tuple = tile_conversion_utils::MakeShapeTuple(flat_valid_shape, span);
+    auto acc_initial = b.Bind(
+        "acc_initial",
+        reg.Create("tile.load", {flat_target, zero_offsets, rectangular_shape_tuple, flat_valid_shape_tuple},
+                   {{"target_memory", MemorySpace::Vec}}, span),
+        span);
+    auto acc_final = b.EmitForReduce(
+        "peer", zero_idx, comm.nranks_idx, one_idx, acc_initial,
+        [&](LoweringBuilder& body, const VarPtr& peer, const VarPtr& acc) {
+          return body.EmitIfExpr(
+              body.NotEq(peer, comm.my_rank, span),
+              [&](LoweringBuilder& then_body) {
+                auto recv = then_body.Bind("recv",
+                                           reg.Create("pld.tile.remote_load",
+                                                      {flat_target, peer, zero_offsets,
+                                                       rectangular_shape_tuple, flat_valid_shape_tuple},
+                                                      {}, span),
+                                           span);
+                return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+              },
+              [&](LoweringBuilder& /*else_body*/) -> ExprPtr { return acc; }, span);
+        },
+        span);
+    b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "2", span);
+    b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, two_i32, "2", span);
+    b.Bind("store_ret", reg.Create("tile.store", {acc_final, zero_offsets, flat_target}, {}, span), span);
+    return target;
+  }
 
-  auto acc_final = b.EmitForReduce(
-      "peer", zero_idx, comm.nranks_idx, one_idx, acc_initial,
-      [&](LoweringBuilder& body, const VarPtr& peer, const VarPtr& acc) {
-        return body.EmitIfExpr(
-            body.NotEq(peer, comm.my_rank, span),
-            [&](LoweringBuilder& then_body) {
-              auto recv =
-                  then_body.Bind("recv",
-                                 OpRegistry::GetInstance().Create(
-                                     "pld.tile.remote_load",
-                                     {flat_target, peer, zero_offsets, flat_valid_shape_tuple}, {}, span),
-                                 span);
-              // Bind the add result so codegen sees a named tile buffer to
-              // write into (pto.tadd lowers to `ins(...) outs(<bound>)`);
-              // yielding a raw Call leaves outs() empty and MLIR rejects it.
-              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
-            },
-            [&](LoweringBuilder& /*else_body*/) -> ExprPtr {
-              // peer == my_rank: pass acc through unchanged.
-              return acc;
+  auto chunk_shape_tuple = tile_conversion_utils::MakeShapeTuple({one_idx, chunk_cols}, span);
+
+  // ---- Phases 3/3.5/4: reduce one UB-safe chunk at a time ----
+  //
+  // The physical tile uses the selected statically aligned chunk width. The
+  // final chunk carries [1, min(chunk_cols, valid_cols - col)] as valid_shape,
+  // so local and remote TLOADs never read past the tensor while allocation
+  // remains static.
+  // A post-reduce barrier is required for every chunk before that chunk is
+  // written back; otherwise a fast rank can overwrite bytes a slow peer has
+  // not remote-loaded yet.
+  b.EmitFor(
+      "col", zero_idx, flat_valid_shape[1], chunk_cols,
+      [&](LoweringBuilder& chunk_body, const VarPtr& col) {
+        auto remaining = MakeSub(flat_valid_shape[1], col, span);
+        auto valid_cols = MakeMin(chunk_cols, remaining, span);
+        auto chunk_valid_shape_tuple = tile_conversion_utils::MakeShapeTuple({one_idx, valid_cols}, span);
+        auto chunk_offsets = tile_conversion_utils::MakeShapeTuple({zero_idx, col}, span);
+
+        auto acc_loaded = chunk_body.Bind(
+            "acc_loaded",
+            reg.Create("tile.load", {flat_target, chunk_offsets, chunk_shape_tuple, chunk_valid_shape_tuple},
+                       {{"target_memory", MemorySpace::Vec}}, span),
+            span);
+        // The ragged TLOAD carries a dynamic valid_shape. Fill its padding
+        // with zero and promote the accumulator back to the fixed physical
+        // chunk type before it becomes a loop-carried / if-result tile.
+        // Otherwise memory allocation may hoist an alloc_tile whose
+        // valid_col still depends on the chunk loop variable, violating SSA
+        // dominance in the generated PTO.
+        auto acc_initial = chunk_body.Bind(
+            "acc_initial",
+            reg.Create("tile.fillpad_inplace", {acc_loaded}, {{"pad_value", PadValue::zero}}, span), span);
+
+        auto acc_final = chunk_body.EmitForReduce(
+            "peer", zero_idx, comm.nranks_idx, one_idx, acc_initial,
+            [&](LoweringBuilder& peer_body, const VarPtr& peer, const VarPtr& acc) {
+              return peer_body.EmitIfExpr(
+                  peer_body.NotEq(peer, comm.my_rank, span),
+                  [&](LoweringBuilder& then_body) {
+                    auto recv_loaded = then_body.Bind(
+                        "recv_loaded",
+                        OpRegistry::GetInstance().Create(
+                            "pld.tile.remote_load",
+                            {flat_target, peer, chunk_offsets, chunk_shape_tuple, chunk_valid_shape_tuple},
+                            {}, span),
+                        span);
+                    auto recv = then_body.Bind("recv",
+                                               reg.Create("tile.fillpad_inplace", {recv_loaded},
+                                                          {{"pad_value", PadValue::zero}}, span),
+                                               span);
+                    // Bind the add result so codegen sees a named tile buffer
+                    // to write into.
+                    return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+                  },
+                  [&](LoweringBuilder& /*else_body*/) -> ExprPtr { return acc; }, span);
             },
             span);
+
+        // The signal cell starts at 1 after the ready barrier. Each completed
+        // chunk adds one, so wait for chunk_id + 2.
+        auto chunk_id = MakeFloorDiv(col, chunk_cols, span);
+        auto expected_idx = MakeAdd(chunk_id, two_idx, span);
+        auto expected_i32 = chunk_body.Bind(
+            "chunk_expected", std::make_shared<ir::Cast>(expected_idx, DataType::INT32, span), span);
+        chunk_body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32,
+                                 "_chunk", span);
+        chunk_body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected_i32, "_chunk", span);
+
+        // Accumulation deliberately uses the fixed physical chunk type. Narrow
+        // the final alias back to the real tail before store so the last chunk
+        // cannot write beyond the logical tensor extent.
+        auto store_value = chunk_body.Bind(
+            "store_value", reg.Create("tile.set_validshape", {acc_final, one_idx, valid_cols}, {}, span),
+            span);
+        chunk_body.Bind("store_ret",
+                        reg.Create("tile.store", {store_value, chunk_offsets, flat_target}, {}, span), span);
       },
       span);
-
-  // ---- Phase 3.5: post-reduce barrier (AtomicAdd 1 → wait >= 2) ----
-  // Phase 4 overwrites every rank's slot of ``target``; without this barrier,
-  // a fast rank could write its reduced value back to ``target`` while a slow
-  // rank is still in Phase 3 reading the original Phase-1 staged data from
-  // the same slot via ``pld.tile.remote_load`` — a write-after-read hazard
-  // that surfaces as wrong sums on slower ranks.
-  //
-  // Reuse the same signal cells: each peer atomic-adds 1 again, raising my
-  // cell from 1 to 2, so the second wait checks ``cell >= 2``. ``kGe`` (not
-  // ``kEq``) is required for the same race-window reason as Phase 2b: a
-  // faster peer can advance the cell past 2 before the slower rank gets
-  // around to polling — but since the buffer is single-shot per call and
-  // no peer adds more than ``+1`` here, the cell tops out at 2 and
-  // ``>= 2`` is both safe and tight. See the prelude comment block above
-  // and the hand-written reference at
-  // ``tests/st/distributed/collectives/test_l3_allreduce.py``.
-  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, "2", span);
-  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, two_i32, "2", span);
-
-  // ---- Phase 4: store the reduced accumulator back into the target slot ----
-  b.Bind("store_ret", reg.Create("tile.store", {acc_final, zero_offsets, flat_target}, {}, span), span);
 
   // In-place semantics: the rebind LHS receives the (post-reduce) target view.
   return target;

@@ -32,6 +32,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
@@ -679,6 +680,8 @@ class PTOCodegen : public CodegenBase {
    * @brief Get the pointer-identity key for a variable
    */
   [[nodiscard]] const ir::Var* GetVarKey(const ir::VarPtr& var) const;
+  void CheckExprVarsBound(const std::vector<ir::ExprPtr>& exprs, const ir::Span& span,
+                          const std::string& context) const;
   void BindVarToMlir(const ir::VarPtr& var, const std::string& mlir_name);
   void BindTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
   void BindVarToMemRef(const ir::VarPtr& var, const ir::Var* base_ptr);

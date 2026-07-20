@@ -48,6 +48,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1438,6 +1439,15 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
+  if (ir::IsOp(call, "pld.tile.remote_load")) {
+    auto result_tile_type = As<ir::TileType>(op->var_->GetType());
+    INTERNAL_CHECK_SPAN(result_tile_type, call->span_)
+        << "Internal error: pld.tile.remote_load result must be a TileType";
+    const auto result_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+    CheckExprVarsBound(result_tile_view.valid_shape, call->span_,
+                       "pld.tile.remote_load inferred valid_shape");
+  }
+
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && !alias_scatter_result_to_input) {
       EmitAllocTileForVar(op->var_, tile_type);
@@ -1653,6 +1663,19 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const { return Data
 const ir::Var* PTOCodegen::GetVarKey(const VarPtr& var) const {
   INTERNAL_CHECK(var != nullptr) << "Internal error: variable key requested for null Var";
   return var.get();
+}
+
+void PTOCodegen::CheckExprVarsBound(const std::vector<ir::ExprPtr>& exprs, const ir::Span& span,
+                                    const std::string& context) const {
+  ir::var_collectors::VarDefUseCollector collector;
+  for (const auto& expr : exprs) {
+    collector.VisitExpr(expr);
+  }
+  for (const auto* var : collector.var_uses) {
+    CHECK_SPAN(fs_.var_to_mlir.count(var) != 0, span)
+        << context << " depends on unbound symbol '" << var->name_hint_
+        << "'; pass a scalar, loop, or physical tensor-shape value that is available in the kernel";
+  }
 }
 
 void PTOCodegen::BindVarToMlir(const VarPtr& var, const std::string& mlir_name) {

@@ -106,7 +106,8 @@ against the enum range so codegen can cast back without a second guard.
 ### `pld.tile.remote_load` (TLOAD)
 
 ```text
-pld.tile.remote_load(target, peer, offsets, shape) -> TileType(shape, target.dtype)
+pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])
+    -> TileType(shape, target.dtype)
 ```
 
 Reads a region of the `peer` rank's slice of a window-bound `DistributedTensor`
@@ -115,13 +116,24 @@ into a local tile. Mirrors `tile.load` at the IR level (positional `offsets` /
 address translation is realised at codegen by
 `CommRemoteOffset(ctx, peer) + addptr + make_tensor_view`.
 
-Verifier: `target` must be `DistributedTensorType`; `peer` must be a
-`ScalarType` rank index; `offsets` / `shape` must each be a `MakeTuple` whose
-rank equals `target.shape.size()`.
+`valid_shape` is optional. With or without it, type inference intersects the
+requested window with the source tensor's effective valid region and checks
+provable physical bounds. When present, `shape` remains the physical UB tile
+allocation while `valid_shape` additionally limits the remote partition and
+the tile's valid extent. This is the fixed-width ragged-tail form used by
+chunked collectives.
 
-DSL (`python/pypto/language/distributed/op/tile_ops.py`) exposes `peer` /
-`offsets` / `shape` as keyword-only for readability; the IR op keeps them
-positional, matching `tile.load`.
+Every symbolic source or requested valid extent that survives inference must
+be runtime-bound by a kernel scalar, loop variable, or physical tensor-shape
+parameter. A symbol that appears only in type metadata is rejected during PTO
+codegen.
+
+Verifier: `target` must be `DistributedTensorType`; `peer` must be a
+`ScalarType` rank index; `offsets` / `shape` / optional `valid_shape` must each
+be a `MakeTuple` whose rank equals `target.shape.size()`.
+
+DSL (`python/pypto/language/distributed/op/tile_ops.py`) accepts positional or
+keyword arguments; the IR op keeps them positional, matching `tile.load`.
 
 ### `pld.tile.remote_store` (TSTORE)
 
@@ -271,15 +283,32 @@ pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "m
 Reduces every participating rank's window-bound `src` slice in place and returns
 the same type as `src`. The `mode` keyword selects the lowering algorithm:
 
+Fully-valid packed mesh targets are viewed as one logical `[1, N]` stream and
+processed in UB chunks of at most 16 KiB. A statically known `N` smaller than
+that budget shrinks the physical chunk to the smallest 32-byte-aligned width
+that covers `N`; larger or dynamic inputs retain the maximum width. The last
+chunk keeps its selected physical width
+but carries `valid_shape=[1, min(chunk, N-offset)]`, so arbitrary element counts
+neither read nor store past the end.
+
 For mesh lowering, a partial `TensorView.valid_shape` is preserved for packed ND
 targets when its valid box can be represented by collapsing the leading dimensions
-to one 2D rectangle; only that rectangle is reduced. Strided targets, DN partial
-views, and non-representable partial boxes are rejected explicitly.
+to one 2D rectangle and a statically bounded physical tile fits within one 16-KiB
+chunk. A symbolic valid extent falls back to the source's physical rectangle when
+that rectangle fits the budget. Oversized partial rectangles,
+strided targets, DN partial views, and non-representable partial boxes are rejected
+explicitly.
+
+Any symbolic target or partial-valid extent that survives lowering must be
+runtime-bound by a kernel scalar, loop variable, or physical tensor-shape
+parameter; a type-metadata-only symbol is rejected during PTO codegen. A fully
+dynamic physical target dimension is bound from that tensor parameter.
 
 - **`"mesh"` (default)** — direct all-to-all exchange with O(P) HCCL windows.
-  Signal shape `[NR, 1]` (one cell per rank).  4-phase decomposition: notify-all
-  (Set 1) / wait-all (Ge 1) / remote_load+accumulate / store-back with a
-  post-reduce WAR-guard barrier (AtomicAdd 1 → Ge 2).
+  Signal shape `[NR, 1]` (one cell per rank). An `AtomicAdd 1` / `wait ≥1` ready
+  barrier precedes the chunk loop. Each chunk performs
+  `remote_load+accumulate`, then `AtomicAdd 1` / wait for its monotonic chunk
+  counter before store-back, preventing write-after-read races.
 - **`"ring"`** — NCCL-style chunked reduce-scatter + allgather schedule with
   O(1) HCCL windows.  Signal shape `[2 * (NR − 1), NR]` (one row per ring
   round, one cell per rank).  2(P−1) ring steps with per-round barriers

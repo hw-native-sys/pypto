@@ -359,6 +359,124 @@ def test_remote_load_returns_tile_type_with_target_dtype():
     assert call.type.shape[0].value == 32
 
 
+def test_remote_load_four_arg_form_rejects_out_of_bounds_window():
+    """Omitting valid_shape still enforces the requested physical window."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [1, 17], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="reads past the end of dimension 1"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, _make_shape_tuple([0, 0], span), _make_shape_tuple([1, 8192], span)],
+            {},
+            span,
+        )
+
+
+def test_remote_load_four_arg_form_narrows_to_source_valid_shape():
+    """The implicit request cannot widen a partial source valid region."""
+    span = ir.Span.unknown()
+    shape = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+    view = ir.TensorView(
+        valid_shape=[ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(8, DataType.INT64, span)],
+        stride=[],
+        layout=ir.TensorLayout.ND,
+    )
+    target = ir.Var("data", ir.DistributedTensorType(shape, DataType.FP32, None, view), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    call = ir.create_op_call(
+        "pld.tile.remote_load",
+        [target, peer, _make_shape_tuple([0, 0], span), _make_shape_tuple([1, 16], span)],
+        {},
+        span,
+    )
+
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.tile_view is not None
+    assert call.type.tile_view.valid_shape == [1, 8]
+
+
+def test_remote_load_valid_shape_preserves_physical_tile_and_narrows_tail():
+    """A ragged remote load keeps its fixed physical shape and carries valid_shape."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [1, 17], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([1, 8192], span)
+    valid_shape = _make_shape_tuple([1, 17], span)
+
+    call = ir.create_op_call(
+        "pld.tile.remote_load",
+        [target, peer, offsets, shape, valid_shape],
+        {},
+        span,
+    )
+
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.shape == [1, 8192]
+    assert call.type.tile_view is not None
+    assert call.type.tile_view.valid_shape == [1, 17]
+
+
+def test_remote_load_rejects_mismatched_valid_shape_rank():
+    """The optional valid_shape must use the target coordinate rank."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64, 32], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="valid_shape rank"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [
+                target,
+                peer,
+                _make_shape_tuple([0, 0], span),
+                _make_shape_tuple([16, 16], span),
+                _make_shape_tuple([16], span),
+            ],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_negative_valid_shape():
+    """The valid region cannot contain a negative extent."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="valid_shape 0 is provably negative"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [
+                target,
+                peer,
+                _make_shape_tuple([0], span),
+                _make_shape_tuple([32], span),
+                _make_shape_tuple([-1], span),
+            ],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_non_integer_valid_shape():
+    """The valid region must be expressed with integer extents."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    float_valid_shape = ir.MakeTuple([ir.ConstFloat(1.0, DataType.FP32, span)], span)
+
+    with pytest.raises(Exception, match="valid_shape 0 must be an integer scalar"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, _make_shape_tuple([0], span), _make_shape_tuple([32], span), float_valid_shape],
+            {},
+            span,
+        )
+
+
 def test_remote_load_rejects_plain_tensor_target():
     """Negative: a plain pl.Tensor target is refused — must be window-bound."""
     span = ir.Span.unknown()

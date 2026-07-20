@@ -744,7 +744,7 @@ class TestConvertTensorToTileOps:
 
         ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 14),
         so it sees ``pld.tensor.allreduce`` as a single composite Call before
-        the 4-phase decomposition exists. Without the explicit
+        the ready-plus-per-chunk decomposition exists. Without the explicit
         ``has_read | has_write`` marking, the param-direction analysis
         would leave the window params as In and a downstream reader of
         the same window slot would miss the RAW edge (issue #1732), same

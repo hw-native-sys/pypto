@@ -236,33 +236,38 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
 
 }  // namespace
 
-// pld.tile.remote_load(target, peer, offsets, shape) — load a peer's slice of
+// pld.tile.remote_load(target, peer, offsets, shape[, valid_shape]) — load a peer's slice of
 // a window-bound DistributedTensor into a local tile. Lowers to:
 //   delems = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
 //   peer_ptr = pto.addptr local_ptr, delems
 //   peer_view = pto.make_tensor_view peer_ptr, shape=..., strides=...
-//   pto.partition_view peer_view, offsets=..., sizes=<shape>
+//   pto.partition_view peer_view, offsets=..., sizes=<valid_shape-or-shape>
 //   pto.tload ins(<pview>) outs(<tile>)
 static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 4) << "pld.tile.remote_load requires 4 arguments (target, peer, offsets, "
-                                  "shape), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 4 || op->args_.size() == 5, op->span_)
+      << "pld.tile.remote_load requires 4 or 5 arguments "
+         "(target, peer, offsets, shape[, valid_shape]), got "
+      << op->args_.size();
 
   auto binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tile.remote_load");
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[2]);
   INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "pld.tile.remote_load offsets must be MakeTuple";
   auto shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
   INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "pld.tile.remote_load shape must be MakeTuple";
+  auto result_tile_type = As<ir::TileType>(op->GetType());
+  INTERNAL_CHECK_SPAN(result_tile_type, op->span_) << "pld.tile.remote_load result must be a TileType";
 
   auto peer_view = EmitCommRemoteView(binding, op->args_[1], codegen);
 
   const std::string dtype_str = codegen.GetTypeString(binding.type->dtype_);
-  const auto& shape_elems = shapes_tuple->elements_;
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
-  std::string partition_view = EmitPartitionViewPTO(
-      binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str, partition_type,
-      GetIndexOffsetCodes(offsets_tuple->elements_, codegen), GetSizeCodes(shape_elems, codegen), codegen);
+  const auto result_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+  const auto& valid_shape_elems = result_tile_view.valid_shape;
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(valid_shape_elems), dtype_str);
+  std::string partition_view =
+      EmitPartitionViewPTO(binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str,
+                           partition_type, GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                           GetSizeCodes(valid_shape_elems, codegen), codegen);
 
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_)

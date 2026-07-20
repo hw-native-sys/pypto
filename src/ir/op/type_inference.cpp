@@ -532,7 +532,8 @@ void CheckWindowReadDimBounds(const WindowReadValidShapeParams& p, size_t i) {
   // is the standing bounds invariant of the type this read produces. The request
   // is returned as the result whenever the source cannot be proven narrower, so
   // an oversized one would otherwise walk straight into the result type. Reject
-  // what we can disprove and trust the rest, as everywhere else here.
+  // what we can disprove and trust the rest, as everywhere else here. Operators
+  // that require stricter scalar-kind validation enforce it in their deducers.
   if (!p.requested_valid.empty()) {
     const ExprPtr& requested = p.requested_valid[i];
     CHECK_SPAN(ProveValidExtentLessEqual(requested, p.window[i]) != ProofResult::kFalse, p.span)
@@ -573,11 +574,17 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
 
     // available = clamp(source_valid - offset, 0, window).
     //
-    // When the source is fully valid and the read is non-clamping, the
-    // precondition checked above already gives window <= source_valid - offset,
-    // so the clamp is the window itself and no guard expression is built.
+    // When the source is fully valid and the read is non-clamping, proof-only
+    // callers may trust the precondition checked above and avoid building a
+    // guard expression. Runtime-intersection callers must retain a symbolic
+    // source bound: an unknown `window <= source_valid - offset` relation is
+    // accepted by the verifier, but the emitted read still has to stay in-bounds.
+    // Static source bounds keep the historical proof-only path so bounded
+    // dynamic offsets produced by collective schedules remain codegen-friendly.
     ExprPtr available;
-    if (source_fully_valid && !params.clamp) {
+    const bool source_bound_is_static = As<ConstInt>(src_valid) != nullptr;
+    if (source_fully_valid && !params.clamp &&
+        (!params.materialize_symbolic_intersection || source_bound_is_static)) {
       available = window;
     } else {
       CHECK_SPAN(IsIntegerScalarExpr(offset), params.span)
@@ -594,23 +601,24 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
     // With no explicit request, the source's extent under the window *is* the
     // answer, guard expression and all.
     //
-    // With one, the request is narrowed to the source's extent only when that is
-    // provably the smaller of the two. An undecidable relation between them is
-    // taken on trust, exactly as the bounds obligation above is: the request is
-    // the caller's declared statement of what this read touches, and it is the
-    // only one of the two that the operator is sure it can name. A source valid
-    // extent is a *type-level* expression, and may legitimately mention a symbol
-    // that has no value in the reading function at all — a `pl.dynamic()` dim used
-    // in a parameter's `valid_shape` is bound at the call site, so a standalone
-    // (precompiled) kernel never receives it. Folding such a symbol into a runtime
-    // `min` would emit an operand that does not exist. Narrowing only on a proof
-    // keeps every real intersection — a partial source is still cut down to what it
-    // actually has — without inventing a guard over a name we cannot materialize.
+    // With one, proof-only callers narrow to the source's extent only when that
+    // is provably the smaller of the two. An undecidable relation is otherwise
+    // taken on trust because a source-valid type expression can mention a symbol
+    // that is not bound in the reading function. Callers that know those symbols
+    // are available at runtime may opt into materializing the exact min instead.
     if (params.requested_valid.empty()) {
       result.push_back(available);
       continue;
     }
     const ExprPtr& requested = params.requested_valid[i];
+    // Most window readers preserve the historical proof-only narrowing below:
+    // when ordering is unknown, keep the caller's requested extent. Remote
+    // loads opt into an exact runtime min because their partition must never
+    // include invalid peer-buffer elements.
+    if (params.materialize_symbolic_intersection) {
+      result.push_back(MinExtent(requested, available, params.span));
+      continue;
+    }
     const bool source_is_narrower = !AreExprsEqual(available, window) &&
                                     ProveValidExtentLessEqual(available, requested) == ProofResult::kTrue;
     result.push_back(source_is_narrower ? available : requested);

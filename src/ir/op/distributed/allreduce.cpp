@@ -17,7 +17,8 @@
  * :class:`DistributedTensorType` across every rank of its comm group, using a
  * window-bound INT32 ``signal`` matrix for the cross-rank barrier. Sibling of
  * ``pld.system.notify`` / ``pld.system.wait`` / ``pld.tile.remote_load``.
- * Explicit-signal InCore allreduce uses the 4-phase decomposition in
+ * Explicit-signal InCore mesh allreduce uses a ready barrier followed by
+ * UB-sized reduce/barrier/store chunks in
  * ``src/ir/transforms/lower_composite_ops_pass.cpp``; host-level allreduce is
  * lowered later by ``LowerHostTensorCollectives``.
  * Explicit signal buffers are single-shot: callers issuing multiple allreduces
@@ -126,8 +127,8 @@ REGISTER_OP("pld.tensor.allreduce")
         "group. After the call, every rank's slice of `target` holds the reduced value. "
         "`signal`, when present, is a window-bound INT32 matrix used as the cross-rank barrier "
         "(one slot per rank). Host one-argument calls synthesize a private signal before lowering. "
-        "`op` selects the reduction operator. Explicit-signal InCore calls are lowered to a 4-phase "
-        "decomposition (notify / wait / remote_load + accumulate / store) by LowerCompositeOps; "
+        "`op` selects the reduction operator. Explicit-signal InCore calls are lowered to a ready "
+        "barrier plus UB-sized remote_load + accumulate + guarded store chunks by LowerCompositeOps; "
         "host-level calls are lowered later by LowerHostTensorCollectives.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (InOut)")

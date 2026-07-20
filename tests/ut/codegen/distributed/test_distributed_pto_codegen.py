@@ -96,6 +96,343 @@ def test_ctx_arg_materialized_per_distributed_tensor():
     assert header.count("!pto.ptr<i64>") == 2, header
 
 
+def test_remote_load_ragged_tail_partitions_only_valid_extent():
+    """A fixed physical remote tile must not read beyond its valid tail."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[1, 17], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 17], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 8192],
+                valid_shape=[1, 17],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert "sizes = [%c1_index, %c17_index]" in remote_partition, remote_partition
+    alloc = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line)
+    assert "valid_row = %c1_index" in alloc, alloc
+    assert "valid_col = %c17_index" in alloc, alloc
+
+
+def test_remote_load_intersects_requested_and_source_valid_extent():
+    """remote_load must not partition beyond the source's valid region."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[
+                [1, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 8], stride=[], layout=pl.TensorLayout.ND),
+            ],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, 16],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert "sizes = [%c1_index, %c8_index]" in remote_partition, remote_partition
+    alloc = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line)
+    assert "valid_row = %c1_index" in alloc, alloc
+    assert "valid_col = %c8_index" in alloc, alloc
+
+
+def test_remote_load_without_valid_shape_uses_source_valid_extent():
+    """The four-argument form still partitions only the source's real data."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[
+                [1, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 8], stride=[], layout=pl.TensorLayout.ND),
+            ],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, 16])
+            return pl.store(tile, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert "sizes = [%c1_index, %c8_index]" in remote_partition, remote_partition
+
+
+def test_remote_load_rejects_type_only_dynamic_partition_extent():
+    """A repeated type-only symbol is not a runtime codegen binding."""
+    n = pl.dynamic("REMOTE_VALID_N")
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[
+                [1, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, n], stride=[], layout=pl.TensorLayout.ND),
+            ],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, n],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    with pytest.raises(Exception, match="depends on unbound symbol 'REMOTE_VALID_N'"):
+        _generate_mlir(P)
+
+
+def test_remote_load_intersects_runtime_bound_dynamic_source_valid_extent():
+    """A source-valid symbol bound by a tensor shape narrows the partition."""
+    n = pl.dynamic("REMOTE_PHYSICAL_N")
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[
+                [1, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, n], stride=[], layout=pl.TensorLayout.ND),
+            ],
+            shape_anchor: pl.Tensor[[1, n], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, 16],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    assert "func.func @kernel" in mlir
+    assert "REMOTE_PHYSICAL_N" not in mlir
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert "sizes = [%c1_index, %c16_index]" not in remote_partition, remote_partition
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
+
+
+def test_remote_load_clamps_runtime_bound_fully_valid_dynamic_source():
+    """Both call forms clamp a fully-valid dynamic source to its runtime extent."""
+    n = pl.dynamic("REMOTE_FULLY_VALID_N")
+
+    @pl.program
+    class DefaultCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[1, n], pl.FP32],
+            shape_anchor: pl.Tensor[[1, n], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    @pl.program
+    class ExplicitCall:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[1, n], pl.FP32],
+            shape_anchor: pl.Tensor[[1, n], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, 16],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    for program in (DefaultCall, ExplicitCall):
+        mlir = _generate_mlir(program)
+        min_results = {
+            match.group(1)
+            for line in mlir.splitlines()
+            if (match := re.match(r"\s*(%[A-Za-z0-9_.$]+) = arith\.minsi ", line))
+        }
+        remote_partitions = [
+            line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+        ]
+        assert len(remote_partitions) == 1
+        remote_partition = remote_partitions[0]
+        assert "sizes = [%c1_index, %c16_index]" not in remote_partition, remote_partition
+        size_match = re.search(r"sizes = \[%c1_index, (%[A-Za-z0-9_.$]+)\]", remote_partition)
+        assert size_match is not None, remote_partition
+        assert size_match.group(1) in min_results, remote_partition
+
+
+def test_remote_load_codegen_uses_runtime_min_of_source_and_requested_valid_extents():
+    """The peer partition consumes the exact min of two bound symbolic extents."""
+    source_cols = pl.dynamic("REMOTE_SOURCE_COLS")
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[
+                [1, 16],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, source_cols], stride=[], layout=pl.TensorLayout.ND),
+            ],
+            shape_anchor: pl.Tensor[[1, source_cols], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+            requested_cols: pl.Scalar[pl.INDEX],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, requested_cols],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    class RemoteLoadCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[ir.Call] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == ir.get_op("pld.tile.remote_load").name:
+                self.calls.append(op)
+            super().visit_call(op)
+
+    collector = RemoteLoadCollector()
+    collector.visit_program(P)
+    assert len(collector.calls) == 1
+    inferred_type = collector.calls[0].type
+    assert isinstance(inferred_type, ir.TileType)
+    assert inferred_type.tile_view is not None
+    valid_cols = inferred_type.tile_view.valid_shape[1]
+    assert isinstance(valid_cols, ir.Min)
+
+    def collect_min_vars(expr: ir.Expr) -> set[str]:
+        if isinstance(expr, ir.Var):
+            return {expr.name_hint}
+        if isinstance(expr, ir.Min):
+            return collect_min_vars(expr.left) | collect_min_vars(expr.right)
+        return set()
+
+    assert collect_min_vars(valid_cols) == {"REMOTE_SOURCE_COLS", "requested_cols"}
+
+    mlir = _generate_mlir(P)
+    min_dependencies = {
+        match.group(1): (match.group(2), match.group(3))
+        for line in mlir.splitlines()
+        if (
+            match := re.match(
+                r"\s*(%[A-Za-z0-9_.$]+) = arith\.minsi "
+                r"(%[A-Za-z0-9_.$]+), (%[A-Za-z0-9_.$]+) : index",
+                line,
+            )
+        )
+    }
+    assert min_dependencies, mlir
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    size_match = re.search(r"sizes = \[%c1_index, (%[A-Za-z0-9_.$]+)\]", remote_partition)
+    assert size_match is not None, remote_partition
+
+    def collect_argument_dependencies(value: str) -> set[str]:
+        if re.fullmatch(r"%arg[0-9]+", value):
+            return {value}
+        if value in min_dependencies:
+            left, right = min_dependencies[value]
+            return collect_argument_dependencies(left) | collect_argument_dependencies(right)
+        return set()
+
+    partition_size = size_match.group(1)
+    assert partition_size in min_dependencies, remote_partition
+    assert len(collect_argument_dependencies(partition_size)) == 2, remote_partition
+
+
+def test_remote_load_accepts_scalar_bound_dynamic_partition_extent():
+    """An explicit scalar valid extent is already bound in the kernel."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[1, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+            valid_cols: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(
+                data,
+                peer=peer,
+                offsets=[0, 0],
+                shape=[1, 16],
+                valid_shape=[1, valid_cols],
+            )
+            return pl.store(tile, [0, 0], out)
+
+    mlir = _generate_mlir(P)
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
+    index_casts = re.findall(r"arith\.index_cast %[A-Za-z0-9_.$]+ : i32 to index", mlir)
+    assert len(index_casts) >= 2, mlir  # peer plus valid_cols
+
+
 def _split_module(mlir: str) -> dict[str, str]:
     """Split ``module {...}`` into a mapping of ``func_name -> body``.
 

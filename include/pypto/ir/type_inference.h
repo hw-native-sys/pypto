@@ -289,6 +289,10 @@ struct WindowReadValidShapeParams {
   /// clamp, has to say so instead of naming an option it does not have.
   std::string bounds_remedy;
   Span span = Span::unknown();
+  /// Materialize ``min(requested_valid, available)`` when their ordering is
+  /// symbolic. The caller must ensure every symbol in the resulting runtime
+  /// expression is bound in the generated function.
+  bool materialize_symbolic_intersection = false;
 };
 
 /**

@@ -238,11 +238,16 @@ def allreduce(
     type is ``target``'s :class:`ir.DistributedTensorType` (the rebind target —
     same semantics as :func:`pl.store`).
 
-    Explicit-signal InCore allreduce is expanded by LowerCompositeOps into the
-    4-phase notify/wait/remote_load+accumulate/store decomposition (mesh) or
-    the 2(P−1)-step reduce-scatter + allgather ring schedule (ring). Host-level
+    Explicit-signal InCore allreduce is expanded by LowerCompositeOps into a
+    ready barrier followed by UB-sized remote-load/accumulate chunks, each with
+    a monotonic AtomicAdd/wait before store (mesh), or the 2(P−1)-step
+    reduce-scatter + allgather ring schedule (ring). Host-level
     allreduce is lowered later by LowerHostTensorCollectives after signal
-    synthesis and comm-domain materialization.
+    synthesis and comm-domain materialization. Any symbolic target or
+    partial-valid extent that survives lowering must be runtime-bound by a
+    kernel scalar, loop variable, or physical tensor-shape parameter; a
+    type-metadata-only symbol is rejected during PTO codegen. A fully dynamic
+    physical target dimension is bound from that tensor parameter.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     if signal is _ALLREDUCE_SIGNAL_MISSING:

@@ -10,7 +10,7 @@
 """IR builders for ``pld.tile.*`` distributed tile ops.
 
 The IR op signature is positional (matching ``tile.load``); the DSL wrapper
-keeps ``peer`` / ``offsets`` / ``shape`` keyword-only for readability.
+accepts the same positional-or-keyword form so printed IR round-trips.
 """
 
 from collections.abc import Sequence
@@ -27,10 +27,11 @@ def remote_load(
     peer: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     *,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tile.remote_load(target, peer, offsets, shape)`` Call.
+    """Build a ``pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])`` Call.
 
     Args:
         target: A :class:`ir.Expr` with type :class:`ir.DistributedTensorType`
@@ -39,6 +40,12 @@ def remote_load(
         offsets: Per-dimension offsets into ``target``'s coordinate space —
             sequence of ints/:class:`ir.Expr`, or an existing :class:`ir.MakeTuple`.
         shape: Per-dimension tile shape — same shape conventions as ``offsets``.
+        valid_shape: Optional valid extent inside the physical ``shape``. Use a
+            smaller final dimension for a fixed-width ragged tail. Every
+            symbolic source or requested valid extent that survives inference
+            must be runtime-bound by a kernel scalar, loop variable, or physical
+            tensor-shape parameter; a type-metadata-only symbol is rejected
+            during PTO codegen.
         span: Optional source span (auto-captured if absent).
 
     Returns:
@@ -48,9 +55,12 @@ def remote_load(
     actual_span = _get_span_or_capture(span, frame_offset=1)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
     shape_tuple = _to_make_tuple(shape, actual_span)
+    args = [target, peer, offsets_tuple, shape_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call(
         "pld.tile.remote_load",
-        [target, peer, offsets_tuple, shape_tuple],
+        args,
         {},
         actual_span,
     )
