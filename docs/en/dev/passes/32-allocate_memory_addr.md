@@ -88,7 +88,7 @@ with passes.PassContext(
     [],
     memory_planner=passes.MemoryPlanner.DSA,
     dsa_export_dir="build/dsa-corpus",
-    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.LINEAR,
+    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
 ):
     program_with_addrs = passes.allocate_memory_addr()(program)
 ```
@@ -100,16 +100,21 @@ dsa_export_dir="build/dsa-corpus")`.
 `dsa_solution_dir` to replay a recorded placement rather than invoking the
 solver. The placement is accepted only when its fingerprint matches the freshly
 exported problem and independent validation succeeds. The
-experimental `dsa_reuse_penalty_recognizer` is disabled by default. `LINEAR`
-recognizes only adjacent, full-allocation handoffs in one flat region;
-`QUADRATIC` scans compatible pairs within each simple region, including nested
-regions, as a research reference. Both
-use the same provisional PTO operation classification and record whether the
-physical handoff is WAR or WAW. The experimental v1 promotion policy turns
-cross-pipe candidates into unit-weight pair edges; same-pipe candidates remain
-report-only. Nested candidates are also report-only. Weight calibration remains
-a separate modeling step. Unsupported operations, views, aliases, and
-control-flow-crossing handoffs are left unpriced.
+experimental `dsa_reuse_penalty_recognizer` is disabled by default. `QUADRATIC`
+is the only enabled research mode and prioritizes coverage: it derives abstract
+source/destination routes from resolved
+memory spaces, then compares per-resource terminal-access and initial-write
+frontiers for all lifetime-compatible allocation pairs, including nested and
+distance-one loop handoffs. Logical SSA reachability is retained as evidence;
+it is not treated as proof that an asynchronous access completed. Partial-view
+and same-operation handoffs are reported but remain unpriced. The experimental
+v3 promotion policy aggregates qualifying cross-resource records into
+unit-weight pair edges. Same-resource records and records with uncertain range,
+operation-alias, structured-control, or ordering semantics remain report-only.
+Operation-registry effects distinguish execution-time accesses from declarations
+and metadata-only views; mutating inherit-input operations and tuple outputs
+remain visible to the access frontier. Weight calibration is a separate modeling
+step.
 
 The
 system-test harness additionally accepts `--memory-planner=dsa` and
@@ -167,13 +172,15 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
 5. Retain normalized alias-class members and pipeline group/stage/residue data.
    This provenance does not change placement by itself.
 6. When explicitly enabled, recognize potential false physical dependencies.
-   The near-linear mode indexes terminal accesses by `(region, statement)` and
-   checks only the next statement. The quadratic reference checks all
-   lifetime-compatible pairs and removes pairs already ordered by transitive SSA
-   dependence. A supported terminal read or write followed by an unordered
-   initial write becomes a WAR or WAW candidate. The separate experimental v1
-   policy promotes cross-pipe candidates to unit `cross_pipe` edges and records
-   same-pipe candidates without pricing them.
+   The coverage-first quadratic reference maps resolved memory classes
+   (`external`, `UB`, `L1`, `L0`) to abstract transfer/compute resources, then
+   compares access frontiers for all lifetime-compatible pairs while preserving
+   exact arenas, control-path, loop, and byte-range context. A terminal
+   read or write followed by an initial write becomes a WAR or WAW candidate;
+   SSA reachability is retained as evidence rather than treated as asynchronous
+   completion. The experimental v3 policy promotes only complete, flat,
+   cross-resource candidates to unit `cross_pipe` schema edges. Same-resource, nested,
+   loop-carried, partial-range, and uncertain candidates remain report-only.
 7. Validate the strict schema/profile and try deterministic first-fit followed
    by bounded PyPTO-structured search. If no capacity-fitting placement is
    found, remove only the `pipeline_stage` reason, retain every correctness

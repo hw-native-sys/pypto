@@ -237,13 +237,11 @@ enum class MemoryPlanner {
 /**
  * @brief Experimental recognizer used to derive DSA soft reuse edges.
  *
- * Disabled is the production default. Linear recognizes only adjacent
- * allocation handoffs and is O(N log N). Quadratic is a research reference
- * that scans every lifetime-compatible allocation pair.
+ * Disabled is the production default. Quadratic is a coverage-first research
+ * reference that scans every lifetime-compatible allocation pair.
  */
 enum class DsaReusePenaltyRecognizer {
   Disabled,
-  Linear,
   Quadratic,
 };
 

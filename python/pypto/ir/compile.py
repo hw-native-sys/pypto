@@ -317,8 +317,8 @@ def compile(  # noqa: PLR0913
             solution artifacts. When set, ``MemoryPlanner.DSA`` validates and
             replays the recorded placement instead of invoking a solver.
         dsa_reuse_penalty_recognizer: Experimental soft-edge recognizer used
-            with ``MemoryPlanner.DSA``. ``LINEAR`` considers adjacent handoffs;
-            ``QUADRATIC`` is a research reference over compatible pairs.
+            with ``MemoryPlanner.DSA``. ``QUADRATIC`` is the coverage-first
+            research reference over all compatible pairs.
         ptoas_sync_summary_dir: Optional directory for one machine-readable
             InsertSync JSONL summary per PTOAS codegen unit. This is
             instrumentation only and does not change placement or codegen.

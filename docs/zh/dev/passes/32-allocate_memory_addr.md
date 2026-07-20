@@ -82,7 +82,7 @@ with passes.PassContext(
     [],
     memory_planner=passes.MemoryPlanner.DSA,
     dsa_export_dir="build/dsa-corpus",
-    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.LINEAR,
+    dsa_reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
 ):
     program_with_addrs = passes.allocate_memory_addr()(program)
 ```
@@ -93,14 +93,18 @@ dsa_export_dir="build/dsa-corpus")`。
 `RunConfig` 也暴露 `memory_planner` 和 `dsa_export_dir` 字段。设置
 `dsa_solution_dir` 可跳过求解并回放已记录的 placement；只有当 fingerprint
 与当前重新导出的问题完全匹配且独立验证通过时才会接受。实验性的
-`dsa_reuse_penalty_recognizer` 默认关闭。`LINEAR` 只识别同一平坦区域中相邻的
-完整分配交接；`QUADRATIC` 作为研究基线，在每个简单 region 内扫描可复用 buffer
-对，包括嵌套 region。两者共享临时的
-PTO 操作分类，并记录物理交接属于 WAR 还是 WAW。实验性的 v1 promotion policy 只把
-cross-pipe candidate 转换成单位权重 pair edge；same-pipe 和嵌套 candidate 仅记录
-而不定价。
-权重标定属于独立建模问题。不支持的操作、view、alias 和跨控制流交接不会被猜测
-定价。system-test harness
+`dsa_reuse_penalty_recognizer` 默认关闭。`QUADRATIC` 是当前唯一启用的研究模式，
+并优先保证覆盖率：它先根据
+已解析的 memory space 推导抽象 source/destination route，再对所有生命周期可复用的
+allocation pair 比较每种执行资源上的终止访问 frontier 和初始写
+frontier，并覆盖嵌套控制流和跨一次循环回边的交接。逻辑 SSA 可达性只作为证据保留，
+不被当作异步访问已经完成的证明。partial view 和同一操作内部的交接会被记录，但不会
+定价。实验性的 v3 promotion policy 会把符合条件的 cross-resource 记录聚合成单位
+权重 pair edge；same-resource，以及访问范围、操作 alias、结构化控制流或顺序语义
+不确定的记录只用于报告。
+operation registry 中的 effect 会区分执行期访问、纯声明和仅修改元数据的 view；
+会修改数据的 inherit-input 操作以及 tuple 输出仍会进入 access frontier。
+权重标定属于独立建模问题。system-test harness
 支持 `--memory-planner=dsa`、`--dsa-export-dir=...` 以及用于精确 A/B 回放的
 `--dsa-solution-dir=...`。使用 `--ptoas-sync-summary-dir=...` 可为每个代码
 生成单元保存一份机器可读的 PTOAS InsertSync JSONL 摘要，从而比较两个有效
@@ -146,11 +150,14 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    hard-separated；每条 separation 都保留其类型化来源。
 5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。provenance
    本身不改变 placement。
-6. 显式启用时识别潜在的错误物理依赖。近线性模式按 `(region, statement)` 索引
-   末次访问并只检查下一条语句；二次参考模式检查所有 lifetime 可复用对，并删除
-   已被传递 SSA 依赖排序的 pair。受支持的末次读写后若出现未排序的首次写入，就
-   记录 WAR 或 WAW candidate。独立的实验性 v1 policy 只把 cross-pipe candidate
-   转换成单位权重 `cross_pipe` edge；same-pipe candidate 仅记录而不定价。
+6. 显式启用时识别潜在的错误物理依赖。覆盖优先的二次参考模式先把已解析的
+   `external`、`UB`、`L1`、`L0` memory class 映射到抽象传输或计算资源，再针对所有
+   lifetime 可复用 pair 比较 access frontier，并保留精确 arena、control path、loop 和
+   byte range 上下文。末端读写后若出现首次写入，就记录 WAR 或 WAW candidate；SSA
+   reachability 只作为 evidence 保留，不能证明异步访问已经完成。实验性 v3 policy
+   只把信息完整、flat、cross-resource 的 candidate 转换成单位权重 `cross_pipe`
+   schema edge。same-resource、nested、loop-carried、partial-range 和不确定的 candidate
+   仅记录而不定价。
 7. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
    PyPTO-structured search。若未找到 capacity-fitting placement，则只删除
    `pipeline_stage` reason，保留所有 correctness reason，增加单位

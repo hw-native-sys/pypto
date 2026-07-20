@@ -167,10 +167,8 @@ void BindPass(nb::module_& m) {
   nb::enum_<DsaReusePenaltyRecognizer>(passes, "DsaReusePenaltyRecognizer",
                                        "Selects experimental DSA soft-edge recognition")
       .value("DISABLED", DsaReusePenaltyRecognizer::Disabled, "Do not recognize soft reuse edges")
-      .value("LINEAR", DsaReusePenaltyRecognizer::Linear,
-             "Recognize adjacent supported allocation handoffs in O(N log N)")
       .value("QUADRATIC", DsaReusePenaltyRecognizer::Quadratic,
-             "Research reference over all lifetime-compatible allocation pairs");
+             "Coverage-first research reference over all lifetime-compatible allocation pairs");
 
   passes.def(
       "is_dsa_solver_available",

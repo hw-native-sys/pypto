@@ -426,9 +426,9 @@ class TestMakeCacheKey:
         assert key_a != key_b
 
     def test_dsa_reuse_recognizer_splits_key(self):
-        key_linear = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR)
+        key_disabled = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.DISABLED)
         key_quadratic = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
-        assert key_linear != key_quadratic
+        assert key_disabled != key_quadratic
 
 
 class TestResolveMemoryPlanner:
@@ -484,10 +484,11 @@ class TestResolveDsaReusePenaltyRecognizer:
         assert _resolve_dsa_reuse_penalty_recognizer(None) == DsaReusePenaltyRecognizer.DISABLED
 
     def test_run_config_wins_and_unset_config_defers_to_context(self):
-        explicit = RunConfig(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.LINEAR)
+        explicit = RunConfig(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
         unset = RunConfig()
+        with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.DISABLED):
+            assert _resolve_dsa_reuse_penalty_recognizer(explicit) == DsaReusePenaltyRecognizer.QUADRATIC
         with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC):
-            assert _resolve_dsa_reuse_penalty_recognizer(explicit) == DsaReusePenaltyRecognizer.LINEAR
             assert _resolve_dsa_reuse_penalty_recognizer(unset) == DsaReusePenaltyRecognizer.QUADRATIC
 
 

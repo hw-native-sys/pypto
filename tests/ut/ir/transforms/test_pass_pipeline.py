@@ -143,7 +143,6 @@ class TestPassContext:
         "recognizer",
         [
             passes.DsaReusePenaltyRecognizer.DISABLED,
-            passes.DsaReusePenaltyRecognizer.LINEAR,
             passes.DsaReusePenaltyRecognizer.QUADRATIC,
         ],
     )
