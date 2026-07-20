@@ -132,11 +132,32 @@ _PTO_ISA_HTTPS_FALLBACK = "https://gitcode.com/luohuan40/pto-isa.git"
 _PTO_ISA_SSH_FALLBACK = "git@gitcode.com:luohuan40/pto-isa.git"
 _PTO_ISA_PRIMARY_CLONE_TIMEOUT = 60
 _PTO_ISA_FALLBACK_CLONE_TIMEOUT = 300
+_PROJECT_ROOT = Path(__file__).parents[3]
+_PTO_ISA_PIN_PATH = _PROJECT_ROOT / "runtime" / "pto_isa.pin"
 
 
 def _get_pto_isa_clone_path() -> Path:
     """Return the default path where PTO-ISA is cloned."""
-    return Path(__file__).parent.parent.parent.parent / "build_output" / "_deps" / "pto-isa"
+    return _PROJECT_ROOT / "build_output" / "_deps" / "pto-isa"
+
+
+def _read_runtime_pto_isa_pin() -> str | None:
+    """Return the runtime's pinned PTO-ISA commit, or ``None`` when unavailable."""
+    try:
+        commit = _PTO_ISA_PIN_PATH.read_text().strip()
+    except OSError as e:
+        logger.warning(
+            f"Failed to read runtime PTO-ISA pin at {_PTO_ISA_PIN_PATH}: {e}; "
+            "falling back to the latest remote HEAD"
+        )
+        return None
+
+    if not commit:
+        logger.warning(
+            f"Runtime PTO-ISA pin at {_PTO_ISA_PIN_PATH} is empty; falling back to the latest remote HEAD"
+        )
+        return None
+    return commit
 
 
 def _clone_pto_isa(clone_path: Path, primary_url: str, fallback_url: str) -> bool:
@@ -188,16 +209,18 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
     """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
 
     Args:
-        commit: If provided, checkout this specific commit.
+        commit: Commit to checkout. Defaults to the revision in
+            ``runtime/pto_isa.pin`` when that file is available.
         clone_protocol: ``"https"`` or ``"ssh"``.
 
     Returns:
         PTO-ISA root path if successful, ``None`` otherwise.
     """
+    resolved_commit = commit or _read_runtime_pto_isa_pin()
     existing_root = os.environ.get("PTO_ISA_ROOT")
     if existing_root:
-        if commit:
-            _checkout_pto_isa_commit(Path(existing_root), commit)
+        if resolved_commit:
+            _checkout_pto_isa_commit(Path(existing_root), resolved_commit)
         return existing_root
 
     clone_path = _get_pto_isa_clone_path()
@@ -210,10 +233,10 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
             primary_url, fallback_url = _PTO_ISA_SSH, _PTO_ISA_SSH_FALLBACK
         if not _clone_pto_isa(clone_path, primary_url, fallback_url):
             return None
-        if commit:
-            _checkout_pto_isa_commit(clone_path, commit)
-    elif commit:
-        _checkout_pto_isa_commit(clone_path, commit)
+        if resolved_commit:
+            _checkout_pto_isa_commit(clone_path, resolved_commit)
+    elif resolved_commit:
+        _checkout_pto_isa_commit(clone_path, resolved_commit)
     else:
         _update_pto_isa_to_latest(clone_path)
 

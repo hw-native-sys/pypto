@@ -291,7 +291,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "init for the whole batch). Mutually exclusive with --work-dir.",
     )
     parser.add_argument("--device-id", type=int, required=True, help="Hardware device index")
-    parser.add_argument("--pto-isa-commit", default=None, help="Pin pto-isa to this commit")
+    parser.add_argument(
+        "--pto-isa-commit",
+        default=None,
+        help="Override runtime/pto_isa.pin with this pto-isa commit",
+    )
     # DFX toggles — names mirror tests/st/conftest.py so the harness round-trip
     # (_dfx_to_cli) is symmetric.
     parser.add_argument("--enable-l2-swimlane", action="store_true", help="Capture L2 swimlane records")

@@ -135,6 +135,11 @@ Defines the tile-level instruction set for the target hardware. Provides C++ hea
 
 **Interface:** C++ header library defining the instruction API. Downstream consumers `#include` pto-isa headers; the hardware vendor provides the target-specific implementations that back these headers.
 
+PyPTO's managed checkout under `build_output/_deps/pto-isa` uses the commit in
+`runtime/pto_isa.pin` by default, matching the runtime submodule's build. Pass
+`--pto-isa-commit` to override that revision for a test run. If the pin file is
+unavailable, PyPTO falls back to the pto-isa remote's default branch tip.
+
 ### simpler — Task Runtime
 
 Executes compiled programs on Ascend hardware. Manages the three-program execution model: Host, AICPU kernel, and AICore kernel.

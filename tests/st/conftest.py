@@ -202,7 +202,7 @@ def pytest_addoption(parser):
         "--pto-isa-commit",
         action="store",
         default=None,
-        help="Pin the pto-isa clone to a specific git commit (hash or tag). Default: use latest remote HEAD.",
+        help="Override runtime/pto_isa.pin with a specific pto-isa commit (hash or tag).",
     )
     parser.addoption(
         "--analyze-auto-scopes-for-deps",
