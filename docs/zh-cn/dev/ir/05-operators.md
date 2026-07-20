@@ -10,6 +10,7 @@
 | **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
 | **SyncOp** | UnknownType | 流水线屏障和同步 | `src/ir/op/sync_ops/sync.cpp` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
+| **PrefetchOp** | 不透明句柄 (opaque handle) | GM→L2 异步预取 | `src/ir/op/prefetch/prefetch_async.cpp` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
 
@@ -446,6 +447,88 @@ class CrossCoreExample:
 
 参阅 [TPUSH/TPOP ISA 参考](../../reference/pto-isa/01-tpush_tpop.md) 和[缓冲区管理](../../reference/pto-isa/02-buffer_management.md)了解硬件细节。
 
+## PrefetchOp：GM→L2 异步预取
+
+一种隐藏访存延迟 (latency hiding) 的缓存提示。`async_prefetch` 通过 SDMA 异步地把一段
+全局内存 (GM) 拉入 L2 缓存，期间可以并行执行不相关的计算；`wait` 阻塞直到预取完成。
+预取不改变任何张量的值——同一个 kernel 加不加预取在数值上完全一致，只影响性能。
+
+与大多数 PTO intrinsic 不同，`TPREFETCH_ASYNC` 不携带隐式的 wait-event 同步，
+因此必须通过 event/session 这对句柄显式等待完成。
+
+### 操作
+
+| DSL | 操作数 | 结果 | PTOAS op |
+| --- | ------ | ---- | -------- |
+| `pl.prefetch.make_context(ws)` | GM `INT8` 暂存 Tensor | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
+| `pl.prefetch.async_prefetch(src, ctx)` | GM Tensor、context | `AsyncEventType` | `pto.tprefetch_async` |
+| `pl.prefetch.session(ctx)` | context | `AsyncSessionType` | `pto.get_prefetch_async_session` |
+| `pl.prefetch.wait(evt, session)` | event、session | `BOOL` 标量 | `pto.comm.wait_async_event` |
+
+这三个结果类型都是不透明的单例标记类型 (opaque singleton marker，无 shape、无 buffer)，
+与 `CommCtxType` 属于同一族。
+
+### 约束
+
+- `src` 必须是**扁平连续的逻辑一维 GM** 区域：shape 必须完全静态，且除最后一维外
+  所有维度都为 `1`（`[N]`、`[1, N]`、`[1, 1, N]`）。该检查与 PTOAS 的
+  `TPrefetchAsyncOp::verify()` 保持一致，因此 shape 写错会在 PyPTO IR 构造阶段就报错，
+  而不是拖到 PTOAS 校验阶段。
+- `workspace` 必须是 `INT8` 张量——SDMA 路径需要的是原始字节暂存区。
+- `workspace` 必须**足够容纳 SDMA context**。pto-isa 的布局为
+  `BatchWriteFlagInfo` (64B) + `kSdmaMaxChannel` (48) x `BatchWriteChannelInfo`
+  (64B) + `kSdmaSendWorkspaceBytes` (48 x 64)，约 **6.1KB 下限**。该要求位于
+  pto-isa 而非 IR 中，PyPTO 无法校验——workspace 开小了仍能通过编译，只会在真机上
+  出问题。请留足余量；ST 中使用 64KB。
+
+### 使用示例
+
+```python
+@pl.program
+class PrefetchExample:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self, x: pl.Tensor[[1, 4096], pl.FP32], ws: pl.Tensor[[1024], pl.INT8],
+        out: pl.Tensor[[1, 128], pl.FP32],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        ctx = pl.prefetch.make_context(ws)
+        evt = pl.prefetch.async_prefetch(x, ctx)     # 预热 L2，不阻塞
+        session = pl.prefetch.session(ctx)
+        # ... 此处的无关计算与预取重叠执行 ...
+        pl.prefetch.wait(evt, session)               # 此时 x 已驻留在 L2
+        tile = pl.load(x, [0, 0], [1, 128])
+        return pl.store(tile, [0, 0], out)
+```
+
+**执行核**：这一族是 **AIV-only**。`TPREFETCH_ASYNC` 的 SDMA `tmpBuf` 来自
+`PrefetchAsyncContext` 内部的 Vec(UB) scratch tile（pto-isa 有
+`static_assert(ScratchTile::Loc == TileType::Vec)`），而 UB 位于向量核。这些算子
+声明了 `CoreAffinity::VECTOR`，因此在混合 kernel 中 `ExpandMixedKernel` 会把它们留在
+向量侧——既不会放到 cube 侧，也不会被复制到 cube 侧。
+
+**硬件支持**：SDMA CMO 路径仅在 A3/A5 上生效。在其他平台上 PTOAS 会把预取退化为
+功能性 no-op，因此使用这些 op 的 kernel 仍然是可移植的——PyPTO 自身不做任何平台门控。
+
+**但 workspace 非法不会退化，而是挂死。** 上述退化只覆盖*不支持的平台*，不覆盖畸形的
+workspace。设备侧的 session 初始化只拒绝空指针，因此一个仅仅清零的 buffer 会给出垃圾
+SQ 基址：doorbell 写入无效地址，`prefetch.wait` 永久自旋，kernel 最终以 AICore
+`507018`（`S1:running-stalled`）失败。
+
+因此 workspace 必须是**主机侧初始化过的 SDMA context**，绝不能是普通分配。从 runtime
+获取并以 `DeviceTensor` 绑定：
+
+```python
+with ChipWorker(config=RunConfig(platform="a2a3", device_id=0)) as w:
+    ws_addr = w.sdma_prefetch_workspace_addr()   # 不可用时返回 0
+    ws = DeviceTensor(ws_addr, (65536,), torch.int8)
+    compiled(a, ws, out, config=cfg)
+```
+
+`sdma_prefetch_workspace_addr()` 每进程通过 pto-isa 的 `SdmaWorkspaceManager::Init`
+初始化一次；不可用时（CANN 缺少可用的 `aclnnShmemSdmaStarsQuery`，或模拟器）返回 0。
+绑定 0 是安全的——那正是预取降级所走的 null 路径。返回的地址由 runtime 持有，不要
+free。参见 `tests/st/runtime/ops/test_prefetch_async.py`。
+
 ## 文件组织
 
 | 目录/文件 | 内容 |
@@ -458,6 +541,7 @@ class CrossCoreExample:
 | `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
 | `sync_ops/cross_core.cpp` | CrossCoreOp: tpush, tpop, pipe init, buffers |
+| `prefetch/prefetch_async.cpp` | PrefetchOp: make_context, async_prefetch, session, wait |
 
 **优势**：
 

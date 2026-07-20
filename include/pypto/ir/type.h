@@ -798,6 +798,84 @@ inline CommCtxTypePtr GetCommCtxType() {
   return comm_ctx_type;
 }
 
+/**
+ * @brief Opaque handle to an asynchronous GM->L2 prefetch context.
+ *
+ * Produced by ``prefetch.make_context(workspace)`` from a GM ``INT8`` scratch
+ * tensor, and consumed by ``prefetch.async_prefetch`` / ``prefetch.session``.
+ * Lowers to PTOAS ``!pto.prefetch_async_context`` (C++ ``pto::PrefetchAsyncContext``).
+ *
+ * Carries no per-instance fields; the backing workspace is recovered at codegen
+ * time from the producing ``prefetch.make_context`` argument.
+ */
+class PrefetchAsyncContextType : public Type {
+ public:
+  PrefetchAsyncContextType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::PrefetchAsyncContextType; }
+  [[nodiscard]] std::string TypeName() const override { return "PrefetchAsyncContextType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using PrefetchAsyncContextTypePtr = std::shared_ptr<const PrefetchAsyncContextType>;
+
+/// Get the shared singleton PrefetchAsyncContextType instance.
+inline PrefetchAsyncContextTypePtr GetPrefetchAsyncContextType() {
+  static const auto prefetch_async_context_type = std::make_shared<PrefetchAsyncContextType>();
+  return prefetch_async_context_type;
+}
+
+/**
+ * @brief Opaque handle to an in-flight asynchronous DMA completion event.
+ *
+ * Returned by ``prefetch.async_prefetch`` and consumed by ``prefetch.wait``
+ * together with the matching :class:`AsyncSessionType`. Lowers to PTOAS
+ * ``!pto.async_event`` (C++ ``pto::comm::AsyncEvent``).
+ */
+class AsyncEventType : public Type {
+ public:
+  AsyncEventType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AsyncEventType; }
+  [[nodiscard]] std::string TypeName() const override { return "AsyncEventType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using AsyncEventTypePtr = std::shared_ptr<const AsyncEventType>;
+
+/// Get the shared singleton AsyncEventType instance.
+inline AsyncEventTypePtr GetAsyncEventType() {
+  static const auto async_event_type = std::make_shared<AsyncEventType>();
+  return async_event_type;
+}
+
+/**
+ * @brief Opaque handle to the asynchronous DMA session an event belongs to.
+ *
+ * Projected out of a :class:`PrefetchAsyncContextType` by ``prefetch.session``
+ * and paired with an :class:`AsyncEventType` in ``prefetch.wait``. Lowers to
+ * PTOAS ``!pto.async_session`` (C++ ``pto::comm::AsyncSession``).
+ */
+class AsyncSessionType : public Type {
+ public:
+  AsyncSessionType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AsyncSessionType; }
+  [[nodiscard]] std::string TypeName() const override { return "AsyncSessionType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using AsyncSessionTypePtr = std::shared_ptr<const AsyncSessionType>;
+
+/// Get the shared singleton AsyncSessionType instance.
+inline AsyncSessionTypePtr GetAsyncSessionType() {
+  static const auto async_session_type = std::make_shared<AsyncSessionType>();
+  return async_session_type;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

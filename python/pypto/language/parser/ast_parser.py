@@ -24,6 +24,7 @@ from pypto.ir.printer import python_print
 from pypto.language.distributed import op as _dsl_pld
 from pypto.language.dsl_api import RangeIterator as _DslRangeIterator
 from pypto.language.op import array_ops as _dsl_array
+from pypto.language.op import prefetch_ops as _dsl_prefetch
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
@@ -5332,6 +5333,11 @@ class ASTParser:
             op_name = attrs[2]
             return self._parse_array_op(op_name, call)
 
+        # pl.prefetch.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "prefetch":
+            op_name = attrs[2]
+            return self._parse_prefetch_op(op_name, call)
+
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
             return self._parse_typed_constant(call)
@@ -5345,7 +5351,11 @@ class ASTParser:
             return self._parse_dtype_get_byte(attrs[1], call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
-        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "tile", "system", "array"):
+        if (
+            len(attrs) >= 2
+            and attrs[0] == "pl"
+            and attrs[1] not in ("tensor", "tile", "system", "array", "prefetch")
+        ):
             op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
@@ -7268,6 +7278,10 @@ class ASTParser:
     def _parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse array operation (create / get_element / update_element)."""
         return self._dispatch_op(_dsl_array, "pl.array", op_name, call)
+
+    def _parse_prefetch_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse async-prefetch operation (make_context / async_prefetch / session / wait)."""
+        return self._dispatch_op(_dsl_prefetch, "pl.prefetch", op_name, call)
 
     def _validate_pld_op_call(self, op_name: str, call: ast.Call) -> None:
         """Parser-context checks shared by 2-segment and 3-segment pld paths.

@@ -437,6 +437,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return GetWindowBufferType();
     } else if (type_kind == "CommCtxType") {
       return GetCommCtxType();
+    } else if (type_kind == "PrefetchAsyncContextType") {
+      return GetPrefetchAsyncContextType();
+    } else if (type_kind == "AsyncEventType") {
+      return GetAsyncEventType();
+    } else if (type_kind == "AsyncSessionType") {
+      return GetAsyncSessionType();
     } else if (type_kind == "MemRefType") {
       return GetMemRefType();
     } else if (type_kind == "Ptr") {

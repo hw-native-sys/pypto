@@ -22,6 +22,7 @@ from pypto.language.typing.array import Array
 from pypto.language.typing.direction import InOut, Out
 from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.memref import MemRef
+from pypto.language.typing.prefetch_handle import AsyncEvent, AsyncSession, PrefetchAsyncContext
 from pypto.language.typing.ptr import Ptr
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
@@ -34,11 +35,14 @@ IntLike: TypeAlias = int | Scalar | Expr
 
 __all__ = [
     "Array",
+    "AsyncEvent",
+    "AsyncSession",
     "DynVar",
     "InOut",
     "IntLike",
     "MemRef",
     "Out",
+    "PrefetchAsyncContext",
     "Ptr",
     "Scalar",
     "Tensor",
