@@ -11,21 +11,27 @@
 """Parser tests for ``pld.tensor.alloc_window_buffer`` (and its
 ``pld.alloc_window_buffer`` short form).
 
-After the MemRef-mirror redesign, the alloc op is a pure-allocation primitive
-(parallel to ``tile.alloc(memspace, size)``):
+The alloc op supports two forms:
 
-* ``size`` is a scalar **byte** count; no shape, no dtype on the alloc.
-* The op returns the singleton :class:`PtrType`; the parser binds the LHS as
-  a plain :class:`ir.Var` of type :class:`ir.PtrType`. The
-  comm-collection pass later wraps the Ptr in an :class:`ir.WindowBuffer` Var
-  subclass and registers it on ``CommDomainScopeStmt wrappers in each host_orch body``.
-* The LHS variable name flows through ``Var.name_hint`` (and is also injected
-  as the op's ``name`` kwarg so the comm-collection pass can find it).
+* **Canonical byte form:** ``alloc_window_buffer(size)`` — ``size`` is a scalar
+  **byte** count; no shape, no dtype on the alloc.
+* **Shape+dtype convenience overload:** ``alloc_window_buffer(shape, *, dtype=...)``
+  — ``shape`` is a list / tuple of per-rank dimensions. The byte size is computed
+  automatically as ``product(shape) × dtype.get_byte()`` and the call normalizes
+  to the canonical byte form in IR.
+
+The op returns the singleton :class:`PtrType`; the parser binds the LHS as
+a plain :class:`ir.Var` of type :class:`ir.PtrType`. The
+comm-collection pass later wraps the Ptr in an :class:`ir.WindowBuffer` Var
+subclass and registers it on ``CommDomainScopeStmt wrappers in each host_orch body``.
+The LHS variable name flows through ``Var.name_hint`` (and is also injected
+as the op's ``name`` kwarg so the comm-collection pass can find it).
 """
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import DataType
 from pypto.pypto_core import ir
 
 
@@ -172,15 +178,14 @@ def test_alloc_window_buffer_rejects_duplicate_names():
 
 
 def test_alloc_window_buffer_rejects_user_kwargs():
-    """The user-facing alloc takes only a positional size — no kwargs are allowed.
-    Unknown kwargs surface from the DSL wrapper's Python signature."""
-    with pytest.raises(Exception, match="unexpected keyword argument"):
+    """``dtype=`` is rejected on the scalar byte form — it is only valid with the shape form."""
+    with pytest.raises(Exception, match="dtype= is only valid when the first argument is a shape"):
 
         @pl.program
         class P:  # noqa: F841
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
             def host_orch(self):
-                buf = pld.alloc_window_buffer(8, dtype=pl.FP32)  # noqa: F841
+                buf = pld.alloc_window_buffer(8, dtype=pl.FP32)  # pyright: ignore[reportArgumentType] # noqa: F841
                 return buf
 
 
@@ -208,9 +213,9 @@ def test_alloc_window_buffer_rejects_bare_call_outside_assignment():
                 return 0
 
 
-def test_alloc_window_buffer_rejects_list_for_size():
-    """The redesigned signature takes a scalar byte size, not a shape list."""
-    with pytest.raises(Exception, match="size must be a scalar"):
+def test_alloc_window_buffer_rejects_list_without_dtype():
+    """A list/tuple without ``dtype=`` is rejected — the shape form requires dtype."""
+    with pytest.raises(Exception, match="requires dtype="):
 
         @pl.program
         class P:  # noqa: F841
@@ -218,6 +223,114 @@ def test_alloc_window_buffer_rejects_list_for_size():
             def host_orch(self):
                 buf = pld.alloc_window_buffer([256])  # pyright: ignore[reportArgumentType] # noqa: F841
                 return buf
+
+
+def test_alloc_window_buffer_shaped_static():
+    """Shape+dtype form with static int-literal dimensions folds to a single ``ConstInt``
+    carrying the total byte size (not a Mul chain)."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer([64, 128], dtype=pl.FP32)
+            return buf
+
+    func = _get_host_orch(P)
+    stmt = _find_alloc_assignment(func)
+    assert isinstance(stmt.value, ir.Call)
+    call = stmt.value
+    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.kwargs["name"] == "buf"
+    assert "dtype" not in call.kwargs
+    assert len(call.args) == 1
+    # Static shape must fold to a single ConstInt byte-size arg.
+    assert isinstance(call.args[0], ir.ConstInt)
+    assert call.args[0].value == 64 * 128 * 4  # FP32 = 4 bytes
+    assert call.args[0].dtype == DataType.INT64
+
+
+def test_alloc_window_buffer_shaped_long_form():
+    """Shape+dtype form works with the 3-segment ``pld.tensor.alloc_window_buffer`` form
+    and folds static dims to a ConstInt byte-size arg."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.tensor.alloc_window_buffer([32, 16], dtype=pl.INT32)
+            return buf
+
+    func = _get_host_orch(P)
+    stmt = _find_alloc_assignment(func)
+    assert isinstance(stmt.value, ir.Call)
+    call = stmt.value
+    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.kwargs["name"] == "buf"
+    assert len(call.args) == 1
+    # Static shape must fold to a single ConstInt byte-size arg.
+    assert isinstance(call.args[0], ir.ConstInt)
+    assert call.args[0].value == 32 * 16 * 4  # INT32 = 4 bytes
+    assert call.args[0].dtype == DataType.INT64
+
+
+def test_alloc_window_buffer_rejects_empty_shape():
+    """An empty shape list is rejected with a clear error."""
+    with pytest.raises(Exception, match="shape must be non-empty"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                buf = pld.alloc_window_buffer([], dtype=pl.FP32)  # noqa: F841
+                return buf
+
+
+def test_alloc_window_buffer_rejects_non_positive_static_dim():
+    """Zero and negative static dimensions are rejected with a clear error."""
+    with pytest.raises(Exception, match="all dimensions must be positive"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                buf = pld.alloc_window_buffer([0, 128], dtype=pl.FP32)  # noqa: F841
+                return buf
+
+    with pytest.raises(Exception, match="all dimensions must be positive"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                buf = pld.alloc_window_buffer([64, -1], dtype=pl.FP32)  # noqa: F841
+                return buf
+
+
+def test_alloc_window_buffer_shaped_dynamic():
+    """Shape+dtype form with a dynamic dim (``pld.world_size()``) produces a Mul chain
+    (not a single ConstInt) and parses successfully."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer([64, pld.world_size()], dtype=pl.FP32)
+            return buf
+
+    func = _get_host_orch(P)
+    stmt = _find_alloc_assignment(func)
+    assert isinstance(stmt.value, ir.Call)
+    call = stmt.value
+    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.kwargs["name"] == "buf"
+    assert "dtype" not in call.kwargs
+    assert len(call.args) == 1
+    # Dynamic shape — the byte size is a Mul chain, not a ConstInt.
+    byte_size = call.args[0]
+    assert isinstance(byte_size, ir.Mul)
+    assert isinstance(byte_size.type, ir.ScalarType)
+    assert byte_size.type.dtype == DataType.INT64
 
 
 if __name__ == "__main__":
