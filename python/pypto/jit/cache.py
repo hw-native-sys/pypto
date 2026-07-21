@@ -148,6 +148,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     dsa_solution_dir: str | None = None,
     dsa_reuse_penalty_recognizer: Any = None,
+    dsa_reference_placement: Any = None,
+    dsa_reference_target: str | None = None,
     ptoas_sync_summary_dir: str | None = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
@@ -206,6 +208,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         dsa_reuse_penalty_recognizer: Effective experimental DSA edge recognizer.
             Included because recognized edges can change the selected physical
             addresses for the same kernel.
+        dsa_reference_placement: Effective compact/loose DSA endpoint.
+        dsa_reference_target: Exact function selected for a loose endpoint.
         ptoas_sync_summary_dir: Optional PTOAS InsertSync summary directory.
             Included because requesting a fresh summary must force PTOAS to run
             instead of returning an artifact compiled without instrumentation.
@@ -247,6 +251,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             "dsa_reuse_penalty_recognizer",
             None if dsa_reuse_penalty_recognizer is None else str(dsa_reuse_penalty_recognizer),
         ),
+        (
+            "dsa_reference_placement",
+            None if dsa_reference_placement is None else str(dsa_reference_placement),
+        ),
+        ("dsa_reference_target", dsa_reference_target),
         ("ptoas_sync_summary_dir", ptoas_sync_summary_dir),
     )
     return (

@@ -75,6 +75,8 @@ def _validate_pass_context_conflicts(
     dsa_export_dir: str | None,
     dsa_solution_dir: str | None,
     dsa_reuse_penalty_recognizer: _passes.DsaReusePenaltyRecognizer | None,
+    dsa_reference_placement: _passes.DsaReferencePlacement | None,
+    dsa_reference_target: str | None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -108,6 +110,16 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with dsa_reuse_penalty_recognizer while a PassContext is already active. "
             "Set the recognizer on the existing PassContext instead."
         )
+    if dsa_reference_placement is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with dsa_reference_placement while a PassContext is already active. "
+            "Set the reference placement on the existing PassContext instead."
+        )
+    if dsa_reference_target is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with dsa_reference_target while a PassContext is already active. "
+            "Set the reference target on the existing PassContext instead."
+        )
     return outer
 
 
@@ -125,6 +137,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
     dsa_export_dir: str | None = None,
     dsa_solution_dir: str | None = None,
     dsa_reuse_penalty_recognizer: _passes.DsaReusePenaltyRecognizer | None = None,
+    dsa_reference_placement: _passes.DsaReferencePlacement | None = None,
+    dsa_reference_target: str | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -142,6 +156,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
         dsa_export_dir=dsa_export_dir,
         dsa_solution_dir=dsa_solution_dir,
         dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+        dsa_reference_placement=dsa_reference_placement,
+        dsa_reference_target=dsa_reference_target,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -173,6 +189,14 @@ def _run_pass_pipeline(  # noqa: PLR0913
             if dsa_reuse_penalty_recognizer is not None
             else outer.get_dsa_reuse_penalty_recognizer()
         )
+        reference_placement = (
+            dsa_reference_placement
+            if dsa_reference_placement is not None
+            else outer.get_dsa_reference_placement()
+        )
+        reference_target = (
+            dsa_reference_target if dsa_reference_target is not None else outer.get_dsa_reference_target()
+        )
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -189,12 +213,26 @@ def _run_pass_pipeline(  # noqa: PLR0913
             if dsa_reuse_penalty_recognizer is not None
             else _passes.DsaReusePenaltyRecognizer.DISABLED
         )
+        reference_placement = (
+            dsa_reference_placement
+            if dsa_reference_placement is not None
+            else _passes.DsaReferencePlacement.DEFAULT
+        )
+        reference_target = dsa_reference_target
     if export_dir is not None and mplan != _passes.MemoryPlanner.DSA:
         raise ValueError("dsa_export_dir requires memory_planner=MemoryPlanner.DSA")
     if solution_dir is not None and mplan != _passes.MemoryPlanner.DSA:
         raise ValueError("dsa_solution_dir requires memory_planner=MemoryPlanner.DSA")
     if reuse_recognizer != _passes.DsaReusePenaltyRecognizer.DISABLED and mplan != _passes.MemoryPlanner.DSA:
         raise ValueError("dsa_reuse_penalty_recognizer requires memory_planner=MemoryPlanner.DSA")
+    if reference_placement != _passes.DsaReferencePlacement.DEFAULT and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_reference_placement requires memory_planner=MemoryPlanner.DSA")
+    if reference_target is not None and reference_placement != _passes.DsaReferencePlacement.LOOSE:
+        raise ValueError("dsa_reference_target requires dsa_reference_placement=DsaReferencePlacement.LOOSE")
+    if reference_target == "":
+        raise ValueError("dsa_reference_target must be a non-empty exact function name")
+    if solution_dir is not None and reference_placement != _passes.DsaReferencePlacement.DEFAULT:
+        raise ValueError("dsa_solution_dir cannot be combined with dsa_reference_placement")
     ctx = _passes.PassContext(
         instruments,
         vlevel,
@@ -205,6 +243,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
         export_dir,
         solution_dir,
         reuse_recognizer,
+        reference_placement,
+        reference_target,
     )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
@@ -258,6 +298,8 @@ def compile(  # noqa: PLR0913
     dsa_export_dir: str | None = None,
     dsa_solution_dir: str | None = None,
     dsa_reuse_penalty_recognizer: _passes.DsaReusePenaltyRecognizer | None = None,
+    dsa_reference_placement: _passes.DsaReferencePlacement | None = None,
+    dsa_reference_target: str | None = None,
     ptoas_sync_summary_dir: str | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
@@ -322,6 +364,11 @@ def compile(  # noqa: PLR0913
         dsa_reuse_penalty_recognizer: Experimental soft-edge recognizer used
             with ``MemoryPlanner.DSA``. ``QUADRATIC`` is the coverage-first
             research reference over all compatible pairs.
+        dsa_reference_placement: Experimental controlled-placement endpoint.
+            ``COMPACT`` retains the normal DSA result; ``LOOSE`` greedily
+            reduces physical reuse within capacity in the same compilation.
+        dsa_reference_target: Optional exact function name to which ``LOOSE``
+            applies. Sibling functions retain their compact placement.
         ptoas_sync_summary_dir: Optional directory for one machine-readable
             InsertSync JSONL summary per PTOAS codegen unit. This is
             instrumentation only and does not change placement or codegen.
@@ -375,6 +422,8 @@ def compile(  # noqa: PLR0913
         dsa_export_dir=dsa_export_dir,
         dsa_solution_dir=dsa_solution_dir,
         dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+        dsa_reference_placement=dsa_reference_placement,
+        dsa_reference_target=dsa_reference_target,
     )
     if ptoas_sync_summary_dir is not None and skip_ptoas:
         raise ValueError("ptoas_sync_summary_dir requires PTOAS code generation (skip_ptoas=False)")
@@ -410,6 +459,8 @@ def compile(  # noqa: PLR0913
             dsa_export_dir=dsa_export_dir,
             dsa_solution_dir=dsa_solution_dir,
             dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+            dsa_reference_placement=dsa_reference_placement,
+            dsa_reference_target=dsa_reference_target,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),

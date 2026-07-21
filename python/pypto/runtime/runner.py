@@ -45,6 +45,7 @@ from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import (
     DiagnosticCheckSet,
     DiagnosticPhase,
+    DsaReferencePlacement,
     DsaReusePenaltyRecognizer,
     MemoryPlanner,
 )
@@ -235,6 +236,8 @@ class RunConfig:
             ``memory_planner=MemoryPlanner.DSA``.
         dsa_reuse_penalty_recognizer: Experimental DSA soft-edge recognizer.
             Disabled by default; used only with ``MemoryPlanner.DSA``.
+        dsa_reference_placement: Experimental compact/loose DSA endpoint.
+        dsa_reference_target: Optional exact function selected for a loose endpoint.
         ptoas_sync_summary_dir: Optional directory for machine-readable PTOAS
             InsertSync JSONL summaries. Each codegen unit writes a separate file.
     """
@@ -274,6 +277,8 @@ class RunConfig:
     dsa_export_dir: str | None = None
     dsa_solution_dir: str | None = None
     dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None = None
+    dsa_reference_placement: DsaReferencePlacement | None = None
+    dsa_reference_target: str | None = None
     ptoas_sync_summary_dir: str | None = None
 
     def __post_init__(self) -> None:
@@ -435,6 +440,8 @@ def compile_program(  # noqa: PLR0913
     dsa_export_dir: str | None = None,
     dsa_solution_dir: str | None = None,
     dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None = None,
+    dsa_reference_placement: DsaReferencePlacement | None = None,
+    dsa_reference_target: str | None = None,
     ptoas_sync_summary_dir: str | None = None,
     skip_ptoas: bool = False,
 ) -> None:
@@ -460,6 +467,8 @@ def compile_program(  # noqa: PLR0913
         dsa_export_dir: Optional schema-v1 corpus directory for the DSA planner.
         dsa_solution_dir: Optional fingerprinted placement replay directory.
         dsa_reuse_penalty_recognizer: Optional experimental soft-edge recognizer.
+        dsa_reference_placement: Optional compact/loose DSA endpoint.
+        dsa_reference_target: Optional exact function selected for a loose endpoint.
         ptoas_sync_summary_dir: Optional directory for PTOAS InsertSync summaries.
         skip_ptoas: If ``True``, stop after PTO source generation without invoking ptoas.
     """
@@ -480,6 +489,8 @@ def compile_program(  # noqa: PLR0913
         dsa_export_dir=dsa_export_dir,
         dsa_solution_dir=dsa_solution_dir,
         dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+        dsa_reference_placement=dsa_reference_placement,
+        dsa_reference_target=dsa_reference_target,
         ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         skip_ptoas=skip_ptoas,
     )
@@ -537,6 +548,8 @@ def run(
         dsa_export_dir=config.dsa_export_dir,
         dsa_solution_dir=config.dsa_solution_dir,
         dsa_reuse_penalty_recognizer=config.dsa_reuse_penalty_recognizer,
+        dsa_reference_placement=config.dsa_reference_placement,
+        dsa_reference_target=config.dsa_reference_target,
         ptoas_sync_summary_dir=config.ptoas_sync_summary_dir,
         skip_ptoas=config.codegen_only,
     )

@@ -17,13 +17,15 @@ from pypto.jit.cache import (
     make_cache_key,
 )
 from pypto.jit.decorator import (
+    _resolve_dsa_reference_placement,
+    _resolve_dsa_reference_target,
     _resolve_dsa_reuse_penalty_recognizer,
     _resolve_dsa_solution_dir,
     _resolve_enable_pypto_l0c_double_buffer,
     _resolve_memory_planner,
 )
 from pypto.pypto_core import DataType, ir, passes
-from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime import RunConfig
 
 
@@ -73,6 +75,8 @@ class TestMakeCacheKey:
         dep_layouts=(),
         dsa_solution_dir=None,
         dsa_reuse_penalty_recognizer=None,
+        dsa_reference_placement=None,
+        dsa_reference_target=None,
         ptoas_sync_summary_dir=None,
     ):
         return make_cache_key(
@@ -92,6 +96,8 @@ class TestMakeCacheKey:
             dep_layouts=dep_layouts,
             dsa_solution_dir=dsa_solution_dir,
             dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+            dsa_reference_placement=dsa_reference_placement,
+            dsa_reference_target=dsa_reference_target,
             ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
@@ -117,6 +123,8 @@ class TestMakeCacheKey:
             ("dep_layouts", ()),
             ("dsa_solution_dir", None),
             ("dsa_reuse_penalty_recognizer", None),
+            ("dsa_reference_placement", None),
+            ("dsa_reference_target", None),
             ("ptoas_sync_summary_dir", None),
         )
 
@@ -435,6 +443,18 @@ class TestMakeCacheKey:
         key_quadratic = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
         assert key_disabled != key_quadratic
 
+    def test_dsa_reference_endpoint_and_target_split_key(self):
+        compact = self._make_key(dsa_reference_placement=DsaReferencePlacement.COMPACT)
+        loose_a = self._make_key(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="kernel_a",
+        )
+        loose_b = self._make_key(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="kernel_b",
+        )
+        assert len({compact, loose_a, loose_b}) == 3
+
 
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
@@ -496,6 +516,28 @@ class TestResolveDsaReusePenaltyRecognizer:
             assert _resolve_dsa_reuse_penalty_recognizer(explicit) == DsaReusePenaltyRecognizer.QUADRATIC
         with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC):
             assert _resolve_dsa_reuse_penalty_recognizer(unset) == DsaReusePenaltyRecognizer.QUADRATIC
+
+
+class TestResolveDsaReferencePlacement:
+    def test_run_config_wins_and_unset_config_defers_to_context(self):
+        explicit = RunConfig(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="run_config_target",
+        )
+        unset = RunConfig()
+        with passes.PassContext(
+            [],
+            dsa_reference_placement=DsaReferencePlacement.COMPACT,
+        ):
+            assert _resolve_dsa_reference_placement(explicit) == DsaReferencePlacement.LOOSE
+            assert _resolve_dsa_reference_target(explicit) == "run_config_target"
+        with passes.PassContext(
+            [],
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="context_target",
+        ):
+            assert _resolve_dsa_reference_placement(unset) == DsaReferencePlacement.LOOSE
+            assert _resolve_dsa_reference_target(unset) == "context_target"
 
 
 if __name__ == "__main__":
