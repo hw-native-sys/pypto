@@ -28,7 +28,11 @@ from pypto.runtime import ChipWorker, RunConfig
 @pytest.fixture
 def fake_simpler_worker():
     """Patch ``simpler.worker.Worker`` so ChipWorker construction does not touch a device."""
-    with patch("pypto.runtime.worker._SimplerWorker") as cls:
+    with (
+        patch("pypto.runtime.worker._SimplerWorker") as cls,
+        # init() builds a prewarm CallConfig; patch the cache so no simpler import happens.
+        patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+    ):
         instance = MagicMock()
         cls.return_value = instance
         yield instance
@@ -49,6 +53,14 @@ class TestLifecycleIdempotency:
     def test_auto_init_on_construction(self, fake_simpler_worker):
         ChipWorker(config=RunConfig(platform="a2a3sim"))
         fake_simpler_worker.init.assert_called_once()
+
+    def test_init_prewarms_arena_cache(self, fake_simpler_worker):
+        ChipWorker(config=RunConfig(platform="a2a3sim"))
+        # init() builds the prebuilt runtime-arena so the first dispatch doesn't
+        # pay the ~800ms cold build. Sizing is the runtime's own default (a bare
+        # CallConfig): dispatch takes ring sizing from the per-call RunConfig, so
+        # prewarming this worker's config would build an arena nobody asks for.
+        assert fake_simpler_worker.init.call_args.kwargs["prewarm_config"] is not None
 
     def test_init_idempotent(self, fake_simpler_worker):
         w = ChipWorker(config=RunConfig(platform="a2a3sim"))  # first init

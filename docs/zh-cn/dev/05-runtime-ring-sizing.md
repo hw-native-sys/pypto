@@ -79,9 +79,10 @@ compiled = run(
 ```python
 from pypto.runtime import RunConfig
 
-with compiled.prepare() as rt:           # 仅一次性 setup
-    prefill_cfg = RunConfig(platform="a2a3", ring_task_window=256)
-    decode_cfg = RunConfig(platform="a2a3", ring_task_window=64)
+prefill_cfg = RunConfig(platform="a2a3", ring_task_window=256)
+decode_cfg = RunConfig(platform="a2a3", ring_task_window=64)
+
+with compiled.prepare(prefill_cfg) as rt:              # 一次性 setup + 预热
     rt(host_x, weight, host_out, config=prefill_cfg)   # prefill 用较大的 window
     rt(host_x, weight, host_out, config=decode_cfg)    # decode 用较小的 window
 
@@ -93,6 +94,35 @@ compiled(a, b, c, config=RunConfig(platform="a2a3", ring_heap=8 * 1024 * 1024))
 忽略（它们在编译 / prepare 时设置，而非按派发设置）。
 
 只设置你想覆盖的字段即可；其余字段保持未设置，并按上述优先级回退。
+
+## Arena 预热与单槽缓存
+
+某个 ring 尺寸对应的运行时 arena，首次使用时需要约 800ms 构建。worker 现在会在
+`init` 时主动构建它 —— `prepare(config)` / `ChipWorker` / `execute_on_device` ——
+使这次冷构建落在 setup 阶段，而不是落在第一次（通常被计时的）派发里。
+
+arena 缓存以**完整的 per-ring 尺寸向量**为 key（4 个 ring 的 `ring_task_window` /
+`ring_heap` / `ring_dep_pool` 一起 hash）。所以"一次派发内各 ring 尺寸不同"——即
+list 形式，如 `ring_task_window=[256, 128, 64, 0]`——是**一个** key、**一块** arena：
+只要 `prepare(...)` 传的是同一个 `RunConfig`，预热就完整覆盖它。下面的单槽限制**只**针对
+*不同派发之间*使用*不同*尺寸向量，与"一次派发内各 ring 不同"无关。
+
+缓存**每个 worker 只保留一个**尺寸向量，且每次构建 arena 都会**覆盖**那个槽，因此：
+
+- 把派发用的 `RunConfig` 传给 `prepare(...)`。它**只**用于预热、不会被保存，所以每次
+  派发仍需各自传 `config=`。如上例，`prefill_cfg` 要同时传给 `prepare(...)` 和首次
+  prefill 派发；decode 派发使用 `decode_cfg`。
+- 预热只能省掉**首个**派发的冷构建，且仅当首个派发的尺寸与预热尺寸一致时才生效——所以
+  请预热你**首个**派发使用的尺寸，而非最频繁的那个。任何首个派发用了别的尺寸都会 miss、
+  重建、覆盖掉预热槽，预热白费。
+- **同一个 worker 的多次派发之间尽量保持 ring 尺寸不变**。单槽是每个 worker 各一个、每次切换
+  都被覆盖，所以交替尺寸时**每次**切换都会重建 arena（与预热无关；上例 `decode_cfg` 那次付
+  一次构建，紧接着的 `prefill_cfg` 又付一次）。把不同尺寸拆到不同 worker 通常行不通——之所以
+  要常驻一个 worker（`prepare(..., extra_compiled=[...])`），正是为了共享 KV cache 这类
+  设备驻留状态，而分开的 worker 无法共享。所以应挑一个能服务该 worker 所有派发形状的尺寸，而
+  不是逐次派发改尺寸。
+- L2 派发的 ring 尺寸来自每次调用的 `RunConfig`，因此 `ChipWorker` 预热的是运行时的默认
+  尺寸；若某次调用的 `RunConfig` 指定了不同的 ring 尺寸，则会重建一次。
 
 ## 相关文档
 

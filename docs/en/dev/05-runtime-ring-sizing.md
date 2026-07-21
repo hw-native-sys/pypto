@@ -84,9 +84,10 @@ ring sizes:
 ```python
 from pypto.runtime import RunConfig
 
-with compiled.prepare() as rt:           # setup once
-    prefill_cfg = RunConfig(platform="a2a3", ring_task_window=256)
-    decode_cfg = RunConfig(platform="a2a3", ring_task_window=64)
+prefill_cfg = RunConfig(platform="a2a3", ring_task_window=256)
+decode_cfg = RunConfig(platform="a2a3", ring_task_window=64)
+
+with compiled.prepare(prefill_cfg) as rt:              # setup once + prewarm
     rt(host_x, weight, host_out, config=prefill_cfg)   # large window for prefill
     rt(host_x, weight, host_out, config=decode_cfg)    # smaller window for decode
 
@@ -100,6 +101,46 @@ time, not per dispatch).
 
 Set only the fields you want to override; the rest stay unset and fall back per
 the precedence above.
+
+## Arena prewarm and the single-slot cache
+
+A ring sizing's runtime arena costs ~800 ms to build the first time it is used.
+Workers build it eagerly at `init` — `prepare(config)` / `ChipWorker` /
+`execute_on_device` — so the cold build lands in setup instead of inside the
+first (usually timed) dispatch.
+
+The arena cache is keyed on the **full per-ring sizing vector** (all four rings'
+`ring_task_window` / `ring_heap` / `ring_dep_pool`, hashed together). So a single
+dispatch that sizes rings differently — the list form, e.g.
+`ring_task_window=[256, 128, 64, 0]` — is one key and one arena: prewarm covers
+it completely, as long as `prepare(...)` gets that same `RunConfig`. The
+single-slot limit below is only about *different dispatches* using *different*
+sizing vectors, never about per-ring differences within one dispatch.
+
+The cache holds exactly **one** sizing vector per worker, and every arena build
+overwrites that slot. So:
+
+- Pass the dispatch `RunConfig` to `prepare(...)`. It is used for the prewarm
+  only — it is not stored, so every dispatch still needs its own `config=`.
+  In the example above, pass `prefill_cfg` to both `prepare(...)` and the first
+  prefill dispatch; the decode dispatch uses `decode_cfg`.
+- The prewarm only removes the cold build from the **first** dispatch, and only
+  when that dispatch's sizing matches the prewarmed one — so prewarm the sizing
+  your *first* dispatch uses, not the most frequent one. Any first dispatch with
+  a different sizing misses, rebuilds, and overwrites the prewarmed slot, wasting
+  the prewarm.
+- Keep the ring sizing **constant across a worker's dispatches**. The single
+  slot is per worker and is overwritten on every switch, so alternating sizings
+  rebuild the arena on **each** switch regardless of prewarm (the `decode_cfg`
+  dispatch above pays a build, and the next `prefill_cfg` pays another). Splitting
+  the sizings across separate workers is usually not an option — the reason to
+  hold one worker (`prepare(..., extra_compiled=[...])`) is to share device-
+  resident state such as a KV cache, which separate workers cannot. So pick one
+  sizing that serves all of that worker's dispatch shapes rather than varying it
+  per dispatch.
+- L2 dispatch takes its ring sizing from the per-call `RunConfig`, so a
+  `ChipWorker` prewarms the runtime's default sizing; a per-call `RunConfig` that
+  sizes the rings differently rebuilds once.
 
 ## Related
 

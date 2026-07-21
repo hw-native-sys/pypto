@@ -25,7 +25,11 @@ from pypto.runtime import ChipWorker, RegistrationHandle, RunConfig
 @pytest.fixture
 def fake_simpler_worker():
     """Patch ``simpler.worker.Worker`` so ChipWorker construction does no I/O."""
-    with patch("pypto.runtime.worker._SimplerWorker") as cls:
+    with (
+        patch("pypto.runtime.worker._SimplerWorker") as cls,
+        # init() builds a prewarm CallConfig; patch the cache so no simpler import happens.
+        patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+    ):
         instance = MagicMock()
         instance.register.side_effect = lambda cc: 100 + id(cc) % 100  # deterministic cid
         instance.aicpu_dlopen_count = 0

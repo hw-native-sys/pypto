@@ -24,7 +24,11 @@ from pypto.runtime import ChipWorker, DeviceTensor, RunConfig
 @pytest.fixture
 def fake_simpler_worker():
     """Patch ``simpler.worker.Worker`` so ChipWorker construction does not touch a device."""
-    with patch("pypto.runtime.worker._SimplerWorker") as cls:
+    with (
+        patch("pypto.runtime.worker._SimplerWorker") as cls,
+        # init() builds a prewarm CallConfig; patch the cache so no simpler import happens.
+        patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+    ):
         instance = MagicMock()
         cls.return_value = instance
         yield instance

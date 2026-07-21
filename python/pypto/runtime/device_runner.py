@@ -735,7 +735,10 @@ def execute_on_device(  # noqa: PLR0913
             active._run_chip(chip_callable, orch_args, cfg)
             return
         worker = Worker(level=level, device_id=device_id, platform=platform, runtime=runtime_name)
-        worker.init()
+        # Prewarm with this dispatch's own config so the single run below hits the
+        # prebuilt runtime-arena cache instead of paying the ~800ms cold build
+        # inside the timed dispatch. No-op without a prebuilt arena.
+        worker.init(prewarm_config=cfg)
         try:
             # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
             # register the callable, run it, then close — close() runs finalize()

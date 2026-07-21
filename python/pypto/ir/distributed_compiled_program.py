@@ -368,7 +368,7 @@ class DistributedCompiledProgram:
 
     def prepare(
         self,
-        config: Any = None,
+        config: "RunConfig | None" = None,
         *,
         extra_compiled: Sequence["DistributedCompiledProgram"] = (),
         callbacks: dict[str, Callable[..., Any]] | None = None,
@@ -393,7 +393,13 @@ class DistributedCompiledProgram:
         the one-shot ``compile(...)(*args)`` / ``execute_distributed`` path.
 
         Args:
-            config: Optional run configuration (reserved; currently unused).
+            config: Optional :class:`~pypto.runtime.RunConfig` used **only** to
+                prewarm the runtime-arena cache with its ring sizing, so the first
+                dispatch skips the ~800ms cold build. It is not stored: every
+                dispatch still takes its own ``config=``, so pass the same
+                ``RunConfig`` to both. ``None`` prewarms the program's baseline
+                sizing (env / compile-time fallback). The cache is single-slot, so
+                dispatches that alternate ring sizings rebuild on each switch.
             extra_compiled: Additional compatible programs to prepare on the
                 same L3 worker (multi-program serving — e.g. ``prefill`` prepares
                 the worker and passes ``[decode]`` here so both share the worker

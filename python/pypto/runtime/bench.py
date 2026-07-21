@@ -982,7 +982,9 @@ def benchmark(
                 # stderr too; on failure it is echoed back so diagnostics survive.
                 try:
                     with _capture_fd_stderr(log_path):
-                        with compiled.prepare() as rt:
+                        # Pass the dispatch config so prepare() prewarms the ring
+                        # sizing the loop below actually dispatches with.
+                        with compiled.prepare(config) as rt:
                             handle = rt.register(compiled)  # register once (cid=0)
                             _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=config)
                 except Exception:

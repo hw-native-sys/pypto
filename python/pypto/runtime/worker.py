@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 # would make ``simpler`` a hard import-time dependency of ``pypto.runtime`` and
 # break unit-test environments that do not install simpler.
 _SimplerWorker: type | None = None
+_SimplerCallConfig: type | None = None
 
 
 def _get_simpler_worker_cls() -> type:
@@ -69,6 +70,18 @@ def _get_simpler_worker_cls() -> type:
         _SimplerWorker = _W
     assert _SimplerWorker is not None
     return _SimplerWorker
+
+
+def _get_simpler_call_config_cls() -> type:
+    global _SimplerCallConfig  # noqa: PLW0603 - module-level cache that tests patch directly
+    if _SimplerCallConfig is None:
+        from .task_interface import (  # noqa: PLC0415
+            CallConfig as _CC,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+
+        _SimplerCallConfig = _CC
+    assert _SimplerCallConfig is not None
+    return _SimplerCallConfig
 
 
 # Stack of active ChipWorkers (most-recent last). ContextVar gives correct
@@ -175,7 +188,16 @@ class ChipWorker(Worker):
         """Initialize device state. Idempotent — a second call is a no-op."""
         if self._initialized:
             return
-        self._impl.init()
+        # Prewarm the prebuilt runtime-arena cache so the first run() hits it
+        # instead of paying the ~800ms cold build inside a (usually timed)
+        # dispatch. Only ring sizing keys the cache, and dispatch takes its ring
+        # sizing from the *per-call* RunConfig (``_dispatch``) — never from this
+        # worker's ``_config`` — so a bare CallConfig is what an unsized dispatch
+        # resolves to (runtime_env 0 -> PTO2_RING_* / compile-time fallback).
+        # Transcribing ``_config``'s rings here would instead build an arena no
+        # dispatch asks for. A per-call RunConfig that sizes the rings differently
+        # rebuilds once, as before. No-op without a prebuilt arena.
+        self._impl.init(prewarm_config=_get_simpler_call_config_cls()())
         self._initialized = True
 
     def close(self) -> None:

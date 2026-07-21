@@ -738,7 +738,10 @@ def execute_distributed(
         try:
             w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
             sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
-            w.init()
+            # Prewarm with this dispatch's own config so the single run below hits
+            # the prebuilt runtime-arena cache instead of paying the ~800ms cold
+            # build inside the timed dispatch. No-op without a prebuilt arena.
+            w.init(prewarm_config=call_config)
             _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids))
         finally:
             if w is not None:
@@ -911,14 +914,13 @@ class DistributedWorker(Worker):
     def __init__(
         self,
         compiled: DistributedCompiledProgram | Sequence[DistributedCompiledProgram],
-        config: Any = None,
+        config: RunConfig | None = None,
         *,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
-        del config  # reserved for future per-runtime overrides
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
         inherited = tuple(inherited_host_tensors) if inherited_host_tensors is not None else ()
         for tensor in inherited:
@@ -1013,17 +1015,17 @@ class DistributedWorker(Worker):
                 self._states[prog]["sub_ids"] = sub_ids
                 self._states[prog]["chip_cids"] = chip_cids
 
-            self._w.init()
-
-            # Fork the chip/sub workers now (rather than lazily on the first
-            # ``run()``) so the device-memory API — ``malloc`` / ``copy_to`` /
-            # ``alloc_tensor`` — is usable before the first dispatch: those route
-            # through the orchestrator, which only exists after the hierarchy is
-            # started. ``_start_hierarchical`` is idempotent and is the same fork
-            # the first ``run()`` would trigger; the comm path already runs it from
-            # ``init()``. Intermediates are allocated above (pre-fork) so forked
-            # children inherit their shared-memory mappings.
-            self._w._start_hierarchical()
+            # Prewarm the prebuilt runtime-arena cache so the first run() hits it
+            # instead of paying the ~800ms cold build. The cache is single-slot per
+            # worker: exactly one ring sizing is prewarmed — ``config``'s when given
+            # (built exactly as ``run()`` builds it, so the sizing keys match), else
+            # the primary program's baseline. No-op without a prebuilt arena.
+            prewarm_cc = self._states[primary]["call_config"]
+            if config is not None:
+                prewarm_cc = _make_call_config(
+                    primary._distributed_config, config, dfx_base=primary.output_dir / "dfx_outputs"
+                )
+            self._w.init(prewarm_config=prewarm_cc)
         except Exception:
             if self._w is not None:
                 try:

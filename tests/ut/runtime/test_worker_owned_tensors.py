@@ -25,7 +25,11 @@ from pypto.runtime import ChipWorker, RunConfig
 @pytest.fixture
 def fake_simpler_worker():
     """Patch ``simpler.worker.Worker`` so ChipWorker construction does no I/O."""
-    with patch("pypto.runtime.worker._SimplerWorker") as cls:
+    with (
+        patch("pypto.runtime.worker._SimplerWorker") as cls,
+        # init() builds a prewarm CallConfig; patch the cache so no simpler import happens.
+        patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+    ):
         instance = MagicMock()
         # Deterministic malloc: incrementing pointer.
         ptr_state = {"next": 0x1000}

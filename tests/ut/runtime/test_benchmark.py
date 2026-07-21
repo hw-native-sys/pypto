@@ -563,8 +563,10 @@ class _FakeDistributedCompiled:
     def __init__(self, rt: _FakeDistributedWorker) -> None:
         self._rt = rt
         self.platform = "a2a3sim"
+        self.prepare_config: Any = "unset"
 
-    def prepare(self) -> _FakeDistributedWorker:
+    def prepare(self, config: Any = None) -> _FakeDistributedWorker:
+        self.prepare_config = config
         return self._rt
 
 
@@ -585,6 +587,9 @@ def test_benchmark_l3_dispatches_via_distributed_worker():
     assert rt.register_calls == 1  # registered exactly once
     assert rt.handle.call_count == 3  # warmup + rounds launches
     assert chip_ctor.call_count == 0  # L3 must NOT touch ChipWorker
+    # prepare() gets the dispatch config, so it prewarms the runtime arena with
+    # the ring sizing the loop dispatches with (here: None -> baseline sizing).
+    assert compiled.prepare_config is None
     # The parser is told this is a distributed run.
     assert parse.call_args.kwargs == {"rounds": 2, "warmup": 1, "distributed": True}
     assert stats.rounds == 2
@@ -616,7 +621,7 @@ def test_benchmark_l3_capture_wraps_prepare(span_root):
     """
 
     class _CompiledEmittingAtPrepare(_FakeDistributedCompiled):
-        def prepare(self) -> _FakeDistributedWorker:
+        def prepare(self, config: Any = None) -> _FakeDistributedWorker:
             # Two ranks each emit one dispatch's markers at fork/prepare time,
             # before the measured loop runs.
             for pid, dev_us in ((100, 10.0), (101, 20.0)):
