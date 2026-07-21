@@ -183,6 +183,15 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
           }
         } else if (k == kAttrTaskIdVar) {
           if (const auto* var = std::any_cast<VarPtr>(&v)) add_var(*var);
+        } else if (k == kAttrPredicate) {
+          // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — an Expr, so collect
+          // every Var it references (the operand tensor and its indices)
+          // rather than remapping a single Var. DCE runs at pass 5, well
+          // before OutlineSpmdScopes moves this onto Submit::predicate_, so
+          // the attr is live IR here: without this the operand's feeding
+          // assignment looks dead and its removal leaves a dangling reference
+          // — the same failure mode as issue #1456 above.
+          if (const auto* pred = std::any_cast<ExprPtr>(&v)) collect_expr_refs(*pred);
         }
       }
       if (auto spmd = std::dynamic_pointer_cast<const SpmdScopeStmt>(scope_stmt)) {

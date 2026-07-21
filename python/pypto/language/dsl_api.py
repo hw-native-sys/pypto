@@ -659,6 +659,7 @@ class SpmdContext:
         optimizations: list[Optimization] | None = None,
         deps: list[Any] | None = None,
         allow_early_resolve: bool = False,
+        predicate: Any = None,
     ) -> None:
         self.core_num = core_num
         self.sync_start = sync_start
@@ -666,6 +667,7 @@ class SpmdContext:
         self.optimizations = optimizations
         self.deps = deps
         self.allow_early_resolve = allow_early_resolve
+        self.predicate = predicate
 
     def __enter__(self) -> Any:
         # The parser intercepts the ``with pl.spmd(...) [as tid]:`` pattern and
@@ -702,6 +704,7 @@ def spmd(
     optimizations: list[Optimization] | None = None,
     deps: list[Any] | None = None,
     allow_early_resolve: bool = False,
+    predicate: Any = None,
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
@@ -760,6 +763,26 @@ def spmd(
             hint. Rejected on a ``pl.cluster()``-nested ``pl.spmd`` (such a scope
             is unwrapped into the Group function and never produces a Submit, so
             the hint would be lost).
+        predicate: Optional **dispatch predicate** — a single comparison of one
+            tensor element against an integer literal, e.g.
+            ``predicate=(row_count[e] > 0)``. Same surface, validation and
+            lowering as ``pl.spmd_submit(..., predicate=...)``: the scheduler
+            evaluates it at the dispatch point (after this scope's dependencies
+            are satisfied, so the value is current) and retires the task inline —
+            never dispatching it to a core — when it is false, while still
+            settling fanin/fanout so downstream consumers unlock. The comparison
+            is parsed but **never evaluated** in orchestration; reading it there
+            would stall on ``wait_for_tensor_ready``, exactly what the predicate
+            avoids. Like ``allow_early_resolve`` it forces the dispatch to lower
+            to an ``ir.Submit`` (even without ``as tid``) and is rejected on a
+            ``pl.cluster()``-nested ``pl.spmd``.
+
+            **Contract:** the operand tensor's producing task must be one of
+            ``deps=`` — otherwise the predicate may read a stale value. ``deps=``
+            is only available on the ``as tid`` form, so a predicate over a
+            tensor produced in the same function needs that form. The parser
+            makes a best-effort check (see ``pl.spmd_submit``); getting ``deps=``
+            right remains the author's responsibility.
 
     Returns:
         Context manager / loop iterator for the SPMD scope.
@@ -801,6 +824,12 @@ def spmd(
         >>> with pl.cluster():
         ...     with pl.spmd(4, sync_start=True):
         ...         out = self.kernel(a, b, out)
+        >>>
+        >>> # Dispatch predicate — skip the expert entirely when its row count is 0
+        >>> with pl.spmd(1) as gate_tid:
+        ...     row_count = self.gate(row_count)
+        >>> with pl.spmd(4, deps=[gate_tid], predicate=(row_count[0, 0] > 0)) as tid:
+        ...     out = self.expert(x, out)
     """
     if isinstance(core_num, bool) or not isinstance(core_num, (int, _ir.Expr)):
         raise ValueError(f"core_num must be a positive integer or ir.Expr, got {core_num!r}")
@@ -813,6 +842,7 @@ def spmd(
         optimizations=optimizations,
         deps=deps,
         allow_early_resolve=allow_early_resolve,
+        predicate=predicate,
     )
 
 

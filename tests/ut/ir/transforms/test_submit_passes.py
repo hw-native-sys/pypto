@@ -16,6 +16,7 @@ DCE / SSA and the printer's round-trip preserve the structural shape
 to Call.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 
@@ -209,6 +210,227 @@ def test_submit_single_lhs_form_round_trips():
     # the RoundtripInstrument on every pass. If the parser had still
     # required ``out, tid = ...`` unpacking, this call would raise.
     passes.convert_to_ssa()(program_before)
+
+
+# ---------------------------------------------------------------------------
+# Scope-form dispatch predicate — ``with pl.spmd(..., predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# ``pl.spmd_submit(..., predicate=)`` builds a Submit at parse time, so the
+# predicate is covered by the Submit field walk above. The *scope* form is
+# outlined only later, so between parse and outline the predicate lives on
+# ``SpmdScopeStmt.attrs`` as an Expr carrying live SSA Vars (the operand tensor
+# and its indices).
+#
+# Three code paths must know about that attr — IRVisitor::VisitScopeAttrs,
+# IRMutator::MutateScopeAttrs, and ConvertToSSA::SubstScopeAttrs. Missing the
+# SSA one leaves the predicate pointing at the pre-SSA Var: the IR still
+# verifies and codegen still emits a predicate, but it reads a *dangling*
+# operand. These tests pin the observable consequence rather than the
+# mechanism.
+
+_SCOPE_PREDICATE_PROGRAM = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def expert(
+        self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        t = pl.load(x, [0, 0], [128, 128])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def gate(
+        self, g: pl.Out[pl.Tensor[[512, 128], pl.INT32]]
+    ) -> pl.Tensor[[512, 128], pl.INT32]:
+        t = pl.load(g, [0, 0], [128, 128])
+        g = pl.store(t, [0, 0], g)
+        return g
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.spmd(1) as g_tid:
+            rc = self.gate(rc)
+        with pl.spmd(1, deps=[g_tid], predicate=(rc[0, 0] > 0)) as t:
+            out = self.expert(x, out)
+        return out
+"""
+
+
+def _spmd_scopes(program: ir.Program) -> list:
+    """Every SpmdScopeStmt in ``main``, in source order."""
+    found: list = []
+
+    def walk(stmt) -> None:
+        if isinstance(stmt, ir.SpmdScopeStmt):
+            found.append(stmt)
+        for field in ("stmts", "body"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif value is not None:
+                walk(value)
+
+    main = program.get_function("main")
+    assert main is not None
+    walk(main.body)
+    return found
+
+
+def _predicate_operand(scope) -> ir.Var:
+    """The tensor Var a scope's ``predicate`` attr reads."""
+    predicate = dict(scope.attrs.items())["predicate"]
+    operand = predicate.left
+    while isinstance(operand, ir.Cast):
+        operand = operand.operand
+    assert isinstance(operand, ir.Call)  # tensor.read
+    tensor = operand.args[0]
+    assert isinstance(tensor, ir.Var)
+    return tensor
+
+
+def test_ssa_renames_scope_predicate_operand():
+    """The operand Var inside the scope-attr Expr is versioned like any other use.
+
+    ``rc`` is rebound by the gate scope, so SSA must rewrite the predicate's
+    operand to the post-rebind version. Without the ConvertToSSA scope-attr
+    branch it would keep pointing at the original parameter Var.
+    """
+    program = pl.parse_program(_SCOPE_PREDICATE_PROGRAM)
+    before = _predicate_operand(_spmd_scopes(program)[1])
+    assert before.name_hint == "rc"
+
+    after_program = passes.convert_to_ssa()(program)
+    after = _predicate_operand(_spmd_scopes(after_program)[1])
+
+    assert after.unique_id != before.unique_id, "predicate operand was not SSA-versioned"
+    assert after.name_hint.startswith("rc"), after.name_hint
+
+
+def test_ssa_predicate_operand_matches_the_gate_scope_result():
+    """The versioned operand is the value the gate scope produced, not a fresh Var.
+
+    Renaming to *some* new Var would satisfy the test above; this pins that it
+    renames to the same SSA version the producing scope defines, which is what
+    makes the dispatch-point read observe the current value.
+    """
+    program = passes.convert_to_ssa()(pl.parse_program(_SCOPE_PREDICATE_PROGRAM))
+    gate_scope, expert_scope = _spmd_scopes(program)
+    operand = _predicate_operand(expert_scope)
+
+    produced = [
+        stmt.var.unique_id
+        for stmt in _flatten_stmts(gate_scope.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var, ir.Var)
+    ]
+    assert operand.unique_id in produced, (
+        "predicate operand should be the gate scope's SSA result, "
+        f"got {operand.name_hint} (#{operand.unique_id}), scope defines {produced}"
+    )
+
+
+def _flatten_stmts(stmt) -> list:
+    """All statements under ``stmt``, flattening SeqStmts and scope bodies."""
+    out: list = []
+
+    def walk(node) -> None:
+        out.append(node)
+        for field in ("stmts", "body"):
+            value = getattr(node, field, None)
+            if isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif value is not None:
+                walk(value)
+
+    walk(stmt)
+    return out
+
+
+def test_structural_hash_handles_var_and_expr_scope_attrs():
+    """Scopes carrying Var-/Expr-valued attrs must be hashable.
+
+    ``structural_hash``'s attr codec used to throw on any attr it could not
+    hash, which made every ``with pl.spmd(...) as tid:`` (``task_id_var``) and
+    every ``with pl.spmd(..., predicate=...)`` un-hashable — valid IR that a
+    caching or dedup path would crash on. Such attrs are now skipped (the hash
+    is coarser; ``structural_equal`` still distinguishes them).
+    """
+    program = pl.parse_program(_SCOPE_PREDICATE_PROGRAM)
+    assert isinstance(ir.structural_hash(program), int)
+
+    # Equal programs still hash equal.
+    again = pl.parse_program(_SCOPE_PREDICATE_PROGRAM)
+    assert ir.structural_hash(program) == ir.structural_hash(again)
+
+    # ...and structural_equal remains the authority on the predicate itself.
+    no_predicate = pl.parse_program(_SCOPE_PREDICATE_PROGRAM.replace(", predicate=(rc[0, 0] > 0)", ""))
+    assert isinstance(ir.structural_hash(no_predicate), int)
+    assert not ir.structural_equal(program, no_predicate)
+
+
+# A predicate whose index is a *computed* Var (``idx``), used nowhere else.
+# That makes the assignment feeding it dead unless DCE counts the predicate as a
+# use — see test_dce_keeps_the_predicate_operands_producer.
+_SCOPE_PREDICATE_LIVE_INDEX_PROGRAM = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def expert(
+        self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        t = pl.load(x, [0, 0], [128, 128])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Tensor[[512, 128], pl.INT32],
+        i: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        idx = i + 1
+        with pl.spmd(1, predicate=(rc[idx, 0] > 0)):
+            out = self.expert(x, out)
+        return out
+"""
+
+
+def test_dce_keeps_the_predicate_operands_producer():
+    """A Var used *only* inside the predicate is a live use, not dead code.
+
+    ``idx`` feeds nothing but the predicate's index. Without the predicate
+    branch in DCE's scope-attr live-root collection, its assignment is deleted
+    and the attr is left referencing a free variable — the IR still prints and
+    passes structural checks, so nothing else catches it. Regression for the
+    same failure class as issue #1456.
+    """
+    program = passes.simplify()(pl.parse_program(_SCOPE_PREDICATE_LIVE_INDEX_PROGRAM))
+    main = program.get_function("main")
+    assert main is not None
+    printed = ir.python_print(main)
+
+    assert "idx" in printed, printed
+    # The tell-tale of a dropped live root: the printer renders an undefined
+    # reference with a __FREE_VAR suffix.
+    assert "__FREE_VAR" not in printed, f"predicate references a dangling Var:\n{printed}"
+    # The assignment itself survived, not just the name inside the predicate.
+    assert "idx: pl.Scalar" in printed, printed
 
 
 if __name__ == "__main__":

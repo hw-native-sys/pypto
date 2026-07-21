@@ -294,10 +294,6 @@ def test_print_parse_round_trip():
     ir.assert_structural_equal(reparsed, prog)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 # ---------------------------------------------------------------------------
 # Runtime-ABI safety: operand dtype and index range
 # ---------------------------------------------------------------------------
@@ -373,3 +369,272 @@ class Prog:
 """
     with pytest.raises(ParserSyntaxError, match="not in deps="):
         pl.parse_program(src)
+
+
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.spmd(..., predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# The scope form shares every validation helper with pl.spmd_submit (the shape
+# checks above are not re-run per form), but reaches the IR by a different
+# route: the predicate rides on ``SpmdScopeStmt.attrs`` as an Expr until
+# OutlineSpmdScopes moves it onto ``Submit.predicate``. These tests cover the
+# attr landing, all three spmd spellings, the print round-trip, and the two
+# rejections specific to a scope (cluster nesting, producer-not-in-deps).
+
+_SCOPE_HEAD = f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def expert(self, x: {_FP32_T}, out: pl.Out[{_FP32_T}]) -> {_FP32_T}:
+        t = pl.load(x, [0, 0], [128, 128])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def gate(self, g: pl.Out[{_INT32_T}]) -> {_INT32_T}:
+        t = pl.load(g, [0, 0], [128, 128])
+        g = pl.store(t, [0, 0], g)
+        return g
+"""
+
+
+def _scope_program(predicate_src: str = "rc[0, 0] > 0", deps_src: str = "deps=[g_tid], "):
+    """Two spmd scopes; the second carries ``predicate_src`` (as-tid form)."""
+    return pl.parse_program(
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.spmd(1) as g_tid:
+            rc = self.gate(rc)
+        with pl.spmd(1, {deps_src}predicate=({predicate_src})) as t:
+            out = self.expert(x, out)
+        return out
+"""
+    )
+
+
+def _spmd_scopes(prog):
+    """All SpmdScopeStmts in ``main``, in source order."""
+    found = []
+
+    def walk(stmt):
+        if isinstance(stmt, ir.SpmdScopeStmt):
+            found.append(stmt)
+        for field in ("stmts", "body"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif value is not None:
+                walk(value)
+
+    walk(prog.get_function("main").body)
+    return found
+
+
+def test_scope_predicate_lands_on_scope_attrs():
+    """The predicate is stored on the scope as the comparison Expr itself."""
+    prog = _scope_program("rc[0, 0] > 0")
+    gate_scope, expert_scope = _spmd_scopes(prog)
+    assert "predicate" not in dict(gate_scope.attrs.items())
+    predicate = dict(expert_scope.attrs.items())["predicate"]
+    assert isinstance(predicate, ir.Gt)
+    assert _pred_const(predicate).value == 0
+    # Reuses tensor.read rather than a bespoke encoding.
+    assert _pred_read(predicate).op.name == "tensor.read"
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+
+
+def test_scope_predicate_canonical_attr_order():
+    """deps -> task_id_var -> predicate; the print round-trip relies on it."""
+    prog = _scope_program()
+    _, expert_scope = _spmd_scopes(prog)
+    assert [k for k, _ in expert_scope.attrs.items()] == [
+        "manual_dep_edges",
+        "task_id_var",
+        "predicate",
+    ]
+
+
+def test_scope_predicate_print_parse_round_trip():
+    prog = _scope_program("rc[0, 0] >= 2")
+    printed = python_print(prog)
+    assert "predicate=(" in printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(reparsed, prog)
+
+
+def test_scope_predicate_plain_with_form():
+    """No ``as tid``: the predicate still lands (the outliner synthesises a tid).
+
+    ``rc`` is a plain parameter here, so it has no tracked producer and the
+    deps contract check passes without a ``deps=`` (unavailable on this form).
+    """
+    prog = pl.parse_program(
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        with pl.spmd(1, predicate=(rc[0, 0] > 0)):
+            out = self.expert(x, out)
+        return out
+"""
+    )
+    (scope,) = _spmd_scopes(prog)
+    assert isinstance(dict(scope.attrs.items())["predicate"], ir.Gt)
+
+
+def test_scope_predicate_for_form():
+    """``for i in pl.spmd(n, predicate=...)`` records the predicate too."""
+    prog = pl.parse_program(
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        for i in pl.spmd(4, predicate=(rc[0, 0] > 0)):
+            t = pl.load(x, [i * 128, 0], [128, 128])
+            out = pl.store(t, [i * 128, 0], out)
+        return out
+"""
+    )
+    (scope,) = _spmd_scopes(prog)
+    assert isinstance(dict(scope.attrs.items())["predicate"], ir.Gt)
+
+
+def test_scope_predicate_operand_producer_must_be_in_deps():
+    """Same contract as the call form: omitting deps= is caught."""
+    with pytest.raises(ParserSyntaxError, match="produced by the task"):
+        _scope_program("rc[0, 0] > 0", deps_src="")
+
+
+def test_scope_predicate_rejected_inside_cluster():
+    """A cluster-nested pl.spmd never becomes a Submit, so the predicate is lost."""
+    with pytest.raises(ParserSyntaxError, match=r"cannot be nested inside `pl\.cluster"):
+        pl.parse_program(
+            _SCOPE_HEAD
+            + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        with pl.cluster():
+            with pl.spmd(1, predicate=(rc[0, 0] > 0)):
+                out = self.expert(x, out)
+        return out
+"""
+        )
+
+
+def test_scope_predicate_shape_validation_is_shared():
+    """The call form's shape rules apply verbatim — spot-check two."""
+    with pytest.raises(ParserSyntaxError, match="must compare one tensor element"):
+        _scope_program("rc[0, 0] % 8 == 0")
+    with pytest.raises(ParserSyntaxError, match="Only simple comparisons"):
+        _scope_program("0 < rc[0, 0] < 8")
+
+
+def test_scope_without_predicate_has_no_attr():
+    prog = pl.parse_program(
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: {_FP32_T}, out: pl.Out[{_FP32_T}]) -> {_FP32_T}:
+        with pl.spmd(1):
+            out = self.expert(x, out)
+        return out
+"""
+    )
+    (scope,) = _spmd_scopes(prog)
+    assert "predicate" not in dict(scope.attrs.items())
+
+
+def test_scope_producer_is_tracked_for_the_deps_contract():
+    """A scope-produced operand IS tracked, so ``deps=`` is genuinely enforced.
+
+    The rejection test above only proves *something* raised; this pins the
+    mechanism: naming the producing scope in ``deps=`` accepts, and the same
+    program without it rejects. Before scope-producer tracking existed both
+    spellings parsed, silently certifying a stale-read predicate.
+    """
+    # Producer named in deps= -> accepted.
+    prog = _scope_program("rc[0, 0] > 0", deps_src="deps=[g_tid], ")
+    _, expert_scope = _spmd_scopes(prog)
+    assert isinstance(dict(expert_scope.attrs.items())["predicate"], ir.Gt)
+    # Same program, producer omitted -> rejected, naming the producing task.
+    with pytest.raises(ParserSyntaxError, match="produced by the task"):
+        _scope_program("rc[0, 0] > 0", deps_src="")
+
+
+def test_scope_producer_tracking_survives_tid_rebinding():
+    """A rebound ``tid`` name must not certify an unrelated scope.
+
+    Strict SSA reuses one ``ir.Var`` object across same-named rebindings, so
+    identity alone would match; the per-Var generation counter is what makes
+    this reject.
+    """
+    with pytest.raises(ParserSyntaxError, match="produced by the task"):
+        pl.parse_program(
+            _SCOPE_HEAD
+            + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}],
+        rc2: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.spmd(1) as tid:
+            rc = self.gate(rc)
+        with pl.spmd(1) as tid:
+            rc2 = self.gate(rc2)
+        with pl.spmd(1, deps=[tid], predicate=(rc[0, 0] > 0)) as t:
+            out = self.expert(x, out)
+        return out
+"""
+        )
+
+
+def test_scope_predicate_deps_hint_matches_the_form():
+    """The remediation hint must be reachable from the form the author wrote.
+
+    Scope-producer tracking made this case reachable: on the plain / for-forms
+    ``deps=`` is rejected outright, so a hint saying "add deps=[tid]" would send
+    the author into a second, different error. Those forms are told to switch to
+    the ``as tid`` capture form instead.
+    """
+    # as-tid form: deps= is available, so "add it" is the right advice.
+    with pytest.raises(ParserSyntaxError) as as_tid:
+        _scope_program("rc[0, 0] > 0", deps_src="")
+    assert "deps=[g_tid]" in as_tid.value.hint, as_tid.value.hint
+
+    # plain with-form: deps= is not accepted; the hint must say so and point at
+    # the capture form rather than at a kwarg that would itself be rejected.
+    plain_src = (
+        _SCOPE_HEAD
+        + f"""
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.spmd(1) as g_tid:
+            rc = self.gate(rc)
+        with pl.spmd(1, predicate=(rc[0, 0] > 0)):
+            out = self.expert(x, out)
+        return out
+"""
+    )
+    with pytest.raises(ParserSyntaxError) as plain:
+        pl.parse_program(plain_src)
+    hint = plain.value.hint
+    assert "does not accept deps=" in hint, hint
+    assert "as tid" in hint, hint
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -1878,11 +1878,11 @@ class OutWindowExternalizer {
         // fields. RewriteCallAttrs copies every attr off the transient Call
         // view, so without this filter the rebuilt Submit would carry both the
         // real field and a stale attr copy of it — duplicated state that the
-        // printer emits twice and that structural_hash cannot encode (its attr
-        // codec has no ExprPtr branch). The fields themselves are threaded
-        // explicitly through the constructor below.
-        static const std::array<const char*, 4> kViewSynthesizedKeys = {"predicate", "core_num", "sync_start",
-                                                                        "allow_early_resolve"};
+        // printer emits twice and that structural_hash silently ignores (its
+        // attr codec skips Var-/Expr-valued entries). The fields themselves are
+        // threaded explicitly through the constructor below.
+        static const std::array<const char*, 4> kViewSynthesizedKeys = {kAttrPredicate, "core_num",
+                                                                        "sync_start", "allow_early_resolve"};
         std::vector<std::pair<std::string, std::any>> submit_attrs;
         submit_attrs.reserve(new_attrs.size());
         for (const auto& attr : new_attrs) {

@@ -3587,6 +3587,55 @@ class ASTParser:
             )
         return kw.value.value
 
+    # ``pl.spmd()`` keywords whose *value* the caller interprets. ``deps`` is
+    # conditionally legal (see _validate_spmd_kwarg_name).
+    _SPMD_KWARGS = frozenset(
+        {"core_num", "sync_start", "name_hint", "optimizations", "allow_early_resolve", "predicate"}
+    )
+
+    def _validate_spmd_kwarg_name(
+        self, kw: ast.keyword, anchor: ast.AST, *, usage_hint: str, allow_deps: bool
+    ) -> None:
+        """Reject a ``pl.spmd()`` keyword that is not legal in this context.
+
+        Split out of :meth:`_parse_spmd_kwargs` so that method handles only what
+        each keyword's *value* means, while "is this keyword name accepted here"
+        lives in one place. Covers three rejections:
+
+        * ``**kwargs`` unpacking (``kw.arg is None``) — the parser must see each
+          keyword literally.
+        * ``deps=`` outside the ``as tid`` capture form, where there is no TaskId
+          to hang the edges on.
+        * any unrecognised name, whose hint lists the keywords valid *here*.
+        """
+        if kw.arg is None:
+            # `pl.spmd(**cfg)` — ast.keyword.arg is None for **kwargs unpacking.
+            raise ParserSyntaxError(
+                "pl.spmd() does not accept **kwargs; pass core_num (positional) "
+                "and sync_start=/name_hint=/optimizations= explicitly",
+                span=self.span_tracker.get_span(kw.value),
+                hint=usage_hint,
+            )
+        if kw.arg == "deps" and not allow_deps:
+            raise ParserSyntaxError(
+                "pl.spmd() does not accept 'deps=' here",
+                span=self.span_tracker.get_span(kw.value),
+                hint="Use `with pl.spmd(n, deps=[...]) as tid:` (the with-form) to "
+                "declare explicit TaskId deps, or `out, tid = pl.spmd_submit(..., "
+                "deps=[...])` for the single-call form.",
+            )
+        if kw.arg == "deps" or kw.arg in self._SPMD_KWARGS:
+            return
+        supported = "'sync_start', 'name_hint', 'optimizations', "
+        if allow_deps:
+            supported += "'deps', "
+        supported += "'allow_early_resolve', 'predicate'"
+        raise ParserSyntaxError(
+            f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
+            span=self.span_tracker.get_span(anchor),
+            hint=f"Supported keywords: {supported}",
+        )
+
     def _parse_spmd_kwargs(
         self,
         anchor: ast.AST,
@@ -3594,15 +3643,18 @@ class ASTParser:
         *,
         usage_hint: str,
         allow_deps: bool = False,
-    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None", "int | None", "list[ir.Var]", bool]:
+    ) -> tuple[
+        "ir.Expr", bool, str, "ir.SplitMode | None", "int | None", "list[ir.Var]", bool, "ir.Expr | None"
+    ]:
         """Parse the ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=, deps=, ...)`` arguments.
 
         Also accepts ``allow_early_resolve=`` (the speculative early-dispatch
-        hint). The first positional argument is ``core_num`` (range-like). Returns
+        hint) and ``predicate=`` (the dispatch predicate). The first positional
+        argument is ``core_num`` (range-like). Returns
         ``(core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars,
-        allow_early_resolve)`` with ``sync_start`` / ``allow_early_resolve``
-        defaulting to ``False``, ``split_mode`` / ``split_slot_num`` to ``None``,
-        and ``dep_vars`` to ``[]``.
+        allow_early_resolve, predicate)`` with ``sync_start`` /
+        ``allow_early_resolve`` defaulting to ``False``, ``split_mode`` /
+        ``split_slot_num`` / ``predicate`` to ``None``, and ``dep_vars`` to ``[]``.
 
         ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
         :meth:`_parse_spmd_optimizations_list`.
@@ -3617,6 +3669,15 @@ class ASTParser:
         (same as ``pl.submit`` / ``pl.at``); it is always accepted here (it needs
         no ``as tid``), and a cluster-nesting guard at the call site rejects it
         when the dispatch would be unwrapped into a Group function.
+
+        ``predicate=(t[i] > 0)`` is a dispatch predicate — the same surface and
+        the same validation as ``pl.spmd_submit(..., predicate=)``, shared via
+        :meth:`_parse_submit_predicate_kwarg`. It rides on the ``SpmdScopeStmt``
+        until ``OutlineSpmdScopes`` moves it onto the synthesised ``Submit``.
+        Like ``allow_early_resolve`` it needs no ``as tid`` (the outliner
+        synthesises a TaskId Var when the scope has none) and is rejected by the
+        same cluster-nesting guard. The producer-in-``deps=`` contract is checked
+        below, once ``dep_vars`` is resolved.
         """
         if len(call.args) > 1:
             raise ParserSyntaxError(
@@ -3633,15 +3694,9 @@ class ASTParser:
         split_slot_num: int | None = None
         deps_kw: ast.keyword | None = None
         allow_early_resolve: bool = False
+        predicate: ir.Expr | None = None
         for kw in call.keywords:
-            if kw.arg is None:
-                # `pl.spmd(**cfg)` — ast.keyword.arg is None for **kwargs unpacking.
-                raise ParserSyntaxError(
-                    "pl.spmd() does not accept **kwargs; pass core_num (positional) "
-                    "and sync_start=/name_hint=/optimizations= explicitly",
-                    span=self.span_tracker.get_span(kw.value),
-                    hint=usage_hint,
-                )
+            self._validate_spmd_kwarg_name(kw, anchor, usage_hint=usage_hint, allow_deps=allow_deps)
             if kw.arg == "name_hint":
                 name_hint = self._parse_scope_name_hint(kw.value, "pl.spmd()")
             elif kw.arg == "core_num":
@@ -3657,30 +3712,13 @@ class ASTParser:
             elif kw.arg == "optimizations":
                 split_mode, split_slot_num = self._parse_spmd_optimizations_list(kw.value)
             elif kw.arg == "deps":
-                if not allow_deps:
-                    raise ParserSyntaxError(
-                        "pl.spmd() does not accept 'deps=' here",
-                        span=self.span_tracker.get_span(kw.value),
-                        hint="Use `with pl.spmd(n, deps=[...]) as tid:` (the with-form) to "
-                        "declare explicit TaskId deps, or `out, tid = pl.spmd_submit(..., "
-                        "deps=[...])` for the single-call form.",
-                    )
                 deps_kw = kw
             elif kw.arg == "allow_early_resolve":
                 allow_early_resolve = self._parse_spmd_bool_literal_kwarg(kw, usage_hint)
-            else:
-                supported = (
-                    "Supported keywords: 'sync_start', 'name_hint', 'optimizations', 'deps', "
-                    "'allow_early_resolve'"
-                    if allow_deps
-                    else "Supported keywords: 'sync_start', 'name_hint', 'optimizations', "
-                    "'allow_early_resolve'"
-                )
-                raise ParserSyntaxError(
-                    f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
-                    span=self.span_tracker.get_span(anchor),
-                    hint=supported,
-                )
+            elif kw.arg == "predicate":
+                # Not a bool literal — parsed as an ordinary expression and
+                # shape-validated, exactly as on pl.spmd_submit.
+                predicate = self._parse_submit_predicate_kwarg("pl.spmd()", [kw])
         if core_num is None:
             raise ParserSyntaxError(
                 "pl.spmd() requires core_num (first positional argument)",
@@ -3691,26 +3729,63 @@ class ASTParser:
         if deps_kw is not None:
             anchor_span = self.span_tracker.get_span(anchor)
             dep_vars = self._parse_submit_deps_kwarg("pl.spmd()", [deps_kw], anchor_span)
-        return core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars, allow_early_resolve
-
-    def _reject_spmd_early_resolve_in_cluster(self, allow_early_resolve: bool, span: "ir.Span") -> None:
-        """Reject ``allow_early_resolve=True`` on a ``pl.cluster()``-nested ``pl.spmd``.
-
-        A cluster-nested Spmd scope is unwrapped into the Group function by
-        ``OutlineClusterScopes`` (``UnwrapNestedSpmd``) and never lowers to a
-        ``Submit``, so the early-dispatch hint would be silently dropped. Raise a
-        clear parse-time error instead, mirroring the ``as tid`` cluster rejection
-        in :meth:`_parse_spmd_scope_with_tid`.
-        """
-        if allow_early_resolve and self._is_inside_scope(ir.ScopeKind.Cluster):
-            raise ParserSyntaxError(
-                "`pl.spmd(..., allow_early_resolve=True)` cannot be nested inside `pl.cluster()` — "
-                "a cluster-nested pl.spmd is unwrapped into the Group function and never produces a "
-                "Submit, so the early-dispatch hint would be lost.",
-                span=span,
-                hint="Use a standalone `with pl.spmd(..., allow_early_resolve=True):` (implicit "
-                "cluster) to keep the hint.",
+        # Producer-in-deps contract, checked once dep_vars is known. Same
+        # best-effort spot check as pl.spmd_submit: the scheduler reads the
+        # operand at the dispatch point, so its producing task must be a
+        # dependency or the read may observe a stale value. On the plain /
+        # for-forms deps= is unavailable, so a tracked producer reports here and
+        # the error steers the author to the ``as tid`` form.
+        if predicate is not None:
+            self._validate_predicate_deps(
+                "pl.spmd()",
+                predicate,
+                dep_vars,
+                self.span_tracker.get_span(anchor),
+                # allow_deps is False on the plain / for-forms, where deps= is
+                # rejected outright — the hint must not tell the author to add one.
+                deps_accepted=allow_deps,
             )
+        return (
+            core_num,
+            sync_start,
+            name_hint,
+            split_mode,
+            split_slot_num,
+            dep_vars,
+            allow_early_resolve,
+            predicate,
+        )
+
+    def _reject_spmd_submit_only_kwargs_in_cluster(
+        self, allow_early_resolve: bool, predicate: "ir.Expr | None", span: "ir.Span"
+    ) -> None:
+        """Reject Submit-only ``pl.spmd()`` kwargs on a ``pl.cluster()``-nested scope.
+
+        Covers ``allow_early_resolve=True`` and ``predicate=(...)``: both are
+        carried by ``Submit`` fields with no plain-``Call`` equivalent. A
+        cluster-nested Spmd scope is unwrapped into the Group function by
+        ``OutlineClusterScopes`` (``UnwrapNestedSpmd``) and never lowers to a
+        ``Submit``, so either would be silently dropped. Raise a clear parse-time
+        error instead, mirroring the ``as tid`` cluster rejection in
+        :meth:`_parse_spmd_scope_with_tid`. ``UnwrapNestedSpmd`` re-asserts this
+        for hand-built / deserialized IR.
+        """
+        if not self._is_inside_scope(ir.ScopeKind.Cluster):
+            return
+        # Report the kwarg the user actually wrote, so the message names it.
+        if allow_early_resolve:
+            kwarg, lost = "allow_early_resolve=True", "the early-dispatch hint"
+        elif predicate is not None:
+            kwarg, lost = "predicate=(...)", "the dispatch predicate"
+        else:
+            return
+        raise ParserSyntaxError(
+            f"`pl.spmd(..., {kwarg})` cannot be nested inside `pl.cluster()` — "
+            "a cluster-nested pl.spmd is unwrapped into the Group function and never produces a "
+            f"Submit, so {lost} would be lost.",
+            span=span,
+            hint=f"Use a standalone `with pl.spmd(..., {kwarg}):` (implicit cluster) to keep it.",
+        )
 
     @staticmethod
     def _spmd_body_reads_block_idx(body: "list[ast.stmt]") -> bool:
@@ -3879,6 +3954,7 @@ class ASTParser:
             split_slot_num,
             dep_vars,
             allow_early_resolve,
+            predicate,
         ) = self._parse_spmd_kwargs(
             stmt, context_expr, usage_hint=with_hint, allow_deps=optional_vars is not None
         )
@@ -3897,18 +3973,25 @@ class ASTParser:
                 split_slot_num,
                 dep_vars,
                 allow_early_resolve,
+                predicate,
                 optional_vars,
             )
             return
 
         # ``allow_early_resolve`` opts the grid dispatch into speculative
-        # early-dispatch (mirrors pl.submit / pl.at). A cluster-nested pl.spmd is
+        # early-dispatch and ``predicate`` gates it at the dispatch point (both
+        # mirror pl.submit / pl.spmd_submit). A cluster-nested pl.spmd is
         # unwrapped into the Group function by OutlineClusterScopes and never
-        # lowers to a Submit, so the hint would be silently dropped — reject it
+        # lowers to a Submit, so either would be silently dropped — reject them
         # here (mirrors the ``as tid`` cluster rejection in
         # _parse_spmd_scope_with_tid).
-        self._reject_spmd_early_resolve_in_cluster(allow_early_resolve, span)
+        self._reject_spmd_submit_only_kwargs_in_cluster(allow_early_resolve, predicate, span)
         spmd_attrs: list[tuple[str, Any]] = [("allow_early_resolve", True)] if allow_early_resolve else []
+        # Canonical attr order: allow_early_resolve then predicate (matches the
+        # ``as tid`` form) so a print -> reparse compares equal under
+        # structural_equal's positional attr check.
+        if predicate is not None:
+            spmd_attrs.append(("predicate", predicate))
 
         # No ``as tid``: the plain with-form. ``deps=`` was already rejected above
         # (allow_deps=False), so dep_vars is empty here. The shared helper keeps the
@@ -3939,6 +4022,7 @@ class ASTParser:
         split_slot_num: "int | None",
         dep_vars: "list[ir.Var]",
         allow_early_resolve: bool,
+        predicate: "ir.Expr | None",
         optional_vars: "ast.expr",
     ) -> None:
         """Parse ``with pl.spmd(n, deps=[...]) as tid:`` capturing the dispatch TaskId.
@@ -3976,9 +4060,9 @@ class ASTParser:
                 hint="Use `with pl.spmd(...) as tid:` (single name; nested tuples are not allowed).",
             )
 
-        # Canonical attr order (deps, task_id_var, allow_early_resolve) mirrors
-        # _parse_at_meta so a print -> reparse cycle compares equal under
-        # structural_equal's positional attr check.
+        # Canonical attr order (deps, task_id_var, allow_early_resolve,
+        # predicate) mirrors _parse_at_meta so a print -> reparse cycle compares
+        # equal under structural_equal's positional attr check.
         scope_attrs: list[tuple[str, Any]] = []
         if dep_vars:
             scope_attrs.append(("manual_dep_edges", dep_vars))
@@ -3990,6 +4074,12 @@ class ASTParser:
         # _parse_at_meta does for pl.at scopes.
         if allow_early_resolve:
             scope_attrs.append(("allow_early_resolve", True))
+        # ``predicate`` after it — an Expr (not a flag), read off the scope by the
+        # Spmd outliner and moved onto ``Submit.predicate``. It carries live SSA
+        # Vars (the operand tensor and its indices), which ConvertToSSA versions
+        # via SubstScopeAttrs.
+        if predicate is not None:
+            scope_attrs.append(("predicate", predicate))
 
         # Emit the transient ``AssignStmt(tid, system.task_invalid())`` placeholder
         # one stmt BEFORE the scope so ConvertToSSA has a def for the tid Var; the
@@ -4018,6 +4108,48 @@ class ASTParser:
             split_slot_num,
             scope_attrs,
         )
+        self._record_scope_producer(stmt.body, tid_var)
+
+    def _record_scope_producer(self, body: "list[ast.stmt]", tid_var: "ir.Var") -> None:
+        """Record ``body``'s assigned Vars as produced by the scope's ``tid_var``.
+
+        The scope-form counterpart of the tracking ``_parse_submit_tuple_lhs``
+        does for ``out, tid = pl.submit(...)``. Without it a
+        ``with pl.spmd(...) as tid:`` that writes a tensor leaves no producer
+        record, so :meth:`_validate_predicate_deps` silently certifies a later
+        ``predicate=`` over that tensor even when the scope is absent from
+        ``deps=`` — the exact stale-read the contract exists to prevent, in the
+        form most natural to write.
+
+        Same best-effort scope as the call form: only names bound by a
+        top-level assignment in the scope body are tracked (aliases, writes
+        through ``pl.Out`` arguments, and rebinds via an intervening call are
+        not). The generation counter mirrors the submit path so a ``tid`` name
+        rebound by a later scope cannot match by Var identity alone.
+        """
+        names: list[str] = []
+
+        def collect(target: ast.expr) -> None:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for elt in target.elts:
+                    collect(elt)
+
+        for node in body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    collect(target)
+            elif isinstance(node, ast.AnnAssign):
+                collect(node.target)
+        if not names:
+            return
+        gen = self._tid_binding_generation.get(tid_var.unique_id, 0) + 1
+        self._tid_binding_generation[tid_var.unique_id] = gen
+        for name in names:
+            produced = self.scope_manager.lookup_var(name)
+            if isinstance(produced, ir.Var):
+                self._submit_producer_tid[produced.unique_id] = (tid_var, gen)
 
     def _parse_spmd_for_loop(self, stmt: ast.For, iter_call: ast.Call) -> None:
         """Parse ``for i in pl.spmd(N, ...): body`` into
@@ -4061,16 +4193,20 @@ class ASTParser:
             split_slot_num,
             _,
             allow_early_resolve,
+            predicate,
         ) = self._parse_spmd_kwargs(stmt, iter_call, usage_hint=spmd_hint)
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
 
         span = self.span_tracker.get_span(stmt)
-        # ``allow_early_resolve`` rides on the SpmdScopeStmt (read by the Spmd
-        # outliner onto the synthesised Submit). A cluster-nested pl.spmd is
-        # unwrapped into the Group and never produces a Submit, so reject the hint
-        # there (mirrors the with-form / as-tid guards).
-        self._reject_spmd_early_resolve_in_cluster(allow_early_resolve, span)
+        # ``allow_early_resolve`` / ``predicate`` ride on the SpmdScopeStmt (read
+        # by the Spmd outliner onto the synthesised Submit). A cluster-nested
+        # pl.spmd is unwrapped into the Group and never produces a Submit, so
+        # reject them there (mirrors the with-form / as-tid guards).
+        self._reject_spmd_submit_only_kwargs_in_cluster(allow_early_resolve, predicate, span)
         spmd_attrs: list[tuple[str, Any]] = [("allow_early_resolve", True)] if allow_early_resolve else []
+        # Canonical attr order — see the with-form.
+        if predicate is not None:
+            spmd_attrs.append(("predicate", predicate))
         # Merge forward-sticky pl.dump_tag tensors onto the auto-outlined InCore
         # scope — the kernel the loop body lowers to. The with-form (pl.at /
         # pl.spmd / pl.cluster) routes through _parse_scope_body for this; the
@@ -5748,7 +5884,7 @@ class ASTParser:
         predicate: ir.Expr | None = None
         if as_submit:
             allow_early_resolve = self._parse_submit_allow_early_resolve_kwarg(method_name, keywords)
-            predicate = self._parse_submit_predicate_kwarg(method_name, keywords, span)
+            predicate = self._parse_submit_predicate_kwarg(method_name, keywords)
             if predicate is not None:
                 self._validate_predicate_deps(method_name, predicate, user_dep_vars, span)
         return_types = func_obj.return_types if func_obj else []
@@ -6151,12 +6287,12 @@ class ASTParser:
             )
         return kw.value.value
 
-    def _parse_submit_predicate_kwarg(
-        self, method_name: str, keywords: list[ast.keyword], span: ir.Span
-    ) -> ir.Expr | None:
+    def _parse_submit_predicate_kwarg(self, method_name: str, keywords: list[ast.keyword]) -> ir.Expr | None:
         """Extract the optional ``predicate=(<tensor>[<indices>] <op> <int>)`` kwarg.
 
-        Accepted on ``pl.submit(...)`` and ``pl.spmd_submit(...)``. Encodes a
+        Accepted on ``pl.submit(...)``, ``pl.spmd_submit(...)`` and the
+        ``with pl.spmd(...)`` scope form (``method_name`` names the caller in
+        error messages). Encodes a
         dispatch predicate the scheduler evaluates at the dispatch point; a
         false result retires the task inline without dispatching to a core,
         while still settling fanin/fanout. Returns the comparison
@@ -6325,7 +6461,13 @@ class ASTParser:
             )
 
     def _validate_predicate_deps(
-        self, method_name: str, predicate: ir.Expr, dep_vars: list[ir.Var], span: ir.Span
+        self,
+        method_name: str,
+        predicate: ir.Expr,
+        dep_vars: list[ir.Var],
+        span: ir.Span,
+        *,
+        deps_accepted: bool = True,
     ) -> None:
         """Enforce that a ``predicate=`` operand's producer is one of ``deps=``.
 
@@ -6341,6 +6483,12 @@ class ASTParser:
         parameter, say) has no tracked producer, and an ``Array[N, TASK_ID]``
         dep entry does not name its producers individually — both are skipped
         rather than risk rejecting a correct program.
+
+        ``deps_accepted`` tailors the remediation hint. The plain
+        ``with pl.spmd(...):`` and ``for i in pl.spmd(...):`` forms do not take
+        ``deps=`` at all, so telling their author to add one would send them
+        into a second, different error; there the fix is to switch to the
+        ``as tid`` capture form.
         """
         if not isinstance(predicate, self._PREDICATE_CMP_TYPES):
             return
@@ -6361,14 +6509,23 @@ class ASTParser:
         if any(d is producer_tid for d in dep_vars) and current_gen == producer_gen:
             return
         tid_name = producer_tid.name_hint
+        why = (
+            "Without it the scheduler may evaluate the predicate before the producing task has "
+            "written the tensor."
+        )
+        hint = (
+            f"Add the producer to the dependency list: deps=[{tid_name}]. {why}"
+            if deps_accepted
+            else (
+                f"This form does not accept deps=. Capture the TaskId instead: "
+                f"`with pl.spmd(n, deps=[{tid_name}], predicate=...) as tid:`. {why}"
+            )
+        )
         raise ParserSyntaxError(
             f"'{method_name}' predicate reads '{operand.name_hint}', which is produced by the task "
             f"bound to '{tid_name}', but '{tid_name}' is not in deps=",
             span=span,
-            hint=(
-                f"Add the producer to the dependency list: deps=[{tid_name}]. Without it the scheduler "
-                "may evaluate the predicate before the producing task has written the tensor."
-            ),
+            hint=hint,
         )
 
     def _parse_dispatch_device_kwarg(

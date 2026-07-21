@@ -1009,14 +1009,21 @@ class ScopeOutliner : public IRMutator {
     // Threaded onto the synthesised Submit below — same hint as
     // ``pl.submit(..., allow_early_resolve=True)``.
     bool scope_allow_early_resolve = op->GetAttr<bool>("allow_early_resolve", false);
+    // Dispatch predicate (``with pl.spmd(..., predicate=(t[i] > 0)):``). Rides
+    // on the scope from parse through SSA (which versions the Vars inside it);
+    // moved onto ``Submit::predicate_`` below, after which the attr is gone —
+    // the field is the single source of truth, so it is deliberately NOT copied
+    // into ``submit_attrs``.
+    ExprPtr scope_predicate = op->GetAttr<ExprPtr>(kAttrPredicate, nullptr);
 
-    // Dependency edges (or an early-resolve flag) force the Submit shape: deps
-    // live in the typed ``Submit::deps_`` field and the flag in
-    // ``Submit::allow_early_resolve_`` — neither has a plain-Call carrier. A
-    // scope written without ``as tid`` gets a synthetic (unused) TaskId Var; DCE
-    // keeps the Submit itself alive (task launches are effectful) and codegen
-    // skips the unconsumed trailing tuple element.
-    if ((!scope_dep_edges.empty() || scope_allow_early_resolve) && !scope_task_id_var) {
+    // Dependency edges (or an early-resolve flag, or a dispatch predicate)
+    // force the Submit shape: deps live in the typed ``Submit::deps_`` field,
+    // the flag in ``Submit::allow_early_resolve_`` and the predicate in
+    // ``Submit::predicate_`` — none has a plain-Call carrier. A scope written
+    // without ``as tid`` gets a synthetic (unused) TaskId Var; DCE keeps the
+    // Submit itself alive (task launches are effectful) and codegen skips the
+    // unconsumed trailing tuple element.
+    if ((!scope_dep_edges.empty() || scope_allow_early_resolve || scope_predicate) && !scope_task_id_var) {
       scope_task_id_var = std::make_shared<Var>(GenerateFreshSSAName("tid"),
                                                 std::make_shared<ScalarType>(DataType::TASK_ID), op->span_);
       var_types_[scope_task_id_var.get()] = scope_task_id_var->GetType();
@@ -1131,7 +1138,8 @@ class ScopeOutliner : public IRMutator {
           global_var, call_args, std::move(submit_deps), std::vector<std::pair<std::string, std::any>>{},
           std::move(submit_attrs), call_return_type ? call_return_type : std::make_shared<UnknownType>(),
           op->span_, /*core_num=*/std::nullopt, /*sync_start=*/false,
-          /*allow_early_resolve=*/scope_allow_early_resolve);
+          /*allow_early_resolve=*/scope_allow_early_resolve,
+          /*predicate=*/scope_predicate ? std::optional<ExprPtr>(scope_predicate) : std::nullopt);
     } else {
       std::vector<std::pair<std::string, std::any>> call_attrs;
       // ``dump_vars`` first — see the Submit branch above for the ordering

@@ -373,6 +373,14 @@ class IRPythonPrinter : public IRVisitor {
   // it must survive a print/reparse roundtrip while the scope still exists.
   bool PrintScopeAllowEarlyResolveAttr(const ScopeStmtPtr& op);
 
+  // Emit ``predicate=(<expr>)`` if the scope carries ``kAttrPredicate``;
+  // returns true when printed. Same contract as
+  // PrintScopeAllowEarlyResolveAttr — the outliner reads the predicate off the
+  // scope and threads it onto the synthesised ``Submit``, so it must survive a
+  // print/reparse roundtrip while the scope still exists. The comparison Expr
+  // prints itself, so there is no bespoke syntax.
+  bool PrintScopePredicateAttr(const ScopeStmtPtr& op);
+
   // Emit ``windowize=True`` for an explicitly opted-in InCore scope.
   bool PrintScopeWindowizeAttr(const ScopeStmtPtr& op);
 
@@ -1727,6 +1735,15 @@ bool IRPythonPrinter::PrintScopeAllowEarlyResolveAttr(const ScopeStmtPtr& op) {
   return true;
 }
 
+bool IRPythonPrinter::PrintScopePredicateAttr(const ScopeStmtPtr& op) {
+  auto pred = op->GetAttr<ExprPtr>(kAttrPredicate, nullptr);
+  if (!pred) return false;
+  stream_ << ", predicate=(";
+  VisitExpr(pred);
+  stream_ << ")";
+  return true;
+}
+
 bool IRPythonPrinter::PrintScopeWindowizeAttr(const ScopeStmtPtr& op) {
   if (!op->GetAttr<bool>("windowize", false)) return false;
   stream_ << ", windowize=True";
@@ -1865,6 +1882,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     }
     PrintScopeDepsAttr(op);
     PrintScopeAllowEarlyResolveAttr(op);
+    PrintScopePredicateAttr(op);
     stream_ << ")";
     PrintScopeTaskIdVarSuffix(op);
     stream_ << ":\n";
@@ -1903,6 +1921,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
       PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
     }
     PrintScopeAllowEarlyResolveAttr(op);
+    PrintScopePredicateAttr(op);
     stream_ << "):\n";
     IncreaseIndent();
     // Emit the InCore body skipping the get_block_idx binding we just
@@ -1932,6 +1951,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
   PrintScopeAllowEarlyResolveAttr(op);
+  PrintScopePredicateAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);

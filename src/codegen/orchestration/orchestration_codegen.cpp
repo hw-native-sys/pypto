@@ -2303,8 +2303,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // here (the DSL parser rejects it earlier with a better message; this is the
   // backstop for IR built by other means).
   void EmitPredicateHint(const std::string& task_var, const CallPtr& call) {
-    if (!call->HasAttr("predicate")) return;
-    auto pred = call->GetAttr<ExprPtr>("predicate", nullptr);
+    if (!call->HasAttr(kAttrPredicate)) return;
+    auto pred = call->GetAttr<ExprPtr>(kAttrPredicate, nullptr);
     INTERNAL_CHECK_SPAN(pred, call->span_) << "Submit predicate attr is null";
     auto cmp = std::dynamic_pointer_cast<const BinaryExpr>(pred);
     CHECK_SPAN(cmp && RenderPredicateOp(pred->GetKind(), false) != nullptr, pred->span_)

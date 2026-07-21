@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 
+#include <string>
+
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
@@ -106,10 +108,22 @@ class IRVisitor : public IRFunctor<void> {
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
 
   /// Visit Var-typed entries in a ScopeStmt's ``attrs_``
-  /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars``).
-  /// Called from the per-subclass visitors so analyses (unused-var detection,
-  /// SSA Var liveness) see Var refs stashed on the scope.
+  /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars``),
+  /// plus the Expr-valued ``predicate`` attr. Called from the per-subclass
+  /// visitors so analyses (unused-var detection, SSA Var liveness) see Var refs
+  /// stashed on the scope.
   void VisitScopeAttrs(const ScopeStmtPtr& op);
+
+  /// Per-attr opt-out consulted by ``VisitScopeAttrs``. Returning false skips
+  /// that key only; the rest of the walk is unchanged, so a subclass never
+  /// needs to restate the base's key handling (and cannot silently miss a key
+  /// added to it later).
+  ///
+  /// ``NoNestedCall`` returns false for ``kAttrPredicate``: that value is a
+  /// declarative comparison spec the scheduler evaluates at the dispatch
+  /// point, not an expression this program evaluates, so the three-address-code
+  /// invariant does not apply to it.
+  [[nodiscard]] virtual bool ShouldVisitScopeAttr(const std::string& /*key*/) const { return true; }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
   void VisitStmt_(const SplitAivScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;

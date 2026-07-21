@@ -139,5 +139,84 @@ class TestPredicatedDispatch:
         assert result.passed, f"predicated dispatch (gate={gate_value}) failed: {result.error}"
 
 
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.spmd(..., predicate=...) as tid:``
+# ---------------------------------------------------------------------------
+#
+# Identical task chain and identical expected values as above; only the
+# authoring form differs. The scope form carries the predicate on the
+# SpmdScopeStmt until OutlineSpmdScopes moves it onto the Submit, so it
+# exercises a different frontend path (scope-attr walk + SSA substitution of
+# the operand Var) into the same runtime behaviour. Running both proves the two
+# spellings really are equivalent on hardware, not just in codegen text.
+
+
+def _build_scope_program():
+    R, C = _R, _C
+    SENTINEL, POISON = _SENTINEL, _POISON
+
+    @pl.program
+    class ScopePredicatedDispatchProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def x_producer(self, x: pl.Out[pl.Tensor[[R, C], pl.FP32]]) -> pl.Tensor[[R, C], pl.FP32]:
+            t: pl.Tile[[R, C], pl.FP32] = pl.tile.full([R, C], dtype=pl.FP32, value=SENTINEL)
+            return pl.store(t, [0, 0], x)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def clobber(self, x: pl.Out[pl.Tensor[[R, C], pl.FP32]]) -> pl.Tensor[[R, C], pl.FP32]:
+            t: pl.Tile[[R, C], pl.FP32] = pl.tile.full([R, C], dtype=pl.FP32, value=POISON)
+            return pl.store(t, [0, 0], x)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consumer(
+            self, x: pl.Tensor[[R, C], pl.FP32], out: pl.Out[pl.Tensor[[R, C], pl.FP32]]
+        ) -> pl.Tensor[[R, C], pl.FP32]:
+            t: pl.Tile[[R, C], pl.FP32] = pl.load(x, [0, 0], [R, C])
+            return pl.store(t, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Out[pl.Tensor[[R, C], pl.FP32]],
+            gate: pl.Tensor[[R, C], pl.INT32],
+            out: pl.Out[pl.Tensor[[R, C], pl.FP32]],
+        ) -> pl.Tensor[[R, C], pl.FP32]:
+            with pl.spmd(1) as xp_tid:
+                x = self.x_producer(x)
+            # Predicated clobber authored as a scope: the predicate rides on the
+            # SpmdScopeStmt and is moved onto the Submit by the outliner.
+            # ``gate`` is a host-initialised input with no in-function producer,
+            # so ``deps=[xp_tid]`` covers the operand ordering requirement.
+            with pl.spmd(1, deps=[xp_tid], predicate=(gate[0, 0] > 0)) as clobber_tid:
+                x = self.clobber(x)
+            with pl.spmd(1, deps=[clobber_tid]) as _:
+                out = self.consumer(x, out)
+            return out
+
+    return ScopePredicatedDispatchProgram
+
+
+class _ScopePredicatedDispatchPTO(_PredicatedDispatchPTO):
+    """Same chain as _PredicatedDispatchPTO, authored with the pl.spmd scope form."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"scope_predicated_dispatch_gate{self._gate_value}_{_R}x{_C}"
+
+    def get_program(self) -> Any:
+        return _build_scope_program()
+
+
+class TestScopePredicatedDispatch:
+    """``with pl.spmd(..., predicate=...)`` must behave exactly like the submit form."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("gate_value", [0, 1], ids=["predicate_false_skips", "predicate_true_dispatches"])
+    def test_scope_predicated_dispatch(self, test_runner, platform, gate_value):
+        result = test_runner.run(_ScopePredicatedDispatchPTO(gate_value=gate_value, platform=platform))
+        assert result.passed, f"scope predicated dispatch (gate={gate_value}) failed: {result.error}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

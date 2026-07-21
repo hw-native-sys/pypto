@@ -966,6 +966,29 @@ std::pair<std::vector<std::pair<std::string, std::any>>, bool> IRMutator::Mutate
           continue;
         }
       }
+    } else if (k == kAttrPredicate) {
+      // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — an Expr tree, not a
+      // Var, so mutate the whole subtree (the operand tensor Var and its
+      // index Vars must follow any remapping the mutator is performing).
+      //
+      // No pipeline pass currently reaches this: the passes that run while the
+      // attr still exists (before OutlineSpmdScopes) either do not remap Vars
+      // inside it, or — like FlattenCallExpr — override the Spmd handler and
+      // copy attrs_ verbatim. ConvertToSSA has its own SubstScopeAttrs. This
+      // branch is therefore untested-by-construction, and kept for the same
+      // reason the sibling Var attrs above are handled here: any future
+      // IRMutator-based pass that renames Vars must not silently skip the
+      // predicate. Deleting it would make the predicate the one scope attr the
+      // generic mutator ignores.
+      const auto* pred = std::any_cast<ExprPtr>(&v);
+      if (pred && *pred) {
+        auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*pred);
+        if (remapped && remapped.get() != pred->get()) {
+          any_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(remapped)));
+          continue;
+        }
+      }
     }
     new_attrs.emplace_back(k, v);
   }
