@@ -30,7 +30,7 @@ namespace ir {
 
 namespace {
 
-/// Shared scaffold: visit every Call in the body, resolve its op via
+/// Shared scaffold: visit every Call or Submit in the body, resolve its op via
 /// `GlobalVar` lookup, invoke @p on_match for each resolved (call, callee)
 /// pair. Returning `true` from @p on_match terminates the walk early.
 class CallVisitor : public IRVisitor {
@@ -53,6 +53,8 @@ class CallVisitor : public IRVisitor {
     }
     IRVisitor::VisitExpr_(call);
   }
+
+  void VisitExpr_(const SubmitPtr& submit) override { VisitExpr_(SubmitToCallView(submit)); }
 
  private:
   const ProgramPtr& program_;

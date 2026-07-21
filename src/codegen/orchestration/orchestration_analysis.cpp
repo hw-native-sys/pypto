@@ -104,7 +104,12 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
   std::function<void(const FunctionPtr&)> scan_func;
   scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
     for (const auto& stmt : stmts) {
-      auto call = transform_utils::GetCallFromStmt(stmt);
+      CallPtr call;
+      if (auto assign = As<AssignStmt>(stmt)) {
+        call = transform_utils::AsCallOrSubmitView(assign->value_);
+      } else if (auto eval = As<EvalStmt>(stmt)) {
+        call = transform_utils::AsCallOrSubmitView(eval->expr_);
+      }
       if (op_predicates::IsInitializePipe(call)) {
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
