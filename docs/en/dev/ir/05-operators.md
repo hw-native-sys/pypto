@@ -319,7 +319,8 @@ with ib.function("tile_computation") as f:
     tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
     tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
-    # row_sum collapses the last axis -> [32, 1]; it needs a scratch tile
+    # row_sum collapses the last axis -> [32, 1]. Its scratch tile must have
+    # the same rank and be at least as large as the input in every dimension.
     tmp_tile = ib.let("tmp_tile", tile.create([32, 128], DataType.FP32))
     tile_sum = ib.let("tile_sum", tile.row_sum(tile_sqrt, tmp_tile))
     result = ib.let("result", tile.store(tile_sum, [0, 0], output))

@@ -22,6 +22,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -64,6 +65,33 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   // Row reduction requires at least 2D tile
   CHECK(input_ndim >= 2) << "The operator " << op_name << " requires at least a 2D tile, but got "
                          << input_ndim << " dimensions";
+
+  // The PTO row-reduction instructions use tmp_tile as full-size scratch.
+  // An undersized scratch tile compiles but produces silently incorrect
+  // results, so reject it while constructing the op. Larger extents remain
+  // valid because tensor-to-tile lowering intentionally pads short rows.
+  auto tmp_type = As<TileType>(args[1]->GetType());
+  CHECK_SPAN(tmp_type, args[1]->span_)
+      << "The operator " << op_name << " requires tmp_tile to be a TileType, but got "
+      << args[1]->GetType()->TypeName();
+  CHECK_SPAN(tmp_type->shape_.size() == input_shape.size(), args[1]->span_)
+      << "The operator " << op_name << " requires tmp_tile to have the same rank as the input, but got "
+      << "tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
+      << FormatShape(input_shape);
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    const auto input_extent = GetConstantDimension(input_shape[i]);
+    const auto tmp_extent = GetConstantDimension(tmp_type->shape_[i]);
+    const bool provably_undersized =
+        input_extent && tmp_extent
+            ? *tmp_extent < *input_extent
+            : ProveValidExtentLessEqual(input_shape[i], tmp_type->shape_[i]) == ProofResult::kFalse;
+    CHECK_SPAN(!provably_undersized, args[1]->span_)
+        << "The operator " << op_name
+        << " requires tmp_tile shape to be at least the input shape in every dimension, but tmp_tile "
+           "dimension "
+        << i << " is undersized; got tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
+        << FormatShape(input_shape);
+  }
 
   // Output shape is [...batch_dims, rows, 1] - reduce along last axis with keepdim=True
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
@@ -129,7 +157,7 @@ REGISTER_OP("tile.row_sum")
     .set_op_category("TileOp")
     .set_description("Row-wise sum reduction (reduces along axis=1, maps to TROWSUM)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -145,7 +173,7 @@ REGISTER_OP("tile.row_max")
     .set_op_category("TileOp")
     .set_description("Row-wise max reduction (reduces along axis=1, maps to TROWMAX)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -161,7 +189,7 @@ REGISTER_OP("tile.row_min")
     .set_op_category("TileOp")
     .set_description("Row-wise min reduction (reduces along axis=1, maps to TROWMIN)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -177,7 +205,7 @@ REGISTER_OP("tile.row_prod")
     .set_op_category("TileOp")
     .set_description("Row-wise product reduction (reduces along axis=1, maps to TROWPROD)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)

@@ -1833,8 +1833,8 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
             for i, (acc_iter,) in pl.range(2, init_values=(init_tile,)):
                 offset: pl.Scalar[pl.INDEX] = i * 256
                 chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
-                tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
-                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
                 updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)
@@ -2168,8 +2168,8 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
             init_offset: pl.Scalar[pl.INDEX] = 0
             for i, (acc_iter, offset) in pl.range(2, init_values=(init_tile, init_offset)):
                 chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
-                tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
-                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
                 updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)

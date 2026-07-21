@@ -1234,7 +1234,8 @@ def row_max(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with the same rank as ``tile`` and every
+            dimension at least as large as the corresponding input dimension
 
     Returns:
         Tile wrapping the row_max operation
@@ -1248,7 +1249,8 @@ def row_sum(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with the same rank as ``tile`` and every
+            dimension at least as large as the corresponding input dimension
 
     Returns:
         Tile wrapping the row_sum operation
@@ -1262,7 +1264,8 @@ def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with the same rank as ``tile`` and every
+            dimension at least as large as the corresponding input dimension
 
     Returns:
         Tile wrapping the row_min operation
@@ -1276,7 +1279,8 @@ def row_prod(tile: Tile, tmp_tile: Tile) -> Tile:
 
     Args:
         tile: Input tile
-        tmp_tile: Temporary tile
+        tmp_tile: Scratch tile with the same rank as ``tile`` and every
+            dimension at least as large as the corresponding input dimension
 
     Returns:
         Tile wrapping the row_prod operation

@@ -33,7 +33,7 @@ def tile_softmax(a: pl.Tensor, output: pl.Out[pl.Tensor]):
         tile_a = pl.load(a, [0, 0], [64, 64])
 
         # Step 1: row-wise max for numerical stability
-        max_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        max_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
         row_max: pl.Tile[[64, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
 
         # Step 2: subtract row max from each row: x - max(x)
@@ -43,7 +43,7 @@ def tile_softmax(a: pl.Tensor, output: pl.Out[pl.Tensor]):
         exp_shifted = pl.exp(shifted)
 
         # Step 4: row-wise sum of exp values
-        sum_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        sum_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
         row_sum: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(exp_shifted, sum_tmp)
 
         # Step 5: divide each row by its sum

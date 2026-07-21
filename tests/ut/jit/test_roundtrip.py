@@ -922,11 +922,11 @@ class TestSoftmax:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [64, 64])
-                max_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                max_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
                 row_max: pl.Tile[[64, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
                 shifted = pl.row_expand_sub(tile_a, row_max)
                 exp_shifted = pl.exp(shifted)
-                sum_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                sum_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
                 row_sum: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(exp_shifted, sum_tmp)
                 result = pl.row_expand_div(exp_shifted, row_sum)
                 out = pl.store(result, [0, 0], output)
@@ -947,11 +947,11 @@ class TestSoftmax:
         @jit.incore
         def tile_softmax(a: pl.Tensor, output: pl.Out[pl.Tensor]):
             tile_a = pl.load(a, [0, 0], [64, 64])
-            max_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            max_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
             row_max: pl.Tile[[64, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
             shifted = pl.row_expand_sub(tile_a, row_max)
             exp_shifted = pl.exp(shifted)
-            sum_tmp = pl.create_tile([64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            sum_tmp = pl.create_tile([64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
             row_sum: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(exp_shifted, sum_tmp)
             result = pl.row_expand_div(exp_shifted, row_sum)
             out = pl.store(result, [0, 0], output)

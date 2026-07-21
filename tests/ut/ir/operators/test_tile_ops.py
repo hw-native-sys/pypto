@@ -520,8 +520,8 @@ class TestTileReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.tile.create(
-                    [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_max: pl.Tile[[32, 1], pl.FP32] = pl.row_max(tile_in, tmp_tile)
                 result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_max, [0, 0], output)
@@ -542,8 +542,8 @@ class TestTileReductionOps:
                 self, input: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 1], pl.FP32]
             ) -> pl.Tensor[[128, 1], pl.FP32]:
                 tile_in: pl.Tile[[32, 128], pl.FP32] = pl.load(input, [0, 0], [32, 128])
-                tmp_tile: pl.Tile[[32, 1], pl.FP32] = pl.tile.create(
-                    [32, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp_tile: pl.Tile[[32, 128], pl.FP32] = pl.tile.create(
+                    [32, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 tile_sum: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_in, tmp_tile)
                 result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_sum, [0, 0], output)
@@ -553,6 +553,30 @@ class TestTileReductionOps:
 
         assert optimized_program is not None
         assert "tile.row_sum" in str(optimized_program)
+
+    @pytest.mark.parametrize("op", [tile.row_max, tile.row_sum])
+    @pytest.mark.parametrize("tmp_shape", [[8, 1], [8, 64], [8, 256]])
+    def test_tile_row_reduction_rejects_undersized_tmp(self, op, tmp_shape):
+        """Row reductions reject scratch storage that cannot hold the input tile."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType(tmp_shape, DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile shape to be at least the input shape"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op", [tile.row_max, tile.row_sum])
+    @pytest.mark.parametrize("tmp_shape", [[8, 512], [8, 640]])
+    def test_tile_row_reduction_accepts_sufficient_tmp(self, op, tmp_shape):
+        """Row reductions accept exact-size and padded scratch storage."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType(tmp_shape, DataType.FP32), span)
+
+        call = op(input_tile, tmp_tile)
+
+        assert isinstance(call.type, ir.TileType)
+        assert [dim.value for dim in call.type.shape] == [8, 1]
 
     def test_tile_row_min(self):
         """Test tile.row_min operation."""
@@ -789,7 +813,7 @@ class TestTileReductionOps:
         sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
         span = ir.Span.unknown()
         tmp_type = ir.TileType(
-            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
             DataType.FP32,
         )
         tmp_var = ir.Var("tmp", tmp_type, span)
@@ -809,7 +833,7 @@ class TestTileReductionOps:
         sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
         span = ir.Span.unknown()
         tmp_type = ir.TileType(
-            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
             DataType.FP32,
         )
         tmp_var = ir.Var("tmp", tmp_type, span)
