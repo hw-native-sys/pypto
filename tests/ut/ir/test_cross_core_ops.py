@@ -147,16 +147,29 @@ def test_cross_core_sync_static_and_dynamic_event_ids():
     """Cross-core sync accepts either a user event id or a dynamic index operand."""
     span = ir.Span.unknown()
 
-    static_set = system_ops.sync_set(3, pipe=ir.PipeType.FIX, ffts_mode=1, span=span)
+    static_set = system_ops.sync_set(3, pipe=ir.PipeType.FIX, ffts_mode=1, core_type="aiv", span=span)
     assert isinstance(static_set.type, ir.UnknownType)
     assert static_set.args == []
-    assert static_set.kwargs == {"pipe": int(ir.PipeType.FIX), "event_id": 3, "ffts_mode": 1}
+    assert static_set.kwargs == {
+        "pipe": int(ir.PipeType.FIX),
+        "event_id": 3,
+        "ffts_mode": 1,
+        "core_type": "aiv",
+    }
 
     event_id = ir.Var("event_id", ir.ScalarType(DataType.INDEX), span)
-    dynamic_wait = system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3, span=span)
+    dynamic_wait = system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3, core_type="aic", span=span)
     assert isinstance(dynamic_wait.type, ir.UnknownType)
     assert dynamic_wait.args == [event_id]
     assert "event_id" not in dynamic_wait.kwargs
+    assert dynamic_wait.kwargs["core_type"] == "aic"
+
+
+@pytest.mark.parametrize("core_type", ["cube", "vector", "mix"])
+def test_cross_core_sync_rejects_invalid_core_type(core_type):
+    """Mixed kernels target explicit events with the public AIC/AIV names."""
+    with pytest.raises(ValueError, match="core_type"):
+        system_ops.sync_set(0, pipe=ir.PipeType.FIX, core_type=core_type)
 
 
 @pytest.mark.parametrize("event_id", [-1, 14])

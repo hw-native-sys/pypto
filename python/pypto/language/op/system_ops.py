@@ -70,22 +70,30 @@ def sync_set(
     *,
     pipe: PipeType,
     ffts_mode: int | None = None,
+    core_type: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Set a Cube/Vector cross-core event using a static or dynamic event id."""
+    """Set a Cube/Vector cross-core event using a static or dynamic event id.
+
+    Set ``core_type`` to ``"aic"`` or ``"aiv"`` inside a mixed InCore kernel.
+    """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
-    return _ir_ops.sync_set(event_expr, pipe=pipe, ffts_mode=ffts_mode, span=span)
+    return _ir_ops.sync_set(event_expr, pipe=pipe, ffts_mode=ffts_mode, core_type=core_type, span=span)
 
 
 def sync_wait(
     event_id: IntLike,
     *,
     pipe: PipeType,
+    core_type: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Wait for a Cube/Vector cross-core event using a static or dynamic event id."""
+    """Wait for a Cube/Vector cross-core event using a static or dynamic event id.
+
+    Set ``core_type`` to ``"aic"`` or ``"aiv"`` inside a mixed InCore kernel.
+    """
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
-    return _ir_ops.sync_wait(event_expr, pipe=pipe, span=span)
+    return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=core_type, span=span)
 
 
 def set_ffts(workspace: Tensor, *, span: Span | None = None) -> Call:

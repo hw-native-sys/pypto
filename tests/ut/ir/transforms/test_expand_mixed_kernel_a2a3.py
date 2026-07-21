@@ -63,6 +63,36 @@ def _op_name(stmt: ir.Stmt) -> str:
     return ""
 
 
+def test_explicit_sync_core_type_routes_each_event_to_one_lane():
+    """Mixed JIT kernels must not duplicate set/wait onto both core types."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def explicit_sync(
+            self,
+            workspace: pl.Tensor[[256], pl.INT64],
+            x: pl.Tensor[[16], pl.FP32],
+        ) -> pl.Tensor[[16], pl.FP32]:
+            pl.system.set_ffts(workspace)
+            pl.system.sync_set(4, pipe=pl.PipeType.MTE3, ffts_mode=2, core_type="aiv")
+            pl.system.sync_wait(4, pipe=pl.PipeType.MTE2, core_type="aic")
+            return x
+
+    after = _run_pipeline(Before)
+    aic = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIC)
+    aiv = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIV)
+    aic_ops = [_op_name(stmt) for stmt in ir.flatten_to_stmts(aic.body)]
+    aiv_ops = [_op_name(stmt) for stmt in ir.flatten_to_stmts(aiv.body)]
+
+    assert aic_ops.count("system.set_ffts") == 1
+    assert aic_ops.count("system.sync_wait") == 1
+    assert "system.sync_set" not in aic_ops
+    assert aiv_ops.count("system.set_ffts") == 1
+    assert aiv_ops.count("system.sync_set") == 1
+    assert "system.sync_wait" not in aiv_ops
+
+
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
     """On Ascend910B, cross-core push needs no layout adaptation on the AIV side.
 

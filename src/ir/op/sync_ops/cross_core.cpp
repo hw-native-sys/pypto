@@ -88,6 +88,10 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
       CHECK(allow_ffts_mode) << op_name << " does not support ffts_mode";
       const int ffts_mode = AnyCast<int>(value, "kwarg key: ffts_mode");
       CHECK(ffts_mode >= 0 && ffts_mode <= 2) << op_name << " ffts_mode must be in [0, 2], got " << ffts_mode;
+    } else if (key == "core_type") {
+      const auto core_type = AnyCast<std::string>(value, "kwarg key: core_type");
+      CHECK(core_type == "aic" || core_type == "aiv")
+          << op_name << " core_type must be 'aic' or 'aiv', got '" << core_type << "'";
     }
   }
 
@@ -123,6 +127,7 @@ REGISTER_OP("system.sync_set")
     .set_attr<int>("pipe")
     .set_attr<int>("event_id")
     .set_attr<int>("ffts_mode")
+    .set_attr<std::string>("core_type")
     .f_deduce_type([](const auto& args, const auto& kwargs) {
       return DeduceCrossCoreSyncType(args, kwargs, "system.sync_set", true);
     });
@@ -133,6 +138,7 @@ REGISTER_OP("system.sync_wait")
     .add_argument("event_id_dyn", "Optional dynamic event id (ScalarType(INDEX))")
     .set_attr<int>("pipe")
     .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
     .f_deduce_type([](const auto& args, const auto& kwargs) {
       return DeduceCrossCoreSyncType(args, kwargs, "system.sync_wait", false);
     });

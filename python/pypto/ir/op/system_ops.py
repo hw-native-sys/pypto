@@ -150,6 +150,7 @@ def _create_cross_core_sync_op(
     *,
     pipe: PipeType,
     ffts_mode: int | None,
+    core_type: str | None,
     span: Span | None,
 ) -> Call:
     """Create a PTO cross-core sync set/wait operation."""
@@ -164,6 +165,10 @@ def _create_cross_core_sync_op(
 
     if ffts_mode is not None:
         kwargs["ffts_mode"] = ffts_mode
+    if core_type is not None:
+        if core_type not in ("aic", "aiv"):
+            raise ValueError(f"{op_name} core_type must be 'aic' or 'aiv', got {core_type!r}")
+        kwargs["core_type"] = core_type
 
     actual_span = _get_span_or_capture(span, frame_offset=2)
     return _ir_core.create_op_call(op_name, args, kwargs, actual_span)
@@ -174,20 +179,34 @@ def sync_set(
     *,
     pipe: PipeType,
     ffts_mode: int | None = None,
+    core_type: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Set an explicit Cube/Vector cross-core synchronization event."""
-    return _create_cross_core_sync_op("system.sync_set", event_id, pipe=pipe, ffts_mode=ffts_mode, span=span)
+    """Set an explicit Cube/Vector cross-core synchronization event.
+
+    ``core_type`` targets the operation to one lane when expanding a mixed
+    InCore kernel. It may be omitted in an explicitly typed AIC/AIV function.
+    """
+    return _create_cross_core_sync_op(
+        "system.sync_set", event_id, pipe=pipe, ffts_mode=ffts_mode, core_type=core_type, span=span
+    )
 
 
 def sync_wait(
     event_id: int | Expr,
     *,
     pipe: PipeType,
+    core_type: str | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Wait for an explicit Cube/Vector cross-core synchronization event."""
-    return _create_cross_core_sync_op("system.sync_wait", event_id, pipe=pipe, ffts_mode=None, span=span)
+    """Wait for an explicit Cube/Vector cross-core synchronization event.
+
+    ``core_type`` targets the operation to one lane when expanding a mixed
+    InCore kernel. It may be omitted in an explicitly typed AIC/AIV function.
+    """
+    return _create_cross_core_sync_op(
+        "system.sync_wait", event_id, pipe=pipe, ffts_mode=None, core_type=core_type, span=span
+    )
 
 
 def bar_v(*, span: Span | None = None) -> Call:

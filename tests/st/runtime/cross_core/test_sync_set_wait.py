@@ -18,17 +18,13 @@ have landed, after which Cube consumes the complete tensor. No ``tpush`` or
 
 The GM transfer is physically padded to 16 rows because AIC Mat/Acc tiles must
 be box-aligned, while ``valid_shape`` keeps the logical payload at five rows.
-The AIV and AIC signatures intentionally stay identical because they share one
-mixed-kernel launch argument layout.
+The single ``pl.jit`` function is expanded into AIV and AIC kernels that share
+one mixed-kernel launch argument layout.
 """
-
-import sys
-from typing import Any
 
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 ROWS = 5
 LANE0_ROWS = 2
@@ -38,62 +34,46 @@ N = 16
 CUBE_PHYSICAL_ROWS = 16
 V2C_EVENT_ID = 4
 FFTS_WORKSPACE_ELEMENTS = 256
-A2A3_BOARD_PLATFORMS = ("a2a3",)
 
 
-@pl.program
-class SyncSetWaitProgram:
+@pl.jit
+def sync_set_wait_odd_shape(
+    a: pl.Tensor[[ROWS, K], pl.FP32],
+    b: pl.Tensor[[ROWS, K], pl.FP32],
+    weight: pl.Tensor[[K, N], pl.FP32],
+    transfer: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32]],
+    ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
+    output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
+):
     """Uneven 2/3-row AIV split followed by one AIC consumer."""
-
-    @pl.function(
-        type=pl.FunctionType.AIV,
-        attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
-    )
-    def vector_producer(
-        self,
-        a: pl.Tensor[[ROWS, K], pl.FP32],
-        b: pl.Tensor[[ROWS, K], pl.FP32],
-        weight: pl.Tensor[[K, N], pl.FP32],
-        transfer: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32]],
-        ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
-        output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
-    ):
+    for _ in pl.spmd(1, name_hint="sync_set_wait"):
         pl.system.set_ffts(ffts_workspace)
-        lane: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-        if lane == 0:
-            a_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [LANE0_ROWS, K])
-            b_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(b, [0, 0], [LANE0_ROWS, K])
-            sum_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.add(a_lane0, b_lane0)
-            pl.store(sum_lane0, [0, 0], transfer)
-        else:
-            a_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(
-                a, [LANE0_ROWS, 0], [LANE1_ROWS, K]
-            )
-            b_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(
-                b, [LANE0_ROWS, 0], [LANE1_ROWS, K]
-            )
-            sum_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.add(a_lane1, b_lane1)
-            pl.store(sum_lane1, [LANE0_ROWS, 0], transfer)
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            if aiv_id == 0:
+                a_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [LANE0_ROWS, K])
+                b_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(b, [0, 0], [LANE0_ROWS, K])
+                sum_lane0: pl.Tile[[LANE0_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.add(a_lane0, b_lane0)
+                pl.store(sum_lane0, [0, 0], transfer)
+            else:
+                a_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [LANE0_ROWS, 0], [LANE1_ROWS, K]
+                )
+                b_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.load(
+                    b, [LANE0_ROWS, 0], [LANE1_ROWS, K]
+                )
+                sum_lane1: pl.Tile[[LANE1_ROWS, K], pl.FP32, pl.Mem.Vec] = pl.add(a_lane1, b_lane1)
+                pl.store(sum_lane1, [LANE0_ROWS, 0], transfer)
 
-        # Mode 2 is a V-to-C reduction: AIC unblocks only after both AIV lanes
-        # have signalled this event, so the complete five-row GM tensor is ready.
-        pl.system.sync_set(V2C_EVENT_ID, pipe=pl.PipeType.MTE3)
+            # Mode 2 is a V-to-C reduction: AIC unblocks only after both AIV
+            # lanes have signalled, so the complete five-row GM tensor is ready.
+            pl.system.sync_set(
+                V2C_EVENT_ID,
+                pipe=pl.PipeType.MTE3,
+                ffts_mode=2,
+                core_type="aiv",
+            )
 
-    @pl.function(
-        type=pl.FunctionType.AIC,
-        attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
-    )
-    def cube_consumer(
-        self,
-        a: pl.Tensor[[ROWS, K], pl.FP32],
-        b: pl.Tensor[[ROWS, K], pl.FP32],
-        weight: pl.Tensor[[K, N], pl.FP32],
-        transfer: pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32],
-        ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
-        output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
-    ) -> pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]:
-        pl.system.set_ffts(ffts_workspace)
-        pl.system.sync_wait(V2C_EVENT_ID, pipe=pl.PipeType.MTE2)
+        pl.system.sync_wait(V2C_EVENT_ID, pipe=pl.PipeType.MTE2, core_type="aic")
         transfer_mat: pl.Tile[
             [CUBE_PHYSICAL_ROWS, K],
             pl.FP32,
@@ -120,74 +100,33 @@ class SyncSetWaitProgram:
             pl.Mem.Acc,
             pl.TileView(valid_shape=[ROWS, N]),
         ] = pl.matmul(transfer_left, weight_right)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
-    def group_func(
-        self,
-        a: pl.Tensor[[ROWS, K], pl.FP32],
-        b: pl.Tensor[[ROWS, K], pl.FP32],
-        weight: pl.Tensor[[K, N], pl.FP32],
-        transfer: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32]],
-        ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
-        output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
-    ) -> pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]:
-        result = self.cube_consumer(a, b, weight, transfer, ffts_workspace, output)
-        self.vector_producer(a, b, weight, transfer, ffts_workspace, output)
-        return result
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(
-        self,
-        a: pl.Tensor[[ROWS, K], pl.FP32],
-        b: pl.Tensor[[ROWS, K], pl.FP32],
-        weight: pl.Tensor[[K, N], pl.FP32],
-        transfer: pl.InOut[pl.Tensor[[CUBE_PHYSICAL_ROWS, K], pl.FP32]],
-        ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
-        output: pl.Out[pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]],
-    ) -> pl.Tensor[[CUBE_PHYSICAL_ROWS, N], pl.FP32]:
-        return self.group_func(a, b, weight, transfer, ffts_workspace, output)
-
-
-class SyncSetWaitTestCase(PTOTestCase):
-    """Explicit-event V2C: uneven AIV split, then ``output = (a + b) @ weight``."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "cross_core_sync_set_wait_odd_shape"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [ROWS, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [ROWS, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("weight", [K, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("transfer", [CUBE_PHYSICAL_ROWS, K], DataType.FP32, init_value=torch.zeros),
-            TensorSpec(
-                "ffts_workspace",
-                [FFTS_WORKSPACE_ELEMENTS],
-                DataType.INT64,
-                init_value=torch.zeros,
-            ),
-            TensorSpec("output", [CUBE_PHYSICAL_ROWS, N], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return SyncSetWaitProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        tensors["output"][:ROWS] = torch.matmul(tensors["a"] + tensors["b"], tensors["weight"])
+        output = pl.store(result, [0, 0], output)
+    return output
 
 
 class TestSyncSetWait:
     """Explicit cross-core sync event system test."""
 
-    @pytest.mark.parametrize("platform", A2A3_BOARD_PLATFORMS)
-    def test_static_event_id_on_board(self, test_runner, platform):
+    @pytest.mark.platforms("a2a3")
+    def test_static_event_id_on_board(self, test_config):
         """Synchronize one 2/3-row two-AIV GM write with one AIC wait."""
-        result = test_runner.run(SyncSetWaitTestCase(platform=platform))
-        assert result.passed, f"Cross-core sync_set/sync_wait failed: {result.error}"
+        sync_set_wait_odd_shape._cache.clear()
+        torch.manual_seed(0)
+        a = torch.randn(ROWS, K, dtype=torch.float32)
+        b = torch.randn(ROWS, K, dtype=torch.float32)
+        weight = torch.randn(K, N, dtype=torch.float32)
+        transfer = torch.zeros(CUBE_PHYSICAL_ROWS, K, dtype=torch.float32)
+        ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
+        output = torch.zeros(CUBE_PHYSICAL_ROWS, N, dtype=torch.float32)
+
+        sync_set_wait_odd_shape(a, b, weight, transfer, ffts_workspace, output, config=test_config)
+
+        expected = torch.zeros_like(output)
+        expected[:ROWS] = torch.matmul(a + b, weight)
+        assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3), (
+            f"odd-shape sync_set/sync_wait max diff = {(output - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v", *sys.argv[1:]]))
+    pytest.main([__file__, "-v"])

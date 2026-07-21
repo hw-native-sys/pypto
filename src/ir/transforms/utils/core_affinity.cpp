@@ -114,7 +114,20 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
     return CoreAffinity::SHARED;  // mix
   }
 
-  // 2b. Explicit split-reshape ops are cross-C/V boundaries (the data crosses
+  // 2b. Explicit cross-core events are shared when authored inside an already
+  // typed AIC/AIV function. A mixed InCore kernel, however, needs an explicit
+  // target so ExpandMixedKernel retains the set/wait on only that lane.
+  if (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")) {
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key != "core_type") continue;
+      const auto core_type = AnyCast<std::string>(value, "core_type");
+      if (core_type == "aic") return CoreAffinity::CUBE;
+      if (core_type == "aiv") return CoreAffinity::VECTOR;
+    }
+    return CoreAffinity::SHARED;
+  }
+
+  // 2c. Explicit split-reshape ops are cross-C/V boundaries (the data crosses
   // the cube/vector divide as a tpush on the producer plus a tpop on the
   // consumer), so they roll up as MIXED exactly like a boundary tile.move.
   // ExpandMixedKernel's boundary arm folds them into tpush/tpop with the
