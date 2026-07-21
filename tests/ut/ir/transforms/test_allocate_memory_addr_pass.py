@@ -885,6 +885,8 @@ def _allocate_with_dsa(
     export_dir: str | None = None,
     solution_dir: str | None = None,
     reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.DISABLED,
+    reference_placement=passes.DsaReferencePlacement.DEFAULT,
+    reference_target: str | None = None,
 ):
     """Run the standalone planner through its PassContext-owned adapter."""
     with passes.PassContext(
@@ -893,6 +895,8 @@ def _allocate_with_dsa(
         dsa_export_dir=export_dir,
         dsa_solution_dir=solution_dir,
         dsa_reuse_penalty_recognizer=reuse_penalty_recognizer,
+        dsa_reference_placement=reference_placement,
+        dsa_reference_target=reference_target,
     ):
         return passes.allocate_memory_addr()(base)
 
@@ -910,6 +914,57 @@ def test_dsa_planner_reuses_at_read_before_write_boundary():
     # Every producer's last read precedes its consumer's write at the same
     # statement point, so all three buffers may use one physical slot.
     assert plan_peak == 16384
+
+
+@requires_dsa
+def test_dsa_loose_reference_spreads_only_the_selected_function(tmp_path):
+    """Compact and loose endpoints are derived and validated in one compile.
+
+    An unmatched exact target must retain the compact baseline so multi-kernel
+    programs can vary one DSA instance without perturbing siblings.
+    """
+    base = _dsa_chain_program()
+    compact_dir = tmp_path / "compact"
+    loose_dir = tmp_path / "loose"
+    unmatched_dir = tmp_path / "unmatched"
+
+    compact = _allocate_with_dsa(
+        base,
+        str(compact_dir),
+        reference_placement=passes.DsaReferencePlacement.COMPACT,
+    )
+    loose = _allocate_with_dsa(
+        base,
+        str(loose_dir),
+        reference_placement=passes.DsaReferencePlacement.LOOSE,
+        reference_target="read_before_write_chain",
+    )
+    unmatched = _allocate_with_dsa(
+        base,
+        str(unmatched_dir),
+        reference_placement=passes.DsaReferencePlacement.LOOSE,
+        reference_target="some_other_kernel",
+    )
+
+    assert _vec_peak(compact) == 16384
+    assert _vec_peak(loose) == 3 * 16384
+    assert _vec_peak(unmatched) == 16384
+
+    compact_problem = compact_dir / "pypto_read_before_write_chain.dsa.json"
+    loose_problem = loose_dir / "pypto_read_before_write_chain.dsa.json"
+    assert compact_problem.read_text() == loose_problem.read_text()
+
+    compact_solution = json.loads(
+        (compact_dir / "pypto_read_before_write_chain.dsa.solution.json").read_text()
+    )
+    loose_solution = json.loads((loose_dir / "pypto_read_before_write_chain.dsa.solution.json").read_text())
+    unmatched_solution = json.loads(
+        (unmatched_dir / "pypto_read_before_write_chain.dsa.solution.json").read_text()
+    )
+    assert compact_solution["problem_fingerprint"] == loose_solution["problem_fingerprint"]
+    assert compact_solution["metadata"]["reference_placement"] == "compact"
+    assert loose_solution["metadata"]["reference_placement"] == "loose"
+    assert unmatched_solution["metadata"]["reference_placement"] == "compact"
 
 
 @requires_dsa

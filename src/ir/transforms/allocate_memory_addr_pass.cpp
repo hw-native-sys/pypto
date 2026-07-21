@@ -44,10 +44,11 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #ifdef PYPTO_ENABLE_DSA_SOLVER
-#include "dsa/model.h"
-#include "dsa/pypto_structured_search_solver.h"
-#include "dsa/structured_problem.h"
-#include "dsa/validator.h"
+#include "dsa/algorithms/pypto_structured_search_solver.h"
+#include "dsa/analysis/reuse_geometry.h"
+#include "dsa/model/model.h"
+#include "dsa/model/structured_problem.h"
+#include "dsa/model/validator.h"
 #include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #endif
 #include "pypto/ir/transforms/pass_context.h"
@@ -304,7 +305,10 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
     const std::optional<std::string>& export_directory, const std::optional<std::string>& solution_directory,
-    DsaReusePenaltyRecognizer reuse_penalty_recognizer) {
+    DsaReusePenaltyRecognizer reuse_penalty_recognizer, DsaReferencePlacement reference_placement,
+    const std::optional<std::string>& reference_target) {
+  CHECK_SPAN(!reference_target || reference_placement == DsaReferencePlacement::Loose, func->span_)
+      << "dsa_reference_target requires the Loose reference endpoint";
   const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -333,6 +337,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
   size_t relaxed_separation_count = 0;
   std::string solver_name;
   if (solution_directory) {
+    CHECK_SPAN(reference_placement == DsaReferencePlacement::Default, func->span_)
+        << "DSA placement replay cannot be combined with a compact/loose reference endpoint";
     const ::dsa::StructuredSolutionDocument replay =
         dsa_adapter::ReadSolutionJson(strict_exported.document.instance, *solution_directory);
     if (replay.problem_fingerprint == ::dsa::FingerprintStructuredProblem(strict_exported.document)) {
@@ -403,6 +409,27 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
       }
     }
   }
+
+  const bool reference_target_matches = !reference_target || *reference_target == func->name_;
+  const bool make_loose = reference_placement == DsaReferencePlacement::Loose && reference_target_matches;
+  if (make_loose && run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value() &&
+      run.solution_errors.empty()) {
+    const ::dsa::SparseReferenceResult sparse =
+        ::dsa::BuildSparseReferencePlacement(solved_exported.document.problem, *run.result.solution);
+    run.result.solution = sparse.solution;
+    run.solution_errors = ::dsa::ValidateSolution(solved_exported.document.problem, *run.result.solution);
+    run.result.objective = ::dsa::EvaluateObjective(solved_exported.document.problem, *run.result.solution);
+    run.result.status =
+        run.solution_errors.empty() &&
+                ::dsa::EvaluateObjectiveMetric(solved_exported.document.problem, run.result.objective,
+                                               ::dsa::ObjectiveMetric::kCapacityOverflow) == 0
+            ? ::dsa::SolveStatus::kFeasible
+            : ::dsa::SolveStatus::kBestEffortNoFit;
+    solver_name = "sparse_reference";
+    LOG_INFO << "[dsa] sparse reference for " << func->name_ << " reduced physical reuse pairs from "
+             << sparse.initial.pair_count << " to " << sparse.final.pair_count << " in "
+             << sparse.accepted_moves << " move(s)";
+  }
   INTERNAL_CHECK_SPAN(run.problem_errors.empty(), func->span_)
       << "DSA exporter produced an invalid pypto_structured problem for '" << func->name_
       << "': " << run.problem_errors.front();
@@ -412,8 +439,13 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
     LOG_INFO << "[dsa] exported " << func->name_ << " to " << output;
     if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value() &&
         run.solution_errors.empty()) {
+      std::map<std::string, std::string> solution_metadata{{"solver", solver_name}};
+      if (reference_placement != DsaReferencePlacement::Default) {
+        solution_metadata["reference_placement"] = make_loose ? "loose" : "compact";
+      }
+      if (reference_target) solution_metadata["reference_target"] = *reference_target;
       const std::string solution_output = dsa_adapter::WriteSolutionJson(
-          solved_exported, *run.result.solution, *export_directory, {{"solver", solver_name}});
+          solved_exported, *run.result.solution, *export_directory, solution_metadata);
       LOG_INFO << "[dsa] exported selected placement for " << func->name_ << " to " << solution_output;
     }
   }
@@ -490,8 +522,13 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
         context == nullptr ? std::nullopt : context->GetDsaSolutionDir();
     const DsaReusePenaltyRecognizer reuse_penalty_recognizer =
         context == nullptr ? DsaReusePenaltyRecognizer::Disabled : context->GetDsaReusePenaltyRecognizer();
+    const DsaReferencePlacement reference_placement =
+        context == nullptr ? DsaReferencePlacement::Default : context->GetDsaReferencePlacement();
+    const std::optional<std::string> reference_target =
+        context == nullptr ? std::nullopt : context->GetDsaReferenceTarget();
     memref_pairs = PlanWithStandaloneDsa(func, *policy, reserve_resolution.reserved_end_by_space, memrefs,
-                                         export_directory, solution_directory, reuse_penalty_recognizer);
+                                         export_directory, solution_directory, reuse_penalty_recognizer,
+                                         reference_placement, reference_target);
 #else
     CHECK_SPAN(false, func->span_)
         << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "

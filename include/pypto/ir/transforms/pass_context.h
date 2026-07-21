@@ -259,6 +259,19 @@ enum class DsaReusePenaltyRecognizer {
   Quadratic,
 };
 
+/**
+ * @brief Experimental placement endpoint for controlled DSA studies.
+ *
+ * Default preserves the selected solver placement. Compact records that same
+ * baseline explicitly. Loose greedily spreads lifetime-compatible allocation
+ * classes within capacity after the normal solution has been validated.
+ */
+enum class DsaReferencePlacement {
+  Default,
+  Compact,
+  Loose,
+};
+
 class PassContext {
  public:
   /**
@@ -286,6 +299,10 @@ class PassContext {
    *        solution artifacts to replay instead of invoking a solver.
    * @param dsa_reuse_penalty_recognizer Experimental recognizer used to derive
    *        soft reuse edges. Disabled by default; Quadratic is research-only.
+   * @param dsa_reference_placement Experimental compact/loose endpoint used for
+   *        controlled placement studies.
+   * @param dsa_reference_target Optional exact function name to which Loose is
+   *        applied. Other functions retain the compact baseline.
    */
   explicit PassContext(
       std::vector<PassInstrumentPtr> instruments,
@@ -295,7 +312,9 @@ class PassContext {
       MemoryPlanner memory_planner = MemoryPlanner::PyPTO, bool enable_pypto_l0c_double_buffer = false,
       std::optional<std::string> dsa_export_dir = std::nullopt,
       std::optional<std::string> dsa_solution_dir = std::nullopt,
-      DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled);
+      DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled,
+      DsaReferencePlacement dsa_reference_placement = DsaReferencePlacement::Default,
+      std::optional<std::string> dsa_reference_target = std::nullopt);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -374,6 +393,12 @@ class PassContext {
    */
   [[nodiscard]] DsaReusePenaltyRecognizer GetDsaReusePenaltyRecognizer() const;
 
+  /** @brief Get the experimental compact/loose DSA endpoint. */
+  [[nodiscard]] DsaReferencePlacement GetDsaReferencePlacement() const;
+
+  /** @brief Get the optional exact function selected for a Loose endpoint. */
+  [[nodiscard]] const std::optional<std::string>& GetDsaReferenceTarget() const;
+
   /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
@@ -403,6 +428,8 @@ class PassContext {
   std::optional<std::string> dsa_export_dir_;
   std::optional<std::string> dsa_solution_dir_;
   DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer_;
+  DsaReferencePlacement dsa_reference_placement_;
+  std::optional<std::string> dsa_reference_target_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

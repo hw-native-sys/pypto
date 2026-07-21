@@ -106,6 +106,13 @@ class DsaReusePenaltyRecognizer(Enum):
     DISABLED = ...
     QUADRATIC = ...
 
+class DsaReferencePlacement(Enum):
+    """Selects an experimental compact/loose DSA placement endpoint."""
+
+    DEFAULT = ...
+    COMPACT = ...
+    LOOSE = ...
+
 def is_dsa_solver_available() -> bool:
     """Return whether this build includes the standalone DSA solver adapter."""
 
@@ -286,6 +293,8 @@ class PassContext:
         dsa_export_dir: str | None = None,
         dsa_solution_dir: str | None = None,
         dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer = DsaReusePenaltyRecognizer.DISABLED,
+        dsa_reference_placement: DsaReferencePlacement = DsaReferencePlacement.DEFAULT,
+        dsa_reference_target: str | None = None,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -334,6 +343,14 @@ class PassContext:
 
     def get_dsa_reuse_penalty_recognizer(self) -> DsaReusePenaltyRecognizer:
         """Get the experimental DSA soft-edge recognizer."""
+        ...
+
+    def get_dsa_reference_placement(self) -> DsaReferencePlacement:
+        """Get the experimental compact/loose DSA endpoint."""
+        ...
+
+    def get_dsa_reference_target(self) -> str | None:
+        """Get the exact function selected for a loose DSA endpoint."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -861,6 +878,7 @@ __all__ = [
     "VerificationLevel",
     "MemoryPlanner",
     "DsaReusePenaltyRecognizer",
+    "DsaReferencePlacement",
     "is_dsa_solver_available",
     "DiagnosticPhase",
     "DiagnosticCheck",

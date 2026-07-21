@@ -308,7 +308,9 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
                          MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
                          std::optional<std::string> dsa_export_dir,
                          std::optional<std::string> dsa_solution_dir,
-                         DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer)
+                         DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer,
+                         DsaReferencePlacement dsa_reference_placement,
+                         std::optional<std::string> dsa_reference_target)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
@@ -318,6 +320,8 @@ PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, Verificatio
       dsa_export_dir_(std::move(dsa_export_dir)),
       dsa_solution_dir_(std::move(dsa_solution_dir)),
       dsa_reuse_penalty_recognizer_(dsa_reuse_penalty_recognizer),
+      dsa_reference_placement_(dsa_reference_placement),
+      dsa_reference_target_(std::move(dsa_reference_target)),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -333,6 +337,10 @@ const std::optional<std::string>& PassContext::GetDsaSolutionDir() const { retur
 DsaReusePenaltyRecognizer PassContext::GetDsaReusePenaltyRecognizer() const {
   return dsa_reuse_penalty_recognizer_;
 }
+
+DsaReferencePlacement PassContext::GetDsaReferencePlacement() const { return dsa_reference_placement_; }
+
+const std::optional<std::string>& PassContext::GetDsaReferenceTarget() const { return dsa_reference_target_; }
 
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 

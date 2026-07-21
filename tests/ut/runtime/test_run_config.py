@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.backend import BackendType
-from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime.runner import RunConfig, _DfxOpts, compile_program, execute_compiled, run
 
 
@@ -557,6 +557,19 @@ class TestRunConfigCompileForwarding:
         assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
         assert captured["ptoas_sync_summary_dir"] == str(tmp_path / "sync")
         assert captured["skip_ptoas"] is False
+
+        captured.clear()
+        run(
+            object(),
+            config=RunConfig(
+                platform="a2a3sim",
+                memory_planner=MemoryPlanner.DSA,
+                dsa_reference_placement=DsaReferencePlacement.LOOSE,
+                dsa_reference_target="target_kernel",
+            ),
+        )
+        assert captured["dsa_reference_placement"] == DsaReferencePlacement.LOOSE
+        assert captured["dsa_reference_target"] == "target_kernel"
 
     def test_system_harness_forwards_dsa_reuse_recognizer(self, monkeypatch, tmp_path):
         st_root = Path(__file__).resolve().parents[2] / "st"

@@ -38,7 +38,7 @@ from pypto.jit.decorator import (
 from pypto.jit.specializer import TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
-from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime.runner import RunConfig
 
 # ---------------------------------------------------------------------------
@@ -2259,6 +2259,8 @@ class TestCompileKwargForwarding:
             dsa_export_dir=str(tmp_path / "dsa-corpus"),
             dsa_solution_dir=str(tmp_path / "dsa-solutions"),
             dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC,
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="target_kernel",
             ptoas_sync_summary_dir=str(tmp_path / "sync-summaries"),
         )
         kwargs = _run_config_compile_kwargs(cfg)
@@ -2271,6 +2273,8 @@ class TestCompileKwargForwarding:
         assert kwargs["dsa_export_dir"] == str(tmp_path / "dsa-corpus")
         assert kwargs["dsa_solution_dir"] == str(tmp_path / "dsa-solutions")
         assert kwargs["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
+        assert kwargs["dsa_reference_placement"] == DsaReferencePlacement.LOOSE
+        assert kwargs["dsa_reference_target"] == "target_kernel"
         assert kwargs["ptoas_sync_summary_dir"] == str(tmp_path / "sync-summaries")
         assert "diagnostic_phase" in kwargs
         assert "disabled_diagnostics" in kwargs

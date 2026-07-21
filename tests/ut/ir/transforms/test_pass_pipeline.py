@@ -152,6 +152,24 @@ class TestPassContext:
         context = passes.PassContext([], dsa_reuse_penalty_recognizer=recognizer)
         assert context.get_dsa_reuse_penalty_recognizer() == recognizer
 
+    @pytest.mark.parametrize(
+        "placement",
+        [
+            passes.DsaReferencePlacement.DEFAULT,
+            passes.DsaReferencePlacement.COMPACT,
+            passes.DsaReferencePlacement.LOOSE,
+        ],
+    )
+    def test_dsa_reference_placement_round_trip(self, placement):
+        context = passes.PassContext(
+            [],
+            dsa_reference_placement=placement,
+            dsa_reference_target="target" if placement == passes.DsaReferencePlacement.LOOSE else None,
+        )
+        assert context.get_dsa_reference_placement() == placement
+        expected_target = "target" if placement == passes.DsaReferencePlacement.LOOSE else None
+        assert context.get_dsa_reference_target() == expected_target
+
     def test_after_mode_succeeds_on_valid_pipeline(self):
         """AFTER mode succeeds when pass actually produces its claimed property."""
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
