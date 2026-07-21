@@ -241,11 +241,12 @@ def test_const_device_kwarg_renders_literal_worker():
     assert "__comm_d0[0].device_ctx" in code, code
 
 
-def test_comm_group_program_emits_allocate_domain_with_block():
+def test_comm_group_program_emits_domain_provider_with_block():
     """Programs with ``pld.alloc_window_buffer`` emit a
-    ``with orch.allocate_domain(...)`` wrapping the for-loop body, with the
-    same ``__comm_d0`` handle used for all ``buffer_ptrs`` / ``device_ctx``
-    accesses below."""
+    ``with (_domain_provider or orch.allocate_domain)(...)`` wrapping the
+    for-loop body. The optional provider lets persistent execution retain a
+    domain, while the fallback preserves one-shot behavior. Both paths bind
+    the same ``__comm_d0`` handle used below."""
 
     @pl.program
     class Prog:
@@ -263,7 +264,8 @@ def test_comm_group_program_emits_allocate_domain_with_block():
 
     code = _lower(Prog)
     # The with-block opens with the literal spec list and binds the handle.
-    assert re.search(r"with orch\.allocate_domain\(", code), code
+    assert "_domain_provider=None" in code, code
+    assert re.search(r"with \(_domain_provider or orch\.allocate_domain\)\(", code), code
     assert re.search(r'name="comm_d0",', code), code
     # Empty CommDomainScopeStmt.devices_ (this program declares no explicit subset on
     # the alloc) lowers to `workers=[*range(world_size)]` — resolved at
@@ -390,7 +392,9 @@ def test_hoisted_world_size_temp_in_alloc_size_lowers_to_kwarg():
     code = _lower(Prog)
     assert re.search(r"window_size=\(.*\bworld_size\b.*\),", code), code
     assert re.search(r"CommBufferSpec\(.*\bworld_size\b.*\),", code), code
-    alloc_block = code.split("with orch.allocate_domain(")[1].split(") as __comm_d0:")[0]
+    alloc_block = code.split("with (_domain_provider or orch.allocate_domain)(")[1].split(") as __comm_d0:")[
+        0
+    ]
     assert "n__ssa_v0" not in alloc_block and " n " not in alloc_block and " n*" not in alloc_block, code
 
 
@@ -437,11 +441,11 @@ def test_two_groups_emit_nested_allocate_domain():
 
     # Both groups emit their own allocate_domain block, in source order.
     d0_match = re.search(
-        r'with orch\.allocate_domain\(\s*name="comm_d0",\s*workers=\[0, 1\],',
+        r'with \(_domain_provider or orch\.allocate_domain\)\(\s*name="comm_d0",\s*workers=\[0, 1\],',
         code,
     )
     d1_match = re.search(
-        r'with orch\.allocate_domain\(\s*name="comm_d1",\s*workers=\[2, 3\],',
+        r'with \(_domain_provider or orch\.allocate_domain\)\(\s*name="comm_d1",\s*workers=\[2, 3\],',
         code,
     )
     assert d0_match is not None, code
