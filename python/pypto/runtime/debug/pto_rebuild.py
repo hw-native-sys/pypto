@@ -33,6 +33,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
+
 __all__ = ["rebuild_kernel_cpp_from_pto", "PTOAS_BODY_BEGIN", "PTOAS_BODY_END"]
 
 # These literals MUST match the strings written by
@@ -43,8 +45,7 @@ __all__ = ["rebuild_kernel_cpp_from_pto", "PTOAS_BODY_BEGIN", "PTOAS_BODY_END"]
 PTOAS_BODY_BEGIN = "// --- ptoas-generated code ---"
 PTOAS_BODY_END = "// --- Kernel entry point ---"
 
-# Mirror ``pto_backend._preprocess_ptoas_output``'s function-definition
-# pattern: the same regex that converts the ptoas-emitted
+# Match the ptoas-emitted
 # ``AICORE void <name>(...)`` qualifier into ``static __aicore__ void
 # <name>(...)``. Capturing the name here lets us discover which kernel cpps
 # each .pto feeds without persisting a map at compile time.
@@ -107,33 +108,6 @@ def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"ptoas rebuild failed for {pto_path.name}: {result.stderr.strip()}")
-
-
-def _preprocess_ptoas_body(content: str) -> str:
-    """Local copy of ``pto_backend._preprocess_ptoas_output``.
-
-    Must stay in step with the two-pass rewrite there: the first sub makes
-    top-level kernels file-local, the second normalises remaining ``AICORE``
-    qualifiers on mixed-kernel sub-functions and helpers.
-    """
-    lines = content.splitlines(keepends=True)
-    filtered: list[str] = []
-    for line in lines:
-        s = line.strip()
-        if s.startswith("#include") and ("pto-inst" in s or "cstdint" in s or "tensor.h" in s):
-            continue
-        if s == "using namespace pto;":
-            continue
-        if s.startswith("set_ffts_base_addr("):
-            continue
-        filtered.append(line)
-    result = "".join(filtered)
-    result = re.sub(
-        r'(?:extern\s*"C"\s*)?(?:__global__\s+)?AICORE\s+void',
-        "static __aicore__ void",
-        result,
-    )
-    return re.sub(r"\bAICORE\b", "__aicore__", result)
 
 
 def _extract_func_names(ptoas_cpp: str) -> list[str]:

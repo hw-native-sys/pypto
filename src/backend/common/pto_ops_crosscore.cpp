@@ -348,29 +348,29 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
                                                codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   const std::string op_name = std::string("system.sync_") + action;
-  CHECK_SPAN(op->args_.size() <= 1, op->span_)
+  INTERNAL_CHECK_SPAN(op->args_.size() <= 1, op->span_)
       << op_name << " accepts at most one dynamic event-id operand, got " << op->args_.size();
 
   const int pipe_value = op->GetKwarg<int>("pipe", -1);
-  CHECK_SPAN(
+  INTERNAL_CHECK_SPAN(
       pipe_value >= static_cast<int>(ir::PipeType::MTE1) && pipe_value <= static_cast<int>(ir::PipeType::ALL),
       op->span_)
       << op_name << " requires a valid pipe attribute, got " << pipe_value;
 
   const bool has_static_event_id = op->HasKwarg("event_id");
   const bool has_dynamic_event_id = op->args_.size() == 1;
-  CHECK_SPAN(has_static_event_id != has_dynamic_event_id, op->span_)
+  INTERNAL_CHECK_SPAN(has_static_event_id != has_dynamic_event_id, op->span_)
       << op_name << " requires exactly one static event_id attribute or dynamic event-id operand";
 
   std::string event_code;
   if (has_static_event_id) {
     const int event_id = op->GetKwarg<int>("event_id", -1);
-    CHECK_SPAN(event_id >= 0 && event_id <= 13, op->span_)
+    INTERNAL_CHECK_SPAN(event_id >= 0 && event_id <= 13, op->span_)
         << op_name << " event_id must be in the user-available range [0, 13], got " << event_id;
     event_code = std::to_string(event_id);
   } else {
     auto event_type = ir::As<ScalarType>(op->args_[0]->GetType());
-    CHECK_SPAN(event_type && event_type->dtype_ == DataType::INDEX, op->span_)
+    INTERNAL_CHECK_SPAN(event_type && event_type->dtype_ == DataType::INDEX, op->span_)
         << op_name << " dynamic event id must have ScalarType(INDEX)";
     event_code = codegen.GetExprAsCode(op->args_[0]);
   }
@@ -379,9 +379,10 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
   oss << "pto.sync." << action << " <PIPE_" << ir::PipeTypeToString(static_cast<ir::PipeType>(pipe_value))
       << ">, " << event_code;
   if (op->HasKwarg("ffts_mode")) {
-    CHECK_SPAN(std::string_view(action) == "set", op->span_) << op_name << " does not support ffts_mode";
+    INTERNAL_CHECK_SPAN(std::string_view(action) == "set", op->span_)
+        << op_name << " does not support ffts_mode";
     const int ffts_mode = op->GetKwarg<int>("ffts_mode", -1);
-    CHECK_SPAN(ffts_mode >= 0 && ffts_mode <= 2, op->span_)
+    INTERNAL_CHECK_SPAN(ffts_mode >= 0 && ffts_mode <= 2, op->span_)
         << op_name << " ffts_mode must be in [0, 2], got " << ffts_mode;
     oss << " {ffts_mode = " << ffts_mode << " : i32}";
   }
@@ -391,16 +392,16 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
 
 static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK_SPAN(op->args_.size() == 1, op->span_)
+  INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
       << "system.set_ffts requires one workspace tensor, got " << op->args_.size();
   auto workspace = As<ir::Var>(op->args_[0]);
-  CHECK_SPAN(workspace, op->span_) << "system.set_ffts workspace must be a tensor variable";
+  INTERNAL_CHECK_SPAN(workspace, op->span_) << "system.set_ffts workspace must be a tensor variable";
   auto tensor_type = ir::AsTensorTypeLike(workspace->GetType());
-  CHECK_SPAN(tensor_type && tensor_type->dtype_ == DataType::INT64 && tensor_type->shape_.size() == 1,
-             op->span_)
+  INTERNAL_CHECK_SPAN(
+      tensor_type && tensor_type->dtype_ == DataType::INT64 && tensor_type->shape_.size() == 1, op->span_)
       << "system.set_ffts workspace must be a one-dimensional INT64 tensor";
   auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
-  CHECK_SPAN(extent && extent->value_ >= 256, op->span_)
+  INTERNAL_CHECK_SPAN(extent && extent->value_ >= 256, op->span_)
       << "system.set_ffts workspace must have a static length of at least 256 INT64 elements";
   codegen.Emit("pto.set_ffts " + codegen.GetVarName(workspace) + " : memref<" +
                std::to_string(extent->value_) + "xi64>");

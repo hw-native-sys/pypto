@@ -477,13 +477,25 @@ def test_if_else_with_return_vars():
 # ---------------------------------------------------------------------------
 
 
-def test_system_ops_are_noops():
+@pytest.mark.parametrize(
+    "op_name",
+    ["system.sync_src", "system.sync_set", "system.sync_wait", "system.set_ffts"],
+)
+def test_system_ops_are_noops(op_name):
     """System ops should emit no-op comments."""
-    sync_call = _op_call("system.sync_src", [], {"set_pipe": 4, "wait_pipe": 5, "event_id": 0})
-    body = ir.EvalStmt(sync_call, _span())
-    func = _simple_function("f", [], body)
+    params = []
+    if op_name == "system.sync_src":
+        call = _op_call(op_name, [], {"set_pipe": 4, "wait_pipe": 5, "event_id": 0})
+    elif op_name in ("system.sync_set", "system.sync_wait"):
+        call = _op_call(op_name, [], {"pipe": ir.PipeType.MTE2, "event_id": 0})
+    else:
+        workspace = _tensor_var("workspace", [256], DataType.INT64)
+        params = [workspace]
+        call = _op_call(op_name, [workspace])
+    body = ir.EvalStmt(call, _span())
+    func = _simple_function("f", params, body)
     code = torch_codegen(func)
-    assert "# sync_src" in code
+    assert f"# {op_name.split('.')[-1]}" in code
 
 
 # ---------------------------------------------------------------------------

@@ -1045,6 +1045,9 @@ def _register_ops() -> None:  # noqa: PLR0915
     for op_name in (
         "system.sync_src",
         "system.sync_dst",
+        "system.sync_set",
+        "system.sync_wait",
+        "system.set_ffts",
         "system.bar_v",
         "system.bar_m",
         "system.bar_all",

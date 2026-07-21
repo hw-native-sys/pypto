@@ -942,11 +942,13 @@ class TestPreprocessPtoasOutput:
     def test_drops_runtime_managed_ffts_base_write(self):
         result = _preprocess_ptoas_output(
             "AICORE void kernel(__gm__ int64_t* workspace) {\n"
-            "  set_ffts_base_addr((uint64_t) workspace);\n"
+            "  uint64_t ffts_addr = (uint64_t) workspace;\n"
+            "  set_ffts_base_addr(ffts_addr);\n"
             "  wait_flag_dev(3);\n"
             "}\n"
         )
         assert "set_ffts_base_addr" not in result
+        assert "(uint64_t) workspace" in result
         assert "wait_flag_dev(3)" in result
 
     def test_preserves_helpers(self):

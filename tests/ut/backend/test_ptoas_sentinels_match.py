@@ -10,10 +10,9 @@
 """Regression guards binding ``pto_rebuild`` to ``pto_backend`` invariants.
 
 The rebuild path in ``pypto.runtime.debug.pto_rebuild`` deliberately holds
-local copies of three pto_backend internals (sentinel literals, the body
-preprocess pipeline, and the base ptoas flag list) so the debug entry point
-does not pull in the full codegen stack. These tests catch silent drift if
-either side evolves.
+local copies of the wrapper sentinel literals and base ptoas flag list while
+sharing the lightweight body-preprocessing helper with the main backend.
+These tests catch silent drift if either side evolves.
 """
 
 from __future__ import annotations
@@ -58,11 +57,7 @@ AICORE void helper() {}
 
 
 def test_preprocess_matches_pto_backend() -> None:
-    """``pto_rebuild._preprocess_ptoas_body`` must produce byte-identical
-    output to ``pto_backend._preprocess_ptoas_output`` on the same input —
-    otherwise a spliced kernel cpp will diverge from a fresh ``ir.compile()``
-    output and miscompile silently.
-    """
+    """The rebuild and main backend paths must share byte-identical preprocessing."""
     expected = pto_backend._preprocess_ptoas_output(_PTOAS_SAMPLE)
     actual = pto_rebuild._preprocess_ptoas_body(_PTOAS_SAMPLE)
     assert actual == expected, (

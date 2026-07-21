@@ -169,7 +169,7 @@ def test_cross_core_sync_rejects_reserved_or_out_of_range_event_ids(event_id):
 def test_cross_core_sync_rejects_non_index_dynamic_event_id():
     """PTO's dynamic event operand is index-typed."""
     event_id = ir.Var("event_id", ir.ScalarType(DataType.INT32), ir.Span.unknown())
-    with pytest.raises(TypeError, match=r"ScalarType\(INDEX\)"):
+    with pytest.raises(ValueError, match=r"ScalarType\(INDEX\)"):
         system_ops.sync_wait(event_id, pipe=ir.PipeType.MTE3)
 
 

@@ -121,7 +121,6 @@ def sync_dst(
     )
 
 
-_MAX_USER_CROSS_CORE_EVENT_ID = 13
 _MIN_FFTS_WORKSPACE_ELEMENTS = 256
 
 
@@ -154,33 +153,16 @@ def _create_cross_core_sync_op(
     span: Span | None,
 ) -> Call:
     """Create a PTO cross-core sync set/wait operation."""
-    if not isinstance(pipe, PipeType):
-        raise TypeError(f"{op_name} pipe must be PipeType, got {type(pipe).__name__}")
-
     args: list[Expr] = []
     kwargs: dict[str, Any] = {"pipe": pipe}
-    if isinstance(event_id, bool):
-        raise TypeError(f"{op_name} event_id must be int or ScalarType(INDEX), got bool")
-    if isinstance(event_id, int):
-        if not 0 <= event_id <= _MAX_USER_CROSS_CORE_EVENT_ID:
-            raise ValueError(
-                f"{op_name} event_id must be in the user-available range "
-                f"[0, {_MAX_USER_CROSS_CORE_EVENT_ID}], got {event_id}"
-            )
+    if isinstance(event_id, int) and not isinstance(event_id, bool):
         kwargs["event_id"] = event_id
     elif isinstance(event_id, Expr):
-        event_type = event_id.type
-        if not isinstance(event_type, ScalarType) or event_type.dtype != DataType.INDEX:
-            raise TypeError(f"{op_name} dynamic event_id must have ScalarType(INDEX), got {event_type}")
         args.append(event_id)
     else:
-        raise TypeError(f"{op_name} event_id must be int or ScalarType(INDEX), got {type(event_id).__name__}")
+        raise TypeError(f"{op_name} event_id must be int or Expr, got {type(event_id).__name__}")
 
     if ffts_mode is not None:
-        if isinstance(ffts_mode, bool) or not isinstance(ffts_mode, int):
-            raise TypeError(f"{op_name} ffts_mode must be int, got {type(ffts_mode).__name__}")
-        if not 0 <= ffts_mode <= 2:
-            raise ValueError(f"{op_name} ffts_mode must be in [0, 2], got {ffts_mode}")
         kwargs["ffts_mode"] = ffts_mode
 
     actual_span = _get_span_or_capture(span, frame_offset=2)
