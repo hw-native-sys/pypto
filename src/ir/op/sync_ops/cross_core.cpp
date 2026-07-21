@@ -10,6 +10,7 @@
  */
 
 #include <any>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -20,8 +21,10 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -43,6 +46,24 @@ TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
 }
 
 constexpr int kMaxUserCrossCoreEventId = 13;
+constexpr int64_t kMinFFTSWorkspaceElements = 256;
+
+TypePtr DeduceSetFFTSType(const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(kwargs.empty()) << "system.set_ffts does not accept attributes";
+  CHECK(args.size() == 1) << "system.set_ffts requires one workspace tensor, got " << args.size();
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type) << "system.set_ffts workspace must be a Tensor";
+  CHECK(tensor_type->dtype_ == DataType::INT64)
+      << "system.set_ffts workspace must have INT64 dtype, got " << tensor_type->dtype_.ToString();
+  CHECK(tensor_type->shape_.size() == 1)
+      << "system.set_ffts workspace must be 1-D, got rank " << tensor_type->shape_.size();
+  auto extent = As<ConstInt>(tensor_type->shape_[0]);
+  CHECK(extent && extent->value_ >= kMinFFTSWorkspaceElements)
+      << "system.set_ffts workspace must have a static length of at least " << kMinFFTSWorkspaceElements
+      << " INT64 elements";
+  return GetUnknownType();
+}
 
 TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -55,8 +76,8 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
     if (key == "event_id") {
       const int event_id = AnyCast<int>(value, "kwarg key: event_id");
       CHECK(event_id >= 0 && event_id <= kMaxUserCrossCoreEventId)
-          << op_name << " event_id must be in the user-available range [0, "
-          << kMaxUserCrossCoreEventId << "], got " << event_id;
+          << op_name << " event_id must be in the user-available range [0, " << kMaxUserCrossCoreEventId
+          << "], got " << event_id;
       has_static_event_id = true;
     } else if (key == "pipe") {
       const int pipe = AnyCast<int>(value, "kwarg key: pipe");
@@ -66,8 +87,7 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
     } else if (key == "ffts_mode") {
       CHECK(allow_ffts_mode) << op_name << " does not support ffts_mode";
       const int ffts_mode = AnyCast<int>(value, "kwarg key: ffts_mode");
-      CHECK(ffts_mode >= 0 && ffts_mode <= 2)
-          << op_name << " ffts_mode must be in [0, 2], got " << ffts_mode;
+      CHECK(ffts_mode >= 0 && ffts_mode <= 2) << op_name << " ffts_mode must be in [0, 2], got " << ffts_mode;
     }
   }
 
@@ -89,6 +109,12 @@ TypePtr DeduceCrossCoreSyncType(const std::vector<ExprPtr>& args,
 // Registration Function for Cross-Core System Operations
 // (tile.tpush/tpop are registered in tile_ops/cross_core.cpp)
 // ============================================================================
+
+REGISTER_OP("system.set_ffts")
+    .set_description("Declare the A3 FFTS setup operand for explicit cross-core synchronization")
+    .set_op_category("CrossCoreOp")
+    .add_argument("workspace", "One-dimensional INT64 FFTS workspace")
+    .f_deduce_type(DeduceSetFFTSType);
 
 REGISTER_OP("system.sync_set")
     .set_description("Set an explicit cross-core synchronization event")

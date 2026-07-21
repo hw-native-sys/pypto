@@ -11,7 +11,7 @@
 
 System operations handle hardware synchronization and cross-core communication:
 - sync_src / sync_dst: Set/Wait flag-based synchronization between pipes
-- sync_set / sync_wait: Explicit Cube/Vector cross-core event synchronization
+- set_ffts / sync_set / sync_wait: Explicit Cube/Vector cross-core event synchronization
 - bar_v / bar_m / bar_all: Barrier synchronization for vector, matrix, or all units
 - tpush_to_aiv / tpush_to_aic: Push tile data across cores
 - tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
@@ -122,6 +122,27 @@ def sync_dst(
 
 
 _MAX_USER_CROSS_CORE_EVENT_ID = 13
+_MIN_FFTS_WORKSPACE_ELEMENTS = 256
+
+
+def set_ffts(workspace: Expr, *, span: Span | None = None) -> Call:
+    """Declare the A3 FFTS setup operand for explicit cross-core synchronization."""
+    workspace_type = workspace.type
+    if not isinstance(workspace_type, TensorType):
+        raise TypeError(f"system.set_ffts workspace must be a Tensor, got {workspace_type}")
+    if workspace_type.dtype != DataType.INT64:
+        raise TypeError(f"system.set_ffts workspace must have INT64 dtype, got {workspace_type.dtype}")
+    if len(workspace_type.shape) != 1:
+        raise ValueError(f"system.set_ffts workspace must be 1-D, got rank {len(workspace_type.shape)}")
+    workspace_size = workspace_type.shape[0]
+    if not isinstance(workspace_size, ConstInt) or workspace_size.value < _MIN_FFTS_WORKSPACE_ELEMENTS:
+        raise ValueError(
+            "system.set_ffts workspace must have a static length of at least "
+            f"{_MIN_FFTS_WORKSPACE_ELEMENTS} INT64 elements"
+        )
+
+    actual_span = _get_span_or_capture(span, frame_offset=2)
+    return _ir_core.create_op_call("system.set_ffts", [workspace], {}, actual_span)
 
 
 def _create_cross_core_sync_op(

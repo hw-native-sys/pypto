@@ -241,7 +241,9 @@ using namespace pto;
 def _preprocess_ptoas_output(content: str) -> str:
     """Strip includes/using and make functions static in ptoas output.
 
-    Removes the header lines that the wrapper already provides, and replaces
+    Removes the header lines that the wrapper already provides, drops PTOAS's
+    per-function FFTS base-address write because the A2/A3 persistent runtime
+    has already installed the device control address, and replaces
     ``__global__ AICORE void`` with ``static __aicore__ void`` so the wrapper's
     ``kernel_entry`` is the actual entry point.
     """
@@ -254,6 +256,8 @@ def _preprocess_ptoas_output(content: str) -> str:
         ):
             continue
         if stripped == "using namespace pto;":
+            continue
+        if stripped.startswith("set_ffts_base_addr("):
             continue
         filtered.append(line)
     result = "".join(filtered)

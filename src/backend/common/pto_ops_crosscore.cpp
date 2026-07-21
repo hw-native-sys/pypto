@@ -352,9 +352,9 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
       << op_name << " accepts at most one dynamic event-id operand, got " << op->args_.size();
 
   const int pipe_value = op->GetKwarg<int>("pipe", -1);
-  CHECK_SPAN(pipe_value >= static_cast<int>(ir::PipeType::MTE1) &&
-                 pipe_value <= static_cast<int>(ir::PipeType::ALL),
-             op->span_)
+  CHECK_SPAN(
+      pipe_value >= static_cast<int>(ir::PipeType::MTE1) && pipe_value <= static_cast<int>(ir::PipeType::ALL),
+      op->span_)
       << op_name << " requires a valid pipe attribute, got " << pipe_value;
 
   const bool has_static_event_id = op->HasKwarg("event_id");
@@ -376,8 +376,8 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
   }
 
   std::ostringstream oss;
-  oss << "pto.sync." << action << " <PIPE_"
-      << ir::PipeTypeToString(static_cast<ir::PipeType>(pipe_value)) << ">, " << event_code;
+  oss << "pto.sync." << action << " <PIPE_" << ir::PipeTypeToString(static_cast<ir::PipeType>(pipe_value))
+      << ">, " << event_code;
   if (op->HasKwarg("ffts_mode")) {
     CHECK_SPAN(std::string_view(action) == "set", op->span_) << op_name << " does not support ffts_mode";
     const int ffts_mode = op->GetKwarg<int>("ffts_mode", -1);
@@ -386,6 +386,24 @@ static std::string MakeCrossCoreSyncCodegenPTO(const char* action, const CallPtr
     oss << " {ffts_mode = " << ffts_mode << " : i32}";
   }
   codegen.Emit(oss.str());
+  return "";
+}
+
+static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK_SPAN(op->args_.size() == 1, op->span_)
+      << "system.set_ffts requires one workspace tensor, got " << op->args_.size();
+  auto workspace = As<ir::Var>(op->args_[0]);
+  CHECK_SPAN(workspace, op->span_) << "system.set_ffts workspace must be a tensor variable";
+  auto tensor_type = ir::AsTensorTypeLike(workspace->GetType());
+  CHECK_SPAN(tensor_type && tensor_type->dtype_ == DataType::INT64 && tensor_type->shape_.size() == 1,
+             op->span_)
+      << "system.set_ffts workspace must be a one-dimensional INT64 tensor";
+  auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
+  CHECK_SPAN(extent && extent->value_ >= 256, op->span_)
+      << "system.set_ffts workspace must have a static length of at least 256 INT64 elements";
+  codegen.Emit("pto.set_ffts " + codegen.GetVarName(workspace) + " : memref<" +
+               std::to_string(extent->value_) + "xi64>");
   return "";
 }
 
@@ -425,6 +443,9 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
   });
   reg("system.sync_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCrossCoreSyncCodegenPTO("wait", op, codegen);
+  });
+  reg("system.set_ffts", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSetFFTSCodegenPTO(op, codegen);
   });
 
   reg("system.reserve_buffer", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {

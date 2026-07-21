@@ -124,6 +124,8 @@ def _preprocess_ptoas_body(content: str) -> str:
             continue
         if s == "using namespace pto;":
             continue
+        if s.startswith("set_ffts_base_addr("):
+            continue
         filtered.append(line)
     result = "".join(filtered)
     result = re.sub(

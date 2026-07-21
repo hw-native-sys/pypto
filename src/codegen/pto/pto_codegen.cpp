@@ -322,6 +322,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// the ccec get_subblockid() register.
   [[nodiscard]] bool UsesSubblockOp() const { return uses_subblock_op_; }
 
+  [[nodiscard]] const std::set<const ir::Var*>& GetFFTSWorkspaceVars() const { return ffts_workspace_vars_; }
+
   void VisitExpr_(const VarPtr& op) override {
     if (iter_arg_ids_.count(op->UniqueId())) return;
     if (auto tile_type = ir::GetTileTypeWithMemRef(op->GetType())) {
@@ -343,6 +345,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_subblock_op_ && ir::IsOp(op, "tile.get_subblock_idx")) {
         uses_subblock_op_ = true;
       }
+      if (ir::IsOp(op, "system.set_ffts") && op->args_.size() == 1) {
+        if (auto workspace = As<ir::Var>(op->args_[0])) {
+          ffts_workspace_vars_.insert(workspace.get());
+        }
+      }
     }
     ir::IRVisitor::VisitExpr_(op);
   }
@@ -354,6 +361,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::set<uint64_t> iter_arg_ids_;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
+  std::set<const ir::Var*> ffts_workspace_vars_;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::Var* base_ptr = memref->base_.get();
@@ -589,6 +597,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
+  fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
   if (uses_spmd_params) {
     fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
     fs_.used_ssa_names.insert("__pypto_spmd_block_num");
@@ -702,7 +711,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     first_param = false;
     const auto& param = func->params_[tensor_param_indices[j]];
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
-    stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
+    if (fs_.ffts_workspace_vars.count(param.get()) > 0) {
+      auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
+      INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
+          << "FFTS workspace must be a statically sized INT64 tensor";
+      stream_ << "%arg" << j << ": memref<" << extent->value_ << "xi64>";
+    } else {
+      stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
+    }
   }
   for (size_t j = 0; j < scalar_param_indices.size(); j++) {
     if (!first_param) stream_ << ", ";
@@ -792,6 +808,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         RecordGMSlotBufferSSA(GetVarName(var), tensor_type->dtype_);
         continue;
       }
+      if (fs_.ffts_workspace_vars.count(var.get()) > 0) continue;
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
       // Remember the base pointer so mid-body pl.read/pl.write resolve to !pto.ptr
@@ -904,7 +921,8 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
-    if (param->name_hint_ == "__gm_pipe_buffer") continue;  // GM slot buffer is a raw pointer
+    if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
+    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a memref
 
     std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();

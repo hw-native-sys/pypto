@@ -43,6 +43,7 @@ __all__ = [
     "sync_dst",
     "sync_set",
     "sync_wait",
+    "set_ffts",
     "bar_v",
     "bar_m",
     "bar_all",
@@ -85,6 +86,13 @@ def sync_wait(
     """Wait for a Cube/Vector cross-core event using a static or dynamic event id."""
     event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.sync_wait(event_expr, pipe=pipe, span=span)
+
+
+def set_ffts(workspace: Tensor, *, span: Span | None = None) -> Call:
+    """Declare the A3 FFTS setup operand for explicit cross-core synchronization."""
+    if not isinstance(workspace, Tensor):
+        raise TypeError(f"set_ffts workspace must be a Tensor, got {type(workspace).__name__}")
+    return _ir_ops.set_ffts(workspace.unwrap(), span=span)
 
 
 _SYNCALL_SOFT_CORE_TYPES = ("aiv_only", "aic_only", "mix")

@@ -109,11 +109,38 @@ def test_cross_core_ops_registered():
         "system.aiv_initialize_pipe",
         "system.reserve_buffer",
         "system.import_peer_buffer",
+        "system.set_ffts",
         "system.sync_set",
         "system.sync_wait",
     ]
     for name in op_names:
         assert ir.is_op_registered(name), f"{name} should be registered"
+
+
+def test_set_ffts_accepts_a3_workspace_tensor():
+    """The FFTS setup op accepts a practical one-dimensional INT64 workspace."""
+    span = ir.Span.unknown()
+    workspace = ir.Var("ffts_workspace", ir.TensorType([256], DataType.INT64), span)
+
+    call = system_ops.set_ffts(workspace, span=span)
+
+    assert isinstance(call.type, ir.UnknownType)
+    assert call.args == [workspace]
+
+
+@pytest.mark.parametrize(
+    ("shape", "dtype", "message"),
+    [
+        ([255], DataType.INT64, "at least 256"),
+        ([256], DataType.INT32, "INT64"),
+        ([16, 16], DataType.INT64, "1-D"),
+    ],
+)
+def test_set_ffts_rejects_invalid_workspace(shape, dtype, message):
+    """Reject workspaces that PTOAS cannot use as its A3 FFTS backing store."""
+    workspace = ir.Var("ffts_workspace", ir.TensorType(shape, dtype), ir.Span.unknown())
+    with pytest.raises((TypeError, ValueError), match=message):
+        system_ops.set_ffts(workspace)
 
 
 def test_cross_core_sync_static_and_dynamic_event_ids():

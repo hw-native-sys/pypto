@@ -819,6 +819,7 @@ class PTOCodegen : public CodegenBase {
     std::string gm_slot_buffer_ssa;
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
+    std::set<const ir::Var*> ffts_workspace_vars;
 
     /// SSA names of the synthetic SPMD block_idx/block_num params, appended at
     /// the func.func signature tail. Empty when the current function does not
@@ -882,6 +883,7 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
+      ffts_workspace_vars.clear();
 
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();

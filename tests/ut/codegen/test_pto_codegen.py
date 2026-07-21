@@ -939,6 +939,16 @@ class TestPreprocessPtoasOutput:
         assert "TADDS(v2);" in result
         assert "TSTORE(v3);" in result
 
+    def test_drops_runtime_managed_ffts_base_write(self):
+        result = _preprocess_ptoas_output(
+            "AICORE void kernel(__gm__ int64_t* workspace) {\n"
+            "  set_ffts_base_addr((uint64_t) workspace);\n"
+            "  wait_flag_dev(3);\n"
+            "}\n"
+        )
+        assert "set_ffts_base_addr" not in result
+        assert "wait_flag_dev(3)" in result
+
     def test_preserves_helpers(self):
         result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
         assert "ptoas_bitcast" in result

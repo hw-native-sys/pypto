@@ -2736,6 +2736,26 @@ class TestCrossCoreSyncCodegen:
         assert "pto.sync.set <PIPE_MTE3>, 3 {ffts_mode = 1 : i32}" in mlir
         assert "pto.sync.wait <PIPE_MTE2>, 3" in mlir
 
+    def test_a3_ffts_workspace_setup(self):
+        """An FFTS tensor stays a memref and lowers to the required PTO setup op."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                ffts_workspace: pl.Tensor[[256], pl.INT64],
+                x: pl.Tensor[[16], pl.FP32],
+            ) -> pl.Tensor[[16], pl.FP32]:
+                pl.system.set_ffts(ffts_workspace)
+                pl.system.sync_wait(event_id=3, pipe=pl.PipeType.MTE2)
+                return x
+
+        mlir = self._generate_mlir(Prog)
+        assert "%arg0: memref<256xi64>" in mlir
+        assert "pto.set_ffts %arg0 : memref<256xi64>" in mlir
+        assert "ffts_workspace_view" not in mlir
+
     def test_dynamic_event_id(self):
         """An index scalar lowers to the PTO dynamic event-id operand."""
 

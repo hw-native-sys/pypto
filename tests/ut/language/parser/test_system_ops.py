@@ -76,6 +76,27 @@ class TestSystemOpsParsing:
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
+    def test_set_ffts_round_trip(self):
+        """The A3 FFTS workspace setup survives Python printing and reparsing."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                ffts_workspace: pl.Tensor[[256], pl.INT64],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.set_ffts(ffts_workspace)
+                pl.system.sync_wait(event_id=3, pipe=pl.PipeType.MTE2)
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.set_ffts(ffts_workspace)" in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
     def test_cross_core_sync_dynamic_round_trip(self):
         """An index SSA event id is printed as the dynamic sync operand."""
 
