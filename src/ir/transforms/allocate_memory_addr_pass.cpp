@@ -11,10 +11,14 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -39,8 +43,18 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#ifdef PYPTO_ENABLE_DSA_SOLVER
+#include "dsa/algorithms/pypto_structured_search_solver.h"
+#include "dsa/analysis/reuse_geometry.h"
+#include "dsa/model/model.h"
+#include "dsa/model/structured_problem.h"
+#include "dsa/model/validator.h"
+#include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
+#endif
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -286,6 +300,188 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   return memref_pairs;
 }
 
+#ifdef PYPTO_ENABLE_DSA_SOLVER
+std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
+    const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
+    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
+    const std::optional<std::string>& export_directory, const std::optional<std::string>& solution_directory,
+    DsaReusePenaltyRecognizer reuse_penalty_recognizer, DsaReferencePlacement reference_placement,
+    const std::optional<std::string>& reference_target) {
+  CHECK_SPAN(!reference_target || reference_placement == DsaReferencePlacement::Loose, func->span_)
+      << "dsa_reference_target requires the Loose reference endpoint";
+  const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
+  if (allocation_plan.intervals.empty()) return {};
+
+  std::unordered_map<MemorySpace, uint64_t> pool_caps;
+  if (backend::BackendConfig::IsConfigured()) {
+    const backend::Backend* active_backend = backend::GetBackend();
+    for (const LifetimeInterval& lifetime : allocation_plan.intervals) {
+      if (pool_caps.count(lifetime.memory_space) != 0) continue;
+      const uint64_t capacity = active_backend->GetMemSize(lifetime.memory_space);
+      if (capacity > 0) pool_caps[lifetime.memory_space] = capacity;
+    }
+  }
+
+  const dsa_adapter::ExportedProblem strict_exported = dsa_adapter::BuildStructuredProblem(
+      func, allocation_plan, policy, reserved_end_by_space, pool_caps, reuse_penalty_recognizer);
+  if (strict_exported.document.problem.buffers.empty()) return {};
+
+  ::dsa::PyptoStructuredSearchOptions search_options;
+  search_options.seed = 0;
+  search_options.max_iterations = 2'000;
+  search_options.restarts = 4;
+  search_options.stagnation_limit = 100;
+  dsa_adapter::ExportedProblem solved_exported = strict_exported;
+  dsa_adapter::SolverRun run;
+  bool pipeline_intent_relaxed = false;
+  size_t relaxed_separation_count = 0;
+  std::string solver_name;
+  if (solution_directory) {
+    CHECK_SPAN(reference_placement == DsaReferencePlacement::Default, func->span_)
+        << "DSA placement replay cannot be combined with a compact/loose reference endpoint";
+    const ::dsa::StructuredSolutionDocument replay =
+        dsa_adapter::ReadSolutionJson(strict_exported.document.instance, *solution_directory);
+    if (replay.problem_fingerprint == ::dsa::FingerprintStructuredProblem(strict_exported.document)) {
+      solved_exported.document = strict_exported.document;
+    } else {
+      const ::dsa::PipelineIntentRelaxation relaxation =
+          ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
+      CHECK_SPAN(replay.problem_fingerprint == ::dsa::FingerprintStructuredProblem(relaxation.document),
+                 func->span_)
+          << "DSA replay for '" << func->name_
+          << "' matches neither the strict recognized problem nor its pipeline-intent relaxation";
+      solved_exported.document = relaxation.document;
+      relaxed_separation_count = relaxation.relaxed_separation_count;
+    }
+    try {
+      run.result.solution = ::dsa::ValidateAndExtractStructuredSolution(solved_exported.document, replay);
+    } catch (const std::exception& exception) {
+      CHECK_SPAN(false, func->span_) << "DSA replay rejected the placement for '" << func->name_
+                                     << "': " << exception.what();
+    }
+    run.problem_errors = ::dsa::ValidateStructuredProblemDocument(solved_exported.document);
+    run.solution_errors = ::dsa::ValidateSolution(solved_exported.document.problem, *run.result.solution);
+    run.result.objective = ::dsa::EvaluateObjective(solved_exported.document.problem, *run.result.solution);
+    run.result.status =
+        run.solution_errors.empty() &&
+                ::dsa::EvaluateObjectiveMetric(solved_exported.document.problem, run.result.objective,
+                                               ::dsa::ObjectiveMetric::kCapacityOverflow) == 0
+            ? ::dsa::SolveStatus::kFeasible
+            : ::dsa::SolveStatus::kBestEffortNoFit;
+    solver_name = "replay";
+    if (solved_exported.document.metadata.count("pipeline_intent_policy") != 0 &&
+        solved_exported.document.metadata.at("pipeline_intent_policy") == "soft_after_strict_no_fit") {
+      pipeline_intent_relaxed =
+          !::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution).empty();
+    }
+  } else {
+    const ::dsa::PyptoStructuredSearchSolver solver(search_options);
+    run = dsa_adapter::SolveWithFirstFit(solved_exported);
+    solver_name = "first_fit";
+    const bool has_reuse_cost = solved_exported.document.problem.cost_model &&
+                                !solved_exported.document.problem.cost_model->reuse_penalties.empty();
+    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit || has_reuse_cost) {
+      // Invoke bounded structured search when first-fit cannot fit or when the
+      // objective contains costs that first-fit does not optimize.
+      run = dsa_adapter::Solve(solved_exported, solver);
+      solver_name = solver.Name();
+    }
+    if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
+      const ::dsa::PipelineIntentRelaxation relaxation =
+          ::dsa::BuildPipelineIntentRelaxation(strict_exported.document);
+      if (relaxation.relaxed_separation_count != 0) {
+        solved_exported.document = relaxation.document;
+        relaxed_separation_count = relaxation.relaxed_separation_count;
+        run = dsa_adapter::Solve(solved_exported, solver);
+        solver_name = solver.Name();
+        if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value()) {
+          // The relaxed search can occasionally discover a strict-feasible
+          // ordering that the first search missed. In that case retain the hard
+          // contract and do not report a performance degradation.
+          const std::vector<std::string> strict_errors =
+              ::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution);
+          if (strict_errors.empty()) {
+            solved_exported.document = strict_exported.document;
+          } else {
+            pipeline_intent_relaxed = true;
+          }
+        }
+      }
+    }
+  }
+
+  const bool reference_target_matches = !reference_target || *reference_target == func->name_;
+  const bool make_loose = reference_placement == DsaReferencePlacement::Loose && reference_target_matches;
+  if (make_loose && run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value() &&
+      run.solution_errors.empty()) {
+    const ::dsa::SparseReferenceResult sparse =
+        ::dsa::BuildSparseReferencePlacement(solved_exported.document.problem, *run.result.solution);
+    run.result.solution = sparse.solution;
+    run.solution_errors = ::dsa::ValidateSolution(solved_exported.document.problem, *run.result.solution);
+    run.result.objective = ::dsa::EvaluateObjective(solved_exported.document.problem, *run.result.solution);
+    run.result.status =
+        run.solution_errors.empty() &&
+                ::dsa::EvaluateObjectiveMetric(solved_exported.document.problem, run.result.objective,
+                                               ::dsa::ObjectiveMetric::kCapacityOverflow) == 0
+            ? ::dsa::SolveStatus::kFeasible
+            : ::dsa::SolveStatus::kBestEffortNoFit;
+    solver_name = "sparse_reference";
+    LOG_INFO << "[dsa] sparse reference for " << func->name_ << " reduced physical reuse pairs from "
+             << sparse.initial.pair_count << " to " << sparse.final.pair_count << " in "
+             << sparse.accepted_moves << " move(s)";
+  }
+  INTERNAL_CHECK_SPAN(run.problem_errors.empty(), func->span_)
+      << "DSA exporter produced an invalid pypto_structured problem for '" << func->name_
+      << "': " << run.problem_errors.front();
+
+  if (export_directory) {
+    const std::string output = dsa_adapter::WriteProblemJson(solved_exported, *export_directory);
+    LOG_INFO << "[dsa] exported " << func->name_ << " to " << output;
+    if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value() &&
+        run.solution_errors.empty()) {
+      std::map<std::string, std::string> solution_metadata{{"solver", solver_name}};
+      if (reference_placement != DsaReferencePlacement::Default) {
+        solution_metadata["reference_placement"] = make_loose ? "loose" : "compact";
+      }
+      if (reference_target) solution_metadata["reference_target"] = *reference_target;
+      const std::string solution_output = dsa_adapter::WriteSolutionJson(
+          solved_exported, *run.result.solution, *export_directory, solution_metadata);
+      LOG_INFO << "[dsa] exported selected placement for " << func->name_ << " to " << solution_output;
+    }
+  }
+
+  if (pipeline_intent_relaxed) {
+    std::ostringstream message;
+    message << "the DSA planner could not find a capacity-fitting placement that preserves all "
+            << relaxed_separation_count << " pipeline-stage separation(s) for '" << func->name_
+            << "'; it compiled with a soft pipeline-intent fallback that incurred reuse cost "
+            << run.result.objective.reuse_cost
+            << ". The generated program is correct, but software-pipeline overlap may be reduced.";
+    EmitDiagnostics({Diagnostic(DiagnosticSeverity::PerfHint, "AllocateMemoryAddr", 0, "PH-DSA-001",
+                                message.str(), func->span_)},
+                    "AllocateMemoryAddr");
+  }
+
+  CHECK_SPAN(run.compatibility.Compatible(), func->span_)
+      << "The selected standalone DSA solver cannot handle exported function '" << func->name_
+      << "' (unsupported feature/objective: "
+      << (!run.compatibility.unsupported_features.empty() ? run.compatibility.unsupported_features.front()
+                                                          : run.compatibility.unsupported_objectives.front())
+      << ")";
+  CHECK_SPAN(run.result.status == ::dsa::SolveStatus::kFeasible, func->span_)
+      << "The standalone DSA solver could not fit function '" << func->name_
+      << "' within its memory-pool capacities"
+      << (run.result.diagnostics.empty() ? std::string() : ": " + run.result.diagnostics.front());
+  INTERNAL_CHECK_SPAN(run.result.solution.has_value(), func->span_)
+      << "DSA solver reported feasible without returning a solution for '" << func->name_ << "'";
+  INTERNAL_CHECK_SPAN(run.solution_errors.empty(), func->span_)
+      << "Independent DSA validation rejected the solution for '" << func->name_
+      << "': " << run.solution_errors.front();
+
+  return dsa_adapter::BuildMemRefReplacements(solved_exported, *run.result.solution, memrefs, policy);
+}
+#endif
+
 /**
  * @brief Allocate real memory addresses for existing alloc operations
  *
@@ -311,8 +507,36 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
-  // Step 3: Allocate memory addresses using the policy
-  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);
+  const PassContext* context = PassContext::Current();
+  const MemoryPlanner memory_planner =
+      context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
+
+  // Step 3: either run the legacy bump allocator on MemoryReuse's groups or
+  // hand the pre-MemoryReuse allocation identities to the standalone solver.
+  std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
+  if (memory_planner == MemoryPlanner::Dsa) {
+#ifdef PYPTO_ENABLE_DSA_SOLVER
+    const std::optional<std::string> export_directory =
+        context == nullptr ? std::nullopt : context->GetDsaExportDir();
+    const std::optional<std::string> solution_directory =
+        context == nullptr ? std::nullopt : context->GetDsaSolutionDir();
+    const DsaReusePenaltyRecognizer reuse_penalty_recognizer =
+        context == nullptr ? DsaReusePenaltyRecognizer::Disabled : context->GetDsaReusePenaltyRecognizer();
+    const DsaReferencePlacement reference_placement =
+        context == nullptr ? DsaReferencePlacement::Default : context->GetDsaReferencePlacement();
+    const std::optional<std::string> reference_target =
+        context == nullptr ? std::nullopt : context->GetDsaReferenceTarget();
+    memref_pairs = PlanWithStandaloneDsa(func, *policy, reserve_resolution.reserved_end_by_space, memrefs,
+                                         export_directory, solution_directory, reuse_penalty_recognizer,
+                                         reference_placement, reference_target);
+#else
+    CHECK_SPAN(false, func->span_)
+        << "MemoryPlanner.DSA is unavailable in this build. Reconfigure PyPTO with "
+           "-DPYPTO_ENABLE_DSA_SOLVER=ON and a dsa-solver 0.10 CMake package.";
+#endif
+  } else {
+    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);
+  }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;

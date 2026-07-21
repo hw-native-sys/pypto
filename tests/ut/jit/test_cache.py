@@ -16,9 +16,16 @@ from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
 )
-from pypto.jit.decorator import _resolve_enable_pypto_l0c_double_buffer, _resolve_memory_planner
+from pypto.jit.decorator import (
+    _resolve_dsa_reference_placement,
+    _resolve_dsa_reference_target,
+    _resolve_dsa_reuse_penalty_recognizer,
+    _resolve_dsa_solution_dir,
+    _resolve_enable_pypto_l0c_double_buffer,
+    _resolve_memory_planner,
+)
 from pypto.pypto_core import DataType, passes
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime import RunConfig
 
 
@@ -64,6 +71,11 @@ class TestMakeCacheKey:
         analyze_auto_scopes_for_deps=False,
         memory_planner=None,
         enable_pypto_l0c_double_buffer=False,
+        dsa_solution_dir=None,
+        dsa_reuse_penalty_recognizer=None,
+        dsa_reference_placement=None,
+        dsa_reference_target=None,
+        ptoas_sync_summary_dir=None,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -78,6 +90,11 @@ class TestMakeCacheKey:
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            dsa_solution_dir=dsa_solution_dir,
+            dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+            dsa_reference_placement=dsa_reference_placement,
+            dsa_reference_target=dsa_reference_target,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
         )
 
     def test_basic_key_structure(self):
@@ -99,7 +116,19 @@ class TestMakeCacheKey:
             ("analyze_auto_scopes_for_deps", False),
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
+            ("dsa_solution_dir", None),
+            ("dsa_reuse_penalty_recognizer", None),
+            ("dsa_reference_placement", None),
+            ("dsa_reference_target", None),
+            ("ptoas_sync_summary_dir", None),
         )
+
+    def test_ptoas_sync_summary_directory_causes_miss(self):
+        without_summary = self._make_key()
+        with_summary = self._make_key(ptoas_sync_summary_dir="/tmp/sync-a")
+        other_summary = self._make_key(ptoas_sync_summary_dir="/tmp/sync-b")
+        assert without_summary != with_summary
+        assert with_summary != other_summary
 
     def test_tensor_shape_in_key(self):
         key = self._make_key(
@@ -397,6 +426,28 @@ class TestMakeCacheKey:
         )
         assert key_off != key_on, "dbC=2 opt-in must split the cache key"
 
+    def test_dsa_solution_directory_splits_key(self):
+        key_a = self._make_key(dsa_solution_dir="/tmp/placement-a")
+        key_b = self._make_key(dsa_solution_dir="/tmp/placement-b")
+        assert key_a != key_b
+
+    def test_dsa_reuse_recognizer_splits_key(self):
+        key_disabled = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.DISABLED)
+        key_quadratic = self._make_key(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
+        assert key_disabled != key_quadratic
+
+    def test_dsa_reference_endpoint_and_target_split_key(self):
+        compact = self._make_key(dsa_reference_placement=DsaReferencePlacement.COMPACT)
+        loose_a = self._make_key(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="kernel_a",
+        )
+        loose_b = self._make_key(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="kernel_b",
+        )
+        assert len({compact, loose_a, loose_b}) == 3
+
 
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
@@ -436,6 +487,49 @@ class TestResolveEnablePyptoL0cDoubleBuffer:
         assert cfg.memory_planner is None
         with passes.PassContext([], memory_planner=MemoryPlanner.PTOAS):
             assert _resolve_memory_planner(cfg) == MemoryPlanner.PTOAS
+
+
+class TestResolveDsaSolutionDir:
+    def test_reads_run_config_or_active_context(self):
+        cfg = RunConfig(dsa_solution_dir="/tmp/config-solutions")
+        assert _resolve_dsa_solution_dir(cfg) == "/tmp/config-solutions"
+        with passes.PassContext([], dsa_solution_dir="/tmp/context-solutions"):
+            assert _resolve_dsa_solution_dir(None) == "/tmp/context-solutions"
+
+
+class TestResolveDsaReusePenaltyRecognizer:
+    def test_defaults_to_disabled(self):
+        assert _resolve_dsa_reuse_penalty_recognizer(None) == DsaReusePenaltyRecognizer.DISABLED
+
+    def test_run_config_wins_and_unset_config_defers_to_context(self):
+        explicit = RunConfig(dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC)
+        unset = RunConfig()
+        with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.DISABLED):
+            assert _resolve_dsa_reuse_penalty_recognizer(explicit) == DsaReusePenaltyRecognizer.QUADRATIC
+        with passes.PassContext([], dsa_reuse_penalty_recognizer=DsaReusePenaltyRecognizer.QUADRATIC):
+            assert _resolve_dsa_reuse_penalty_recognizer(unset) == DsaReusePenaltyRecognizer.QUADRATIC
+
+
+class TestResolveDsaReferencePlacement:
+    def test_run_config_wins_and_unset_config_defers_to_context(self):
+        explicit = RunConfig(
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="run_config_target",
+        )
+        unset = RunConfig()
+        with passes.PassContext(
+            [],
+            dsa_reference_placement=DsaReferencePlacement.COMPACT,
+        ):
+            assert _resolve_dsa_reference_placement(explicit) == DsaReferencePlacement.LOOSE
+            assert _resolve_dsa_reference_target(explicit) == "run_config_target"
+        with passes.PassContext(
+            [],
+            dsa_reference_placement=DsaReferencePlacement.LOOSE,
+            dsa_reference_target="context_target",
+        ):
+            assert _resolve_dsa_reference_placement(unset) == DsaReferencePlacement.LOOSE
+            assert _resolve_dsa_reference_target(unset) == "context_target"
 
 
 if __name__ == "__main__":

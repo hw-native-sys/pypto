@@ -17,8 +17,9 @@ Memory planning distinguishes two kinds of buffer sharing:
 
 This pass handles only the **must-alias** case. It was split out of
 [`MemoryReuse`](30-memory_reuse.md) (it is that pass's former "Step 0") so that
-the opportunistic lifetime coalescing can be skipped independently — e.g. when
-ptoas owns lifetime reuse under `compile(memory_planner=MemoryPlanner.PTOAS)`.
+the opportunistic lifetime coalescing can be skipped independently — either
+when ptoas owns planning under `MemoryPlanner.PTOAS`, or when the standalone
+solver jointly chooses reuse and offsets under `MemoryPlanner.DSA`.
 
 **When to use**: Run after [`InitMemRef`](28-init_memref.md) (which creates the
 MemRefs) and before [`MemoryReuse`](30-memory_reuse.md). It always runs; only the
@@ -49,6 +50,11 @@ its own fresh MemRef. This pass closes that gap:
    view inputs). `IfStmt` return values are retargeted into both branch yields.
 2. **Apply retype** (`RetypeApplier`): rewrite the collected variable types in
    place so the producer writes directly into the carried buffer.
+3. **Reconcile remaining external-planner carries** (`YieldFixupMutator`): when
+   `MemoryReuse` is skipped, insert explicit moves for producer/view shapes that
+   cannot be retargeted safely. PTOAS materializes loop-carry moves here and
+   handles if-phi copies in its addr-less codegen. DSA emits explicit addresses,
+   so it materializes both if-phi and loop-carry moves before lifetime export.
 
 The pass is a no-op when there is nothing to retarget (`Compute` returns no
 rewrites), and skips `Orchestration` functions (no TileType variables).
@@ -63,6 +69,10 @@ outs(%acc)` rather than writing to a distinct `%acc_next` buffer. Under
 what lets ptoas `PlanMemory` keep the accumulator in one buffer while still
 doing the lifetime reuse and address assignment itself. See
 [PTO Codegen — Who plans memory](../codegen/00-pto_codegen.md).
+
+DSA cannot use the PTOAS-only codegen repair because its level-3 PTO contains
+explicit addresses. Its if-phi copies therefore remain ordinary IR operations,
+participate in DSA lifetime analysis, and are validated with the placement.
 
 ## Notes
 

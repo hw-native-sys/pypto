@@ -77,6 +77,11 @@ include_directories(${CMAKE_SOURCE_DIR})
 include(${CMAKE_SOURCE_DIR}/cmake/libbacktrace.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/msgpack.cmake)
 
+option(PYPTO_ENABLE_DSA_SOLVER "Enable the standalone dsa-solver memory planner" OFF)
+if(PYPTO_ENABLE_DSA_SOLVER)
+    find_package(dsa-solver 0.10 CONFIG REQUIRED)
+endif()
+
 # PyPTO core sources
 set(PYPTO_SOURCES
     # Core
@@ -305,6 +310,12 @@ set(PYPTO_SOURCES
     src/backend/common/pto_ops_distributed.cpp
     src/backend/common/soc.cpp
 )
+
+if(PYPTO_ENABLE_DSA_SOLVER)
+    list(APPEND PYPTO_SOURCES
+        src/ir/transforms/dsa/memref_dsa_adapter.cpp
+        src/ir/transforms/dsa/reuse_penalty_recognizer.cpp)
+endif()
 
 # Include Python bindings
 add_subdirectory(python/bindings)

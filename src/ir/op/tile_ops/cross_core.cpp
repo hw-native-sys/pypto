@@ -279,6 +279,7 @@ REGISTER_OP("tile.aiv_shard")
     .add_argument("tile", "Tile data to shard (TileType, 2D)")
     .set_attr<int>("split")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSplitReshape(args, kwargs, "tile.aiv_shard", /*halve=*/true);
@@ -291,6 +292,7 @@ REGISTER_OP("tile.aic_gather")
     .add_argument("tile", "Tile data to gather (TileType, 2D)")
     .set_attr<int>("split")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSplitReshape(args, kwargs, "tile.aic_gather", /*halve=*/false);

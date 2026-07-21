@@ -41,9 +41,9 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 26 | `26-canonicalize_io_order.md` | 26th pass |
 | 27 | `27-materialize_tensor_strides.md` | 27th pass (RFC #1300 P3 — wired into Default starting from P6) |
 | 28 | `28-init_memref.md` | 28th pass |
-| 29 | `29-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
-| 30 | `30-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
-| 31 | `31-allocate_memory_addr.md` | 31st pass (skippable under `memory_planner=PTOAS`) |
+| 29 | `29-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` or `DSA` |
+| 30 | `30-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` or `DSA` |
+| 31 | `31-allocate_memory_addr.md` | 31st pass; skipped under `memory_planner=PTOAS`, and acts as the standalone export/solve/validate/writeback boundary under `DSA` |
 | 32 | `32-fold_no_op_reshape.md` | 32nd pass |
 | 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
 | 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |

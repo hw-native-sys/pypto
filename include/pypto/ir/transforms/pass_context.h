@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -244,6 +245,31 @@ class DiagnosticInstrument : public PassInstrument {
 enum class MemoryPlanner {
   PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
   PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+  Dsa,    ///< Standalone DSA solver allocates unmerged PyPTO buffers (level3)
+};
+
+/**
+ * @brief Experimental recognizer used to derive DSA soft reuse edges.
+ *
+ * Disabled is the production default. Quadratic is a coverage-first research
+ * reference that scans every lifetime-compatible allocation pair.
+ */
+enum class DsaReusePenaltyRecognizer {
+  Disabled,
+  Quadratic,
+};
+
+/**
+ * @brief Experimental placement endpoint for controlled DSA studies.
+ *
+ * Default preserves the selected solver placement. Compact records that same
+ * baseline explicitly. Loose greedily spreads lifetime-compatible allocation
+ * classes within capacity after the normal solution has been validated.
+ */
+enum class DsaReferencePlacement {
+  Default,
+  Compact,
+  Loose,
 };
 
 class PassContext {
@@ -267,13 +293,28 @@ class PassContext {
    *        device validation). No effect under PtoAS, which already emits dbC=2
    *        unconditionally. When true, AutoTileMatmulL0 emits two co-live L0C
    *        accumulators and MemoryReuse's capacity gate allocates the ping-pong.
+   * @param dsa_export_dir Optional directory for deterministic schema-v1
+   *        ``pypto_structured`` problems emitted by MemoryPlanner::Dsa.
+   * @param dsa_solution_dir Optional directory containing versioned DSA
+   *        solution artifacts to replay instead of invoking a solver.
+   * @param dsa_reuse_penalty_recognizer Experimental recognizer used to derive
+   *        soft reuse edges. Disabled by default; Quadratic is research-only.
+   * @param dsa_reference_placement Experimental compact/loose endpoint used for
+   *        controlled placement studies.
+   * @param dsa_reference_target Optional exact function name to which Loose is
+   *        applied. Other functions retain the compact baseline.
    */
-  explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic,
-                       DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
-                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
-                       bool enable_pypto_l0c_double_buffer = false);
+  explicit PassContext(
+      std::vector<PassInstrumentPtr> instruments,
+      VerificationLevel verification_level = VerificationLevel::Basic,
+      DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
+      DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
+      MemoryPlanner memory_planner = MemoryPlanner::PyPTO, bool enable_pypto_l0c_double_buffer = false,
+      std::optional<std::string> dsa_export_dir = std::nullopt,
+      std::optional<std::string> dsa_solution_dir = std::nullopt,
+      DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled,
+      DsaReferencePlacement dsa_reference_placement = DsaReferencePlacement::Default,
+      std::optional<std::string> dsa_reference_target = std::nullopt);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -338,6 +379,27 @@ class PassContext {
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 
   /**
+   * @brief Get the optional standalone DSA corpus export directory
+   */
+  [[nodiscard]] const std::optional<std::string>& GetDsaExportDir() const;
+
+  /**
+   * @brief Get the optional standalone DSA placement replay directory
+   */
+  [[nodiscard]] const std::optional<std::string>& GetDsaSolutionDir() const;
+
+  /**
+   * @brief Get the experimental DSA reuse-penalty recognizer.
+   */
+  [[nodiscard]] DsaReusePenaltyRecognizer GetDsaReusePenaltyRecognizer() const;
+
+  /** @brief Get the experimental compact/loose DSA endpoint. */
+  [[nodiscard]] DsaReferencePlacement GetDsaReferencePlacement() const;
+
+  /** @brief Get the optional exact function selected for a Loose endpoint. */
+  [[nodiscard]] const std::optional<std::string>& GetDsaReferenceTarget() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -363,6 +425,11 @@ class PassContext {
   DiagnosticCheckSet disabled_diagnostics_;
   MemoryPlanner memory_planner_;
   bool enable_pypto_l0c_double_buffer_;
+  std::optional<std::string> dsa_export_dir_;
+  std::optional<std::string> dsa_solution_dir_;
+  DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer_;
+  DsaReferencePlacement dsa_reference_placement_;
+  std::optional<std::string> dsa_reference_target_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

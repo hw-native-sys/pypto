@@ -68,6 +68,11 @@ target_link_libraries(${LIBRARY_NAME} PRIVATE
     msgpackc-cxx
 )
 
+if(PYPTO_ENABLE_DSA_SOLVER)
+    target_compile_definitions(${LIBRARY_NAME} PRIVATE PYPTO_ENABLE_DSA_SOLVER=1)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE dsa::solver)
+endif()
+
 # Handle installation based on build mode
 if(SKBUILD_MODE)
     # scikit-build-core: install to the wheel

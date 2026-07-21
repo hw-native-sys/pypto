@@ -13,10 +13,13 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -157,8 +160,35 @@ void BindPass(nb::module_& m) {
   nb::enum_<MemoryPlanner>(passes, "MemoryPlanner", "Selects who plans on-chip buffer memory")
       .value("PYPTO", MemoryPlanner::PyPTO,
              "PyPTO's AllocateMemoryAddr bakes physical addresses (ptoas --pto-level=level3)")
+      .value("DSA", MemoryPlanner::Dsa,
+             "Standalone DSA solver jointly reuses and places unmerged PyPTO buffers (level3)")
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
+
+  nb::enum_<DsaReusePenaltyRecognizer>(passes, "DsaReusePenaltyRecognizer",
+                                       "Selects experimental DSA soft-edge recognition")
+      .value("DISABLED", DsaReusePenaltyRecognizer::Disabled, "Do not recognize soft reuse edges")
+      .value("QUADRATIC", DsaReusePenaltyRecognizer::Quadratic,
+             "Coverage-first research reference over all lifetime-compatible allocation pairs");
+
+  nb::enum_<DsaReferencePlacement>(passes, "DsaReferencePlacement",
+                                   "Experimental endpoint for compact/loose DSA studies")
+      .value("DEFAULT", DsaReferencePlacement::Default, "Use the normal selected DSA placement")
+      .value("COMPACT", DsaReferencePlacement::Compact,
+             "Label the normal selected DSA placement as the compact baseline")
+      .value("LOOSE", DsaReferencePlacement::Loose,
+             "Greedily reduce physical reuse within capacity after normal DSA solving");
+
+  passes.def(
+      "is_dsa_solver_available",
+      []() {
+#ifdef PYPTO_ENABLE_DSA_SOLVER
+        return true;
+#else
+        return false;
+#endif
+      },
+      "Return whether this PyPTO build includes the standalone DSA solver adapter");
 
   // Bind DiagnosticPhase enum
   nb::enum_<DiagnosticPhase>(passes, "DiagnosticPhase",
@@ -281,15 +311,21 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool>(),
+                    MemoryPlanner, bool, std::optional<std::string>, std::optional<std::string>,
+                    DsaReusePenaltyRecognizer, DsaReferencePlacement, std::optional<std::string>>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
-           nb::arg("enable_pypto_l0c_double_buffer") = false,
+           nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("dsa_export_dir") = nb::none(),
+           nb::arg("dsa_solution_dir") = nb::none(),
+           nb::arg("dsa_reuse_penalty_recognizer") = DsaReusePenaltyRecognizer::Disabled,
+           nb::arg("dsa_reference_placement") = DsaReferencePlacement::Default,
+           nb::arg("dsa_reference_target") = nb::none(),
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, memory planner selection, and the experimental "
-           "PyPTO-planner L0C double-buffer (dbC=2) opt-in")
+           "optional disabled diagnostic checks, memory planner selection, the experimental "
+           "PyPTO-planner L0C double-buffer opt-in, DSA export directory, and DSA solution replay "
+           "directory")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -307,6 +343,16 @@ void BindPass(nb::module_& m) {
            "Get the memory planner selection for this context")
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
            "Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner")
+      .def("get_dsa_export_dir", &PassContext::GetDsaExportDir,
+           "Get the optional standalone DSA corpus export directory")
+      .def("get_dsa_solution_dir", &PassContext::GetDsaSolutionDir,
+           "Get the optional standalone DSA placement replay directory")
+      .def("get_dsa_reuse_penalty_recognizer", &PassContext::GetDsaReusePenaltyRecognizer,
+           "Get the experimental DSA soft-edge recognizer")
+      .def("get_dsa_reference_placement", &PassContext::GetDsaReferencePlacement,
+           "Get the experimental compact/loose DSA endpoint")
+      .def("get_dsa_reference_target", &PassContext::GetDsaReferenceTarget,
+           "Get the optional exact function selected for a loose DSA endpoint")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

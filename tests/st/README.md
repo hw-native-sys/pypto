@@ -153,6 +153,10 @@ The test framework provides extensive configuration through pytest command-line 
 | `--platform` | `a2a3` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
 | `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `DebugTileOptimization` |
+| `--memory-planner` | `pypto` | Suite-wide on-chip planner: `pypto`, `dsa`, or `ptoas`. The DSA choice requires a DSA-enabled build. |
+| `--dsa-export-dir` | unset | Base directory for deterministic DSA corpus exports, partitioned by test and platform. |
+| `--dsa-solution-dir` | unset | Base directory for fingerprinted DSA placement replay, using the same test/platform partitioning. |
+| `--ptoas-sync-summary-dir` | unset | Base directory for one machine-readable PTOAS InsertSync JSONL summary per codegen unit. |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
 | `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
@@ -176,9 +180,23 @@ pytest tests/st/ -v --forked --save-kernels --dump-passes
 # Generate code without running (for code inspection)
 pytest tests/st/ -v --forked --codegen-only --save-kernels
 
+# Run the full suite through the standalone DSA planner and record instances
+pytest tests/st/ -v --forked --memory-planner=dsa --dsa-export-dir=build/dsa-corpus
+
+# Replay those exact placements, or matching alternatives produced by dsa-bench
+pytest tests/st/ -v --forked --memory-planner=dsa --dsa-solution-dir=build/dsa-corpus
+
+# Record downstream synchronization for a replayed placement
+pytest tests/st/ -v --forked --memory-planner=dsa \
+  --dsa-solution-dir=build/placement-a \
+  --ptoas-sync-summary-dir=build/sync-a
+
 # Combine multiple options
 pytest tests/st/ -v --forked --platform=a2a3sim --save-kernels --dump-passes
 ```
+
+The synchronization-summary option requires a PTOAS build that provides
+`--pto-insert-sync-summary`.
 
 ## Advanced Usage
 

@@ -1266,6 +1266,13 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
         "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
+        "memory_planner": run_config.memory_planner,
+        "dsa_export_dir": run_config.dsa_export_dir,
+        "dsa_solution_dir": run_config.dsa_solution_dir,
+        "dsa_reuse_penalty_recognizer": run_config.dsa_reuse_penalty_recognizer,
+        "dsa_reference_placement": run_config.dsa_reference_placement,
+        "dsa_reference_target": run_config.dsa_reference_target,
+        "ptoas_sync_summary_dir": run_config.ptoas_sync_summary_dir,
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
@@ -1306,6 +1313,42 @@ def _resolve_enable_pypto_l0c_double_buffer() -> bool:
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False
+
+
+def _resolve_dsa_solution_dir(run_config: Any) -> str | None:
+    """Resolve the placement replay directory that changes generated addresses."""
+    if run_config is not None and run_config.dsa_solution_dir is not None:
+        return run_config.dsa_solution_dir
+    ctx = _passes.PassContext.current()
+    return ctx.get_dsa_solution_dir() if ctx is not None else None
+
+
+def _resolve_dsa_reuse_penalty_recognizer(run_config: Any) -> _passes.DsaReusePenaltyRecognizer:
+    """Resolve the recognizer because it changes exported costs and placement."""
+    if run_config is not None and run_config.dsa_reuse_penalty_recognizer is not None:
+        return run_config.dsa_reuse_penalty_recognizer
+    ctx = _passes.PassContext.current()
+    if ctx is not None:
+        return ctx.get_dsa_reuse_penalty_recognizer()
+    return _passes.DsaReusePenaltyRecognizer.DISABLED
+
+
+def _resolve_dsa_reference_placement(run_config: Any) -> _passes.DsaReferencePlacement:
+    """Resolve the compact/loose endpoint because it changes physical addresses."""
+    if run_config is not None and run_config.dsa_reference_placement is not None:
+        return run_config.dsa_reference_placement
+    ctx = _passes.PassContext.current()
+    if ctx is not None:
+        return ctx.get_dsa_reference_placement()
+    return _passes.DsaReferencePlacement.DEFAULT
+
+
+def _resolve_dsa_reference_target(run_config: Any) -> str | None:
+    """Resolve the exact function selected for a loose endpoint."""
+    if run_config is not None and run_config.dsa_reference_target is not None:
+        return run_config.dsa_reference_target
+    ctx = _passes.PassContext.current()
+    return ctx.get_dsa_reference_target() if ctx is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -1789,6 +1832,11 @@ class JITFunction:
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            dsa_solution_dir=_resolve_dsa_solution_dir(run_config),
+            dsa_reuse_penalty_recognizer=_resolve_dsa_reuse_penalty_recognizer(run_config),
+            dsa_reference_placement=_resolve_dsa_reference_placement(run_config),
+            dsa_reference_target=_resolve_dsa_reference_target(run_config),
+            ptoas_sync_summary_dir=(run_config.ptoas_sync_summary_dir if run_config is not None else None),
         )
 
         # L1 cache lookup
@@ -2132,6 +2180,11 @@ class JITFunction:
             # from an ambient PassContext — which still changes the artifact.
             memory_planner=_resolve_memory_planner(None),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
+            dsa_solution_dir=_resolve_dsa_solution_dir(None),
+            dsa_reuse_penalty_recognizer=_resolve_dsa_reuse_penalty_recognizer(None),
+            dsa_reference_placement=_resolve_dsa_reference_placement(None),
+            dsa_reference_target=_resolve_dsa_reference_target(None),
+            ptoas_sync_summary_dir=None,
         )
 
         # Populate cache via ir.compile() (codegen included) as a best-effort

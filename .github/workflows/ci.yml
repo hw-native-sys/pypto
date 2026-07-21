@@ -93,6 +93,26 @@ jobs:
       with:
         submodules: true
 
+    - name: Checkout dsa-solver
+      uses: actions/checkout@v4
+      with:
+        repository: tonibohnlein/dsa-solver
+        ref: 40665f073404fe508be3b8bcdeb57e13efaf9646
+        path: dsa-solver
+        submodules: false
+
+    - name: Checkout dsa-solver dependencies
+      working-directory: dsa-solver
+      run: |
+        for attempt in 1 2 3 4 5; do
+          if git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1; then
+            exit 0
+          fi
+          echo "Submodule checkout attempt ${attempt} failed; retrying"
+          sleep $((attempt * 5))
+        done
+        exit 1
+
     - name: Fetch base branch for diff
       if: github.event_name == 'pull_request'
       run: git fetch origin ${{ github.base_ref }} --depth=1
@@ -109,15 +129,32 @@ jobs:
         PIP_CACHE_DIR: /root/.cache/pip
       run: |
         VERSION=$(python -c "import sys; sys.path.insert(0, 'tests/lint'); from clang_tidy import REQUIRED_VERSION; print(REQUIRED_VERSION)")
-        python -m pip install --retries 5 --timeout 60 "clang-tidy==${VERSION}"
+        python -m pip install --retries 5 --timeout 60 "clang-tidy==${VERSION}" nanobind
         clang-tidy --version
+
+    - name: Configure DSA-enabled compile database
+      run: |
+        cmake -S dsa-solver -B dsa-solver/build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DDSA_ENABLE_MINIMALLOC_BASELINE=OFF \
+          -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/dsa-install"
+        cmake --build dsa-solver/build --parallel 2
+        cmake --install dsa-solver/build
+        DSA_SOLVER_DIR="$(dirname "$(find "$RUNNER_TEMP/dsa-install" -name dsa-solver-config.cmake -print -quit)")"
+        test -f "$DSA_SOLVER_DIR/dsa-solver-config.cmake"
+        cmake -S . -B "$RUNNER_TEMP/pypto-clang-tidy" \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+          -DPYPTO_ENABLE_DSA_SOLVER=ON \
+          -Ddsa-solver_DIR="$DSA_SOLVER_DIR" \
+          -Dnanobind_DIR="$(python -c 'import nanobind; print(nanobind.cmake_dir())')"
+        cmake --build "$RUNNER_TEMP/pypto-clang-tidy" --target project_libbacktrace --parallel 2
 
     - name: Run clang-tidy
       run: |
         if [ "${{ github.event_name }}" = "pull_request" ]; then
-          python tests/lint/clang_tidy.py --strict-version --jobs=$(nproc) --diff-base=origin/${{ github.base_ref }}
+          python tests/lint/clang_tidy.py --strict-version --jobs=2 -B "$RUNNER_TEMP/pypto-clang-tidy" --diff-base=origin/${{ github.base_ref }}
         else
-          python tests/lint/clang_tidy.py --strict-version --jobs=$(nproc)
+          python tests/lint/clang_tidy.py --strict-version --jobs=2 -B "$RUNNER_TEMP/pypto-clang-tidy"
         fi
 
   unit-tests:
@@ -164,6 +201,61 @@ jobs:
 
     - name: Test unit tests (${{ matrix.ut_label }})
       run: pytest ${{ matrix.ut_paths }} -n auto --maxprocesses 8 -v
+
+  dsa-integration-tests:
+    # The normal wheel intentionally keeps the optional adapter disabled. This
+    # job builds the public solver package first, enables the adapter, and runs
+    # the exporter/solver/validator/writeback tests with bounded parallelism.
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+    - name: Checkout PyPTO
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Checkout dsa-solver
+      uses: actions/checkout@v4
+      with:
+        repository: tonibohnlein/dsa-solver
+        ref: 40665f073404fe508be3b8bcdeb57e13efaf9646
+        path: dsa-solver
+        submodules: false
+    - name: Checkout dsa-solver dependencies
+      working-directory: dsa-solver
+      run: |
+        for attempt in 1 2 3 4 5; do
+          if git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1; then
+            exit 0
+          fi
+          echo "Submodule checkout attempt ${attempt} failed; retrying"
+          sleep $((attempt * 5))
+        done
+        exit 1
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Build and install dsa-solver
+      run: |
+        cmake -S dsa-solver -B dsa-solver/build -DCMAKE_BUILD_TYPE=Release -DDSA_ENABLE_MINIMALLOC_BASELINE=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/dsa-install"
+        cmake --build dsa-solver/build --parallel 2
+        cmake --install dsa-solver/build
+    - name: Install DSA-enabled PyPTO
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        DSA_SOLVER_DIR="$(dirname "$(find "$RUNNER_TEMP/dsa-install" -name dsa-solver-config.cmake -print -quit)")"
+        test -f "$DSA_SOLVER_DIR/dsa-solver-config.cmake"
+        CMAKE_ARGS="-DPYPTO_ENABLE_DSA_SOLVER=ON -Ddsa-solver_DIR=$DSA_SOLVER_DIR" pip install -v .[dev]
+    - name: Test DSA adapter integration
+      run: >-
+        pytest tests/ut/codegen/test_memory_planner_switch.py
+        tests/ut/ir/transforms/test_allocate_memory_addr_pass.py
+        tests/ut/runtime/test_run_config.py::TestRunConfigCompileForwarding
+        tests/ut/jit/test_decorator.py::TestCompileKwargForwarding
+        -n 2 -v
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going

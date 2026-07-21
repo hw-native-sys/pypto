@@ -15,12 +15,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -45,6 +47,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -56,16 +59,8 @@
 namespace pypto {
 namespace ir {
 
-/**
- * @brief Lifetime interval for a TileType variable (based on topological order)
- */
-struct LifetimeInterval {
-  VarPtr variable;           ///< The variable
-  int def_point;             ///< Definition point (topological order)
-  int last_use_point;        ///< Last use point (topological order)
-  MemorySpace memory_space;  ///< Memory space
-  uint64_t size;             ///< Size in bytes
-};
+// LifetimeInterval now lives in utils/lifetime_analysis.h so the DSA adapter can
+// consume the same per-allocation intervals this pass computes.
 
 namespace {
 
@@ -1304,8 +1299,6 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
       continue;
     }
 
-    const auto& memref = tile_type->memref_.value();
-
     std::vector<VarPtr> sharing_group;
     if (var_sharing_groups.count(var)) {
       sharing_group = var_sharing_groups[var];
@@ -1316,6 +1309,7 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     // Compute MERGED lifetime for all variables in the sharing group
     int min_def_point = INT_MAX;
     int max_last_use = INT_MIN;
+    uint64_t max_size = 0;
 
     for (const auto& group_var : sharing_group) {
       int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
@@ -1325,6 +1319,12 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
+
+      auto group_tile_type = As<TileType>(group_var->GetType());
+      INTERNAL_CHECK_SPAN(group_tile_type != nullptr && group_tile_type->memref_.has_value(),
+                          group_var->span_)
+          << "Expected every allocation sharing-group member to carry a MemRef";
+      max_size = std::max(max_size, group_tile_type->memref_.value()->size_);
     }
 
     LifetimeInterval interval;
@@ -1338,7 +1338,11 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     INTERNAL_CHECK_SPAN(memory_space.has_value(), sharing_group[0]->span_)
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
-    interval.size = memref->size_;
+    interval.size = max_size;
+    interval.alias_members.reserve(sharing_group.size());
+    for (const auto& group_var : sharing_group) {
+      interval.alias_members.push_back(group_var->name_hint_);
+    }
 
     lifetimes.push_back(interval);
 
@@ -1666,7 +1670,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const FunctionPtr& func,
-    std::vector<Diagnostic>* out_hints) {
+    std::vector<Diagnostic>* out_hints,
+    std::map<std::pair<MemorySpace, int32_t>, int32_t>* out_pipeline_depths = nullptr) {
   std::map<VarPtr, VarPtr> reuse_map;
 
   // Members of a sharing group (the vars that already physically share one base).
@@ -2131,6 +2136,17 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
       }
       out_hints->emplace_back(DiagnosticSeverity::PerfHint, "MemoryReuse", 0, "PH-MR-001", msg.str(),
                               func ? func->span_ : Span::unknown());
+    }
+  }
+
+  if (out_pipeline_depths != nullptr) {
+    *out_pipeline_depths = group_depth;
+    // A pathological shed-budget exhaustion switches the whole space to the
+    // legacy predicate. That predicate has no single residue count, so export
+    // the conservative depth-one contract instead of claiming depths that the
+    // dry-run packer did not realize.
+    for (auto& [key, depth] : *out_pipeline_depths) {
+      if (force_legacy_spaces.count(key.first) != 0) depth = 1;
     }
   }
 
@@ -2829,26 +2845,28 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     new_body = applier.VisitStmt(new_body);
   }
 
-  // Under memory_planner=PtoAS the whole MemoryReuse pass is skipped, and with it
-  // YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
+  // Under memory_planner=PtoAS or Dsa the whole MemoryReuse pass is skipped, and
+  // with it YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
   // loop yields a value living in a different buffer than its iter_arg/return_var,
   // it inserts the `tile.move` that writes the result back into the carry. Without
   // it the carry is never updated and the loop silently becomes a no-op — the
   // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
   // because its branch producer runs on a `[1, N]` view in its own buffer.
   //
-  // Run it here so both planners reconcile carries by the same mechanism. Under
-  // PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
-  // can themselves create fresh mismatches.
+  // Run it here so both external planners reconcile carries. Under PyPTO it stays
+  // where it is: Step 4 must run *after* the reuse decisions, which can themselves
+  // create fresh mismatches.
   //
-  // Only the ForStmt half: PTO codegen already re-points a branch-local producer
-  // at the if-phi handle, and copies in whatever it declines to re-point
-  // (#1956/#1985). An IR-level `tile.move` there would displace that copy-free
-  // path with an extra buffer plus a `pto.tmov`. Loop carries have no such
-  // codegen path, so they still need the move.
+  // PTOAS needs only the ForStmt half: its addr-less codegen re-points a
+  // branch-local producer at the if-phi handle and copies in whatever it declines
+  // to re-point (#1956/#1985). DSA emits explicit addresses, so that codegen path
+  // is disabled; DSA must materialize both IfStmt and ForStmt fixups in the IR
+  // before lifetime export and placement.
   const auto* ctx = PassContext::Current();
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
-    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
+  if (ctx != nullptr &&
+      (ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
+    const bool fixup_if_stmts = ctx->GetMemoryPlanner() == MemoryPlanner::Dsa;
+    YieldFixupMutator yield_fixup(fixup_if_stmts);
     new_body = yield_fixup.VisitStmt(new_body);
   }
 
@@ -2960,6 +2978,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 6: Strip the now-consumed pipeline_membership attr so it does not ride
   // downstream into later passes / codegen. It was only needed to carry stage
   // identity from LowerPipelineLoops to the reuse decision above.
+  //
+  // MemoryPlanner::Dsa skips this pass entirely, so the adapter still sees the
+  // membership provenance. Every invocation that actually runs MemoryReuse has
+  // consumed the tag and strips it before downstream passes/codegen.
   new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
@@ -2969,6 +2991,159 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+// Shared entry point (see utils/lifetime_analysis.h): the DSA adapter reuses the
+// exact per-allocation intervals + pipeline-clone separations this pass computes,
+// so both plan from identical liveness. ComputeLifetimes has internal linkage but
+// is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
+AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
+  auto analysis = ComputeLifetimes(func->body_);
+  AllocationPlan plan;
+  plan.intervals = std::move(analysis.lifetimes);
+  const auto& intervals = plan.intervals;
+
+  // The portable schema represents hard exclusions as explicit index pairs.
+  // Build them through indices so the analysis is output-sensitive:
+  // O(N log N + E log E), where E is the number of pairs emitted.
+  std::map<std::pair<size_t, size_t>, std::set<AllocationSeparationReason>> separation_reasons;
+  auto add_separation = [&separation_reasons](size_t first, size_t second,
+                                              AllocationSeparationReason reason) {
+    if (first == second) return;
+    if (second < first) std::swap(first, second);
+    separation_reasons[{first, second}].insert(reason);
+  };
+
+  // Allocation base_ Ptr -> interval index, for resolving forbid-alias operands.
+  std::unordered_map<const Var*, size_t> base_to_index;
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto mr = GetTypeMemRef(intervals[i].variable->GetType());
+    if (mr.has_value() && mr.value()) base_to_index[mr.value()->base_.get()] = i;
+  }
+
+  HazardInputs hazard;
+  if (NeedsLoadTpopHazardGuard(func)) {
+    HazardInputCollector collector;
+    collector.VisitStmt(func->body_);
+    hazard = collector.Take();
+  }
+  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  const ForbidAliasMap forbid_alias = forbid_collector.Take();
+
+  // (1) Pipeline double-buffer separations. Export the full requested pipeline
+  // intent first: every distinct source stage gets its own residue and remains
+  // hard-separated from every other stage in the group. Capacity pressure is
+  // handled by an explicit second solve that relaxes only these typed edges.
+  const auto& pm = analysis.pipeline_membership;
+  {
+    using GroupKey = std::pair<MemorySpace, int32_t>;
+    std::map<GroupKey, uint64_t> group_slot;  // (space, group) -> max member size
+    // (space, group) -> stage -> interval indices. Bucketing by stage/residue
+    // avoids scanning unrelated allocations or same-residue pairs.
+    std::map<GroupKey, std::map<int32_t, std::vector<size_t>>> group_members;
+    for (size_t index = 0; index < intervals.size(); ++index) {
+      const LifetimeInterval& iv = intervals[index];
+      auto it = pm.find(iv.variable.get());
+      if (it == pm.end()) continue;
+      for (const auto& [g, st] : it->second) {
+        const GroupKey key{iv.memory_space, g};
+        group_slot[key] = std::max(group_slot[key], iv.size);
+        group_members[key][st].push_back(index);
+      }
+    }
+
+    for (const auto& [key, members_by_stage] : group_members) {
+      INTERNAL_CHECK(members_by_stage.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+          << "Pipeline group has too many distinct stages for DSA export";
+      const int32_t depth = static_cast<int32_t>(members_by_stage.size());
+      const uint64_t slot = group_slot[key];
+
+      std::map<int32_t, std::vector<size_t>> members_by_residue;
+      PipelineAllocationGroup exported_group;
+      exported_group.memory_space = key.first;
+      exported_group.group = key.second;
+      exported_group.slot_size = slot;
+      exported_group.depth = static_cast<uint32_t>(depth);
+      exported_group.effective_depth = static_cast<uint32_t>(depth);
+      int32_t ord = 0;
+      for (const auto& [stage, members] : members_by_stage) {
+        const int32_t residue = ord++;
+        auto& bucket = members_by_residue[residue];
+        bucket.insert(bucket.end(), members.begin(), members.end());
+        for (size_t index : members) {
+          exported_group.members.push_back({index, stage, static_cast<uint32_t>(residue)});
+        }
+      }
+      plan.pipeline_groups.push_back(std::move(exported_group));
+
+      for (auto first_bucket = members_by_residue.begin(); first_bucket != members_by_residue.end();
+           ++first_bucket) {
+        auto second_bucket = first_bucket;
+        ++second_bucket;
+        for (; second_bucket != members_by_residue.end(); ++second_bucket) {
+          for (size_t first : first_bucket->second) {
+            for (size_t second : second_bucket->second) {
+              add_separation(first, second, AllocationSeparationReason::PipelineStage);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // (2) Ascend910B split-AIV load + tpop_from_aic in-place hazard (backend-gated;
+  // empty off-910B). Directional: a writer whose def coincides with a load-derived
+  // input's last use, and which consumes a tpop value, must not reuse that input.
+  if (NeedsLoadTpopHazardGuard(func)) {
+    std::map<int, std::vector<size_t>> writers_by_def;
+    std::map<int, std::vector<size_t>> inputs_by_last_use;
+    for (size_t i = 0; i < intervals.size(); ++i) {
+      const LifetimeInterval& interval = intervals[i];
+      if (hazard.reads_tpop.count(interval.variable.get()) != 0) {
+        writers_by_def[interval.def_point].push_back(i);
+      }
+      if (hazard.load_derived.count(interval.variable.get()) != 0) {
+        inputs_by_last_use[interval.last_use_point].push_back(i);
+      }
+    }
+    for (const auto& [point, writers] : writers_by_def) {
+      auto inputs = inputs_by_last_use.find(point);
+      if (inputs == inputs_by_last_use.end()) continue;
+      for (size_t writer : writers) {
+        for (size_t input : inputs->second) {
+          add_separation(writer, input, AllocationSeparationReason::TargetHazard);
+        }
+      }
+    }
+  }
+
+  // (3) Op-semantic forbid-alias (e.g. tile.sel mask/tmp vs output). The collector
+  // maps a writer's representative to the operand Vars its buffer must avoid; each
+  // operand resolves (via base_ identity — no reuse chain exists pre-solve) to an
+  // allocation, which is kept apart from the writer.
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    auto fa = forbid_alias.find(intervals[i].variable.get());
+    if (fa == forbid_alias.end()) continue;
+    for (const VarPtr& operand : fa->second) {
+      auto mr = GetTypeMemRef(operand->GetType());
+      if (!mr.has_value() || !mr.value()) continue;
+      auto bit = base_to_index.find(mr.value()->base_.get());
+      if (bit != base_to_index.end()) {
+        add_separation(i, bit->second, AllocationSeparationReason::SemanticNoAlias);
+      }
+    }
+  }
+
+  plan.separations.reserve(separation_reasons.size());
+  for (const auto& [indices, reasons] : separation_reasons) {
+    AllocationSeparation separation;
+    separation.first = indices.first;
+    separation.second = indices.second;
+    separation.reasons.assign(reasons.begin(), reasons.end());
+    plan.separations.push_back(std::move(separation));
+  }
+  return plan;
+}
 
 namespace pass {
 Pass MaterializeSemanticAliases() {

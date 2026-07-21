@@ -53,7 +53,7 @@ def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> B
     raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
 
 
-def compile(  # noqa: PLR0913
+def compile(  # noqa: PLR0912, PLR0913, PLR0915
     program: _ir_core.Program,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
@@ -70,6 +70,12 @@ def compile(  # noqa: PLR0913
     distributed_config: Any = None,
     block_dim: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
+    dsa_reuse_penalty_recognizer: _passes.DsaReusePenaltyRecognizer | None = None,
+    dsa_reference_placement: _passes.DsaReferencePlacement | None = None,
+    dsa_reference_target: str | None = None,
+    ptoas_sync_summary_dir: str | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -109,11 +115,31 @@ def compile(  # noqa: PLR0913
             semantics-required aliasing (loop-carried accumulators, in-place ops)
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
+            ``MemoryPlanner.DSA`` skips only ``MemoryReuse`` and hands the
+            unmerged, semantics-normalized allocations to the standalone DSA
+            solver before validating and writing addresses back.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
             under the PyPTO memory planner (experimental, default off). ``None``
             inherits the setting from an active outer ``PassContext`` (else
             ``False``); has no effect under ``PTOAS``, which already emits dbC=2
             unconditionally.
+        dsa_export_dir: Optional directory for deterministic
+            ``pypto_structured`` schema-v1 JSON problems. This is valid only
+            with ``MemoryPlanner.DSA``.
+        dsa_solution_dir: Optional directory containing fingerprinted DSA
+            solution artifacts. When set, ``MemoryPlanner.DSA`` validates and
+            replays the recorded placement instead of invoking a solver.
+        dsa_reuse_penalty_recognizer: Experimental soft-edge recognizer used
+            with ``MemoryPlanner.DSA``. ``QUADRATIC`` is the coverage-first
+            research reference over all compatible pairs.
+        dsa_reference_placement: Experimental controlled-placement endpoint.
+            ``COMPACT`` retains the normal DSA result; ``LOOSE`` greedily
+            reduces physical reuse within capacity in the same compilation.
+        dsa_reference_target: Optional exact function name to which ``LOOSE``
+            applies. Sibling functions retain their compact placement.
+        ptoas_sync_summary_dir: Optional directory for one machine-readable
+            InsertSync JSONL summary per PTOAS codegen unit. This is
+            instrumentation only and does not change placement or codegen.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -182,6 +208,31 @@ def compile(  # noqa: PLR0913
             "compile() was called with memory_planner while a PassContext is already active. "
             "Set the memory planner on the existing PassContext instead."
         )
+    if dsa_export_dir is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_export_dir while a PassContext is already active. "
+            "Set the DSA export directory on the existing PassContext instead."
+        )
+    if dsa_solution_dir is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_solution_dir while a PassContext is already active. "
+            "Set the DSA solution directory on the existing PassContext instead."
+        )
+    if dsa_reuse_penalty_recognizer is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_reuse_penalty_recognizer while a PassContext is already active. "
+            "Set the recognizer on the existing PassContext instead."
+        )
+    if dsa_reference_placement is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_reference_placement while a PassContext is already active. "
+            "Set the reference placement on the existing PassContext instead."
+        )
+    if dsa_reference_target is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with dsa_reference_target while a PassContext is already active. "
+            "Set the reference target on the existing PassContext instead."
+        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -213,6 +264,21 @@ def compile(  # noqa: PLR0913
             if enable_pypto_l0c_double_buffer is not None
             else outer.get_enable_pypto_l0c_double_buffer()
         )
+        export_dir = dsa_export_dir if dsa_export_dir is not None else outer.get_dsa_export_dir()
+        solution_dir = dsa_solution_dir if dsa_solution_dir is not None else outer.get_dsa_solution_dir()
+        reuse_recognizer = (
+            dsa_reuse_penalty_recognizer
+            if dsa_reuse_penalty_recognizer is not None
+            else outer.get_dsa_reuse_penalty_recognizer()
+        )
+        reference_placement = (
+            dsa_reference_placement
+            if dsa_reference_placement is not None
+            else outer.get_dsa_reference_placement()
+        )
+        reference_target = (
+            dsa_reference_target if dsa_reference_target is not None else outer.get_dsa_reference_target()
+        )
     else:
         vlevel = (
             verification_level if verification_level is not None else _passes.get_default_verification_level()
@@ -221,7 +287,48 @@ def compile(  # noqa: PLR0913
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
+        export_dir = dsa_export_dir
+        solution_dir = dsa_solution_dir
+        reuse_recognizer = (
+            dsa_reuse_penalty_recognizer
+            if dsa_reuse_penalty_recognizer is not None
+            else _passes.DsaReusePenaltyRecognizer.DISABLED
+        )
+        reference_placement = (
+            dsa_reference_placement
+            if dsa_reference_placement is not None
+            else _passes.DsaReferencePlacement.DEFAULT
+        )
+        reference_target = dsa_reference_target
+    if export_dir is not None and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_export_dir requires memory_planner=MemoryPlanner.DSA")
+    if solution_dir is not None and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_solution_dir requires memory_planner=MemoryPlanner.DSA")
+    if reuse_recognizer != _passes.DsaReusePenaltyRecognizer.DISABLED and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_reuse_penalty_recognizer requires memory_planner=MemoryPlanner.DSA")
+    if reference_placement != _passes.DsaReferencePlacement.DEFAULT and mplan != _passes.MemoryPlanner.DSA:
+        raise ValueError("dsa_reference_placement requires memory_planner=MemoryPlanner.DSA")
+    if reference_target is not None and reference_placement != _passes.DsaReferencePlacement.LOOSE:
+        raise ValueError("dsa_reference_target requires dsa_reference_placement=DsaReferencePlacement.LOOSE")
+    if reference_target == "":
+        raise ValueError("dsa_reference_target must be a non-empty exact function name")
+    if solution_dir is not None and reference_placement != _passes.DsaReferencePlacement.DEFAULT:
+        raise ValueError("dsa_solution_dir cannot be combined with dsa_reference_placement")
+    if ptoas_sync_summary_dir is not None and skip_ptoas:
+        raise ValueError("ptoas_sync_summary_dir requires PTOAS code generation (skip_ptoas=False)")
+    ctx = _passes.PassContext(
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        mplan,
+        dbc_flag,
+        export_dir,
+        solution_dir,
+        reuse_recognizer,
+        reference_placement,
+        reference_target,
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -231,6 +338,11 @@ def compile(  # noqa: PLR0913
             "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
             "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
             "resolution are deferred to ptoas — verify on-device."
+        )
+    elif mplan == _passes.MemoryPlanner.DSA:
+        logger.info(
+            "memory_planner=DSA: skipping opportunistic MemoryReuse; the standalone solver "
+            "jointly chooses reuse and offsets, then PyPTO validates and writes them back."
         )
 
     def _stage(name: str) -> AbstractContextManager[Any]:
@@ -258,6 +370,7 @@ def compile(  # noqa: PLR0913
                     skip_ptoas=skip_ptoas,
                     block_dim=block_dim,
                     memory_planner=mplan,
+                    ptoas_sync_summary_dir=ptoas_sync_summary_dir,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

@@ -259,26 +259,24 @@ class PassManager:
         self.strategy = strategy
         self.analyze_auto_scopes_for_deps = analyze_auto_scopes_for_deps
 
-        # When the active PassContext selects ptoas as the memory planner, skip
-        # the opportunistic lifetime reuse (MemoryReuse) and address assignment
-        # (AllocateMemoryAddr) so ptoas PlanMemory owns them (codegen emits no
-        # `pto.alloc_tile addr` and ptoas runs at --pto-level=level2).
-        # MaterializeSemanticAliases still runs, so semantics-required aliasing
-        # (loop-carried accumulators, in-place ops) is preserved as a shared
-        # MemRef that codegen renders as one tile_buf handle — ptoas cannot
-        # recover that from independent addr-less allocs. Read here because
-        # __init__ runs inside the compile() PassContext (see compile.py).
+        # MemoryReuse is planner-owned: PTOAS skips both PyPTO memory passes,
+        # while DSA skips only MemoryReuse and uses AllocateMemoryAddr as its
+        # export/solve/validate/writeback boundary. MaterializeSemanticAliases
+        # always runs first, preserving correctness-required buffer identity.
+        # Read here because __init__ runs inside compile()'s PassContext.
         ctx = passes.PassContext.current()
         # The construction-time planner fixes the pass LIST (MemoryReuse +
-        # AllocateMemoryAddr are dropped only for PTOAS). PTOAS-gated pass *behaviour*
-        # (AutoTileMatmulL0's dbC=2) reads the planner again at execution time, so
-        # run_passes re-asserts the run-time planner still matches this one — otherwise a
-        # PassManager built outside PTOAS but run inside a PTOAS context would keep
-        # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
-        # into one shrunk single-buffer tile (see _check_planner_consistency).
+        # AllocateMemoryAddr are planner-dependent). Planner-gated pass behaviour reads
+        # the active context again at execution time, so run_passes re-asserts the
+        # run-time planner still matches this one (see _check_planner_consistency).
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
-        skip_mem_planning = self._construction_planner == passes.MemoryPlanner.PTOAS
-        _mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
+        # PTOAS owns both reuse and address assignment. DSA needs PyPTO's
+        # AllocateMemoryAddr pass as its adapter/writeback boundary, but it must
+        # see the unmerged allocation identities, so only MemoryReuse is skipped.
+        skipped_memory_passes = {
+            passes.MemoryPlanner.PTOAS: {"MemoryReuse", "AllocateMemoryAddr"},
+            passes.MemoryPlanner.DSA: {"MemoryReuse"},
+        }.get(self._construction_planner, set())
 
         # The C++ pipeline is the single source of truth for both pass objects
         # and names. Strategy recipes contain factories only; names always come
@@ -290,7 +288,7 @@ class PassManager:
         )
         for pass_factory in pass_factories:
             pass_obj = pass_factory()
-            if skip_mem_planning and pass_obj.get_name() in _mem_planning_passes:
+            if pass_obj.get_name() in skipped_memory_passes:
                 continue
             self._pipeline.add_pass(pass_obj)
 
@@ -457,13 +455,32 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
+        dsa_solution_dir = ctx.get_dsa_solution_dir() if ctx else None
+        reuse_recognizer = (
+            ctx.get_dsa_reuse_penalty_recognizer() if ctx else passes.DsaReusePenaltyRecognizer.DISABLED
+        )
+        reference_placement = (
+            ctx.get_dsa_reference_placement() if ctx else passes.DsaReferencePlacement.DEFAULT
+        )
+        reference_target = ctx.get_dsa_reference_target() if ctx else None
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
         else:
             inner_phase = outer_phase
 
         with passes.PassContext(
-            [*outer_instruments, *extra_instruments], level, inner_phase, disabled, mplan, dbc_flag
+            [*outer_instruments, *extra_instruments],
+            level,
+            inner_phase,
+            disabled,
+            mplan,
+            dbc_flag,
+            dsa_export_dir,
+            dsa_solution_dir,
+            reuse_recognizer,
+            reference_placement,
+            reference_target,
         ):
             try:
                 return self._pipeline.run(input_ir)
@@ -500,6 +517,15 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        dsa_export_dir = ctx.get_dsa_export_dir() if ctx else None
+        dsa_solution_dir = ctx.get_dsa_solution_dir() if ctx else None
+        reuse_recognizer = (
+            ctx.get_dsa_reuse_penalty_recognizer() if ctx else passes.DsaReusePenaltyRecognizer.DISABLED
+        )
+        reference_placement = (
+            ctx.get_dsa_reference_placement() if ctx else passes.DsaReferencePlacement.DEFAULT
+        )
+        reference_target = ctx.get_dsa_reference_target() if ctx else None
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
         else:
@@ -507,7 +533,17 @@ class PassManager:
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
         with passes.PassContext(
-            [*outer_instruments, timing_instrument], level, dphase, disabled, mplan, dbc_flag
+            [*outer_instruments, timing_instrument],
+            level,
+            dphase,
+            disabled,
+            mplan,
+            dbc_flag,
+            dsa_export_dir,
+            dsa_solution_dir,
+            reuse_recognizer,
+            reference_placement,
+            reference_target,
         ):
             try:
                 return self._pipeline.run(input_ir)

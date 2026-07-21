@@ -794,6 +794,7 @@ REGISTER_OP("tile.create")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
     .set_attr<bool>("flat_layout")
+    .no_execution_memory_access()
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")

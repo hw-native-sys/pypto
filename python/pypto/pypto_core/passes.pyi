@@ -97,7 +97,24 @@ class MemoryPlanner(Enum):
     """Selects who plans on-chip buffer memory."""
 
     PYPTO = ...
+    DSA = ...
     PTOAS = ...
+
+class DsaReusePenaltyRecognizer(Enum):
+    """Selects experimental DSA soft-edge recognition."""
+
+    DISABLED = ...
+    QUADRATIC = ...
+
+class DsaReferencePlacement(Enum):
+    """Selects an experimental compact/loose DSA placement endpoint."""
+
+    DEFAULT = ...
+    COMPACT = ...
+    LOOSE = ...
+
+def is_dsa_solver_available() -> bool:
+    """Return whether this build includes the standalone DSA solver adapter."""
 
 class DiagnosticPhase(Enum):
     """Controls when DiagnosticInstrument runs registered checks (warnings + perf hints)."""
@@ -273,12 +290,19 @@ class PassContext:
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
+        dsa_export_dir: str | None = None,
+        dsa_solution_dir: str | None = None,
+        dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer = DsaReusePenaltyRecognizer.DISABLED,
+        dsa_reference_placement: DsaReferencePlacement = DsaReferencePlacement.DEFAULT,
+        dsa_reference_target: str | None = None,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
         ``enable_pypto_l0c_double_buffer`` opts in to L0C double-buffering (dbC=2)
         under the PyPTO memory planner (experimental, default off; no effect under
         PtoAS, which already emits dbC=2).
+        ``dsa_export_dir`` optionally retains schema-v1 inputs under the DSA planner.
+        ``dsa_solution_dir`` replays fingerprinted placements instead of solving.
         """
         ...
 
@@ -307,6 +331,26 @@ class PassContext:
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
         """Whether L0C double-buffering (dbC=2) is enabled under the PyPTO memory planner."""
+        ...
+
+    def get_dsa_export_dir(self) -> str | None:
+        """Get the optional standalone DSA corpus export directory."""
+        ...
+
+    def get_dsa_solution_dir(self) -> str | None:
+        """Get the optional standalone DSA placement replay directory."""
+        ...
+
+    def get_dsa_reuse_penalty_recognizer(self) -> DsaReusePenaltyRecognizer:
+        """Get the experimental DSA soft-edge recognizer."""
+        ...
+
+    def get_dsa_reference_placement(self) -> DsaReferencePlacement:
+        """Get the experimental compact/loose DSA endpoint."""
+        ...
+
+    def get_dsa_reference_target(self) -> str | None:
+        """Get the exact function selected for a loose DSA endpoint."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -833,6 +877,9 @@ __all__ = [
     "VerificationMode",
     "VerificationLevel",
     "MemoryPlanner",
+    "DsaReusePenaltyRecognizer",
+    "DsaReferencePlacement",
+    "is_dsa_solver_available",
     "DiagnosticPhase",
     "DiagnosticCheck",
     "DiagnosticCheckSet",

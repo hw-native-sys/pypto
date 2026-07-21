@@ -284,23 +284,21 @@ Based on TileType variables collected from the function body. Each tile variable
 
 #### Who plans memory: `compile(memory_planner=...)`
 
-Who assigns the physical `addr` is selected by the `memory_planner` option
-(`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`, default
-`PYPTO`). It threads to both the pass pipeline (via `PassContext`) and codegen:
+Who assigns the physical `addr` is selected by `memory_planner` (`PYPTO`, `DSA`,
+or `PTOAS`; default `PYPTO`) and threads to the pass pipeline and codegen:
 
 | Mode | Pipeline | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | -------- | ---------------- | -------------------- | ----- |
 | `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
+| `DSA` (optional build) | runs `MaterializeSemanticAliases`; skips `MemoryReuse`; `AllocateMemoryAddr` exports, solves, validates, and writes back | emits the validated `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
 | `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
-Memory planning is split into two passes: **`MaterializeSemanticAliases`**
-forces *semantics-required* aliasing (loop-carried accumulators, in-place ops)
-to share one MemRef, while **`MemoryReuse`** does *opportunistic* lifetime-based
-coalescing of independent buffers. `InitMemRef` + `MaterializeSemanticAliases`
-run in both modes, so the must-alias buffers survive; in `PTOAS` mode codegen
-renders those shared MemRefs as a single `tile_buf` handle with an in-place
-`outs(%acc)`, and ptoas `PlanMemory` (which `level2` requires, rejecting any
-`addr` operand) does the lifetime reuse and address assignment.
+`MaterializeSemanticAliases` preserves mandatory loop-carry and in-place aliases
+in every mode. `PYPTO` then coalesces independent buffers in `MemoryReuse`; `DSA`
+solves the unmerged identities; `PTOAS` renders shared MemRefs as one `tile_buf`
+and delegates reuse and addresses to `PlanMemory`. In `DSA` mode,
+`dsa_export_dir` retains the validated schema-v1 input. See
+[AllocateMemoryAddr](../passes/31-allocate_memory_addr.md) for setup and limits.
 
 > **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
 > hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution

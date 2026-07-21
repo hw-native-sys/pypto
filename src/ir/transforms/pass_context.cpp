@@ -16,6 +16,7 @@
 #include <fstream>
 #include <ios>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -304,13 +305,23 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
                          DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
-                         MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer)
+                         MemoryPlanner memory_planner, bool enable_pypto_l0c_double_buffer,
+                         std::optional<std::string> dsa_export_dir,
+                         std::optional<std::string> dsa_solution_dir,
+                         DsaReusePenaltyRecognizer dsa_reuse_penalty_recognizer,
+                         DsaReferencePlacement dsa_reference_placement,
+                         std::optional<std::string> dsa_reference_target)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
       memory_planner_(memory_planner),
       enable_pypto_l0c_double_buffer_(enable_pypto_l0c_double_buffer),
+      dsa_export_dir_(std::move(dsa_export_dir)),
+      dsa_solution_dir_(std::move(dsa_solution_dir)),
+      dsa_reuse_penalty_recognizer_(dsa_reuse_penalty_recognizer),
+      dsa_reference_placement_(dsa_reference_placement),
+      dsa_reference_target_(std::move(dsa_reference_target)),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -318,6 +329,18 @@ VerificationLevel PassContext::GetVerificationLevel() const { return verificatio
 MemoryPlanner PassContext::GetMemoryPlanner() const { return memory_planner_; }
 
 bool PassContext::GetEnablePyptoL0cDoubleBuffer() const { return enable_pypto_l0c_double_buffer_; }
+
+const std::optional<std::string>& PassContext::GetDsaExportDir() const { return dsa_export_dir_; }
+
+const std::optional<std::string>& PassContext::GetDsaSolutionDir() const { return dsa_solution_dir_; }
+
+DsaReusePenaltyRecognizer PassContext::GetDsaReusePenaltyRecognizer() const {
+  return dsa_reuse_penalty_recognizer_;
+}
+
+DsaReferencePlacement PassContext::GetDsaReferencePlacement() const { return dsa_reference_placement_; }
+
+const std::optional<std::string>& PassContext::GetDsaReferenceTarget() const { return dsa_reference_target_; }
 
 DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phase_; }
 
