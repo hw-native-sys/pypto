@@ -2403,6 +2403,97 @@ class TestTileMoveAccNoopElision:
         )
 
 
+class TestTileMoveLayoutNoopElision:
+    """Same-addr tile.move must keep pto.tmov when layouts differ.
+
+    Complements #1310 (acc→acc same-layout elision): A5 V→C may co-locate an ND
+    cast result and an NZ ``*_nz`` adapt at one Vec address. Eliding that tmov
+    drops the fractal adapt and leaves TPUSH RowMajor vs AIC ColMajor.
+    Build IR with a shared MemRef so codegen sees same space+addr without relying
+    on MemoryReuse (which now gates layout coalescing).
+    """
+
+    @staticmethod
+    def _vec_tile_move_program(*, dst_view: ir.TileView | None, name: str) -> ir.Program:
+        span = ir.Span.unknown()
+        size = 64
+        nbytes = size * size * 2  # BF16
+        byte_offset_zero = ir.ConstInt(0, DataType.INT64, span)
+        shared = ir.MemRef(ir.MemorySpace.Vec, byte_offset_zero, nbytes, 0)
+
+        inp = ir.Var("inp", ir.TensorType([size, size], DataType.BF16), span)
+        out = ir.Var("out", ir.TensorType([size, size], DataType.BF16), span)
+
+        src_ty = ir.TileType([size, size], DataType.BF16, shared, None, ir.MemorySpace.Vec)
+        dst_ty = ir.TileType([size, size], DataType.BF16, shared, dst_view, ir.MemorySpace.Vec)
+        src = ir.Var("src_nd", src_ty, span)
+        dst = ir.Var("dst_layout", dst_ty, span)
+        result = ir.Var("result", ir.TensorType([size, size], DataType.BF16), span)
+
+        zero = ir.ConstInt(0, DataType.INDEX, span)
+        dim = ir.ConstInt(size, DataType.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([dim, dim], span)
+
+        load = ir.Call(ir.Op("tile.load"), [inp, offsets, shapes], {}, src_ty, span)
+        move = ir.Call(
+            ir.Op("tile.move"),
+            [src],
+            {"target_memory": ir.MemorySpace.Vec},
+            dst_ty,
+            span,
+        )
+        store = ir.Call(ir.Op("tile.store"), [dst, offsets, out], result.type, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.SeqStmts(
+                    [
+                        ir.AssignStmt(src, load, span),
+                        ir.AssignStmt(dst, move, span),
+                        ir.AssignStmt(result, store, span),
+                    ],
+                    span,
+                ),
+                ir.ReturnStmt([result], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            name,
+            [(inp, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+            [ir.TensorType([size, size], DataType.BF16)],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        return ir.Program([func], f"{name}_program", span)
+
+    @staticmethod
+    def _generate_mlir(program: ir.Program) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        return codegen.PTOCodegen().generate(program)
+
+    def test_same_addr_different_layout_emits_tmov(self):
+        """ND→NZ at one Vec address must still emit pto.tmov (not elide)."""
+        nz = ir.TileView(
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        mlir = self._generate_mlir(self._vec_tile_move_program(dst_view=nz, name="move_nd_to_nz_same_addr"))
+        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
+        assert tmovs, f"same-addr ND→NZ tile.move must emit pto.tmov (layout adapt); got none in:\n{mlir}"
+        assert any("loc=vec" in ln for ln in tmovs), f"expected vec→vec tmov, got:\n{tmovs}"
+
+    def test_same_addr_same_layout_elides_tmov(self):
+        """Same space+addr+layout tile.move remains a no-op (elide pto.tmov)."""
+        mlir = self._generate_mlir(self._vec_tile_move_program(dst_view=None, name="move_nd_to_nd_same_addr"))
+        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
+        assert not tmovs, f"same-addr same-layout tile.move must elide pto.tmov; got:\n{tmovs}\nfull:\n{mlir}"
+
+
 class TestTileStoreAtomicCodegen:
     """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""
 

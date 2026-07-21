@@ -30,6 +30,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -485,6 +486,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
   // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
   // unsupported same-space address pairs (fixes #1310).
+  //
+  // Do NOT elide when TileView layouts differ (e.g. A5 V→C ND→NZ adapt before
+  // tpush_to_aic). MemoryReuse may still co-locate the *_nz tile with the cast
+  // result at the same Vec addr; eliding then drops the real tmov and TPUSH keeps
+  // RowMajor while AIC TPOP expects Mat ColMajor — silent numerical FAIL.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
@@ -515,11 +521,19 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
           auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
           auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
           if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
-            // Alias the destination to the source SSA value so downstream
-            // references use the source's defined buffer, not the destination's
-            // alloc_tile (which would be unwritten after eliding the tmov).
-            codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
-            return std::string("");  // no-op: same space, same address
+            const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile);
+            const auto dst_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
+            const bool same_layout = src_view.blayout == dst_view.blayout &&
+                                     src_view.slayout == dst_view.slayout &&
+                                     src_view.fractal == dst_view.fractal;
+            if (same_layout) {
+              // Alias the destination to the source SSA value so downstream
+              // references use the source's defined buffer, not the destination's
+              // alloc_tile (which would be unwritten after eliding the tmov).
+              codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
+              return std::string("");  // no-op: same space, same address, same layout
+            }
+            // Different layout at the same address: keep pto.tmov (ND↔NZ adapt).
           }
         }
       }
