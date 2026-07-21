@@ -38,7 +38,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
-`dsa-solver` 0.9 package as follows:
+`dsa-solver` 0.10 package as follows:
 
 ```bash
 cmake -S /path/to/dsa-solver -B /path/to/dsa-solver/build \
@@ -115,6 +115,16 @@ Operation-registry effects distinguish execution-time accesses from declarations
 and metadata-only views; mutating inherit-input operations and tuple outputs
 remain visible to the access frontier. Weight calibration is a separate modeling
 step.
+
+For controlled placement studies, `dsa_reference_placement=COMPACT` labels the
+normal validated DSA result, while `LOOSE` greedily reduces physical reuse
+without exceeding capacity. `dsa_reference_target="name"` applies `LOOSE` only
+to that exact function and keeps sibling kernels compact. Each endpoint is
+constructed and validated within the compilation that emits it, avoiding
+cross-compilation placement replay when generated function identities are
+unstable. These are
+experimental measurement endpoints, not production solver policies, and cannot
+be combined with `dsa_solution_dir`.
 
 The
 system-test harness additionally accepts `--memory-planner=dsa` and

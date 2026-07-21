@@ -33,7 +33,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 schema-v1 DSA solver：first-fit 初始化、受限 structured search，并且仅在严格问题无法装入容量时显式放宽流水线意图 | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
-DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.9 package，再让
+DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.10 package，再让
 PyPTO 使用它：
 
 ```bash
@@ -104,7 +104,16 @@ frontier，并覆盖嵌套控制流和跨一次循环回边的交接。逻辑 SS
 不确定的记录只用于报告。
 operation registry 中的 effect 会区分执行期访问、纯声明和仅修改元数据的 view；
 会修改数据的 inherit-input 操作以及 tuple 输出仍会进入 access frontier。
-权重标定属于独立建模问题。system-test harness
+权重标定属于独立建模问题。
+
+对于受控 placement 实验，`dsa_reference_placement=COMPACT` 标记正常且已验证的
+DSA 结果；`LOOSE` 在不超过容量的前提下贪心减少物理地址复用。
+`dsa_reference_target="name"` 只对该精确函数应用 `LOOSE`，同一程序中的其他 kernel
+保持 compact。每个端点都在产生它的编译过程中直接构造并独立验证，避免生成函数身份
+不稳定时进行跨编译 placement 回放。这些模式仅用于实验测量，不是生产求解策略，
+也不能与 `dsa_solution_dir` 同时使用。
+
+system-test harness
 支持 `--memory-planner=dsa`、`--dsa-export-dir=...` 以及用于精确 A/B 回放的
 `--dsa-solution-dir=...`。使用 `--ptoas-sync-summary-dir=...` 可为每个代码
 生成单元保存一份机器可读的 PTOAS InsertSync JSONL 摘要，从而比较两个有效
