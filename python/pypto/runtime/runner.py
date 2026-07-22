@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
@@ -89,7 +89,10 @@ class RunConfig:
         atol: Absolute tolerance for result comparison.
         strategy: PyPTO optimisation strategy applied during compilation.
         backend_type: Code-generation backend (:attr:`BackendType.Ascend910B` by default).
-        dump_passes: If ``True``, dump intermediate IR after each pass.
+        dump_passes: Per-pass IR dump control. A :class:`~pypto.ir.PassDumpLevel`
+            (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
+            (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). ``EXPLICIT`` resolves
+            implicit tile layouts and distributed window buffers in the dump.
         save_kernels: If ``True``, retain generated artefacts after execution.
             When ``False`` (default), a temporary directory is used and cleaned up.
         save_kernels_dir: Directory to save generated artefacts when *save_kernels*
@@ -223,7 +226,7 @@ class RunConfig:
     atol: float = 1e-5
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
     backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B)
-    dump_passes: bool = False
+    dump_passes: bool | PassDumpLevel = False
     save_kernels: bool = False
     save_kernels_dir: str | None = None
     codegen_only: bool = False
@@ -398,7 +401,7 @@ def compile_program(  # noqa: PLR0913
     *,
     strategy: OptimizationStrategy,
     backend_type: BackendType,
-    dump_passes: bool = False,
+    dump_passes: bool | PassDumpLevel = False,
     diagnostic_phase: DiagnosticPhase | None = None,
     disabled_diagnostics: DiagnosticCheckSet | None = None,
     profiling: bool = False,
@@ -416,7 +419,8 @@ def compile_program(  # noqa: PLR0913
         work_dir: Output directory for generated artefacts.
         strategy: PyPTO optimisation strategy applied during compilation.
         backend_type: Code-generation backend.
-        dump_passes: If ``True``, dump intermediate IR after each pass.
+        dump_passes: Per-pass IR dump control — a :class:`~pypto.ir.PassDumpLevel`
+            or a ``bool`` (``True`` -> ``CONCISE``, ``False`` -> ``NONE``).
         diagnostic_phase: Override the diagnostic phase gate for compilation.
         disabled_diagnostics: Set of diagnostic checks to disable.
         profiling: If ``True``, enable compile profiling.

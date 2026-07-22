@@ -178,6 +178,24 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
 
 `run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline. When invoked inside an existing `PassContext`, dump mode preserves the outer context's instruments (e.g., user-provided `VerificationInstrument`) and verification level, appending the dump instrument to the combined list.
 
+**Dump verbosity (`PassDumpLevel`).** The `dump_passes` knob (on `ir.compile`, `RunConfig`, and `run_passes`' `dump_ir`) accepts a `PassDumpLevel` enum — or a `bool` for backwards compatibility (`True` → `CONCISE`, `False` → `NONE`):
+
+| Level | Meaning |
+| ----- | ------- |
+| `NONE` | No per-pass dumps. |
+| `CONCISE` | Concise canonical IR (the default); best for diffing passes. |
+| `EXPLICIT` | Fully-resolved dump — self-describing for layouts (issue #2088). |
+
+By default (`CONCISE`) a dumped `pl.Tile` annotation omits its `blayout`/`slayout`/`fractal` whenever they equal the memory-space *implicit* view, and canonical IR stores an implicit view as `nullopt` — so a tile can print with no `TileView` at all even though its real layout is non-trivial (e.g. a `pl.Mem.Acc` tile is really `blayout=col_major, slayout=row_major, fractal=1024`). `EXPLICIT` makes every dumped tile print its fully-resolved layout from `GetEffectiveTileView`, and surfaces the `window_buffer` back-reference that a `pld.DistributedTensor` carries but the concise form drops — so a layout/aliasing bug is decidable from the printed IR alone. The concise tile layout still reparses to identical IR (an explicit view that matches the implicit one canonicalizes back to `nullopt`); the window-buffer marker is a debug-only annotation (the value re-derives from `pld.tensor.window` on reparse). Programmatically, pass `explicit_layout=True` to `python_print(...)`.
+
+```python
+from pypto.ir import PassDumpLevel
+from pypto.runtime import RunConfig
+
+RunConfig(dump_passes=PassDumpLevel.EXPLICIT)   # fully-resolved dumps
+RunConfig(dump_passes=True)                     # == PassDumpLevel.CONCISE
+```
+
 ### ReportInstrument
 
 Instrument that generates reports to files after specified passes. Uses `ReportGeneratorRegistry` to dispatch report generation:

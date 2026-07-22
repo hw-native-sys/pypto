@@ -190,8 +190,8 @@ bool IsRightAssociative(const ExprPtr& expr) {
  */
 class IRPythonPrinter : public IRVisitor {
  public:
-  explicit IRPythonPrinter(std::string prefix = "pl", bool concise = false)
-      : prefix_(std::move(prefix)), concise_(concise) {}
+  explicit IRPythonPrinter(std::string prefix = "pl", bool concise = false, bool explicit_layout = false)
+      : prefix_(std::move(prefix)), concise_(concise), explicit_layout_(explicit_layout) {}
   ~IRPythonPrinter() override = default;
 
   /**
@@ -281,8 +281,14 @@ class IRPythonPrinter : public IRVisitor {
   // redundant op-level ``split=`` kwarg on aiv_shard/aic_gather is suppressed
   // (the region's mode is the authoritative carrier; the parser re-stamps it).
   int split_aiv_scope_depth_ = 0;
-  std::string prefix_;                    // Prefix for type names (e.g., "pl" or "ir")
-  bool concise_;                          // When true, omit intermediate type annotations
+  std::string prefix_;  // Prefix for type names (e.g., "pl" or "ir")
+  bool concise_;        // When true, omit intermediate type annotations
+  // When true, print every tile's fully-resolved blayout/slayout/fractal from
+  // GetEffectiveTileView — including tiles whose canonical tile_view_ is nullopt
+  // (whose layout would otherwise be silently implicit). Makes a dump
+  // self-describing for tile layouts (opt-in debugging aid, issue #2088); the
+  // concise canonical form stays the default.
+  bool explicit_layout_;
   ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
 
   // Per-function rename map: Var pointer → unique printed name.
@@ -520,9 +526,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
   // ``As<TensorType>`` is precise-match and would not fire for the subclass,
   // so dispatch on DistributedTensorType first and pass it through the
   // TensorType base for shared field access.
+  auto dt_tensor = As<DistributedTensorType>(type);
   TensorTypePtr tensor_type;
   std::string tensor_head;
-  if (auto dt_tensor = As<DistributedTensorType>(type)) {
+  if (dt_tensor) {
     tensor_type = dt_tensor;
     tensor_head = "pld.DistributedTensor";
   } else if (auto plain_tensor = As<TensorType>(type)) {
@@ -550,6 +557,18 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     // Add optional memref as positional arg
     if (tensor_type->memref_.has_value()) {
       oss << ", " << PrintMemRef(*tensor_type->memref_.value());
+    }
+
+    // Fully-resolved dump (issue #2088): a DistributedTensorType carries a
+    // WindowBuffer back-reference that the concise form drops, so two same
+    // shape/dtype distributed tensors viewing *different* window buffers print
+    // identically. Surface the buffer name so a dump distinguishes them. This is
+    // a debug-only marker (a quoted string, not round-trip syntax): the subscript
+    // DSL has no window_buffer slot — the value re-derives from pld.tensor.window
+    // on reparse — and Python forbids keyword subscripts, so it cannot be encoded
+    // as parseable annotation syntax. Emitted only under explicit_layout_.
+    if (explicit_layout_ && dt_tensor && dt_tensor->window_buffer_.has_value()) {
+      oss << ", \"window_buffer=" << dt_tensor->window_buffer_.value()->name_hint_ << "\"";
     }
 
     oss << "]";
@@ -585,14 +604,23 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << prefix_ << ".Mem." << mem_str;
     }
 
-    if (tile_type->tile_view_.has_value()) {
-      // PrintTileView elides every default field and returns "" when the explicit
-      // view happens to match the implicit one — possible only on incoherent IR
-      // (canonical IR stores that as nullopt and never reaches this branch).
-      // Fall back to an empty TileView() literal so the output stays parseable
-      // and TileTypeCoherence can flag the real bug.
-      auto view_str =
-          PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
+    // Pick the view to render, then print once. explicit_layout_ resolves an
+    // absent canonical view (tile_view_ == nullopt) to its implicit form via
+    // GetEffectiveTileView so the annotation states its real blayout/slayout/
+    // fractal (issue #2088) — PrintTileView forces those fields in that mode, so
+    // it never returns "" for the explicit view. The concise branch only renders
+    // a present view; when a present view happens to match the implicit one
+    // (possible only on incoherent IR — canonical IR stores that as nullopt), the
+    // empty-string fallback keeps the output parseable so TileTypeCoherence can
+    // flag the real bug.
+    std::optional<TileView> view;
+    if (explicit_layout_) {
+      view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+    } else if (tile_type->tile_view_.has_value()) {
+      view = tile_type->tile_view_.value();
+    }
+    if (view.has_value()) {
+      auto view_str = PrintTileView(*view, tile_type->shape_, tile_type->memory_space_);
       oss << ", " << (view_str.empty() ? prefix_ + ".TileView()" : view_str);
     }
 
@@ -2746,8 +2774,9 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
 
 std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
                                            const std::optional<MemorySpace>& memory_space) {
-  // Caller already gated on has_value(); a present view is non-implicit by the
-  // TileType canonical-encoding invariant, so always render the explicit form.
+  // Caller already gated on has_value() (or passed the resolved effective view in
+  // explicit_layout_ mode); a present view is non-implicit by the TileType
+  // canonical-encoding invariant, so always render the explicit form.
   std::ostringstream oss;
   oss << prefix_ << ".TileView(";
 
@@ -2757,8 +2786,15 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
     first = false;
   };
 
-  // Compute the implicit view so we can elide fields that match it.
-  TileView implicit_view = tile_view_semantics::GetImplicitTileView(tile_shape, memory_space);
+  // Compute the implicit view so we can elide layout fields that match it — but
+  // only in concise mode. Under explicit_layout_ the blayout/slayout/fractal
+  // guards short-circuit on `explicit_layout_ ||` and never read it, so skipping
+  // it avoids a wasted GetImplicitTileView (already folded into the effective
+  // view the caller resolved for absent-view tiles).
+  TileView implicit_view;
+  if (!explicit_layout_) {
+    implicit_view = tile_view_semantics::GetImplicitTileView(tile_shape, memory_space);
+  }
 
   // valid_shape — omit if it matches the parent tile's shape
   bool valid_shape_matches = tile_view.valid_shape.empty() ||
@@ -2792,7 +2828,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   }
 
   // blayout — omit if matches the implicit view for this shape+memory_space
-  if (tile_view.blayout != implicit_view.blayout) {
+  // (kept in explicit_layout_ mode so every tile self-describes its layout).
+  if (explicit_layout_ || tile_view.blayout != implicit_view.blayout) {
     maybe_comma();
     oss << "blayout=" << prefix_ << ".TileLayout.";
     switch (tile_view.blayout) {
@@ -2809,7 +2846,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   }
 
   // slayout — omit if matches the implicit view for this shape+memory_space
-  if (tile_view.slayout != implicit_view.slayout) {
+  // (kept in explicit_layout_ mode so every tile self-describes its layout).
+  if (explicit_layout_ || tile_view.slayout != implicit_view.slayout) {
     maybe_comma();
     oss << "slayout=" << prefix_ << ".TileLayout.";
     switch (tile_view.slayout) {
@@ -2826,7 +2864,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std:
   }
 
   // fractal — omit if matches the implicit view for this shape+memory_space
-  if (tile_view.fractal != implicit_view.fractal) {
+  // (kept in explicit_layout_ mode so every tile self-describes its layout).
+  if (explicit_layout_ || tile_view.fractal != implicit_view.fractal) {
     maybe_comma();
     oss << "fractal=" << tile_view.fractal;
   }
@@ -2943,13 +2982,14 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
 // ================================
 // Public API
 // ================================
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix, bool concise) {
-  IRPythonPrinter printer(prefix, concise);
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix, bool concise,
+                        bool explicit_layout) {
+  IRPythonPrinter printer(prefix, concise, explicit_layout);
   return printer.Print(node);
 }
 
-std::string PythonPrint(const TypePtr& type, const std::string& prefix) {
-  IRPythonPrinter printer(prefix);
+std::string PythonPrint(const TypePtr& type, const std::string& prefix, bool explicit_layout) {
+  IRPythonPrinter printer(prefix, /*concise=*/false, explicit_layout);
   return printer.Print(type);
 }
 

@@ -37,7 +37,7 @@ from .compile import compile
 from .directions import make_call
 from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
-from .pass_manager import OptimizationStrategy, PassManager
+from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 from .printer import python_print
 
 # Per-call-site direction aliases re-exported at the top level.
@@ -83,6 +83,7 @@ __all__ = [
     "compile",
     "PassManager",
     "OptimizationStrategy",
+    "PassDumpLevel",
     "VerificationMode",
     "VerificationLevel",
     "PassContext",

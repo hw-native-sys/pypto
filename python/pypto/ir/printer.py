@@ -17,6 +17,7 @@ def python_print(
     prefix: str = "pl",
     concise: bool = False,
     format: bool = True,
+    explicit_layout: bool = False,
 ) -> str:
     """Print IR node or Type object in Python IR syntax.
 
@@ -28,11 +29,14 @@ def python_print(
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
         concise: If true, omit intermediate type annotations (default false)
         format: If true, apply registered format callback (default true)
+        explicit_layout: If true, print every tile's fully-resolved
+            blayout/slayout/fractal (including tiles whose canonical view is
+            absent) so the output is self-describing for layouts (default false)
 
     Returns:
         Python-style string representation
     """
     if isinstance(node, _ir_core.Type):
-        return _ir_core.python_print_type(node, prefix, format)
+        return _ir_core.python_print_type(node, prefix, format, explicit_layout)
     else:
-        return _ir_core.python_print(node, prefix, concise, format)
+        return _ir_core.python_print(node, prefix, concise, format, explicit_layout)

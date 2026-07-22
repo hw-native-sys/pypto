@@ -3488,7 +3488,13 @@ class ProgramBuilder:
         """
 
 # ========== Python Printer ==========
-def python_print(node: IRNode, prefix: str = "pl", concise: bool = False, format: bool = True) -> str:
+def python_print(
+    node: IRNode,
+    prefix: str = "pl",
+    concise: bool = False,
+    format: bool = True,
+    explicit_layout: bool = False,
+) -> str:
     """Print an IR node as a Python string.
 
     Args:
@@ -3496,18 +3502,24 @@ def python_print(node: IRNode, prefix: str = "pl", concise: bool = False, format
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
         concise: If true, omit intermediate type annotations (default false)
         format: If true, apply registered format callback (default true)
+        explicit_layout: If true, print every tile's fully-resolved
+            blayout/slayout/fractal (including tiles whose canonical view is
+            absent) so the output is self-describing for layouts (default false)
 
     Returns:
         String representation of the IR node
     """
 
-def python_print_type(type: Type, prefix: str = "pl", format: bool = True) -> str:
+def python_print_type(
+    type: Type, prefix: str = "pl", format: bool = True, explicit_layout: bool = False
+) -> str:
     """Print a Type object as a Python string.
 
     Args:
         type: Type object to print
         prefix: Module prefix (default 'pl' for 'import pypto.language as pl')
         format: If true, apply registered format callback (default true)
+        explicit_layout: If true, print fully-resolved tile layouts (default false)
 
     Returns:
         String representation of the Type

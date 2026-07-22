@@ -92,6 +92,38 @@ class OptimizationStrategy(Enum):
     DebugTileOptimization = "DebugTileOptimization"  # Debug-only PTO tile pipeline
 
 
+class PassDumpLevel(Enum):
+    """Verbosity level for per-pass IR dumps (the ``dump_passes`` knob).
+
+    Ordered from least to most detail. ``dump_passes`` accepts either this enum
+    or a ``bool`` for backwards compatibility (``True`` -> ``CONCISE``,
+    ``False`` -> ``NONE``); see :func:`coerce_dump_level`.
+
+    Note: this is a plain ``Enum``, so every member is truthy —
+    ``bool(PassDumpLevel.NONE) is True``. Never gate on a raw ``if dump_passes:``;
+    route through :func:`coerce_dump_level` and compare ``is PassDumpLevel.NONE``.
+    """
+
+    NONE = 0  # No per-pass dumps.
+    CONCISE = 1  # Concise canonical IR — the default; best for diffing passes.
+    # Fully-resolved dump (issue #2088): every tile prints its effective
+    # blayout/slayout/fractal (including tiles whose canonical view is implicit),
+    # and distributed tensors surface their window-buffer back-reference, so a
+    # layout/aliasing bug is decidable from the printed IR alone.
+    EXPLICIT = 2
+
+
+def coerce_dump_level(dump_passes: bool | PassDumpLevel) -> PassDumpLevel:
+    """Normalize a ``dump_passes`` value (bool or enum) to a :class:`PassDumpLevel`.
+
+    ``True`` maps to ``CONCISE`` (the historical dump-on behavior) and ``False``
+    to ``NONE``, so existing ``bool`` callers keep working unchanged.
+    """
+    if isinstance(dump_passes, PassDumpLevel):
+        return dump_passes
+    return PassDumpLevel.CONCISE if dump_passes else PassDumpLevel.NONE
+
+
 class PassManager:
     """Manager for organizing and executing IR transformation passes.
 
@@ -330,7 +362,7 @@ class PassManager:
     def run_passes(
         self,
         input_ir: core_ir.Program,
-        dump_ir: bool = False,
+        dump_ir: "bool | PassDumpLevel" = False,
         output_dir: str | None = None,
         prefix: str = "pl",
     ) -> core_ir.Program:
@@ -338,20 +370,23 @@ class PassManager:
 
         Args:
             input_ir: Input Program to transform
-            dump_ir: Whether to dump IR after each pass (default: False)
-            output_dir: Directory to dump IR files. Required when dump_ir=True.
+            dump_ir: Per-pass dump control. Accepts a :class:`PassDumpLevel`
+                (``NONE`` / ``CONCISE`` / ``EXPLICIT``) or a ``bool``
+                (``True`` -> ``CONCISE``, ``False`` -> ``NONE``). Default: no dump.
+            output_dir: Directory to dump IR files. Required when dumping.
             prefix: Module prefix for python_print (default: 'pl')
 
         Returns:
             Transformed Program after all passes have been applied
 
         Raises:
-            ValueError: If dump_ir=True but output_dir is None
+            ValueError: If dumping is enabled but output_dir is None
             RuntimeError: If the run-time memory planner differs from the one the
                 PassManager was constructed under (see _check_planner_consistency)
         """
         self._check_planner_consistency()
-        if not dump_ir:
+        dump_level = coerce_dump_level(dump_ir)
+        if dump_level is PassDumpLevel.NONE:
             prof = CompileProfiler.current()
             if prof is not None:
                 return self._run_with_profiling(input_ir, prof)
@@ -359,17 +394,21 @@ class PassManager:
 
         # Dump mode: validate parameters, use CallbackInstrument for IR dumping
         if output_dir is None:
-            raise ValueError("output_dir is required when dump_ir=True")
+            raise ValueError("output_dir is required when dumping IR")
 
         if not isinstance(input_ir, core_ir.Program):
             raise ValueError("dump_ir mode only supports Program input")
 
         os.makedirs(output_dir, exist_ok=True)
 
+        # EXPLICIT (issue #2088): make each dump self-describing for tile layouts
+        # and distributed window buffers.
+        explicit_layout = dump_level is PassDumpLevel.EXPLICIT
+
         # Save frontend IR
         frontend_path = os.path.join(output_dir, "00_frontend.py")
         with open(frontend_path, "w") as f:
-            content = python_print(input_ir, prefix=prefix)
+            content = python_print(input_ir, prefix=prefix, explicit_layout=explicit_layout)
             f.write(content)
             if not content.endswith("\n"):
                 f.write("\n")
@@ -408,7 +447,7 @@ class PassManager:
             # Dump IR
             dump_path = os.path.join(output_dir, f"{stem}.py")
             with open(dump_path, "w") as f:
-                content = python_print(program, prefix=prefix)
+                content = python_print(program, prefix=prefix, explicit_layout=explicit_layout)
                 f.write(content)
                 if not content.endswith("\n"):
                     f.write("\n")
