@@ -105,7 +105,10 @@ controls, pass `--input-dir` with one exact `<ABI-name>.bin` per pointer instead
 Mixed AIC/AIV inputs are launched as one co-scheduled group. They require
 `--ptoas-root`; the generator reuses PTOAS's validation-harness wrapper, which
 merges both bodies and their shared pipe objects into one global kernel. It
-never launches an AIC or AIV half in isolation.
+never launches an AIC or AIV half in isolation. PyPTO's synthetic block-index,
+block-count, and AIV-lane parameters are removed from the host ABI and rebound
+to direct-launch hardware builtins. In particular, the two vector lanes receive
+distinct `get_subblockid()` values rather than one host-provided scalar.
 
 For a small workload where exact model values matter, use
 `--args-dump <args_dump.json> --func-id <id> --task-id <id>` instead of

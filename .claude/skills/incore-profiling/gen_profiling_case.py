@@ -206,7 +206,114 @@ def _load_ptoas_generator(ptoas_root: Path) -> tuple[ModuleType, Path, str]:
     return module, script, digest
 
 
-def _prepare_mixed_group(cpp_text: str, ptoas_root: Path) -> tuple[str, list[Param], str, dict[str, str]]:
+# The standalone case launches a normal mixed global kernel, not PyPTO's
+# tensormap runtime ``kernel_entry(int64_t *args)`` ABI. Therefore the CCE
+# direct-launch builtins are authoritative here. In the real PyPTO runtime the
+# wrapper instead uses get_*_id(args), because that scheduler carries logical
+# identities in its dispatch payload and its raw subblock register can be stale.
+_PTO_IDENTITY_BUILTINS = {
+    "__pypto_spmd_block_idx": "get_block_idx()",
+    "__pypto_spmd_block_num": "get_block_num()",
+    "__pypto_spmd_subblock_idx": "get_subblockid()",
+}
+
+
+def _raw_function_params(function_text: str, function_name: str) -> list[str]:
+    match = re.search(
+        rf"\bAICORE\s+void\s+{re.escape(function_name)}\s*\(([^)]*)\)",
+        function_text,
+    )
+    if match is None:
+        raise ValueError(f"cannot find PTOAS function signature for {function_name}")
+    return _split_params(match.group(1))
+
+
+def _pto_function_param_names(pto_text: str, function_name: str) -> list[str]:
+    match = re.search(
+        rf"func\.func\s+@{re.escape(function_name)}\s*\((.*?)\)\s*(?:attributes|->|\{{)",
+        pto_text,
+        re.S,
+    )
+    if match is None:
+        raise ValueError(f"cannot find PTO function signature for {function_name}")
+    return re.findall(r"%([A-Za-z_]\w*)\s*:", match.group(1))
+
+
+def _external_mixed_abi_and_identity_bindings(
+    pto_text: str,
+    name: str,
+    aic_text: str,
+    aiv_text: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Split user ABI parameters from PyPTO's trailing runtime identities."""
+    sides = []
+    for suffix, function_text in (("aic", aic_text), ("aiv", aiv_text)):
+        function_name = f"{name}_{suffix}"
+        raw_params = _raw_function_params(function_text, function_name)
+        pto_names = _pto_function_param_names(pto_text, function_name)
+        if len(raw_params) != len(pto_names):
+            raise ValueError(
+                f"PTO/PTOAS parameter count differs for {function_name}: "
+                f"{len(pto_names)} != {len(raw_params)}"
+            )
+        first_identity = next(
+            (index for index, param_name in enumerate(pto_names) if param_name in _PTO_IDENTITY_BUILTINS),
+            len(pto_names),
+        )
+        suffix_names = pto_names[first_identity:]
+        unsupported = [param_name for param_name in suffix_names if param_name not in _PTO_IDENTITY_BUILTINS]
+        if unsupported:
+            raise ValueError(
+                f"runtime identity parameters must form a recognized trailing suffix in {function_name}: "
+                f"{unsupported}"
+            )
+        sides.append((raw_params, pto_names, first_identity))
+
+    aic_raw, _, aic_user_count = sides[0]
+    aiv_raw, _, aiv_user_count = sides[1]
+    if aic_user_count != aiv_user_count:
+        raise ValueError(f"mixed AIC/AIV user ABI lengths differ: {aic_user_count} != {aiv_user_count}")
+    external = aiv_raw[:aiv_user_count]
+    aic_types = [(_parse_param(p).cpp_type, _parse_param(p).is_ptr) for p in aic_raw[:aic_user_count]]
+    aiv_types = [(_parse_param(p).cpp_type, _parse_param(p).is_ptr) for p in external]
+    if aic_types != aiv_types:
+        raise ValueError("mixed AIC/AIV user ABI types differ")
+
+    bindings: dict[str, str] = {}
+    for raw_params, pto_names, first_identity in sides:
+        for raw_param, identity_name in zip(raw_params[first_identity:], pto_names[first_identity:]):
+            variable = _parse_param(raw_param).name
+            builtin = _PTO_IDENTITY_BUILTINS[identity_name]
+            previous = bindings.setdefault(variable, builtin)
+            if previous != builtin:
+                raise ValueError(f"PTOAS variable {variable} maps to conflicting runtime identities")
+    return external, bindings
+
+
+def _bind_mixed_runtime_identities(
+    wrapped: str,
+    name: str,
+    external_params: list[str],
+    bindings: dict[str, str],
+) -> str:
+    """Bind PyPTO's synthetic identity suffix to direct-launch CCE builtins."""
+    pattern = re.compile(
+        rf'(?P<head>extern\s+"C"\s+__global__\s+AICORE\s+void\s+{re.escape(name)})'
+        r"\s*\([^)]*\)\s*\{"
+    )
+    declarations = "".join(
+        f"\n  int32_t {variable} = static_cast<int32_t>({builtin});" for variable, builtin in bindings.items()
+    )
+    replacement = rf"\g<head>({', '.join(external_params)}) {{{declarations}"
+    rewritten, count = pattern.subn(replacement, wrapped, count=1)
+    if count != 1:
+        raise RuntimeError("cannot rewrite PTOAS mixed wrapper launch ABI")
+    return rewritten
+
+
+def _prepare_mixed_group(
+    cpp_text: str, pto_text: str, ptoas_root: Path
+) -> tuple[str, list[Param], str, dict[str, str]]:
     """Create the same mixed AIC/AIV group wrapper used by PTOAS validation."""
     module, script, digest = _load_ptoas_generator(ptoas_root)
     info = module._describe_kernel_source(cpp_text)
@@ -216,6 +323,12 @@ def _prepare_mixed_group(cpp_text: str, ptoas_root: Path) -> tuple[str, list[Par
     if not isinstance(raw_params, list) or not raw_params:
         raise ValueError(f"PTOAS mixed-kernel description has no launch ABI: {script}")
     name = info["kernel_name"]
+    external_params, identity_bindings = _external_mixed_abi_and_identity_bindings(
+        pto_text,
+        name,
+        info["aic_text"],
+        info["aiv_text"],
+    )
     wrapped = module._append_mixed_kernel_wrapper(
         cpp_text,
         name,
@@ -223,14 +336,16 @@ def _prepare_mixed_group(cpp_text: str, ptoas_root: Path) -> tuple[str, list[Par
         info["aic_text"],
         info["aiv_text"],
     )
+    wrapped = _bind_mixed_runtime_identities(wrapped, name, external_params, identity_bindings)
     if not re.search(rf'extern\s+"C"\s+__global__\s+AICORE\s+void\s+{re.escape(name)}\s*\(', wrapped):
         raise RuntimeError("PTOAS mixed-kernel wrapper did not emit the expected global entry")
     provenance = {
         "kind": "ptoas_validation_group_wrapper",
         "generator": str(script.resolve()),
         "generator_sha256": digest,
+        "identity_source": "direct_launch_builtins",
     }
-    return name, [_parse_param(param) for param in raw_params], wrapped, provenance
+    return name, [_parse_param(param) for param in external_params], wrapped, provenance
 
 
 # ── Parse the sibling .pto for static buffer sizes ───────────────────────────
@@ -601,7 +716,7 @@ if(ENABLE_NPU_BENCHMARK)
         ${PTO_ISA_ROOT}/include ${PTO_ISA_ROOT}/tests/common)
     target_link_directories(@TESTCASE@_npu PUBLIC ${ASCEND_HOME_PATH}/lib64)
     target_link_libraries(@TESTCASE@_npu PRIVATE
-        @TESTCASE@_kernel stdc++ ascendcl m c_sec dl pthread)
+        @TESTCASE@_kernel runtime stdc++ ascendcl m c_sec dl pthread)
     set_target_properties(@TESTCASE@_npu PROPERTIES BUILD_RPATH "$ORIGIN")
 endif()
 """
@@ -1141,6 +1256,7 @@ def generate(  # noqa: PLR0913
             f"sibling .pto not found next to the kernel: {pto_path}. "
             "The .pto carries the static tensor shapes used for buffer sizing."
         )
+    pto_text = pto_path.read_text(encoding="utf-8")
     name, is_mixed, params = parse_cpp(cpp_text)
     mixed_wrapper: dict[str, str] | None = None
     mixed_group_wrapped = False
@@ -1150,9 +1266,9 @@ def generate(  # noqa: PLR0913
                 "real-device mixed AIC/AIV timing requires --ptoas-root so the canonical PTOAS "
                 "group wrapper is used"
             )
-        name, params, cpp_text, mixed_wrapper = _prepare_mixed_group(cpp_text, ptoas_root)
+        name, params, cpp_text, mixed_wrapper = _prepare_mixed_group(cpp_text, pto_text, ptoas_root)
         mixed_group_wrapped = True
-    pto_sizes = parse_pto_sizes(pto_path.read_text(encoding="utf-8"))
+    pto_sizes = parse_pto_sizes(pto_text)
 
     counts: dict[str, int] = {}
     for i, p in enumerate(params):

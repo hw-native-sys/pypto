@@ -45,17 +45,27 @@ def _write_kernel(root: Path, *, mixed: bool = False) -> Path:
     if mixed:
         signature = "\n".join(
             (
-                "AICORE void sample_aic(__gm__ float* v0, int32_t n) {}",
-                "AICORE void sample_aiv(__gm__ float* v0, int32_t n) {}",
+                "AICORE void sample_aic(__gm__ float* v0, int32_t block_idx, int32_t block_num) {}",
+                "AICORE void sample_aiv(__gm__ float* v0, int32_t block_idx, "
+                "int32_t block_num, int32_t subblock_idx) {}",
             )
         )
     else:
         signature = 'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t n) {}'
     cpp.write_text(signature + "\n", encoding="utf-8")
-    cpp.with_suffix(".pto").write_text(
-        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
-        encoding="utf-8",
-    )
+    pto = "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n"
+    if mixed:
+        pto = """\
+func.func @sample_aic(%arg0: !pto.ptr<f32>, %__pypto_spmd_block_idx: i32,
+    %__pypto_spmd_block_num: i32) attributes {pto.kernel_kind = #pto.kernel_kind<cube>} {
+}
+func.func @sample_aiv(%arg0: !pto.ptr<f32>, %__pypto_spmd_block_idx: i32,
+    %__pypto_spmd_block_num: i32, %__pypto_spmd_subblock_idx: i32)
+    attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+"""
+    cpp.with_suffix(".pto").write_text(pto, encoding="utf-8")
     return cpp
 
 
@@ -88,6 +98,7 @@ def test_generate_npu_case_with_real_inputs(generator: ModuleType, tmp_path: Pat
     cmake = (case / "CMakeLists.txt").read_text(encoding="utf-8")
     assert 'option(ENABLE_SIM_GOLDEN "Build Ascend simulator (camodel) executable" OFF)' in cmake
     assert 'option(ENABLE_NPU_BENCHMARK "Build real-device standalone benchmark executable" ON)' in cmake
+    assert "compact_sample_kernel runtime" in cmake
     main = (case / "main.cpp").read_text(encoding="utf-8")
     assert "aclrtEventElapsedTime" in main
     assert "PYPTO_BENCH_ROUNDS" in main
@@ -105,15 +116,19 @@ def _describe_kernel_source(text):
     return {
         "kind": "mixed",
         "kernel_name": "sample",
-        "raw_params": ["__gm__ float* v0", "int32_t n"],
-        "aic_text": "AICORE void sample_aic(__gm__ float* v0, int32_t n) {}",
-        "aiv_text": "AICORE void sample_aiv(__gm__ float* v0, int32_t n) {}",
+        "raw_params": ["__gm__ float* v0", "int32_t block_idx", "int32_t block_num", "int32_t subblock_idx"],
+        "aic_text": "AICORE void sample_aic(__gm__ float* v0, int32_t block_idx, int32_t block_num) {}",
+        "aiv_text": (
+            "AICORE void sample_aiv(__gm__ float* v0, int32_t block_idx, "
+            "int32_t block_num, int32_t subblock_idx) {}"
+        ),
     }
 
 def _append_mixed_kernel_wrapper(text, name, raw_params, aic_text, aiv_text):
     del aic_text, aiv_text
     return text + '\\n// PTOAS_CANONICAL_MIXED_WRAPPER\\n' + (
-        'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t n) {}\\n'
+        'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t block_idx, '
+        'int32_t block_num, int32_t subblock_idx) {}\\n'
     )
 """.lstrip(),
         encoding="utf-8",
@@ -145,7 +160,6 @@ def test_generate_npu_mixed_uses_ptoas_group_wrapper(
         "dav-c220",
         run_mode="npu",
         block_dim=8,
-        scalar_values={"n": "8"},
         synthetic_seed=19,
         ptoas_root=ptoas_root,
     )
@@ -156,7 +170,6 @@ def test_generate_npu_mixed_uses_ptoas_group_wrapper(
         "dav-c220",
         run_mode="npu",
         block_dim=8,
-        scalar_values={"n": "8"},
         synthetic_seed=19,
         ptoas_root=ptoas_root,
     )
@@ -164,9 +177,15 @@ def test_generate_npu_mixed_uses_ptoas_group_wrapper(
     generated = (compact / "mixed_kernel.cpp").read_text(encoding="utf-8")
     assert "PTOAS_CANONICAL_MIXED_WRAPPER" in generated
     assert "#if defined(__DAV_CUBE__)" not in generated
+    assert "int32_t block_idx = static_cast<int32_t>(get_block_idx());" in generated
+    assert "int32_t block_num = static_cast<int32_t>(get_block_num());" in generated
+    assert "int32_t subblock_idx = static_cast<int32_t>(get_subblockid());" in generated
+    assert "void sample(__gm__ float* v0)" in generated
     manifest = json.loads((compact / "standalone_manifest.json").read_text(encoding="utf-8"))
     assert manifest["mixed"] is True
     assert manifest["mixed_runner"]["kind"] == "ptoas_validation_group_wrapper"
+    assert manifest["mixed_runner"]["identity_source"] == "direct_launch_builtins"
+    assert manifest["parameters"] == [{"cpp_type": "float", "elements": 8, "kind": "pointer", "name": "v0"}]
     validated, pointers = comparison.validate_cases(compact, loose)
     assert validated["kernel"] == "sample"
     assert pointers == ["v0"]
