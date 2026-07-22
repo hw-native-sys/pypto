@@ -3787,6 +3787,50 @@ class ASTParser:
             hint=f"Use a standalone `with pl.spmd(..., {kwarg}):` (implicit cluster) to keep it.",
         )
 
+    def _reject_submit_dispatch_metadata_in_cluster(
+        self,
+        *,
+        user_dep_vars: list["ir.Var"],
+        core_num: "ir.Expr | None",
+        sync_start: bool,
+        allow_early_resolve: bool,
+        predicate: "ir.Expr | None",
+        span: "ir.Span",
+    ) -> None:
+        """Reject per-task metadata on a Submit nested inside ``pl.cluster()``.
+
+        A cluster body is outlined into one Group task. Calls or plain Submit
+        nodes inside that body identify the Group's AIC/AIV callees, but they
+        are not dispatched independently, so their task-level controls have no
+        runtime carrier and would otherwise be silently ignored.
+        """
+        if not self._is_inside_scope(ir.ScopeKind.Cluster):
+            return
+
+        metadata_fields: list[str] = []
+        if user_dep_vars:
+            metadata_fields.append("deps")
+        if core_num is not None:
+            metadata_fields.append("core_num")
+        if sync_start:
+            metadata_fields.append("sync_start")
+        if allow_early_resolve:
+            metadata_fields.append("allow_early_resolve")
+        if predicate is not None:
+            metadata_fields.append("predicate")
+        if not metadata_fields:
+            return
+
+        construct = "pl.spmd_submit" if core_num is not None else "pl.submit"
+        raise ParserSyntaxError(
+            f"`{construct}(...)` inside `pl.cluster()` cannot carry per-task dispatch metadata "
+            f"({', '.join(metadata_fields)}) — the cluster is dispatched as one Group task, so metadata on "
+            "an inner Submit would be ignored",
+            span=span,
+            hint="Move the dependency or launch control to the dispatch surrounding the cluster, "
+            "or omit it from the inner Submit.",
+        )
+
     @staticmethod
     def _spmd_body_reads_block_idx(body: "list[ast.stmt]") -> bool:
         """True if any statement in an inline SPMD body calls ``get_block_idx()``.
@@ -5887,6 +5931,14 @@ class ASTParser:
             predicate = self._parse_submit_predicate_kwarg(method_name, keywords)
             if predicate is not None:
                 self._validate_predicate_deps(method_name, predicate, user_dep_vars, span)
+            self._reject_submit_dispatch_metadata_in_cluster(
+                user_dep_vars=user_dep_vars,
+                core_num=core_num_expr,
+                sync_start=sync_start,
+                allow_early_resolve=allow_early_resolve,
+                predicate=predicate,
+                span=span,
+            )
         return_types = func_obj.return_types if func_obj else []
         # A callee that declares no ``-> `` annotation has empty ``return_types``
         # but may ``return <value>`` (e.g. an InCore kernel returning its

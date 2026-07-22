@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -37,8 +38,10 @@ class CallVisitor : public IRVisitor {
  public:
   using OnMatchFn = std::function<bool(const CallPtr&, const FunctionPtr&)>;
 
-  CallVisitor(const ProgramPtr& program, OnMatchFn on_match)
-      : program_(program), on_match_(std::move(on_match)) {}
+  CallVisitor(const ProgramPtr& program, OnMatchFn on_match, bool reject_submit_dispatch_metadata = false)
+      : program_(program),
+        on_match_(std::move(on_match)),
+        reject_submit_dispatch_metadata_(reject_submit_dispatch_metadata) {}
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
@@ -54,11 +57,22 @@ class CallVisitor : public IRVisitor {
     IRVisitor::VisitExpr_(call);
   }
 
-  void VisitExpr_(const SubmitPtr& submit) override { VisitExpr_(SubmitToCallView(submit)); }
+  void VisitExpr_(const SubmitPtr& submit) override {
+    if (reject_submit_dispatch_metadata_) {
+      CHECK_SPAN(submit->deps_.empty() && !submit->core_num_.has_value() && !submit->sync_start_ &&
+                     !submit->allow_early_resolve_ && !submit->predicate_.has_value(),
+                 submit->span_)
+          << "A Submit nested inside a Group function cannot carry per-task dispatch metadata "
+             "(deps, core_num, sync_start, allow_early_resolve, or predicate). The Group is dispatched "
+             "as one task, so metadata on an inner Submit would be ignored.";
+    }
+    VisitExpr_(SubmitToCallView(submit));
+  }
 
  private:
   const ProgramPtr& program_;
   OnMatchFn on_match_;
+  bool reject_submit_dispatch_metadata_;
   bool stop_ = false;
 };
 
@@ -85,25 +99,28 @@ GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func, const ProgramPtr
   // and is what BuildWrapperReorderedParams expects (the call whose arg
   // order it reorders against). Group bodies emitted by ExpandMixedKernel
   // place AIC before AIV in source order, so the AIC call wins in practice.
-  CallVisitor visitor(program, [&](const CallPtr& call, const FunctionPtr& callee) {
-    if (callee->func_type_ == FunctionType::AIC && info.aic_name.empty()) {
-      info.aic_name = callee->name_;
-      if (!info.inner_call) {
-        info.inner_call = call;
-        info.inner_callee = callee;
-      }
-    } else if (callee->func_type_ == FunctionType::AIV && info.aiv_name.empty()) {
-      info.aiv_name = callee->name_;
-      if (!info.inner_call) {
-        info.inner_call = call;
-        info.inner_callee = callee;
-      }
-    } else if (callee->func_type_ == FunctionType::InCore && !info.inner_call) {
-      info.inner_call = call;
-      info.inner_callee = callee;
-    }
-    return false;  // collect all matches
-  });
+  CallVisitor visitor(
+      program,
+      [&](const CallPtr& call, const FunctionPtr& callee) {
+        if (callee->func_type_ == FunctionType::AIC && info.aic_name.empty()) {
+          info.aic_name = callee->name_;
+          if (!info.inner_call) {
+            info.inner_call = call;
+            info.inner_callee = callee;
+          }
+        } else if (callee->func_type_ == FunctionType::AIV && info.aiv_name.empty()) {
+          info.aiv_name = callee->name_;
+          if (!info.inner_call) {
+            info.inner_call = call;
+            info.inner_callee = callee;
+          }
+        } else if (callee->func_type_ == FunctionType::InCore && !info.inner_call) {
+          info.inner_call = call;
+          info.inner_callee = callee;
+        }
+        return false;  // collect all matches
+      },
+      /*reject_submit_dispatch_metadata=*/true);
   visitor.VisitStmt(group_func->body_);
   return info;
 }

@@ -12,7 +12,11 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics.exceptions import ParserTypeError, UnsupportedFeatureError
+from pypto.language.parser.diagnostics.exceptions import (
+    ParserSyntaxError,
+    ParserTypeError,
+    UnsupportedFeatureError,
+)
 
 
 def _first_runtime_scope(stmt):
@@ -121,6 +125,38 @@ class TestManualScopeParsing:
         assert len(k2_deps) == 1
         assert isinstance(k2_deps[0].type, ir.ScalarType)
         assert k2_deps[0].type.dtype == pl.TASK_ID
+
+    @pytest.mark.parametrize(
+        "submit_expr",
+        [
+            "pl.submit(self.k2, x, deps=[a_tid])",
+            "pl.submit(self.k2, x, allow_early_resolve=True)",
+            "pl.submit(self.k2, a, deps=[a_tid], predicate=(a[0] > 0))",
+            "pl.spmd_submit(self.k2, x, core_num=2)",
+        ],
+    )
+    def test_cluster_nested_submit_rejects_per_task_dispatch_metadata(self, submit_expr):
+        """Inner Submit controls cannot be represented by the outlined Group dispatch."""
+        source = f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.AIC)
+    def k1(self, x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def k2(self, x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
+        with pl.cluster():
+            a, a_tid = pl.submit(self.k1, x)
+            b, _ = {submit_expr}
+        return b
+"""
+        with pytest.raises(ParserSyntaxError, match="cannot carry per-task dispatch metadata"):
+            pl.parse_program(source)
 
     def test_submit_none_dep_entry_dropped(self):
         """A bare ``None`` entry in ``deps=`` contributes no edge."""
