@@ -174,11 +174,13 @@ region while preserving the surrounding control flow.
    Boundary tile.move (ClassifyMoveDirection):
      CUBE_TO_VECTOR — replace the move with
          tile.aiv_shard(full_cube_tile, split=int(mode))   -> HALF
-       Re-attach the op's declared consuming-lane memory (Vec, read via
-       GetDeclaredOutputMemory so this matches the explicit pl.aiv_shard
-       path exactly) to the deduced HALF type, seed the result var into
-       tile_vars (its half extent), and record the old->new var rebind.
-       The cube source (the matmul / Acc result) stays FULL.
+       The deduced HALF type already carries the consuming-lane memory
+       (Vec): the split deducer leaves memory_space null and
+       OpRegistry::Create fills it from tile.aiv_shard's set_output_memory
+       declaration, so this path and the explicit pl.aiv_shard form read
+       one declaration. Seed the result var into tile_vars (its half
+       extent) and record the old->new var rebind. The cube source (the
+       matmul / Acc result) stays FULL.
      VECTOR_TO_CUBE — insert
          tile.aic_gather(half_vector_tile, split=int(mode))  -> FULL
        resolving the source to its halved var so the gather doubles

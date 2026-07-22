@@ -138,8 +138,9 @@ result = passes.lower_auto_vector_split()(program)
    边界 tile.move（ClassifyMoveDirection）：
      CUBE_TO_VECTOR —— 将 move 替换为
          tile.aiv_shard(full_cube_tile, split=int(mode))   -> 半
-       把该算子声明的消费侧 lane 内存（Vec，经 GetDeclaredOutputMemory 读取，
-       使之与显式 pl.aiv_shard 路径完全一致）重新附加到推导出的半类型上，将结果
+       推导出的半类型已经带有消费侧 lane 内存（Vec）：切分推导器让 memory_space
+       保持为空，由 OpRegistry::Create 用 tile.aiv_shard 的 set_output_memory
+       声明填充，因此本路径与显式 pl.aiv_shard 形式读取的是同一处声明。将结果
        var 连同其半尺寸种入 tile_vars，并记录 旧->新 var 重绑。cube 源（matmul /
        Acc 结果）保持全尺寸。
      VECTOR_TO_CUBE —— 插入
