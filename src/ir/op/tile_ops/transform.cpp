@@ -387,6 +387,7 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
 
   TileView result_view = source_view;
   result_view.valid_shape = std::move(plan.valid_shape);
+  result_view.pad = reinterpret_view_semantics::NormalizePad(source_view.pad);
   result_view.stride.clear();
   result_view.start_offset = nullptr;
   return std::make_shared<TileType>(std::move(plan.shape), target_dtype, std::nullopt,

@@ -50,6 +50,13 @@ inline bool IsSupportedDType(DataType dtype) {
          dtype == DataType::FP32 || dtype == DataType::BF16;
 }
 
+/** Preserve only dtype-independent padding across a reinterpret view. */
+inline PadValue NormalizePad(PadValue source_pad) {
+  // zero has the same bit pattern for every supported dtype, while max/min are
+  // defined by the source element type and are invalid after reinterpretation.
+  return source_pad == PadValue::zero ? PadValue::zero : PadValue::null;
+}
+
 /** Extract and validate a shape tuple operand. */
 inline std::vector<ExprPtr> ExtractShape(const ExprPtr& shape_arg, const std::string& op_name) {
   auto tuple_type = As<TupleType>(shape_arg->GetType());

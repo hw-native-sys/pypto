@@ -2205,6 +2205,23 @@ class TestTileReinterpretViewIR:
         result_view = call.type.get_effective_tile_view()
         assert [dim.value for dim in result_view.valid_shape if isinstance(dim, ir.ConstInt)] == [4, 24]
 
+    @pytest.mark.parametrize(
+        ("source_pad", "expected_pad"),
+        [
+            (ir.PadValue.null, ir.PadValue.null),
+            (ir.PadValue.zero, ir.PadValue.zero),
+            (ir.PadValue.max, ir.PadValue.null),
+            (ir.PadValue.min, ir.PadValue.null),
+        ],
+    )
+    def test_normalizes_dtype_dependent_padding(self, source_pad, expected_pad):
+        view = ir.TileView(pad=source_pad)
+
+        call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.get_effective_tile_view().pad == expected_pad
+
     def test_rejects_mismatched_explicit_byte_size(self):
         with pytest.raises(ValueError, match=r"equal source and target byte sizes.*512 bytes.*256 bytes"):
             tile.reinterpret_view(

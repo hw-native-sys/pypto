@@ -1558,6 +1558,24 @@ class TestTensorReinterpretViewIR:
         assert isinstance(call.type.shape[1], ir.ConstInt)
         assert call.type.shape[1].value == 32
 
+    @pytest.mark.parametrize(
+        ("source_pad", "expected_pad"),
+        [
+            (ir.PadValue.null, ir.PadValue.null),
+            (ir.PadValue.zero, ir.PadValue.zero),
+            (ir.PadValue.max, ir.PadValue.null),
+            (ir.PadValue.min, ir.PadValue.null),
+        ],
+    )
+    def test_normalizes_dtype_dependent_padding(self, source_pad, expected_pad):
+        view = ir.TensorView([], ir.TensorLayout.ND, pad=source_pad)
+
+        call = tensor.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TensorType)
+        result_pad = call.type.tensor_view.pad if call.type.tensor_view is not None else ir.PadValue.null
+        assert result_pad == expected_pad
+
     def test_wider_dtype_auto_shape(self):
         call = tensor.reinterpret_view(self._var([8, 16], DataType.INT16), DataType.FP32)
 

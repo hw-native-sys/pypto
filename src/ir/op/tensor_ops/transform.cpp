@@ -234,7 +234,9 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   TensorView result_view;
   result_view.layout = layout;
   result_view.valid_shape = std::move(plan.valid_shape);
-  result_view.pad = tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  const PadValue source_pad =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  result_view.pad = reinterpret_view_semantics::NormalizePad(source_pad);
   if (preserve_explicit_stride) {
     result_view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(plan.shape, layout);
   }
