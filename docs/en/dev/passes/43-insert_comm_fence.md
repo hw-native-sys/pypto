@@ -2,43 +2,83 @@
 
 ## Overview
 
-`InsertCommFence` implements the *data-before-signal* obligation the latest PTOAS
-pushes onto the compiler — a cross-rank write must be visible to the peer before
-the `pld.system.notify` that signals it — with two ops at two granularities:
+`InsertCommFence` implements the *data-before-signal* memory-consistency contract
+the latest PTOAS enforces in its `pto-memory-consistency` pass and pushes onto the
+compiler. The contract is **two-sided**:
 
-1. `system.cacheinvalid` is **per address**: one is emitted **immediately after
-   every publishing write**, invalidating the cache lines of exactly that write's
-   region.
-2. `system.fence` is **per notify**: a single GM barrier before a notify orders
-   *all* prior writes, so one fence covers however many writes precede it.
+- **Publish side.** A `pto.comm.tnotify` requires an explicit
+  `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching
+  `pto.cmo.cacheinvalid` release marker and before the signal — a cross-rank write
+  must be visible to the peer before the notify that signals it.
+- **Consume side.** A cacheable GM load after `pto.comm.twait` (or a successful
+  `pto.comm.ttest`) requires an explicit `pto.cmo.cacheinvalid all
+  #pto.address_space<gm>` first, so the reader sees the peer's fresh write.
+
+Both cache markers are the **same** `system.cacheinvalid` op, in two forms
+distinguished by arity:
+
+| Form | IR | Lowers to |
+| ---- | -- | --------- |
+| Region | `system.cacheinvalid(tensor, shapes, offsets)` | `pto.cmo.cacheinvalid … single_cache_line` |
+| Whole-GM | `system.cacheinvalid()` (no args) | `pto.cmo.cacheinvalid all #pto.address_space<gm>` |
+
+`system.fence` lowers to `pto.fence.barrier_all #pto.fence_scope<gm>` — a GM
+barrier with DDR observability, stronger than a bare `pto.barrier <PIPE_ALL>`.
+
+## What the pass inserts
+
+A single forward structural traversal (`InsertCommMarkers`) inserts, per op:
+
+- **after each publishing write** — a whole-tensor **region** `system.cacheinvalid`
+  of the written target, **immediately followed by a `system.fence`**. ptoas
+  requires the fence to directly follow the release marker, so both land at the
+  write site (one per address), not deferred to the notify;
+- **before each bare barrier notify** — a **whole-GM** `system.cacheinvalid` +
+  `system.fence`. A *bare barrier notify* is one with no pending fenced publishing
+  write (a pure barrier signal, or a notify whose write lives in a prior loop so
+  `pending` was reset). A notify that *does* have a pending fenced write needs
+  nothing — the write's own `cacheinvalid; fence` is its release marker;
+- **after each wait** — a **whole-GM** `system.cacheinvalid` (the consume-side
+  invalidate before the next cacheable read).
 
 ```text
 remote_store(a); remote_store(b); notify
-  -> remote_store(a); cacheinvalid(a); remote_store(b); cacheinvalid(b); fence; notify
+  -> remote_store(a); cacheinvalid(a); fence; remote_store(b); cacheinvalid(b); fence; notify
+
+for p: (if p != me: notify)                 (bare barrier notify — no write)
+  -> for p: (if p != me: cacheinvalid(); fence; notify)
+
+for c: store; for p: notify                 (write and notify in separate loops)
+  -> for c: (store; cacheinvalid; fence);
+     for p: (cacheinvalid(); fence; notify)
+
+wait; read
+  -> wait; cacheinvalid(); read
 ```
 
-- `system.cacheinvalid` lowers to `pto.cmo.cacheinvalid … single_cache_line`.
-- `system.fence` lowers to `pto.fence.barrier_all #pto.fence_scope<gm>` — a GM
-  barrier with DDR observability, stronger than a bare `pto.barrier <PIPE_ALL>`.
+Why the fence sits at the write, not the notify: ptoas matches the fence to the
+release marker **lexically and locally**. A fence placed near a notify whose data
+was released by a `cacheinvalid` in a *different* loop is rejected — the fence must
+immediately follow that `cacheinvalid`. Emitting `cacheinvalid; fence` together at
+every write satisfies this for a following notify no matter how far away (even
+across loop nests), and a straight-line `store; notify` still lowers to the
+canonical `store; cacheinvalid; fence; notify`.
 
-Because the two share nothing, they are two **independent traversals**
-(`CacheInvalidInserter`, then `FenceInserter`) — order is irrelevant (a
-cacheinvalid is inert to the fence analysis).
+The region cacheinvalid currently covers the **whole target tensor** (region
+`[0, …]` offsets over the tensor's full shape), reusing the tensor type's dim
+exprs. Narrowing to the precise written sub-region — the write's own
+`(shapes, offsets)` are right there at the write site — is a planned follow-up.
 
-### cacheinvalid is placed at the write site (always in scope)
+### Markers land where the write / wait / notify is (always in scope)
 
-Placing the cacheinvalid immediately after its write means the target `Var` is
-trivially in scope (the write just used it) — whether it is a window parameter, an
-alias (`dv = pl.tensor.view(win); remote_store(dv)`), a loop-carried `iter_arg`, or
-a value defined inside a branch. There is **no cross-scope tracking and nothing is
-ever silently dropped**: the per-write cacheinvalid always lands next to its write,
-at every nesting level. (Contrast the earlier design, which batched cacheinvalids
-before the notify and had to reason about which targets were still in scope there.)
-
-The cacheinvalid currently covers the **whole target tensor** (region `[0, …]`
-offsets over the tensor's full shape), reusing the tensor type's dim exprs.
-Narrowing to the precise written sub-region — the write's own `(shapes, offsets)`
-args are right there at the write site — is a planned follow-up.
+Placing the region cacheinvalid immediately after its write means the target `Var`
+is trivially in scope (the write just used it) — whether it is a window parameter,
+an alias (`dv = pl.tensor.view(win); remote_store(dv)`), a loop-carried `iter_arg`,
+or a value defined inside a branch. There is **no cross-scope tracking and nothing
+is ever silently dropped**: every marker lands next to the op that needs it, at
+every nesting level. A bare single-statement branch/loop body is wrapped in place
+(`body -> { markers; body; markers }`); after the first run the body is a
+`SeqStmts`, so the pass stays idempotent.
 
 ## Position in the pipeline
 
@@ -47,12 +87,11 @@ args are right there at the write site — is a planned follow-up.
 ```
 
 It runs **last** in the Default pipeline, after every statement-reordering pass
-(`SkewCrossCorePipeline`, `LowerPipelineLoops`, `CanonicalizeIOOrder`, ...). A
-`system.fence` has no operands and no dependency edges, so an earlier insertion
-could be moved away from its notify; running last keeps the fence adjacent to the
-notify through codegen. The passes before it (`MaterializeRuntimeScopes`,
-`ClassifyIterArgCarry`) only touch Orchestration functions, so the InCore IR this
-pass sees is exactly what codegen lowers.
+(`SkewCrossCorePipeline`, `LowerPipelineLoops`, `CanonicalizeIOOrder`, ...). The
+inserted ops have no operands and no dependency edges, so an earlier insertion
+could be moved away from its notify/wait; running last keeps them adjacent through
+codegen. The passes before it only touch Orchestration functions, so the InCore IR
+this pass sees is exactly what codegen lowers.
 
 ## What counts as a publishing write
 
@@ -64,80 +103,63 @@ Decided by `op_predicates::IsPublishingWrite`:
 | `tile.store` | destination tensor (arg 2) is a window-bound `DistributedTensorType` (a peer can `remote_load` it) |
 | `pld.tile.get` / `pld.tensor.get` | local destination (arg 0) is window-bound |
 | any call to an unregistered op name | conservative — a user function not analysed interprocedurally |
+| `Submit` (task launch) | conservative — treated as a write for ordering |
 
 A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
-`Tensor` are **not** publishing writes.
+`Tensor` are **not** publishing writes. A plain-tensor store therefore emits no
+region cacheinvalid, but a notify after it is still a *bare barrier notify* and
+gets the whole-GM cacheinvalid + fence.
 
-## Algorithm
+## Algorithm — one forward traversal with a `pending` bool
 
-Two independent `O(N)` traversals.
+A single `pending` bool flows in execution order and decides the notify marker:
 
-### Traversal 1 — `CacheInvalidInserter` (per-address, structural only)
+- a **publishing write** sets `pending = true` (it emitted its own `cacheinvalid;
+  fence`);
+- a **notify** or **fence** clears `pending = false`;
+- a **wait** / anything else leaves it unchanged.
 
-A plain structural rewrite: after each publishing-write child of a `SeqStmts`,
-append a whole-tensor `cacheinvalid` for that write's target. A bare
-single-statement branch/loop body that *is* a publishing write is wrapped in
-place (`body -> { body; cacheinvalid }`). No control-flow analysis, no `pending`
-state. Idempotent: a write already followed by its cacheinvalid is left alone.
+At each notify: if `pending` is true, a fenced write already precedes it, so
+nothing is added; if `pending` is false the notify is a *bare barrier notify* and
+gets its own whole-GM `cacheinvalid; fence`.
 
-### Traversal 2 — `FenceInserter` (per-notify, control-flow aware)
+`pending` is **conservative across control flow** so an uncertain path emits the
+safe whole-GM marker rather than trusting a region marker that may not precede:
 
-**Pass 1 — subtree summaries (bottom-up / post-order, memoized).** Each statement
-records three pure structural bits:
-
-- `opens_with_notify` — some path reaches a notify before any write/fence;
-- `may_end_with_write` — the subtree may exit with an uncovered publishing write;
-- `transparent` — some path falls through touching no write/fence/notify.
-
-Loops are always `transparent` (they may iterate zero times); `opens` / `may_end`
-come from the body.
-
-**Pass 2 — forward insertion.** A single `pending` bool flows in execution order.
-At each `SeqStmts`, before a child that `opens_with_notify`, a fence is emitted if
-`pending` (then `pending` clears) — **except before an `if`**, which is recursed
-into so each branch fences at its own real notify:
-
-```text
-remote_store; cacheinvalid; notify         -> ...; fence; notify           (straight line)
-remote_store; cacheinvalid; for p: notify  -> ...; fence; for p: notify     (hoist before loop)
-remote_store; cacheinvalid; if c: notify   -> ...; if c: { fence; notify }  (inside the branch)
-```
-
-The `if` differs from the loop on purpose. A notify inside an `if` is
-*conditional*, so pushing the barrier into the taken branch is strictly more
-precise than hoisting an unconditional barrier before the `if` (no barrier runs
-when the branch is not taken). A loop whose body does **not** end with a write
-(e.g. a `for p: notify` barrier) *does* hoist, so one fence before the loop covers
-all iterations instead of one per iteration.
-
-A loop whose body **may end with a write** is entered with
-`pending || may_end_with_write(body)`, so a write at the tail of one iteration
-fences the notify at the head of the next — the ring-allreduce back-edge (the tail
-write's own cacheinvalid was already placed by traversal 1). Such a loop already
-fences at its own head, so an incoming pending write is **not** hoisted before it:
-the head fence on iteration 0 covers that write too (a hoisted fence would be a
-redundant second barrier before the same notify). Concretely
-`store; for { notify; store }` emits a single fence, at the loop head — not one
-before the loop plus one inside.
+- **`if`** — each branch is marked with its own incoming `pending`; after the `if`,
+  `pending` is the **AND** of the two branch outcomes (a write on only one path is
+  not proven). A conditional notify with no proven pending write thus gets its own
+  whole-GM marker inside its branch.
+- **loops** — the body is entered with `pending = false`, and `pending` is reset to
+  false after the loop. This is required for correctness, not just conservatism:
+  ptoas checks the release marker **lexically**, so a loop-head notify cannot rely
+  on a fence carried in from before the loop (iteration 0) or from the previous
+  iteration's tail write (the back-edge) — neither lexically precedes it in the
+  body. Clearing `pending` forces every loop-body notify to get its own marker.
 
 ```text
-for s: { for p: notify(...); ...; store(win); cacheinvalid(win) }
-     -> for s: { fence; for p: notify(...); ...; store(win); cacheinvalid(win) }
+remote_store; notify                 -> remote_store; cacheinvalid; fence; notify
+remote_store; for: notify             -> remote_store; cacheinvalid; fence;
+                                         for: { cacheinvalid(); fence; notify }
+for: { notify; store }                -> for: { cacheinvalid(); fence; notify;
+                                                store; cacheinvalid; fence }
 ```
 
-An existing `system.fence` clears `pending`, so the pass is **idempotent** and
-takes a user-written fence as the complete barrier (no duplicate fence added).
+An existing region `cacheinvalid` **immediately followed by a fence** after a
+write, and an existing whole-GM cacheinvalid immediately after a wait, are
+recognized and **not duplicated**, so the pass is idempotent.
 
 ## Codegen interaction
 
 `InsertCommFence` supersedes the former unconditional drain barrier emitted after
-every TPUT in `MakePutCodegenPTO` (a PTOAS#872 workaround). That codegen barrier
-is removed: the fence now fires only when a notify actually follows, and it adds
-the DDR-observability drain a pipe barrier cannot. The TPUT/TGET **pre** barriers
-and the TGET **tail** barrier are unrelated (in-core RAW ordering, not
+every TPUT in `MakePutCodegenPTO` (a PTOAS#872 workaround). That codegen barrier is
+removed: the fence now fires only when a notify actually follows, and it adds the
+DDR-observability drain a pipe barrier cannot. The TPUT/TGET **pre** barriers and
+the TGET **tail** barrier are unrelated (in-core RAW ordering, not
 data-before-signal) and are kept.
 
 ## Consumers
 
 None downstream in the pipeline. PTO codegen lowers the inserted `system.cacheinvalid`
-and `system.fence` via their existing op handlers; no other pass reasons about them.
+(region or whole-GM by arity) and `system.fence` via their existing op handlers; no
+other pass reasons about them.

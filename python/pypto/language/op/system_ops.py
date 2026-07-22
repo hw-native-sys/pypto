@@ -15,6 +15,7 @@ tpop ops accept optional shape/dtype kwargs to create typed results.
 """
 
 from collections.abc import Sequence
+from typing import overload
 
 from pypto.ir.op import system_ops as _ir_ops
 from pypto.ir.op.system_ops import (
@@ -213,29 +214,51 @@ def syncall(
     return _ir_ops.syncall_soft(core_type, args, span=actual_span)
 
 
+@overload
+def cacheinvalid(*, span: Span | None = None) -> Call: ...
+@overload
 def cacheinvalid(
     tensor: Tensor,
     shapes: Sequence[int | Scalar],
     offsets: Sequence[int | Scalar],
     *,
     span: Span | None = None,
+) -> Call: ...
+def cacheinvalid(
+    tensor: Tensor | None = None,
+    shapes: Sequence[int | Scalar] | None = None,
+    offsets: Sequence[int | Scalar] | None = None,
+    *,
+    span: Span | None = None,
 ) -> Call:
-    """Invalidate the cache lines backing a tensor sub-region.
+    """Invalidate cache lines: a tensor sub-region, or the whole GM address space.
 
-    Codegen picks the lowering by the region size:
+    Two forms selected by arity:
 
-    - ``shapes`` all 1 (scalar write): ``pto.addptr`` +
-      ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
-    - otherwise (tile store): ``pto.partition_view`` +
-      ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
+    - No arguments: invalidate the entire GM address space; lowers to
+      ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
+    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region. Codegen
+      picks the lowering by region size:
+
+      - ``shapes`` all 1 (scalar write): ``pto.addptr`` +
+        ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+      - otherwise (tile store): ``pto.partition_view`` +
+        ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
 
     Args:
-        tensor: Target tensor whose sub-region is invalidated.
+        tensor: Target tensor whose sub-region is invalidated; omit for whole-GM.
         shapes: Per-dimension region sizes; length must equal the tensor rank
             (all 1 selects the scalar-write / ptr form).
         offsets: Per-dimension start offsets; length must equal the tensor rank.
         span: Optional source span for debugging (auto-captured if not provided).
     """
+    if tensor is None:
+        return _ir_ops.cacheinvalid(span=span)
+    if shapes is None or offsets is None:
+        raise ValueError(
+            "system.cacheinvalid region form requires both shapes and offsets "
+            "(or pass no arguments for the whole-GM form)"
+        )
     shp = [s.unwrap() if isinstance(s, Scalar) else s for s in shapes]
     off = [o.unwrap() if isinstance(o, Scalar) else o for o in offsets]
     return _ir_ops.cacheinvalid(tensor.unwrap(), shp, off, span=span)

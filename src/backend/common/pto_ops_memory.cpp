@@ -818,8 +818,14 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
   reg("system.cacheinvalid", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
+    // No-arg form: invalidate the whole GM address space.
+    if (op->args_.empty()) {
+      codegen.Emit("pto.cmo.cacheinvalid all #pto.address_space<gm>");
+      return std::string("");
+    }
     INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
-        << "system.cacheinvalid takes 3 arguments (tensor, offsets, shapes), got " << op->args_.size();
+        << "system.cacheinvalid takes 0 (whole-GM) or 3 arguments (tensor, shapes, offsets), got "
+        << op->args_.size();
     const auto tensor_var = AsVarLike(op->args_[0]);
     INTERNAL_CHECK_SPAN(tensor_var, op->span_)
         << "system.cacheinvalid first argument must be a tensor variable";

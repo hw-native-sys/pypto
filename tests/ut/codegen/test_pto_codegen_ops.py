@@ -2973,6 +2973,29 @@ class TestCacheInvalidCodegen:
         assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
         assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"
 
+    def test_cacheinvalid_whole_gm_no_args_emits_all(self):
+        """The no-argument form invalidates the whole GM address space."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_cacheinvalid_all(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                pl.system.cacheinvalid()
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        cmo_line = _cmo_cacheinvalid_line(mlir)
+        # Whole-GM form: `all #pto.address_space<gm>`, no ptr / partition view.
+        assert "all #pto.address_space<gm>" in cmo_line, f"whole-GM form not emitted: {cmo_line}"
+        assert "single_cache_line" not in cmo_line
+        assert "partition_tensor_view" not in cmo_line
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

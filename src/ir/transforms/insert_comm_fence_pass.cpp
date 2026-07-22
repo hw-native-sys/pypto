@@ -11,62 +11,66 @@
 
 /**
  * @file insert_comm_fence_pass.cpp
- * @brief Insert `system.cacheinvalid` after each publishing write and a GM
- *        `system.fence` before each releasing `pld.system.notify`
- *        (data-before-signal).
+ * @brief Insert the ptoas data-before-signal memory markers around cross-rank
+ *        publish (`pld.system.notify`) and consume (`pld.system.wait`) points.
  *
- * The latest PTOAS requires the upper layer to explicitly order a cross-rank
- * write against the notify that signals its completion: the written data must be
- * visible to the peer before the signal arrives. Two ops implement this, at two
- * different granularities and — because they share nothing — via two independent
- * traversals:
+ * The latest PTOAS enforces a two-sided contract in its `pto-memory-consistency`
+ * pass and pushes the markers onto the compiler:
  *
- *   - `system.cacheinvalid` is **per address**: each publishing write invalidates
- *     the cache lines of exactly the region it wrote, so one cacheinvalid is
- *     emitted **immediately after every publishing write** (`CacheInvalidInserter`,
- *     a single structural traversal — no control-flow analysis). Placing it at the
- *     write site keeps its target trivially in scope, so there is no cross-scope
- *     tracking and nothing is ever silently dropped.
- *   - `system.fence` is **per notify**: a single GM barrier before a notify
- *     orders *all* prior writes, so at most one fence is emitted before a notify
- *     that has an unflushed publishing write (`FenceInserter`, carrying a
- *     `pending` bool over a memoized subtree summary).
+ *   - Publish side: a `pto.comm.tnotify` requires an explicit
+ *     `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching
+ *     `pto.cmo.cacheinvalid` release marker and before the signal.
+ *   - Consume side: a cacheable GM load after `pto.comm.twait` / a successful
+ *     `pto.comm.ttest` requires an explicit `pto.cmo.cacheinvalid all
+ *     #pto.address_space<gm>` first (so the reader sees the peer's fresh write).
  *
- * So the shapes are, e.g.:
+ * Both markers are the same `system.cacheinvalid` op: with a (tensor, shapes,
+ * offsets) region it invalidates that sub-region; with no argument it
+ * invalidates the whole GM address space (`... cacheinvalid all ...`).
  *
- *   remote_store(a); remote_store(b); notify
- *     -> remote_store(a); cacheinvalid(a); remote_store(b); cacheinvalid(b); fence; notify
+ * A single forward structural traversal inserts, per op:
  *
- * The cacheinvalid currently covers the **whole target tensor** (region = full
- * shape at zero offsets), reusing the tensor type's dim exprs. Narrowing to the
- * precise written sub-region (available from the write's own args at the write
- * site) is a planned follow-up.
+ *   - after each **publishing write** (remote_store / put / get / window-bound
+ *     tile.store): a whole-tensor region `system.cacheinvalid` of the written
+ *     region followed **immediately** by a GM `system.fence`. ptoas requires the
+ *     fence to directly follow the release marker, so both land at the write site
+ *     (per address) — not deferred to the notify.
+ *   - before each **bare barrier notify** (a notify with no fenced publishing
+ *     write pending — e.g. a pure barrier signal, or a notify whose write lives in
+ *     a prior loop so `pending` was reset): a no-arg (whole-GM)
+ *     `system.cacheinvalid` + `system.fence` as the release marker (there is no
+ *     data region to point at). A notify that *does* have a pending fenced write
+ *     needs nothing — the write's own `cacheinvalid; fence` is the marker.
+ *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid` (the
+ *     consume-side invalidate before the next cacheable read).
  *
- * Fence placement (`FenceInserter`), two passes, O(N):
+ * Example shapes:
  *
- * - Pass 1 (`SummaryCache`, bottom-up / post-order, memoized): per statement,
- *   `opens_with_notify` (reaches a notify before any write/fence),
- *   `may_end_with_write` (may exit with an uncovered publishing write),
- *   `transparent` (may fall through touching nothing). Loops are always
- *   `transparent` (they may iterate zero times).
+ *   remote_store; notify         -> remote_store; cacheinvalid(dst); fence; notify
+ *   for p: (if p!=me: notify)     -> for p: (if p!=me: cacheinvalid; fence; notify)
+ *   for c: store; for p: notify   -> for c: (store; cacheinvalid; fence);
+ *                                     for p: (cacheinvalid; fence; notify)
+ *   wait; read                   -> wait; cacheinvalid; read
  *
- * - Pass 2 (forward): carry a `pending` bool. At each `SeqStmts`, before a child
- *   that `opens_with_notify`, emit a fence if `pending` — except before an `if`,
- *   which is recursed into so each branch fences at its own real notify (a
- *   conditional notify's barrier belongs in the taken branch). Loops still hoist
- *   (the body runs every iteration). A loop body is entered with
- *   `pending || may_end_with_write(body)` (the ring back-edge). An existing fence
- *   clears `pending`, so it is idempotent.
+ * The region cacheinvalid covers the whole target tensor (full shape at zero
+ * offsets), reusing the tensor type's dim exprs; narrowing to the precise written
+ * sub-region is a planned follow-up.
  *
- * Runs last in the Default pipeline (after all statement-reordering passes) so
- * the inserted ops stay adjacent through codegen. See
- * `op_predicates::IsPublishingWrite` / `IsNotify` for the write/notify sets.
+ * A single forward `pending` bool decides the notify marker: it is set by a
+ * publishing write (which also emits its own fence) and cleared by a notify/fence.
+ * It is conservative across control flow (reset after a loop; `and`-merged across
+ * `if` branches), so an uncertain path emits the safe whole-GM cacheinvalid +
+ * fence rather than relying on a region marker that may not precede.
+ *
+ * Idempotent: a notify already preceded by a fence, a write already followed by
+ * its region cacheinvalid, and a wait already followed by a whole-GM cacheinvalid
+ * are left alone. Runs last in the Default pipeline (after all statement-reordering
+ * passes) so the inserted ops stay adjacent through codegen.
  */
 
 #include <cstddef>
 #include <memory>
 #include <optional>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -92,8 +96,8 @@ namespace pass {
 
 namespace {
 
-// The effect a leaf statement has on the running `pending` state.
-enum class Effect { kWrite, kNotify, kFence, kNone };
+// The effect a leaf statement has on the running `pending` state / markers.
+enum class Effect { kWrite, kNotify, kWait, kFence, kNone };
 
 // The call carried by a leaf statement, if any.
 CallPtr LeafCall(const StmtPtr& stmt) {
@@ -107,8 +111,8 @@ CallPtr LeafCall(const StmtPtr& stmt) {
 }
 
 // Classify a call-like statement (EvalStmt / AssignStmt). A submit is treated
-// conservatively as a publishing write for fence ordering; its launched task
-// body is not analysed here (and it has no single region to cacheinvalidate).
+// conservatively as a publishing write for ordering; its launched task body is
+// not analysed here (and it has no single region to cacheinvalidate).
 Effect StmtEffect(const StmtPtr& stmt) {
   ExprPtr value;
   if (auto eval = As<EvalStmt>(stmt)) {
@@ -120,6 +124,7 @@ Effect StmtEffect(const StmtPtr& stmt) {
   if (auto call = As<Call>(value)) {
     if (op_predicates::IsPublishingWrite(call)) return Effect::kWrite;
     if (op_predicates::IsNotify(call)) return Effect::kNotify;
+    if (IsOp(call, "pld.system.wait")) return Effect::kWait;
     if (IsOp(call, "system.fence")) return Effect::kFence;
     return Effect::kNone;
   }
@@ -127,10 +132,26 @@ Effect StmtEffect(const StmtPtr& stmt) {
   return Effect::kNone;
 }
 
+// `pending` after a leaf with the given effect. A wait / cacheinvalid does not
+// touch the publish-side pending state.
+bool NextPending(bool pending, Effect effect) {
+  switch (effect) {
+    case Effect::kWrite:
+      return true;
+    case Effect::kNotify:
+    case Effect::kFence:
+      return false;
+    case Effect::kWait:
+    case Effect::kNone:
+      return pending;
+  }
+  return pending;
+}
+
 // The destination tensor of a publishing write, whose cache lines must be
 // invalidated after it. Null when there is no single addressable target (a
-// `Submit`, or an op not in the publishing set). Callers guard on
-// `IsPublishingWrite` first; the arg positions mirror each op's registration.
+// `Submit`, or an op not in the publishing set). The arg positions mirror each
+// op's registration.
 ExprPtr PublishingWriteTarget(const CallPtr& call) {
   if (!call || !call->op_) return nullptr;
   if (IsOp(call, "pld.tile.remote_store")) {
@@ -161,13 +182,24 @@ ExprPtr WriteTargetToInvalidate(const StmtPtr& stmt) {
   return AsInvalidatableTarget(target) ? target : nullptr;
 }
 
-// True if `stmt` is a `system.cacheinvalid` whose target Var is `target`.
+bool IsLeafOp(const StmtPtr& stmt, const char* op_name) {
+  auto call = LeafCall(stmt);
+  return call && IsOp(call, op_name);
+}
+
+// True if `stmt` is a region `system.cacheinvalid` whose target Var is `target`.
 bool IsCacheInvalidFor(const StmtPtr& stmt, const ExprPtr& target) {
   auto call = LeafCall(stmt);
   if (!call || !IsOp(call, "system.cacheinvalid") || call->args_.empty()) return false;
   auto have = AsVarLike(call->args_[0]);
   auto want = AsVarLike(target);
   return have && want && have.get() == want.get();
+}
+
+// True if `stmt` is a whole-GM `system.cacheinvalid` (the no-argument form).
+bool IsCacheInvalidAll(const StmtPtr& stmt) {
+  auto call = LeafCall(stmt);
+  return call && IsOp(call, "system.cacheinvalid") && call->args_.empty();
 }
 
 // Whole-tensor cacheinvalid for `target`: region = the target's full shape at
@@ -191,11 +223,21 @@ StmtPtr MakeCacheInvalid(const ExprPtr& target, const Span& span) {
   return std::make_shared<EvalStmt>(call, span);
 }
 
-// ---------------------------------------------------------------------------
-// Traversal 1: insert a whole-tensor `system.cacheinvalid` right after every
-// publishing write. Pure structural rewrite — no control-flow analysis.
-// ---------------------------------------------------------------------------
-class CacheInvalidInserter : public IRMutator {
+StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
+  return std::make_shared<EvalStmt>(OpRegistry::GetInstance().Create(op_name, /*args=*/{}, span), span);
+}
+
+// Whole-GM cacheinvalid: the no-argument form of `system.cacheinvalid`.
+StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cacheinvalid", span); }
+
+// Forward traversal: emit the ptoas data-before-signal markers per op.
+class InsertCommMarkers : public IRMutator {
+ public:
+  // Entry point: process a function body. A SeqStmts is walked statement by
+  // statement; a bare single statement (a degenerate one-op body) is wrapped
+  // with its own markers, matching the treatment of if/for bodies.
+  StmtPtr MarkTopLevel(const StmtPtr& body) { return MarkBody(body); }
+
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     std::vector<StmtPtr> out;
@@ -203,30 +245,57 @@ class CacheInvalidInserter : public IRMutator {
     bool changed = false;
     const auto& stmts = op->stmts_;
     for (size_t i = 0; i < stmts.size(); ++i) {
-      auto new_child = VisitStmt(stmts[i]);
-      if (new_child.get() != stmts[i].get()) changed = true;
+      const StmtPtr& child = stmts[i];
+      const Effect eff = StmtEffect(child);
+      // Publish side, bare barrier notify: when no fenced publishing write is
+      // pending, the notify has no data region to release, so emit a whole-GM
+      // cacheinvalid + fence before it (unless already fenced). A pending write
+      // already emitted its own `cacheinvalid; fence` — ptoas accepts that as the
+      // release marker — so a pending notify needs nothing here.
+      if (eff == Effect::kNotify && !pending_ && !(i > 0 && IsLeafOp(stmts[i - 1], "system.fence"))) {
+        out.push_back(MakeCacheInvalidAll(child->span_));
+        out.push_back(MakeNoArgOp("system.fence", child->span_));
+        changed = true;
+      }
+      auto new_child = VisitStmt(child);
+      if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
-      if (auto target = WriteTargetToInvalidate(stmts[i])) {
-        // Idempotent: skip if the next original sibling already is that cacheinvalid.
-        const bool already = (i + 1 < stmts.size()) && IsCacheInvalidFor(stmts[i + 1], target);
+      // Per-address: a region cacheinvalid + fence after each publishing write.
+      // ptoas requires the fence to immediately follow the release marker.
+      if (auto target = WriteTargetToInvalidate(child)) {
+        const bool already = i + 2 < stmts.size() && IsCacheInvalidFor(stmts[i + 1], target) &&
+                             IsLeafOp(stmts[i + 2], "system.fence");
         if (!already) {
-          out.push_back(MakeCacheInvalid(target, stmts[i]->span_));
+          out.push_back(MakeCacheInvalid(target, child->span_));
+          out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
         }
       }
+      // Consume side: a whole-GM cacheinvalid after each wait.
+      if (eff == Effect::kWait && !(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
+        out.push_back(MakeCacheInvalidAll(child->span_));
+        changed = true;
+      }
+      pending_ = NextPending(pending_, eff);
     }
     if (!changed) return op;
     return SeqStmts::Flatten(std::move(out), op->span_);
   }
 
-  // Bare single-statement bodies (a publishing write not wrapped in a SeqStmts,
-  // e.g. `if c: remote_store(...)`) have no SeqStmts handler to append to, so
-  // wrap them here. After the first run the body becomes a SeqStmts and takes the
-  // handler above, which keeps it idempotent.
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    auto new_then = WrapBareWrite(op->then_body_);
+    const bool pending_in = pending_;
+    auto new_then = MarkBody(op->then_body_);
+    const bool then_pending = pending_;
+    bool else_pending = pending_in;
     std::optional<StmtPtr> new_else = op->else_body_;
-    if (op->else_body_.has_value()) new_else = WrapBareWrite(op->else_body_.value());
+    if (op->else_body_.has_value()) {
+      pending_ = pending_in;
+      new_else = MarkBody(op->else_body_.value());
+      else_pending = pending_;
+    }
+    // Conservative: only stay `pending` if both paths definitely leave a write
+    // pending; otherwise the next notify emits the safe cacheinvalid_all.
+    pending_ = then_pending && else_pending;
     const bool then_changed = new_then.get() != op->then_body_.get();
     const bool else_changed = op->else_body_.has_value() && new_else->get() != op->else_body_->get();
     if (!then_changed && !else_changed) return op;
@@ -234,217 +303,53 @@ class CacheInvalidInserter : public IRMutator {
     result->then_body_ = std::move(new_then);
     result->else_body_ = std::move(new_else);
     return result;
-  }
-
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return VisitLoopBody(op, op->body_); }
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return VisitLoopBody(op, op->body_); }
-
- private:
-  StmtPtr WrapBareWrite(const StmtPtr& body) {
-    auto visited = VisitStmt(body);
-    auto target = WriteTargetToInvalidate(body);
-    if (!target) return visited;  // SeqStmts / non-write body: handled elsewhere
-    return SeqStmts::Flatten({visited, MakeCacheInvalid(target, body->span_)}, body->span_);
-  }
-
-  template <typename LoopPtr>
-  StmtPtr VisitLoopBody(const LoopPtr& op, const StmtPtr& body) {
-    // WrapBareWrite already fully visited `body`; if it is unchanged the loop is
-    // unchanged — return `op` directly (re-invoking IRMutator::VisitStmt_ would
-    // walk the body a second time, O(2^depth) over nested loops).
-    auto new_body = WrapBareWrite(body);
-    if (new_body.get() == body.get()) return op;
-    auto result = MutableCopy(op);
-    result->body_ = std::move(new_body);
-    return result;
-  }
-};
-
-// ---------------------------------------------------------------------------
-// Traversal 2: insert a GM `system.fence` before each releasing notify.
-// ---------------------------------------------------------------------------
-struct Summary {
-  bool opens_with_notify = false;   // reaches a notify before any write/fence
-  bool may_end_with_write = false;  // may exit with an uncovered publishing write
-  bool transparent = false;         // may fall through touching no write/fence/notify
-};
-
-// Pass 1: memoized bottom-up subtree summaries (drives fence placement).
-class SummaryCache {
- public:
-  const Summary& Get(const StmtPtr& stmt) {
-    auto it = cache_.find(stmt.get());
-    if (it != cache_.end()) return it->second;
-    Summary summary = Compute(stmt);
-    return cache_.emplace(stmt.get(), summary).first->second;
-  }
-
- private:
-  Summary Compute(const StmtPtr& stmt) {
-    if (auto seq = As<SeqStmts>(stmt)) {
-      bool opens = false;
-      bool may_end = false;
-      bool transparent = true;
-      bool clear = true;  // some path reaches here without a write/fence/notify
-      for (const auto& child : seq->stmts_) {
-        const Summary& cs = Get(child);
-        if (clear && cs.opens_with_notify) opens = true;
-        clear = clear && cs.transparent;
-        may_end = cs.may_end_with_write || (cs.transparent && may_end);
-        transparent = transparent && cs.transparent;
-      }
-      return {opens, may_end, transparent};
-    }
-    if (auto iff = As<IfStmt>(stmt)) {
-      const Summary& then_s = Get(iff->then_body_);
-      Summary else_s =
-          iff->else_body_.has_value() ? Get(iff->else_body_.value()) : Summary{false, false, true};
-      return {then_s.opens_with_notify || else_s.opens_with_notify,
-              then_s.may_end_with_write || else_s.may_end_with_write,
-              then_s.transparent || else_s.transparent};
-    }
-    if (auto loop = As<ForStmt>(stmt)) {
-      const Summary& body = Get(loop->body_);
-      return {body.opens_with_notify, body.may_end_with_write, true};
-    }
-    if (auto loop = As<WhileStmt>(stmt)) {
-      const Summary& body = Get(loop->body_);
-      return {body.opens_with_notify, body.may_end_with_write, true};
-    }
-    if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      return Get(scope->body_);
-    }
-    switch (StmtEffect(stmt)) {
-      case Effect::kWrite:
-        return {false, true, false};
-      case Effect::kNotify:
-        return {true, false, false};
-      case Effect::kFence:
-        return {false, false, false};
-      case Effect::kNone:
-        return {false, false, true};
-    }
-    return {false, false, true};
-  }
-
-  std::unordered_map<const Stmt*, Summary> cache_;
-};
-
-// Pass 2: forward insertion carrying a single `pending` bool.
-class FenceInserter : public IRMutator {
- public:
-  explicit FenceInserter(SummaryCache* summaries) : summaries_(summaries) {}
-
- protected:
-  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
-    std::vector<StmtPtr> out;
-    out.reserve(op->stmts_.size());
-    bool changed = false;
-    for (const auto& child : op->stmts_) {
-      if (MaybeFenceBefore(&out, child)) changed = true;
-      auto new_child = VisitStmt(child);
-      if (new_child.get() != child.get()) changed = true;
-      out.push_back(std::move(new_child));
-    }
-    if (!changed) return op;
-    return SeqStmts::Flatten(std::move(out), op->span_);
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override { return VisitLoop(op, op->body_); }
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return VisitLoop(op, op->body_); }
 
-  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    const bool pending_in = pending_;
-    auto new_then = VisitBranch(op->then_body_);
-    const bool pending_then = pending_;
-    bool pending_else = pending_in;
-    std::optional<StmtPtr> new_else = op->else_body_;
-    if (op->else_body_.has_value()) {
-      pending_ = pending_in;
-      new_else = VisitBranch(op->else_body_.value());
-      pending_else = pending_;
-    }
-    pending_ = pending_then || pending_else;
-    const bool then_changed = new_then.get() != op->then_body_.get();
-    const bool else_changed = op->else_body_.has_value() && new_else->get() != op->else_body_->get();
-    if (!then_changed && !else_changed) return op;
-    auto result = MutableCopy(op);
-    result->then_body_ = std::move(new_then);
-    result->else_body_ = std::move(new_else);
-    return result;
-  }
-
-  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    pending_ = NextPending(pending_, StmtEffect(op));
-    return op;
-  }
-
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    pending_ = NextPending(pending_, StmtEffect(op));
-    return op;
-  }
-
  private:
-  static bool NextPending(bool pending, Effect effect) {
-    switch (effect) {
-      case Effect::kWrite:
-        return true;
-      case Effect::kNotify:
-      case Effect::kFence:
-        return false;
-      case Effect::kNone:
-        return pending;
-    }
-    return pending;
-  }
-
-  // Emit a fence into `out` before `next` when a write is pending and `next`
-  // opens with a notify — with two exceptions that are recursed into instead:
-  //   - an `if`, so each branch fences at its own real notify (a conditional
-  //     notify's barrier belongs in the taken branch);
-  //   - a loop whose body may end with a write, which already fences at its own
-  //     head once the incoming pending write flows in (the ring back-edge seed) —
-  //     a hoisted fence here would be a redundant second barrier before the same
-  //     first-iteration notify. A loop that does *not* end with a write (e.g. a
-  //     `for p: notify` barrier) still hoists, so one fence covers all iterations
-  //     instead of one per iteration.
-  // Returns true if a fence was inserted.
-  bool MaybeFenceBefore(std::vector<StmtPtr>* out, const StmtPtr& next) {
-    const Summary& s = summaries_->Get(next);
-    if (!pending_ || As<IfStmt>(next) || !s.opens_with_notify) return false;
-    if ((As<ForStmt>(next) || As<WhileStmt>(next)) && s.may_end_with_write) return false;
-    out->push_back(MakeFence(next->span_));
-    pending_ = false;
-    return true;
-  }
-
-  // Visit an if-branch body. A `SeqStmts` body inserts internally; a bare
-  // single-statement notify body has no `SeqStmts` handler, so fence around it.
-  StmtPtr VisitBranch(const StmtPtr& body) {
+  // Visit a body that may be a bare single statement (an `if`/`for` body without
+  // an enclosing SeqStmts, e.g. `if p != me: notify`). A SeqStmts body is handled
+  // by its own visitor; a bare leaf gets its markers wrapped around it here. After
+  // the first run a wrapped body is a SeqStmts, so the pass stays idempotent.
+  StmtPtr MarkBody(const StmtPtr& body) {
     if (As<SeqStmts>(body)) return VisitStmt(body);
+    const Effect eff = StmtEffect(body);
     std::vector<StmtPtr> out;
-    if (!MaybeFenceBefore(&out, body)) return VisitStmt(body);
-    out.push_back(VisitStmt(body));
+    if (eff == Effect::kNotify && !pending_) {
+      out.push_back(MakeCacheInvalidAll(body->span_));
+      out.push_back(MakeNoArgOp("system.fence", body->span_));
+    }
+    auto visited = VisitStmt(body);
+    out.push_back(visited);
+    if (auto target = WriteTargetToInvalidate(body)) {
+      out.push_back(MakeCacheInvalid(target, body->span_));
+      out.push_back(MakeNoArgOp("system.fence", body->span_));
+    }
+    if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
+    pending_ = NextPending(pending_, eff);
+    if (out.size() == 1) return visited;
     return SeqStmts::Flatten(std::move(out), body->span_);
   }
 
   template <typename LoopPtr>
   StmtPtr VisitLoop(const LoopPtr& op, const StmtPtr& body) {
-    // Back-edge: a write at the tail of one iteration reaches a notify at the
-    // head of the next, so enter the body already pending if the body may write.
-    const bool pending_in = pending_ || summaries_->Get(body).may_end_with_write;
-    pending_ = pending_in;
-    auto result = IRMutator::VisitStmt_(op);  // reconstructs the loop, visiting `body`
-    pending_ = pending_in;                    // loop exit state (may run zero times)
+    // Enter the loop body with `pending_ = false`: ptoas checks the release marker
+    // lexically, so a loop-head notify cannot rely on a fence carried in from
+    // before the loop (iteration 0) or from the previous iteration's tail write
+    // (the back-edge) — neither precedes it lexically in the body. Marking with a
+    // cleared `pending` forces every loop-body notify to get its own
+    // cacheinvalid + fence. After the loop, stay conservative for the same reason.
+    pending_ = false;
+    auto new_body = MarkBody(body);
+    pending_ = false;
+    if (new_body.get() == body.get()) return op;
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
     return result;
   }
 
-  StmtPtr MakeFence(const Span& span) {
-    auto fence_call = OpRegistry::GetInstance().Create("system.fence", /*args=*/{}, span);
-    return std::make_shared<EvalStmt>(fence_call, span);
-  }
-
-  SummaryCache* summaries_;
   bool pending_ = false;
 };
 
@@ -453,12 +358,8 @@ class FenceInserter : public IRMutator {
 Pass InsertCommFence() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
     if (!func || !func->body_) return func;
-    // Independent traversals: per-address cacheinvalid after each write, then the
-    // per-notify fence. Order is irrelevant — a cacheinvalid is inert to the fence
-    // summary — so cacheinvalid runs first for a simpler mental model.
-    auto with_ci = CacheInvalidInserter().VisitStmt(func->body_);
-    SummaryCache summaries;
-    auto new_body = FenceInserter(&summaries).VisitStmt(with_ci);
+    InsertCommMarkers mutator;
+    auto new_body = mutator.MarkTopLevel(func->body_);
     if (new_body.get() == func->body_.get()) return func;
     return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                       func->return_types_, new_body, func->span_, func->func_type_,

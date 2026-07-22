@@ -219,6 +219,23 @@ class TestSystemOpsParsing:
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
+    def test_cacheinvalid_round_trip_whole_gm(self):
+        """Round-trip for the no-argument (whole-GM) form."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.system.cacheinvalid()
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.cacheinvalid()" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
     def test_cacheinvalid_rejects_float_offset(self):
         """A non-integer offset is rejected at the IR wrapper, not deep in codegen."""
         span = ir.Span.unknown()
