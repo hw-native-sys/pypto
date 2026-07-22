@@ -3970,13 +3970,22 @@ class TestConvertCrossCoreSplitOps:
         function's Tensor return shape. The producer mirrors the realistic boundary
         each op sees: a cube ``pl.matmul`` for the shard, a Vec ``pl.exp`` for the
         gather.
+
+        The shard's ``pl.matmul`` is emitted OUTSIDE the region: each AIV lane holds
+        only half the tile, so a cube op inside a data-parallel region cannot be
+        vector-split (rejected by AivSplitValid check (a)). Producing the full cube
+        tile first and sharding it inside the region is the authoring shape real
+        kernels use. The gather's ``pl.exp`` is a vector op and belongs inside.
         """
         if op == "aiv_shard":
             params = "a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]"
-            body = "qk = pl.matmul(a, b)\n                res = pl.aiv_shard(qk)"
+            pre_region = "qk = pl.matmul(a, b)\n"
+            body = "res = pl.aiv_shard(qk)"
         else:
             params = "x: pl.Tensor[[128, 128], pl.FP32]"
+            pre_region = ""
             body = "h = pl.exp(x)\n                res = pl.aic_gather(h)"
+        pre_region_line = f"            {pre_region}" if pre_region else ""
         text = (
             "import pypto.language as pl\n\n\n"
             "@pl.program\n"
@@ -3984,6 +3993,7 @@ class TestConvertCrossCoreSplitOps:
             "    @pl.function(type=pl.FunctionType.InCore)\n"
             f"    def main_incore_0(self, {params}) -> pl.Tensor[{out_shape}, pl.FP32]:\n"
             "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+            f"{pre_region_line}"
             f"            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.{mode}):\n"
             f"                {body}\n"
             "        return res\n"
@@ -4015,8 +4025,9 @@ class TestConvertCrossCoreSplitOps:
                 self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
+                    # Cube op OUTSIDE the region: a matmul cannot be vector-split.
+                    qk = pl.matmul(a, b)
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        qk = pl.matmul(a, b)
                         res = pl.aiv_shard(qk)
                 return res
 
@@ -4030,14 +4041,14 @@ class TestConvertCrossCoreSplitOps:
                 ret0__out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
+                    a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                    )
+                    qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-                        a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                            a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                        )
-                        b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                            b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                        )
-                        qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
                         # split= suppressed inside the region; re-stamped from the mode.
                         res__tile: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
                 ret0__store: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
@@ -4058,8 +4069,9 @@ class TestConvertCrossCoreSplitOps:
                 self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
             ) -> pl.Tensor[[128, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
+                    # Cube op OUTSIDE the region: a matmul cannot be vector-split.
+                    qk = pl.matmul(a, b)
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        qk = pl.matmul(a, b)
                         res = pl.aiv_shard(qk)
                 return res
 
@@ -4073,14 +4085,14 @@ class TestConvertCrossCoreSplitOps:
                 ret0__out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
             ) -> pl.Tensor[[128, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
+                    a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
+                    )
+                    qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
-                        a_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                            a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                        )
-                        b_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
-                            b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat
-                        )
-                        qk__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_mat, b_mat)
                         res__tile: pl.Tile[[128, 64], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk__tile)
                 ret0__store: pl.Tensor[[128, 64], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
@@ -4090,8 +4102,11 @@ class TestConvertCrossCoreSplitOps:
 
     def test_aic_gather_up_down_lowers_to_tile_aic_gather(self):
         """``pl.aic_gather(vec_tensor)`` in an UP_DOWN ``split_aiv`` region lowers to
-        ``tile.aic_gather`` with split axis 0 doubled ([128, 128] -> [256, 128]) and Vec
-        memory re-attached; the exp producer loads its operand to Vec."""
+        ``tile.aic_gather`` with split axis 0 doubled ([128, 128] -> [256, 128]) and Mat
+        memory re-attached; the exp producer loads its operand to Vec.
+
+        The gather's declared memory is the CONSUMING (cube) lane's space: it carries a
+        vector-produced half to AIC, where ExpandMixedKernel pops it into Mat."""
 
         @pl.program
         class Before:
@@ -4117,7 +4132,7 @@ class TestConvertCrossCoreSplitOps:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                         h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
-                        res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aic_gather(h__tile)
+                        res__tile: pl.Tile[[256, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
                 ret0__store: pl.Tensor[[256, 128], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
@@ -4126,8 +4141,8 @@ class TestConvertCrossCoreSplitOps:
 
     def test_aic_gather_left_right_lowers_to_tile_aic_gather(self):
         """``pl.aic_gather(vec_tensor)`` in a LEFT_RIGHT ``split_aiv`` region lowers to
-        ``tile.aic_gather`` with split axis 1 doubled ([128, 128] -> [128, 256]) and Vec
-        memory re-attached."""
+        ``tile.aic_gather`` with split axis 1 doubled ([128, 128] -> [128, 256]) and Mat
+        memory re-attached (the consuming cube lane's space)."""
 
         @pl.program
         class Before:
@@ -4153,7 +4168,7 @@ class TestConvertCrossCoreSplitOps:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
                         h__tile: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.exp(x__tile)
-                        res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.tile.aic_gather(h__tile)
+                        res__tile: pl.Tile[[128, 256], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(h__tile)
                 ret0__store: pl.Tensor[[128, 256], pl.FP32] = pl.tile.store(res__tile, [0, 0], ret0__out)
                 return ret0__store
 
@@ -4217,6 +4232,61 @@ class TestConvertCrossCoreSplitOps:
         assert auto_call is not None
 
         # The two aiv_shard result types must be structurally identical.
+        ir.assert_structural_equal(explicit_call.type, auto_call.type)
+
+    def test_explicit_gather_type_matches_auto_path(self):
+        """AUTO oracle for the mirror direction: the ``tile.aic_gather`` result type
+        from the explicit ``tensor.aic_gather`` conversion is structurally identical
+        to the one LowerAutoVectorSplit synthesizes (same doubled shape, Mat memory).
+
+        This is the direction the boundary memory contract actually flipped
+        (producer-side Vec -> consuming-lane Mat), so it is what guards the
+        "the two lowering paths cannot drift apart" claim.
+        """
+        span = ir.Span.unknown()
+
+        # Explicit path: pl.aic_gather(vector value) → tile.aic_gather (Mat full).
+        explicit = passes.convert_tensor_to_tile_ops()(
+            self._parse_split_kernel("aic_gather", "UP_DOWN", [256, 128])
+        )
+        explicit_call = self._find_split_op(explicit, ir.get_op("tile.aic_gather").name)
+
+        # AUTO path: a mixed InCore function whose V->C tile.move boundary
+        # LowerAutoVectorSplit rewrites into tile.aic_gather. Built at the tile
+        # level for the same reason as the shard oracle above.
+        vec = ir.Var("vec", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Vec), span)
+        out_0 = ir.Var("out_0", ir.TensorType([128, 128], DataType.FP32), span)
+        move = tile_ops.move(vec, MemorySpace.Mat, span=span)
+        assert isinstance(move.type, ir.TileType)
+        gathered = ir.Var("gathered", move.type, span)
+        store = tile_ops.store(vec, [0, 0], out_0, span=span)
+        out_store = ir.Var("out_store", store.type, span)
+        auto_func = ir.Function(
+            "split_auto",
+            [(vec, ir.ParamDirection.In), (out_0, ir.ParamDirection.Out)],
+            [out_0.type],
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(gathered, move, span),
+                    ir.AssignStmt(out_store, store, span),
+                    ir.ReturnStmt([out_store], span),
+                ],
+                span,
+            ),
+            span,
+            ir.FunctionType.InCore,
+            attrs={"split": ir.SplitMode.UP_DOWN},
+        )
+        auto_program = ir.Program([auto_func], "auto", span)
+        with passes.PassContext([]):
+            auto_lowered = passes.lower_auto_vector_split()(auto_program)
+        auto_call = _find_first_call_to(
+            _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aic_gather").name
+        )
+        assert auto_call is not None
+
+        assert isinstance(explicit_call.type, ir.TileType)
+        assert explicit_call.type.memory_space == MemorySpace.Mat
         ir.assert_structural_equal(explicit_call.type, auto_call.type)
 
 

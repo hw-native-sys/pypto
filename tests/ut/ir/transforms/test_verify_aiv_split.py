@@ -14,7 +14,11 @@ between OutlineIncoreScopes and LowerAutoVectorSplit). Per region it checks:
   (a) no cube compute inside a region (each AIV lane holds only half the tile);
   (b) no AIV reduce over the split axis inside a region (partial reduction);
   (c) the ``tile.aiv_shard`` / ``tile.aic_gather`` boundary ops appear only
-      inside a region.
+      inside a region, and never inside a task-parallel ``mode=NONE`` one;
+  (d) the boundary memory contract — ``tile.aiv_shard`` is ``Acc -> Vec`` and
+      ``tile.aic_gather`` is ``Vec -> Mat``, since both ops *are* the cross-core
+      transfer, so the operand must sit on the producing lane and the result on
+      the consuming one.
 Full-width vector compute *outside* a region is legal (multi-mode goal) and is
 deliberately NOT flagged.
 
@@ -145,9 +149,14 @@ def test_boundary_outside_region_fails():
 
 
 def test_valid_region_passes():
-    """A region with vector compute + a boundary op inside it is valid."""
+    """A region with vector compute + a boundary op inside it is valid.
+
+    The shard operand is Acc: aiv_shard carries a CUBE-produced value (a matmul
+    result in L0C) across to the vector lane, so Acc is the only valid operand
+    space. Sharding a Vec operand is rejected by check (d) below.
+    """
     span = ir.Span.unknown()
-    data = ir.Var("d", _tile([16, 128]), span)
+    data = ir.Var("d", _tile([16, 128], mem=MS.Acc), span)
     shard = T.aiv_shard(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
     sharded = ir.Var("sharded", shard.type, span)
     add = T.add(sharded, sharded, span)
@@ -159,6 +168,90 @@ def test_valid_region_passes():
     program = _program(ir.SeqStmts([region], span))
 
     assert _errors(program) == []
+
+
+# ---------------------------------------------------------------------------
+# (d) Boundary memory contract: aiv_shard is Acc -> Vec, aic_gather is Vec -> Mat
+# ---------------------------------------------------------------------------
+
+
+def test_shard_vector_produced_operand_fails():
+    """aiv_shard of a Vec (vector-produced) operand -> Error.
+
+    Regression guard: ExpandMixedKernel routes the shard's tpush onto the AIC
+    lane by op name, but a Vec operand's producer stays on AIV. The cube half
+    then references a value it never defines, which InitMemRef turns into an
+    orphan Mem.Vec allocation and PTO codegen finally rejects with
+    "no MLIR mapping for MemRef base". Catch it here instead.
+    """
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128], mem=MS.Vec), span)
+    shard = T.aiv_shard(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    res = ir.Var("res", shard.type, span)
+    region = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(res, shard, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "tile.aiv_shard" in errors[0].message
+    assert "operand is in Vec" in errors[0].message
+    assert "requires Acc" in errors[0].message
+
+
+def test_gather_cube_produced_operand_fails():
+    """aic_gather of an Acc (cube-produced) operand -> Error (the mirror case)."""
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128], mem=MS.Acc), span)
+    gather = T.aic_gather(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    res = ir.Var("res", gather.type, span)
+    region = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(res, gather, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "tile.aic_gather" in errors[0].message
+    assert "operand is in Acc" in errors[0].message
+    assert "requires Vec" in errors[0].message
+
+
+def test_gather_vector_produced_operand_passes():
+    """aic_gather of a Vec operand is the valid direction -> no error."""
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128], mem=MS.Vec), span)
+    gather = T.aic_gather(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    res = ir.Var("res", gather.type, span)
+    region = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(res, gather, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    assert _errors(program) == []
+
+
+def test_boundary_result_in_wrong_memory_fails():
+    """A boundary result stamped with the PRODUCER-side space -> Error.
+
+    The declared type describes the CONSUMING lane. This is the shape the
+    tensor->tile converter used to emit for aic_gather (Vec, the producer side)
+    before it read the space from the op's set_output_memory declaration.
+    """
+    span = ir.Span.unknown()
+    data = ir.Var("d", _tile([16, 128], mem=MS.Vec), span)
+    gather = T.aic_gather(data, split=int(ir.SplitMode.UP_DOWN.value), span=span)
+    assert isinstance(gather.type, ir.TileType)
+    # Re-type the call result to the producer-side Vec instead of the Mat the op declares.
+    wrong = ir.TileType(gather.type.shape, FP32, None, gather.type.tile_view, MS.Vec)
+    mistyped = ir.Call(gather.op, gather.args, gather.kwargs, wrong, span)
+    res = ir.Var("res", wrong, span)
+    region = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(res, mistyped, span)])
+    program = _program(ir.SeqStmts([region], span))
+
+    errors = _errors(program)
+    assert len(errors) == 1
+    assert errors[0].rule_name == "AivSplitValid"
+    assert "tile.aic_gather" in errors[0].message
+    assert "result is in Vec" in errors[0].message
+    assert "must be Mat" in errors[0].message
 
 
 def test_fullwidth_vector_outside_region_passes():

@@ -2345,12 +2345,12 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // Memory-space re-attachment. The tile-level split deducer (DeduceSplitReshape)
 // intentionally drops the boundary memory space (returns a TileType with a null
 // memref / null memory_space), because the deduction fixpoint must not inherit an
-// input-side layout. The AUTO path restores it in ReshapeTypeWithMemory:
-//   * C->V aiv_shard  -> the move's Vec DESTINATION memory.
-//   * V->C aic_gather -> the Vec half-tile SOURCE memory (inherit input side).
-// Both boundaries resolve to MemorySpace::Vec (verified against the AUTO oracle:
-// _shard_vec / _gather_vec in test_lower_auto_vector_split.py both assert Vec),
-// so this converter re-attaches Vec to the deduced half/full type.
+// input-side layout. This converter re-attaches the CONSUMER-side boundary memory
+// the tile op declares via set_output_memory (cross_core.cpp): Vec for the C->V
+// aiv_shard (AIV pops into UB), Mat for the V->C aic_gather (AIC pops into L1).
+// Reading it from the registry keeps the two declarations from drifting apart —
+// previously both directions were hard-coded to Vec here, which made the gather's
+// declared type disagree with the Mat tpop ExpandMixedKernel actually emits.
 //
 // No InputSpaceReq. The realistic (region-only) operand is an on-chip tile — a
 // cube (Mat/Acc) matmul result for aiv_shard, a Vec vector-compute result for
@@ -2372,13 +2372,17 @@ void OpConversionRegistry::RegisterCrossCoreOps() {
       // args[0] is already tile-typed here (its producer lowered earlier in this
       // pass); the tile deducer forwards the "split" attr and halves/doubles the
       // split-axis extent.
+      // The boundary memory needs no re-attachment here: the split deducer leaves
+      // the space null, and Create fills it from the tile op's set_output_memory
+      // declaration (Vec for the shard, Mat for the gather). LowerAutoVectorSplit
+      // builds its aiv_shard / aic_gather through the same Create, so both paths
+      // read one declaration and cannot drift apart.
       auto call = op_reg.Create(tile_op, args, kwargs, span);
       auto tt = As<TileType>(call->GetType());
-      INTERNAL_CHECK_SPAN(tt, span) << "Internal error: " << tile_op << " must deduce a TileType";
-      // Re-attach the vector-side (Vec) boundary memory the split deducer drops.
-      auto typed =
-          std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_, tt->tile_view_, MemorySpace::Vec);
-      return ConversionResult{std::make_shared<Call>(call->op_, call->args_, call->kwargs_, typed, span)};
+      INTERNAL_CHECK_SPAN(tt && tt->memory_space_.has_value(), span)
+          << "Internal error: " << tile_op
+          << " must deduce a TileType carrying the declared boundary memory space";
+      return ConversionResult{call};
     };
   };
   RegisterCustom("tensor.aiv_shard", convert("tile.aiv_shard"));

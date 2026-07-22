@@ -118,21 +118,6 @@ ExprPtr HalfDimExtent(const ExprPtr& dim_size) {
   return MakeFloorDiv(dim_size, two, dim_size->span_);
 }
 
-// Re-attach a memory space to a split-reshape op's deduced result type. The
-// aiv_shard / aic_gather deducer correctly halves/doubles the split-axis shape
-// and valid_shape but drops the memory space (see DeduceSplitReshape); the
-// boundary's target memory (Vec for the shard/gather result) is restored here.
-TypePtr ReshapeTypeWithMemory(const TypePtr& deduced_type, const std::optional<MemorySpace>& mem) {
-  auto tt = std::dynamic_pointer_cast<const TileType>(deduced_type);
-  if (!tt) return deduced_type;
-  return std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_, tt->tile_view_, mem);
-}
-
-std::optional<MemorySpace> TileMemory(const TypePtr& type) {
-  if (auto tt = std::dynamic_pointer_cast<const TileType>(type)) return tt->memory_space_;
-  return std::nullopt;
-}
-
 // Make a split-kwarg call (split int attr is the SplitMode int encoding).
 CallPtr MakeReshapeOpCall(const std::string& op_name, const ExprPtr& source, int split_int,
                           const Span& span) {
@@ -295,9 +280,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: C->V boundary tile.move must carry a source tile";
           auto shard = MakeReshapeOpCall("tile.aiv_shard", call->args_[0], split_int, call->span_);
-          // Result: the op's deduced HALF type, with the boundary target memory
-          // (the move's destination memory, e.g. Vec) re-attached.
-          auto half_type = ReshapeTypeWithMemory(shard->GetType(), TileMemory(call->GetType()));
+          // Result: the op's deduced HALF type. The split deducer leaves the memory
+          // space null, and OpRegistry::Create fills it from tile.aiv_shard's
+          // set_output_memory declaration — Vec, the CONSUMING (vector) lane, which
+          // is also the C->V move's destination. Going through Create is what keeps
+          // this AUTO path's IR identical to the explicit pl.aiv_shard form lowered
+          // by ConvertTensorToTileOps: both get the space from the same declaration.
+          auto half_type = shard->GetType();
           auto new_var = std::make_shared<Var>(assign->var_->name_hint_, half_type, assign->var_->span_);
           auto shard_typed =
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);
@@ -328,14 +317,11 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
             if (it != var_replacements.end()) src = it->second;
           }
           auto gather = MakeReshapeOpCall("tile.aic_gather", src, split_int, call->span_);
-          // Gather result: full shape, Vec memory (inherit input side).
-          auto src_tt = std::dynamic_pointer_cast<const TileType>(src->GetType());
-          auto gather_tt = std::dynamic_pointer_cast<const TileType>(gather->GetType());
-          TypePtr gather_type = gather->GetType();
-          if (src_tt && gather_tt) {
-            gather_type = std::make_shared<TileType>(gather_tt->shape_, gather_tt->dtype_, gather_tt->memref_,
-                                                     gather_tt->tile_view_, src_tt->memory_space_);
-          }
+          // Gather result: full shape, with the memory space OpRegistry::Create
+          // fills in from tile.aic_gather's set_output_memory declaration — Mat, the
+          // CONSUMING (cube) lane, which is the space ExpandMixedKernel pops the
+          // V->C boundary into. Same single source of truth as the shard above.
+          auto gather_type = gather->GetType();
           auto gather_typed =
               std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_, gather_type, gather->span_);
           // Name the gathered FULL tile with the cube-destination's "_mat" suffix:

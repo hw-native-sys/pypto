@@ -155,8 +155,16 @@ PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
  * only half the tile, so cube ops cannot be vector-split); (b) no AIV reduce
  * over the split axis inside a region (partial per-lane reduction); (c) the
  * ``tile.aiv_shard`` / ``tile.aic_gather`` boundary ops appear only inside a
- * region. Full-width vector compute outside a region is legal (multi-mode), so
- * "bare vector compute outside a region" is intentionally not checked.
+ * region, and never inside a task-parallel ``mode=NONE`` one; (d) the boundary
+ * memory contract — ``tile.aiv_shard`` is ``Acc -> Vec`` and
+ * ``tile.aic_gather`` is ``Vec -> Mat``, since both ops *are* the cross-core
+ * transfer, so the operand must sit on the producing lane and the result on the
+ * consuming one. Each memory side of (d) is skipped until its space is
+ * resolved, which is why ConvertTensorToTileOps and InferTileMemorySpace
+ * re-produce this property (see pass_properties.h) — at OutlineIncoreScopes the
+ * boundary is still the space-less ``tensor.*`` form. Full-width vector compute
+ * outside a region is legal (multi-mode), so "bare vector compute outside a
+ * region" is intentionally not checked.
  * @return Shared pointer to AivSplitValid PropertyVerifier
  */
 PropertyVerifierPtr CreateAivSplitValidPropertyVerifier();

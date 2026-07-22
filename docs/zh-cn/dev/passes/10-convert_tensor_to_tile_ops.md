@@ -190,7 +190,7 @@ oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor，位于区域
 **转换细节：**
 
 - **split 关键字透传。** `split` 整型属性（`1` = `UP_DOWN`/axis0,`2` = `LEFT_RIGHT`/axis1,即 tpush/tpop 编码）原样透传给 tile 算子,由其对切分轴长度做减半（shard）或加倍（gather）。
-- **Vec 内存重新附着。** tile 级切分推导器有意丢弃边界内存空间（推导定点不得继承输入侧布局）。AUTO 路径在 `ReshapeTypeWithMemory` 中恢复之；本转换器与之对齐,将 `MemorySpace::Vec` 重新附着到推导出的半块/整块 `TileType` —— C→V shard 目的端与 V→C gather 源端都解析为 Vec。
+- **边界内存。** tile 级切分推导器有意让边界内存空间保持为空（推导定点不得继承输入侧布局）；随后 `OpRegistry::Create` 会用该 tile 算子 `set_output_memory` 的声明填充它,因此本转换器无需自行重新附着。`LowerAutoVectorSplit` 也通过同一个 `Create` 构造 `aiv_shard` / `aic_gather`,这正是两条路径逐字节一致的原因——一处声明,读取一次。该空间是**消费侧 lane** 的：`tile.aiv_shard` → `Vec`（AIV 将半块 pop 进 UB）,`tile.aic_gather` → `Mat`（AIC 将整块 pop 进 L1,即 `ExpandMixedKernel` 构造 V→C tpop 所用的空间）。操作数侧则相反——shard 为 `Acc`,gather 为 `Vec`——它由 `AivSplitValid` 验证器强制,而非声明为输入约束：输入约束一旦被违反,`InferTileMemorySpace` 会*插入一次 move* 去满足它,而不是报告作者的错误。
 - **不合成 load。** 现实（仅区域内）操作数在转换器运行时已是片上 tile（其生产者——`aiv_shard` 对应 cube matmul,`aic_gather` 对应 Vec 向量算子——已在本 pass 更早处下降）,因此不注入 `tile.load`；`aiv_shard` / `aic_gather` **本身**即是跨核传输。
 
 **本 pass 之前即被识别。** 由于 `tensor.*` 形式从 `OutlineIncoreScopes` 一直存活到本 pass 运行,更早的阶段已将其视为 AIV 切分边界：`ClassifyCallAffinity` 把 `tensor.*` 与 `tile.*` 的 shard/gather 都归为 `MIXED`（使 cube/vector 外联正确切分）,`SplitAivStructuralVerifier` 要求两种形式都必须位于区域内。

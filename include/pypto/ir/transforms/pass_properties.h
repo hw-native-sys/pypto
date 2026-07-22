@@ -132,9 +132,18 @@ inline const PassProperties kOutlineHierarchyScopesProperties{
 
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
+// Re-opens the AivSplitValid window. OutlineIncoreScopes establishes the property
+// while the AIV-split boundary is still `tensor.aiv_shard` / `tensor.aic_gather` —
+// a TensorType carries no memory space, so the verifier's boundary memory contract
+// check (d) is necessarily skipped there. This pass rewrites those ops to their
+// tile form and attaches the declared boundary memory, which is exactly what
+// check (d) inspects, so it invalidates and re-produces the property to force a
+// second verification at a point where the memory sides are observable.
 inline const PassProperties kConvertTensorToTileOpsProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::NormalizedStmtStructure},
-    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure,
+                 IRProperty::AivSplitValid},
+    .invalidated = {IRProperty::AivSplitValid}};
 
 // -- Orchestration tensor optimization pass -----------------------------------
 
@@ -176,10 +185,17 @@ inline const PassProperties kCanonicalizeTileSliceProperties{
 
 // -- Tile memory space inference pass -----------------------------------------
 
+// Also re-verifies AivSplitValid (same rationale as ConvertTensorToTileOps): this
+// pass is what finally resolves every tile memory space, so an AIV-split boundary
+// whose operand space was still unresolved at pass 10 — and therefore skipped by
+// check (d) — becomes observable here, the last verification point before
+// LowerAutoVectorSplit erases the region node.
 inline const PassProperties kInferTileMemorySpaceProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::NormalizedStmtStructure},
-    .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+    .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
+                 IRProperty::AivSplitValid},
+    .invalidated = {IRProperty::AivSplitValid}};
 
 // -- Materialize tensor strides pass (RFC #1300 §2.4) ------------------------
 

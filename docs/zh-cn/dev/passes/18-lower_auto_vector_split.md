@@ -138,9 +138,10 @@ result = passes.lower_auto_vector_split()(program)
    边界 tile.move（ClassifyMoveDirection）：
      CUBE_TO_VECTOR —— 将 move 替换为
          tile.aiv_shard(full_cube_tile, split=int(mode))   -> 半
-       把 move 的目标内存（Vec）重新附加到推导出的半类型上，将结果 var 连同其半
-       尺寸种入 tile_vars，并记录 旧->新 var 重绑。cube 源（matmul / Acc 结果）
-       保持全尺寸。
+       把该算子声明的消费侧 lane 内存（Vec，经 GetDeclaredOutputMemory 读取，
+       使之与显式 pl.aiv_shard 路径完全一致）重新附加到推导出的半类型上，将结果
+       var 连同其半尺寸种入 tile_vars，并记录 旧->新 var 重绑。cube 源（matmul /
+       Acc 结果）保持全尺寸。
      VECTOR_TO_CUBE —— 插入
          tile.aic_gather(half_vector_tile, split=int(mode))  -> 全
        将源解析到其折半后的 var 使 gather 把 半 -> 全 翻倍，随后保留对折叠后全尺寸
@@ -215,10 +216,16 @@ V→C `tile.move` 变为 `tile.aic_gather`；对折叠后 tile 的 cube 放置 m
 `[128, 128]` `Mat`——cube 侧绝不会看到折半 tile：
 
 ```python
-gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Vec]  = pl.tile.aic_gather(vec, split=1)
+gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Mat]  = pl.tile.aic_gather(vec, split=1)
 gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
                                                                       target_memory=pl.Mem.Mat)
 ```
+
+gather 结果是 `Mat` 而非 `Vec`：边界算子声明的类型指的是**消费侧** lane 的空间，
+而 AIC 会把 V→C 传输 pop 进 L1。（`Vec` 指的是*生产侧* lane，与镜像算子
+`tile.aiv_shard` 相矛盾——后者为其 cube 产出的操作数声明向量侧的 `Vec`。）随后的
+cube 放置 move 才把 tile 放到最终的操作数空间——matmul 操作数为 `Mat → Left`；
+此处的 `Mat → Mat` 是空操作，仅因本 pass 保留了作者原有的 move 而存在。
 
 ## 实现
 

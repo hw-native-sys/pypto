@@ -174,10 +174,11 @@ region while preserving the surrounding control flow.
    Boundary tile.move (ClassifyMoveDirection):
      CUBE_TO_VECTOR — replace the move with
          tile.aiv_shard(full_cube_tile, split=int(mode))   -> HALF
-       Re-attach the move's destination memory (Vec) to the deduced HALF
-       type, seed the result var into tile_vars (its half extent), and
-       record the old->new var rebind. The cube source (the matmul / Acc
-       result) stays FULL.
+       Re-attach the op's declared consuming-lane memory (Vec, read via
+       GetDeclaredOutputMemory so this matches the explicit pl.aiv_shard
+       path exactly) to the deduced HALF type, seed the result var into
+       tile_vars (its half extent), and record the old->new var rebind.
+       The cube source (the matmul / Acc result) stays FULL.
      VECTOR_TO_CUBE — insert
          tile.aic_gather(half_vector_tile, split=int(mode))  -> FULL
        resolving the source to its halved var so the gather doubles
@@ -259,10 +260,18 @@ gathered tile keeps the FULL `[128, 128]` `Mat` shape — the cube side never
 sees a halved tile:
 
 ```python
-gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Vec]  = pl.tile.aic_gather(vec, split=1)
+gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Mat]  = pl.tile.aic_gather(vec, split=1)
 gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
                                                                       target_memory=pl.Mem.Mat)
 ```
+
+The gather result is `Mat`, not `Vec`: the declared type of a boundary op names
+the **consuming** lane's space, and AIC pops a V→C transfer into L1. (`Vec` would
+name the *producing* lane, contradicting the mirror op `tile.aiv_shard`, which
+declares the vector-side `Vec` for its cube-produced operand.) The cube placement
+move that follows is what puts the tile in its final operand space — `Mat → Left`
+for a matmul operand; the `Mat → Mat` shown here is a no-op that survives only
+because the pass preserves the author's original move.
 
 ## Implementation
 

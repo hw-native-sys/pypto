@@ -272,13 +272,36 @@ REGISTER_OP("tile.tpop_from_aiv")
 // Split-axis reshape ops (aiv_shard / aic_gather)
 // ============================================================================
 
+// Boundary memory contract (see AivSplitValidPropertyVerifier check (d)).
+//
+// Both ops ARE the cross-core transfer, so the value has two memory spaces: one
+// on the producing lane and one on the consuming lane. The declared type
+// describes the CONSUMING side — that is the lane the result Var is read on, and
+// it is what ExpandMixedKernel materializes as the boundary tpop:
+//
+//   tile.aiv_shard : Acc (cube produces into L0C) -> Vec (AIV pops into UB)
+//   tile.aic_gather: Vec (vector produces into UB) -> Mat (AIC pops into L1)
+//
+// The operand side is NOT declared via set_input_memory: a violated input
+// constraint makes InferTileMemorySpace *insert a tile.move* to the required
+// space (infer_tile_memory_space_pass.cpp MoveCollector), which for a Vec
+// operand would synthesize a physically impossible UB -> L0C move instead of
+// reporting the authoring error. The operand contract is enforced by the
+// AivSplitValid verifier, which reports it as a user diagnostic with a span.
+//
+// Acc (not Mat) is the cube side of aiv_shard: the shard's operand is pushed
+// across the c2v pipe, and only an L0C tile is a supported tpush producer — a
+// Mat/L1 tile is rejected by ptoas ("'pto.tpush' op tile type must map to a
+// supported producer pipe"). aic_gather is the mirror image but its cube side is
+// the tpop DESTINATION, which is Mat (GetBoundaryTpopMemory(CoreSide::AIC)).
+
 // Shard a full tile into half along the split axis (cube -> vector vocabulary).
 REGISTER_OP("tile.aiv_shard")
     .set_op_category("CrossCoreOp")
     .set_description("Shard a 2D tile into half along the split axis (full -> half)")
     .add_argument("tile", "Tile data to shard (TileType, 2D)")
     .set_attr<int>("split")
-    .set_output_memory_inherit_input()
+    .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSplitReshape(args, kwargs, "tile.aiv_shard", /*halve=*/true);
@@ -290,7 +313,7 @@ REGISTER_OP("tile.aic_gather")
     .set_description("Gather a 2D tile into full along the split axis (half -> full)")
     .add_argument("tile", "Tile data to gather (TileType, 2D)")
     .set_attr<int>("split")
-    .set_output_memory_inherit_input()
+    .set_output_memory(MemorySpace::Mat)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSplitReshape(args, kwargs, "tile.aic_gather", /*halve=*/false);

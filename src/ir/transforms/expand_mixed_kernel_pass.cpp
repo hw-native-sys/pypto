@@ -191,7 +191,7 @@ TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
           // Treat explicit split-reshape results like tpop results: a follow-on
-          // tile.move that places an aic_gather result for the cube (Vec -> Left)
+          // tile.move that places an aic_gather result for the cube (Mat -> Left)
           // must NOT be re-detected as a second cross-core boundary — the data
           // already crosses via the gather's own tpush/tpop, so the move is just
           // internal cube placement on the consuming lane.
@@ -699,10 +699,11 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       {
         const auto& bm = bm_it->second;
         // The cross-core transfer memory FOR THIS SIDE: AIC drains into Mat,
-        // AIV into Vec. Op-driven boundaries (aiv_shard / aic_gather) keep the
-        // input memory on both sides, so the fractal view and tpop type must
-        // key off this transfer memory rather than the op's inherited result
-        // memory (which is Vec on both lanes).
+        // AIV into Vec. An op-driven boundary (aiv_shard / aic_gather) declares
+        // only its CONSUMING lane's space (Vec / Mat respectively, see
+        // cross_core.cpp), so each side's fractal view and tpop type must key
+        // off this transfer memory rather than the op's result memory — which
+        // names the other lane whenever this side is the producer.
         const MemorySpace xfer_ms = GetBoundaryTpopMemory(side);
         const int op_split = bm.op_driven ? bm.split : 0;
         if (bm.direction == push_direction) {

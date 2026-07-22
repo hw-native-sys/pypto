@@ -10,6 +10,7 @@
  */
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,18 +18,74 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/split_axis_utils.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
+
+/// Everything that differs between the two split-axis boundary ops: the memory
+/// space each side must carry, plus the direction-specific diagnostic wording.
+/// Keeping it in one table row per op means a reader (and an editor) sees the
+/// whole contract for an op in one place, and the check itself stays uniform.
+///
+/// `result` mirrors the op's set_output_memory declaration (cross_core.cpp),
+/// restated here as the checkable form of the same contract. `operand` is
+/// deliberately NOT declared as a set_input_memory constraint over there — a
+/// violated input constraint makes InferTileMemorySpace insert a physically
+/// impossible move instead of reporting the authoring error — so this verifier
+/// is the only place it is stated at all.
+struct BoundaryMemoryContract {
+  MemorySpace operand;       ///< space on the PRODUCING lane (the op's input)
+  MemorySpace result;        ///< space on the CONSUMING lane (the op's output)
+  const char* producer;      ///< lane that must have produced the operand
+  const char* delivery;      ///< what the result hands to the consuming lane
+  const char* operand_hint;  ///< authoring fix appended to the operand diagnostic
+};
+
+/// The contract for a tile-level boundary op, or nullopt for anything else.
+/// The tensor.* forms are deliberately excluded: a TensorType has no memory
+/// space, so there is nothing to check until ConvertTensorToTileOps lowers them.
+std::optional<BoundaryMemoryContract> GetBoundaryMemoryContract(const CallPtr& op) {
+  if (IsOp(op, "tile.aiv_shard")) {
+    // The hint stays space-neutral: the check rejects any non-Acc operand, and
+    // only Vec means "vector-produced". A Mat operand is a different mistake
+    // (L1 is not a supported cross-core producer pipe), so naming pl.load /
+    // pl.full unconditionally would misdescribe it.
+    return BoundaryMemoryContract{
+        MemorySpace::Acc, MemorySpace::Vec, "cube", "half to the vector",
+        " Only a cube-produced value reaches the vector lane through this boundary: Acc is the "
+        "matmul result the c2v pipe can push. A Vec operand is vector-produced (pl.load / "
+        "pl.full) and already lives on the AIV lane — drop the pl.aiv_shard and let the implicit "
+        "affinity-gated split halve it. A Mat operand is not a supported producer pipe; move it "
+        "through a pl.matmul, or load it on the vector lane instead."};
+  }
+  if (IsOp(op, "tile.aic_gather")) {
+    return BoundaryMemoryContract{
+        MemorySpace::Vec, MemorySpace::Mat, "vector", "full tile to the cube",
+        " Gather the value only after it has been computed by vector ops on the AIV lane."};
+  }
+  return std::nullopt;
+}
+
+/// Memory space of `expr` when it is a tile whose space is already resolved.
+/// nullopt means "not a tile" or "space not yet inferred" — both are skip
+/// conditions, since the verifier also runs before InferTileMemorySpace.
+std::optional<MemorySpace> ResolvedTileMemory(const ExprPtr& expr) {
+  if (!expr) return std::nullopt;
+  auto tile_type = As<TileType>(expr->GetType());
+  if (!tile_type) return std::nullopt;
+  return tile_type->memory_space_;
+}
 
 // Structural verifier for the first-class SplitAivScopeStmt region (live between
 // OutlineIncoreScopes and LowerAutoVectorSplit). It keys every check on the node
@@ -43,8 +100,17 @@ namespace {
 //       produces a partial per-lane reduction (a miscompile).
 //   (c) tile.aiv_shard / tile.aic_gather (the AIV-split boundary) must appear
 //       inside a region, never at top level.
+//   (d) The boundary memory contract: tile.aiv_shard is Acc -> Vec and
+//       tile.aic_gather is Vec -> Mat (see cross_core.cpp). Both ops ARE the
+//       cross-core transfer, so the operand must live on the PRODUCING lane and
+//       the result on the CONSUMING one. Each side is skipped until its memory
+//       space is resolved, so the check is inert at the OutlineIncoreScopes
+//       verification point (where the boundary is still the space-less
+//       `tensor.*` form) and live from ConvertTensorToTileOps onwards — which is
+//       why both that pass and InferTileMemorySpace re-produce this property
+//       (see pass_properties.h); without that, (d) would never run.
 //
-// Check (d) ("no bare vector compute outside a region") is DELIBERATELY OMITTED:
+// Check (e) ("no bare vector compute outside a region") is DELIBERATELY OMITTED:
 // full-width vector compute outside a region is now legal (multi-mode goal).
 //
 // The checked ops (matmul, reduces, aiv_shard/aic_gather) are always plain Calls
@@ -94,6 +160,9 @@ class SplitAivStructuralVerifier : public IRVisitor {
                              "the non-split axis, or gather the lanes back (tile.aic_gather) before "
                              "reducing.");
         }
+        // (d) The boundary memory contract. Gated on `boundary` so a non-boundary
+        // node does not pay for the contract lookup's registry queries.
+        if (boundary) CheckBoundaryMemory(op);
       } else if (in_none_region) {
         // (c') A boundary op needs a split axis to mark — none exists in a
         // task-parallel (mode=NONE) region. Cube / reduce / full-width vector
@@ -115,6 +184,39 @@ class SplitAivStructuralVerifier : public IRVisitor {
   }
 
  private:
+  /// (d) Enforce the producing-lane / consuming-lane memory spaces of a
+  /// split-axis boundary op. Both sides are skipped until their space is
+  /// resolved, so the same verifier is safe to run across the whole
+  /// OutlineIncoreScopes .. LowerAutoVectorSplit window.
+  void CheckBoundaryMemory(const CallPtr& op) {
+    auto contract = GetBoundaryMemoryContract(op);
+    if (!contract) return;
+
+    // Operand side: the value must still sit on the lane that produced it. The
+    // dominant failure is a shard of a vector-produced value: the use migrates to
+    // the AIV half while the producer stays behind, leaving the cube half
+    // referencing a value it never defines (which surfaces much later as an orphan
+    // Mem.Vec allocation and an internal codegen error).
+    if (!op->args_.empty()) {
+      if (auto operand_ms = ResolvedTileMemory(op->args_[0]);
+          operand_ms.has_value() && *operand_ms != contract->operand) {
+        Err(op->span_, "'" + op->op_->name_ + "' operand is in " + MemorySpaceToString(*operand_ms) +
+                           ", but it transfers a " + contract->producer +
+                           "-produced value across the cross-core boundary and requires " +
+                           MemorySpaceToString(contract->operand) + "." + contract->operand_hint);
+      }
+    }
+
+    // Result side: the declared type describes the CONSUMING lane, i.e. the space
+    // ExpandMixedKernel materializes the boundary tpop in.
+    if (auto result_ms = ResolvedTileMemory(op); result_ms.has_value() && *result_ms != contract->result) {
+      Err(op->span_, "'" + op->op_->name_ + "' result is in " + MemorySpaceToString(*result_ms) +
+                         ", but it delivers its " + contract->delivery + " lane and must be " +
+                         MemorySpaceToString(contract->result) +
+                         " (the memory ExpandMixedKernel pops it into).");
+    }
+  }
+
   void Err(const Span& span, const std::string& message) {
     diagnostics_.emplace_back(DiagnosticSeverity::Error, "AivSplitValid", 0, message, span);
   }

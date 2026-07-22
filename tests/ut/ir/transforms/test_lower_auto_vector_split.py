@@ -127,10 +127,15 @@ def _shard_vec(tile, split, half_shape, span):
     )
 
 
-def _gather_vec(tile, split, full_shape, span):
-    """A V->C boundary ``tile.aic_gather`` returning a doubled *Vec* tile."""
+def _gather_mat(tile, split, full_shape, span):
+    """A V->C boundary ``tile.aic_gather`` returning a doubled *Mat* tile.
+
+    The boundary op's declared memory is the CONSUMING lane's space: aic_gather
+    carries a vector-produced half to AIC, where ExpandMixedKernel pops it into
+    Mat. (The mirror op, aiv_shard, declares Vec for the same reason.)
+    """
     return ir.Call(
-        ir.get_op("tile.aic_gather"), [tile], {"split": split}, _tile(full_shape, None, MS.Vec), span
+        ir.get_op("tile.aic_gather"), [tile], {"split": split}, _tile(full_shape, None, MS.Mat), span
     )
 
 
@@ -852,12 +857,13 @@ def test_vc_boundary_becomes_aic_gather_and_cube_placement_stays_full():
         [out_0.type],
     )
 
-    # V->C move becomes aic_gather (HALF -> FULL, doubled to [256, 128] Vec);
-    # the cube placement move keeps the FULL [128, 128] Mat tile.
+    # V->C move becomes aic_gather (HALF -> FULL, doubled to [256, 128] Mat —
+    # the consuming cube lane's space); the cube placement move keeps the FULL
+    # [128, 128] Mat tile.
     sub = _sub_var()
     e_vec = ir.Var("vec", _tile([128, 128], mem=MS.Vec), span)
     e_out = ir.Var("out_0", _tensor([128, 128]), span)
-    e_gather = _gather_vec(e_vec, 1, [256, 128], span)
+    e_gather = _gather_mat(e_vec, 1, [256, 128], span)
     e_gathered_mat = ir.Var("gathered_mat", e_gather.type, span)
     e_move = _move_call(e_gathered_mat, MS.Mat, _tile([128, 128], None, MS.Mat), span)
     e_gathered = ir.Var("gathered", e_move.type, span)
