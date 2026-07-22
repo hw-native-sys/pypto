@@ -808,17 +808,21 @@ Pass ClassifyIterArgCarry();
 Pass StampTfreeSplit();
 
 /**
- * @brief Insert a GM `system.fence` between a publishing write and the
- *        `pld.system.notify` that releases it (data-before-signal).
+ * @brief Insert the ptoas data-before-signal markers around cross-rank publish
+ *        and consume points (all via `system.cacheinvalid`).
  *
- * The latest PTOAS requires the compiler to explicitly order a cross-rank write
- * (or a local store into a window a peer reads) against the notify that signals
- * its completion. This pass places a `system.fence` between the last unflushed
- * publishing write and each following notify, hoisting the fence before an
- * enclosing `if` / `for` where the notify lives (barrier idiom) and fencing the
- * loop back-edge (ring-allreduce). Idempotent — an existing `system.fence`
- * clears the pending state. Runs last, after all statement-reordering passes,
- * so the fence stays adjacent to its notify through codegen.
+ * Verified on ptoas 0.50, the contract reduces to two purely-local rules — the
+ * `pld.system.notify` itself needs no marker:
+ *   - after each **local** publishing write (window-bound `tile.store`, or `get`
+ *     into a local destination): a region `system.cacheinvalid` of the written
+ *     region immediately followed by a GM `system.fence`;
+ *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
+ *
+ * The **remote** writes `remote_store` / `put` land at a peer-offset address that
+ * a local-target cacheinvalid cannot address, so they are left to their codegen,
+ * which emits a correct peer-region `pto.cmo.cacheinvalid` + GM fence. The pass
+ * carries no control-flow state and is idempotent. Runs last, after all
+ * statement-reordering passes, so the markers stay adjacent through codegen.
  */
 Pass InsertCommFence();
 

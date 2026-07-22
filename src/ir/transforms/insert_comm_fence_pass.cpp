@@ -35,11 +35,16 @@
  *
  * So a single structural traversal inserts, per op, with no control-flow state:
  *
- *   - after each **publishing write** (remote_store / put / get / window-bound
- *     tile.store): a whole-tensor region `system.cacheinvalid` of the written
- *     region followed **immediately** by a GM `system.fence`.
+ *   - after each **local publishing write** (window-bound `tile.store`, or `get`
+ *     into a local destination): a whole-tensor region `system.cacheinvalid` of
+ *     the written region followed **immediately** by a GM `system.fence`.
  *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
  *   - **notify**: nothing.
+ *
+ * The **remote** writes `remote_store` / `put` land at a peer-offset GM address
+ * (`local_ptr + delems(peer)`) that a local-target cacheinvalid cannot address, so
+ * this pass leaves them alone: their codegen emits a correct peer-region
+ * `pto.cmo.cacheinvalid` + GM fence itself (the peer offset is only known there).
  *
  * Example shapes:
  *
@@ -122,23 +127,25 @@ Effect StmtEffect(const StmtPtr& stmt) {
   return Effect::kNone;
 }
 
-// The destination tensor of a publishing write, whose cache lines must be
-// invalidated after it. Null when there is no single addressable target (a
-// `Submit`, or an op not in the publishing set). The arg positions mirror each
-// op's registration.
+// The local destination tensor of a publishing write, whose cache lines must be
+// invalidated after it. The arg positions mirror each op's registration.
+//
+// Only writes to a *local* GM address are handled here — a region
+// `system.cacheinvalid(target)` addresses `target`'s local base, which is correct
+// for a local-window store (`tile.store`) or a peer-read-into-local (`get`). The
+// **remote** writes `remote_store` / `put` land at a peer-offset address
+// (`local_ptr + delems(peer)`) that the local target view does not address, so a
+// local-target cacheinvalid would miss them; their codegen emits a correct
+// peer-region `pto.cmo.cacheinvalid` + fence itself, and they return null here.
 ExprPtr PublishingWriteTarget(const CallPtr& call) {
   if (!call || !call->op_) return nullptr;
-  if (IsOp(call, "pld.tile.remote_store")) {
-    return call->args_.size() > 1 ? call->args_[1] : nullptr;  // (src_tile, target, ...)
-  }
-  if (IsOp(call, "pld.tile.put") || IsOp(call, "pld.tensor.put") || IsOp(call, "pld.tile.get") ||
-      IsOp(call, "pld.tensor.get")) {
-    return call->args_.empty() ? nullptr : call->args_[0];  // (dst, ...)
+  if (IsOp(call, "pld.tile.get") || IsOp(call, "pld.tensor.get")) {
+    return call->args_.empty() ? nullptr : call->args_[0];  // (dst, ...) — local destination
   }
   if (IsOp(call, "tile.store")) {
     return call->args_.size() > 2 ? call->args_[2] : nullptr;  // (tile, indices, dst)
   }
-  return nullptr;
+  return nullptr;  // remote_store / put -> peer-relative, handled by their codegen
 }
 
 // A target tensor usable for cacheinvalid: a `Var`-like with a `TensorType`.

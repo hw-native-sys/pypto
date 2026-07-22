@@ -693,25 +693,25 @@ def classify_iter_arg_carry() -> Pass:
     """
 
 def insert_comm_fence() -> Pass:
-    """Insert a GM ``system.fence`` before each data-releasing ``pld.system.notify``.
+    """Insert the ptoas data-before-signal markers (all via ``system.cacheinvalid``).
 
-    The latest PTOAS requires the compiler to explicitly order a publishing write
-    against the notify that signals its completion, so the written data is visible
-    to the peer before the signal arrives. A **publishing write** is a remote write
-    (``pld.tile.remote_store`` / ``pld.tile.put`` / ``pld.tensor.put``), a local
-    ``tile.store`` into a window-bound ``DistributedTensor`` (a peer can
-    ``remote_load`` it), or a ``pld.tile.get`` / ``pld.tensor.get`` into a
-    window-bound destination.
+    Verified on ptoas 0.50, the contract reduces to two purely-local rules — the
+    ``pld.system.notify`` itself needs no marker:
 
-    A single fence covers multiple preceding writes; the fence is hoisted before an
-    enclosing ``if`` / ``for`` when the notify lives inside it (the
-    ``for peer: if peer != me: notify`` barrier idiom), and the loop back-edge is
-    fenced so a write at the tail of one iteration is released before the notify at
-    the head of the next (ring-allreduce). Idempotent — an existing ``system.fence``
-    clears the pending state.
+    * After each **local** publishing write — a ``tile.store`` into a window-bound
+      ``DistributedTensor`` (a peer can ``remote_load`` it), or a ``get`` into a
+      local destination — a region ``system.cacheinvalid`` of the written region
+      immediately followed by a GM ``system.fence``.
+    * After each **wait** — a no-arg (whole-GM) ``system.cacheinvalid``.
+
+    The **remote** writes ``pld.tile.remote_store`` / ``pld.tile.put`` /
+    ``pld.tensor.put`` land at a peer-offset address that a local-target
+    cacheinvalid cannot address, so they are left to their codegen, which emits a
+    correct peer-region cacheinvalid + fence. The pass carries no control-flow
+    state and is idempotent.
 
     Runs last in the Default pipeline, after all statement-reordering passes, so the
-    inserted fence stays adjacent to its notify through codegen.
+    inserted markers stay adjacent through codegen.
     """
 
 class NestedCallErrorType(Enum):

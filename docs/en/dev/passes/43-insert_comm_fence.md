@@ -31,18 +31,28 @@ Verified empirically on ptoas 0.50, the contract reduces to **two purely-local
 rules** — the *notify* itself needs no marker. A single structural traversal
 (`InsertCommMarkers`), with no control-flow state, inserts:
 
-- **after each publishing write** — a whole-tensor **region** `system.cacheinvalid`
-  of the written target, **immediately followed by a `system.fence`**. ptoas ties
-  the release fence to this cacheinvalid; any later `tnotify` that publishes the
-  data is satisfied by it, so both markers land at the write site (one per
-  address);
+- **after each local publishing write** — a window-bound `tile.store`, or a `get`
+  into a local destination: a whole-tensor **region** `system.cacheinvalid` of the
+  written target, **immediately followed by a `system.fence`**. ptoas ties the
+  release fence to this cacheinvalid; any later `tnotify` that publishes the data
+  is satisfied by it, so both markers land at the write site (one per address);
 - **after each wait** — a **whole-GM** `system.cacheinvalid` (the consume-side
   invalidate before the next cacheable read);
-- **notify** — nothing.
+- **notify** — nothing;
+- **remote writes** `remote_store` / `put` — nothing here (see below).
+
+A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which
+is correct for a local-window store. The **remote** writes `remote_store` / `put`
+write to a **peer-offset** GM address (`local_ptr + delems(peer)`) that the local
+target view does not address — a local-target cacheinvalid would clean the wrong
+cache line and miss the peer's data. The peer offset is only known during codegen
+(`EmitCommRemoteView`), so this pass leaves remote writes alone and their codegen
+emits a correct peer-region `pto.cmo.cacheinvalid <peer_view> single_cache_line` +
+GM fence right after the store itself.
 
 ```text
-remote_store(a); remote_store(b); notify
-  -> remote_store(a); cacheinvalid(a); fence; remote_store(b); cacheinvalid(b); fence; notify
+store(win_a); store(win_b); notify        (local window stores)
+  -> store(win_a); cacheinvalid(win_a); fence; store(win_b); cacheinvalid(win_b); fence; notify
 
 for c: store; for p: notify                 (write and notify in separate loops)
   -> for c: (store; cacheinvalid; fence);
@@ -90,30 +100,29 @@ could be moved away from its notify/wait; running last keeps them adjacent throu
 codegen. The passes before it only touch Orchestration functions, so the InCore IR
 this pass sees is exactly what codegen lowers.
 
-## What counts as a publishing write
+## Which writes the pass marks
 
-Decided by `op_predicates::IsPublishingWrite`:
+The pass marks only **local** publishing writes — those whose written GM address is
+the local target view, so a region `cacheinvalid(target)` (which addresses the
+local base) is correct:
 
-| Case | Condition |
-| ---- | --------- |
-| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` | remote write (always) |
-| `tile.store` | destination tensor (arg 2) is a window-bound `DistributedTensorType` (a peer can `remote_load` it) |
-| `pld.tile.get` / `pld.tensor.get` | local destination (arg 0) is window-bound |
-| any call to an unregistered op name | conservative — a user function not analysed interprocedurally |
-| `Submit` (task launch) | conservative — treated as a write for ordering |
+| Case | Marked by | Target arg |
+| ---- | --------- | ---------- |
+| `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | **pass** | dst (arg 2) |
+| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | **pass** | dst (arg 0) |
+| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` (peer-offset write) | **codegen** (peer-region cacheinvalid + fence) | n/a |
 
 A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
-`Tensor` are **not** publishing writes — no marker is emitted for them, and the
-notify after them needs none either.
+`Tensor` are **not** publishing writes — no marker at all.
 
 ## Algorithm — one structural traversal, no flow state
 
 Both rules are purely local, so the pass carries **no** control-flow state (no
 `pending` bool, no `if`/loop analysis, no notify classification):
 
-- at each **publishing write**, append `region cacheinvalid; fence`;
+- at each **local publishing write**, append `region cacheinvalid; fence`;
 - at each **wait**, append `cacheinvalid()`;
-- **notify** is left untouched.
+- **notify** and **remote writes** are left untouched.
 
 `if`/`for`/`while` bodies are visited normally; the only special handling is
 wrapping a bare single-statement body (a write/wait that is the sole body of an
@@ -122,9 +131,9 @@ rules are local and append-only, control flow is irrelevant: a write inside one
 loop is correctly marked whether or not its notify lives in another.
 
 ```text
-remote_store; notify                 -> remote_store; cacheinvalid; fence; notify
-remote_store; for: notify             -> remote_store; cacheinvalid; fence; for: notify
-for: { notify; store }                -> for: { notify; store; cacheinvalid; fence }
+store(win); notify                   -> store(win); cacheinvalid(win); fence; notify
+store(win); for: notify               -> store(win); cacheinvalid(win); fence; for: notify
+for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid(win); fence }
 ```
 
 An existing region `cacheinvalid` **immediately followed by a fence** after a
@@ -133,12 +142,13 @@ recognized and **not duplicated**, so the pass is idempotent.
 
 ## Codegen interaction
 
-`InsertCommFence` supersedes the former unconditional drain barrier emitted after
-every TPUT in `MakePutCodegenPTO` (a PTOAS#872 workaround). That codegen barrier is
-removed: the fence now fires only when a notify actually follows, and it adds the
-DDR-observability drain a pipe barrier cannot. The TPUT/TGET **pre** barriers and
-the TGET **tail** barrier are unrelated (in-core RAW ordering, not
-data-before-signal) and are kept.
+The former unconditional drain barrier emitted after every TPUT in
+`MakePutCodegenPTO` (a PTOAS#872 workaround) is removed. In its place, `remote_store`
+and `put` codegen each emit their own peer-region `pto.cmo.cacheinvalid` + GM
+`pto.fence.barrier_all` right after the store (the peer offset is only known
+there) — the data-before-signal release marker for the remote write, at the
+correct peer address. The TPUT/TGET **pre** barriers and the TGET **tail** barrier
+are unrelated (in-core RAW ordering, not data-before-signal) and are kept.
 
 ## Consumers
 

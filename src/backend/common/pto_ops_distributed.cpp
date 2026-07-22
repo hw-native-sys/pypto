@@ -392,6 +392,15 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(tstore_line.str());
+
+  // Data-before-signal (ptoas memory-consistency): clean+invalidate the
+  // peer-addressed lines this store dirtied, then a GM fence, so the write
+  // reaches DDR before any later `pld.system.notify` releases it. The peer
+  // offset (`local_ptr + delems(peer)`) is only known here, so InsertCommFence
+  // leaves remote writes to this codegen instead of emitting a local-target
+  // `system.cacheinvalid` that would miss the peer lines.
+  codegen.Emit("pto.cmo.cacheinvalid " + partition_view + " single_cache_line : " + partition_type);
+  codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
   return "";
 }
 
@@ -653,12 +662,16 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   tput << ") {atomicType = #pto<atomic_type " << atomic_attr << ">}";
   codegen.Emit(tput.str());
 
-  // No tail barrier here: the InsertCommFence pass now emits a GM system.fence
-  // (pto.fence.barrier_all #pto.fence_scope<gm>) before any pld.system.notify
-  // that releases this write. That fence is stronger than a pipe barrier — it
-  // adds the DDR-observability drain a `pto.barrier <PIPE_ALL>` alone cannot —
-  // and it only fires when a notify actually follows, so the data-before-signal
-  // ordering obligation is met without an unconditional per-TPUT barrier.
+  // Data-before-signal (ptoas memory-consistency): clean+invalidate the
+  // peer-addressed destination region, then a GM fence, so the write reaches DDR
+  // before any later `pld.system.notify` releases it. The peer offset is only
+  // known here (EmitCommRemoteView on `dst`), so InsertCommFence leaves remote
+  // writes to this codegen. This GM fence is also stronger than the former
+  // unconditional `pto.barrier <PIPE_ALL>` tail barrier — it adds the
+  // DDR-observability drain a pipe barrier alone cannot — and it only fires as
+  // part of the release marker rather than after every TPUT.
+  codegen.Emit("pto.cmo.cacheinvalid " + dst_pview + " single_cache_line : " + partition_type);
+  codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
   return "";
 }
 

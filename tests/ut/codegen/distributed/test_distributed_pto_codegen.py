@@ -182,6 +182,18 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     # the EmitPartitionViewPTO contract.
     assert "pto.tstore" in kernel, kernel
     assert "_peer_pview" in kernel, kernel
+    # Data-before-signal: remote_store emits its own cacheinvalid at the SAME
+    # peer-addressed partition view it stored into, then a GM fence (the peer
+    # offset is only known here, so InsertCommFence leaves remote writes alone).
+    lines = kernel.splitlines()
+    tstore_i = next(i for i, ln in enumerate(lines) if "pto.tstore" in ln)
+    # The store's destination SSA (outs operand) is exactly what gets invalidated.
+    store_dst = lines[tstore_i].split("outs(", 1)[1].split(" ", 1)[0].split(":", 1)[0].strip()
+    cinv_i = next(
+        i for i, ln in enumerate(lines) if f"pto.cmo.cacheinvalid {store_dst} single_cache_line" in ln
+    )
+    fence_i = next(i for i, ln in enumerate(lines) if "pto.fence.barrier_all #pto.fence_scope<gm>" in ln)
+    assert tstore_i < cinv_i < fence_i, kernel
     # Address translation is inlined at the call site (same constraints as
     # remote_load) — no func.call to an offset helper.
     assert "func.call @CommRemoteOffset" not in kernel, kernel
@@ -352,10 +364,10 @@ def test_notify_emits_comm_tnotify_with_attr():
     assert "#pto<notify_op atomic_add>" in mlir_add
 
 
-def test_fence_inserted_before_notify_releasing_remote_store():
-    """The InsertCommFence pass runs in the Default pipeline, so a remote_store
-    followed by a notify lowers to a whole-tensor ``pto.cmo.cacheinvalid`` and a
-    GM ``pto.fence.barrier_all`` — both emitted, in that order, before the
+def test_remote_store_cacheinvalid_fence_before_releasing_notify():
+    """A remote_store followed by a notify lowers to a peer-region
+    ``pto.cmo.cacheinvalid`` + GM ``pto.fence.barrier_all`` (emitted by the
+    remote_store codegen at the peer address), in that order, before the
     ``pto.comm.tnotify`` that releases it (data-before-signal)."""
 
     @pl.program
@@ -737,16 +749,16 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, (
         f"staging tile must be the [4, 32] chunk, got: {stage_alloc_line}"
     )
-    # No codegen-emitted drain barrier after the tput anymore. The InsertCommFence
-    # pass inserts a GM `system.fence` (pto.fence.barrier_all) only before a
-    # following `pld.system.notify` — this kernel has none — so the
-    # data-before-signal ordering now lives in the IR, not in an unconditional
-    # per-tput `pto.barrier <PIPE_ALL>`.
+    # The former unconditional `pto.barrier <PIPE_ALL>` drain after the tput is
+    # gone; put now emits its own peer-region `pto.cmo.cacheinvalid` + GM
+    # `pto.fence.barrier_all` (data-before-signal at the peer address) instead.
     lines = mlir.splitlines()
     tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput(" in line)
     assert "pto.barrier <PIPE_ALL>" not in lines[tput_idx + 1], (
         f"unexpected PIPE_ALL drain right after tput: {lines[tput_idx + 1]}"
     )
+    assert "pto.cmo.cacheinvalid" in lines[tput_idx + 1], lines[tput_idx + 1]
+    assert "pto.fence.barrier_all #pto.fence_scope<gm>" in lines[tput_idx + 2], lines[tput_idx + 2]
 
 
 def test_put_pipeline_emits_two_staging_buffers_in_one_buf_group():

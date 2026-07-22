@@ -13,18 +13,21 @@
 The pass enforces the ptoas data-before-signal contract with two purely-local
 rules (verified on ptoas 0.50); the ``notify`` itself needs no marker:
 
-* **After every publishing write** (remote_store / put / get, or a local store
-  into a window-bound ``DistributedTensor``): a whole-tensor region
+* **After every local publishing write** — a window-bound ``pl.store`` (or ``get``
+  into a local destination): a whole-tensor region
   ``pl.system.cacheinvalid(target, shape, [0, ...])`` immediately followed by
-  ``pl.system.fence()``. ptoas ties the release fence to this cacheinvalid, so a
-  later notify — even in a different loop — is satisfied without its own marker.
-* **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args) — the
-  consume-side invalidate before the next cacheable read.
+  ``pl.system.fence()``.
+* **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args).
+
+The **remote** writes ``remote_store`` / ``put`` land at a peer-offset address and
+are left untouched by the pass — their codegen emits a correct peer-region
+cacheinvalid + fence itself (see the codegen tests). So a program whose only
+publishing write is a ``remote_store`` is returned unchanged by this pass.
 
 Each test builds a ``Before`` program, runs the pass, and structurally compares
-the result against a hand-written ``Expected`` (the same body with the markers
-inserted). The pass runs inside ``passes.PassContext([])`` so the autouse
-verification context is bypassed — mirroring ``test_stamp_tfree_split.py``.
+the result against a hand-written ``Expected``. The pass runs inside
+``passes.PassContext([])`` so the autouse verification context is bypassed —
+mirroring ``test_stamp_tfree_split.py``.
 """
 
 import pypto.language as pl
@@ -42,41 +45,7 @@ def _apply(program):
         return passes.insert_comm_fence()(program)
 
 
-def test_remote_store_then_notify():
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst, [1, N], [0, 0])
-            pl.system.fence()
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    ir.assert_structural_equal(_apply(Before), Expected)
-
-
-def test_local_store_into_window_then_notify():
+def test_window_store_then_notify():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -110,8 +79,28 @@ def test_local_store_into_window_then_notify():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_local_store_into_plain_tensor_no_markers():
-    # A plain store is not a publishing write, and the notify needs no marker.
+def test_remote_store_left_to_codegen():
+    # A remote_store lands at a peer-offset address the pass can't invalidate; it
+    # is left untouched here (its codegen emits the peer-region cacheinvalid).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.load(inp, [0, 0], [1, N])
+            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_plain_tensor_store_no_markers():
+    # A plain (non-window) store is not a publishing write; nothing is inserted.
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -126,37 +115,23 @@ def test_local_store_into_plain_tensor_no_markers():
             pl.store(local, [0, 0], outp)  # plain tensor — not published to a peer
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            outp: pl.Out[pl.Tensor[[1, N], pl.FP32]],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            pl.store(local, [0, 0], outp)
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    ir.assert_structural_equal(_apply(Before), Expected)
+    ir.assert_structural_equal(_apply(Before), Before)
 
 
-def test_multiple_writes_each_get_cacheinvalid_and_fence():
+def test_multiple_window_stores_each_get_cacheinvalid_and_fence():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pl.store(local, [0, 0], win)
+            pl.store(local, [0, 0], win)
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     @pl.program
@@ -165,37 +140,37 @@ def test_multiple_writes_each_get_cacheinvalid_and_fence():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst, [1, N], [0, 0])
+            pl.store(local, [0, 0], win)
+            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst, [1, N], [0, 0])
+            pl.store(local, [0, 0], win)
+            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_two_distinct_targets_each_gets_cacheinvalid():
+def test_two_distinct_windows_each_gets_cacheinvalid():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst_a: pld.DistributedTensor[[1, N], pl.FP32],
-            dst_b: pld.DistributedTensor[[1, N], pl.FP32],
+            win_a: pld.DistributedTensor[[1, N], pl.FP32],
+            win_b: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst_a, peer=peer, offsets=[0, 0])
-            pld.tile.remote_store(local, target=dst_b, peer=peer, offsets=[0, 0])
+            pl.store(local, [0, 0], win_a)
+            pl.store(local, [0, 0], win_b)
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     @pl.program
@@ -204,79 +179,40 @@ def test_two_distinct_targets_each_gets_cacheinvalid():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst_a: pld.DistributedTensor[[1, N], pl.FP32],
-            dst_b: pld.DistributedTensor[[1, N], pl.FP32],
+            win_a: pld.DistributedTensor[[1, N], pl.FP32],
+            win_b: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst_a, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst_a, [1, N], [0, 0])
+            pl.store(local, [0, 0], win_a)
+            pl.system.cacheinvalid(win_a, [1, N], [0, 0])
             pl.system.fence()
-            pld.tile.remote_store(local, target=dst_b, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst_b, [1, N], [0, 0])
-            pl.system.fence()
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    ir.assert_structural_equal(_apply(Before), Expected)
-
-
-def test_inscope_alias_of_param_target_gets_cacheinvalid():
-    # The remote_store target is an in-scope alias (a view) of a window param.
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            dv = pl.tensor.view(dst, [1, N])
-            pld.tile.remote_store(local, target=dv, peer=peer, offsets=[0, 0])
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            dv = pl.tensor.view(dst, [1, N])
-            pld.tile.remote_store(local, target=dv, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dv, [1, N], [0, 0])
+            pl.store(local, [0, 0], win_b)
+            pl.system.cacheinvalid(win_b, [1, N], [0, 0])
             pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_write_inside_if_branch_cacheinvalidated_in_branch():
-    # The write (and its target alias) live inside the branch; the cacheinvalid +
-    # fence are emitted right after the write, in the branch. The outer notify
-    # needs no marker.
+def test_write_inside_if_branch():
+    # The window store lives inside the branch; its cacheinvalid + fence are
+    # emitted right after it, in the branch. The outer notify needs no marker.
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
             cond: pl.Scalar[pl.BOOL],
         ):
             local = pl.load(inp, [0, 0], [1, N])
             if cond:
-                dv = pl.tensor.view(dst, [1, N])
-                pld.tile.remote_store(local, target=dv, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     @pl.program
@@ -285,23 +221,22 @@ def test_write_inside_if_branch_cacheinvalidated_in_branch():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
             cond: pl.Scalar[pl.BOOL],
         ):
             local = pl.load(inp, [0, 0], [1, N])
             if cond:
-                dv = pl.tensor.view(dst, [1, N])
-                pld.tile.remote_store(local, target=dv, peer=peer, offsets=[0, 0])
-                pl.system.cacheinvalid(dv, [1, N], [0, 0])
+                pl.store(local, [0, 0], win)
+                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_notify_inside_if_write_fenced_before_if():
+def test_notify_inside_if_write_before():
     # The write is before the if; its cacheinvalid + fence release the data for the
     # conditional notify, which needs no marker of its own.
     @pl.program
@@ -310,13 +245,13 @@ def test_notify_inside_if_write_fenced_before_if():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
             cond: pl.Scalar[pl.BOOL],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pl.store(local, [0, 0], win)
             if cond:
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
@@ -328,14 +263,14 @@ def test_notify_inside_if_write_fenced_before_if():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
             cond: pl.Scalar[pl.BOOL],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst, [1, N], [0, 0])
+            pl.store(local, [0, 0], win)
+            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             if cond:
                 pld.system.notify(
@@ -354,12 +289,12 @@ def test_notify_inside_loop_after_write():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pl.store(local, [0, 0], win)
             for i in pl.range(N):
                 pld.system.notify(target=signal, peer=i, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
@@ -369,13 +304,13 @@ def test_notify_inside_loop_after_write():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-            pl.system.cacheinvalid(dst, [1, N], [0, 0])
+            pl.store(local, [0, 0], win)
+            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             for i in pl.range(N):
                 pld.system.notify(target=signal, peer=i, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
@@ -385,14 +320,14 @@ def test_notify_inside_loop_after_write():
 
 def test_loop_back_edge_notify_then_write():
     # for { notify; store } — the tail store gets its cacheinvalid + fence; that
-    # fence (from the previous iteration / final iteration) covers the notify.
+    # fence (previous / final iteration) covers the notify.
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
@@ -401,7 +336,7 @@ def test_loop_back_edge_notify_then_write():
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
 
     @pl.program
     class Expected:
@@ -409,7 +344,7 @@ def test_loop_back_edge_notify_then_write():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
@@ -418,51 +353,9 @@ def test_loop_back_edge_notify_then_write():
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-                pl.system.cacheinvalid(dst, [1, N], [0, 0])
+                pl.store(local, [0, 0], win)
+                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
-
-    ir.assert_structural_equal(_apply(Before), Expected)
-
-
-def test_nested_loops_write_in_inner_body():
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            for _i in pl.range(N):
-                for _j in pl.range(N):
-                    pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-                    pld.system.notify(
-                        target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
-                    )
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            local = pl.load(inp, [0, 0], [1, N])
-            for _i in pl.range(N):
-                for _j in pl.range(N):
-                    pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
-                    pl.system.cacheinvalid(dst, [1, N], [0, 0])
-                    pl.system.fence()
-                    pld.system.notify(
-                        target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
-                    )
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
@@ -487,7 +380,7 @@ def test_combo_ring_barrier_idiom():
                         pld.system.notify(
                             target=signal, peer=p, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                         )
-                pld.tile.remote_store(local, target=win, peer=me, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
 
     @pl.program
     class Expected:
@@ -506,7 +399,7 @@ def test_combo_ring_barrier_idiom():
                         pld.system.notify(
                             target=signal, peer=p, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                         )
-                pld.tile.remote_store(local, target=win, peer=me, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
                 pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
 
@@ -515,7 +408,6 @@ def test_combo_ring_barrier_idiom():
 
 def test_combo_two_phase_loops():
     # for { notify; store }; for { notify; store } — reduce-scatter then allgather.
-    # Each store gets its cacheinvalid + fence; the notifies get nothing.
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -531,12 +423,12 @@ def test_combo_two_phase_loops():
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=win, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
             for _t in pl.range(N):
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=win, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
 
     @pl.program
     class Expected:
@@ -553,14 +445,14 @@ def test_combo_two_phase_loops():
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=win, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
                 pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
             for _t in pl.range(N):
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
-                pld.tile.remote_store(local, target=win, peer=peer, offsets=[0, 0])
+                pl.store(local, [0, 0], win)
                 pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
 
@@ -656,12 +548,12 @@ def test_idempotent():
         def f(
             self,
             inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            win: pld.DistributedTensor[[1, N], pl.FP32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
             local = pl.load(inp, [0, 0], [1, N])
-            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pl.store(local, [0, 0], win)
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     once = _apply(Before)
