@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
 
 _SKILL_DIR = Path(__file__).parents[3] / ".claude" / "skills" / "incore-profiling"
@@ -98,6 +99,97 @@ def test_generate_npu_rejects_mixed_dispatch(generator: ModuleType, tmp_path: Pa
             tmp_path / "output",
             "dav-c220",
             run_mode="npu",
+        )
+
+
+def test_generate_npu_case_with_synthetic_inputs(generator: ModuleType, tmp_path: Path):
+    kernel = tmp_path / "kernel.cpp"
+    kernel.write_text(
+        'extern "C" __global__ AICORE void sample(__gm__ bfloat16_t* v0, int32_t n) {}\n',
+        encoding="utf-8",
+    )
+    kernel.with_suffix(".pto").write_text(
+        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        encoding="utf-8",
+    )
+
+    case = generator.generate(
+        kernel,
+        "synthetic_sample",
+        tmp_path / "output",
+        "dav-c220",
+        run_mode="npu",
+        block_dim=4,
+        scalar_values={"n": "8"},
+        synthetic_seed=19,
+    )
+    repeated = generator.generate(
+        kernel,
+        "synthetic_sample_repeated",
+        tmp_path / "repeated",
+        "dav-c220",
+        run_mode="npu",
+        block_dim=4,
+        scalar_values={"n": "8"},
+        synthetic_seed=19,
+    )
+
+    raw = np.fromfile(case / "v0.bin", dtype=np.uint16)
+    fp32 = (raw.astype(np.uint32) << 16).view(np.float32)
+    assert len(raw) == 8
+    assert np.isfinite(fp32).all()
+    assert np.any(fp32 != 0.0)
+    assert (case / "v0.bin").read_bytes() == (repeated / "v0.bin").read_bytes()
+    manifest = json.loads((case / "standalone_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["input_source"] == {"kind": "synthetic", "seed": 19}
+
+
+def test_generate_npu_requires_explicit_scalars(generator: ModuleType, tmp_path: Path):
+    kernel = _write_kernel(tmp_path)
+    with pytest.raises(ValueError, match="require every scalar ABI argument explicitly"):
+        generator.generate(
+            kernel,
+            "missing_scalar",
+            tmp_path / "output",
+            "dav-c220",
+            run_mode="npu",
+            synthetic_seed=19,
+        )
+
+
+def test_generate_npu_synthetic_integer_input_is_safe(generator: ModuleType, tmp_path: Path):
+    kernel = tmp_path / "integer_kernel.cpp"
+    kernel.write_text(
+        'extern "C" __global__ AICORE void sample(__gm__ int32_t* v0) {}\n',
+        encoding="utf-8",
+    )
+    kernel.with_suffix(".pto").write_text(
+        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        encoding="utf-8",
+    )
+
+    case = generator.generate(
+        kernel,
+        "integer_sample",
+        tmp_path / "output",
+        "dav-c220",
+        run_mode="npu",
+        synthetic_seed=19,
+    )
+
+    assert np.array_equal(np.fromfile(case / "v0.bin", dtype=np.int32), np.zeros(8, dtype=np.int32))
+
+
+def test_generate_npu_requires_input_source(generator: ModuleType, tmp_path: Path):
+    kernel = _write_kernel(tmp_path)
+    with pytest.raises(ValueError, match="require one input source"):
+        generator.generate(
+            kernel,
+            "no_inputs",
+            tmp_path / "output",
+            "dav-c220",
+            run_mode="npu",
+            scalar_values={"n": "8"},
         )
 
 
