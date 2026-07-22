@@ -571,7 +571,7 @@ class TestRunConfigCompileForwarding:
         assert captured["dsa_reference_placement"] == DsaReferencePlacement.LOOSE
         assert captured["dsa_reference_target"] == "target_kernel"
 
-    def test_system_harness_forwards_dsa_reuse_recognizer(self, monkeypatch, tmp_path):
+    def test_system_harness_forwards_dsa_experiment_controls(self, monkeypatch, tmp_path):
         st_root = Path(__file__).resolve().parents[2] / "st"
         monkeypatch.syspath_prepend(str(st_root))
 
@@ -607,6 +607,8 @@ class TestRunConfigCompileForwarding:
             None,
             None,
             DsaReusePenaltyRecognizer.QUADRATIC,
+            DsaReferencePlacement.LOOSE,
+            "target_kernel",
             None,
         )
 
@@ -620,6 +622,8 @@ class TestRunConfigCompileForwarding:
 
         assert captured["memory_planner"] == MemoryPlanner.DSA
         assert captured["dsa_reuse_penalty_recognizer"] == DsaReusePenaltyRecognizer.QUADRATIC
+        assert captured["dsa_reference_placement"] == DsaReferencePlacement.LOOSE
+        assert captured["dsa_reference_target"] == "target_kernel"
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}
