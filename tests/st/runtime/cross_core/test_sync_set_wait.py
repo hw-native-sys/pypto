@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""On-board odd-shape V2C split using explicit cross-core events.
+"""On-board odd-shape V2C splits using explicit cross-core events.
 
 Two AIV lanes partition a logical ``[5, K]`` tensor unevenly: lane 0 computes
 rows ``[0:2]`` and lane 1 computes rows ``[2:5]``. Both write into one GM
@@ -20,6 +20,11 @@ The GM transfer is physically padded to 16 rows because AIC Mat/Acc tiles must
 be box-aligned, while ``valid_shape`` keeps the logical payload at five rows.
 The single ``pl.jit`` function is expanded into AIV and AIC kernels that share
 one mixed-kernel launch argument layout.
+
+The second case transposes the uneven partitioning idea to the trailing axis
+of a larger logical ``[127, 255]`` tensor. The AIV lanes copy the left 127
+columns and right 128 columns into the same padded GM tensor. After both lanes
+signal the event, AIC consumes all 255 logical columns in a matrix multiply.
 """
 
 import pypto.language as pl
@@ -34,6 +39,16 @@ N = 16
 CUBE_PHYSICAL_ROWS = 16
 V2C_EVENT_ID = 4
 FFTS_WORKSPACE_ELEMENTS = 256
+
+LR_ROWS = 127
+LR_COLS = 255
+LR_LEFT_COLS = 127
+LR_RIGHT_COLS = LR_COLS - LR_LEFT_COLS
+LR_LEFT_PHYSICAL_COLS = 128
+LR_CUBE_ROWS = 128
+LR_CUBE_COLS = 256
+LR_OUTPUT_COLS = 16
+LR_EVENT_ID = 5
 
 
 @pl.jit
@@ -104,6 +119,80 @@ def sync_set_wait_odd_shape(
     return output
 
 
+@pl.jit
+def sync_set_wait_odd_last_axis(
+    input_tensor: pl.Tensor[[LR_ROWS, LR_COLS], pl.FP16],
+    weight: pl.Tensor[[LR_CUBE_COLS, LR_OUTPUT_COLS], pl.FP16],
+    transfer: pl.InOut[pl.Tensor[[LR_CUBE_ROWS, LR_CUBE_COLS], pl.FP16]],
+    ffts_workspace: pl.Tensor[[FFTS_WORKSPACE_ELEMENTS], pl.INT64],
+    output: pl.Out[pl.Tensor[[LR_CUBE_ROWS, LR_OUTPUT_COLS], pl.FP32]],
+):
+    """Copy an odd trailing axis as explicit 127/128 left/right AIV shards."""
+    for _ in pl.spmd(1, name_hint="sync_set_wait_odd_last_axis"):
+        pl.system.set_ffts(ffts_workspace)
+        # NONE preserves the explicitly uneven shard widths. Automatic
+        # LEFT_RIGHT splitting assumes equal physical halves and therefore
+        # cannot represent a 127/128 partition without padding the payload.
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            if aiv_id == 0:
+                left: pl.Tile[
+                    [LR_ROWS, LR_LEFT_PHYSICAL_COLS],
+                    pl.FP16,
+                    pl.Mem.Vec,
+                    pl.TileView(valid_shape=[LR_ROWS, LR_LEFT_COLS]),
+                ] = pl.load(
+                    input_tensor,
+                    [0, 0],
+                    [LR_ROWS, LR_LEFT_PHYSICAL_COLS],
+                    valid_shapes=[LR_ROWS, LR_LEFT_COLS],
+                )
+                pl.store(left, [0, 0], transfer)
+            else:
+                right: pl.Tile[[LR_ROWS, LR_RIGHT_COLS], pl.FP16, pl.Mem.Vec] = pl.load(
+                    input_tensor,
+                    [0, LR_LEFT_COLS],
+                    [LR_ROWS, LR_RIGHT_COLS],
+                )
+                pl.store(right, [0, LR_LEFT_COLS], transfer)
+
+            pl.system.sync_set(
+                LR_EVENT_ID,
+                pipe=pl.PipeType.MTE3,
+                ffts_mode=2,
+                core_type="aiv",
+            )
+
+        pl.system.sync_wait(LR_EVENT_ID, pipe=pl.PipeType.MTE2, core_type="aic")
+        transfer_mat: pl.Tile[
+            [LR_CUBE_ROWS, LR_CUBE_COLS],
+            pl.FP16,
+            pl.Mem.Mat,
+            pl.TileView(valid_shape=[LR_ROWS, LR_CUBE_COLS]),
+        ] = pl.load(
+            transfer,
+            [0, 0],
+            [LR_CUBE_ROWS, LR_CUBE_COLS],
+            valid_shapes=[LR_ROWS, LR_CUBE_COLS],
+            target_memory=pl.Mem.Mat,
+        )
+        weight_mat: pl.Tile[[LR_CUBE_COLS, LR_OUTPUT_COLS], pl.FP16, pl.Mem.Mat] = pl.load(
+            weight,
+            [0, 0],
+            [LR_CUBE_COLS, LR_OUTPUT_COLS],
+            target_memory=pl.Mem.Mat,
+        )
+        transfer_left = pl.move(transfer_mat, target_memory=pl.Mem.Left)
+        weight_right = pl.move(weight_mat, target_memory=pl.Mem.Right)
+        result: pl.Tile[
+            [LR_CUBE_ROWS, LR_OUTPUT_COLS],
+            pl.FP32,
+            pl.Mem.Acc,
+            pl.TileView(valid_shape=[LR_ROWS, LR_OUTPUT_COLS]),
+        ] = pl.matmul(transfer_left, weight_right)
+        output = pl.store(result, [0, 0], output)
+    return output
+
+
 class TestSyncSetWait:
     """Explicit cross-core sync event system test."""
 
@@ -125,6 +214,31 @@ class TestSyncSetWait:
         expected[:ROWS] = torch.matmul(a + b, weight)
         assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3), (
             f"odd-shape sync_set/sync_wait max diff = {(output - expected).abs().max().item()}"
+        )
+
+    @pytest.mark.platforms("a2a3")
+    def test_odd_last_axis_left_right_on_board(self, test_config):
+        """Synchronize explicit 127/128-column AIV shards before AIC consumes them."""
+        sync_set_wait_odd_last_axis._cache.clear()
+        torch.manual_seed(1)
+        input_tensor = torch.randn(LR_ROWS, LR_COLS, dtype=torch.float16)
+        weight = torch.randn(LR_CUBE_COLS, LR_OUTPUT_COLS, dtype=torch.float16)
+        transfer = torch.zeros(LR_CUBE_ROWS, LR_CUBE_COLS, dtype=torch.float16)
+        ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
+        output = torch.zeros(LR_CUBE_ROWS, LR_OUTPUT_COLS, dtype=torch.float32)
+
+        sync_set_wait_odd_last_axis(
+            input_tensor,
+            weight,
+            transfer,
+            ffts_workspace,
+            output,
+            config=test_config,
+        )
+
+        expected = torch.matmul(input_tensor.float(), weight[:LR_COLS].float())
+        assert torch.allclose(output[:LR_ROWS], expected, rtol=1e-3, atol=1e-3), (
+            f"odd-last-axis sync_set/sync_wait max diff = {(output[:LR_ROWS] - expected).abs().max().item()}"
         )
 
 
