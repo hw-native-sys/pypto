@@ -15,57 +15,47 @@
  *        publish (`pld.system.notify`) and consume (`pld.system.wait`) points.
  *
  * The latest PTOAS enforces a two-sided contract in its `pto-memory-consistency`
- * pass and pushes the markers onto the compiler:
+ * pass and pushes the markers onto the compiler. Verified empirically on ptoas
+ * 0.50, the contract reduces to exactly two purely-local rules — the *notify*
+ * itself needs nothing:
  *
- *   - Publish side: a `pto.comm.tnotify` requires an explicit
- *     `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching
- *     `pto.cmo.cacheinvalid` release marker and before the signal.
+ *   - Publish side: each publishing GM write requires a `pto.cmo.cacheinvalid`
+ *     of the written region **immediately followed by** a
+ *     `pto.fence.barrier_all #pto.fence_scope<gm>`. Any later `pto.comm.tnotify`
+ *     that releases that data is satisfied by this fence — including a notify in a
+ *     different loop; the fence does *not* need to sit next to the notify. A pure
+ *     barrier notify (no data at all) needs nothing.
  *   - Consume side: a cacheable GM load after `pto.comm.twait` / a successful
- *     `pto.comm.ttest` requires an explicit `pto.cmo.cacheinvalid all
- *     #pto.address_space<gm>` first (so the reader sees the peer's fresh write).
+ *     `pto.comm.ttest` requires a `pto.cmo.cacheinvalid all #pto.address_space<gm>`
+ *     first (so the reader sees the peer's fresh write).
  *
  * Both markers are the same `system.cacheinvalid` op: with a (tensor, shapes,
  * offsets) region it invalidates that sub-region; with no argument it
  * invalidates the whole GM address space (`... cacheinvalid all ...`).
  *
- * A single forward structural traversal inserts, per op:
+ * So a single structural traversal inserts, per op, with no control-flow state:
  *
  *   - after each **publishing write** (remote_store / put / get / window-bound
  *     tile.store): a whole-tensor region `system.cacheinvalid` of the written
- *     region followed **immediately** by a GM `system.fence`. ptoas requires the
- *     fence to directly follow the release marker, so both land at the write site
- *     (per address) — not deferred to the notify.
- *   - before each **bare barrier notify** (a notify with no fenced publishing
- *     write pending — e.g. a pure barrier signal, or a notify whose write lives in
- *     a prior loop so `pending` was reset): a no-arg (whole-GM)
- *     `system.cacheinvalid` + `system.fence` as the release marker (there is no
- *     data region to point at). A notify that *does* have a pending fenced write
- *     needs nothing — the write's own `cacheinvalid; fence` is the marker.
- *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid` (the
- *     consume-side invalidate before the next cacheable read).
+ *     region followed **immediately** by a GM `system.fence`.
+ *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
+ *   - **notify**: nothing.
  *
  * Example shapes:
  *
  *   remote_store; notify         -> remote_store; cacheinvalid(dst); fence; notify
- *   for p: (if p!=me: notify)     -> for p: (if p!=me: cacheinvalid; fence; notify)
  *   for c: store; for p: notify   -> for c: (store; cacheinvalid; fence);
- *                                     for p: (cacheinvalid; fence; notify)
- *   wait; read                   -> wait; cacheinvalid; read
+ *                                     for p: notify
+ *   wait; read                   -> wait; cacheinvalid(); read
  *
  * The region cacheinvalid covers the whole target tensor (full shape at zero
  * offsets), reusing the tensor type's dim exprs; narrowing to the precise written
  * sub-region is a planned follow-up.
  *
- * A single forward `pending` bool decides the notify marker: it is set by a
- * publishing write (which also emits its own fence) and cleared by a notify/fence.
- * It is conservative across control flow (reset after a loop; `and`-merged across
- * `if` branches), so an uncertain path emits the safe whole-GM cacheinvalid +
- * fence rather than relying on a region marker that may not precede.
- *
- * Idempotent: a notify already preceded by a fence, a write already followed by
- * its region cacheinvalid, and a wait already followed by a whole-GM cacheinvalid
- * are left alone. Runs last in the Default pipeline (after all statement-reordering
- * passes) so the inserted ops stay adjacent through codegen.
+ * Idempotent: a write already followed by its region cacheinvalid + fence, and a
+ * wait already followed by a whole-GM cacheinvalid, are left alone. Runs last in
+ * the Default pipeline (after all statement-reordering passes) so the inserted ops
+ * stay adjacent through codegen.
  */
 
 #include <cstddef>
@@ -96,8 +86,8 @@ namespace pass {
 
 namespace {
 
-// The effect a leaf statement has on the running `pending` state / markers.
-enum class Effect { kWrite, kNotify, kWait, kFence, kNone };
+// The effect a leaf statement has on the inserted markers.
+enum class Effect { kWrite, kWait, kNone };
 
 // The call carried by a leaf statement, if any.
 CallPtr LeafCall(const StmtPtr& stmt) {
@@ -112,7 +102,9 @@ CallPtr LeafCall(const StmtPtr& stmt) {
 
 // Classify a call-like statement (EvalStmt / AssignStmt). A submit is treated
 // conservatively as a publishing write for ordering; its launched task body is
-// not analysed here (and it has no single region to cacheinvalidate).
+// not analysed here (and it has no single region to cacheinvalidate). Notifies
+// are intentionally *not* classified: ptoas ties the release fence to the write's
+// cacheinvalid, not to the notify, so the notify needs no marker of its own.
 Effect StmtEffect(const StmtPtr& stmt) {
   ExprPtr value;
   if (auto eval = As<EvalStmt>(stmt)) {
@@ -123,29 +115,11 @@ Effect StmtEffect(const StmtPtr& stmt) {
   if (!value) return Effect::kNone;
   if (auto call = As<Call>(value)) {
     if (op_predicates::IsPublishingWrite(call)) return Effect::kWrite;
-    if (op_predicates::IsNotify(call)) return Effect::kNotify;
     if (IsOp(call, "pld.system.wait")) return Effect::kWait;
-    if (IsOp(call, "system.fence")) return Effect::kFence;
     return Effect::kNone;
   }
   if (As<Submit>(value)) return Effect::kWrite;
   return Effect::kNone;
-}
-
-// `pending` after a leaf with the given effect. A wait / cacheinvalid does not
-// touch the publish-side pending state.
-bool NextPending(bool pending, Effect effect) {
-  switch (effect) {
-    case Effect::kWrite:
-      return true;
-    case Effect::kNotify:
-    case Effect::kFence:
-      return false;
-    case Effect::kWait:
-    case Effect::kNone:
-      return pending;
-  }
-  return pending;
 }
 
 // The destination tensor of a publishing write, whose cache lines must be
@@ -230,12 +204,15 @@ StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
 // Whole-GM cacheinvalid: the no-argument form of `system.cacheinvalid`.
 StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cacheinvalid", span); }
 
-// Forward traversal: emit the ptoas data-before-signal markers per op.
+// Structural traversal: emit `cacheinvalid; fence` after every publishing write
+// and `cacheinvalid()` after every wait. No control-flow state is needed — both
+// rules are purely local — so if/for/while bodies are visited normally; the only
+// special handling is wrapping a bare single-statement body (a write/wait that is
+// the sole body of an if/for without an enclosing SeqStmts).
 class InsertCommMarkers : public IRMutator {
  public:
-  // Entry point: process a function body. A SeqStmts is walked statement by
-  // statement; a bare single statement (a degenerate one-op body) is wrapped
-  // with its own markers, matching the treatment of if/for bodies.
+  // Entry point: process a function body (delegates to the same bare-body-aware
+  // wrapping used for if/for/while bodies).
   StmtPtr MarkTopLevel(const StmtPtr& body) { return MarkBody(body); }
 
  protected:
@@ -247,20 +224,10 @@ class InsertCommMarkers : public IRMutator {
     for (size_t i = 0; i < stmts.size(); ++i) {
       const StmtPtr& child = stmts[i];
       const Effect eff = StmtEffect(child);
-      // Publish side, bare barrier notify: when no fenced publishing write is
-      // pending, the notify has no data region to release, so emit a whole-GM
-      // cacheinvalid + fence before it (unless already fenced). A pending write
-      // already emitted its own `cacheinvalid; fence` — ptoas accepts that as the
-      // release marker — so a pending notify needs nothing here.
-      if (eff == Effect::kNotify && !pending_ && !(i > 0 && IsLeafOp(stmts[i - 1], "system.fence"))) {
-        out.push_back(MakeCacheInvalidAll(child->span_));
-        out.push_back(MakeNoArgOp("system.fence", child->span_));
-        changed = true;
-      }
       auto new_child = VisitStmt(child);
       if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
-      // Per-address: a region cacheinvalid + fence after each publishing write.
+      // Publish side: a region cacheinvalid + fence after each publishing write.
       // ptoas requires the fence to immediately follow the release marker.
       if (auto target = WriteTargetToInvalidate(child)) {
         const bool already = i + 2 < stmts.size() && IsCacheInvalidFor(stmts[i + 1], target) &&
@@ -276,26 +243,15 @@ class InsertCommMarkers : public IRMutator {
         out.push_back(MakeCacheInvalidAll(child->span_));
         changed = true;
       }
-      pending_ = NextPending(pending_, eff);
     }
     if (!changed) return op;
     return SeqStmts::Flatten(std::move(out), op->span_);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    const bool pending_in = pending_;
     auto new_then = MarkBody(op->then_body_);
-    const bool then_pending = pending_;
-    bool else_pending = pending_in;
     std::optional<StmtPtr> new_else = op->else_body_;
-    if (op->else_body_.has_value()) {
-      pending_ = pending_in;
-      new_else = MarkBody(op->else_body_.value());
-      else_pending = pending_;
-    }
-    // Conservative: only stay `pending` if both paths definitely leave a write
-    // pending; otherwise the next notify emits the safe cacheinvalid_all.
-    pending_ = then_pending && else_pending;
+    if (op->else_body_.has_value()) new_else = MarkBody(op->else_body_.value());
     const bool then_changed = new_then.get() != op->then_body_.get();
     const bool else_changed = op->else_body_.has_value() && new_else->get() != op->else_body_->get();
     if (!then_changed && !else_changed) return op;
@@ -310,47 +266,31 @@ class InsertCommMarkers : public IRMutator {
 
  private:
   // Visit a body that may be a bare single statement (an `if`/`for` body without
-  // an enclosing SeqStmts, e.g. `if p != me: notify`). A SeqStmts body is handled
-  // by its own visitor; a bare leaf gets its markers wrapped around it here. After
-  // the first run a wrapped body is a SeqStmts, so the pass stays idempotent.
+  // an enclosing SeqStmts, e.g. `if p != me: remote_store(...)`). A SeqStmts body
+  // is handled by its own visitor; a bare leaf gets its markers wrapped here.
+  // After the first run a wrapped body is a SeqStmts, so the pass stays idempotent.
   StmtPtr MarkBody(const StmtPtr& body) {
     if (As<SeqStmts>(body)) return VisitStmt(body);
     const Effect eff = StmtEffect(body);
-    std::vector<StmtPtr> out;
-    if (eff == Effect::kNotify && !pending_) {
-      out.push_back(MakeCacheInvalidAll(body->span_));
-      out.push_back(MakeNoArgOp("system.fence", body->span_));
-    }
     auto visited = VisitStmt(body);
-    out.push_back(visited);
+    std::vector<StmtPtr> out{visited};
     if (auto target = WriteTargetToInvalidate(body)) {
       out.push_back(MakeCacheInvalid(target, body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
     }
     if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
-    pending_ = NextPending(pending_, eff);
     if (out.size() == 1) return visited;
     return SeqStmts::Flatten(std::move(out), body->span_);
   }
 
   template <typename LoopPtr>
   StmtPtr VisitLoop(const LoopPtr& op, const StmtPtr& body) {
-    // Enter the loop body with `pending_ = false`: ptoas checks the release marker
-    // lexically, so a loop-head notify cannot rely on a fence carried in from
-    // before the loop (iteration 0) or from the previous iteration's tail write
-    // (the back-edge) — neither precedes it lexically in the body. Marking with a
-    // cleared `pending` forces every loop-body notify to get its own
-    // cacheinvalid + fence. After the loop, stay conservative for the same reason.
-    pending_ = false;
     auto new_body = MarkBody(body);
-    pending_ = false;
     if (new_body.get() == body.get()) return op;
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
     return result;
   }
-
-  bool pending_ = false;
 };
 
 }  // namespace

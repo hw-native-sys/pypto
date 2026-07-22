@@ -24,38 +24,33 @@
 
 ## 本 pass 插入什么
 
-一趟前向结构遍历（`InsertCommMarkers`）按 op 插入：
+在 ptoas 0.50 上实测，该契约可归结为**两条纯局部规则** —— *notify* 本身无需任何标记。
+一趟结构遍历（`InsertCommMarkers`），不带任何控制流状态，插入：
 
 - **每个发布写之后** —— 一条覆盖整张量的**区域** `system.cacheinvalid`，**紧跟一条
-  `system.fence`**。ptoas 要求 fence 直接跟在释放标记之后，因此两者都落在写入点（每地址
-  一条），不推迟到 notify；
-- **每个裸 barrier notify 之前** —— 一条**全 GM** `system.cacheinvalid` + `system.fence`。
-  *裸 barrier notify* 指没有已 fence 的发布写待处理者（纯 barrier 信号，或其写位于前一个
-  循环、`pending` 已被重置）。有已 fence 发布写待处理的 notify 无需任何标记 —— 该写自身的
-  `cacheinvalid; fence` 即为释放标记；
+  `system.fence`**。ptoas 把释放 fence 关联到该写的 cacheinvalid；任何随后发布该数据的
+  `tnotify` 都由它满足，因此两者都落在写入点（每地址一条）；
 - **每个 wait 之后** —— 一条**全 GM** `system.cacheinvalid`（消费侧在下一次可缓存读之前
-  的失效）。
+  的失效）；
+- **notify** —— 什么都不插。
 
 ```text
 remote_store(a); remote_store(b); notify
   -> remote_store(a); cacheinvalid(a); fence; remote_store(b); cacheinvalid(b); fence; notify
 
-for p: (if p != me: notify)                 （裸 barrier notify —— 无写）
-  -> for p: (if p != me: cacheinvalid(); fence; notify)
-
 for c: store; for p: notify                 （写与 notify 在不同循环）
   -> for c: (store; cacheinvalid; fence);
-     for p: (cacheinvalid(); fence; notify)
+     for p: notify
 
 wait; read
   -> wait; cacheinvalid(); read
 ```
 
-fence 为何落在写而非 notify：ptoas 以**词法且局部**的方式把 fence 与释放标记匹配。若某
-notify 的数据由*另一个*循环中的 `cacheinvalid` 释放，则放在该 notify 附近的 fence 会被
-拒绝 —— fence 必须紧跟那条 `cacheinvalid`。在每个写处一起发射 `cacheinvalid; fence`，
-无论其后的 notify 有多远（哪怕跨循环嵌套）都满足要求；而直线 `store; notify` 仍降为规范的
-`store; cacheinvalid; fence; notify`。
+notify 为何无需标记、fence 为何落在写：ptoas 把所需的释放 fence 关联到发布写的
+`cacheinvalid`，而非 notify。因此发布「先前（哪怕在*另一个*循环里）写入」数据的 `tnotify`
+已由该写的 `cacheinvalid; fence` 满足 —— fence **不必**紧挨 notify。纯 barrier notify
+（完全无数据）什么都不需要。（此结论经实测验证：从 ring-allreduce 的 `.pto` 删掉 notify 侧
+标记后 ptoas 0.50 仍接受；而删掉 wait 侧的 `cacheinvalid all` 则被拒绝。）
 
 区域 cacheinvalid 目前覆盖**整个目标张量**（以全 `0` offset 覆盖完整 shape），复用类型的
 dim 表达式。收窄为精确写入子区域（写自身的 `(shapes, offsets)` 就在写入点旁边）是后续
@@ -67,7 +62,7 @@ dim 表达式。收窄为精确写入子区域（写自身的 `(shapes, offsets)
 window 参数、别名（`dv = pl.tensor.view(win); remote_store(dv)`）、循环携带的 `iter_arg`，
 还是分支内定义的值。**不需要任何跨作用域跟踪，也绝不会 silent drop**：每条标记都落在需要
 它的 op 旁边，任何嵌套层级皆然。裸单语句的分支/循环体会就地包裹
-（`body -> { markers; body; markers }`）；首次运行后该体成为 `SeqStmts`，故本 pass 幂等。
+（`body -> { body; markers }`）；首次运行后该体成为 `SeqStmts`，故本 pass 幂等。
 
 ## 在流水线中的位置
 
@@ -94,36 +89,25 @@ codegen 最终降级的 IR。
 | `Submit`（任务启动） | 保守 —— 排序上视作写 |
 
 `remote_load`（结果是 tile、不写 GM）以及写入普通 `Tensor` 的 `tile.store` **不是**发布
-写。普通张量 store 因此不发区域 cacheinvalid，但其后的 notify 仍是*裸 barrier notify*，
-会得到全 GM cacheinvalid + fence。
+写 —— 不为它们插标记，其后的 notify 也无需任何标记。
 
-## 算法 —— 一趟前向遍历 + `pending` 布尔
+## 算法 —— 一趟结构遍历，无流状态
 
-一个 `pending` 布尔按执行序流动，决定 notify 的标记：
+两条规则都是纯局部的，因此本 pass **不带**任何控制流状态（无 `pending` 布尔、无 `if`/循环
+分析、无 notify 分类）：
 
-- **发布写**置 `pending = true`（它已发射自己的 `cacheinvalid; fence`）；
-- **notify** 或 **fence** 清 `pending = false`；
-- **wait** / 其它保持不变。
+- 每个**发布写**处追加 `region cacheinvalid; fence`；
+- 每个 **wait** 处追加 `cacheinvalid()`；
+- **notify** 保持不动。
 
-在每个 notify 处：若 `pending` 为真，则已有一条已 fence 的写在其前，不再补任何标记；若
-`pending` 为假则该 notify 是*裸 barrier notify*，补一条全 GM `cacheinvalid; fence`。
-
-`pending` 对控制流**保守**，使不确定的路径发射安全的全 GM 标记，而非依赖可能并不先行的
-区域标记：
-
-- **`if`** —— 每个分支以流入的 `pending` 标记；`if` 之后 `pending` 取两分支结果的**与**
-  （只在一条路径上的写不算证明）。故无已证明写待处理的条件 notify 在其分支内部补全 GM 标记。
-- **循环** —— body 以 `pending = false` 进入，循环之后 `pending` 也重置为假。这是**正确性**
-  要求而非仅保守：ptoas 以**词法**方式检查释放标记，故循环头部的 notify 不能依赖来自循环前
-  （迭代 0）或上一轮迭代尾部写（回边）的 fence —— 二者在 body 中都不词法先行。清零 `pending`
-  强制每个循环体内的 notify 各自补标记。
+`if`/`for`/`while` 的 body 正常递归访问；唯一的特殊处理是包裹裸单语句 body（作为 `if`/`for`
+唯一 body、且无外层 `SeqStmts` 的写/wait），使其标记也能落上。由于两条规则都是局部且只追加，
+控制流无关紧要：某个循环内的写会被正确标记，无论其 notify 是否在另一个循环。
 
 ```text
 remote_store; notify                 -> remote_store; cacheinvalid; fence; notify
-remote_store; for: notify             -> remote_store; cacheinvalid; fence;
-                                         for: { cacheinvalid(); fence; notify }
-for: { notify; store }                -> for: { cacheinvalid(); fence; notify;
-                                                store; cacheinvalid; fence }
+remote_store; for: notify             -> remote_store; cacheinvalid; fence; for: notify
+for: { notify; store }                -> for: { notify; store; cacheinvalid; fence }
 ```
 
 写之后**紧跟一条 fence** 的已存在区域 `cacheinvalid`、以及紧接 wait 之后已存在的全 GM
