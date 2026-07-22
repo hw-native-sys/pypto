@@ -76,6 +76,7 @@ Generate and build both cases separately:
 ```bash
 python .claude/skills/incore-profiling/gen_profiling_case.py \
   --run-mode npu --input <compact>/kernel.cpp \
+  --ptoas-root <PTOAS-checkout> \
   --synthetic-inputs --scalar <name>=<exact-value> \
   --block-dim <exact-block-dim> \
   --testcase compact_<kernel> --output-root <compact-out>
@@ -101,6 +102,11 @@ pointer inputs are zeroed to avoid invalid dynamic indices. Every scalar ABI
 argument is mandatory in NPU mode. For kernels with data-dependent pointer
 controls, pass `--input-dir` with one exact `<ABI-name>.bin` per pointer instead.
 
+Mixed AIC/AIV inputs are launched as one co-scheduled group. They require
+`--ptoas-root`; the generator reuses PTOAS's validation-harness wrapper, which
+merges both bodies and their shared pipe objects into one global kernel. It
+never launches an AIC or AIV half in isolation.
+
 For a small workload where exact model values matter, use
 `--args-dump <args_dump.json> --func-id <id> --task-id <id>` instead of
 `--synthetic-inputs`. Import rejects mixed AIC/AIV, incomplete, non-contiguous,
@@ -110,9 +116,9 @@ The driver verifies ABI, launch metadata, inputs, and captured outputs. It
 restores inputs per launch, times with `aclrtEventElapsedTime`, runs serial ABBA
 quartets, and writes `samples.tsv` plus `report.json`.
 
-For broad DSA studies, use model compilation only to discover about 20 pure,
-high-signal kernels. Rank by sync change, removed reuse pairs, and useful work;
-exclude unchanged, trivial, mixed, and failed captures.
+For broad DSA studies, use model compilation only to discover about 20
+high-signal kernels or mixed groups. Rank by sync change, removed reuse pairs,
+and useful work; exclude unchanged, trivial, and failed cases.
 
 CANN, the camodel SoC, and the compile arch are auto-resolved from `--target`.
 Override any of them with `--cann-set-env`, `--soc-version`, `--aicore-arch`.

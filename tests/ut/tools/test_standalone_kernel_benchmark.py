@@ -40,9 +40,15 @@ def comparison() -> ModuleType:
 
 
 def _write_kernel(root: Path, *, mixed: bool = False) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     cpp = root / "kernel.cpp"
     if mixed:
-        signature = "AICORE void sample_aic(__gm__ float* v0, int32_t n) {}"
+        signature = "\n".join(
+            (
+                "AICORE void sample_aic(__gm__ float* v0, int32_t n) {}",
+                "AICORE void sample_aiv(__gm__ float* v0, int32_t n) {}",
+            )
+        )
     else:
         signature = 'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t n) {}'
     cpp.write_text(signature + "\n", encoding="utf-8")
@@ -90,9 +96,34 @@ def test_generate_npu_case_with_real_inputs(generator: ModuleType, tmp_path: Pat
     assert "sample<<<blockDim, nullptr, stream>>>" in launch
 
 
-def test_generate_npu_rejects_mixed_dispatch(generator: ModuleType, tmp_path: Path):
+def _write_fake_ptoas_generator(root: Path) -> Path:
+    script = root / "test" / "npu_validation" / "scripts" / "generate_testcase.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        """
+def _describe_kernel_source(text):
+    return {
+        "kind": "mixed",
+        "kernel_name": "sample",
+        "raw_params": ["__gm__ float* v0", "int32_t n"],
+        "aic_text": "AICORE void sample_aic(__gm__ float* v0, int32_t n) {}",
+        "aiv_text": "AICORE void sample_aiv(__gm__ float* v0, int32_t n) {}",
+    }
+
+def _append_mixed_kernel_wrapper(text, name, raw_params, aic_text, aiv_text):
+    del aic_text, aiv_text
+    return text + '\\n// PTOAS_CANONICAL_MIXED_WRAPPER\\n' + (
+        'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t n) {}\\n'
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_generate_npu_mixed_requires_ptoas_group_wrapper(generator: ModuleType, tmp_path: Path):
     kernel = _write_kernel(tmp_path, mixed=True)
-    with pytest.raises(ValueError, match="co-scheduled group"):
+    with pytest.raises(ValueError, match="requires --ptoas-root"):
         generator.generate(
             kernel,
             "mixed",
@@ -100,6 +131,45 @@ def test_generate_npu_rejects_mixed_dispatch(generator: ModuleType, tmp_path: Pa
             "dav-c220",
             run_mode="npu",
         )
+
+
+def test_generate_npu_mixed_uses_ptoas_group_wrapper(
+    generator: ModuleType, comparison: ModuleType, tmp_path: Path
+):
+    kernel = _write_kernel(tmp_path / "kernel", mixed=True)
+    ptoas_root = _write_fake_ptoas_generator(tmp_path / "PTOAS")
+    compact = generator.generate(
+        kernel,
+        "mixed",
+        tmp_path / "compact",
+        "dav-c220",
+        run_mode="npu",
+        block_dim=8,
+        scalar_values={"n": "8"},
+        synthetic_seed=19,
+        ptoas_root=ptoas_root,
+    )
+    loose = generator.generate(
+        kernel,
+        "mixed",
+        tmp_path / "loose",
+        "dav-c220",
+        run_mode="npu",
+        block_dim=8,
+        scalar_values={"n": "8"},
+        synthetic_seed=19,
+        ptoas_root=ptoas_root,
+    )
+
+    generated = (compact / "mixed_kernel.cpp").read_text(encoding="utf-8")
+    assert "PTOAS_CANONICAL_MIXED_WRAPPER" in generated
+    assert "#if defined(__DAV_CUBE__)" not in generated
+    manifest = json.loads((compact / "standalone_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["mixed"] is True
+    assert manifest["mixed_runner"]["kind"] == "ptoas_validation_group_wrapper"
+    validated, pointers = comparison.validate_cases(compact, loose)
+    assert validated["kernel"] == "sample"
+    assert pointers == ["v0"]
 
 
 def test_generate_npu_case_with_synthetic_inputs(generator: ModuleType, tmp_path: Path):

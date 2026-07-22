@@ -42,12 +42,15 @@ tensors wired in afterwards — see the skill's "Caveats".
 """
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 
@@ -184,6 +187,50 @@ def parse_cpp(cpp_text: str) -> tuple[str, bool, list[Param]]:
         "no '__global__ AICORE void <name>', bare 'AICORE void <name>', "
         "or '<name>_aic' decl found in kernel .cpp"
     )
+
+
+def _load_ptoas_generator(ptoas_root: Path) -> tuple[ModuleType, Path, str]:
+    """Load PTOAS's canonical validation generator for mixed-kernel wrapping."""
+    script = ptoas_root / "test" / "npu_validation" / "scripts" / "generate_testcase.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"PTOAS mixed-kernel generator not found: {script}")
+    spec = importlib.util.spec_from_file_location("_pypto_ptoas_validation_generator", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load PTOAS mixed-kernel generator: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for symbol in ("_describe_kernel_source", "_append_mixed_kernel_wrapper"):
+        if not callable(getattr(module, symbol, None)):
+            raise RuntimeError(f"PTOAS generator lacks required mixed-kernel helper {symbol}: {script}")
+    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+    return module, script, digest
+
+
+def _prepare_mixed_group(cpp_text: str, ptoas_root: Path) -> tuple[str, list[Param], str, dict[str, str]]:
+    """Create the same mixed AIC/AIV group wrapper used by PTOAS validation."""
+    module, script, digest = _load_ptoas_generator(ptoas_root)
+    info = module._describe_kernel_source(cpp_text)
+    if info.get("kind") != "mixed":
+        raise ValueError(f"PTOAS did not classify the input as a mixed AIC/AIV kernel: {script}")
+    raw_params = info.get("raw_params")
+    if not isinstance(raw_params, list) or not raw_params:
+        raise ValueError(f"PTOAS mixed-kernel description has no launch ABI: {script}")
+    name = info["kernel_name"]
+    wrapped = module._append_mixed_kernel_wrapper(
+        cpp_text,
+        name,
+        raw_params,
+        info["aic_text"],
+        info["aiv_text"],
+    )
+    if not re.search(rf'extern\s+"C"\s+__global__\s+AICORE\s+void\s+{re.escape(name)}\s*\(', wrapped):
+        raise RuntimeError("PTOAS mixed-kernel wrapper did not emit the expected global entry")
+    provenance = {
+        "kind": "ptoas_validation_group_wrapper",
+        "generator": str(script.resolve()),
+        "generator_sha256": digest,
+    }
+    return name, [_parse_param(param) for param in raw_params], wrapped, provenance
 
 
 # ── Parse the sibling .pto for static buffer sizes ───────────────────────────
@@ -573,7 +620,14 @@ if __name__ == "__main__":
 """
 
 
-def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param]) -> str:
+def emit_kernel_cpp(
+    cpp_text: str,
+    name: str,
+    is_mixed: bool,
+    params: list[Param],
+    *,
+    mixed_group_wrapped: bool = False,
+) -> str:
     """Compat preamble + the original kernel + (mixed) a merged __global__ dispatcher.
 
     For a mixed kernel the standalone ``<name>_aic`` / ``<name>_aiv`` are
@@ -597,7 +651,7 @@ def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param
     out = _PREAMBLE + "\n" + cpp_text
     if not is_mixed and not has_global_entry:
         out += f'\n\nextern "C" __global__ AICORE void {name}({decl}) {{\n  {name}_impl({call});\n}}\n'
-    if is_mixed:
+    if is_mixed and not mixed_group_wrapped:
         # The AIV side of a mixed kernel may take extra trailing scalar args
         # beyond the AIC launch ABI (e.g. block-partition offsets the runtime
         # derives per AIV subblock). The synthesized single-core dispatcher has
@@ -1062,7 +1116,7 @@ def _extract_dump_invocation(
     return scalar_values, capture
 
 
-def generate(
+def generate(  # noqa: PLR0913
     input_cpp: Path,
     testcase: str,
     output_root: Path,
@@ -1074,6 +1128,7 @@ def generate(
     scalar_values: dict[str, str] | None = None,
     dump_selection: DumpSelection | None = None,
     synthetic_seed: int | None = None,
+    ptoas_root: Path | None = None,
 ) -> Path:
     if run_mode not in {"sim", "npu"}:
         raise ValueError(f"run_mode must be 'sim' or 'npu', got {run_mode!r}")
@@ -1087,11 +1142,16 @@ def generate(
             "The .pto carries the static tensor shapes used for buffer sizing."
         )
     name, is_mixed, params = parse_cpp(cpp_text)
+    mixed_wrapper: dict[str, str] | None = None
+    mixed_group_wrapped = False
     if run_mode == "npu" and is_mixed:
-        raise ValueError(
-            "real-device standalone timing does not support a synthesized mixed AIC/AIV dispatcher; "
-            "benchmark the original co-scheduled group instead"
-        )
+        if ptoas_root is None:
+            raise ValueError(
+                "real-device mixed AIC/AIV timing requires --ptoas-root so the canonical PTOAS "
+                "group wrapper is used"
+            )
+        name, params, cpp_text, mixed_wrapper = _prepare_mixed_group(cpp_text, ptoas_root)
+        mixed_group_wrapped = True
     pto_sizes = parse_pto_sizes(pto_path.read_text(encoding="utf-8"))
 
     counts: dict[str, int] = {}
@@ -1142,7 +1202,14 @@ def generate(
     if synthetic_seed is not None:
         _write_synthetic_inputs(out_dir, params, counts, seed=synthetic_seed)
     (out_dir / f"{testcase}_kernel.cpp").write_text(
-        emit_kernel_cpp(cpp_text, name, is_mixed, params), encoding="utf-8"
+        emit_kernel_cpp(
+            cpp_text,
+            name,
+            is_mixed,
+            params,
+            mixed_group_wrapped=mixed_group_wrapped,
+        ),
+        encoding="utf-8",
     )
     (out_dir / "launch.cpp").write_text(emit_launch_cpp(name, params), encoding="utf-8")
     main_cpp = (
@@ -1169,6 +1236,7 @@ def generate(
         "aicore_arch": aicore_arch,
         "block_dim": block_dim,
         "mixed": is_mixed,
+        **({"mixed_runner": mixed_wrapper} if mixed_wrapper is not None else {}),
         **(
             {"input_source": {"kind": "synthetic", "seed": synthetic_seed}}
             if synthetic_seed is not None
@@ -1209,6 +1277,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--soc-version", default="Ascend910B1", help="CLI compat (cmake -DSOC_VERSION)")
     ap.add_argument("--aicore-arch", default="dav-c220", help="--cce-aicore-arch (a2a3 / a5)")
     ap.add_argument("--block-dim", type=int, default=1, help="exact launch block dimension")
+    ap.add_argument(
+        "--ptoas-root",
+        type=Path,
+        help="PTOAS checkout supplying its canonical mixed AIC/AIV group wrapper",
+    )
     ap.add_argument(
         "--input-dir",
         type=Path,
@@ -1269,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
         scalar_values=scalar_values,
         dump_selection=dump_selection,
         synthetic_seed=args.synthetic_seed if args.synthetic_inputs else None,
+        ptoas_root=args.ptoas_root,
     )
     print(f"[gen_profiling_case] wrote testcase -> {out_dir}")
     return 0
