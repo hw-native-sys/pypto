@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
@@ -1496,6 +1497,56 @@ class KernelCallCounter : public IRVisitor {
   std::unordered_map<std::string, size_t> counts_;
 };
 
+/// Ascend910B no-split cross-core pipes need both AIV sub-lanes to execute:
+/// lane 0 performs the real work while SplitVectorKernel synthesizes a
+/// zero-valid-shape replay on lane 1 so every hardware pipe handshake is
+/// balanced. Auto-expanded mixed kernels are stamped in ExpandMixedFunction;
+/// hand-written AIC/AIV Groups need the same inference here.
+class NoSplitCrossCorePipeCollector : public IRVisitor {
+ public:
+  [[nodiscard]] bool UsesNoSplitPipeOnly() const { return uses_pipe_ && !uses_split_pipe_; }
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    if (op_predicates::IsInitializePipe(op)) {
+      uses_pipe_ = true;
+    } else if (op_predicates::IsTPush(op) || op_predicates::IsTPop(op) || op_predicates::IsTFree(op)) {
+      uses_pipe_ = true;
+      uses_split_pipe_ = uses_split_pipe_ || op->GetKwarg<int>("split", 0) != 0;
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  bool uses_pipe_ = false;
+  bool uses_split_pipe_ = false;
+};
+
+bool NeedsInferredNoSplitDualAivDispatch(const FunctionPtr& func) {
+  if (!func || func->func_type_ != FunctionType::AIV || !pypto::backend::BackendConfig::IsConfigured() ||
+      !PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() ||
+      func->GetAttr<bool>(kDualAivDispatchAttr, false) || func->HasAttr("external_source") ||
+      func->requires_runtime_binding_) {
+    return false;
+  }
+  if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) return false;
+
+  NoSplitCrossCorePipeCollector collector;
+  collector.VisitStmt(func->body_);
+  return collector.UsesNoSplitPipeOnly();
+}
+
+FunctionPtr WithDualAivDispatch(const FunctionPtr& func) {
+  auto result = MutableCopy(func);
+  auto attrs = result->attrs_;
+  attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                             [](const auto& kv) { return kv.first == kDualAivDispatchAttr; }),
+              attrs.end());
+  attrs.emplace_back(kDualAivDispatchAttr, true);
+  result->attrs_ = std::move(attrs);
+  return result;
+}
+
 bool IsCanonicalGroupMemberCall(const CallPtr& call, const FunctionPtr& callee, const FunctionPtr& group) {
   if (!call || !callee || !group) return false;
   if (call->args_.size() != group->params_.size() || callee->params_.size() != group->params_.size()) {
@@ -1699,19 +1750,22 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
     // AIV-only Groups and pre-expansion Groups are handled by their existing
     // dispatch paths. A mixed Group needs exactly the shared AIC/AIV ABI here.
     if (!aic.inner_call || !aiv.inner_call) continue;
-    if (IsCanonicalGroupMemberCall(aic.inner_call, aic.inner_callee, group) &&
-        IsCanonicalGroupMemberCall(aiv.inner_call, aiv.inner_callee, group)) {
-      continue;
-    }
+    const bool needs_abi_normalization =
+        !IsCanonicalGroupMemberCall(aic.inner_call, aic.inner_callee, group) ||
+        !IsCanonicalGroupMemberCall(aiv.inner_call, aiv.inner_callee, group);
+    const bool needs_dual_aiv_dispatch = NeedsInferredNoSplitDualAivDispatch(aiv.inner_callee);
+    if (!needs_abi_normalization && !needs_dual_aiv_dispatch) continue;
 
-    CHECK_SPAN(
-        !aic.inner_callee->HasAttr("external_source") && !aiv.inner_callee->HasAttr("external_source") &&
-            !aic.inner_callee->requires_runtime_binding_ && !aiv.inner_callee->requires_runtime_binding_,
-        group->span_)
-        << "Mixed Group '" << group->name_
-        << "' has AIC/AIV members with different argument layouts. External or runtime-bound members "
-           "cannot be adapted; declare both members with the same signature and forward the Group's full "
-           "parameter list.";
+    if (needs_abi_normalization) {
+      CHECK_SPAN(
+          !aic.inner_callee->HasAttr("external_source") && !aiv.inner_callee->HasAttr("external_source") &&
+              !aic.inner_callee->requires_runtime_binding_ && !aiv.inner_callee->requires_runtime_binding_,
+          group->span_)
+          << "Mixed Group '" << group->name_
+          << "' has AIC/AIV members with different argument layouts. External or runtime-bound members "
+             "cannot be adapted; declare both members with the same signature and forward the Group's full "
+             "parameter list.";
+    }
 
     const bool exclusive_pair =
         call_counter.Count(aic.inner_callee->name_) == 1 && call_counter.Count(aiv.inner_callee->name_) == 1;
@@ -1726,6 +1780,7 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
 
     auto normalized_aic = BuildGroupAbiAdapter(group, aic, aic_name, peer_renames);
     auto normalized_aiv = BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames);
+    if (needs_dual_aiv_dispatch) normalized_aiv = WithDualAivDispatch(normalized_aiv);
     if (exclusive_pair) {
       replacements[aic_name] = normalized_aic;
       replacements[aiv_name] = normalized_aiv;

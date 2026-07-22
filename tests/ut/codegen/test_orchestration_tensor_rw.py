@@ -995,6 +995,7 @@ class TestTensorReadWriteOffsetCodegen:
         vec = transformed.get_function("vec_side")
         assert cube is not None
         assert vec is not None
+        assert vec.attrs.get("dual_aiv_dispatch") is True
         canonical_names = [param.name_hint for param in cube.params]
         assert canonical_names == [param.name_hint for param in vec.params]
         assert canonical_names[-1] == "__gm_pipe_buffer"
@@ -1008,6 +1009,15 @@ class TestTensorReadWriteOffsetCodegen:
         assert shape_values == ["512"], code
         assert "rt_submit_task" in code, code
         assert result.func_name_to_signature["cube_side"] == result.func_name_to_signature["vec_side"]
+        expected_mixed = (
+            result.func_name_to_id["cube_side"],
+            result.func_name_to_id["vec_side"],
+            result.func_name_to_id["vec_side"],
+        )
+        assert (
+            f"MixedKernels mixed_0 = {{{expected_mixed[0]}, {expected_mixed[1]}, {expected_mixed[2]}}};"
+            in code
+        )
         # The one shared task payload must contain all three Group tensors plus
         # the injected workspace; pre-fix it was built only from cube_side and
         # omitted ext_out, so vec_side unpacked q as its output/workspace.

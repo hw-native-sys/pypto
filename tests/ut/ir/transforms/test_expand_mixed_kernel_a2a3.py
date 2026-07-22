@@ -129,6 +129,50 @@ def test_hand_written_group_members_share_canonical_abi():
         assert [arg.name_hint for arg in call.args] == expected_names
 
 
+def test_hand_written_no_split_pipe_group_infers_dual_aiv_dispatch():
+    """910B explicit pipe members get the same lane-1 handshake replay as auto-expanded mixed kernels."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            v2c = pl.reserve_buffer(name="probe_v2c", size=4096, base=pl.AUTO)
+            c2v_peer = pl.import_peer_buffer(name="probe_c2v", peer_func="vec_side")
+            pl.aic_initialize_pipe(c2v_peer, v2c, dir_mask=3, slot_size=512)
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            c2v = pl.reserve_buffer(name="probe_c2v", size=4096, base=pl.AUTO)
+            v2c_peer = pl.import_peer_buffer(name="probe_v2c", peer_func="cube_side")
+            pl.aiv_initialize_pipe(c2v, v2c_peer, dir_mask=3, slot_size=512)
+            tile = pl.tpop_from_aic(shape=[16, 16], dtype=pl.FP32, split=0)
+            pl.tfree_to_aic(tile, split=0)
+            return out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            self.cube_side(q, sink)
+            return self.vec_side(out)
+
+    after = _run_pipeline(Program)
+    vec = after.get_function("vec_side")
+    assert vec is not None
+    assert vec.attrs.get("dual_aiv_dispatch") is True
+
+
 def test_reused_hand_written_group_members_get_private_adapters():
     """A member used outside its Group keeps its original ABI."""
 
