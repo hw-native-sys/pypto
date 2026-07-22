@@ -1,6 +1,6 @@
 ---
 name: incore-profiling
-description: Profile PyPTO kernels in-core with the Ascend msprof op-simulator — cycle-accurate per-kernel traces. Use when the user wants to profile a built case, inspect kernel timing or instruction streams, or generate MindStudio Insight traces.
+description: Profile PyPTO kernels in-core with the Ascend msprof op-simulator or compare standalone compact/loose kernels on a real NPU. Use for per-kernel timing, instruction traces, MindStudio Insight artifacts, or controlled DSA placement experiments.
 ---
 
 # In-Core Kernel Profiling (msprof op-simulator)
@@ -64,6 +64,49 @@ python .claude/skills/incore-profiling/incore_profile.py \
   (needs no toolchain).
 - `--func <name>` profiles a single kernel; repeatable.
 
+## Standalone real-device comparison
+
+Compare exact compact and loose PTOAS sources. Capture a real invocation with
+`RunConfig(enable_dump_args=2)`, find its `func_id` in `kernel_config.py`, and
+select repeated dispatches with `--task-id` or `--task-occurrence`. Import rejects
+mixed AIC/AIV, incomplete, non-contiguous, ambiguous, or truncated captures.
+
+Generate and build both cases separately:
+
+```bash
+python .claude/skills/incore-profiling/gen_profiling_case.py \
+  --run-mode npu --input <compact>/kernel.cpp \
+  --args-dump <model-build>/dfx_outputs/args_dump/args_dump.json \
+  --func-id <kernel-func-id> --task-occurrence 0 \
+  --block-dim <exact-block-dim> \
+  --testcase compact_<kernel> --output-root <compact-out>
+
+cmake -S <compact-case> -B <compact-case>/build \
+  -DPTO_ISA_ROOT=<pto-isa> -DSOC_VERSION=Ascend910B2
+cmake --build <compact-case>/build --parallel 2
+```
+
+Repeat for the loose `kernel.cpp`, using the same dump selection and launch
+metadata. Then run paired ABBA batches:
+
+```bash
+python .claude/skills/incore-profiling/standalone_compare.py \
+  --compact-case <compact-case> --loose-case <loose-case> \
+  --output <real-output-abi-name> --device-id 0 \
+  --quartets 8 --warmup 10 --rounds 100 --output-root <results>
+```
+
+Manual fallback: pass `--input-dir` with one `<ABI-name>.bin` per pointer and
+every scalar as `--scalar NAME=VALUE`; never rely on the default `1` in results.
+
+The driver verifies ABI, launch metadata, inputs, and captured outputs. It
+restores inputs per launch, times with `aclrtEventElapsedTime`, runs serial ABBA
+quartets, and writes `samples.tsv` plus `report.json`.
+
+For broad DSA studies, use model compilation only to discover about 20 pure,
+high-signal kernels. Rank by sync change, removed reuse pairs, and useful work;
+exclude unchanged, trivial, mixed, and failed captures.
+
 CANN, the camodel SoC, and the compile arch are auto-resolved from `--target`.
 Override any of them with `--cann-set-env`, `--soc-version`, `--aicore-arch`.
 
@@ -79,35 +122,17 @@ Each run writes to `<build-dir>/kernel_insight_all_funcs_<timestamp>/`:
 
 A final `EXPORTED N/M` line reports how many kernels succeeded.
 
-### Next step: clean the trace
+### Clean and store the trace
 
-The raw `visualize_data.bin` is cluttered (sync flags, cache-miss / control-flow
-lanes). Turn it into a de-cluttered, Perfetto-viewable per-pipe trace with the
-repo tool:
+Create a Perfetto-viewable per-pipe trace:
 
 ```bash
 python -m pypto.tools.clean_sim_trace \
   <build-dir>/kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out/OPPROF_* -o <out>
 ```
 
-It writes `trace.clean.json` (pipeline lanes in dataflow order
-MTE2→MTE1→CUBE→VECTOR→FIXPIPE→MTE3, sync flags re-anchored as flow arrows) and
-`instr_metrics.json` (per-instruction pipe / cycles / vector-utilization). With
-`-o <out>` it also copies the raw binary trace (`visualize_data.bin` + per-core
-data) into `<out>/raw_simulator/` (source left intact; `--no-copy-raw` skips). The
-per-pipe cycle breakdown is the fastest way to spot a degenerate trace
-(`CUBE=0` cycles — see **Caveats**). Rename the cleaned trace to
-`<kernel>.clean.json` straight away (see below) so multiple profiled kernels stay
-distinguishable when downloaded side by side for Perfetto.
-
-### Where to put the cleaned trace
-
-**Always write the cleaned, presentable trace under the repo's `build_output/`
-in a descriptive, self-documenting folder — never leave it in `/tmp`.** Use the
-name pattern `incore_<kernel>_<source-stem>_<timestamp>/` (e.g.
-`build_output/incore_fa_fused_decode2l_20260611_160643/`) so the kernel, the
-originating script, and the run are obvious from the directory listing alone.
-Recommended layout inside that folder:
+Write it under gitignored
+`build_output/incore_<kernel>_<source>_<timestamp>/`, not `/tmp`:
 
 ```text
 build_output/incore_<kernel>_<source>_<ts>/
@@ -117,57 +142,24 @@ build_output/incore_<kernel>_<source>_<ts>/
   summary.txt            provenance (source script, wired workload, per-pipe breakdown)
 ```
 
-`build_output/` is gitignored, so these artifacts stay local. The `summary.txt`
-must record the wired workload (e.g. `fa_total`, work-table, `seq_lens`, scalar
-args) when real intermediates were patched in — otherwise the numbers are not
-reproducible. Pass `-o build_output/incore_<kernel>_<source>_<ts>` to
-`clean_sim_trace` so the output lands in the run folder directly (no nested
-subfolder) — this also auto-copies `raw_simulator/` (the binary trace) into the
-folder — then rename its `trace.clean.json` to `<kernel>.clean.json` — the
-kernel-name prefix keeps multiple profiled kernels distinguishable when several
-`.clean.json` files are downloaded together and opened in Perfetto:
-
-```bash
-mv build_output/incore_<kernel>_<source>_<ts>/trace.clean.json \
-   build_output/incore_<kernel>_<source>_<ts>/<kernel>.clean.json
-```
+Record inputs/scalars in `summary.txt`, and rename `trace.clean.json` to
+`<kernel>.clean.json`.
 
 ## Troubleshooting
 
-- **Build fails with `unknown type name '__biasbuf__'` or `use of undeclared
-  identifier 'aicore'`** (often after `argument unused during compilation:
-  '--cce-aicore-enable-tl'`) — the CANN is **not TL-capable** (commonly
-  `ascend-toolkit/latest`, e.g. 8.3.RC1). Re-run with a TL-capable
-  `--cann-set-env <…/cann-8.5.x/set_env.sh>`. The tool preflights this and should
-  now fail early naming the cause.
+- **`__biasbuf__` / `aicore` compile errors** — select a TL-capable CANN with
+  `--cann-set-env`.
 - **Build fails inside `pto/npu/a5/*.hpp`** — wrong target; pass `--target a2a3`
   for an A2/A3 device.
-- **`ld: cannot find -lruntime_camodel`** — the auto-selected SoC has no camodel
-  library. Auto-selection substring-matches `910b` and takes the first match,
-  which can be bare `Ascend910B` even when the camodel ships only for
-  `Ascend910B1`. List the real ones with
-  `find "$ASCEND_HOME_PATH" -name libruntime_camodel.so` and pass the variant
-  matching your device (`npu-smi info`), e.g. `--soc-version Ascend910B1`.
+- **Missing `runtime_camodel`** — select the installed variant with
+  `--soc-version`, commonly `Ascend910B1`.
 - **Trace is ~0 cycles / `CUBE=0` / only SCALAR+sync instrs** — the kernel is
   data-dependent and the auto golden zeroed its control tensor. See **Caveats**.
 - **`CANN set_env.sh not found`** — pass `--cann-set-env <path>`, or set
   `ASCEND_HOME_PATH` / `CANN_SET_ENV`.
-- **`Cannot find msopprof` / `…/tools/msopprof/bin/msopprof does not exist`** —
-  `msprof op` can't find its worker binary. The tool now preflights and
-  auto-provisions one from another local CANN (look for a `provisioned msopprof
-  worker:` log line). If none is found, it fails early naming the expected path —
-  install the matching CANN 9.0.x `msopprof` there (it ships in the complete
-  Ascend-cann-toolkit / MindStudio operator-dev tools) or pass `--msopprof <path>`.
-- **`aclInit … failed: 500000` / `init soc version failed`, preceded by
-  `…/tools/msopprof/lib64/libmsopprof_injection.so from LD_PRELOAD cannot be
-  preloaded … ignored`** — the worker was provisioned but its companion
-  injection lib is missing. `msprof op simulator` `LD_PRELOAD`s
-  `<toolkit>/tools/msopprof/lib64/libmsopprof_injection.so`; when absent, the
-  preload is silently ignored and the testcase's `aclInit` can't init the
-  simulator SoC. Auto-provisioning now copies this lib next to the worker (look
-  for a `provisioned msopprof injection lib:` log line). If you provisioned a
-  worker by hand, copy the sibling `lib64/libmsopprof_injection.so` from the same
-  CANN into `<toolkit>/tools/msopprof/lib64/` too.
+- **Missing `msopprof`** — allow auto-provisioning or pass `--msopprof`.
+- **`aclInit` 500000 after `LD_PRELOAD` warning** — install the matching
+  `msopprof` injection library beside its worker.
 - **`sibling .pto not found`** — the kernel `.cpp` has no `.pto` next to it (the
   generator reads it for buffer sizes). Use a `ptoas/` dir that has both, or pass
   `--ptoas-root <PTOAS source checkout>` to fall back to the validation generator.
@@ -176,35 +168,12 @@ mv build_output/incore_<kernel>_<source>_<ts>/trace.clean.json \
 
 ## Caveats
 
-**Data-dependent kernels read misleadingly fast.** The auto-generated `golden.py`
-zero-fills integer input buffers. If a kernel's loop trip-count, grid-stride
-bound, or work-table length is **read from an input tensor**, the zeroed input
-yields 0 iterations: a sub-microsecond, near-empty trace with `CUBE=0` cycles
-that looks like the kernel is free. This is an artifact of synthetic inputs, not
-a fast kernel — the tool flags it with a `WARN` line and a non-empty `message` in
-`summary.txt`/`manifest_export.csv`. The generator already sizes every GM buffer
-to its full `.pto` shape, so you do **not** need to resize anything — to profile
-such a kernel for real, just overwrite the **control** inputs with a valid set
-(non-zero loop bound + dense work table + real lengths) by editing the case's
-`golden.py` (or writing the `vN.bin` directly) and the scalar tail args in
-`main.cpp`, then rebuild the `*_sim` target and re-run `msprof op simulator`.
-Only the control tensors must be real — per-instruction cost is data-independent,
-so the bulk data tensors can stay random/zero.
+Synthetic integer inputs can make data-dependent loops execute zero times. A
+near-empty or `CUBE=0` trace is not performance evidence; replace control inputs
+and scalar bounds with a real workload. NPU capture mode does this automatically.
 
 ## How it works
 
-For each kernel `.cpp` the tool: (1) generates a standalone testcase via the
-bundled `gen_profiling_case.py` — it reads the kernel signature from the `.cpp`
-and the GM buffer sizes from the sibling `.pto`'s `make_tensor_view` shapes, then
-emits `main.cpp` + `launch.cpp` (`<<<1, …>>>` single-core) + `CMakeLists.txt` +
-`golden.py`; mixed cube+vector kernels get a trivial merged `__global__`
-dispatcher (`#if __DAV_CUBE__` → `<k>_aic`, `#if __DAV_VEC__` → `<k>_aiv`). It
-then (2) builds the simulator binary with CMake, (3) runs `golden.py` for input
-data, (4) runs `msprof op simulator` to collect traces, (5) records the
-artifacts. Steps run per kernel and continue on failure unless `--no-keep-going`.
-
-## Future work
-
-`--target` must currently be passed explicitly. Once the build pipeline records
-the backend arch into the build folder, `incore_profile.py` can auto-detect it
-and `--build-dir` alone will suffice. `--target` will remain as an override.
+The generator derives ABI and sizes from `.cpp`/`.pto`, emits the harness, builds,
+runs `msprof op simulator`, and records each kernel independently. Mixed
+simulator kernels use a synthetic AIC/AIV dispatcher; real NPU mode rejects it.
