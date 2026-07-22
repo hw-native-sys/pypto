@@ -118,9 +118,10 @@ def _get_subblock(var, span):
 def _shard_vec(tile, split, half_shape, span):
     """A C->V boundary ``tile.aiv_shard`` returning a HALF *Vec* tile.
 
-    The pass reattaches the move's Vec destination memory onto the deduced half
-    type, so the result is Vec — ``T.aiv_shard`` alone would inherit the cube
-    input's memory, hence the explicit result type here.
+    ``tile.aiv_shard`` declares Vec as its result memory (the consuming vector
+    lane), and ``OpRegistry::Create`` fills that onto the space-less deduced half
+    type — so the pass itself attaches nothing. This helper still has to state Vec
+    explicitly only because it builds the ``ir.Call`` directly, bypassing Create.
     """
     return ir.Call(
         ir.get_op("tile.aiv_shard"), [tile], {"split": split}, _tile(half_shape, None, MS.Vec), span

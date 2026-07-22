@@ -100,7 +100,9 @@ std::optional<MemorySpace> ResolvedTileMemory(const ExprPtr& expr) {
 //   (b) No AIV reduce that collapses the split axis inside a region — that
 //       produces a partial per-lane reduction (a miscompile).
 //   (c) tile.aiv_shard / tile.aic_gather (the AIV-split boundary) must appear
-//       inside a region, never at top level.
+//       inside a region, never at top level. (c') additionally rejects them in a
+//       task-parallel (SplitMode::None) region: both lanes run the full body
+//       there, so there is no split axis to shard / gather along.
 //   (d) The boundary memory contract: tile.aiv_shard is Acc -> Vec and
 //       tile.aic_gather is Vec -> Mat (see cross_core.cpp). Both ops ARE the
 //       cross-core transfer, so the operand must live on the PRODUCING lane and

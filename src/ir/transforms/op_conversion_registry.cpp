@@ -2342,15 +2342,17 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // (tile.aiv_shard / tile.aic_gather) so the result is byte-identical to what the
 // AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 18).
 //
-// Memory-space re-attachment. The tile-level split deducer (DeduceSplitReshape)
-// intentionally drops the boundary memory space (returns a TileType with a null
-// memref / null memory_space), because the deduction fixpoint must not inherit an
-// input-side layout. This converter re-attaches the CONSUMER-side boundary memory
+// Boundary memory space. The tile-level split deducer (DeduceSplitReshape)
+// intentionally leaves it null (returns a TileType with a null memref / null
+// memory_space), because the deduction fixpoint must not inherit an input-side
+// layout. OpRegistry::Create then fills that null from the CONSUMER-side memory
 // the tile op declares via set_output_memory (cross_core.cpp): Vec for the C->V
 // aiv_shard (AIV pops into UB), Mat for the V->C aic_gather (AIC pops into L1).
-// Reading it from the registry keeps the two declarations from drifting apart —
-// previously both directions were hard-coded to Vec here, which made the gather's
-// declared type disagree with the Mat tpop ExpandMixedKernel actually emits.
+// So this converter attaches nothing of its own — it just asserts the space
+// arrived. LowerAutoVectorSplit builds its boundary ops through the same Create,
+// which is what keeps the two paths from drifting apart; this converter used to
+// hard-code Vec for both directions, which made the gather's declared type
+// disagree with the Mat tpop ExpandMixedKernel actually emits.
 //
 // No InputSpaceReq. The realistic (region-only) operand is an on-chip tile — a
 // cube (Mat/Acc) matmul result for aiv_shard, a Vec vector-compute result for
@@ -2380,8 +2382,9 @@ void OpConversionRegistry::RegisterCrossCoreOps() {
       auto call = op_reg.Create(tile_op, args, kwargs, span);
       auto tt = As<TileType>(call->GetType());
       INTERNAL_CHECK_SPAN(tt && tt->memory_space_.has_value(), span)
-          << "Internal error: " << tile_op
-          << " must deduce a TileType carrying the declared boundary memory space";
+          << "Internal error: OpRegistry::Create left " << tile_op
+          << " without a memory space; it must fill the space-less deduced TileType from the op's "
+             "set_output_memory declaration";
       return ConversionResult{call};
     };
   };
