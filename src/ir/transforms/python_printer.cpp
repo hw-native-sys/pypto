@@ -563,10 +563,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     // WindowBuffer back-reference that the concise form drops, so two same
     // shape/dtype distributed tensors viewing *different* window buffers print
     // identically. Surface the buffer name so a dump distinguishes them. This is
-    // a debug-only marker (a quoted string, not round-trip syntax): the subscript
-    // DSL has no window_buffer slot — the value re-derives from pld.tensor.window
-    // on reparse — and Python forbids keyword subscripts, so it cannot be encoded
-    // as parseable annotation syntax. Emitted only under explicit_layout_.
+    // an informational marker (a quoted string): the subscript DSL has no
+    // window_buffer slot and Python forbids keyword subscripts, so it is emitted
+    // as a trailing string element. The parser strips it (type_resolver +
+    // DistributedTensorMeta) and re-derives the real reference from
+    // pld.tensor.window, so EXPLICIT dumps still reparse to identical IR — which
+    // validate_ir relies on (it reloads every dump). Emitted only under
+    // explicit_layout_.
     if (explicit_layout_ && dt_tensor && dt_tensor->window_buffer_.has_value()) {
       oss << ", \"window_buffer=" << dt_tensor->window_buffer_.value()->name_hint_ << "\"";
     }

@@ -186,7 +186,7 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
 | `CONCISE` | 简洁规范 IR（默认）；最利于逐 Pass 对比 diff。 |
 | `EXPLICIT` | 完全解析的转储——对布局自描述（issue #2088）。 |
 
-默认（`CONCISE`）下，转储的 `pl.Tile` 注解在其 `blayout`/`slayout`/`fractal` 与所属内存空间的*隐式*视图相同时会将其省略，而规范 IR 将隐式视图存储为 `nullopt`——因此即便某个 tile 的真实布局并不平凡，它也可能完全不打印 `TileView`（例如一个 `pl.Mem.Acc` tile 实际上是 `blayout=col_major, slayout=row_major, fractal=1024`）。`EXPLICIT` 让每个转储的 tile 从 `GetEffectiveTileView` 打印其完全解析的布局，并展示 `pld.DistributedTensor` 携带、但简洁形式会丢弃的 `window_buffer` 反向引用——从而仅凭打印出的 IR 即可定位布局/别名缺陷。tile 的简洁布局仍能重新解析为完全相同的 IR（与隐式视图相同的显式视图会规范化回 `nullopt`）；window buffer 标记则是仅供调试的注解（其值在重新解析时会从 `pld.tensor.window` 重新推导）。以编程方式使用时，向 `python_print(...)` 传入 `explicit_layout=True`。
+默认（`CONCISE`）下，转储的 `pl.Tile` 注解在其 `blayout`/`slayout`/`fractal` 与所属内存空间的*隐式*视图相同时会将其省略，而规范 IR 将隐式视图存储为 `nullopt`——因此即便某个 tile 的真实布局并不平凡，它也可能完全不打印 `TileView`（例如一个 `pl.Mem.Acc` tile 实际上是 `blayout=col_major, slayout=row_major, fractal=1024`）。`EXPLICIT` 让每个转储的 tile 从 `GetEffectiveTileView` 打印其完全解析的布局，并展示 `pld.DistributedTensor` 携带、但简洁形式会丢弃的 `window_buffer` 反向引用——从而仅凭打印出的 IR 即可定位布局/别名缺陷。`EXPLICIT` 转储仍能重新解析为完全相同的 IR：tile 布局会规范化回 `nullopt`（与隐式视图相同的显式视图），而 window buffer 标记是一个信息性的尾随字符串,解析器在重新加载时会将其剥离(真实引用会从 `pld.tensor.window` 重新推导)。这样 `compiled.validate_ir()`(会重新加载每个转储)仍能正常工作。以编程方式使用时，向 `python_print(...)` 传入 `explicit_layout=True`。
 
 ```python
 from pypto.ir import PassDumpLevel

@@ -68,5 +68,34 @@ def test_distributed_tensor_with_layout():
     assert param_type.tensor_view is not None
 
 
+def test_distributed_tensor_ignores_explicit_layout_window_buffer_marker():
+    """Parser drops the ``"window_buffer=<name>"`` EXPLICIT-dump debug marker.
+
+    ``PassDumpLevel.EXPLICIT`` appends the marker as a trailing subscript element
+    to surface a distributed tensor's window-buffer back-reference (issue #2088).
+    The parser must ignore it — the real reference re-derives from
+    ``pld.tensor.window`` — so EXPLICIT pass dumps stay reparseable, which
+    ``validate_ir`` relies on (it reloads every dump via ``pl.loads``). Exercises
+    both the ``@pl.program`` source parse (type_resolver) and the eager
+    annotation eval at class definition (the distributed metaclass subscript).
+    """
+
+    @pl.program
+    class P:
+        @pl.function
+        def f(
+            self, x: pld.DistributedTensor[[256], pl.FP32, "window_buffer=wbuf"]
+        ) -> pld.DistributedTensor[[256], pl.FP32]:
+            return x
+
+    gvar = P.get_global_var("f")
+    assert gvar is not None
+    func = P.functions[gvar]
+    param_type = func.params[0].type
+    # Marker stripped: a clean DistributedTensor, no bogus str leaked as layout.
+    assert isinstance(param_type, DistributedTensorType)
+    assert param_type.tensor_view is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

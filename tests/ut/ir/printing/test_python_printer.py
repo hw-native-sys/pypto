@@ -13,11 +13,10 @@ import textwrap
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, ir
 from pypto.ir import MemorySpace
 from pypto.ir.op import tile
 from pypto.ir.printer import python_print
-
-from pypto import DataType, ir
 
 
 def test_python_print_basic_expressions():
