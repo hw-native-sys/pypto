@@ -140,9 +140,15 @@ class SplitAivStructuralVerifier : public IRVisitor {
       // tile.aiv_shard / tile.aic_gather (AUTO split_aiv path, and the outlined
       // low-level form) and the author-facing tensor.aiv_shard / tensor.aic_gather
       // (pl.aiv_shard(tensor) inside a pl.split_aiv region, still tensor.* until
-      // ConvertTensorToTileOps lowers them 1:1). Both must be region-scoped.
-      const bool boundary = IsOp(op, "tile.aiv_shard") || IsOp(op, "tile.aic_gather") ||
-                            IsOp(op, "tensor.aiv_shard") || IsOp(op, "tensor.aic_gather");
+      // ConvertTensorToTileOps lowers them 1:1).
+      //
+      // The two flags have different domains: region-scoping (c)/(c') applies to
+      // BOTH forms, while the memory contract (d) is meaningful only once the
+      // operand and result are tiles — a TensorType carries no memory space.
+      // Keeping them apart lets (d) skip the tensor.* forms without re-deriving
+      // the op identity inside CheckBoundaryMemory.
+      const bool tile_boundary = IsOp(op, "tile.aiv_shard") || IsOp(op, "tile.aic_gather");
+      const bool boundary = tile_boundary || IsOp(op, "tensor.aiv_shard") || IsOp(op, "tensor.aic_gather");
       const bool in_split_region = depth_ > 0 && cur_split_dim_ != -1;  // data-parallel (UpDown/LeftRight)
       const bool in_none_region = depth_ > 0 && cur_split_dim_ == -1;   // task-parallel (None)
       if (in_split_region) {
@@ -161,9 +167,8 @@ class SplitAivStructuralVerifier : public IRVisitor {
                              "the non-split axis, or gather the lanes back (tile.aic_gather) before "
                              "reducing.");
         }
-        // (d) The boundary memory contract. Gated on `boundary` so a non-boundary
-        // node does not pay for the contract lookup's registry queries.
-        if (boundary) CheckBoundaryMemory(op);
+        // (d) The boundary memory contract — tile forms only (see above).
+        if (tile_boundary) CheckBoundaryMemory(op);
       } else if (in_none_region) {
         // (c') A boundary op needs a split axis to mark — none exists in a
         // task-parallel (mode=NONE) region. Cube / reduce / full-width vector
