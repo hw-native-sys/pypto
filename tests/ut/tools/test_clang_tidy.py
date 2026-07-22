@@ -17,7 +17,7 @@ import pytest
 
 
 def _load_clang_tidy() -> ModuleType:
-    path = Path(__file__).parents[2] / "lint" / "clang_tidy.py"
+    path = Path(__file__).resolve().parents[2] / "lint" / "clang_tidy.py"
     spec = importlib.util.spec_from_file_location("pypto_clang_tidy", path)
     assert spec is not None
     assert spec.loader is not None
@@ -35,6 +35,7 @@ clang_tidy = _load_clang_tidy()
         "tests/lint/clang_tidy.py",
         ".clang-tidy",
         ".github/workflows/ci.yml",
+        ".github/workflows/daily_ci.yml",
         "CMakeLists.txt",
         "python/bindings/CMakeLists.txt",
         "cmake/libbacktrace.cmake",

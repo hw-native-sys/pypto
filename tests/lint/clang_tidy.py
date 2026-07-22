@@ -47,13 +47,12 @@ FULL_CHECK_PATHS = frozenset(
     {
         SELF_PATH,
         ".clang-tidy",
-        ".github/workflows/ci.yml",
         "3rdparty/libbacktrace",
         "3rdparty/msgpack-c",
         "runtime",
     }
 )
-FULL_CHECK_PREFIXES = ("cmake/",)
+FULL_CHECK_PREFIXES = (".github/workflows/", "cmake/")
 # Bound the *default* worker count: one clang-tidy process per core is wasteful on
 # a many-core dev box (each process holds a full TU in memory).  CI passes --jobs
 # explicitly and is not affected by this cap.
