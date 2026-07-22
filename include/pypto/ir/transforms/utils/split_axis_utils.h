@@ -60,12 +60,15 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim);
  * @brief Per-split-dim metadata tracked for a halved tile-producing var.
  *
  * Once a tile var has been partitioned along the split axis, downstream ops
- * (e.g. ``tile.store``, loop ``iter_args``/``return_vars``) need its halved
- * extent to re-localize their split-dim offsets. ``half_dim_size`` is that
- * extent (a ``ConstInt`` for static dims, a ``floordiv`` expression otherwise).
+ * (e.g. ``tile.store``, loop ``iter_args``/``return_vars``) need both its
+ * per-lane physical extent and the lane-1 starting offset. They are equal for
+ * an even split. For an uneven static split, ``split_dim_size`` is ceil(N/2)
+ * while ``offset_stride`` is floor(N/2), representing floor/ceil lanes in one
+ * uniform physical tile type.
  */
 struct TileInfo {
-  ExprPtr half_dim_size;
+  ExprPtr split_dim_size;
+  ExprPtr offset_stride;
   // The dimension this tile is currently split along. Usually the global split
   // dim, but a reshape can migrate the split axis to another dimension (e.g. the
   // rms_norm [N,1]<->[1,N] column reshape), so each tracked tile carries its own.
@@ -159,12 +162,16 @@ TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim
  * @param is_aiv Whether this is an AIV lane (gates per-op halving).
  * @param subblock_idx The per-subblock index expr (null for non-AIV).
  * @param var_replacements In/out map of original vars to their rebuilt versions.
+ * @param allow_uneven_static Whether a static odd split dimension may use a
+ *        ceil-sized physical lane with floor/ceil valid extents. The automatic
+ *        split lowering enables this; legacy tpush/tpop paths keep rejecting it.
  * @return The rewritten statement list.
  */
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
                                   bool is_aiv, const ExprPtr& subblock_idx,
-                                  std::unordered_map<const Var*, VarPtr>& var_replacements);
+                                  std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                  bool allow_uneven_static = false);
 
 }  // namespace split_axis
 }  // namespace ir

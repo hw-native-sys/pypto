@@ -32,9 +32,10 @@ work in one body, with the split intent expressed only by the function-level
 2. **Early, explicit lowering (this pass)** — rewrite the AUTO `pl.split`
    body into the same explicit `split_aiv` shape a hand-authored kernel uses,
    *before* `ExpandMixedKernel`. Then the single op-driven boundary arm in
-   `ExpandMixedKernel` folds `tile.aiv_shard` / `tile.aic_gather` into
-   split-stamped `tpush`/`tpop` uniformly — auto and hand-written kernels take
-   the identical downstream path.
+   `ExpandMixedKernel` folds ordinary `tile.aiv_shard` / `tile.aic_gather`
+   boundaries into split-stamped `tpush`/`tpop`. Odd AUTO V→C boundaries carry
+   an internal marker and take the GM + `sync_set`/`sync_wait` path described
+   below.
 
 Approach 2 is the live path. It is byte-identical to the old per-op halving
 (proved during the staged convergence) because both call the same
@@ -160,6 +161,28 @@ region while preserving the surrounding control flow.
 (`split_axis_utils`); it is **not** called for `None` (the region path branches on
 `None` first — there is no axis to derive).
 
+## Uneven static AUTO splits
+
+The function-level AUTO path supports a static odd split extent for a
+**Vector→Cube** boundary. For logical extent `N`, both AIV lanes use one
+`ceil(N/2)` physical tile type, while their valid extents are `floor(N/2)` and
+`ceil(N/2)` and lane 1 starts at offset `floor(N/2)`. Thus a LEFT_RIGHT extent
+of `255` becomes valid widths `127` and `128`, at offsets `0` and `127`, without
+dropping or overlapping valid elements.
+
+The generated `tile.aic_gather` is marked `odd_split_gm_sync`. Its physical
+Cube box is padded on every dimension to the backend L0 alignment while its
+`TileView.valid_shape` retains the original logical shape. `ExpandMixedKernel`
+then stores both unequal AIV shards into one hidden GM tensor and synchronizes
+the AIC load with `system.sync_set` / `system.sync_wait`; this boundary does not
+use `tpush_to_aic` / `tpop_from_aiv`.
+
+This opt-in is deliberately limited to the AUTO whole-function path. Explicit
+`pl.split_aiv` regions and the legacy transport path still require even static
+extents. An odd **Cube→Vector** boundary is also rejected unless an earlier odd
+V→C boundary has already produced an even padded physical box with an odd
+logical valid shape.
+
 ## Algorithm
 
 `LowerFunction` rewrites one mixed `InCore` function:
@@ -183,7 +206,9 @@ region while preserving the surrounding control flow.
        resolving the source to its halved var so the gather doubles
        HALF -> FULL, then keep the original cube-placement move on the
        gathered FULL tile (named "<dest>_mat" so ExpandMixedKernel's V->C
-       boundary names its synthesized tpop after it).
+       boundary names its synthesized tpop after it). For an odd static AUTO
+       extent, use a padded physical Cube type, preserve the logical valid
+       shape, and mark the gather `odd_split_gm_sync` for GM rendezvous lowering.
 
    Affinity gate (ClassifyCallAffinity):
      VECTOR-affine leaf — route the single statement through
@@ -291,8 +316,11 @@ arm (`ProcessStandaloneSplitFunction`) and the `AivSplitValid` verifier
 passes.def("lower_auto_vector_split", &pass::LowerAutoVectorSplit, ...);
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_lower_auto_vector_split.py` and the
-end-to-end `pl.split` golden scenarios in
+**Tests**: `tests/ut/ir/transforms/test_lower_auto_vector_split.py`, the odd
+GM-boundary coverage in `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`,
+the on-board `pl.jit` case in
+`tests/st/runtime/cross_core/test_auto_split_odd.py`, and the end-to-end
+`pl.split` golden scenarios in
 `tests/st/codegen/torch/test_torch_codegen_cross_core.py`
 (`test_lower_auto_vector_split_golden`).
 
@@ -301,7 +329,8 @@ end-to-end `pl.split` golden scenarios in
 - [`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) — runs
   immediately before.
 - [`ExpandMixedKernel`](19-expand_mixed_kernel.md) — runs immediately after;
-  folds `tile.aiv_shard` / `tile.aic_gather` into split-stamped `tpush`/`tpop`.
+  folds ordinary `tile.aiv_shard` / `tile.aic_gather` into split-stamped
+  `tpush`/`tpop`, and odd AUTO V→C gathers into GM + manual event synchronization.
 - [`SplitVectorKernel`](21-split_vector_kernel.md) — downstream; only stamps
   attrs for the `split_aiv` functions this pass produces, plus the no-split
   dual-AIV path.

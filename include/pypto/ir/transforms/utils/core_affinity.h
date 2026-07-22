@@ -54,6 +54,10 @@ struct CVBoundaryMove {
   // 2 = LEFT_RIGHT/axis1). Stamped onto the generated tpush/tpop. 0 for
   // tile.move boundaries (split assigned later by SplitVectorKernel).
   int split = 0;
+  // Compiler-generated odd auto-split V->C boundaries move data through a
+  // shared GM tensor and synchronize with compiler-selected cross-core events instead
+  // of using the equal-half tpush/tpop transport.
+  bool odd_gm_sync = false;
 };
 
 }  // namespace core_affinity
