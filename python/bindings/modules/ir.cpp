@@ -1707,29 +1707,34 @@ void BindIR(nb::module_& m) {
   // Python-style printer function - unified API for IRNode
   ir.def(
       "python_print",
-      [](const IRNodePtr& node, const std::string& prefix, bool concise, bool format) {
-        return MaybeFormat(PythonPrint(node, prefix, concise), format);
+      [](const IRNodePtr& node, const std::string& prefix, bool concise, bool format, bool explicit_layout) {
+        return MaybeFormat(PythonPrint(node, prefix, concise, explicit_layout), format);
       },
       nb::arg("node"), nb::arg("prefix") = "pl", nb::arg("concise") = false, nb::arg("format") = true,
+      nb::arg("explicit_layout") = false,
       "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
       "Args:\n"
       "    node: IR node to print\n"
       "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
       "    concise: If true, omit intermediate type annotations (default false)\n"
-      "    format: If true, apply registered format callback (default true)");
+      "    format: If true, apply registered format callback (default true)\n"
+      "    explicit_layout: If true, print every tile's fully-resolved\n"
+      "        blayout/slayout/fractal (including tiles whose canonical view is\n"
+      "        absent) so the output is self-describing for layouts (default false)");
 
   // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
   ir.def(
       "python_print_type",
-      [](const TypePtr& type, const std::string& prefix, bool format) {
-        return MaybeFormat(PythonPrint(type, prefix), format);
+      [](const TypePtr& type, const std::string& prefix, bool format, bool explicit_layout) {
+        return MaybeFormat(PythonPrint(type, prefix, explicit_layout), format);
       },
-      nb::arg("type"), nb::arg("prefix") = "pl", nb::arg("format") = true,
+      nb::arg("type"), nb::arg("prefix") = "pl", nb::arg("format") = true, nb::arg("explicit_layout") = false,
       "Print Type object in Python IR syntax.\n\n"
       "Args:\n"
       "    type: Type to print\n"
       "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
-      "    format: If true, apply registered format callback (default true)");
+      "    format: If true, apply registered format callback (default true)\n"
+      "    explicit_layout: If true, print fully-resolved tile layouts (default false)");
 
   // Register a Python callable to format printed IR output (e.g., ruff).
   // Pass None to unregister. The callback receives a code string and returns formatted code.

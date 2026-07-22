@@ -69,18 +69,25 @@ bool IsRightAssociative(const ExprPtr& expr);
  * @param node IR node to print (Expr, Stmt, Function, or Program)
  * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
  * @param concise If true, omit intermediate type annotations (default: false)
+ * @param explicit_layout If true, print every tile's fully-resolved
+ *        blayout/slayout/fractal from GetEffectiveTileView — including tiles
+ *        whose canonical tile_view_ is nullopt — so the output is self-describing
+ *        for tile layouts. Default false keeps the concise canonical form.
  * @return Python-style string representation
  */
-std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl", bool concise = false);
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl", bool concise = false,
+                        bool explicit_layout = false);
 
 /**
  * @brief Print a type in Python syntax
  *
  * @param type Type to print (ScalarType, TensorType, TupleType, etc.)
  * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
+ * @param explicit_layout If true, print fully-resolved tile layouts (see the
+ *        IRNode overload). Default false keeps the concise canonical form.
  * @return Python-style string representation
  */
-std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl");
+std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl", bool explicit_layout = false);
 
 /// Callback type for external code formatters (e.g., ruff registered from Python).
 using FormatCallback = std::function<std::string(const std::string&)>;

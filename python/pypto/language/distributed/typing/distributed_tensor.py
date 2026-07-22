@@ -28,7 +28,7 @@ Use::
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from pypto.language.typing.tensor import Tensor, TensorMeta
 
@@ -36,9 +36,24 @@ from pypto.language.typing.tensor import Tensor, TensorMeta
 class DistributedTensorMeta(TensorMeta):
     """Metaclass enabling ``pld.DistributedTensor[...]`` syntax.
 
-    Inherits :class:`TensorMeta`'s subscript dispatch unchanged — a
-    ``DistributedTensor`` is a plain Tensor with a different IR ObjectKind.
+    Inherits :class:`TensorMeta`'s subscript dispatch, except it drops a trailing
+    ``"window_buffer=<name>"`` debug marker before delegating. ``PassDumpLevel.
+    EXPLICIT`` dumps append that marker as an extra subscript element to surface a
+    distributed tensor's window-buffer back-reference (issue #2088); it is
+    informational only — the real reference re-derives from ``pld.tensor.window``
+    — so ignoring it on parse keeps EXPLICIT pass dumps reparseable, which
+    ``validate_ir`` relies on (it reloads every dump via ``pl.loads``).
     """
+
+    def __getitem__(cls, item: Any) -> "DistributedTensor":
+        if (
+            isinstance(item, tuple)
+            and item
+            and isinstance(item[-1], str)
+            and item[-1].startswith("window_buffer=")
+        ):
+            item = item[:-1]
+        return cast("DistributedTensor", super().__getitem__(item))
 
 
 class DistributedTensor(Tensor, metaclass=DistributedTensorMeta):

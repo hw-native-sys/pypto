@@ -401,6 +401,22 @@ class TypeResolver:
         is_distributed = type_name == "DistributedTensor"
         is_tensor_like = type_name == "Tensor" or is_distributed
         tensor_ctor = ir.DistributedTensorType if is_distributed else ir.TensorType
+
+        # PassDumpLevel.EXPLICIT appends a `"window_buffer=<name>"` debug marker as
+        # a trailing subscript element on DistributedTensor annotations (issue
+        # #2088). It is informational only — the real back-reference re-derives
+        # from pld.tensor.window — so drop it before validation/resolution to keep
+        # EXPLICIT pass dumps reparseable (validate_ir reloads every dump via
+        # pl.loads).
+        if is_distributed and isinstance(slice_value, ast.Tuple) and slice_value.elts:
+            last = slice_value.elts[-1]
+            if (
+                isinstance(last, ast.Constant)
+                and isinstance(last.value, str)
+                and last.value.startswith("window_buffer=")
+            ):
+                slice_value.elts = slice_value.elts[:-1]
+
         valid_counts = (2, 3, 4) if is_tensor_like else (2, 3, 4, 5)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if is_tensor_like:

@@ -432,6 +432,60 @@ class TestPassManagerDumpIR:
         # Outer instrument's before callback should have fired for each pass
         assert len(log) == len(pm.pass_names)
 
+    @staticmethod
+    def _acc_tile_program():
+        """A program whose signature carries an Acc tile (implicit boxed view).
+
+        ``Mem.Acc``'s implicit view is ``blayout=col_major, slayout=row_major,
+        fractal=1024`` yet the canonical ``tile_view_`` is ``nullopt``, so the
+        concise dump prints no ``TileView`` at all — the exact omission issue
+        #2088 addresses. The frontend dump (written before any pass) is a stable
+        place to observe whether the resolved layout is printed.
+        """
+        span = ir.Span.unknown()
+        dims = [ir.ConstInt(128, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
+        acc = ir.TileType(dims, DataType.FP32, None, None, ir.MemorySpace.Acc)
+        t = ir.Var("t", acc, span)
+        z = ir.Var("z", acc, span)
+        body = ir.SeqStmts([ir.AssignStmt(z, t, span), ir.ReturnStmt([z], span)], span)
+        func = ir.Function("main", [t], [acc], body, span)
+        return ir.Program([func], "acc_dump_test", span)
+
+    @pytest.mark.parametrize("dump_arg", [True, ir.PassDumpLevel.CONCISE])
+    def test_dump_ir_concise_omits_implicit_tile_layout(self, tmp_path, dump_arg):
+        """CONCISE (and bool ``True``) keep the concise form (no TileView on Acc)."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        output_dir = str(tmp_path / "dump_output")
+
+        # VerificationLevel.NONE: the intentionally-minimal Acc-tile passthrough is
+        # not a valid post-pass pipeline state, so the autouse RoundtripInstrument
+        # would reject it — irrelevant to what the frontend dump (written before any
+        # pass) records here.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            pm.run_passes(self._acc_tile_program(), dump_ir=dump_arg, output_dir=output_dir)
+
+        frontend = (tmp_path / "dump_output" / "00_frontend.py").read_text()
+        assert "pl.Mem.Acc" in frontend
+        assert "TileView" not in frontend
+
+    def test_dump_ir_explicit_level_resolves_tile_layout(self, tmp_path):
+        """PassDumpLevel.EXPLICIT makes dumps state the resolved tile layout."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        output_dir = str(tmp_path / "dump_output")
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            pm.run_passes(
+                self._acc_tile_program(),
+                dump_ir=ir.PassDumpLevel.EXPLICIT,
+                output_dir=output_dir,
+            )
+
+        frontend = (tmp_path / "dump_output" / "00_frontend.py").read_text()
+        assert (
+            "pl.Mem.Acc, pl.TileView(blayout=pl.TileLayout.col_major, "
+            "slayout=pl.TileLayout.row_major, fractal=1024)" in frontend
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

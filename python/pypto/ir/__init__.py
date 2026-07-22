@@ -54,7 +54,7 @@ from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 
 # Import PassManager and OptimizationStrategy
-from .pass_manager import OptimizationStrategy, PassManager
+from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 
 # Import python_print utility
 from .printer import python_print
@@ -105,6 +105,7 @@ __all__ = [
     "CompiledProgram",
     "PassManager",
     "OptimizationStrategy",
+    "PassDumpLevel",
     "VerificationMode",
     "VerificationLevel",
     "PassContext",
