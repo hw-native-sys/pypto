@@ -66,18 +66,17 @@ python .claude/skills/incore-profiling/incore_profile.py \
 
 ## Standalone real-device comparison
 
-Compare exact compact and loose PTOAS sources. Capture a real invocation with
-`RunConfig(enable_dump_args=2)`, find its `func_id` in `kernel_config.py`, and
-select repeated dispatches with `--task-id` or `--task-occurrence`. Import rejects
-mixed AIC/AIV, incomplete, non-contiguous, ambiguous, or truncated captures.
+Compare exact compact and loose PTOAS sources. For large models, prefer
+deterministic standalone ABI inputs: full `enable_dump_args=2` capture can
+overrun the DFX collector before it finalizes. Captured model inputs remain an
+optional validation path for small workloads.
 
 Generate and build both cases separately:
 
 ```bash
 python .claude/skills/incore-profiling/gen_profiling_case.py \
   --run-mode npu --input <compact>/kernel.cpp \
-  --args-dump <model-build>/dfx_outputs/args_dump/args_dump.json \
-  --func-id <kernel-func-id> --task-occurrence 0 \
+  --synthetic-inputs --scalar <name>=<exact-value> \
   --block-dim <exact-block-dim> \
   --testcase compact_<kernel> --output-root <compact-out>
 
@@ -96,8 +95,16 @@ python .claude/skills/incore-profiling/standalone_compare.py \
   --quartets 8 --warmup 10 --rounds 100 --output-root <results>
 ```
 
-Manual fallback: pass `--input-dir` with one `<ABI-name>.bin` per pointer and
-every scalar as `--scalar NAME=VALUE`; never rely on the default `1` in results.
+Synthetic inputs are bounded, deterministic, finite, and emitted in chunks, so
+full-size model kernels do not require a multi-gigabyte in-memory tensor. Integer
+pointer inputs are zeroed to avoid invalid dynamic indices. Every scalar ABI
+argument is mandatory in NPU mode. For kernels with data-dependent pointer
+controls, pass `--input-dir` with one exact `<ABI-name>.bin` per pointer instead.
+
+For a small workload where exact model values matter, use
+`--args-dump <args_dump.json> --func-id <id> --task-id <id>` instead of
+`--synthetic-inputs`. Import rejects mixed AIC/AIV, incomplete, non-contiguous,
+ambiguous, or truncated captures.
 
 The driver verifies ABI, launch metadata, inputs, and captured outputs. It
 restores inputs per launch, times with `aclrtEventElapsedTime`, runs serial ABBA

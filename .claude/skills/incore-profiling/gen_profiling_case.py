@@ -21,8 +21,10 @@ compiled C++ kernel's runtime pointer arithmetic. The kernel ABI (name, arg type
 order) comes from the one ``__global__``/``_aic`` declaration line in the ``.cpp``.
 
 Simulator mode sizes buffers from the sibling ``.pto`` and uses synthetic data.
-NPU mode can instead reconstruct one exact pure-kernel invocation from PyPTO's
-level-2 argument dump, including scalars and captured expected outputs.
+NPU mode accepts deterministic synthetic ABI inputs, caller-supplied input
+files, or one exact pure-kernel invocation reconstructed from PyPTO's level-2
+argument dump. Synthetic inputs avoid full-model DFX capture for large kernels;
+exact scalar ABI values remain mandatory.
 
 It emits, at ``<output-root>/ptoas/<testcase>/``:
   - ``<testcase>_kernel.cpp`` : the input .cpp + a compat preamble (+ a merged
@@ -46,6 +48,8 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 # ── Type maps: .pto pointee / C++ type -> (host C type, numpy dtype) ──────────
 # host type sizes the .bin and the host-side buffers; bf16/half are carried as
@@ -84,6 +88,18 @@ _CPP_BYTE_SIZES = {
     "int64_t": 8,
     "uint64_t": 8,
 }
+_SYNTHETIC_INTEGER_DTYPES = {
+    "int8_t": np.int8,
+    "uint8_t": np.uint8,
+    "int16_t": np.int16,
+    "uint16_t": np.uint16,
+    "int32_t": np.int32,
+    "uint32_t": np.uint32,
+    "int64_t": np.int64,
+    "uint64_t": np.uint64,
+}
+_SYNTHETIC_SEED = 19
+_SYNTHETIC_CHUNK_ELEMENTS = 1 << 20
 
 
 def host_type(cpp_type: str) -> str:
@@ -774,6 +790,45 @@ def emit_golden(params: list[Param], counts: dict[str, int]) -> str:
     return _GOLDEN_TEMPLATE.replace("@INPUT_GENERATE@", "\n".join(lines))
 
 
+def _synthetic_chunk(cpp_type: str, count: int, rng: np.random.Generator) -> np.ndarray:
+    """Create bounded deterministic data represented in the kernel ABI type."""
+    if cpp_type in {"bfloat16_t", "__bf16"}:
+        fp32 = rng.uniform(-0.125, 0.125, size=count).astype(np.float32)
+        return (fp32.view(np.uint32) >> 16).astype(np.uint16)
+    if cpp_type in {"half", "aclFloat16"}:
+        return rng.uniform(-0.125, 0.125, size=count).astype(np.float16)
+    if cpp_type == "float":
+        return rng.uniform(-0.125, 0.125, size=count).astype(np.float32)
+    dtype = _SYNTHETIC_INTEGER_DTYPES.get(cpp_type)
+    if dtype is not None:
+        # Zero is the safest generic value for index/control tensors: it avoids
+        # manufacturing out-of-range dynamic addresses while still exercising
+        # the exact kernel control flow selected by explicit scalar arguments.
+        return np.zeros(count, dtype=dtype)
+    raise ValueError(f"unsupported synthetic-input ABI type {cpp_type!r}")
+
+
+def _write_synthetic_inputs(
+    output_dir: Path,
+    params: list[Param],
+    counts: dict[str, int],
+    *,
+    seed: int,
+) -> None:
+    """Write deterministic finite ABI inputs without retaining large tensors in RAM."""
+    rng = np.random.default_rng(seed)
+    for param in params:
+        if not param.is_ptr:
+            continue
+        remaining = counts[param.name]
+        path = output_dir / f"{param.name}.bin"
+        with path.open("wb") as stream:
+            while remaining:
+                count = min(remaining, _SYNTHETIC_CHUNK_ELEMENTS)
+                stream.write(_synthetic_chunk(param.cpp_type, count, rng).tobytes())
+                remaining -= count
+
+
 def _copy_real_inputs(
     input_dir: Path,
     output_dir: Path,
@@ -811,6 +866,28 @@ def _parse_scalar_assignments(assignments: list[str]) -> dict[str, str]:
             raise ValueError(f"scalar parameter {name!r} was specified more than once")
         values[name] = value
     return values
+
+
+def _validate_input_source(
+    *,
+    run_mode: str,
+    input_dir: Path | None,
+    dump_selection: DumpSelection | None,
+    synthetic_seed: int | None,
+) -> None:
+    """Validate the mutually-exclusive standalone input modes."""
+    synthetic_inputs = synthetic_seed is not None
+    input_sources = sum((input_dir is not None, dump_selection is not None, synthetic_inputs))
+    if input_sources > 1:
+        raise ValueError("input_dir, args_dump, and synthetic_inputs are mutually exclusive")
+    if synthetic_inputs and run_mode != "npu":
+        raise ValueError("synthetic_inputs is only supported for real-NPU standalone cases")
+    if synthetic_seed is not None and synthetic_seed < 0:
+        raise ValueError(f"synthetic_seed must be nonnegative, got {synthetic_seed}")
+    if run_mode == "npu" and input_sources == 0:
+        raise ValueError(
+            "real-NPU standalone cases require one input source: input_dir, args_dump, or synthetic_inputs"
+        )
 
 
 def _select_dump_task(
@@ -996,6 +1073,7 @@ def generate(
     input_dir: Path | None = None,
     scalar_values: dict[str, str] | None = None,
     dump_selection: DumpSelection | None = None,
+    synthetic_seed: int | None = None,
 ) -> Path:
     if run_mode not in {"sim", "npu"}:
         raise ValueError(f"run_mode must be 'sim' or 'npu', got {run_mode!r}")
@@ -1023,8 +1101,12 @@ def generate(
 
     out_dir = output_root / "ptoas" / testcase
     out_dir.mkdir(parents=True, exist_ok=True)
-    if input_dir is not None and dump_selection is not None:
-        raise ValueError("input_dir and args_dump are mutually exclusive")
+    _validate_input_source(
+        run_mode=run_mode,
+        input_dir=input_dir,
+        dump_selection=dump_selection,
+        synthetic_seed=synthetic_seed,
+    )
     capture: dict | None = None
     captured_scalars: dict[str, str] = {}
     if dump_selection is not None:
@@ -1051,6 +1133,14 @@ def generate(
     unknown_scalars = sorted(set(scalar_values) - scalar_names)
     if unknown_scalars:
         raise ValueError(f"scalar values name parameters absent from the kernel ABI: {unknown_scalars}")
+    missing_scalars = sorted(scalar_names - set(scalar_values))
+    if run_mode == "npu" and missing_scalars:
+        raise ValueError(
+            "real-NPU standalone cases require every scalar ABI argument explicitly; "
+            f"missing: {missing_scalars}"
+        )
+    if synthetic_seed is not None:
+        _write_synthetic_inputs(out_dir, params, counts, seed=synthetic_seed)
     (out_dir / f"{testcase}_kernel.cpp").write_text(
         emit_kernel_cpp(cpp_text, name, is_mixed, params), encoding="utf-8"
     )
@@ -1079,6 +1169,11 @@ def generate(
         "aicore_arch": aicore_arch,
         "block_dim": block_dim,
         "mixed": is_mixed,
+        **(
+            {"input_source": {"kind": "synthetic", "seed": synthetic_seed}}
+            if synthetic_seed is not None
+            else {}
+        ),
         **({"capture": capture} if capture is not None else {}),
         "parameters": [
             {
@@ -1120,13 +1215,28 @@ def main(argv: list[str] | None = None) -> int:
         help="directory containing one real <ABI-name>.bin file per pointer argument",
     )
     ap.add_argument(
+        "--synthetic-inputs",
+        action="store_true",
+        help="write deterministic bounded ABI inputs directly (NPU mode; no model args dump)",
+    )
+    ap.add_argument(
+        "--synthetic-seed",
+        type=int,
+        default=_SYNTHETIC_SEED,
+        help=f"seed used by --synthetic-inputs (default: {_SYNTHETIC_SEED})",
+    )
+    ap.add_argument(
         "--scalar",
         action="append",
         default=[],
         metavar="NAME=VALUE",
         help="exact scalar-tail argument; repeat for multiple scalars",
     )
-    ap.add_argument("--args-dump", type=Path, help="args_dump.json from an enable_dump_args=2 model run")
+    ap.add_argument(
+        "--args-dump",
+        type=Path,
+        help="args_dump.json from an enable_dump_args=2 run (small workloads only)",
+    )
     ap.add_argument("--func-id", type=int, help="kernel func_id to extract from --args-dump")
     ap.add_argument("--task-id", help="exact task dispatch ID to extract from --args-dump")
     ap.add_argument(
@@ -1158,6 +1268,7 @@ def main(argv: list[str] | None = None) -> int:
         input_dir=args.input_dir,
         scalar_values=scalar_values,
         dump_selection=dump_selection,
+        synthetic_seed=args.synthetic_seed if args.synthetic_inputs else None,
     )
     print(f"[gen_profiling_case] wrote testcase -> {out_dir}")
     return 0
