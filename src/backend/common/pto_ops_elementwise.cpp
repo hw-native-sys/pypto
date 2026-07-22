@@ -33,9 +33,9 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -678,7 +678,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.gemv_acc has custom codegen (in-place accumulation)
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
-    // tile.move has custom codegen (no-op elision for same-space same-address moves)
+    // tile.move has custom codegen (PTOAS same-handle elision and baked-address validation)
     {"tile.move_fp",         "pto.tmov.fp",          2},
     // tile.transpose has custom codegen (MakeTileTransposeCodegenPTO): pto.ttrans needs
     // ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch workspace tile, NOT
@@ -769,26 +769,23 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     });
   }
 
-  // tile.move → pto.tmov with no-op elision.
-  // When MemoryReuse inserts a tile.move between two MemRefs that end up at the
-  // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
-  // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
-  // unsupported same-space address pairs (fixes #1310).
+  // tile.move → pto.tmov.
   //
-  // Do NOT elide when TileView layouts, padding, or compact representations
-  // differ (e.g. A5 V→C ND→NZ adapt before tpush_to_aic). MemoryReuse may still
-  // co-locate the converted tile with its source at the same address; eliding
-  // then drops the real representation change and silently preserves the source
-  // format.
+  // tile.move is registered not_inplace_safe(), so the PyPTO and DSA-RP
+  // planners must assign distinct source and destination addresses. Validate
+  // that invariant here as well: explicit MemRef bindings and hand-built IR can
+  // bypass planner-created no-alias constraints, and TMOV does not support an
+  // in-place same-address instruction.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
 
-    // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
-    // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
-    // comparison below would see `-1 == -1` and elide EVERY move — including the
-    // loop-carry write-back YieldFixupMutator inserts. There, two vars denote one
-    // buffer exactly when they collapsed onto the same tile_buf handle.
+    // Under memory_planner=PtoAS there is no baked address (AllocateMemoryAddr
+    // and the reuse-packer's not_inplace_safe gate are both skipped). A
+    // redundant loop-carry write-back that YieldFixupMutator inserts collapses
+    // onto a single tile_buf handle, and PTO codegen re-points the producer at
+    // the phi handle (#1956/#1985). Elide only that exact case — src and dst
+    // denote one handle — so we never emit an illegal same-handle pto.tmov.
     if (!codegen.EmitTileAddr()) {
       std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
       if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
@@ -798,32 +795,25 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       return std::string("");
     }
 
-    auto src_var = AsVarLike(op->args_[0]);
-    auto dst_var = codegen.GetCurrentResultVar();
+    const auto src_var = AsVarLike(op->args_[0]);
+    const auto dst_var = codegen.GetCurrentResultVar();
     if (src_var && dst_var) {
-      auto src_tile = As<ir::TileType>(src_var->GetType());
-      auto dst_tile = As<ir::TileType>(dst_var->GetType());
+      const auto src_tile = As<ir::TileType>(src_var->GetType());
+      const auto dst_tile = As<ir::TileType>(dst_var->GetType());
       if (src_tile && dst_tile && src_tile->memref_.has_value() && dst_tile->memref_.has_value()) {
-        auto src_space = src_tile->GetMemorySpace();
-        auto dst_space = dst_tile->GetMemorySpace();
+        const auto src_space = src_tile->GetMemorySpace();
+        const auto dst_space = dst_tile->GetMemorySpace();
         if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
-          auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
-          auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
-            const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile);
-            const auto dst_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
-            const bool same_representation =
-                src_view.blayout == dst_view.blayout && src_view.slayout == dst_view.slayout &&
-                src_view.fractal == dst_view.fractal && src_view.pad == dst_view.pad &&
-                src_view.compact == dst_view.compact;
-            if (same_representation) {
-              // Alias the destination to the source SSA value so downstream
-              // references use the source's defined buffer, not the destination's
-              // alloc_tile (which would be unwritten after eliding the tmov).
-              codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
-              return std::string("");  // no-op: same space, same address, same layout
-            }
-            // Different layout at the same address: keep pto.tmov (ND↔NZ adapt).
+          const ir::MemRefPtr& src_memref = *src_tile->memref_;
+          const ir::MemRefPtr& dst_memref = *dst_tile->memref_;
+          if (src_memref && dst_memref && src_memref->byte_offset_ && dst_memref->byte_offset_ &&
+              ir::AreExprsEqual(src_memref->byte_offset_, dst_memref->byte_offset_)) {
+            const auto const_offset = As<ir::ConstInt>(src_memref->byte_offset_);
+            const std::string address = const_offset ? "byte offset " + std::to_string(const_offset->value_)
+                                                     : "the same symbolic byte offset";
+            CHECK_SPAN(false, op->span_)
+                << "tile.move requires distinct source and destination addresses in "
+                << ir::MemorySpaceToString(*src_space) << ", but both resolve to " << address;
           }
         }
       }

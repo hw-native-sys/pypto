@@ -1361,12 +1361,10 @@ class TestInplaceOps:
     def test_move_output_must_not_alias_input(self):
         """tile.move's output must get a buffer distinct from its input.
 
-        The TMOV intrinsic cannot execute with src == dst (a same-address move
-        is not a legal instruction, only a no-op). If MemoryReuse colocated a
-        same-space layout-changing move (e.g. the A5 V->C ND->NZ fractal adapt)
-        with its source, codegen would see matching addresses and wrongly elide
-        the move as a no-op, dropping the layout adapt. tile.move is registered
-        ``.not_inplace_safe()`` to forbid that colocation.
+        The TMOV intrinsic cannot execute with src == dst. ``tile.move`` is
+        registered ``.not_inplace_safe()`` so MemoryReuse cannot colocate its
+        output with the input; baked-address codegen rejects any explicit alias
+        that bypasses memory planning.
         """
 
         @pl.program

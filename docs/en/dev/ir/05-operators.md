@@ -457,6 +457,11 @@ destination's implicit view collapses to `nullopt` — the same per-space view
 [`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
 retyped tile to.
 
+`tile.move` is not in-place safe: within one memory space, its source and result
+must resolve to distinct addresses. The PyPTO and DSA-RP planners enforce this
+constraint, and baked-address PTO codegen reports an error if an explicit
+MemRef binding or hand-built IR still presents a same-address move.
+
 ### Reshape and the valid region
 
 A reshape is a zero-copy view, so it cannot invent data: `tensor.reshape` and

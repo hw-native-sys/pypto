@@ -168,6 +168,25 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
     assert not _overlap(ranges["source"], ranges["result"])
 
 
+def test_dsa_rp_preserves_tile_move_semantic_separation():
+    """tile.move source and destination remain physically disjoint."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            source = pl.load(input_a, [0, 0], [32, 32])
+            moved = pl.tile.move(source, target_memory=pl.Mem.Vec)
+            return pl.store(moved, [0, 0], output)
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert not _overlap(ranges["source"], ranges["moved"])
+
+
 def test_dsa_rp_preserves_tuple_result_not_inplace_safe_separation():
     """Every physical result of a tuple op inherits its semantic no-alias inputs."""
 
@@ -267,6 +286,76 @@ def test_dsa_rp_acc_to_acc_tile_move_uses_vector_resource(ascend_backend):
     assert frozenset(("_moved", "next_value")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["_moved"], ranges["next_value"])
+
+
+def test_dsa_rp_same_address_tile_move_remains_execution_access(ascend_backend):
+    """A same-address tile.move is functional, never NoAccess."""
+    span = ir.Span.unknown()
+    shared_base = ir.Var("shared", ir.PtrType(), span)
+    next_base = ir.Var("next", ir.PtrType(), span)
+    input_a_base = ir.Var("input_a_base", ir.PtrType(), span)
+    input_b_base = ir.Var("input_b_base", ir.PtrType(), span)
+
+    input_a = ir.Var(
+        "input_a",
+        ir.TensorType([32, 32], DataType.FP32, ir.MemRef(input_a_base, 0, 4096, span)),
+        span,
+    )
+    input_b = ir.Var(
+        "input_b",
+        ir.TensorType([32, 32], DataType.FP32, ir.MemRef(input_b_base, 0, 4096, span)),
+        span,
+    )
+    source_type = ir.TileType(
+        [32, 32],
+        DataType.FP32,
+        ir.MemRef(shared_base, 0, 4096, span),
+        None,
+        ir.MemorySpace.Vec,
+    )
+    moved_type = ir.TileType(
+        [32, 32],
+        DataType.FP32,
+        ir.MemRef(shared_base, 0, 4096, span),
+        None,
+        ir.MemorySpace.Vec,
+    )
+    next_type = ir.TileType(
+        [32, 32],
+        DataType.FP32,
+        ir.MemRef(next_base, 0, 4096, span),
+        None,
+        ir.MemorySpace.Vec,
+    )
+    source = ir.Var("source", source_type, span)
+    moved = ir.Var("moved", moved_type, span)
+    next_value = ir.Var("next_value", next_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(source, ir.Call(ir.Op("tile.load"), [input_a], source_type, span), span),
+            ir.AssignStmt(
+                moved,
+                ir.Call(
+                    ir.Op("tile.move"),
+                    [source],
+                    {"target_memory": ir.MemorySpace.Vec},
+                    moved_type,
+                    span,
+                ),
+                span,
+            ),
+            ir.AssignStmt(next_value, ir.Call(ir.Op("tile.load"), [input_b], next_type, span), span),
+            ir.ReturnStmt(span),
+        ],
+        span,
+    )
+    function = ir.Function("main", [input_a, input_b], [], body, span, type=ir.FunctionType.InCore)
+
+    edges = {
+        (edge["first_name"], edge["second_name"], edge["cost"])
+        for edge in testing.recognize_dsa_reuse_penalties(function)
+    }
+    assert edges == {("source", "next_value", 1)}
 
 
 def test_dsa_rp_same_base_different_offset_tile_move_is_not_elided():

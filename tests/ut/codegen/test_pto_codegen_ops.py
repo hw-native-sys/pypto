@@ -22,7 +22,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from _pto_loc_common import strip_loc
-from pypto import DataType, backend, codegen, ir
+from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -2886,15 +2886,14 @@ class TestTileExtractCodegen:
         )
 
 
-class TestTileMoveAccNoopElision:
-    """Regression test for #1310: pto.tmov acc→acc must be elided.
+class TestTileMoveAccAddressInvariant:
+    """Regressions for #1310/#1352: lowering must not leave Acc→Acc moves.
 
     When AutoTileMatmulL0 rewrites matmul_acc into an inner K-loop, the fresh
     IterArg Vars carry different MemRef bases than the outer loop's accumulator.
-    MemoryReuse's YieldFixupMutator inserts tile.move(target_memory=Acc) for
-    these, but after AllocateMemoryAddr both sides share the same physical Acc
-    address. Codegen must elide the no-op pto.tmov to avoid the unsupported
-    acc→acc address-space pair on Ascend 910B.
+    The semantic-alias and MemoryReuse pipeline must keep the accumulator chain
+    on one buffer without leaving a redundant tile.move. Baked-address codegen
+    rejects any same-address move instead of masking an upstream mismatch.
     """
 
     def _generate_mlir(self, program_cls) -> str:
@@ -2941,9 +2940,8 @@ class TestTileMoveAccNoopElision:
 
         K=512 exceeds L0 capacity (256 for BF16), so AutoTileMatmulL0 rewrites
         each matmul into an inner K-loop with fresh IterArg Vars. MemoryReuse's
-        YieldFixupMutator may insert tile.move acc→acc when the inner loop's
-        yield MemRef has a different base_ pointer than the outer iter-arg init.
-        The codegen must elide this no-op move.
+        semantic-alias handling must align the inner yield with the outer
+        iter-arg so no redundant same-address tile.move reaches codegen.
         """
 
         @pl.program
@@ -3073,29 +3071,36 @@ class TestTileMoveAccNoopElision:
         )
 
 
-class TestTileMoveLayoutNoopElision:
-    """Same-addr tile.move must keep pto.tmov when layouts differ.
-
-    Complements #1310 (acc→acc same-layout elision): A5 V→C may co-locate an ND
-    cast result and an NZ ``*_nz`` adapt at one Vec address. Eliding that tmov
-    drops the fractal adapt and leaves TPUSH RowMajor vs AIC ColMajor.
-    Build IR with a shared MemRef so codegen sees same space+addr without relying
-    on MemoryReuse (which now gates layout coalescing).
-    """
+class TestTileMoveAddressValidation:
+    """Baked-address tile.move rejects in-place source/destination addresses."""
 
     @staticmethod
-    def _vec_tile_move_program(*, dst_view: ir.TileView | None, name: str) -> ir.Program:
+    def _vec_tile_move_program(
+        *,
+        dst_view: ir.TileView | None,
+        name: str,
+        dst_byte_offset: int = 0,
+        dst_space: ir.MemorySpace = ir.MemorySpace.Vec,
+        shared_base: bool = False,
+    ) -> ir.Program:
         span = ir.Span.unknown()
         size = 64
         nbytes = size * size * 2  # BF16
-        byte_offset_zero = ir.ConstInt(0, DataType.INT64, span)
-        shared = ir.MemRef(ir.MemorySpace.Vec, byte_offset_zero, nbytes, 0)
+        src_base = ir.Var(f"{name}_src_base", ir.PtrType(), span)
+        dst_base = src_base if shared_base else ir.Var(f"{name}_dst_base", ir.PtrType(), span)
+        src_memref = ir.MemRef(src_base, ir.ConstInt(0, DataType.INT64, span), nbytes, span)
+        dst_memref = ir.MemRef(
+            dst_base,
+            ir.ConstInt(dst_byte_offset, DataType.INT64, span),
+            nbytes,
+            span,
+        )
 
         inp = ir.Var("inp", ir.TensorType([size, size], DataType.BF16), span)
         out = ir.Var("out", ir.TensorType([size, size], DataType.BF16), span)
 
-        src_ty = ir.TileType([size, size], DataType.BF16, shared, None, ir.MemorySpace.Vec)
-        dst_ty = ir.TileType([size, size], DataType.BF16, shared, dst_view, ir.MemorySpace.Vec)
+        src_ty = ir.TileType([size, size], DataType.BF16, src_memref, None, ir.MemorySpace.Vec)
+        dst_ty = ir.TileType([size, size], DataType.BF16, dst_memref, dst_view, dst_space)
         src = ir.Var("src_nd", src_ty, span)
         dst = ir.Var("dst_layout", dst_ty, span)
         result = ir.Var("result", ir.TensorType([size, size], DataType.BF16), span)
@@ -3109,7 +3114,7 @@ class TestTileMoveLayoutNoopElision:
         move = ir.Call(
             ir.Op("tile.move"),
             [src],
-            {"target_memory": ir.MemorySpace.Vec},
+            {"target_memory": dst_space},
             dst_ty,
             span,
         )
@@ -3145,41 +3150,90 @@ class TestTileMoveLayoutNoopElision:
         backend.set_backend_type(BackendType.Ascend910B)
         return codegen.PTOCodegen().generate(program)
 
-    def test_same_addr_different_layout_emits_tmov(self):
-        """ND→NZ at one Vec address must still emit pto.tmov (not elide)."""
-        nz = ir.TileView(
-            blayout=ir.TileLayout.col_major,
-            slayout=ir.TileLayout.row_major,
-            fractal=1024,
-        )
-        mlir = self._generate_mlir(self._vec_tile_move_program(dst_view=nz, name="move_nd_to_nz_same_addr"))
-        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
-        assert tmovs, f"same-addr ND→NZ tile.move must emit pto.tmov (layout adapt); got none in:\n{mlir}"
-        assert any("loc=vec" in ln for ln in tmovs), f"expected vec→vec tmov, got:\n{tmovs}"
+    @pytest.mark.parametrize(
+        ("dst_view", "name"),
+        [
+            pytest.param(None, "move_same_layout_same_addr", id="same-layout"),
+            pytest.param(
+                ir.TileView(
+                    blayout=ir.TileLayout.col_major,
+                    slayout=ir.TileLayout.row_major,
+                    fractal=1024,
+                ),
+                "move_nd_to_nz_same_addr",
+                id="different-layout",
+            ),
+            pytest.param(
+                ir.TileView(compact=ir.CompactMode.normal),
+                "move_noncompact_to_compact_same_addr",
+                id="different-compact",
+            ),
+            pytest.param(
+                ir.TileView(pad=ir.PadValue.max),
+                "move_unpadded_to_padded_same_addr",
+                id="different-pad",
+            ),
+        ],
+    )
+    def test_same_address_rejected(self, dst_view: ir.TileView | None, name: str):
+        """TMOV cannot use equal source and destination addresses."""
+        program = self._vec_tile_move_program(dst_view=dst_view, name=name)
+        with pytest.raises(ValueError, match="tile.move requires distinct source and destination addresses"):
+            self._generate_mlir(program)
 
-    def test_same_addr_same_layout_elides_tmov(self):
-        """Same space+addr+layout tile.move remains a no-op (elide pto.tmov)."""
-        mlir = self._generate_mlir(self._vec_tile_move_program(dst_view=None, name="move_nd_to_nd_same_addr"))
-        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
-        assert not tmovs, f"same-addr same-layout tile.move must elide pto.tmov; got:\n{tmovs}\nfull:\n{mlir}"
-
-    def test_same_addr_different_compact_mode_emits_tmov(self):
-        """A compact representation change at one address is not a no-op."""
-        compact = ir.TileView(compact=ir.CompactMode.normal)
-        mlir = self._generate_mlir(
-            self._vec_tile_move_program(dst_view=compact, name="move_noncompact_to_compact_same_addr")
+    def test_same_base_distinct_addresses_emit_tmov(self):
+        """Different offsets in one allocation remain a functional move."""
+        program = self._vec_tile_move_program(
+            dst_view=None,
+            name="move_same_base_distinct_addresses",
+            dst_byte_offset=64 * 64 * 2,
+            shared_base=True,
         )
-        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
-        assert tmovs, f"same-addr compact conversion must emit pto.tmov; got none in:\n{mlir}"
+        mlir = self._generate_mlir(program)
+        tmovs = [line for line in mlir.splitlines() if "pto.tmov" in line]
+        assert len(tmovs) == 1
+        assert "loc=vec" in tmovs[0]
 
-    def test_same_addr_different_pad_mode_emits_tmov(self):
-        """A pad-mode change at one address is not a no-op."""
-        padded = ir.TileView(pad=ir.PadValue.max)
-        mlir = self._generate_mlir(
-            self._vec_tile_move_program(dst_view=padded, name="move_unpadded_to_padded_same_addr")
+    def test_equal_numeric_addresses_in_different_spaces_emit_tmov(self):
+        """Equal offsets in independent memory spaces are not an in-place move."""
+        program = self._vec_tile_move_program(
+            dst_view=None,
+            name="move_vec_to_mat_at_zero",
+            dst_space=ir.MemorySpace.Mat,
         )
-        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
-        assert tmovs, f"same-addr pad conversion must emit pto.tmov; got none in:\n{mlir}"
+        mlir = self._generate_mlir(program)
+        tmovs = [line for line in mlir.splitlines() if "pto.tmov" in line]
+        assert len(tmovs) == 1
+        assert "loc=vec" in tmovs[0]
+        assert "loc=mat" in tmovs[0]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_declared_same_address_rejected_after_planning(self, planner, ascend_backend):
+        """A pinned allocation cannot bypass the baked-address invariant."""
+
+        @pl.program
+        class SameAddressMove:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[32, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                src: pl.Tile[[32, 128], pl.FP32, pl.MemRef("shared"), pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [32, 128]
+                )
+                dst: pl.Tile[[32, 128], pl.FP32, pl.MemRef("shared"), pl.Mem.Vec] = pl.tile.move(
+                    src, target_memory=pl.Mem.Vec
+                )
+                return pl.tile.store(dst, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SameAddressMove)
+        function = next(func for func in optimized.functions.values() if ir.is_incore_type(func.func_type))
+        program = ir.Program([function], function.name, optimized.span)
+
+        with pytest.raises(ValueError, match="tile.move requires distinct source and destination addresses"):
+            self._generate_mlir(program)
 
 
 class TestTileStoreAtomicCodegen:

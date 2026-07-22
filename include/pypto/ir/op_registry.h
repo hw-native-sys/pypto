@@ -441,7 +441,8 @@ class OpRegistryEntry {
   }
 
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
-  /// MemoryReuse will skip producer-consumer reuse for such operations.
+  /// The shared allocation-constraint analysis prevents producer-consumer reuse
+  /// for such operations in both MemoryReuse and DSA-RP.
   inline OpRegistryEntry& not_inplace_safe() {
     is_inplace_safe_ = false;
     return *this;

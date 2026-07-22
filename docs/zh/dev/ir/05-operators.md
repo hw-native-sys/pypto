@@ -427,6 +427,10 @@ implicit view 一致时会折叠为 `nullopt` —— 这与
 [`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
+`tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。
+PyPTO 与 DSA-RP 规划器会落实该约束；如果显式 MemRef 绑定或手工构造的 IR 仍留下
+同地址 move，baked-address PTO codegen 会直接报错。
+
 ### reshape 与有效区域（valid region）
 
 reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `tile.reshape` 共用
