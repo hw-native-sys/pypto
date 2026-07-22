@@ -258,8 +258,9 @@ void DistributedCodegen::EmitImports() {
       "from simpler.task_interface import "
       "CallConfig, CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType");
   emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
-  // ``_submit_chip`` wraps ``orch.submit_next_level`` to namespace per-rank DFX
-  // ``output_prefix`` (``<base>/rank{worker}``); a no-op when DFX is off.
+  // ``_submit_chip`` wraps ``orch.submit_next_level`` to namespace per-dispatch
+  // DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``, or ``rank_local/d{k}``
+  // for a comm-less dispatch); a no-op when DFX is off.
   emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
 }
 
@@ -1076,22 +1077,16 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // HOST Worker = SubWorker: orch.submit_sub(callable_id, task_args)
     emitter_.EmitLine("orch.submit_sub(sub_ids[\"" + callee->name_ + "\"], " + ta_var + ")");
   } else {
-    // CHIP Worker: orch.submit_next_level(callable, task_args, config).
-    // N7: thread the dispatch ``device=`` attr (N3 parser) into the
-    // simpler runtime's ``worker=`` kwarg (see simpler/python/simpler/
-    // orchestrator.py — ``-1`` = unconstrained). Empty rank_expr ⇔ no
-    // ``device=`` attr → omit the kwarg, byte-compatible with comm-less L3.
+    // CHIP Worker: dispatch via ``_submit_chip`` (wraps orch.submit_next_level).
+    // N7: thread the dispatch ``device=`` attr (N3 parser) into the simpler
+    // runtime's ``worker=`` kwarg — a rank-pinned dispatch passes its rank; a
+    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``-1``
+    // (unconstrained; see simpler/python/simpler/orchestrator.py). ``_submit_chip``
+    // owns the per-dispatch DFX ``output_prefix`` namespacing — see its docstring.
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
-    if (rank_expr.empty()) {
-      emitter_.EmitLine("orch.submit_next_level(callables[\"" + callee->name_ + "\"], " + ta_var +
-                        ", config)");
-    } else {
-      // Rank-pinned dispatch routes through ``_submit_chip`` so DFX artifacts
-      // land in a per-rank subdir (``<output_prefix>/rank{r}``); a no-op
-      // forward to ``submit_next_level`` when DFX is off.
-      emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
-                        rank_expr + ")");
-    }
+    const std::string worker_arg = rank_expr.empty() ? "-1" : rank_expr;
+    emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
+                      worker_arg + ")");
   }
 
   // If this call has an assignment target (return value), alias it to the OUT

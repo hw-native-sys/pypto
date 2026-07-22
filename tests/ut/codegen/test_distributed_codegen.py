@@ -20,7 +20,7 @@ class TestDistributedCodegen:
     """Test distributed Python codegen on outlined hierarchy programs."""
 
     def test_chip_sub_worker_and_orchestrator(self):
-        """HOST orchestrator calling CHIP orchestrator → CHIP worker produces submit_next_level."""
+        """HOST orchestrator calling CHIP orchestrator → CHIP worker dispatches via _submit_chip."""
 
         @pl.program
         class Input:
@@ -52,8 +52,10 @@ class TestDistributedCodegen:
         assert "def host_orch" in code
         assert "orch, _args, config" in code
 
-        # Verify call-site lowering: CHIP orchestrator → submit_next_level
-        assert "submit_next_level" in code
+        # Verify call-site lowering: CHIP orchestrator → _submit_chip (the
+        # comm-less dispatch passes worker=-1; _submit_chip forwards to
+        # submit_next_level when DFX is off).
+        assert "_submit_chip" in code
         assert 'callables["chip_orch"]' in code
         assert "TaskArgs()" in code
 
@@ -148,7 +150,7 @@ class TestDistributedCodegen:
         cg = codegen.DistributedCodegen()
         code = cg.generate(program)
 
-        assert "submit_next_level" in code
+        assert "_submit_chip" in code
         assert "submit_sub" in code
         assert "TensorArgType.INPUT" in code
 
@@ -632,8 +634,8 @@ class TestDistributedCodegen:
 
         # Each tuple element should get its own tensors[...] alias
         assert code.count('tensors["') >= 2
-        # submit_next_level emitted for chip_orch
-        assert "submit_next_level" in code
+        # _submit_chip dispatch emitted for chip_orch (comm-less, worker=-1)
+        assert "_submit_chip" in code
         # Two OUTPUT_EXISTING args for the two Out params
         assert code.count("TensorArgType.OUTPUT_EXISTING") == 2
 
@@ -669,7 +671,7 @@ class TestDistributedCodegen:
 
         # Must produce identical structure as the pl.Tuple variant
         assert code.count('tensors["') >= 2
-        assert "submit_next_level" in code
+        assert "_submit_chip" in code
         assert code.count("TensorArgType.OUTPUT_EXISTING") == 2
 
 

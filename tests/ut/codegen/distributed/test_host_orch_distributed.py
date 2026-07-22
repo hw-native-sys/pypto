@@ -26,9 +26,10 @@ Plus regressions:
 
 * ``pld.system.world_size()`` lowers to the ``world_size`` kwarg in any expr
   context (e.g. ``pl.range(...)``).
-* Comm-less L3 dispatch (no ``device=``) still emits ``submit_next_level(...,
-  config)`` without the ``worker=`` kwarg AND without an ``allocate_domain``
-  wrapper, preserving binary compatibility with existing L3 demos.
+* Comm-less L3 dispatch (no ``device=``) routes through
+  ``_submit_chip(orch, ..., config, -1)`` — unconstrained (simpler ``worker=-1``
+  default) with a ``rank_local/d{k}`` DFX namespace — without a ``worker=``
+  kwarg AND without an ``allocate_domain`` wrapper.
 """
 
 import re
@@ -291,11 +292,12 @@ def test_comm_group_program_emits_domain_provider_with_block():
 # ---------------------------------------------------------------------------
 
 
-def test_comm_less_dispatch_omits_worker_kwarg():
-    """Comm-less L3 dispatch (no ``device=`` attr) still emits ``submit_next_level(...,
-    config)`` without trailing ``worker=`` and without an ``allocate_domain``
-    wrapper — byte-compatible with existing L3 demos (test_l3_distributed.py /
-    test_l3_parallel_reduce.py)."""
+def test_comm_less_dispatch_routes_through_submit_chip_unconstrained():
+    """Comm-less L3 dispatch (no ``device=`` attr) routes through
+    ``_submit_chip(orch, ..., config, -1)`` — the ``-1`` marks the dispatch
+    unconstrained (simpler ``worker=-1`` default) while still giving it a
+    per-dispatch DFX namespace (``rank_local/d{k}``) so its swimlane records are
+    collected. No trailing ``worker=`` kwarg and no ``allocate_domain`` wrapper."""
 
     @pl.program
     class Prog:
@@ -315,9 +317,10 @@ def test_comm_less_dispatch_omits_worker_kwarg():
             return y
 
     code = _lower(Prog)
-    # The dispatch shape stays intact; the comm-less path emits no wrapper
-    # and no ctx-scalar / Tensor.make / handle subscript.
-    assert "submit_next_level(" in code, code
+    # The dispatch shape stays intact; the comm-less path routes through
+    # ``_submit_chip(..., -1)`` and emits no wrapper, no ctx-scalar / Tensor.make
+    # / handle subscript, and no ``worker=`` kwarg.
+    assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, -1\)", code), code
     assert "worker=" not in code, code
     assert "Tensor.make" not in code, code
     assert "__comm_d0[" not in code, code

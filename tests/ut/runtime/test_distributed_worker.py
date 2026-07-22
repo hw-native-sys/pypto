@@ -1241,11 +1241,21 @@ class TestSubmitChip:
         assert orch.calls == [("chip", 5, "")]
         assert cfg.output_prefix == ""
 
-    def test_unconstrained_worker_not_suffixed(self):
+    def test_unconstrained_worker_suffixed_as_rank_local(self):
+        # A comm-less / unconstrained dispatch (``worker < 0``) has no real rank
+        # but still gets a per-dispatch namespace under ``rank_local`` so its
+        # fixed-name artifacts don't clobber sibling dispatches and
+        # ``_collect_l3_swimlane`` (globs ``rank*``) finds them.
         orch = _RecordingOrch()
         cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
         _submit_chip(orch, "chip", "ta", cfg, -1)
-        assert orch.calls == [("chip", -1, "/work/dfx_outputs")]
+        _submit_chip(orch, "chip", "ta", cfg, -1)  # second comm-less dispatch
+        assert [c[2] for c in orch.calls] == [
+            "/work/dfx_outputs/rank_local/d0",
+            "/work/dfx_outputs/rank_local/d1",
+        ]
+        # worker is still forwarded as -1 (unconstrained) to the runtime.
+        assert [c[1] for c in orch.calls] == [-1, -1]
         assert cfg.output_prefix == "/work/dfx_outputs"
 
 
@@ -1257,17 +1267,20 @@ class TestClearDfxDispatchDirs:
         # only write d0, so the stale d1/d2 must be cleared. A sibling non-d{k}
         # dir (e.g. a future diagnostic) is preserved.
         dfx = tmp_path / "dfx_outputs"
-        for d in ("rank0/d0", "rank0/d1", "rank0/d2", "rank1/d0", "rank0/keepme"):
+        # ``rank_local`` is the comm-less dispatch namespace; it must be cleared
+        # like any other ``rank*`` dir (it matches the same ``rank*`` glob).
+        for d in ("rank0/d0", "rank0/d1", "rank0/d2", "rank1/d0", "rank_local/d0", "rank0/keepme"):
             (dfx / d).mkdir(parents=True)
             (dfx / d / "l2_swimlane_records.json").write_text("{}", encoding="utf-8")
 
         _clear_dfx_dispatch_dirs(dfx)
 
-        # All d{k} dirs gone...
+        # All d{k} dirs gone (rank-pinned and comm-less alike)...
         assert not (dfx / "rank0" / "d0").exists()
         assert not (dfx / "rank0" / "d1").exists()
         assert not (dfx / "rank0" / "d2").exists()
         assert not (dfx / "rank1" / "d0").exists()
+        assert not (dfx / "rank_local" / "d0").exists()
         # ...but the non-dispatch dir and the rank dirs themselves remain.
         assert (dfx / "rank0" / "keepme").is_dir()
         assert (dfx / "rank0").is_dir()
