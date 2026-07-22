@@ -944,7 +944,7 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
     def test_submit_dispatched_pipe_group_sizes_workspace_and_resolves_callees(self):
-        """Submitted AIC/AIV pipe kernels remain visible to orchestration codegen."""
+        """Submitted pipe kernels with different signatures share one Group ABI (#2097)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -953,17 +953,20 @@ class TestTensorReadWriteOffsetCodegen:
             @pl.function(type=pl.FunctionType.AIC)
             def cube_side(
                 self,
-                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                q: pl.Tensor[[16, 16], pl.FP32],
+                sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                task: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 v2c_buf = pl.reserve_buffer(name="submit_v2c", size=4096, base=pl.AUTO)
                 c2v_peer = pl.import_peer_buffer(name="submit_c2v", peer_func="vec_side")
                 pl.aic_initialize_pipe(c2v_peer, v2c_buf, dir_mask=3, slot_size=512)
-                return out
+                return sink
 
             @pl.function(type=pl.FunctionType.AIV)
             def vec_side(
                 self,
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                task: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 c2v_buf = pl.reserve_buffer(name="submit_c2v", size=4096, base=pl.AUTO)
                 v2c_peer = pl.import_peer_buffer(name="submit_v2c", peer_func="cube_side")
@@ -973,11 +976,14 @@ class TestTensorReadWriteOffsetCodegen:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
+                q: pl.Tensor[[16, 16], pl.FP32],
+                sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                task: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 with pl.cluster():
-                    _cube_out, _cube_tid = pl.submit(self.cube_side, out)
-                    vec_out, _vec_tid = pl.submit(self.vec_side, out)
+                    _cube_out, _cube_tid = pl.submit(self.cube_side, q, sink, task)
+                    vec_out, _vec_tid = pl.submit(self.vec_side, out, task)
                 return vec_out
 
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SubmitPipeProgram)
@@ -985,14 +991,28 @@ class TestTensorReadWriteOffsetCodegen:
         assert transformed_text.count("pl.submit(") == 2, transformed_text
         assert "self.cube_side" in transformed_text, transformed_text
         assert "self.vec_side" in transformed_text, transformed_text
+        cube = transformed.get_function("cube_side")
+        vec = transformed.get_function("vec_side")
+        canonical_names = [param.name_hint for param in cube.params]
+        assert canonical_names == [param.name_hint for param in vec.params]
+        assert canonical_names[-1] == "__gm_pipe_buffer"
         orch_func = next(
             func for func in transformed.functions.values() if func.func_type == ir.FunctionType.Orchestration
         )
-        code = codegen.generate_orchestration(transformed, orch_func).code
+        result = codegen.generate_orchestration(transformed, orch_func)
+        code = result.code
 
         shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
         assert shape_values == ["512"], code
         assert "rt_submit_task" in code, code
+        assert result.func_name_to_signature["cube_side"] == result.func_name_to_signature["vec_side"]
+        # The one shared task payload must contain all three Group tensors plus
+        # the injected workspace; pre-fix it was built only from cube_side and
+        # omitted ext_out, so vec_side unpacked q as its output/workspace.
+        task_add_lines = [line for line in code.splitlines() if "params_t0.add_" in line]
+        task_add_text = "\n".join(task_add_lines)
+        for expected in ("ext_q", "ext_sink", "ext_out", "gm_pipe_buffer_0", "task"):
+            assert expected in task_add_text, code
 
 
 if __name__ == "__main__":

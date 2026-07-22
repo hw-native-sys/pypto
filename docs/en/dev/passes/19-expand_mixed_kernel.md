@@ -19,6 +19,33 @@ For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts
 
 After this pass, no `FunctionType::InCore` functions remain in the program.
 
+### Shared argument ABI for hand-written Groups
+
+One runtime `MixedKernels` submission creates a co-scheduled AIC/AIV task whose
+active lanes share one `L0TaskArgs` payload. Consequently, the two compiled
+kernel wrappers must unpack the same tensors-first argument layout. This is
+automatic for Groups created by the mixed-kernel splitter, because both member
+calls forward the complete Group signature.
+
+A hand-written `pl.cluster()` may instead submit members with different source
+signatures, for example `cube(q, k, v, sink, task)` and `vec(out, task)`. The
+outlined Group captures the union of those values. This pass normalizes both DSL
+members to that Group signature and rewrites both inner `Call` or `Submit` nodes
+to forward the complete list. Unused parameters remain valid wrapper arguments;
+each cloned body still references only the values from its original call.
+
+When both member kernels are exclusive to the Group, their names are preserved.
+If either kernel has another call site, the pass creates a Group-private adapter
+pair and rewrites `import_peer_buffer(peer_func=...)` to the adapter peer names,
+leaving the original ABI available to the other callers. External-source and
+runtime-bound members cannot be body-cloned; when their layouts differ, the pass
+rejects the Group and requires both declarations to use the same signature.
+
+This normalization happens before `InjectGMPipeBuffer`, so a backend-injected
+`__gm_pipe_buffer` parameter is appended to the already-identical member
+signatures. It does not require `sync_start`: AIC and AIV are subslots of one
+mixed task, while `sync_start` controls multi-block SPMD launch admission.
+
 ## Unsplittable transpose: reject with an actionable error
 
 A requested vector split is **rejected with a `ValueError`** when the kernel
@@ -253,6 +280,12 @@ Phase 2 — Expand each InCore function F:
 Phase 3 — Rewrite Group callers:
   For each Group function that calls a split InCore, replace the InCore call
   with an AIC call + AIV call sequence (EvalStmt for AIC, AssignStmt for AIV).
+
+Phase 4 — Normalize hand-written mixed Group ABIs:
+  For each Group whose AIC/AIV calls do not both forward the complete Group
+  signature, rebuild the DSL member bodies against one canonical parameter list
+  and rewrite both Call/Submit nodes to pass it. Preserve exclusive member names;
+  otherwise create Group-private adapters and retarget peer_func references.
 ```
 
 **Affinity classification**:

@@ -63,6 +63,129 @@ def _op_name(stmt: ir.Stmt) -> str:
     return ""
 
 
+def test_hand_written_group_members_share_canonical_abi():
+    """Different AIC/AIV signatures are normalized to the Group ABI (#2097).
+
+    ``MixedKernels`` gives every active lane the same runtime argument array.
+    A hand-written Group is allowed to capture the union of its member inputs,
+    so ExpandMixedKernel must make both member wrappers consume that union in
+    the same order instead of letting orchestration codegen use the first call's
+    shorter signature for both lanes.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            self.cube_side(q, sink, task)
+            result = self.vec_side(out, task)
+            return result
+
+    after = _run_pipeline(Program)
+    cube = after.get_function("cube_side")
+    vec = after.get_function("vec_side")
+    group = after.get_function("mixed")
+    expected_names = [param.name_hint for param in group.params]
+
+    assert [param.name_hint for param in cube.params] == expected_names
+    assert [param.name_hint for param in vec.params] == expected_names
+    assert cube.param_directions == group.param_directions
+    assert vec.param_directions == group.param_directions
+
+    member_calls = []
+    for stmt in ir.flatten_to_stmts(group.body):
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            member_calls.append(stmt.value)
+        elif isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+            member_calls.append(stmt.expr)
+    assert len(member_calls) == 2
+    for call in member_calls:
+        assert [arg.name_hint for arg in call.args] == expected_names
+
+
+def test_reused_hand_written_group_members_get_private_adapters():
+    """A member used outside its Group keeps its original ABI."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            self.cube_side(q, sink, task)
+            result = self.vec_side(out, task)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            sink = self.cube_side(q, sink, task)
+            return self.mixed(q, sink, out, task)
+
+    after = _run_pipeline(Program)
+    group = after.get_function("mixed")
+    aic_adapter = after.get_function("mixed_aic_adapter")
+    aiv_adapter = after.get_function("mixed_aiv_adapter")
+    canonical_names = [param.name_hint for param in group.params]
+
+    assert len(after.get_function("cube_side").params) == 3
+    assert len(after.get_function("vec_side").params) == 2
+    assert [param.name_hint for param in aic_adapter.params] == canonical_names
+    assert [param.name_hint for param in aiv_adapter.params] == canonical_names
+    group_text = group.as_python()
+    assert "mixed_aic_adapter(" in group_text
+    assert "mixed_aiv_adapter(" in group_text
+
+
 def test_explicit_sync_core_type_routes_each_event_to_one_lane():
     """Mixed JIT kernels must not duplicate set/wait onto both core types."""
 
