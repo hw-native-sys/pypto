@@ -11,7 +11,6 @@
 
 #include "pypto/codegen/pto/pto_type_utils.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -60,21 +59,6 @@ std::string DataTypeToMLIR(DataType dtype) {
   } else {
     throw ValueError("Invalid DataType value");
   }
-}
-
-std::string ReplaceTileBufDType(const std::string& tile_buf_type, DataType dtype) {
-  constexpr const char* kDTypeKey = "dtype=";
-  const size_t value_begin = tile_buf_type.find(kDTypeKey);
-  INTERNAL_CHECK(value_begin != std::string::npos)
-      << "Internal error: tile_buf type has no dtype field: " << tile_buf_type;
-  const size_t dtype_begin = value_begin + std::char_traits<char>::length(kDTypeKey);
-  const size_t dtype_end = tile_buf_type.find_first_of(",>", dtype_begin);
-  INTERNAL_CHECK(dtype_end != std::string::npos)
-      << "Internal error: malformed tile_buf dtype field: " << tile_buf_type;
-
-  std::string result = tile_buf_type;
-  result.replace(dtype_begin, dtype_end - dtype_begin, DataTypeToMLIR(dtype));
-  return result;
 }
 
 std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type) {

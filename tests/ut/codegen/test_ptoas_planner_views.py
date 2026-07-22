@@ -183,7 +183,7 @@ def test_reshape_of_subview_folds_away_under_pypto_planner():
     assert "pto.treshape" not in mlir, mlir
 
 
-# ── reinterpret_view: bitcast vs byte-preserving treshape ───────────────────
+# ── reinterpret_view: byte-preserving treshape ──────────────────────────────
 
 REINTERPRET_ROWS, REINTERPRET_COLS = 8, 16
 
@@ -236,16 +236,14 @@ class SubviewReinterpretProgram:
         return pl.store(view, [0, 0], out)
 
 
-def test_same_shape_reinterpret_uses_bitcast_under_ptoas():
+def test_same_shape_reinterpret_uses_treshape_under_ptoas():
     mlir = _emit_pto(SameShapeReinterpretProgram, passes.MemoryPlanner.PTOAS)
-    bitcast = _sole_line(mlir, "pto.bitcast")
+    treshape = _sole_line(mlir, "pto.treshape")
 
-    assert "pto.treshape" not in mlir, mlir
-    source_type = _operand_type(bitcast)
-    result_type = _result_type(bitcast)
-    assert "dtype=f32" in source_type, bitcast
-    assert "dtype=i32" in result_type, bitcast
-    assert source_type.replace("dtype=f32", "dtype=i32") == result_type, bitcast
+    assert "pto.bitcast" not in mlir, mlir
+    assert "dtype=f32" in _operand_type(treshape), treshape
+    assert "dtype=i32" in _result_type(treshape), treshape
+    assert f"rows={REINTERPRET_ROWS}, cols={REINTERPRET_COLS}" in _result_type(treshape), treshape
 
 
 def test_width_changing_reinterpret_uses_treshape_under_ptoas():
@@ -258,13 +256,13 @@ def test_width_changing_reinterpret_uses_treshape_under_ptoas():
     assert f"rows={REINTERPRET_ROWS}, cols={REINTERPRET_COLS * 2}" in _result_type(treshape), treshape
 
 
-def test_subview_reinterpret_bitcast_uses_subview_definition_type():
+def test_subview_reinterpret_treshape_uses_subview_definition_type():
     mlir = _emit_pto(SubviewReinterpretProgram, passes.MemoryPlanner.PTOAS)
     subview = _sole_line(mlir, "pto.subview")
-    bitcast = _sole_line(mlir, "pto.bitcast")
+    treshape = _sole_line(mlir, "pto.treshape")
 
-    assert _operand_type(bitcast) == _result_type(subview), f"{subview}\n{bitcast}"
-    assert _operand_type(bitcast).replace("dtype=f32", "dtype=i32") == _result_type(bitcast)
+    assert _operand_type(treshape) == _result_type(subview), f"{subview}\n{treshape}"
+    assert "dtype=i32" in _result_type(treshape), treshape
 
 
 @pytest.mark.parametrize(

@@ -833,27 +833,6 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   codegen.Emit(oss.str());
 }
 
-// Emit a same-shape dtype reinterpret. PTOAS requires every tile_buf field
-// except dtype to match, so derive the result type from the source SSA type and
-// replace only its dtype field.
-static void EmitBitcastView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
-                            std::string result_target, DataType target_dtype,
-                            const std::string& temp_prefix) {
-  const std::string src = codegen.GetExprAsCode(src_arg);
-  const std::string src_type = GetViewSourceType(codegen, src_arg);
-  INTERNAL_CHECK_SPAN(!src_type.empty(), src_arg->span_)
-      << "Internal error: tile.reinterpret_view source has no PTO tile_buf type";
-  const std::string result_type = codegen::ReplaceTileBufDType(src_type, target_dtype);
-
-  result_target = codegen.NewNamedTemp(temp_prefix);
-  codegen.SetCurrentResultBuf(result_target);
-  codegen.RegisterTileBufType(result_target, result_type);
-
-  std::ostringstream oss;
-  oss << result_target << " = pto.bitcast " << src << " : " << src_type << " -> " << result_type;
-  codegen.Emit(oss.str());
-}
-
 void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1165,14 +1144,11 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return std::string("");
     }
 
-    const bool same_shape =
-        ir::tile_view_semantics::ShapeExprListsEquivalent(source_tile->shape_, result_tile->shape_);
-    if (same_shape) {
-      EmitBitcastView(codegen, op->args_[0], result_target, result_tile->dtype_, "reinterpret_view_buf");
-    } else {
-      const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
-      EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reinterpret_view_buf");
-    }
+    // PTOAS treshape is the byte-preserving dtype/shape reinterpret primitive.
+    // Use it even when the shape is unchanged: pto.bitcast does not preserve the
+    // source tile payload on current A2/A3 runtimes.
+    const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
+    EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reinterpret_view_buf");
     return std::string("");
   });
 
