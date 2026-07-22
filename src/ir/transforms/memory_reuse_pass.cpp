@@ -1439,7 +1439,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 static bool IsLegalTileViewOp(const OpPtr& op) {
   return IsOp(op, "tile.reshape") || IsOp(op, "tile.extract") || IsOp(op, "tile.slice") ||
          IsOp(op, "tile.fillpad") || IsOp(op, "tile.fillpad_inplace") || IsOp(op, "tile.transpose_view") ||
-         IsOp(op, "tensor.slice");
+         IsOp(op, "tile.bitcast") || IsOp(op, "tensor.slice");
 }
 
 struct HazardInputs {

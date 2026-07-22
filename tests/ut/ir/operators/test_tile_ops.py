@@ -1542,6 +1542,115 @@ class TestTileTransformOps:
         assert "tile.transpose" in ir_str
 
 
+class TestTileBitcastOp:
+    """Tests for tile.bitcast — zero-copy element-type reinterpretation."""
+
+    @staticmethod
+    def _tile_var(dtype, shape=(16, 128)):
+        span = ir.Span.unknown()
+        return ir.Var("t", ir.TileType(list(shape), dtype), span)
+
+    @staticmethod
+    def _tile_type(call: ir.Call) -> ir.TileType:
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        return result_type
+
+    def test_equal_width_reinterpret_keeps_shape_and_layout(self):
+        """Strict bitcast changes only the dtype; shape/valid/layout carry through."""
+        src = self._tile_var(DataType.FP32)
+
+        call = tile.bitcast(src, DataType.UINT32)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.bitcast"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.UINT32
+        assert len(result_type.shape) == 2
+        src_type = src.type
+        assert isinstance(src_type, ir.TileType)
+        src_view = src_type.get_effective_tile_view()
+        dst_view = result_type.get_effective_tile_view()
+        assert dst_view.blayout == src_view.blayout
+        assert dst_view.slayout == src_view.slayout
+
+    def test_strict_is_the_default_and_rejects_narrowing(self):
+        """Without strict=False a width change is rejected with an actionable message."""
+        src = self._tile_var(DataType.FP32)
+
+        with pytest.raises(ValueError, match="same bit width"):
+            tile.bitcast(src, DataType.FP16)
+
+    def test_non_strict_allows_narrowing(self):
+        """strict=False opts into the PTOAS-permitted narrowing reinterpretation."""
+        src = self._tile_var(DataType.FP32)
+
+        call = tile.bitcast(src, DataType.FP16, strict=False)
+
+        assert self._tile_type(call).dtype == DataType.FP16
+
+    def test_narrowing_rejects_non_row_major_source(self):
+        """A narrowed view covers the leading bytes, which only names the intended
+        elements under a row_major / none_box layout — `fractal` is a BYTE count,
+        so a boxed or col_major element-to-byte mapping shifts with the width."""
+        span = ir.Span.unknown()
+        view = ir.TileView(blayout=ir.TileLayout.col_major)
+        col_major = ir.Var("t", ir.TileType([16, 1], DataType.FP32, None, view), span)
+
+        # Equal width is layout-agnostic and stays allowed.
+        assert self._tile_type(tile.bitcast(col_major, DataType.INT32)).dtype == DataType.INT32
+
+        with pytest.raises(ValueError, match="row_major, none_box"):
+            tile.bitcast(col_major, DataType.FP16, strict=False)
+
+    def test_widening_is_rejected_even_when_not_strict(self):
+        """pto.bitcast cannot address more bytes than the source buffer holds."""
+        src = self._tile_var(DataType.FP16)
+
+        with pytest.raises(ValueError, match="cannot widen"):
+            tile.bitcast(src, DataType.FP32, strict=False)
+
+    def test_same_dtype_is_rejected(self):
+        """A same-dtype bitcast is a no-op — PTOAS rejects it, so we do too."""
+        src = self._tile_var(DataType.FP32)
+
+        with pytest.raises(ValueError, match="differ from the source dtype"):
+            tile.bitcast(src, DataType.FP32)
+
+    def test_sixteen_bit_pairs(self):
+        """BF16/FP16 <-> INT16/UINT16 are the 16-bit equal-width pairings."""
+        for src_dtype, dst_dtype in [
+            (DataType.BF16, DataType.INT16),
+            (DataType.FP16, DataType.UINT16),
+            (DataType.INT8, DataType.UINT8),
+        ]:
+            call = tile.bitcast(self._tile_var(src_dtype), dst_dtype)
+            assert self._tile_type(call).dtype == dst_dtype
+
+    def test_dsl_surface(self):
+        """pl.bitcast dispatches a Tile operand to tile.bitcast."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                output: pl.Tensor[[16, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                tile_a: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [0, 0], [16, 128])
+                bits: pl.Tile[[16, 128], pl.INT32] = pl.bitcast(tile_a, pl.INT32)
+                doubled: pl.Tile[[16, 128], pl.INT32] = pl.add(bits, bits)
+                back: pl.Tile[[16, 128], pl.FP32] = pl.tile.bitcast(doubled, pl.FP32)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.store(back, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.bitcast" in ir_str
+        assert "dtype=pl.INT32" in ir_str
+
+
 class TestTileSliceReshapeOps:
     """Tests for tile slice and reshape operations."""
 

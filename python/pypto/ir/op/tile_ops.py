@@ -456,6 +456,38 @@ def transpose_view(
     return _ir_core.create_op_call("tile.transpose_view", [tile], {}, actual_span)
 
 
+def bitcast(
+    tile: Expr,
+    dtype: int | DataType,
+    *,
+    strict: bool = True,
+    span: Span | None = None,
+) -> Call:
+    """Reinterpret a tile's bits under a different element type.
+
+    Maps to PTOAS ``pto.bitcast``: shape, valid shape and layout are unchanged
+    and the result aliases the source buffer byte-for-byte, so no data movement
+    is emitted. Use :func:`cast` for a value conversion and :func:`reshape` for
+    a shape change.
+
+    Args:
+        tile: Input tile expression
+        dtype: Target element type; must differ from the source dtype
+        strict: When True (default), require ``dtype`` to have the same bit width
+            as the source dtype — the only unambiguous reinterpretation. When
+            False, a narrower ``dtype`` is also allowed; the result keeps the
+            source shape and therefore covers only the leading bytes of the
+            source buffer. Widening is rejected either way.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the reinterpreted tile
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "strict": strict}
+    return _ir_core.create_op_call("tile.bitcast", [tile], kwargs, actual_span)
+
+
 def move(
     tile: Expr,
     target_memory: MemorySpace,

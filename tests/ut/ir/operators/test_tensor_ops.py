@@ -1456,6 +1456,51 @@ def test_tensor_reshape():
     assert len(result_type2.shape) == 2
 
 
+def _bitcast_tensor_var(dtype, shape=(4, 8)):
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(d, DataType.INT32, span) for d in shape]
+    return ir.Var("t", ir.TensorType(dims, dtype), span)
+
+
+def test_tensor_bitcast():
+    """tensor.bitcast changes only the element type; shape carries through."""
+    tensor_var = _bitcast_tensor_var(DataType.FP32)
+
+    call = ir.op.tensor.bitcast(tensor_var, DataType.UINT32)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.bitcast"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.UINT32
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_bitcast_strict_rejects_width_change():
+    """Strict (default) requires equal bit width."""
+    tensor_var = _bitcast_tensor_var(DataType.FP32)
+
+    with pytest.raises(ValueError, match="same bit width"):
+        ir.op.tensor.bitcast(tensor_var, DataType.FP16)
+
+
+def test_tensor_bitcast_non_strict_allows_narrowing_only():
+    """strict=False permits narrowing but never widening."""
+    narrow = ir.op.tensor.bitcast(_bitcast_tensor_var(DataType.FP32), DataType.FP16, strict=False)
+    narrow_type = narrow.type
+    assert isinstance(narrow_type, ir.TensorType)
+    assert narrow_type.dtype == DataType.FP16
+
+    with pytest.raises(ValueError, match="cannot widen"):
+        ir.op.tensor.bitcast(_bitcast_tensor_var(DataType.FP16), DataType.FP32, strict=False)
+
+
+def test_tensor_bitcast_same_dtype_rejected():
+    """A same-dtype bitcast is a no-op and is rejected."""
+    with pytest.raises(ValueError, match="differ from the source dtype"):
+        ir.op.tensor.bitcast(_bitcast_tensor_var(DataType.FP32), DataType.FP32)
+
+
 def test_tensor_reshape_dynamic():
     """Test tensor.reshape with dynamic shapes."""
     span = ir.Span.unknown()

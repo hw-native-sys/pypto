@@ -173,6 +173,10 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
 
   RegisterSimple("tensor.reshape", "tile.reshape");
 
+  // tensor.bitcast → tile.bitcast: both are pure element-type reinterpretations
+  // over the same bytes, and the dtype / strict kwargs carry through unchanged.
+  RegisterSimple("tensor.bitcast", "tile.bitcast");
+
   // tensor.transpose → tile.transpose(input, axis1, axis2). The pto.ttrans scratch is a pure
   // codegen detail, not a semantic operand: FlattenTileNdTo2D is the sole owner of scratch
   // materialization (it emits the codegen-ready 4-arg form for both 2D and per-page >2D

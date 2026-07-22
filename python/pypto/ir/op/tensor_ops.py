@@ -1584,6 +1584,38 @@ def reshape(
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 
+def bitcast(
+    tensor: Expr,
+    dtype: int | DataType,
+    *,
+    strict: bool = True,
+    span: Span | None = None,
+) -> Call:
+    """Reinterpret a tensor's bits under a different element type.
+
+    In-core only: ``ConvertTensorToTileOps`` lowers it 1:1 to ``tile.bitcast``,
+    which aliases the source buffer byte-for-byte and emits no data movement.
+    Not supported in orchestration (host) code. Use :func:`cast` for a value
+    conversion and :func:`reshape` for a shape change.
+
+    Args:
+        tensor: Input tensor expression
+        dtype: Target element type; must differ from the source dtype
+        strict: When True (default), require ``dtype`` to have the same bit width
+            as the source dtype — the only unambiguous reinterpretation. When
+            False, a narrower ``dtype`` is also allowed; the result keeps the
+            source shape and therefore covers only the leading bytes of the
+            source buffer. Widening is rejected either way.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the reinterpreted tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "strict": strict}
+    return _ir_core.create_op_call("tensor.bitcast", [tensor], kwargs, actual_span)
+
+
 def transpose(
     tensor: Expr,
     axis1: int | ConstInt,

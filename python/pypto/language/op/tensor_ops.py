@@ -94,6 +94,7 @@ __all__ = [
     "assemble",
     "concat",
     "reshape",
+    "bitcast",
     "transpose",
     "view",
     "scatter_update",
@@ -1619,6 +1620,30 @@ def reshape(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor:
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.reshape(tensor_expr, _normalize_intlike(shape))
+    return Tensor(expr=call_expr)
+
+
+def bitcast(tensor: Tensor, dtype: DataType, *, strict: bool = True) -> Tensor:
+    """Reinterpret a tensor's bits under a different element type (zero-copy).
+
+    In-core only: lowers 1:1 to :func:`pypto.language.op.tile.bitcast`, which
+    aliases the source buffer byte-for-byte and emits no data movement. Not
+    supported in orchestration (host) code. Use :func:`cast` for a value
+    conversion and :func:`reshape` for a shape change.
+
+    Args:
+        tensor: Input tensor.
+        dtype: Target element type; must differ from the tensor's dtype.
+        strict: When True (default), ``dtype`` must have the same bit width as
+            the tensor's dtype — the only unambiguous reinterpretation. When
+            False, a narrower ``dtype`` is also allowed; the result keeps the
+            source shape and therefore covers only the leading bytes of the
+            source buffer. Widening is rejected either way.
+
+    Returns:
+        Tensor wrapping the reinterpreted view.
+    """
+    call_expr = _ir_ops.bitcast(tensor.unwrap(), dtype, strict=strict)
     return Tensor(expr=call_expr)
 
 

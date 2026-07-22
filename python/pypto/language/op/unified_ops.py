@@ -609,6 +609,15 @@ def reshape(input: T, shape: Sequence[IntLike]) -> T:
     raise TypeError(f"pl.reshape: expected Tensor or Tile, got {type(input).__name__}")
 
 
+def bitcast(input: T, dtype: DataType, *, strict: bool = True) -> T:
+    """Zero-copy element-type reinterpretation, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.bitcast(input, dtype, strict=strict)
+    if isinstance(input, Tile):
+        return _tile.bitcast(input, dtype, strict=strict)
+    raise TypeError(f"pl.bitcast: expected Tensor or Tile, got {type(input).__name__}")
+
+
 def transpose(input: T, axis1: int, axis2: int) -> T:
     """Transpose operation, dispatched by input type."""
     if isinstance(input, Tensor):

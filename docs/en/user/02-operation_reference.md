@@ -24,6 +24,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `exp` | `(input: T) -> T` | Element-wise exponential |
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
+| `bitcast` | `(input: T, dtype: DataType, *, strict: bool = True) -> T` | Zero-copy element-type reinterpretation over the same bytes. `strict=True` (default) requires equal bit width; `strict=False` also allows narrowing (row_major/ND sources only). Widening and same-dtype are rejected. Use `cast` for value conversion |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
 | `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice with offset |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
@@ -56,6 +57,7 @@ Operate on `Tensor` objects (DDR memory).
 | `dim` | `(tensor: Tensor, axis: int) -> Scalar` | Get dimension size (supports negative indexing) |
 | `slice` | `(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor` | Slice. Sugar: `A[0:16, :]` |
 | `reshape` | `(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor` | Reshape |
+| `bitcast` | `(tensor: Tensor, dtype: DataType, *, strict: bool = True) -> Tensor` | Zero-copy element-type reinterpretation. **In-core only** — not supported in orchestration code. See `bitcast` in the unified table for the width rules |
 | `view` | `(tensor: Tensor, shape: Sequence[IntLike] \| None = None, *, layout: TensorLayout \| None = None) -> Tensor` | Zero-copy reinterpret over the same storage; target rank must be at least 1 and DN requires rank at least 2. Orchestration shape reinterpret is ND-only and cannot also change layout |
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | Swap two axes |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = AtomicType.None_) -> Tensor` | Write source into target at offset. Sugar (pre-SSA only): `target[i:i+H, j:j+W] = source`. `atomic=AtomicType.Add` accumulates instead of overwriting (split-K) — only valid when the target is a function output (global memory); non-deterministic FP, target must be pre-zeroed, dtypes fp32/bf16/fp16/int32/int16/int8 (bf16 requires the Ascend910B/A2/A3 profile) |
@@ -259,6 +261,7 @@ scratch tile to materialize numeric results on A2/A3.
 | ---- | --------- | ----------- |
 | `slice` | `(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile` | Slice (at most 2D). Sugar: `A[0:16, :]` |
 | `reshape` | `(tile: Tile, shape: Sequence[IntLike]) -> Tile` | Reshape (at most 2D) |
+| `bitcast` | `(tile: Tile, dtype: DataType, *, strict: bool = True) -> Tile` | Zero-copy element-type reinterpretation aliasing the source buffer; emits no instruction. See `bitcast` in the unified table for the width rules |
 | `transpose` | `(tile: Tile, axis1: int, axis2: int) -> Tile` | Swap two axes |
 | `cast` | `(tile: Tile, target_type: DataType, mode="round") -> Tile` | Type cast |
 

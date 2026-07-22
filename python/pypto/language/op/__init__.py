@@ -116,6 +116,7 @@ from .unified_ops import (
     abs,  # noqa: A004 (intentionally shadows builtin via DSL surface)
     add,
     batch_matmul,
+    bitcast,
     cast,
     cmp,
     col_argmax,
@@ -201,6 +202,7 @@ __all__ = [
     "rsqrt",
     "cast",
     "reshape",
+    "bitcast",
     "transpose",
     "slice",
     "matmul",

@@ -794,9 +794,10 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
 // result var's TileType buf-type (empty if none); when present a fresh temp
 // buffer is bound so the view gets its own SSA name and `: src -> dst` annotation
 // (the MemRef-less source's type comes from the TileType, not a MemRef).
-static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
-                             std::string result_target, const std::string& result_type,
-                             const std::string& temp_prefix) {
+// Returns the SSA name the view was emitted into.
+static std::string EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
+                                    std::string result_target, const std::string& result_type,
+                                    const std::string& temp_prefix) {
   std::string src = codegen.GetExprAsCode(src_arg);
   // Annotate the operand with the type its SSA value was DEFINED with, which
   // GetExprTypeAnnotation resolves through the SSA → tile_buf-type map. Deriving
@@ -823,6 +824,52 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   oss << result_target << " = pto.treshape " << src;
   if (!src_type.empty() && !result_type.empty()) {
     oss << " : " << src_type << " -> " << result_type;
+  }
+  codegen.Emit(oss.str());
+  return result_target;
+}
+
+// Emit a metadata-only `pto.bitcast` reinterpret of `src_arg` into the current
+// result, used when no alloc_tile declaration carries the target dtype at the
+// source address (MemRef-less result, or the PTOAS planner collapsing aliased
+// vars onto one tile_buf handle).
+//
+// PTOAS requires the src and result tile_buf types to agree on shape AND valid
+// shape and to differ only in element type. That rules out reusing the source's
+// registered SSA type directly: it comes from `pto.alloc_tile`, which always
+// renders `v_row=?, v_col=?`, and `pto.bitcast` takes no valid_row / valid_col
+// operands — ptoas would build the destination tile from the result type alone
+// and leave its `RowMaskInternal` / `ColMaskInternal` UNINITIALIZED (pto-isa
+// pto_tile.hpp), so every consumer of the view would read a garbage valid
+// extent. The source is therefore first pinned to its STATIC-valid form with a
+// `pto.treshape` (exactly how tile.reshape / tile.transpose_view solve the same
+// problem), then bitcast. Both ops are metadata-only — no data movement.
+static void EmitBitcastView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
+                            std::string result_target, const std::string& result_view_type) {
+  // The source's static-valid tile_buf type: same shape / valid / layout as the
+  // result, differing only in element type — exactly what pto.bitcast requires.
+  std::string src_view_type;
+  if (auto src_var = AsVarLike(src_arg)) {
+    if (auto src_tile = ir::As<ir::TileType>(src_var->GetType())) {
+      src_view_type = codegen.GetViewTileBufTypeStringFromTileType(src_tile);
+    }
+  }
+  // Pin the source's valid extent (see above). EmitTreshapeView rebinds the
+  // current result buf to the temp it creates, so run it first and let the
+  // bitcast below take the buf back.
+  std::string src = src_view_type.empty()
+                        ? codegen.GetExprAsCode(src_arg)
+                        : EmitTreshapeView(codegen, src_arg, result_target, src_view_type, "bitcast_src");
+
+  if (!result_view_type.empty()) {
+    result_target = codegen.NewNamedTemp("bitcast_buf");
+    codegen.SetCurrentResultBuf(result_target);
+    codegen.RegisterTileBufType(result_target, result_view_type);
+  }
+  std::ostringstream oss;
+  oss << result_target << " = pto.bitcast " << src;
+  if (!src_view_type.empty() && !result_view_type.empty()) {
+    oss << " : " << src_view_type << " -> " << result_view_type;
   }
   codegen.Emit(oss.str());
 }
@@ -1151,6 +1198,44 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // No declaration carries the transposed type — reinterpret the source in
     // place via pto.treshape reading its SSA, exactly like tile.reshape.
     EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "transpose_view_buf");
+    return std::string("");
+  });
+
+  reg("tile.bitcast", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    // Zero-copy element-type reinterpretation. Same two-case shape as
+    // tile.reshape / tile.transpose_view:
+    //  - The result var owns a pre-declared pto.alloc_tile already carrying the
+    //    target dtype at the source buffer's address (InitMemRef shares the
+    //    source MemRef through set_output_memory_inherit_input). The two
+    //    alloc_tile decls at the same addr ARE the bitcast — emit nothing.
+    //  - Otherwise no declaration carries the target dtype, so reinterpret the
+    //    source in place with pto.bitcast. This covers a MemRef-less result (a
+    //    view over a cross-core tpop slot) and the PTOAS planner, where
+    //    addr-less aliased vars collapse onto ONE tile_buf handle so the second
+    //    alloc_tile is never emitted.
+    CHECK(op->args_.size() == 1) << "Operation:[tile.bitcast] requires 1 argument (tile), but got "
+                                 << op->args_.size();
+    auto& codegen = AsPto(codegen_base);
+    std::string result_target = codegen.GetCurrentResultTarget();
+
+    std::string result_type;
+    std::string view_type;  // static valid dims — see tile.reshape above
+    bool result_has_memref = false;
+    if (auto result_var = codegen.GetCurrentResultVar()) {
+      if (auto result_tile = ir::As<ir::TileType>(result_var->GetType())) {
+        result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+        view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
+        result_has_memref = result_tile->memref_.has_value();
+      }
+    }
+    // The result's own alloc_tile already declares the target dtype at the
+    // shared address: it IS the bitcast, so emit nothing.
+    auto existing_type = codegen.GetSSATileBufType(result_target);
+    if (result_has_memref && !existing_type.empty() && existing_type == result_type) {
+      return std::string("");
+    }
+
+    EmitBitcastView(codegen, op->args_[0], result_target, view_type);
     return std::string("");
   });
 

@@ -241,6 +241,16 @@ Shape reinterpretation of a partially valid source is limited to a packed ND
 leading-dimension collapse to 2D and requires an explicit target `valid_shape`;
 this form preserves the source tensor kind and backing metadata.
 
+`tensor.bitcast` is the element-type counterpart of `tensor.view`: a zero-copy
+reinterpretation that keeps shape and view metadata and changes only `dtype`.
+It is **in-core only** — `ConvertTensorToTileOps` lowers it 1:1 to
+`tile.bitcast`, and orchestration codegen rejects it ("Misplaced tensor op").
+`strict=True` (the default) requires the target dtype to have the same bit width
+as the source; `strict=False` also allows narrowing, where the result keeps the
+source shape and therefore covers only the leading bytes of the source buffer.
+Widening and same-dtype are always rejected — use `tensor.cast` for a value
+conversion and `tensor.reshape` for a shape change.
+
 **Example:**
 
 ```python
@@ -277,6 +287,7 @@ with ib.function("tensor_example") as f:
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match) |
+| - | `tile.bitcast` | Zero-copy element-type reinterpretation aliasing the source buffer (`pto.bitcast`). Shape/valid_shape/layout carry through; only `dtype` changes. `strict=True` (default) requires equal bit width; `strict=False` also allows narrowing. Widening and same-dtype are always rejected. Use `tile.cast` for value conversion, `tile.reshape` for shape changes |
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
 | - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1 |

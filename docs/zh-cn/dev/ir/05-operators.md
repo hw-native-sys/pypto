@@ -235,6 +235,14 @@ in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor
 dimensions 折叠为 2D，并且必须显式提供目标 `valid_shape`；该形式会保留源张量
 类型及其底层元数据。
 
+`tensor.bitcast` 是 `tensor.view` 在元素类型维度上的对应操作：零拷贝重新解释，
+保留 shape 与 view 元数据，仅改变 `dtype`。它**仅支持 in-core** ——
+`ConvertTensorToTileOps` 会将其 1:1 下降为 `tile.bitcast`，编排层 codegen 则
+直接报错（"Misplaced tensor op"）。`strict=True`（默认）要求目标 dtype 与源
+dtype 位宽相等；`strict=False` 额外允许窄化，此时结果沿用源 shape，因此只覆盖
+源 buffer 的前若干字节。加宽与同 dtype 始终拒绝 —— 数值转换请用
+`tensor.cast`，形状变换请用 `tensor.reshape`。
+
 **示例：**
 
 ```python
@@ -271,6 +279,7 @@ with ib.function("tensor_example") as f:
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致） |
+| - | `tile.bitcast` | 零拷贝元素类型重新解释，结果与源 buffer 同址（`pto.bitcast`）。shape/valid_shape/layout 全部沿用，仅 `dtype` 改变。`strict=True`（默认）要求位宽相等；`strict=False` 额外允许窄化。加宽与同 dtype 始终拒绝。数值转换请用 `tile.cast`，形状变换请用 `tile.reshape` |
 | - | `tile.transpose` | 交换 tile 的两个轴 |
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
 | - | `tile.ci` | 生成连续整数序列（升序 start+k 或降序 start-k）；dtype ∈ {INT16, INT32}；最内维 != 1 |

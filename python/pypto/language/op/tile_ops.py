@@ -112,6 +112,7 @@ __all__ = [
     "reshape",
     "transpose",
     "transpose_view",
+    "bitcast",
     "set_validshape",
     "rem",
     "rems",
@@ -1856,6 +1857,39 @@ def transpose_view(tile: Tile) -> Tile:
     """
     tile_expr = tile.unwrap()
     call_expr = _ir_ops.transpose_view(tile_expr)
+    return Tile(expr=call_expr)
+
+
+def bitcast(tile: Tile, dtype: DataType, *, strict: bool = True) -> Tile:
+    """Reinterpret a tile's bits under a different element type (zero-copy).
+
+    Maps to PTOAS ``pto.bitcast``. Shape, valid shape and layout are unchanged
+    and the result aliases the source buffer byte-for-byte, so no data movement
+    is emitted. Use :func:`cast` for a value conversion (FP32 -> FP16 rounding)
+    and :func:`reshape` for a shape change.
+
+    Args:
+        tile: Input tile.
+        dtype: Target element type; must differ from the tile's dtype.
+        strict: When True (default), ``dtype`` must have the same bit width as
+            the tile's dtype — the only unambiguous reinterpretation. When
+            False, a narrower ``dtype`` is also allowed; the result keeps the
+            source shape and therefore covers only the leading bytes of the
+            source buffer. Widening is rejected either way.
+
+    Returns:
+        Tile wrapping the reinterpreted view.
+
+    Examples:
+        # Extract sort32 index bits from an FP32 tile
+        idx_bits = pl.tile.bitcast(sorted_tile, pl.UINT32)
+
+        # Sign-bit masking via integer ops on FP32 data
+        bits = pl.tile.bitcast(x, pl.INT32)
+        masked = pl.tile.ands(bits, 0x7FFFFFFF)
+        y = pl.tile.bitcast(masked, pl.FP32)
+    """
+    call_expr = _ir_ops.bitcast(tile.unwrap(), dtype, strict=strict)
     return Tile(expr=call_expr)
 
 

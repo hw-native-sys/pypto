@@ -22,6 +22,7 @@ import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import passes
 
 # ============================================================================
 # Operation to PTO API Mapping
@@ -974,6 +975,159 @@ class TestBroadcastOpsCodegen:
                 break
         else:
             raise AssertionError("no pto.trowexpand ins(...) line in MLIR")
+
+
+class TestTileBitcastCodegen:
+    """Tests for tile.bitcast PTO code generation.
+
+    tile.bitcast is a pure element-type view: InitMemRef shares the source
+    MemRef. Two lowerings follow from that, and both are covered here:
+
+    * PyPTO planner — the result's own ``pto.alloc_tile`` at the shared address
+      already carries the target dtype, so the bitcast emits NO instruction.
+    * PTOAS planner (``memory_planner=PTOAS`` / ``emit_tile_addr=False``) —
+      addr-less aliased vars collapse onto ONE tile_buf handle, so that second
+      alloc_tile is never emitted and the bitcast must lower to an explicit
+      ``pto.treshape`` (pinning the valid extent) + ``pto.bitcast`` pair.
+    """
+
+    @staticmethod
+    def _bitcast_program():
+        """load f32 -> bitcast i32 -> add -> bitcast back to f32 -> store."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                dst: pl.Tensor[[16, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                loaded: pl.Tile[[16, 128], pl.FP32] = pl.load(src, [0, 0], [16, 128])
+                bits: pl.Tile[[16, 128], pl.INT32] = pl.tile.bitcast(loaded, pl.INT32)
+                doubled: pl.Tile[[16, 128], pl.INT32] = pl.tile.add(bits, bits)
+                back: pl.Tile[[16, 128], pl.FP32] = pl.tile.bitcast(doubled, pl.FP32)
+                return pl.store(back, [0, 0], dst)
+
+        return Prog
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def _generate_mlir_ptoas_planner(self, program_cls) -> str:
+        """Same, but under memory_planner=PTOAS (addr-less alloc_tile)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            pm = PassManager.get_strategy(OptimizationStrategy.Default)
+            optimized = pm.run_passes(program_cls)
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen.PTOCodegen().generate(single, emit_tile_addr=False)
+
+    def test_ptoas_planner_lowers_to_explicit_bitcast(self):
+        """Without a per-var addr there is no aliased alloc_tile, so pto.bitcast
+        must be emitted — with STATIC valid dims on both sides.
+
+        ptoas builds a pto.bitcast destination from the result type alone (the op
+        takes no valid_row / valid_col operands), and a `v_row=?` type lowers to a
+        default-constructed Tile whose valid mask is left uninitialized. The
+        preceding pto.treshape is what pins the extent.
+        """
+        mlir = self._generate_mlir_ptoas_planner(self._bitcast_program())
+
+        bitcast_lines = [line.strip() for line in mlir.splitlines() if "pto.bitcast" in line]
+        assert len(bitcast_lines) == 2, f"expected 2 pto.bitcast lines, got {bitcast_lines}\n{mlir}"
+        for line in bitcast_lines:
+            src_ty, _, dst_ty = line.partition("->")
+            assert "v_row=?" not in src_ty and "v_row=?" not in dst_ty, (
+                f"pto.bitcast operands must carry static valid dims (a dynamic valid leaves the "
+                f"destination Tile's valid mask uninitialized); got:\n{line}"
+            )
+            # PTOAS rejects a bitcast whose src/result differ in anything but dtype.
+            assert src_ty.count("rows=16, cols=128") and dst_ty.count("rows=16, cols=128"), (
+                f"pto.bitcast must preserve shape; got:\n{line}"
+            )
+
+        # Each bitcast is preceded by the treshape that pins the valid extent.
+        assert mlir.count("pto.treshape") >= 2, f"expected a treshape per bitcast; got:\n{mlir}"
+
+    def test_bitcast_aliases_source_addr_without_emitting_an_instruction(self):
+        """The i32 view and its f32 source get alloc_tile decls at the SAME addr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                dst: pl.Tensor[[16, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                loaded: pl.Tile[[16, 128], pl.FP32] = pl.load(src, [0, 0], [16, 128])
+                bits: pl.Tile[[16, 128], pl.INT32] = pl.tile.bitcast(loaded, pl.INT32)
+                doubled: pl.Tile[[16, 128], pl.INT32] = pl.tile.add(bits, bits)
+                back: pl.Tile[[16, 128], pl.FP32] = pl.tile.bitcast(doubled, pl.FP32)
+                return pl.store(back, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+
+        alloc_lines = [line.strip() for line in mlir.splitlines() if "pto.alloc_tile" in line]
+        addr_by_dtype: dict[str, list[str]] = {}
+        for line in alloc_lines:
+            addr = line.split("addr = ", 1)[1].split(" ", 1)[0]
+            dtype = line.split("dtype=", 1)[1].split(",", 1)[0]
+            addr_by_dtype.setdefault(dtype, []).append(addr)
+
+        # The load target (f32) and its i32 bitcast view share one address.
+        assert addr_by_dtype["f32"], f"no f32 alloc_tile emitted; got:\n{mlir}"
+        assert addr_by_dtype["i32"], f"no i32 alloc_tile emitted; got:\n{mlir}"
+        assert set(addr_by_dtype["i32"]) & set(addr_by_dtype["f32"]), (
+            f"bitcast view must alias a source address; got f32 at {addr_by_dtype['f32']} "
+            f"and i32 at {addr_by_dtype['i32']}\n{mlir}"
+        )
+
+    def test_bitcast_result_type_matches_the_source_tile_buf_config(self):
+        """Only dtype differs — rows/cols/blayout/slayout/fractal/pad carry through."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 128], pl.FP32],
+                dst: pl.Tensor[[16, 128], pl.INT32],
+            ) -> pl.Tensor[[16, 128], pl.INT32]:
+                loaded: pl.Tile[[16, 128], pl.FP32] = pl.load(src, [0, 0], [16, 128])
+                bits: pl.Tile[[16, 128], pl.INT32] = pl.tile.bitcast(loaded, pl.INT32)
+                doubled: pl.Tile[[16, 128], pl.INT32] = pl.tile.add(bits, bits)
+                return pl.store(doubled, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        alloc_lines = [line.strip() for line in mlir.splitlines() if "pto.alloc_tile" in line]
+
+        def config(line: str) -> str:
+            """tile_buf type with the dtype field stripped."""
+            body = line.split("!pto.tile_buf<", 1)[1]
+            return ", ".join(f for f in body.split(", ") if not f.startswith("dtype="))
+
+        f32_configs = {config(line) for line in alloc_lines if "dtype=f32" in line}
+        i32_configs = {config(line) for line in alloc_lines if "dtype=i32" in line}
+        assert f32_configs and i32_configs, f"expected both f32 and i32 allocs; got:\n{mlir}"
+        assert f32_configs == i32_configs, (
+            f"bitcast must preserve the tile_buf config; f32={f32_configs} i32={i32_configs}\n{mlir}"
+        )
 
 
 class TestTileSliceCodegen:

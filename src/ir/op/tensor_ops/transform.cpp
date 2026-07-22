@@ -556,6 +556,90 @@ REGISTER_OP("tensor.view")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorViewType(args, kwargs);
     });
+
+TypePtr DeduceTensorBitcastType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.bitcast(input, dtype=..., strict=...) — zero-copy element-type
+  // reinterpretation. Lowers 1:1 to tile.bitcast inside InCore functions; see
+  // DeduceTileBitcastType for the shared width rules.
+  CHECK(args.size() == 1) << "tensor.bitcast requires exactly 1 argument (input), but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.bitcast requires input to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  bool has_dtype = false;
+  DataType dst_dtype;
+  bool strict = true;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dtype") {
+      if (value.type() == typeid(DataType)) {
+        dst_dtype = AnyCast<DataType>(value, "kwarg key: dtype");
+      } else {
+        dst_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: dtype"));
+      }
+      has_dtype = true;
+    } else if (key == "strict") {
+      strict = AnyCast<bool>(value, "kwarg key: strict");
+    }
+  }
+  CHECK(has_dtype) << "tensor.bitcast requires a 'dtype' kwarg naming the target element type";
+
+  const DataType src_dtype = tensor_type->dtype_;
+  CHECK(dst_dtype != src_dtype)
+      << "tensor.bitcast requires dtype to differ from the source dtype, but both are "
+      << src_dtype.ToString() << "; drop the bitcast (it would be a no-op)";
+
+  if (strict) {
+    CHECK(dst_dtype.GetBit() == src_dtype.GetBit())
+        << "tensor.bitcast requires dtype to have the same bit width as the source dtype ("
+        << src_dtype.ToString() << " = " << src_dtype.GetBit() << " bits), but got " << dst_dtype.ToString()
+        << " = " << dst_dtype.GetBit()
+        << " bits. Pass strict=False to allow a narrowing reinterpretation (which covers only the "
+           "leading bytes of the source buffer), use tensor.cast for a value conversion, or "
+           "tensor.reshape to change the shape";
+  } else {
+    CHECK(dst_dtype.GetBit() <= src_dtype.GetBit())
+        << "tensor.bitcast cannot widen: dtype " << dst_dtype.ToString() << " = " << dst_dtype.GetBit()
+        << " bits needs more storage than the source dtype " << src_dtype.ToString() << " = "
+        << src_dtype.GetBit() << " bits";
+  }
+
+  // A narrowing bitcast keeps the shape, so the result covers only the leading
+  // `numel * sizeof(dst)` bytes of the source buffer. That is well defined only
+  // for a row-major contiguous ND tensor; under DN / NZ the element -> byte
+  // mapping depends on the element width, so the narrowed view would not address
+  // the intended elements. Equal-width bitcasts are layout-agnostic.
+  if (dst_dtype.GetBit() != src_dtype.GetBit() && tensor_type->tensor_view_.has_value()) {
+    const TensorLayout layout = tensor_type->tensor_view_->layout;
+    CHECK(layout == TensorLayout::ND)
+        << "tensor.bitcast narrowing (strict=False) requires an ND-layout source because the result "
+           "keeps the source shape and therefore covers only the leading bytes of the buffer; under "
+        << TensorLayoutToString(layout)
+        << " the element-to-byte mapping depends on the element width. Use an equal-width bitcast, "
+           "or tensor.cast for a value conversion";
+  }
+
+  // Pure reinterpretation: shape and view metadata are byte-level invariants
+  // that carry through unchanged — only dtype differs.
+  return std::make_shared<TensorType>(tensor_type->shape_, dst_dtype, std::nullopt,
+                                      tensor_type->tensor_view_);
+}
+
+REGISTER_OP("tensor.bitcast")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Zero-copy element-type reinterpretation over the same physical memory. "
+        "In-core only: lowers to tile.bitcast; not supported in orchestration code.")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<DataType>("dtype")  // target element type; must differ from the source dtype
+    .set_attr<bool>("strict")     // true (default): require equal bit width; false: allow narrowing
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorBitcastType(args, kwargs);
+    });
+
 TypePtr DeduceTensorConcatType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 2) << "tensor.concat requires 2 arguments (src0, src1), got " << args.size();

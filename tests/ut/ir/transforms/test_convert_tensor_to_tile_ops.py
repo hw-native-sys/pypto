@@ -2713,6 +2713,47 @@ class TestTensorFullConversion:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestTensorBitcastConversion:
+    def test_tensor_bitcast_conversion(self):
+        """tensor.bitcast -> tile.bitcast conversion, dtype/strict kwargs carried through."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.INT32]:
+                b: pl.Tensor[[64], pl.INT32] = pl.bitcast(x, pl.INT32)
+                y: pl.Tensor[[64], pl.INT32] = pl.add(b, b)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.INT32]:
+                y: pl.Tensor[[64], pl.INT32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.INT32]],
+            ) -> pl.Tensor[[64], pl.INT32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
+                b__tile = pl.tile.bitcast(x__tile, pl.INT32)
+                y__tile = pl.tile.add(b__tile, b__tile)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.INT32]:
+                ret0__out = pl.create_tensor([64], dtype=pl.INT32, layout=pl.TensorLayout.ND)
+                y = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 class TestTensorCiConversion:
     def test_tensor_ci_conversion(self):
         """tensor.ci -> tile.ci conversion preserves dtype + descending kwargs."""

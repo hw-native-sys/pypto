@@ -442,6 +442,90 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
                                     tile_type->memory_space_);
 }
 
+TypePtr DeduceTileBitcastType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tile.bitcast(input, dtype=..., strict=...) — zero-copy element-type
+  // reinterpretation over the same bytes. Maps to PTOAS `pto.bitcast`, which
+  // requires src/result to share shape AND valid shape and to differ only in
+  // element type; shape changes go through tile.reshape and value conversion
+  // through tile.cast.
+  CHECK(args.size() == 1) << "tile.bitcast requires exactly 1 argument (input), but got " << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "tile.bitcast requires input to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  bool has_dtype = false;
+  DataType dst_dtype;
+  bool strict = true;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dtype") {
+      // The DSL passes a DataType; the Python IR layer also accepts the raw
+      // enum code, mirroring tile.gather_mask's output_dtype handling.
+      if (value.type() == typeid(DataType)) {
+        dst_dtype = AnyCast<DataType>(value, "kwarg key: dtype");
+      } else {
+        dst_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: dtype"));
+      }
+      has_dtype = true;
+    } else if (key == "strict") {
+      strict = AnyCast<bool>(value, "kwarg key: strict");
+    }
+  }
+  CHECK(has_dtype) << "tile.bitcast requires a 'dtype' kwarg naming the target element type";
+
+  const DataType src_dtype = tile_type->dtype_;
+  CHECK(dst_dtype != src_dtype)
+      << "tile.bitcast requires dtype to differ from the source dtype, but both are " << src_dtype.ToString()
+      << "; drop the bitcast (it would be a no-op)";
+
+  if (strict) {
+    CHECK(dst_dtype.GetBit() == src_dtype.GetBit())
+        << "tile.bitcast requires dtype to have the same bit width as the source dtype ("
+        << src_dtype.ToString() << " = " << src_dtype.GetBit() << " bits), but got " << dst_dtype.ToString()
+        << " = " << dst_dtype.GetBit()
+        << " bits. Pass strict=False to allow a narrowing reinterpretation (which covers only the "
+           "leading bytes of the source buffer), use tile.cast for a value conversion, or "
+           "tile.reshape to change the shape";
+  } else {
+    CHECK(dst_dtype.GetBit() <= src_dtype.GetBit())
+        << "tile.bitcast cannot widen: dtype " << dst_dtype.ToString() << " = " << dst_dtype.GetBit()
+        << " bits needs more storage than the source dtype " << src_dtype.ToString() << " = "
+        << src_dtype.GetBit() << " bits";
+  }
+
+  const TileView src_v = tile_view_semantics::GetEffectiveTileView(*tile_type);
+
+  // A narrowing bitcast keeps rows/cols, so the result covers only the leading
+  // `rows * cols * sizeof(dst)` bytes of the source buffer. That is well defined
+  // only for a plainly row-major, non-boxed tile: under a fractal / box-scatter
+  // layout the element -> byte mapping itself depends on the element width
+  // (`fractal` is a BYTE count), so "the leading bytes" no longer names the same
+  // elements. Equal-width bitcasts are layout-agnostic and unaffected.
+  if (dst_dtype.GetBit() != src_dtype.GetBit()) {
+    CHECK(src_v.blayout == TileLayout::row_major && src_v.slayout == TileLayout::none_box)
+        << "tile.bitcast narrowing (strict=False) requires a row_major, none_box source tile "
+           "because the result keeps the source shape and therefore covers only the leading bytes "
+           "of the buffer; under a fractal / boxed layout the element-to-byte mapping depends on "
+           "the element width, so the narrowed view would not address the intended elements. Got "
+           "blayout="
+        << TileLayoutToString(src_v.blayout) << ", slayout=" << TileLayoutToString(src_v.slayout)
+        << ". Use an equal-width bitcast, or tile.cast for a value conversion";
+  }
+
+  // Pure reinterpretation: shape, valid shape, layouts, fractal and pad are all
+  // byte-level invariants that carry through unchanged — only dtype differs.
+  TileView tile_view;
+  tile_view.blayout = src_v.blayout;
+  tile_view.slayout = src_v.slayout;
+  tile_view.fractal = src_v.fractal;
+  tile_view.pad = src_v.pad;
+  tile_view.valid_shape = src_v.valid_shape.empty() ? tile_type->shape_ : src_v.valid_shape;
+
+  return std::make_shared<TileType>(tile_type->shape_, dst_dtype, std::nullopt, tile_view,
+                                    tile_type->memory_space_);
+}
+
 // ============================================================================
 // Registration Function for Tile Transform Operations
 // ============================================================================
@@ -509,6 +593,23 @@ REGISTER_OP("tile.transpose_view")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeViewType(args, kwargs);
+    });
+
+REGISTER_OP("tile.bitcast")
+    .set_op_category("TileOp")
+    .set_description("Zero-copy element-type reinterpretation that aliases the source buffer")
+    .add_argument("input", "Input tile (TileType)")
+    .set_attr<DataType>("dtype")  // target element type; must differ from the source dtype
+    .set_attr<bool>("strict")     // true (default): require equal bit width; false: allow narrowing
+    // Pure view: the result reinterprets the same bytes under a different
+    // element type, so it inherits the input's memory space and InitMemRef
+    // shares the input MemRef (same base_ -> same address). Under the PyPTO
+    // planner codegen emits nothing at all — the result's own pto.alloc_tile at
+    // the shared address already carries the target dtype.
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileBitcastType(args, kwargs);
     });
 
 TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
