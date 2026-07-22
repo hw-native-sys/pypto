@@ -1248,6 +1248,39 @@ class TestInplaceOps:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_move_output_must_not_alias_input(self):
+        """tile.move's output must get a buffer distinct from its input.
+
+        The TMOV intrinsic cannot execute with src == dst (a same-address move
+        is not a legal instruction, only a no-op). If MemoryReuse colocated a
+        same-space layout-changing move (e.g. the A5 V->C ND->NZ fractal adapt)
+        with its source, codegen would see matching addresses and wrongly elide
+        the move as a no-op, dropping the layout adapt. tile.move is registered
+        ``.not_inplace_safe()`` to forbid that colocation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP32],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [32, 32])
+                tile_b: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Vec] = pl.move(
+                    tile_a, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        assert bases["tile_b"] != bases["tile_a"], (
+            "move output must not reuse its input's buffer (tile.move is not in-place safe); "
+            f"both bound to {bases['tile_a']}"
+        )
+
     def test_inplace_unsafe_op_allows_non_producer_consumer_reuse(self):
         """tile.recip output must never share a buffer with its input.
 
