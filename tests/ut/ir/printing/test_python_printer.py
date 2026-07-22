@@ -1706,5 +1706,38 @@ def test_reinterpret_view_public_api_print_parse_roundtrip():
     assert python_print(reparsed, format=False) == printed
 
 
+def test_full_special_case_preserves_serialized_attrs():
+    """Special full-call printing must not drop pipeline membership."""
+    source = textwrap.dedent("""\
+        @pl.program
+        class FullPipelineMembership:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_full(self) -> pl.Tile[[8, 16], pl.FP32]:
+                return pl.tile.full(
+                    [8, 16],
+                    dtype=pl.FP32,
+                    value=1.0,
+                    attrs={"pipeline_membership": "0:1"},
+                )
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tensor_full(self) -> pl.Tensor[[8, 16], pl.FP32]:
+                return pl.tensor.full(
+                    [8, 16],
+                    dtype=pl.FP32,
+                    value=2.0,
+                    attrs={"pipeline_membership": "1:1"},
+                )
+    """)
+
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+
+    assert printed.count('attrs={"pipeline_membership":') == 2
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

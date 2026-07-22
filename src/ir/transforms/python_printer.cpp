@@ -1013,6 +1013,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else {
       VisitExpr(val_expr);
     }
+    print_serialized_attrs(/*need_comma=*/true);
     stream_ << ")";
     return;
   }
@@ -1051,6 +1052,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       stream_ << ", scratch_l1=";
       VisitExpr(op->args_[2]);
     }
+    print_serialized_attrs(/*need_comma=*/true);
     stream_ << ")";
     return;
   }
