@@ -25,7 +25,7 @@ import pytest
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.pypto_core.passes import DsaReusePenaltyRecognizer, MemoryPlanner
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -296,6 +296,18 @@ class PTOTestCase(ABC):
             return None
         return self.config.dsa_reuse_penalty_recognizer
 
+    def get_dsa_reference_placement(self) -> DsaReferencePlacement | None:
+        """Return the controlled compact/loose DSA endpoint."""
+        if self.get_memory_planner() != MemoryPlanner.DSA:
+            return None
+        return self.config.dsa_reference_placement
+
+    def get_dsa_reference_target(self) -> str | None:
+        """Return the exact function selected for loose reference placement."""
+        if self.get_dsa_reference_placement() != DsaReferencePlacement.LOOSE:
+            return None
+        return self.config.dsa_reference_target
+
     def get_ptoas_sync_summary_dir(self) -> str | None:
         """Return a collision-free directory for PTOAS synchronization summaries."""
         if self.config.ptoas_sync_summary_dir is None:
@@ -309,6 +321,8 @@ class PTOTestCase(ABC):
         dsa_export_dir: str | None,
         dsa_solution_dir: str | None,
         dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None,
+        dsa_reference_placement: DsaReferencePlacement | None,
+        dsa_reference_target: str | None,
         ptoas_sync_summary_dir: str | None,
     ) -> None:
         """Fill unset compile controls from the suite-wide configuration."""
@@ -320,6 +334,10 @@ class PTOTestCase(ABC):
             self.config.dsa_solution_dir = dsa_solution_dir
         if self.config.dsa_reuse_penalty_recognizer is None:
             self.config.dsa_reuse_penalty_recognizer = dsa_reuse_penalty_recognizer
+        if self.config.dsa_reference_placement is None:
+            self.config.dsa_reference_placement = dsa_reference_placement
+        if self.config.dsa_reference_target is None:
+            self.config.dsa_reference_target = dsa_reference_target
         if self.config.ptoas_sync_summary_dir is None:
             self.config.ptoas_sync_summary_dir = ptoas_sync_summary_dir
 

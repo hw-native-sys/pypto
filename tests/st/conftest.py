@@ -144,6 +144,19 @@ def pytest_addoption(parser):
         help="Experimental DSA reuse-hazard recognizer (default: disabled).",
     )
     parser.addoption(
+        "--dsa-reference-placement",
+        action="store",
+        choices=["default", "compact", "loose"],
+        default="default",
+        help="Experimental controlled DSA placement endpoint (default: default).",
+    )
+    parser.addoption(
+        "--dsa-reference-target",
+        action="store",
+        default=None,
+        help="Exact function selected when --dsa-reference-placement=loose.",
+    )
+    parser.addoption(
         "--ptoas-sync-summary-dir",
         action="store",
         default=None,
@@ -502,6 +515,12 @@ def test_config(request) -> RunConfig:
             "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
             "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
         }[request.config.getoption("--dsa-reuse-penalty-recognizer")],
+        dsa_reference_placement={
+            "default": passes.DsaReferencePlacement.DEFAULT,
+            "compact": passes.DsaReferencePlacement.COMPACT,
+            "loose": passes.DsaReferencePlacement.LOOSE,
+        }[request.config.getoption("--dsa-reference-placement")],
+        dsa_reference_target=request.config.getoption("--dsa-reference-target"),
         ptoas_sync_summary_dir=request.config.getoption("--ptoas-sync-summary-dir"),
     )
 
@@ -888,6 +907,12 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
         "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
     }[session.config.getoption("--dsa-reuse-penalty-recognizer")]
+    dsa_reference_placement = {
+        "default": passes.DsaReferencePlacement.DEFAULT,
+        "compact": passes.DsaReferencePlacement.COMPACT,
+        "loose": passes.DsaReferencePlacement.LOOSE,
+    }[session.config.getoption("--dsa-reference-placement")]
+    dsa_reference_target: str | None = session.config.getoption("--dsa-reference-target")
     ptoas_sync_summary_dir: str | None = session.config.getoption("--ptoas-sync-summary-dir")
     if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
         raise pytest.UsageError(
@@ -959,6 +984,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             dsa_export_dir=dsa_export_dir,
             dsa_solution_dir=dsa_solution_dir,
             dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+            dsa_reference_placement=dsa_reference_placement,
+            dsa_reference_target=dsa_reference_target,
             ptoas_sync_summary_dir=ptoas_sync_summary_dir,
             enable_l2_swimlane=enable_l2_swimlane,
             enable_dump_args=enable_dump_args,
