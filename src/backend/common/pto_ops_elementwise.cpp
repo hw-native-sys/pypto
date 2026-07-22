@@ -15,7 +15,6 @@
  */
 
 #include <cstddef>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -29,7 +28,6 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -480,48 +478,28 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
-  // tile.move → pto.tmov with no-op elision.
-  // When MemoryReuse inserts a tile.move between two MemRefs that end up at the
-  // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
-  // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
-  // unsupported same-space address pairs (fixes #1310).
+  // tile.move → pto.tmov.
+  //
+  // tile.move is registered .not_inplace_safe() (see tile_ops/memory.cpp), so
+  // MemoryReuse never lands the move output on its input's buffer. With baked
+  // addresses, src and dst therefore always occupy distinct buffers: there is
+  // no same-address no-op to elide, and a same-space layout-changing move (the
+  // A5 V→C ND→NZ fractal adapt) is always emitted rather than dropped. So the
+  // baked-address path simply emits pto.tmov unconditionally.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
 
-    // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
-    // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
-    // comparison below would see `-1 == -1` and elide EVERY move — including the
-    // loop-carry write-back YieldFixupMutator inserts. There, two vars denote one
-    // buffer exactly when they collapsed onto the same tile_buf handle.
+    // Under memory_planner=PtoAS there is no baked address (AllocateMemoryAddr
+    // and the reuse-packer's not_inplace_safe gate are both skipped). A
+    // redundant loop-carry write-back that YieldFixupMutator inserts collapses
+    // onto a single tile_buf handle, and PTO codegen re-points the producer at
+    // the phi handle (#1956/#1985). Elide only that exact case — src and dst
+    // denote one handle — so we never emit an illegal same-handle pto.tmov.
     if (!codegen.EmitTileAddr()) {
       std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
       if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
         return std::string("");  // no-op: one handle, the op already wrote in place
-      }
-      codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
-      return std::string("");
-    }
-
-    auto src_var = AsVarLike(op->args_[0]);
-    auto dst_var = codegen.GetCurrentResultVar();
-    if (src_var && dst_var) {
-      auto src_tile = As<ir::TileType>(src_var->GetType());
-      auto dst_tile = As<ir::TileType>(dst_var->GetType());
-      if (src_tile && dst_tile && src_tile->memref_.has_value() && dst_tile->memref_.has_value()) {
-        auto src_space = src_tile->GetMemorySpace();
-        auto dst_space = dst_tile->GetMemorySpace();
-        if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
-          auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
-          auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
-            // Alias the destination to the source SSA value so downstream
-            // references use the source's defined buffer, not the destination's
-            // alloc_tile (which would be unwritten after eliding the tmov).
-            codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
-            return std::string("");  // no-op: same space, same address
-          }
-        }
       }
     }
 
