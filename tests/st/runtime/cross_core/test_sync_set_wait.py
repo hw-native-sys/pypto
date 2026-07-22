@@ -167,12 +167,12 @@ def sync_set_wait_odd_last_axis(
             [LR_CUBE_ROWS, LR_CUBE_COLS],
             pl.FP16,
             pl.Mem.Mat,
-            pl.TileView(valid_shape=[LR_ROWS, LR_CUBE_COLS]),
+            pl.TileView(valid_shape=[LR_ROWS, LR_COLS]),
         ] = pl.load(
             transfer,
             [0, 0],
             [LR_CUBE_ROWS, LR_CUBE_COLS],
-            valid_shapes=[LR_ROWS, LR_CUBE_COLS],
+            valid_shapes=[LR_ROWS, LR_COLS],
             target_memory=pl.Mem.Mat,
         )
         weight_mat: pl.Tile[[LR_CUBE_COLS, LR_OUTPUT_COLS], pl.FP16, pl.Mem.Mat] = pl.load(
@@ -223,7 +223,9 @@ class TestSyncSetWait:
         torch.manual_seed(1)
         input_tensor = torch.randn(LR_ROWS, LR_COLS, dtype=torch.float16)
         weight = torch.randn(LR_CUBE_COLS, LR_OUTPUT_COLS, dtype=torch.float16)
-        transfer = torch.zeros(LR_CUBE_ROWS, LR_CUBE_COLS, dtype=torch.float16)
+        # Keep padding non-zero so the golden catches accidental inclusion of
+        # transfer column 255 in the logical K=255 contraction.
+        transfer = torch.ones(LR_CUBE_ROWS, LR_CUBE_COLS, dtype=torch.float16)
         ffts_workspace = torch.zeros(FFTS_WORKSPACE_ELEMENTS, dtype=torch.int64)
         output = torch.zeros(LR_CUBE_ROWS, LR_OUTPUT_COLS, dtype=torch.float32)
 
