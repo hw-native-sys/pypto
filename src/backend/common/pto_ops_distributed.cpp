@@ -95,38 +95,88 @@ DistTensorBinding ResolveDistTensorBinding(const ExprPtr& arg, codegen::PTOCodeg
   return {var, dist_type, std::move(local_ptr), std::move(ctx_ssa)};
 }
 
+// Inline the peer-vs-local **element offset** computation (``index``) at the
+// call site. Reads the CommContext fields and does the byte→element division:
+//
+//   %c_r = arith.constant <rankId slot> : index
+//   %c_w = arith.constant <windowsIn base slot> : index
+//   %rk_pair = pto.load_scalar %ctx[%c_r] : !pto.ptr<i64> -> i64   ; (rankId, rankNum)
+//   %rk_idx  = index_cast (trunci %rk_pair)                        ; rankId
+//   %lbase = pto.load_scalar %ctx[%c_w + %rk_idx]                  ; windowsIn[rankId]
+//   %pbase = pto.load_scalar %ctx[%c_w + %peer]                    ; windowsIn[peer]
+//   %delems = index_cast (divsi (subi %pbase, %lbase), <elem_size_bytes>)
+//
+// This used to be a module-level ``func.func private @CommRemoteOffset_<dtype>``
+// invoked via ``func.call``. ptoas' ``pto-memory-consistency`` pass rejects a
+// ``func.call`` to a callee containing memory-consistency-relevant ops (the
+// ``pto.load_scalar`` CommContext reads), demanding they live in the caller — so
+// the offset arithmetic is emitted inline here instead. The byte→element size
+// still depends on dtype; the offsets are pinned to ``comm_layout::k*``.
+std::string EmitCommRemoteOffsetInline(const std::string& ctx_ssa, const std::string& peer_ssa,
+                                       const DataType& dtype, codegen::PTOCodegen& codegen) {
+  namespace cl = codegen::distributed::comm_layout;
+  // Sub-byte dtypes (bool / 4-bit) have no whole-byte element stride, so the
+  // byte→element division below is ill-defined. Fail here, where the CHECK
+  // message still has caller context.
+  const int64_t elem_bits = static_cast<int64_t>(dtype.GetBit());
+  CHECK(elem_bits >= 8 && elem_bits % 8 == 0)
+      << "Distributed remote ops only support byte-sized element types, got " << dtype.ToString() << " ("
+      << elem_bits << " bits)";
+  // CommContext field indices in u64 slots (one load_scalar step = one slot),
+  // pinned via static_assert in comm_layout.h so an ABI shift fails compilation.
+  const int64_t k_rank_idx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
+  const int64_t k_win_idx = static_cast<int64_t>(cl::kWindowsInOffset / cl::kWindowSlotStride);
+  const int64_t elem_size_bytes = elem_bits / 8;
+
+  const std::string c_r = codegen.GetOrEmitConstant(k_rank_idx, DataType::INDEX);
+  const std::string c_w = codegen.GetOrEmitConstant(k_win_idx, DataType::INDEX);
+  // rankId = low 32 bits of the (rankId, rankNum) 8-byte slot.
+  const std::string rk_pair = codegen.NewTemp();
+  codegen.Emit(rk_pair + " = pto.load_scalar " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
+  const std::string rk_i32 = codegen.NewTemp();
+  codegen.Emit(rk_i32 + " = arith.trunci " + rk_pair + " : i64 to i32");
+  const std::string rk_idx = codegen.NewTemp();
+  codegen.Emit(rk_idx + " = arith.index_cast " + rk_i32 + " : i32 to index");
+  // local_base = windowsIn[rankId]
+  const std::string lb_off = codegen.NewTemp();
+  codegen.Emit(lb_off + " = arith.addi " + c_w + ", " + rk_idx + " : index");
+  const std::string lbase = codegen.NewTemp();
+  codegen.Emit(lbase + " = pto.load_scalar " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
+  // peer_base = windowsIn[peer]
+  const std::string pb_off = codegen.NewTemp();
+  codegen.Emit(pb_off + " = arith.addi " + c_w + ", " + peer_ssa + " : index");
+  const std::string pbase = codegen.NewTemp();
+  codegen.Emit(pbase + " = pto.load_scalar " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
+  // delta_bytes -> delta_elems (pto.addptr takes element counts, not bytes).
+  const std::string dbytes = codegen.NewTemp();
+  codegen.Emit(dbytes + " = arith.subi " + pbase + ", " + lbase + " : i64");
+  const std::string esize = codegen.GetOrEmitConstant(elem_size_bytes, DataType::INT64);
+  const std::string delems_i = codegen.NewTemp();
+  codegen.Emit(delems_i + " = arith.divsi " + dbytes + ", " + esize + " : i64");
+  const std::string delems = codegen.NewTemp();
+  codegen.Emit(delems + " = arith.index_cast " + delems_i + " : i64 to index");
+  return delems;
+}
+
 // Emit:
-//   (1) a single ``func.call`` to the per-dtype module-level
-//       ``@CommRemoteOffset_<dtype>`` helper (see
-//       ``PTOCodegen::EmitCommRemoteOffsetHelpers``) — returns the
-//       peer-vs-local **element offset** (``index``);
+//   (1) the inlined CommRemoteOffset element offset (see above);
 //   (2) a ``pto.addptr`` against the local DistributedTensor pointer, and
 //   (3) a ``pto.make_tensor_view`` rooted at the resulting peer pointer.
 //
-// Steps (2) and (3) live at the call site (i.e. inside the user kernel's
+// Steps (2) and (3) must live at the call site (i.e. inside the user kernel's
 // ``func.func``) for two intertwined PTOAS constraints:
 //
 // * ``pto.addptr`` must feed ``pto.make_tensor_view`` /
 //   ``initialize_l2g2l_pipe(gm_addr)`` / ``load|store_scalar`` *within
-//   the same func.func*. A helper that ended with ``addptr → return``
-//   would only feed ``func.return``, which PTOAS rejects.
+//   the same func.func*.
 // * ``pto.make_tensor_view`` always lowers to ``memref<…, strided<[?,
 //   ?], offset: ?>>`` when strides are passed as operands, but
 //   ``!pto.tensor_view<…>`` source syntax cannot carry a strided layout
-//   suffix — so the view cannot be returned across a func boundary
-//   either.
-//
-// Both forbidden ops therefore have to live in the user kernel. The
-// helper still pulls its weight: it bundles the CommContext field reads
-// and the byte→element division (which depends on dtype), so multiple
-// remote ops share that work via ``func.call`` without duplicating the
-// scalar arithmetic at each call site.
+//   suffix — so the view cannot be returned across a func boundary either.
 //
 // Generated MLIR (2-D example, ``DistributedTensor[[1, 64], FP32]``):
 //
-//   %peer_idx = arith.index_cast %peer : i32 to index
-//   %delems = func.call @CommRemoteOffset_f32(%ctx, %peer_idx)
-//           : (!pto.ptr<i64>, index) -> index
+//   ... inlined CommRemoteOffset reads → %delems : index ...
 //   %peer_ptr = pto.addptr %local_ptr, %delems
 //             : !pto.ptr<f32> -> !pto.ptr<f32>
 //   %peer_view = pto.make_tensor_view %peer_ptr,
@@ -151,13 +201,10 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   // EmitCastToIndex (no-op when already index-typed).
   std::string peer_ssa = codegen.EmitCastToIndex(peer_expr, codegen.GetExprAsCode(peer_expr));
 
-  // (1) Call the per-dtype offset helper. Registering here causes the helper
-  //     definition to be emitted at module-flush time — any new op that calls
-  //     EmitCommRemoteView is wired up automatically, no codegen-side opt-in.
-  const std::string func_name = codegen.RegisterCommRemoteOffsetHelper(target.type->dtype_);
-  std::string delems = codegen.NewTemp();
-  codegen.Emit(delems + " = func.call @" + func_name + "(" + target.ctx_ssa + ", " + peer_ssa +
-               ") : (!pto.ptr<i64>, index) -> index");
+  // (1) Inline the per-dtype offset computation at the call site (ptoas'
+  //     memory-consistency pass rejects a func.call to a CommContext-reading
+  //     helper — see EmitCommRemoteOffsetInline).
+  std::string delems = EmitCommRemoteOffsetInline(target.ctx_ssa, peer_ssa, target.type->dtype_, codegen);
 
   // (2) addptr from the local pointer by the returned element offset.
   std::string peer_ptr = codegen.NewTemp();
@@ -238,7 +285,7 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
 
 // pld.tile.remote_load(target, peer, offsets, shape) — load a peer's slice of
 // a window-bound DistributedTensor into a local tile. Lowers to:
-//   delems = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   delems = <inline CommRemoteOffset reads> -> delems : index
 //   peer_ptr = pto.addptr local_ptr, delems
 //   peer_view = pto.make_tensor_view peer_ptr, shape=..., strides=...
 //   pto.partition_view peer_view, offsets=..., sizes=<shape>
@@ -278,7 +325,7 @@ static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
 
 // pld.tile.remote_store(src_tile, target, peer, offsets) — write a local tile
 // into a peer's slice of a window-bound DistributedTensor. Lowers to:
-//   delems    = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   delems    = <inline CommRemoteOffset reads> -> delems : index
 //   peer_ptr  = pto.addptr local_ptr, delems
 //   peer_view = pto.make_tensor_view peer_ptr, shape=..., strides=...
 //   pto.partition_view peer_view, offsets=..., sizes=<tile.valid_shape padded
@@ -350,7 +397,7 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
 
 // pld.system.notify(target, peer, offsets, value, *, op) — atomically signal a
 // peer rank's slot in a DistributedTensor signal matrix.
-//   delems = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   delems = <inline CommRemoteOffset reads> -> delems : index
 //   peer_ptr = pto.addptr local_ptr, delems
 //   peer_view = pto.make_tensor_view peer_ptr, shape=..., strides=...
 //   pto.partition_view peer_view, sizes=[1, ..., 1]
@@ -464,7 +511,7 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 // TileType pre-allocated by an IR-level `tile.create` (so the memory allocator
 // gives it a UB address before codegen at --pto-level=level3).
 // Lowers to:
-//   delems   = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   delems   = <inline CommRemoteOffset reads> -> delems : index
 //   dst_ptr  = pto.addptr <dst_local_ptr>, delems
 //   dst_view = pto.make_tensor_view dst_ptr, shape=..., strides=...
 //   dst_pv   = pto.partition_view dst_view, offsets=<dst_offsets>, sizes=<transfer_shape>
@@ -754,14 +801,14 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
   // synchronous bulk get/put. See MakeRemoteLoadCodegenPTO /
   // MakeNotifyCodegenPTO / MakeWaitCodegenPTO / MakeGetCodegenPTO /
   // MakePutCodegenPTO for the emitted MLIR shape.
-  // Cross-rank ops lower to a single
-  // ``func.call @CommRemoteOffset_<dtype>`` against a module-level helper
-  // emitted by PTOCodegen::EmitCommRemoteOffsetHelpers; the helper returns
-  // the peer-vs-local element offset (``index``) and the call site emits
-  // ``pto.addptr`` + ``pto.make_tensor_view`` locally so PTOAS's per-func
-  // "addptr must feed make_tensor_view" check is satisfied. The helper's
-  // byte-offset literals are pinned to ``comm_layout::k*`` constants
-  // (PyPTO compile-time static_asserts catch any CommContext ABI drift).
+  // Cross-rank ops inline the peer-vs-local element offset at the call site
+  // (see EmitCommRemoteOffsetInline): the CommContext ``pto.load_scalar`` reads
+  // + byte→element ``arith.divsi``, then ``pto.addptr`` + ``pto.make_tensor_view``
+  // locally so PTOAS's per-func "addptr must feed make_tensor_view" check is
+  // satisfied and its ``pto-memory-consistency`` pass sees the reads in the
+  // caller (a ``func.call`` to a helper holding them is rejected). The byte-offset
+  // literals are pinned to ``comm_layout::k*`` constants (PyPTO compile-time
+  // static_asserts catch any CommContext ABI drift).
   reg("pld.tile.remote_load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeRemoteLoadCodegenPTO(op, codegen);
   });
