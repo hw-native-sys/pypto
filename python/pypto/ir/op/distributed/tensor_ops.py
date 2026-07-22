@@ -379,8 +379,29 @@ def all_to_all(
     return _ir_core.create_op_call("pld.tensor.all_to_all", _args, {}, actual_span)
 
 
+def all_to_all_v(
+    input: Expr,
+    target: Expr,
+    signal: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.all_to_all_v(...)`` Call.
+
+    3-arg window-as-result intrinsic: 2D Tensor [NR*MAX_RECV, SIZE] input,
+    DistributedTensor [NR*MAX_RECV, SIZE] target (staging window / result),
+    and INT32 barrier signal. Powered by LowerCompositeOps into a 2-phase
+    push-based decomposition (push → barrier), returning the target window.
+    The caller reads back from the window with ``pl.load``.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    _args: list[Expr] = [input, target, signal]
+    return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {}, actual_span)
+
+
 __all__ = [
     "all_to_all",
+    "all_to_all_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

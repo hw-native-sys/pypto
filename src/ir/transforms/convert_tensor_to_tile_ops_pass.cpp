@@ -913,6 +913,16 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (IsOp(call, "pld.tensor.broadcast") && !call->args_.empty()) {
     return call->args_[0];
   }
+  // pld.tensor.all_to_all(input, target, signal): 3-arg push-based
+  // window-as-result.  target (args_[1]) receives peers' writes via TPUT.
+  if (IsOp(call, "pld.tensor.all_to_all") && call->args_.size() >= 2) {
+    return call->args_[1];
+  }
+  // pld.tensor.all_to_all_v(input, target, signal): 3-arg variable-size
+  // push-based window-as-result.  target (args_[1]) receives peers' writes.
+  if (IsOp(call, "pld.tensor.all_to_all_v") && call->args_.size() >= 2) {
+    return call->args_[1];
+  }
   return nullptr;
 }
 
@@ -1109,6 +1119,21 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     // (non-root reads root's slice), written via pld.tile.get into local
     // slot.  Signal is written (Phase 2a notify) and read (Phase 2b wait).
     for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
+      auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
+      MarkAccess(origins, has_read);
+      MarkAccess(origins, has_write);
+    }
+    return;
+  }
+
+  if (IsOp(call, "pld.tensor.all_to_all") || IsOp(call, "pld.tensor.all_to_all_v")) {
+    // 3-arg push-based window-as-result: input (arg[0]) is read-only (Tensor
+    // or DistributedTensor); target (arg[1]) receives peer writes via TPUT and
+    // is returned in-place; signal (arg[2]) is read+written by notify/wait.
+    if (call->args_.size() >= 1) {
+      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+    }
+    for (size_t i = 1; i < call->args_.size(); ++i) {
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
       MarkAccess(origins, has_read);
       MarkAccess(origins, has_write);

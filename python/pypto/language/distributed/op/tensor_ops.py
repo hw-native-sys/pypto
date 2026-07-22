@@ -803,8 +803,50 @@ def all_to_all(
     return DistributedTensor(expr=call)
 
 
+def all_to_all_v(
+    input: Tensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+) -> DistributedTensor:
+    """All-to-all: variable-size personalized exchange (push-based, window-as-result).
+
+    3-arg form: ``pld.tensor.all_to_all_v(input, target, signal)``.
+
+    Mirrors the symmetric ``pld.tensor.all_to_all``: each rank pushes
+    up to ``MAX_RECV`` rows per peer into a flat 2D staging window
+    via ``pld.tile.put``, then returns the window so the caller can
+    read back via ``pl.load``.  There is no built-in read-back phase
+    — the user writes the read-back loop in the InCore function.
+
+    ``input`` is a flat 2D [NR*MAX_RECV, SIZE] Tensor where rows
+    ``dest*MAX_RECV .. (dest+1)*MAX_RECV-1`` contain the (zero-padded)
+    chunk for peer ``dest``.
+    ``target`` is a flat 2D DistributedTensor [NR*MAX_RECV, SIZE] —
+    the staging window that doubles as the result.
+
+    Args:
+        input: Flat 2D Tensor [NR*MAX_RECV, SIZE] with per-destination
+            chunks (zero-padded to MAX_RECV per peer).
+        target: :class:`pld.DistributedTensor` [NR*MAX_RECV, SIZE] —
+            flat 2D staging window (InOut); returned as the result.
+        signal: :class:`pld.DistributedTensor` INT32 barrier (InOut).
+
+    Returns:
+        The ``target`` :class:`pld.DistributedTensor` with received chunks.
+    """
+    target_expr, signal_expr = _unwrap_distributed_tensors(
+        "pld.tensor.all_to_all_v",
+        target=target,
+        signal=signal,
+    )
+    input_expr = _unwrap(input)
+    call = _ir_tensor.all_to_all_v(input_expr, target_expr, signal_expr)
+    return DistributedTensor(expr=call)
+
+
 __all__ = [
     "all_to_all",
+    "all_to_all_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",
