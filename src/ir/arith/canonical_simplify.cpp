@@ -418,6 +418,8 @@ bool CanonicalSimplifier::Impl::TrySumFloorDiv(const SumExpr& sum, int64_t divis
       int64_t k = divisor / split.scale;
       if (MulWouldOverflow(split.lower_factor, k)) return false;
       int64_t new_lower = split.lower_factor * k;
+      INTERNAL_CHECK_SPAN(new_lower > 0, split.index->span_)
+          << "Internal error: TrySumFloorDiv computed non-positive lower factor " << new_lower;
       // Validity: new_lower must divide upper_factor (or upper == kPosInf)
       if (split.upper_factor != ConstIntBound::kPosInf && split.upper_factor % new_lower != 0) {
         return false;
