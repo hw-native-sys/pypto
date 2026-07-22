@@ -42,7 +42,7 @@ def _abi_signature(manifest: dict[str, Any]) -> tuple[Any, ...]:
         for parameter in manifest["parameters"]
     )
     mixed = manifest.get("mixed_runner", {})
-    mixed_runner = (mixed.get("kind"), mixed.get("generator_sha256"))
+    mixed_runner = (mixed.get("kind"), mixed.get("generator_sha256"), mixed.get("identity_source"))
     return manifest["kernel"], manifest["aicore_arch"], manifest["block_dim"], mixed_runner, parameters
 
 
@@ -70,6 +70,11 @@ def validate_cases(compact_dir: Path, loose_dir: Path) -> tuple[dict[str, Any], 
         }
         if runners != {expected_runner}:
             raise ValueError("mixed AIC/AIV kernels require the canonical PTOAS group-level runner")
+        if {
+            compact.get("mixed_runner", {}).get("identity_source"),
+            loose.get("mixed_runner", {}).get("identity_source"),
+        } != {"direct_launch_builtins"}:
+            raise ValueError("mixed AIC/AIV kernels must source block and subblock identity from hardware")
     if _abi_signature(compact) != _abi_signature(loose):
         raise ValueError("compact and loose standalone cases have different ABI or launch metadata")
     pointers = _pointer_names(compact)
