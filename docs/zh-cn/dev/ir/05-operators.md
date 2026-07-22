@@ -313,7 +313,7 @@ with ib.function("tile_computation") as f:
     tile_b = ib.let("tile_b", tile.load(input_b, [0, 0], [32, 128]))
     tile_mul = ib.let("tile_mul", tile.mul(tile_a, tile_b))
     tile_sqrt = ib.let("tile_sqrt", tile.sqrt(tile_mul))
-    # row_sum 折叠最后一轴 -> [32, 1]。scratch tile 必须与输入 rank 相同，
+    # row_sum 折叠最后一轴 -> [32, 1]。scratch tile 必须与输入 dtype 和 rank 相同，
     # 且每一维都不小于输入的对应维度。
     tmp_tile = ib.let("tmp_tile", tile.create([32, 128], DataType.FP32))
     tile_sum = ib.let("tile_sum", tile.row_sum(tile_sqrt, tmp_tile))

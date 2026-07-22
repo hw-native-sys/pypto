@@ -2197,8 +2197,8 @@ def row_max(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType)
-        tmp_tile: Scratch tile with the same rank as ``tile`` and every
-            dimension at least as large as the corresponding input dimension
+        tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
+            every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2216,8 +2216,8 @@ def row_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType)
-        tmp_tile: Scratch tile with the same rank as ``tile`` and every
-            dimension at least as large as the corresponding input dimension
+        tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
+            every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2235,8 +2235,8 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
-        tmp_tile: Scratch tile with the same rank as ``tile`` and every
-            dimension at least as large as the corresponding input dimension
+        tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
+            every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2254,8 +2254,8 @@ def row_prod(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType, e.g. [M, N])
-        tmp_tile: Scratch tile with the same rank as ``tile`` and every
-            dimension at least as large as the corresponding input dimension
+        tmp_tile: Scratch tile with the same dtype and rank as ``tile`` and
+            every dimension at least as large as the corresponding input dimension
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2342,7 +2342,7 @@ def row_argmax(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2359,7 +2359,7 @@ def row_argmin(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
 
     Args:
         tile: Input tile (TileType [M, N])
-        tmp_tile: Temporary tile (TileType)
+        tmp_tile: Scratch tile with exactly the same shape and dtype as ``tile``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

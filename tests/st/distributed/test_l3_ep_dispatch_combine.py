@@ -282,8 +282,8 @@ def _build_ep_dispatch_combine_program(n_ranks: int):
             # the runtime's TROWSUM stage_out for the weight channel.
             for e in pl.range(L):
                 w_wide: pl.Tile[[R, W_PAD], pl.FP32] = pl.load(recv_w, [e * R, 0], [R, W_PAD])
-                tmp: pl.Tile[[R, 1], pl.FP32] = pl.tile.create(
-                    [R, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                tmp: pl.Tile[[R, W_PAD], pl.FP32] = pl.tile.create(
+                    [R, W_PAD], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 w_sum: pl.Tile[[R, 1], pl.FP32] = pl.tile.row_sum(w_wide, tmp)
                 w_row: pl.Tile[[1, R], pl.FP32] = pl.tile.reshape(w_sum, [1, R])

@@ -576,7 +576,43 @@ class TestTileReductionOps:
         call = op(input_tile, tmp_tile)
 
         assert isinstance(call.type, ir.TileType)
-        assert [dim.value for dim in call.type.shape] == [8, 1]
+        assert len(call.type.shape) == 2
+        assert isinstance(call.type.shape[0], ir.ConstInt)
+        assert isinstance(call.type.shape[1], ir.ConstInt)
+        assert [call.type.shape[0].value, call.type.shape[1].value] == [8, 1]
+
+    @pytest.mark.parametrize("op", [tile.row_max, tile.row_sum, tile.row_argmax, tile.row_argmin])
+    def test_tile_row_reduction_rejects_mismatched_tmp_dtype(self, op):
+        """Row reductions require scratch storage with the input element type."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType([8, 512], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile dtype to match input dtype"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op", [tile.row_argmax, tile.row_argmin])
+    @pytest.mark.parametrize("tmp_shape", [[8, 256], [8, 640]])
+    def test_tile_row_arg_reduction_rejects_non_exact_tmp_shape(self, op, tmp_shape):
+        """Row arg reductions reject both undersized and oversized scratch storage."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType(tmp_shape, DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="requires tmp_tile shape to exactly match the input shape"):
+            op(input_tile, tmp_tile)
+
+    @pytest.mark.parametrize("op", [tile.row_argmax, tile.row_argmin])
+    def test_tile_row_arg_reduction_accepts_exact_tmp_shape(self, op):
+        """Row arg reductions accept scratch storage matching the input shape."""
+        span = ir.Span.unknown()
+        input_tile = ir.Var("input_tile", ir.TileType([8, 512], DataType.FP32), span)
+        tmp_tile = ir.Var("tmp_tile", ir.TileType([8, 512], DataType.FP32), span)
+
+        call = op(input_tile, tmp_tile)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT32
 
     def test_tile_row_min(self):
         """Test tile.row_min operation."""

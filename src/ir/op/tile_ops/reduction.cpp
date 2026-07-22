@@ -49,8 +49,9 @@ namespace ir {
 TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const std::string& op_name,
-                                   std::optional<DataType> out_dtype = std::nullopt) {
-  // tile.row_max and tile.row_sum require 2 arguments (tile and tmp_tile)
+                                   std::optional<DataType> out_dtype = std::nullopt,
+                                   bool require_exact_tmp_shape = false) {
+  // Tile row reductions require 2 arguments (tile and tmp_tile).
   CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments, but got " << args.size();
 
   // First argument must be TileType
@@ -74,11 +75,24 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(tmp_type, args[1]->span_)
       << "The operator " << op_name << " requires tmp_tile to be a TileType, but got "
       << args[1]->GetType()->TypeName();
+  CHECK_SPAN(tmp_type->dtype_ == tile_type->dtype_, args[1]->span_)
+      << "The operator " << op_name
+      << " requires tmp_tile dtype to match input dtype, but got tmp_tile dtype "
+      << tmp_type->dtype_.ToString() << " and input dtype " << tile_type->dtype_.ToString();
   CHECK_SPAN(tmp_type->shape_.size() == input_shape.size(), args[1]->span_)
       << "The operator " << op_name << " requires tmp_tile to have the same rank as the input, but got "
       << "tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
       << FormatShape(input_shape);
   for (size_t i = 0; i < input_shape.size(); ++i) {
+    if (require_exact_tmp_shape) {
+      CHECK_SPAN(ProveValidExtentEqual(input_shape[i], tmp_type->shape_[i]) == ProofResult::kTrue,
+                 args[1]->span_)
+          << "The operator " << op_name
+          << " requires tmp_tile shape to exactly match the input shape, but dimension " << i
+          << " differs; got tmp_tile shape " << FormatShape(tmp_type->shape_) << " and input shape "
+          << FormatShape(input_shape);
+      continue;
+    }
     const auto input_extent = GetConstantDimension(input_shape[i]);
     const auto tmp_extent = GetConstantDimension(tmp_type->shape_[i]);
     const bool provably_undersized =
@@ -157,7 +171,7 @@ REGISTER_OP("tile.row_sum")
     .set_op_category("TileOp")
     .set_description("Row-wise sum reduction (reduces along axis=1, maps to TROWSUM)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile at least as large as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -173,7 +187,7 @@ REGISTER_OP("tile.row_max")
     .set_op_category("TileOp")
     .set_description("Row-wise max reduction (reduces along axis=1, maps to TROWMAX)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile at least as large as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -189,7 +203,7 @@ REGISTER_OP("tile.row_min")
     .set_op_category("TileOp")
     .set_description("Row-wise min reduction (reduces along axis=1, maps to TROWMIN)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile at least as large as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -205,7 +219,7 @@ REGISTER_OP("tile.row_prod")
     .set_op_category("TileOp")
     .set_description("Row-wise product reduction (reduces along axis=1, maps to TROWPROD)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Scratch tile at least as large as the input in every dimension (TileType)")
+    .add_argument("tmp_tile", "Same-dtype scratch tile at least as large as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -292,7 +306,7 @@ REGISTER_OP("tile.row_argmax")
     .set_op_category("TileOp")
     .set_description("Row-wise argmax: column index of the per-row maximum (maps to TROWARGMAX)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile with exactly the same shape and dtype as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -301,21 +315,21 @@ REGISTER_OP("tile.row_argmax")
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmax", DataType(DataType::INT32));
+      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmax", DataType(DataType::INT32), true);
     });
 
 REGISTER_OP("tile.row_argmin")
     .set_op_category("TileOp")
     .set_description("Row-wise argmin: column index of the per-row minimum (maps to TROWARGMIN)")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
+    .add_argument("tmp_tile", "Scratch tile with exactly the same shape and dtype as the input (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmin", DataType(DataType::INT32));
+      return DeduceTileRowReductionType(args, kwargs, "tile.row_argmin", DataType(DataType::INT32), true);
     });
 
 REGISTER_OP("tile.col_argmax")
