@@ -108,6 +108,9 @@ def test_hand_written_group_members_share_canonical_abi():
     cube = after.get_function("cube_side")
     vec = after.get_function("vec_side")
     group = after.get_function("mixed")
+    assert cube is not None
+    assert vec is not None
+    assert group is not None
     expected_names = [param.name_hint for param in group.params]
 
     assert [param.name_hint for param in cube.params] == expected_names
@@ -175,15 +178,74 @@ def test_reused_hand_written_group_members_get_private_adapters():
     group = after.get_function("mixed")
     aic_adapter = after.get_function("mixed_aic_adapter")
     aiv_adapter = after.get_function("mixed_aiv_adapter")
+    cube = after.get_function("cube_side")
+    vec = after.get_function("vec_side")
+    assert group is not None
+    assert aic_adapter is not None
+    assert aiv_adapter is not None
+    assert cube is not None
+    assert vec is not None
     canonical_names = [param.name_hint for param in group.params]
 
-    assert len(after.get_function("cube_side").params) == 3
-    assert len(after.get_function("vec_side").params) == 2
+    assert len(cube.params) == 3
+    assert len(vec.params) == 2
     assert [param.name_hint for param in aic_adapter.params] == canonical_names
     assert [param.name_hint for param in aiv_adapter.params] == canonical_names
     group_text = group.as_python()
     assert "mixed_aic_adapter(" in group_text
     assert "mixed_aiv_adapter(" in group_text
+
+
+def test_hand_written_group_submit_remaps_no_dep_override():
+    """A widened Submit keeps no_dep attached to the original member argument."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return q
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            task: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            _cube_out, _cube_tid = pl.submit(self.cube_side, q, task)
+            vec_out, _vec_tid = pl.submit(
+                self.vec_side,
+                pl.no_dep(out),
+                task,
+                attrs={"arg_directions": [pl.adir.output_existing, pl.adir.scalar]},
+            )
+            return vec_out
+
+    after = _run_pipeline(Program)
+    group = after.get_function("mixed")
+    assert group is not None
+    submits = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Submit)
+    ]
+    vec_submit = next(submit for submit in submits if submit.op.name == "vec_side")
+
+    assert list(vec_submit.args) == list(group.params)
+    assert vec_submit.attrs["arg_direction_overrides"] == [1]
+    assert list(vec_submit.arg_directions) == []
 
 
 def test_explicit_sync_core_type_routes_each_event_to_one_lane():

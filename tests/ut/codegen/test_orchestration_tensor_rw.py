@@ -993,6 +993,8 @@ class TestTensorReadWriteOffsetCodegen:
         assert "self.vec_side" in transformed_text, transformed_text
         cube = transformed.get_function("cube_side")
         vec = transformed.get_function("vec_side")
+        assert cube is not None
+        assert vec is not None
         canonical_names = [param.name_hint for param in cube.params]
         assert canonical_names == [param.name_hint for param in vec.params]
         assert canonical_names[-1] == "__gm_pipe_buffer"

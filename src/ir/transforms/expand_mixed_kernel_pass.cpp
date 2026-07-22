@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1585,7 +1586,11 @@ class GroupMemberCallRewriter : public IRMutator {
  public:
   GroupMemberCallRewriter(std::unordered_map<std::string, std::string> callee_renames,
                           std::vector<VarPtr> canonical_args)
-      : callee_renames_(std::move(callee_renames)), canonical_args_(std::move(canonical_args)) {}
+      : callee_renames_(std::move(callee_renames)), canonical_args_(std::move(canonical_args)) {
+    for (size_t i = 0; i < canonical_args_.size(); ++i) {
+      canonical_arg_indices_.emplace(canonical_args_[i].get(), static_cast<int32_t>(i));
+    }
+  }
 
  protected:
   ExprPtr VisitExpr_(const CallPtr& op) override {
@@ -1594,7 +1599,8 @@ class GroupMemberCallRewriter : public IRMutator {
     if (it == callee_renames_.end()) return IRMutator::VisitExpr_(op);
     std::vector<ExprPtr> args(canonical_args_.begin(), canonical_args_.end());
     return std::make_shared<Call>(std::make_shared<GlobalVar>(it->second), std::move(args), op->kwargs_,
-                                  op->attrs_, op->GetType(), op->span_);
+                                  RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_),
+                                  op->GetType(), op->span_);
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {
@@ -1602,14 +1608,56 @@ class GroupMemberCallRewriter : public IRMutator {
     auto it = gv ? callee_renames_.find(gv->name_) : callee_renames_.end();
     if (it == callee_renames_.end()) return IRMutator::VisitExpr_(op);
     std::vector<ExprPtr> args(canonical_args_.begin(), canonical_args_.end());
-    return std::make_shared<Submit>(std::make_shared<GlobalVar>(it->second), std::move(args), op->deps_,
-                                    op->kwargs_, op->attrs_, op->GetType(), op->span_, op->core_num_,
-                                    op->sync_start_, op->allow_early_resolve_, op->predicate_);
+    return std::make_shared<Submit>(
+        std::make_shared<GlobalVar>(it->second), std::move(args), op->deps_, op->kwargs_,
+        RemapPositionalAttrs(op->attrs_, op->args_, op->op_, op->span_), op->GetType(), op->span_,
+        op->core_num_, op->sync_start_, op->allow_early_resolve_, op->predicate_);
   }
 
  private:
+  std::vector<std::pair<std::string, std::any>> RemapPositionalAttrs(
+      const std::vector<std::pair<std::string, std::any>>& source_attrs,
+      const std::vector<ExprPtr>& source_args, const OpPtr& source_op, const Span& source_span) const {
+    std::vector<std::pair<std::string, std::any>> attrs;
+    attrs.reserve(source_attrs.size());
+    for (const auto& [key, value] : source_attrs) {
+      // These directions describe the old member argument list. The standard
+      // pipeline derives them again after ExpandMixedKernel, so retaining the
+      // vector would make the widened Call/Submit fail constructor validation.
+      if (key == kAttrArgDirections) continue;
+      if (key != kAttrArgDirectionOverrides) {
+        attrs.emplace_back(key, value);
+        continue;
+      }
+
+      const auto* old_indices = std::any_cast<std::vector<int32_t>>(&value);
+      INTERNAL_CHECK_SPAN(old_indices != nullptr, source_span)
+          << "Internal error: " << kAttrArgDirectionOverrides << " attr must hold std::vector<int32_t>";
+      std::vector<int32_t> remapped_indices;
+      remapped_indices.reserve(old_indices->size());
+      for (int32_t old_index : *old_indices) {
+        INTERNAL_CHECK_SPAN(old_index >= 0 && static_cast<size_t>(old_index) < source_args.size(),
+                            source_span)
+            << "Internal error: " << kAttrArgDirectionOverrides << " index " << old_index
+            << " is out of range for Group member call to '" << source_op->name_ << "'";
+        auto old_arg = AsVarLike(source_args[static_cast<size_t>(old_index)]);
+        CHECK_SPAN(old_arg != nullptr, source_span)
+            << "Cannot preserve pl.no_dep on non-variable argument " << old_index << " of Group member '"
+            << source_op->name_ << "' while normalizing its shared ABI";
+        auto canonical_it = canonical_arg_indices_.find(old_arg.get());
+        CHECK_SPAN(canonical_it != canonical_arg_indices_.end(), source_span)
+            << "Cannot map pl.no_dep argument " << old_index << " of Group member '" << source_op->name_
+            << "' to a canonical Group parameter";
+        remapped_indices.push_back(canonical_it->second);
+      }
+      attrs.emplace_back(key, std::move(remapped_indices));
+    }
+    return attrs;
+  }
+
   std::unordered_map<std::string, std::string> callee_renames_;
   std::vector<VarPtr> canonical_args_;
+  std::unordered_map<const Var*, int32_t> canonical_arg_indices_;
 };
 
 std::string ReserveAdapterName(const std::string& base, std::unordered_set<std::string>& used_names) {
