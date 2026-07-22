@@ -328,12 +328,12 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // names the synthesized tpop after this var. The standalone split_aiv
           // move-boundary path names that tpop BuildBoundaryTpopName(AIC, dest) =
           // "<dest>_mat", so matching it here keeps both paths' .pto byte-identical.
-          auto full_vec_var =
+          auto full_mat_var =
               std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
-          result.push_back(std::make_shared<AssignStmt>(full_vec_var, gather_typed, assign->span_));
+          result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
           // Original cube placement move, now on the FULL gathered tile.
           std::vector<ExprPtr> move_args = call->args_;
-          move_args[0] = full_vec_var;
+          move_args[0] = full_mat_var;
           auto new_move = std::make_shared<Call>(call->op_, std::move(move_args), call->kwargs_,
                                                  call->GetType(), call->span_);
           result.push_back(std::make_shared<AssignStmt>(assign->var_, new_move, assign->span_));
