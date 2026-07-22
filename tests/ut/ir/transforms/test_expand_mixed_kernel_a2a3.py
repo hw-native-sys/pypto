@@ -14,6 +14,8 @@ GM-pipe-buffer injection is exercised separately in
 own a2a3 boundary behaviour without running InjectGMPipeBuffer.
 """
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
@@ -49,6 +51,14 @@ def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
             passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
         )
     )
+
+
+def _run_auto_split_pipeline_from_tensor(program: ir.Program) -> ir.Program:
+    """Run the tensor-to-tile pipeline including automatic vector splitting."""
+    lowered = passes.infer_tile_memory_space()(
+        passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
+    )
+    return passes.expand_mixed_kernel()(passes.lower_auto_vector_split()(lowered))
 
 
 def _op_name(stmt: ir.Stmt) -> str:
@@ -276,6 +286,71 @@ def test_explicit_sync_core_type_routes_each_event_to_one_lane():
     assert aiv_ops.count("system.set_ffts") == 1
     assert aiv_ops.count("system.sync_set") == 1
     assert "system.sync_wait" not in aiv_ops
+
+
+def test_odd_auto_split_v2c_uses_gm_and_free_event():
+    """A 255-column LEFT_RIGHT split lowers to 127/128 AIV lanes and a GM
+    rendezvous; the boundary must not contain tpush/tpop transport."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def odd_v2c(
+            self,
+            x: pl.Tensor[[127, 255], pl.FP16],
+            y: pl.Tensor[[255, 127], pl.FP16],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            x_tile = pl.load(x, [0, 0], [127, 255])
+            y_tile = pl.load(y, [0, 0], [255, 127])
+            x_doubled = pl.add(x_tile, x_tile)
+            y_doubled = pl.add(y_tile, y_tile)
+            x_left = pl.move(x_doubled, target_memory=pl.MemorySpace.Left)
+            y_right = pl.move(y_doubled, target_memory=pl.MemorySpace.Right)
+            result = pl.matmul(x_left, y_right, out_dtype=pl.FP32)  # pyright: ignore[reportArgumentType]
+            result_vec = pl.move(result, target_memory=pl.MemorySpace.Vec)  # pyright: ignore[reportArgumentType]
+            out_0 = pl.store(result_vec, [0, 0], out_0)
+            return out_0
+
+    after = _run_auto_split_pipeline_from_tensor(Before)
+    aic = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIC)
+    aiv = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIV)
+    group = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.Group)
+    aic_ops = [_op_name(stmt) for stmt in ir.flatten_to_stmts(aic.body)]
+    aiv_ops = [_op_name(stmt) for stmt in ir.flatten_to_stmts(aiv.body)]
+    group_ops = [_op_name(stmt) for stmt in ir.flatten_to_stmts(group.body)]
+
+    assert "tile.tpush_to_aic" not in aiv_ops
+    assert "tile.tpop_from_aiv" not in aic_ops
+    assert "tile.tpush_to_aiv" in aic_ops
+    assert "tile.tpop_from_aic" in aiv_ops
+    assert aiv_ops.count("tile.store") >= 2
+    assert aiv_ops.count("system.sync_set") == 2
+    assert aic_ops.count("system.sync_wait") == 2
+    assert aiv_ops.count("system.set_ffts") == 1
+    assert aic_ops.count("system.set_ffts") == 1
+    assert group_ops.count("tensor.create") == 3
+
+    sync_sets = [
+        cast(ir.Call, stmt.expr)
+        for stmt in ir.flatten_to_stmts(aiv.body)
+        if isinstance(stmt, ir.EvalStmt)
+        and isinstance(stmt.expr, ir.Call)
+        and _op_name(stmt) == "system.sync_set"
+    ]
+    assert [sync_set.kwargs["event_id"] for sync_set in sync_sets] == [13, 12]
+    assert all(sync_set.kwargs["ffts_mode"] == 2 for sync_set in sync_sets)
+
+    transfers = [param for param in aiv.params if param.name_hint.startswith("odd_split_transfer")]
+    assert len(transfers) == 2
+    assert all(isinstance(transfer.type, ir.TensorType) for transfer in transfers)
+    transfer_types = [cast(ir.TensorType, transfer.type) for transfer in transfers]
+    assert [
+        [cast(ir.ConstInt, dim).value for dim in transfer_type.shape] for transfer_type in transfer_types
+    ] == [
+        [128, 256],
+        [256, 128],
+    ]
 
 
 def test_v2c_boundary_uses_nz_layout_on_a2a3():

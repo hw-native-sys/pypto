@@ -32,6 +32,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -87,15 +88,12 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
   return false;
 }
 
-// Half-dim computation. Throws on odd ConstInt because silently floor-dividing
-// odd dims would drop data, and reliably padding the box requires
-// producer/consumer/slot-size co-ordination that lives outside this pass.
-// Users who need odd extents should pad the tile box to a multiple of the
-// producer's innerDim and narrow back with pl.tile.set_validshape; see
-// docs/en/dev/passes/22-split_vector_kernel.md.
-ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
+// Per-lane physical box extent. Legacy tpush/tpop splitting requires equal
+// halves and therefore rejects static odd dimensions. The auto-split GM path
+// opts into ceil(N/2), using a separate floor(N/2) offset stride below.
+ExprPtr ComputeSplitDimSize(const ExprPtr& dim_size, bool allow_uneven_static) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
-    if ((ci->value_ % 2) != 0) {
+    if ((ci->value_ % 2) != 0 && !allow_uneven_static) {
       throw pypto::ValueError(
           "SplitVectorKernel requires an even split dimension, got " + std::to_string(ci->value_) +
           ". Pad the tile box such that the halved dimension stays a multiple of the producer's "
@@ -103,6 +101,14 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
           "fractal=1024, or 64/elem_bytes for fractal=512) — and use pl.tile.set_validshape(...) "
           "with the original odd extent.");
     }
+    return std::make_shared<ConstInt>((ci->value_ + 1) / 2, ci->dtype(), ci->span_);
+  }
+  auto two = std::make_shared<ConstInt>(2, GetScalarDtype(dim_size), dim_size->span_);
+  return MakeFloorDiv(dim_size, two, dim_size->span_);
+}
+
+ExprPtr ComputeOffsetStride(const ExprPtr& dim_size) {
+  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
     return std::make_shared<ConstInt>(ci->value_ / 2, ci->dtype(), ci->span_);
   }
   auto two = std::make_shared<ConstInt>(2, GetScalarDtype(dim_size), dim_size->span_);
@@ -118,20 +124,35 @@ ExprPtr MakeIndexConst(int64_t value, const Span& span) {
 }
 
 ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& original_dim,
-                                 const ExprPtr& half_dim_size, const ExprPtr& subblock_idx) {
+                                 const ExprPtr& split_dim_size, const ExprPtr& offset_stride,
+                                 const ExprPtr& subblock_idx) {
   if (!valid_dim) return valid_dim;
   if (!subblock_idx) {
-    return half_dim_size;
+    return split_dim_size;
+  }
+  auto original_const = std::dynamic_pointer_cast<const ConstInt>(original_dim);
+  auto stride_const = std::dynamic_pointer_cast<const ConstInt>(offset_stride);
+  const bool static_odd =
+      original_const && stride_const && original_const->value_ != 2 * stride_const->value_;
+  if (!static_odd && AreExprsEqual(valid_dim, original_dim)) {
+    return split_dim_size;
+  }
+  auto span = valid_dim->span_;
+  // lane_extent = floor(N/2) for lane 0 and ceil(N/2) for lane 1.
+  ExprPtr lane_extent = split_dim_size;
+  if (static_odd) {
+    auto uneven_tail =
+        MakeSub(original_dim, MakeMul(MakeConstLike(original_dim, 2, span), offset_stride, span), span);
+    lane_extent = MakeAdd(offset_stride, MakeMul(subblock_idx, uneven_tail, span), span);
   }
   if (AreExprsEqual(valid_dim, original_dim)) {
-    return half_dim_size;
+    return lane_extent;
   }
 
-  auto span = valid_dim->span_;
   auto zero = MakeConstLike(valid_dim, 0, span);
-  auto subblock_offset = MakeMul(subblock_idx, half_dim_size, span);
+  auto subblock_offset = MakeMul(subblock_idx, offset_stride, span);
   auto remaining = MakeSub(valid_dim, subblock_offset, span);
-  return MakeMax(MakeMin(remaining, half_dim_size, span), zero, span);
+  return MakeMax(MakeMin(remaining, lane_extent, span), zero, span);
 }
 
 // Whether a tile.set_validshape split-axis operand must be localized to the
@@ -143,11 +164,11 @@ ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& origin
 // share (e.g. a fused-attention head count, valid_row=5 on a [16]->[8] split):
 // localizing it would collapse lane 1 to 0 and silently corrupt that lane.
 bool ValidOperandNeedsLocalize(const ExprPtr& valid_dim, const ExprPtr& original_dim,
-                               const ExprPtr& half_dim_size) {
+                               const ExprPtr& split_dim_size) {
   if (!valid_dim) return false;
   if (AreExprsEqual(valid_dim, original_dim)) return true;
   auto valid_const = std::dynamic_pointer_cast<const ConstInt>(valid_dim);
-  auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+  auto half_const = std::dynamic_pointer_cast<const ConstInt>(split_dim_size);
   return valid_const != nullptr && half_const != nullptr && valid_const->value_ > half_const->value_;
 }
 
@@ -168,12 +189,13 @@ CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }
 
-TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx) {
+TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx, bool allow_uneven_static) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
 
   std::vector<ExprPtr> new_shape = tt->shape_;
-  new_shape[dim] = ComputeHalfDimSize(tt->shape_[dim]);
+  new_shape[dim] = ComputeSplitDimSize(tt->shape_[dim], allow_uneven_static);
+  auto offset_stride = ComputeOffsetStride(tt->shape_[dim]);
 
   // Keep TileView.valid_shape consistent with halved physical shape, and for
   // partial valid regions localize the split dimension to the current subblock.
@@ -181,36 +203,46 @@ TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx
   if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
     TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
-      tv.valid_shape[dim] =
-          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], new_shape[dim], subblock_idx);
+      tv.valid_shape[dim] = LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], new_shape[dim],
+                                                     offset_stride, subblock_idx);
     }
+    new_tile_view = std::move(tv);
+  } else if (auto original_const = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[dim]);
+             allow_uneven_static && original_const && (original_const->value_ % 2) != 0) {
+    // Omitted TileView syntax means valid_shape == physical shape. Once an odd
+    // box is represented by a uniform ceil(N/2) physical extent, materialize
+    // that implicit view so lane 0 does not read or write its padding element.
+    TileView tv = tile_view_semantics::GetImplicitTileView(new_shape, tt->memory_space_);
+    tv.valid_shape[dim] = LocalizeValidDimForSplit(tt->shape_[dim], tt->shape_[dim], new_shape[dim],
+                                                   offset_stride, subblock_idx);
     new_tile_view = std::move(tv);
   }
 
   return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
 }
 
-ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
+ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim, bool allow_uneven_static) {
   auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr);
   if (!tuple || dim < 0 || dim >= static_cast<int>(tuple->elements_.size())) return tuple_expr;
   std::vector<ExprPtr> new_elements = tuple->elements_;
-  new_elements[dim] = ComputeHalfDimSize(new_elements[dim]);
+  new_elements[dim] = ComputeSplitDimSize(new_elements[dim], allow_uneven_static);
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple_expr->span_);
 }
 
 ExprPtr LocalizeTupleElementForSplit(const ExprPtr& tuple_expr, int dim, const ExprPtr& original_dim,
-                                     const ExprPtr& half_dim_size, const ExprPtr& subblock_idx) {
+                                     const ExprPtr& split_dim_size, const ExprPtr& offset_stride,
+                                     const ExprPtr& subblock_idx) {
   auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr);
   if (!tuple || dim < 0 || dim >= static_cast<int>(tuple->elements_.size())) return tuple_expr;
   std::vector<ExprPtr> new_elements = tuple->elements_;
-  new_elements[dim] =
-      LocalizeValidDimForSplit(tuple->elements_[dim], original_dim, half_dim_size, subblock_idx);
+  new_elements[dim] = LocalizeValidDimForSplit(tuple->elements_[dim], original_dim, split_dim_size,
+                                               offset_stride, subblock_idx);
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple_expr->span_);
 }
 
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split_dim,
                                    const ExprPtr& subblock_idx) {
-  auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
+  auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, false);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -263,21 +295,27 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
 }
 
-TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size,
-                              const ExprPtr& subblock_idx) {
+TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& split_dim_size,
+                              const ExprPtr& offset_stride, const ExprPtr& subblock_idx) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
 
   std::vector<ExprPtr> new_shape = tt->shape_;
-  new_shape[dim] = half_dim_size;
+  new_shape[dim] = split_dim_size;
 
   std::optional<TileView> new_tile_view = tt->tile_view_;
   if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
     TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
-      tv.valid_shape[dim] =
-          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], half_dim_size, subblock_idx);
+      tv.valid_shape[dim] = LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], split_dim_size,
+                                                     offset_stride, subblock_idx);
     }
+    new_tile_view = std::move(tv);
+  } else if (auto original_const = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[dim]);
+             original_const && (original_const->value_ % 2) != 0) {
+    TileView tv = tile_view_semantics::GetImplicitTileView(new_shape, tt->memory_space_);
+    tv.valid_shape[dim] = LocalizeValidDimForSplit(tt->shape_[dim], tt->shape_[dim], split_dim_size,
+                                                   offset_stride, subblock_idx);
     new_tile_view = std::move(tv);
   }
 
@@ -312,7 +350,8 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
                                const std::shared_ptr<const TileType>& in_tt, int in_split_dim,
                                const ExprPtr& subblock_idx,
                                std::unordered_map<const Var*, TileInfo>& tile_vars,
-                               std::unordered_map<const Var*, VarPtr>& var_replacements) {
+                               std::unordered_map<const Var*, VarPtr>& var_replacements,
+                               bool allow_uneven_static) {
   auto res_tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
   if (!res_tt || call->args_.size() < 2) return nullptr;
   INTERNAL_CHECK_SPAN(in_split_dim >= 0 && in_split_dim < static_cast<int>(in_tt->shape_.size()), call->span_)
@@ -360,15 +399,16 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
   if (d_out == in_split_dim) return nullptr;
 
   // Halve the migrated dim on both the reshape target arg and the result type.
-  ExprPtr half_dim_size = ComputeHalfDimSize(res_tt->shape_[d_out]);
-  auto new_result_type = HalveTileShape(call->GetType(), d_out, subblock_idx);
+  ExprPtr split_dim_size = ComputeSplitDimSize(res_tt->shape_[d_out], allow_uneven_static);
+  ExprPtr offset_stride = ComputeOffsetStride(res_tt->shape_[d_out]);
+  auto new_result_type = HalveTileShape(call->GetType(), d_out, subblock_idx, allow_uneven_static);
   std::vector<ExprPtr> new_args = call->args_;
-  new_args[1] = HalveTupleElement(call->args_[1], d_out);
+  new_args[1] = HalveTupleElement(call->args_[1], d_out, allow_uneven_static);
 
   auto new_call =
       std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
   auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-  TileInfo info{half_dim_size, d_out};
+  TileInfo info{split_dim_size, offset_stride, d_out};
   tile_vars[assign->var_.get()] = info;
   tile_vars[new_var.get()] = info;
   var_replacements[assign->var_.get()] = new_var;
@@ -377,7 +417,8 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
 
 StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int split_dim,
                     std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
-                    const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements) {
+                    const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements,
+                    bool allow_uneven_static) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (!call || !call->op_) return stmt;
@@ -402,7 +443,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim]), split_dim};
+        auto split_size = ComputeSplitDimSize(tt->shape_[split_dim], false);
+        TileInfo info{split_size, ComputeOffsetStride(tt->shape_[split_dim]), split_dim};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
       }
@@ -433,19 +475,20 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           split_dim >= static_cast<int>(tt->shape_.size())) {
         return stmt;
       }
-      ExprPtr half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
+      ExprPtr split_dim_size = ComputeSplitDimSize(tt->shape_[split_dim], allow_uneven_static);
+      ExprPtr offset_stride = ComputeOffsetStride(tt->shape_[split_dim]);
 
-      auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
+      auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, allow_uneven_static);
       std::vector<ExprPtr> new_args = call->args_;
-      new_args[1] = AdjustOffsets(call->args_[1], split_dim, half_dim_size, subblock_idx);
-      new_args[2] = HalveTupleElement(call->args_[2], split_dim);
+      new_args[1] = AdjustOffsets(call->args_[1], split_dim, offset_stride, subblock_idx);
+      new_args[2] = HalveTupleElement(call->args_[2], split_dim, allow_uneven_static);
       new_args[3] = LocalizeTupleElementForSplit(call->args_[3], split_dim, tt->shape_[split_dim],
-                                                 half_dim_size, subblock_idx);
+                                                 split_dim_size, offset_stride, subblock_idx);
 
       auto new_call =
           std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-      TileInfo info{half_dim_size, split_dim};
+      TileInfo info{split_dim_size, offset_stride, split_dim};
       tile_vars[assign->var_.get()] = info;
       tile_vars[new_var.get()] = info;
       var_replacements[assign->var_.get()] = new_var;
@@ -459,7 +502,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
           auto new_offsets =
-              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.offset_stride, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -504,7 +547,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       // tile.reshape that moves the split axis to a different result dim.
       if (tt && IsOp(call, "tile.reshape") && in_split_dim >= 0 && in_tt) {
         if (auto migrated = TryMigrateReshapeSplit(call, assign, in_tt, in_split_dim, subblock_idx, tile_vars,
-                                                   var_replacements)) {
+                                                   var_replacements, allow_uneven_static)) {
           return migrated;
         }
         // nullptr -> split extent stays in place; fall through to generic halving.
@@ -517,7 +560,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         if (IsSingletonDim(tt->shape_[result_split_dim])) {
           return stmt;
         }
-        auto half_dim_size = ComputeHalfDimSize(tt->shape_[result_split_dim]);
+        auto split_dim_size = ComputeSplitDimSize(tt->shape_[result_split_dim], allow_uneven_static);
+        auto offset_stride = ComputeOffsetStride(tt->shape_[result_split_dim]);
 
         // tile.reshape lifts a full (un-split) source tile -- typically a rank-1
         // load that bypassed the split-specific load rewrite -- onto a 2D shape
@@ -532,7 +576,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         if (IsOp(call, "tile.reshape")) {
           auto input_var = AsVarLike(call->args_[0]);
           bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
-          auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+          auto half_const = std::dynamic_pointer_cast<const ConstInt>(split_dim_size);
           if (!input_is_split && half_const != nullptr) {
             auto full_var =
                 std::make_shared<Var>(assign->var_->name_hint_, call->GetType(), assign->var_->span_);
@@ -545,8 +589,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             for (int d = 0; d < static_cast<int>(tt->shape_.size()); ++d) {
               if (d == result_split_dim) {
                 shape_elems.push_back(MakeIndexConst(half_const->value_, assign->span_));
-                offset_elems.push_back(
-                    MakeMul(subblock_idx, MakeIndexConst(half_const->value_, assign->span_), assign->span_));
+                offset_elems.push_back(MakeMul(subblock_idx, offset_stride, assign->span_));
               } else {
                 auto dim_const = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[d]);
                 INTERNAL_CHECK_SPAN(dim_const != nullptr, assign->span_)
@@ -564,7 +607,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
                 std::make_shared<Var>(assign->var_->name_hint_, slice_call->GetType(), assign->var_->span_);
             auto slice_assign = std::make_shared<AssignStmt>(slice_var, slice_call, assign->span_);
 
-            TileInfo info{half_dim_size, result_split_dim};
+            TileInfo info{split_dim_size, offset_stride, result_split_dim};
             // Track both the original var and the slice replacement, matching the
             // other tile-producing branches: a later tile.store / loop init that
             // references the original var (before the final Substitute) must still
@@ -577,12 +620,13 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           }
         }
 
-        auto new_result_type = HalveTileShape(call->GetType(), result_split_dim, subblock_idx);
+        auto new_result_type =
+            HalveTileShape(call->GetType(), result_split_dim, subblock_idx, allow_uneven_static);
         std::vector<ExprPtr> new_args = call->args_;
         if ((IsOp(call, "tile.full") || IsOp(call, "tile.create")) && call->args_.size() >= 1) {
-          new_args[0] = HalveTupleElement(call->args_[0], result_split_dim);
+          new_args[0] = HalveTupleElement(call->args_[0], result_split_dim, allow_uneven_static);
         } else if (IsOp(call, "tile.reshape") && call->args_.size() >= 2) {
-          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim);
+          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim, allow_uneven_static);
         } else if (IsOp(call, "tile.slice") && call->args_.size() >= 3) {
           // tile.slice = (src, shape, offset[, valid_shape[, drop_dims]]). The
           // generic result-type halving above shrinks the split dim of the
@@ -592,7 +636,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           // tstore expects (half), the qk_pv strided sub-slice miscompile that
           // motivated the explicit-AIV-split RFC. Halve the shape tuple so it
           // tracks the halved result type.
-          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim);
+          new_args[1] = HalveTupleElement(call->args_[1], result_split_dim, allow_uneven_static);
 
           // Offset (arg[2]) localization mirrors the reshape->slice path above:
           // only add the per-subblock base when the SOURCE tile is NOT already
@@ -603,7 +647,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           auto slice_src = AsVarLike(call->args_[0]);
           bool slice_src_is_split = slice_src && tile_vars.count(slice_src.get()) != 0;
           if (!slice_src_is_split) {
-            new_args[2] = AdjustOffsets(call->args_[2], result_split_dim, half_dim_size, subblock_idx);
+            new_args[2] = AdjustOffsets(call->args_[2], result_split_dim, offset_stride, subblock_idx);
           }
 
           // Optional explicit valid_shape (arg[3]) must stay consistent with the
@@ -614,8 +658,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           // LocalizeTupleElementForSplit is a no-op on a tuple whose split_dim
           // is out of range.
           if (call->args_.size() >= 4) {
-            new_args[3] = LocalizeTupleElementForSplit(
-                call->args_[3], result_split_dim, tt->shape_[result_split_dim], half_dim_size, subblock_idx);
+            new_args[3] =
+                LocalizeTupleElementForSplit(call->args_[3], result_split_dim, tt->shape_[result_split_dim],
+                                             split_dim_size, offset_stride, subblock_idx);
           }
         } else if (IsOp(call, "tile.set_validshape") && call->args_.size() == 3) {
           // args = (tile, valid_row, valid_col). Halving the result type alone
@@ -632,15 +677,16 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           const int operand_idx = 1 + result_split_dim;  // dim 0 -> row, 1 -> col
           if (operand_idx < static_cast<int>(call->args_.size()) &&
               ValidOperandNeedsLocalize(call->args_[operand_idx], tt->shape_[result_split_dim],
-                                        half_dim_size)) {
-            new_args[operand_idx] = LocalizeValidDimForSplit(
-                call->args_[operand_idx], tt->shape_[result_split_dim], half_dim_size, subblock_idx);
+                                        split_dim_size)) {
+            new_args[operand_idx] =
+                LocalizeValidDimForSplit(call->args_[operand_idx], tt->shape_[result_split_dim],
+                                         split_dim_size, offset_stride, subblock_idx);
           }
         }
         auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type,
                                                call->span_);
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-        TileInfo info{half_dim_size, result_split_dim};
+        TileInfo info{split_dim_size, offset_stride, result_split_dim};
         tile_vars[assign->var_.get()] = info;
         tile_vars[new_var.get()] = info;
         var_replacements[assign->var_.get()] = new_var;
@@ -666,7 +712,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         auto it = tile_vars.find(tile_var.get());
         if (it != tile_vars.end()) {
           auto new_offsets =
-              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.half_dim_size, subblock_idx);
+              AdjustOffsets(call->args_[1], it->second.split_dim, it->second.offset_stride, subblock_idx);
           std::vector<ExprPtr> new_args = call->args_;
           new_args[1] = new_offsets;
           auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_,
@@ -707,8 +753,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             has_tracked_tile = true;
             tracked_info = it->second;
             tile_vars[ia.get()] = it->second;
-            new_type = ApplyTrackedTileShape(ia->GetType(), it->second.split_dim, it->second.half_dim_size,
-                                             subblock_idx);
+            new_type = ApplyTrackedTileShape(ia->GetType(), it->second.split_dim, it->second.split_dim_size,
+                                             it->second.offset_stride, subblock_idx);
           }
         }
       }
@@ -731,8 +777,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     } else {
       flat.push_back(for_stmt->body_);
     }
-    auto new_body_stmts =
-        ProcessStmts(flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements);
+    auto new_body_stmts = ProcessStmts(flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
+                                       var_replacements, allow_uneven_static);
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
@@ -749,8 +795,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto it = tile_vars.find(new_iter_args[i].get());
       if (it != tile_vars.end()) {
         tile_vars[new_return_vars[i].get()] = it->second;
-        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), it->second.split_dim,
-                                              it->second.half_dim_size, subblock_idx);
+        auto new_type =
+            ApplyTrackedTileShape(new_return_vars[i]->GetType(), it->second.split_dim,
+                                  it->second.split_dim_size, it->second.offset_stride, subblock_idx);
         if (new_type != new_return_vars[i]->GetType()) {
           auto new_return_var =
               std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
@@ -772,7 +819,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       then_flat.push_back(if_stmt->then_body_);
     }
     auto new_then = ProcessStmts(then_flat, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
-                                 var_replacements);
+                                 var_replacements, allow_uneven_static);
     StmtPtr new_then_body =
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
 
@@ -786,7 +833,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         else_flat.push_back(else_body);
       }
       auto new_else_stmts = ProcessStmts(else_flat, mode, split_int, split_dim, tile_vars, is_aiv,
-                                         subblock_idx, var_replacements);
+                                         subblock_idx, var_replacements, allow_uneven_static);
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
@@ -798,7 +845,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
     auto new_stmts = ProcessStmts(seq->stmts_, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
-                                  var_replacements);
+                                  var_replacements, allow_uneven_static);
     return std::make_shared<SeqStmts>(new_stmts, seq->span_);
   }
 
@@ -819,12 +866,13 @@ std::string ReserveFreshName(std::unordered_set<std::string>& used_names, const 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
                                   bool is_aiv, const ExprPtr& subblock_idx,
-                                  std::unordered_map<const Var*, VarPtr>& var_replacements) {
+                                  std::unordered_map<const Var*, VarPtr>& var_replacements,
+                                  bool allow_uneven_static) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
   for (const auto& stmt : stmts) {
-    result.push_back(
-        ProcessStmt(stmt, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx, var_replacements));
+    result.push_back(ProcessStmt(stmt, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx,
+                                 var_replacements, allow_uneven_static));
   }
   return result;
 }

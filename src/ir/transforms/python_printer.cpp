@@ -1148,7 +1148,9 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+      if (kv.first == kPipelineMembershipAttr || kv.first == "odd_split_gm_sync") {
+        serialized_attrs.push_back(&kv);
+      }
     }
     if (!serialized_attrs.empty()) {
       stream_ << (need_comma ? ", " : "") << "attrs={";

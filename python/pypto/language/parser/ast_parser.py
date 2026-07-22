@@ -1277,11 +1277,23 @@ class ASTParser:
                 resolved = self.type_resolver.resolve_type(ann)
             if resolved is not None and not isinstance(resolved, list):
                 inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
-                self.type_resolver.validate_annotation_consistency(
-                    resolved, inferred_for_validation, var_name, span
+                is_internal_odd_split_gather = (
+                    isinstance(value_expr, ir.Call)
+                    and value_expr.op.name == ir.get_op("tile.aic_gather").name
+                    and bool(value_expr.attrs.get("odd_split_gm_sync", False))
                 )
+                if not is_internal_odd_split_gather:
+                    self.type_resolver.validate_annotation_consistency(
+                        resolved, inferred_for_validation, var_name, span
+                    )
                 if isinstance(value_expr.type, ir.UnknownType):
                     # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
+                    override_type = resolved
+                elif is_internal_odd_split_gather:
+                    # LowerAutoVectorSplit pads every physical Cube dimension
+                    # to the backend's L0 alignment. The ordinary aic_gather
+                    # deducer only doubles the split dimension, so the printed
+                    # annotation is the authoritative compiler-generated type.
                     override_type = resolved
                 elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
                     normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
@@ -5611,6 +5623,8 @@ class ASTParser:
             if kw.arg == "split":
                 explicit_split = cast("ast.expr", kw.value)
                 continue
+            if kw.arg == "attrs":
+                continue
             if kw.arg == "mode":
                 raise ParserSyntaxError(
                     f"pl.{op_name}() does not take a mode= argument — pass the lowered "
@@ -5685,9 +5699,10 @@ class ASTParser:
                     span=span,
                     hint=hint,
                 )
-            return ir.create_op_call(
+            result = ir.create_op_call(
                 f"{op_ns}.{op_name}", [operand_expr], {"split": int(explicit_split.value)}, span
             )
+            return self._attach_op_attrs(result, self._parse_op_attrs(call))
 
         # High-level scoped form — inherit the mode from the enclosing scope.
         # This is the only path that emits the tensor form (region-only).
@@ -5700,7 +5715,8 @@ class ASTParser:
                 hint=hint,
             )
         mode = self._split_aiv_mode_stack[-1]
-        return ir.create_op_call(f"{op_ns}.{op_name}", [operand_expr], {"split": int(mode.value)}, span)
+        result = ir.create_op_call(f"{op_ns}.{op_name}", [operand_expr], {"split": int(mode.value)}, span)
+        return self._attach_op_attrs(result, self._parse_op_attrs(call))
 
     @staticmethod
     def _validate_kernel_call_kwargs(

@@ -90,6 +90,27 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 | Cube→Vector (e.g. Acc→Vec) | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
 | Vector→Cube (e.g. Vec→Mat/Left/Right) | `dest_var = tpop_from_aiv()` | `tile.move` to adapt fractal layout, then `tpush_to_aic(adapted_tile)` |
 
+### Odd AUTO Vector→Cube boundaries
+
+An AUTO `tile.aic_gather` marked `odd_split_gm_sync` cannot use the equal-half
+`tpush_to_aic` / `tpop_from_aiv` transport. The pass creates one hidden,
+L0-aligned GM transfer tensor per such boundary and lowers it as follows:
+
+| AIV producer | AIC consumer |
+| ------------ | ------------ |
+| `tile.store(lane_tile, subblock_idx * floor(N/2), transfer)`; `sync_set(MTE3, event, ffts_mode=2)` | `sync_wait(MTE2, event)`; `tile.load(transfer, physical_shape, logical_valid_shape, target_memory=Mat)` |
+
+The two AIV lanes therefore write the logical floor/ceil shards into adjacent
+regions of the same GM tensor. Each boundary receives a distinct free event id,
+allocated from `13` downward after excluding ids already used by explicit
+`sync_set` / `sync_wait` calls. On A2/A3, the pass also creates the 256-element
+INT64 FFTS workspace required by `system.set_ffts` and passes it to both lanes.
+
+Hidden transfer/workspace tensors are `NO_DEP` kernel arguments. A standalone
+Group materializes them locally. When an outer wrapper calls the Group, that
+caller materializes them and the internal Group exposes them as parameters,
+preserving orchestration codegen's wrapper-argument mapping.
+
 **Fractal TileView layout**: Cross-core transfer tile views are computed by `BuildCrossCoreTransferView` based on the destination memory space. The mapping differs between backends:
 
 Ascend950 (a5) — hardware cross-core pipe carries data in fractal layout:
@@ -124,7 +145,7 @@ A `tile.move` is not the only way data crosses the CV boundary. When one lane wr
 
 To stay deadlock-free, a handshake is emitted only when (1) the GM origin tensor has exactly one producer-lane store, (2) the opposite-lane load lives in the **same structural body** (same loop/branch, so the `tpush`/`tpop` execute the same number of times), and (3) the store precedes the load. Pairs split across different loops or branches are left untouched.
 
-Only the **Cube→Vector** direction (cube `tile.store` → vector `tile.load`) is fenced. The AIC `tpush` sends the stored tile raw, exactly as the normal boundary C2V push does on both backends, and the AIV `tpop` lands in `Vec`. The reverse Vector→Cube direction would require the V→C fractal-layout adaptation that the `tile.move` boundary path applies before `tpush_to_aic`; emitting a raw-tile sync there would violate the cross-core transport contract, so V2C GM exchanges are left unfenced.
+Only the **Cube→Vector** direction (cube `tile.store` → vector `tile.load`) is fenced by this generic detector. The AIC `tpush` sends the stored tile raw, exactly as the normal boundary C2V push does on both backends, and the AIV `tpop` lands in `Vec`. A generic reverse Vector→Cube GM exchange would require fractal-layout adaptation, so it is left unfenced. The compiler-generated odd AUTO V→C path above is separate: it deliberately stores the logical shards to GM and reloads them into `Mat` after `sync_set` / `sync_wait`.
 
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 
@@ -242,14 +263,18 @@ Phase 2 — Expand each InCore function F:
       a tile.store on one lane + a tile.load on the other from the same GM
       tensor origin, scheduled as a tpush/tpop sync fence (see "GM-mediated
       cross-lane dependencies" above)
+  2b. For each odd_split_gm_sync V→C boundary, allocate an aligned hidden GM
+      tensor and a distinct free event id; on A2/A3 also allocate FFTS workspace
   3. If not mixed (no CUBE ops or no VECTOR ops, and no boundary moves):
      convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
      - For boundary move (Cube→Vector): emit tpush_to_aiv(source_tile)
-     - For boundary move (Vector→Cube): emit dest_var = tpop_from_aiv() with fractal TileView
+     - For ordinary Vector→Cube: emit dest_var = tpop_from_aiv() with fractal TileView
+     - For odd AUTO Vector→Cube: wait on its event, then load the hidden GM tensor into Mat
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
      - For boundary move (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
-     - For boundary move (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
+     - For ordinary Vector→Cube: emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
+     - For odd AUTO Vector→Cube: store the floor/ceil lane shard into hidden GM, then sync_set
   5a. Assign fractal TileView to all boundary tpop result types and pre-tpush tile.move ops
       via BuildCrossCoreTransferView:
       - Ascend950: Left→NZ, Right→ZN, Mat/Vec→preserve
@@ -268,7 +293,8 @@ Phase 2 — Expand each InCore function F:
      `system.tfree_to_aic` / `system.tfree_to_aiv`, delaying obviously early frees within the same block when needed
  11. If the split bodies use cross-core tile ops and do not already contain setup,
       derive reserve/import/initialize_pipe prologues and prepend them
- 12. Create AIC function (no return) and AIV function (original return)
+ 12. Create AIC function (no return) and AIV function (original return), appending
+     hidden odd-boundary transfer/workspace parameters as NO_DEP arguments
      - On Ascend910B no-split mixed kernels, tag the generated AIV with dual-dispatch metadata
        so later lowering launches the same AIV kernel on both vector lanes and rewrites the secondary lane's tile
        replay path to `valid_shape=[0, 0]`
@@ -435,7 +461,10 @@ class After:
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
-**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel.py`
+**Tests**: `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`,
+`tests/ut/ir/transforms/test_expand_mixed_kernel_a5.py`,
+`tests/ut/ir/transforms/test_expand_mixed_kernel_split_aiv.py`, and the on-board
+`pl.jit` case `tests/st/runtime/cross_core/test_auto_split_odd.py`.
 
 ## Pass Properties
 

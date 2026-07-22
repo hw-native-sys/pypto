@@ -14,9 +14,9 @@
 //
 // Converts an AUTO ``pl.split`` mixed InCore function into the EXPLICIT
 // ``split_aiv`` form *before* ExpandMixedKernel, so that ExpandMixedKernel's
-// op-driven boundary arm folds tile.aiv_shard / tile.aic_gather into
-// split-stamped tpush/tpop uniformly — the same path hand-authored explicit
-// kernels take. Once that conversion happens, the downstream SplitVectorKernel
+// op-driven boundary arm folds ordinary tile.aiv_shard / tile.aic_gather into
+// split-stamped tpush/tpop. Odd AUTO V->C gathers instead use its GM + manual
+// event path. Once that conversion happens, the downstream SplitVectorKernel
 // no longer needs to halve the body: it sees the ``split_aiv`` marker and only
 // stamps attributes (its "already explicit" arm).
 //
@@ -34,7 +34,8 @@
 //   3. C->V boundary: replace with tile.aiv_shard(full_cube_tile, split=int(M))
 //      -> HALF; seed the shard result into tile_vars like tpop_from_aic.
 //   4. V->C boundary: insert tile.aic_gather(half_vector_tile, split=int(M))
-//      -> FULL, then keep the original cube placement move on the full tile.
+//      -> FULL, then keep the original cube placement move. For an odd static
+//      split extent, pad the physical Cube box and mark the gather for GM sync.
 //   5. Halve ONLY the vector sub-region (AFFINITY GATE): a tile-producing op is
 //      halved iff it is VECTOR-affine. CUBE-affine ops (matmul operands, the
 //      cube result before the C->V boundary) stay FULL. We assert no CUBE op was
@@ -45,6 +46,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -53,6 +55,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -64,7 +68,9 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -94,6 +100,7 @@ using split_axis::TileInfo;
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 constexpr const char* kSplitAivAttr = "split_aiv";
+constexpr const char* kOddSplitGmSyncAttr = "odd_split_gm_sync";
 // Stamped by the explicit-region path so ExpandMixedKernel (pass 21) skips its
 // single-func-mode transpose-hazard check (validated per-region here instead).
 constexpr const char* kSplitAivRegionValidatedAttr = "split_aiv_region_validated";
@@ -107,9 +114,8 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
 void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 void ValidateMixedExplicitRegion(const std::vector<StmtPtr>& stmts, const Span& region_span);
 
-// Half of a split-axis physical extent: ConstInt even -> value/2, dynamic ->
-// floordiv(dim, 2). Mirrors split_axis::ComputeHalfDimSize (anonymous in
-// split_axis_utils.cpp) for the tracked TileInfo extent.
+// Floor half of a split-axis extent. For an even boundary this is both the
+// physical lane size and the lane-1 offset stride.
 ExprPtr HalfDimExtent(const ExprPtr& dim_size) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
     return std::make_shared<ConstInt>(ci->value_ / 2, ci->dtype(), ci->span_);
@@ -131,6 +137,35 @@ TypePtr ReshapeTypeWithMemory(const TypePtr& deduced_type, const std::optional<M
 std::optional<MemorySpace> TileMemory(const TypePtr& type) {
   if (auto tt = std::dynamic_pointer_cast<const TileType>(type)) return tt->memory_space_;
   return std::nullopt;
+}
+
+bool HasStaticOddSplitExtent(const TypePtr& type, int split_dim) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tt || split_dim < 0 || split_dim >= static_cast<int>(tt->shape_.size())) return false;
+  auto extent = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[split_dim]);
+  return extent && (extent->value_ % 2) != 0;
+}
+
+// AIC transfer tiles must use cube-aligned physical boxes. Preserve the
+// original effective valid shape so padding is never included in downstream
+// cube compute (e.g. an odd K contraction).
+TypePtr PadForCubeTransfer(const TypePtr& type, MemorySpace memory_space, const Span& span) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  INTERNAL_CHECK_SPAN(tt, span) << "Odd auto-split boundary requires a TileType";
+  const int64_t alignment = PassContext::Current()->GetBackendHandler()->GetL0FractalAlignment();
+  std::vector<ExprPtr> padded_shape = tt->shape_;
+  for (size_t i = 0; i < padded_shape.size(); ++i) {
+    auto extent = std::dynamic_pointer_cast<const ConstInt>(padded_shape[i]);
+    INTERNAL_CHECK_SPAN(extent, span)
+        << "Odd auto-split V->C boundary requires a fully static tile shape; dimension " << i
+        << " is dynamic";
+    const int64_t padded = ((extent->value_ + alignment - 1) / alignment) * alignment;
+    padded_shape[i] = std::make_shared<ConstInt>(padded, extent->dtype(), extent->span_);
+  }
+  TileView view = tile_view_semantics::GetImplicitTileView(padded_shape, memory_space);
+  view.valid_shape = tile_view_semantics::GetEffectiveTileView(*tt).valid_shape;
+  return std::make_shared<TileType>(std::move(padded_shape), tt->dtype_, tt->memref_, std::move(view),
+                                    memory_space);
 }
 
 // Make a split-kwarg call (split int attr is the SplitMode int encoding).
@@ -194,7 +229,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                                 int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
                                 const ExprPtr& subblock_idx,
                                 std::unordered_map<const Var*, VarPtr>& var_replacements,
-                                std::unordered_set<std::string>& used_names) {
+                                std::unordered_set<std::string>& used_names, bool allow_uneven_static) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
 
@@ -264,7 +299,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       auto inj = InjectSubblockIdxIntoStmts(region_stmts, used_names);
       used_names = inj.used_names;
       auto lowered = LowerStmts(inj.body_stmts, rmode, static_cast<int>(rmode), rdim, r_tile_vars,
-                                inj.subblock_idx_expr, r_var_repl, used_names);
+                                inj.subblock_idx_expr, r_var_repl, used_names,
+                                /*allow_uneven_static=*/false);
 
       // Per-region cube-operand backstop and transpose-hazard check, using THIS
       // region's split_dim and span so diagnostics point at the region.
@@ -294,16 +330,32 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // (matmul/Acc result) stays FULL; only the result is halved and tracked.
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: C->V boundary tile.move must carry a source tile";
-          auto shard = MakeReshapeOpCall("tile.aiv_shard", call->args_[0], split_int, call->span_);
+          auto shard_source = call->args_[0];
+          if (auto source_var = AsVarLike(shard_source)) {
+            auto replacement = var_replacements.find(source_var.get());
+            if (replacement != var_replacements.end()) shard_source = replacement->second;
+          }
+          const bool odd_result = HasStaticOddSplitExtent(call->GetType(), split_dim);
+          const bool source_was_padded =
+              odd_result && !HasStaticOddSplitExtent(shard_source->GetType(), split_dim);
+          if (odd_result && !source_was_padded) {
+            throw pypto::ValueError(
+                "LowerAutoVectorSplit: an odd static split dimension is currently supported only for "
+                "VECTOR_TO_CUBE boundaries, where both AIV lanes can rendezvous through GM. Pad this "
+                "CUBE_TO_VECTOR boundary to an even physical box and preserve the logical extent with "
+                "pl.tile.set_validshape(...).");
+          }
+          auto shard = MakeReshapeOpCall("tile.aiv_shard", shard_source, split_int, call->span_);
           // Result: the op's deduced HALF type, with the boundary target memory
           // (the move's destination memory, e.g. Vec) re-attached.
           auto half_type = ReshapeTypeWithMemory(shard->GetType(), TileMemory(call->GetType()));
           auto new_var = std::make_shared<Var>(assign->var_->name_hint_, half_type, assign->var_->span_);
           auto shard_typed =
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);
-          if (auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+          if (auto tt = std::dynamic_pointer_cast<const TileType>(shard_source->GetType());
               tt && split_dim < static_cast<int>(tt->shape_.size())) {
-            TileInfo info{HalfDimExtent(tt->shape_[split_dim])};
+            auto half = HalfDimExtent(tt->shape_[split_dim]);
+            TileInfo info{half, half, split_dim};
             tile_vars[assign->var_.get()] = info;
             tile_vars[new_var.get()] = info;
           }
@@ -326,6 +378,33 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           if (auto src_var = AsVarLike(src)) {
             auto it = var_replacements.find(src_var.get());
             if (it != var_replacements.end()) src = it->second;
+          }
+          const bool odd_gm_sync = HasStaticOddSplitExtent(call->GetType(), split_dim);
+          if (odd_gm_sync) {
+            auto gather_type = PadForCubeTransfer(call->GetType(), MemorySpace::Vec, call->span_);
+            auto gather_call = std::make_shared<Call>(
+                OpRegistry::GetInstance().GetOp("tile.aic_gather"), std::vector<ExprPtr>{src},
+                std::vector<std::pair<std::string, std::any>>{{"split", std::any(split_int)}},
+                std::vector<std::pair<std::string, std::any>>{{kOddSplitGmSyncAttr, std::any(true)}},
+                gather_type, call->span_);
+            auto full_vec_var =
+                std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
+            result.push_back(std::make_shared<AssignStmt>(full_vec_var, gather_call, assign->span_));
+
+            auto move_tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+            INTERNAL_CHECK_SPAN(move_tt && move_tt->memory_space_.has_value(), call->span_)
+                << "Odd auto-split V->C move requires an inferred destination memory space";
+            auto padded_move_type =
+                PadForCubeTransfer(call->GetType(), move_tt->memory_space_.value(), call->span_);  // NOLINT
+            std::vector<ExprPtr> move_args = call->args_;
+            move_args[0] = full_vec_var;
+            auto new_move = std::make_shared<Call>(call->op_, std::move(move_args), call->kwargs_,
+                                                   padded_move_type, call->span_);
+            auto padded_dest =
+                std::make_shared<Var>(assign->var_->name_hint_, padded_move_type, assign->var_->span_);
+            var_replacements[assign->var_.get()] = padded_dest;
+            result.push_back(std::make_shared<AssignStmt>(padded_dest, new_move, assign->span_));
+            continue;
           }
           auto gather = MakeReshapeOpCall("tile.aic_gather", src, split_int, call->span_);
           // Gather result: full shape, Vec memory (inherit input side).
@@ -370,14 +449,45 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (aff == CoreAffinity::VECTOR) {
         // Route this single vector stmt through the shared halving machinery.
         auto lowered = ProcessStmts({stmt}, mode, split_int, split_dim, tile_vars, /*is_aiv=*/true,
-                                    subblock_idx, var_replacements);
+                                    subblock_idx, var_replacements, allow_uneven_static);
         for (auto& s : lowered) result.push_back(s);
         continue;
       }
       if (aff == CoreAffinity::CUBE) {
         // Affinity gate: CUBE ops are passed through FULL — never routed to the
-        // halving machinery. The post-lowering CheckNoCubeTileHalved walk
-        // verifies that no cube operand or result was shrunk (see LowerFunction).
+        // halving machinery. Odd V2C padding can nevertheless replace an input
+        // with a larger physical Cube box; re-run normal op type inference in
+        // that case so placement moves and matmul results inherit the padded
+        // dimensions while retaining their logical valid shapes.
+        auto rebound_expr = transform_utils::Substitute(leaf_call, var_replacements);
+        auto rebound_call = std::dynamic_pointer_cast<const Call>(rebound_expr);
+        INTERNAL_CHECK_SPAN(rebound_call, leaf_call->span_)
+            << "Internal error: substituting a Cube Call did not produce a Call";
+        bool args_changed = false;
+        for (size_t i = 0; i < leaf_call->args_.size(); ++i) {
+          if (leaf_call->args_[i].get() != rebound_call->args_[i].get()) {
+            args_changed = true;
+            break;
+          }
+        }
+        if (args_changed) {
+          auto inferred = OpRegistry::GetInstance().Create(leaf_call->op_->name_, rebound_call->args_,
+                                                           leaf_call->kwargs_, leaf_call->span_);
+          auto rebuilt = std::make_shared<Call>(inferred->op_, inferred->args_, inferred->kwargs_,
+                                                leaf_call->attrs_, inferred->GetType(), leaf_call->span_);
+          if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+            auto new_var =
+                std::make_shared<Var>(assign->var_->name_hint_, rebuilt->GetType(), assign->var_->span_);
+            var_replacements[assign->var_.get()] = new_var;
+            result.push_back(
+                std::make_shared<AssignStmt>(new_var, rebuilt, assign->span_, assign->leading_comments_));
+          } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+            result.push_back(std::make_shared<EvalStmt>(rebuilt, eval->span_, eval->leading_comments_));
+          }
+          continue;
+        }
+        // The post-lowering CheckNoCubeTileHalved walk verifies that no cube
+        // operand or result was shrunk (see LowerFunction).
         result.push_back(stmt);
         continue;
       }
@@ -386,8 +496,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     // --- Compound stmts: recurse into the body for vector content. ---
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
-      auto new_body =
-          LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements, used_names);
+      auto new_body = LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements,
+                                 used_names, allow_uneven_static);
       auto new_for = MutableCopy(for_stmt);
       new_for->body_ = loop_repair::MakeBody(new_body, for_stmt->span_);
       result.push_back(new_for);
@@ -396,12 +506,12 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto then_body = transform_utils::FlattenToStmts(if_stmt->then_body_);
       auto new_then = LowerStmts(then_body, mode, split_int, split_dim, tile_vars, subblock_idx,
-                                 var_replacements, used_names);
+                                 var_replacements, used_names, allow_uneven_static);
       std::optional<StmtPtr> new_else;
-      if (if_stmt->else_body_.has_value()) {
-        auto else_body = transform_utils::FlattenToStmts(*if_stmt->else_body_);
+      if (auto else_stmt = if_stmt->else_body_.value_or(nullptr)) {
+        auto else_body = transform_utils::FlattenToStmts(else_stmt);
         auto new_else_stmts = LowerStmts(else_body, mode, split_int, split_dim, tile_vars, subblock_idx,
-                                         var_replacements, used_names);
+                                         var_replacements, used_names, allow_uneven_static);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
       auto new_if = MutableCopy(if_stmt);
@@ -412,8 +522,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     }
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
-      auto new_body =
-          LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements, used_names);
+      auto new_body = LowerStmts(body, mode, split_int, split_dim, tile_vars, subblock_idx, var_replacements,
+                                 used_names, allow_uneven_static);
       auto new_while = MutableCopy(while_stmt);
       new_while->body_ = loop_repair::MakeBody(new_body, while_stmt->span_);
       result.push_back(new_while);
@@ -468,8 +578,8 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
       CheckNoCubeTileHalved(transform_utils::FlattenToStmts(for_stmt->body_), halved, cube_halved);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       CheckNoCubeTileHalved(transform_utils::FlattenToStmts(if_stmt->then_body_), halved, cube_halved);
-      if (if_stmt->else_body_.has_value()) {
-        CheckNoCubeTileHalved(transform_utils::FlattenToStmts(*if_stmt->else_body_), halved, cube_halved);
+      if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
+        CheckNoCubeTileHalved(transform_utils::FlattenToStmts(else_body), halved, cube_halved);
       }
     } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
       CheckNoCubeTileHalved(seq->stmts_, halved, cube_halved);
@@ -558,9 +668,8 @@ void ScanRegionHalfWidth(const std::vector<StmtPtr>& stmts, std::unordered_set<c
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       ScanRegionHalfWidth(transform_utils::FlattenToStmts(if_stmt->then_body_), half_tiles,
                           full_width_vec_ops);
-      if (if_stmt->else_body_.has_value()) {
-        ScanRegionHalfWidth(transform_utils::FlattenToStmts(*if_stmt->else_body_), half_tiles,
-                            full_width_vec_ops);
+      if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
+        ScanRegionHalfWidth(transform_utils::FlattenToStmts(else_body), half_tiles, full_width_vec_ops);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       ScanRegionHalfWidth(transform_utils::FlattenToStmts(while_stmt->body_), half_tiles, full_width_vec_ops);
@@ -620,7 +729,8 @@ std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
       std::unordered_map<const Var*, TileInfo> ignored_tile_vars;
       std::unordered_map<const Var*, VarPtr> ignored_var_repl;
       auto lowered = LowerStmts({stmt}, SplitMode::None, /*split_int=*/0, /*split_dim=*/0, ignored_tile_vars,
-                                /*subblock_idx=*/nullptr, ignored_var_repl, used_names);
+                                /*subblock_idx=*/nullptr, ignored_var_repl, used_names,
+                                /*allow_uneven_static=*/false);
       for (auto& s : lowered) result.push_back(s);
       continue;
     }
@@ -644,9 +754,8 @@ std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto new_then = LowerExplicitRegions(transform_utils::FlattenToStmts(if_stmt->then_body_), used_names);
       std::optional<StmtPtr> new_else;
-      if (if_stmt->else_body_.has_value()) {
-        auto new_else_stmts =
-            LowerExplicitRegions(transform_utils::FlattenToStmts(*if_stmt->else_body_), used_names);
+      if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
+        auto new_else_stmts = LowerExplicitRegions(transform_utils::FlattenToStmts(else_body), used_names);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
       auto new_if = MutableCopy(if_stmt);
@@ -743,7 +852,8 @@ FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
   std::unordered_set<std::string> used_names = injected.used_names;
 
   auto new_stmts = LowerStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars,
-                              injected.subblock_idx_expr, var_replacements, used_names);
+                              injected.subblock_idx_expr, var_replacements, used_names,
+                              /*allow_uneven_static=*/true);
 
   // Effective cube-operand backstop: re-walk the rebuilt body and assert no
   // CUBE-affine op operates on a halved tile (see CheckNoCubeTileHalved).
@@ -793,9 +903,8 @@ CoreAffinity RollupAffinity(const std::vector<StmtPtr>& stmts) {
       result = RollupAffinity(transform_utils::FlattenToStmts(for_stmt->body_));
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       result = RollupAffinity(transform_utils::FlattenToStmts(if_stmt->then_body_));
-      if (if_stmt->else_body_.has_value()) {
-        result =
-            CombineAffinity(result, RollupAffinity(transform_utils::FlattenToStmts(*if_stmt->else_body_)));
+      if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
+        result = CombineAffinity(result, RollupAffinity(transform_utils::FlattenToStmts(else_body)));
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       result = RollupAffinity(transform_utils::FlattenToStmts(while_stmt->body_));

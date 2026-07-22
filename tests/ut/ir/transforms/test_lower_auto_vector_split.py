@@ -374,6 +374,59 @@ def test_vector_load_halved_left_right():
     ir.assert_structural_equal(_lower(program), expected)
 
 
+def test_vector_load_odd_left_right_uses_floor_ceil_lanes():
+    """LEFT_RIGHT odd extent: use a uniform 128-column physical box while
+    localizing lane 0/lane 1 to 127/128 valid columns at offsets 0/127."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([127, 255]), span)
+    out_0 = ir.Var("out_0", _tensor([127, 255]), span)
+    load = T.load(data, [0, 0], [127, 255], target_memory=MS.Vec, span=span)
+    prev = ir.Var("prev", load.type, span)
+    store = T.store(prev, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(prev, load, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+        mode=ir.SplitMode.LEFT_RIGHT,
+    )
+
+    sub = _sub_var()
+    e_data = ir.Var("data", _tensor([127, 255]), span)
+    e_out = ir.Var("out_0", _tensor([127, 255]), span)
+    c2 = ir.ConstInt(2, DataType.INDEX, span)
+    c127 = ir.ConstInt(127, DataType.INDEX, span)
+    c255 = ir.ConstInt(255, DataType.INDEX, span)
+    lane_valid = c127 + sub * (c255 - c2 * c127)
+    e_load = T.load(
+        e_data,
+        [0, 0 + sub * c127],
+        [127, 128],
+        valid_shapes=[127, lane_valid],
+        target_memory=MS.Vec,
+        span=span,
+    )
+    e_prev = ir.Var("prev", e_load.type, span)
+    e_store = T.store(e_prev, [0, 0 + sub * c127], e_out, span=span)
+    e_out_store = ir.Var("out_store", e_store.type, span)
+    expected = _expected_incore(
+        [(e_data, _IN), (e_out, _OUT)],
+        [
+            ir.AssignStmt(e_prev, e_load, span),
+            ir.AssignStmt(e_out_store, e_store, span),
+            ir.ReturnStmt([e_out_store], span),
+        ],
+        [e_out.type],
+        mode=ir.SplitMode.LEFT_RIGHT,
+        sub=sub,
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
 def test_vector_slice_halves_shape_and_localizes_offset():
     """UP_DOWN: a tile.slice of a full (unsplit) Vec source halves its static shape
     tuple in lockstep with the result (the qk_pv strided sub-slice fix) and

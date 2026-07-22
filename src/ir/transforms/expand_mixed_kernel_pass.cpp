@@ -25,6 +25,7 @@
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -32,11 +33,13 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -63,6 +66,9 @@ namespace ir {
 namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
+constexpr const char* kOddSplitGmSyncAttr = "odd_split_gm_sync";
+constexpr int kMaxUserCrossCoreEventId = 13;
+constexpr int64_t kFFTSWorkspaceElements = 256;
 
 using core_affinity::ClassifyCallAffinity;
 using core_affinity::ClassifyMoveDirection;
@@ -309,7 +315,8 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
                                                     call->args_[0],
                                                     call->GetType(),
                                                     /*op_driven=*/true,
-                                                    call->GetKwarg<int>("split", 0)};
+                                                    call->GetKwarg<int>("split", 0),
+                                                    call->GetAttr<bool>(kOddSplitGmSyncAttr, false)};
       } else if (call) {
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {
@@ -372,6 +379,163 @@ CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr
     kwargs.emplace_back("slayout", std::any(eff.slayout));
   }
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
+}
+
+struct OddSplitBoundaryResource {
+  VarPtr transfer;
+  ExprPtr subblock_idx;
+  ExprPtr offset_stride;
+  int split_dim;
+  int event_id;
+};
+
+CallPtr CreateCompilerCrossCoreEvent(const std::string& op_name, PipeType pipe, const Span& span,
+                                     int event_id, std::optional<int> ffts_mode = std::nullopt) {
+  std::vector<std::pair<std::string, std::any>> kwargs{{"pipe", std::any(static_cast<int>(pipe))},
+                                                       {"event_id", std::any(event_id)}};
+  if (ffts_mode.has_value()) kwargs.emplace_back("ffts_mode", std::any(*ffts_mode));
+  return OpRegistry::GetInstance().Create(op_name, {}, kwargs, span);
+}
+
+class UsedCrossCoreEventCollector : public IRVisitor {
+ public:
+  std::unordered_set<int> event_ids;
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait")) {
+      if (call->HasKwarg("event_id")) event_ids.insert(call->GetKwarg<int>("event_id", -1));
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+};
+
+std::unordered_set<int> CollectUsedCrossCoreEventIds(const StmtPtr& body) {
+  UsedCrossCoreEventCollector collector;
+  collector.VisitStmt(body);
+  return collector.event_ids;
+}
+
+int AllocateOddSplitEventId(std::unordered_set<int>& used_event_ids, const Span& span) {
+  for (int event_id = kMaxUserCrossCoreEventId; event_id >= 0; --event_id) {
+    if (used_event_ids.insert(event_id).second) return event_id;
+  }
+  CHECK_SPAN(false, span)
+      << "ExpandMixedKernel: odd auto-split requires one free cross-core event id, but all user event "
+         "ids [0, 13] are already used in the kernel";
+  return -1;
+}
+
+CallPtr CreateSetFFTS(const VarPtr& workspace, const Span& span) {
+  return OpRegistry::GetInstance().Create("system.set_ffts", {workspace}, {}, span);
+}
+
+CallPtr CreateHiddenTensor(const TypePtr& type, const Span& span) {
+  auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type);
+  INTERNAL_CHECK_SPAN(tensor_type, span) << "Odd auto-split hidden parameter must be a TensorType";
+  auto shape = std::make_shared<MakeTuple>(tensor_type->shape_, span);
+  return OpRegistry::GetInstance().Create("tensor.create", {shape},
+                                          {{"dtype", std::any(tensor_type->dtype_)},
+                                           {"layout", std::any(TensorLayout::ND)},
+                                           {"manual_dep", std::any(true)}},
+                                          span);
+}
+
+std::vector<std::pair<std::string, std::any>> AddNoDepIndices(
+    std::vector<std::pair<std::string, std::any>> attrs, size_t first_hidden, size_t hidden_count) {
+  if (hidden_count == 0) return attrs;
+  std::vector<int32_t> indices;
+  for (const auto& [key, value] : attrs) {
+    if (key == kAttrArgDirectionOverrides) {
+      if (const auto* existing = std::any_cast<std::vector<int32_t>>(&value)) indices = *existing;
+      break;
+    }
+  }
+  for (size_t i = 0; i < hidden_count; ++i) {
+    indices.push_back(static_cast<int32_t>(first_hidden + i));
+  }
+  return WithArgDirectionOverridesAttr(std::move(attrs), std::move(indices));
+}
+
+ExprPtr FindSubblockIdx(const std::vector<StmtPtr>& stmts) {
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (IsOp(std::dynamic_pointer_cast<const Call>(assign->value_), "tile.get_subblock_idx")) {
+        return assign->var_;
+      }
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      if (auto found = FindSubblockIdx(FlattenBody(for_stmt->body_))) return found;
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      if (auto found = FindSubblockIdx(FlattenBody(if_stmt->then_body_))) return found;
+      if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
+        if (auto found = FindSubblockIdx(FlattenBody(else_body))) return found;
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      if (auto found = FindSubblockIdx(FlattenBody(while_stmt->body_))) return found;
+    }
+  }
+  return nullptr;
+}
+
+std::map<const Stmt*, OddSplitBoundaryResource> BuildOddSplitBoundaryResources(
+    const std::vector<StmtPtr>& stmts, const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+    std::vector<VarPtr>& hidden_params, std::unordered_set<int>& used_event_ids) {
+  std::map<const Stmt*, OddSplitBoundaryResource> result;
+  ExprPtr subblock_idx = FindSubblockIdx(stmts);
+  int counter = 0;
+  std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& body) {
+    for (const auto& stmt_ptr : body) {
+      auto boundary_it = boundary_moves.find(stmt_ptr.get());
+      if (boundary_it != boundary_moves.end() && boundary_it->second.odd_gm_sync) {
+        const Stmt* stmt = stmt_ptr.get();
+        const auto& boundary = boundary_it->second;
+        INTERNAL_CHECK_SPAN(boundary.direction == CVDirection::VECTOR_TO_CUBE, boundary.dest_var->span_)
+            << "Odd GM synchronization currently supports only VECTOR_TO_CUBE boundaries";
+        INTERNAL_CHECK_SPAN(subblock_idx, boundary.dest_var->span_)
+            << "Odd auto-split boundary requires tile.get_subblock_idx()";
+        auto full_tile = std::dynamic_pointer_cast<const TileType>(boundary.result_type);
+        INTERNAL_CHECK_SPAN(full_tile && full_tile->shape_.size() >= 2, boundary.dest_var->span_)
+            << "Odd auto-split boundary requires a rank-2-or-higher TileType";
+        const int split_dim = split_axis::SplitDimension(static_cast<SplitMode>(boundary.split));
+        auto effective_view = tile_view_semantics::GetEffectiveTileView(*full_tile);
+        INTERNAL_CHECK_SPAN(split_dim < static_cast<int>(effective_view.valid_shape.size()),
+                            boundary.dest_var->span_)
+            << "Odd auto-split boundary is missing split-axis valid shape";
+        auto logical_extent =
+            std::dynamic_pointer_cast<const ConstInt>(effective_view.valid_shape[split_dim]);
+        INTERNAL_CHECK_SPAN(logical_extent && (logical_extent->value_ % 2) != 0, boundary.dest_var->span_)
+            << "Odd GM synchronization marker requires a static odd logical extent";
+        auto stride = std::make_shared<ConstInt>(logical_extent->value_ / 2, logical_extent->dtype(),
+                                                 logical_extent->span_);
+        auto tensor_type = std::make_shared<TensorType>(full_tile->shape_, full_tile->dtype_);
+        auto transfer = std::make_shared<Var>("odd_split_transfer_" + std::to_string(counter++), tensor_type,
+                                              boundary.dest_var->span_);
+        hidden_params.push_back(transfer);
+        const int event_id = AllocateOddSplitEventId(used_event_ids, boundary.dest_var->span_);
+        result.emplace(stmt, OddSplitBoundaryResource{transfer, subblock_idx, stride, split_dim, event_id});
+      }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt_ptr)) {
+        walk(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt_ptr)) {
+        walk(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) walk(FlattenBody(*if_stmt->else_body_));
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt_ptr)) {
+        walk(FlattenBody(while_stmt->body_));
+      }
+    }
+  };
+  walk(stmts);
+  return result;
+}
+
+std::vector<ExprPtr> MakeOddSplitOffsets(const OddSplitBoundaryResource& resource, size_t rank,
+                                         const Span& span) {
+  std::vector<ExprPtr> offsets(rank);
+  for (size_t i = 0; i < rank; ++i) offsets[i] = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  offsets[static_cast<size_t>(resource.split_dim)] =
+      MakeMul(resource.subblock_idx, resource.offset_stride, span);
+  return offsets;
 }
 
 // ============================================================================
@@ -672,7 +836,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+                                   const std::map<const Stmt*, OddSplitBoundaryResource>& odd_resources) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -698,6 +863,44 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     if (bm_it != boundary_moves.end()) {
       {
         const auto& bm = bm_it->second;
+        if (bm.odd_gm_sync) {
+          auto resource_it = odd_resources.find(stmt.get());
+          INTERNAL_CHECK_SPAN(resource_it != odd_resources.end(), stmt->span_)
+              << "Odd auto-split boundary is missing its GM transfer resource";
+          const auto& resource = resource_it->second;
+          auto full_tile = std::dynamic_pointer_cast<const TileType>(bm.result_type);
+          INTERNAL_CHECK_SPAN(full_tile, stmt->span_) << "Odd auto-split boundary requires a full TileType";
+          if (side == CoreSide::AIV) {
+            auto offsets = std::make_shared<MakeTuple>(
+                MakeOddSplitOffsets(resource, full_tile->shape_.size(), stmt->span_), stmt->span_);
+            auto store = OpRegistry::GetInstance().Create(
+                "tile.store", {bm.source_tile, offsets, resource.transfer}, {}, stmt->span_);
+            result.push_back(std::make_shared<EvalStmt>(store, stmt->span_));
+            result.push_back(std::make_shared<EvalStmt>(
+                CreateCompilerCrossCoreEvent("system.sync_set", PipeType::MTE3, stmt->span_,
+                                             resource.event_id, /*ffts_mode=*/2),
+                stmt->span_));
+          } else {
+            result.push_back(
+                std::make_shared<EvalStmt>(CreateCompilerCrossCoreEvent("system.sync_wait", PipeType::MTE2,
+                                                                        stmt->span_, resource.event_id),
+                                           stmt->span_));
+            std::vector<ExprPtr> zeros(full_tile->shape_.size());
+            for (auto& zero : zeros) zero = std::make_shared<ConstInt>(0, DataType::INDEX, stmt->span_);
+            auto offsets = std::make_shared<MakeTuple>(std::move(zeros), stmt->span_);
+            auto shapes = std::make_shared<MakeTuple>(full_tile->shape_, stmt->span_);
+            auto valid_shapes = std::make_shared<MakeTuple>(
+                tile_view_semantics::GetEffectiveTileView(*full_tile).valid_shape, stmt->span_);
+            auto load = OpRegistry::GetInstance().Create(
+                "tile.load", {resource.transfer, offsets, shapes, valid_shapes},
+                {{"target_memory", std::any(MemorySpace::Mat)}}, stmt->span_);
+            auto loaded_var = std::make_shared<Var>(bm.dest_var->name_hint_, load->GetType(), stmt->span_);
+            tpop_var_remap[bm.dest_var.get()] = loaded_var;
+            tpop_var_remap[loaded_var.get()] = loaded_var;
+            result.push_back(std::make_shared<AssignStmt>(loaded_var, load, stmt->span_));
+          }
+          continue;
+        }
         // The cross-core transfer memory FOR THIS SIDE: AIC drains into Mat,
         // AIV into Vec. Op-driven boundaries (aiv_shard / aic_gather) keep the
         // input memory on both sides, so the fractal view and tpop type must
@@ -857,20 +1060,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
               BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -878,8 +1083,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -1073,9 +1279,11 @@ struct ExpandedKernel {
   FunctionPtr aic_func;
   FunctionPtr aiv_func;
   std::optional<FunctionPtr> group_func;  // nullopt when existing Group caller will be rewritten
+  std::vector<VarPtr> hidden_params;
 };
 
-ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
+ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true,
+                                   bool expose_hidden_group_params = false) {
   // A tile.transpose that swaps the split axis cannot be split correctly:
   // SplitVectorKernel halves the original split axis, but the transpose moves
   // that data to the other dimension, mis-typing the result. Reject the split
@@ -1127,6 +1335,17 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
 
+  std::vector<VarPtr> hidden_params;
+  auto used_event_ids = CollectUsedCrossCoreEventIds(func->body_);
+  auto odd_resources = BuildOddSplitBoundaryResources(stmts, boundary_moves, hidden_params, used_event_ids);
+  VarPtr ffts_workspace;
+  if (!odd_resources.empty() && PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
+    auto workspace_type = std::make_shared<TensorType>(std::vector<int64_t>{kFFTSWorkspaceElements},
+                                                       DataType::INT64, std::nullopt);
+    ffts_workspace = std::make_shared<Var>("odd_split_ffts_workspace", workspace_type, func->span_);
+    hidden_params.push_back(ffts_workspace);
+  }
+
   // Detect GM-mediated cross-lane store/load dependencies (issue #1433) that
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
@@ -1147,7 +1366,14 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
+  if (!odd_resources.empty() && !aic_tpop_remap.empty()) {
+    // Unlike tpop, the odd-boundary consumer is a regular tile.load and can be
+    // removed by FinalizeSplitCoreBody's DCE unless its downstream cube uses
+    // are rebound before finalization.
+    auto rebound = transform_utils::Substitute(MakeBody(aic_stmts, func->span_), aic_tpop_remap);
+    aic_stmts = FlattenBody(rebound);
+  }
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -1175,10 +1401,16 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, odd_resources);
   auto aiv_final =
       FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap)),
                          CoreSide::AIV, aiv_tpop_remap);
+  if (ffts_workspace) {
+    std::vector<StmtPtr> setup{
+        std::make_shared<EvalStmt>(CreateSetFFTS(ffts_workspace, func->span_), func->span_)};
+    aic_final = PrependPipeSetup(setup, aic_final);
+    aiv_final = PrependPipeSetupKeepingSubblockIdx(setup, aiv_final);
+  }
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery
@@ -1201,10 +1433,17 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   aiv_final = PrependPipeSetupKeepingSubblockIdx(automatic_pipe_setup.aiv_stmts, aiv_final);
 
   // Helper to create fresh params and build a DeepClone var_map
+  std::vector<VarPtr> expanded_params = func->params_;
+  expanded_params.insert(expanded_params.end(), hidden_params.begin(), hidden_params.end());
+  std::vector<ParamDirection> expanded_directions = func->param_directions_;
+  for (const auto& hidden : hidden_params) {
+    expanded_directions.push_back(hidden == ffts_workspace ? ParamDirection::In : ParamDirection::InOut);
+  }
+
   auto make_param_map = [&]() {
     std::unordered_map<const Var*, ExprPtr> param_map;
     std::vector<VarPtr> fresh_params;
-    for (const auto& var : func->params_) {
+    for (const auto& var : expanded_params) {
       auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), func->span_);
       fresh_params.push_back(fresh);
       param_map[var.get()] = fresh;
@@ -1245,7 +1484,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   RemapDanglingGmRefsToParam(aic_body_stmt, aic_map, gm_origin_map, func);
   auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(aic_body_stmt, aic_map);
   (void)aic_clone_map_unused;
-  auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
+  auto aic_func = std::make_shared<Function>(aic_name, aic_params, expanded_directions,
                                              std::vector<TypePtr>{}, aic_cloned_body, func->span_,
                                              FunctionType::AIC, std::nullopt, std::nullopt, func->attrs_);
 
@@ -1308,27 +1547,46 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
                     aiv_attrs.end());
     aiv_attrs.emplace_back(kDualAivDispatchAttr, true);
   }
-  auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_,
-                                             func->return_types_, aiv_cloned_body, func->span_,
-                                             FunctionType::AIV, std::nullopt, std::nullopt, aiv_attrs);
+  auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, expanded_directions, func->return_types_,
+                                             aiv_cloned_body, func->span_, FunctionType::AIV, std::nullopt,
+                                             std::nullopt, aiv_attrs);
 
   if (!create_group) {
-    return {aic_func, aiv_func, std::nullopt};
+    return {aic_func, aiv_func, std::nullopt, hidden_params};
   }
 
   // Create Group function: calls AIC then AIV, returns AIV result
   std::string group_name = func->name_;  // Group replaces the original
 
-  // Create fresh parameters for the group function
-  auto [group_params, group_map_unused] = make_param_map();
-  (void)group_map_unused;
+  // Hidden transfer/workspace tensors normally stay local to a standalone
+  // Group.  When an outer orchestration function calls this Group, however,
+  // orchestration codegen requires every AIC/AIV argument to map to a Group
+  // parameter.  Expose the hidden tensors in that internal Group signature;
+  // its caller will materialize them immediately before the call.
+  std::vector<VarPtr> group_params;
+  const auto& group_param_templates = expose_hidden_group_params ? expanded_params : func->params_;
+  group_params.reserve(group_param_templates.size());
+  for (const auto& var : group_param_templates) {
+    group_params.push_back(std::make_shared<Var>(var->name_hint_, var->GetType(), func->span_));
+  }
 
   // Build call args from group params
   std::vector<ExprPtr> call_args(group_params.begin(), group_params.end());
+  std::vector<StmtPtr> group_stmts;
+  if (!expose_hidden_group_params) {
+    for (const auto& hidden : hidden_params) {
+      auto local = std::make_shared<Var>(hidden->name_hint_, hidden->GetType(), func->span_);
+      group_stmts.push_back(std::make_shared<AssignStmt>(
+          local, CreateHiddenTensor(hidden->GetType(), func->span_), func->span_));
+      call_args.push_back(local);
+    }
+  }
+  auto call_attrs = AddNoDepIndices({}, func->params_.size(), hidden_params.size());
 
   // AIC call (no return value)
   auto aic_gvar = std::make_shared<GlobalVar>(aic_name);
-  auto aic_call = std::make_shared<Call>(aic_gvar, call_args, func->span_);
+  auto aic_call = std::make_shared<Call>(aic_gvar, call_args, std::vector<std::pair<std::string, std::any>>{},
+                                         call_attrs, GetUnknownType(), func->span_);
   auto aic_eval = std::make_shared<EvalStmt>(aic_call, func->span_);
 
   // AIV call (returns result)
@@ -1342,13 +1600,14 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   CallPtr aiv_call;
   if (aiv_return_type) {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_);
+    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, std::vector<std::pair<std::string, std::any>>{},
+                                      call_attrs, aiv_return_type, func->span_);
   } else {
-    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, func->span_);
+    aiv_call = std::make_shared<Call>(aiv_gvar, call_args, std::vector<std::pair<std::string, std::any>>{},
+                                      call_attrs, GetUnknownType(), func->span_);
   }
 
   // Build group body
-  std::vector<StmtPtr> group_stmts;
   group_stmts.push_back(aic_eval);
 
   if (func->return_types_.empty()) {
@@ -1382,11 +1641,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   }
 
   auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);
-  auto group_func = std::make_shared<Function>(group_name, group_params, func->param_directions_,
-                                               func->return_types_, group_body, func->span_,
-                                               FunctionType::Group, std::nullopt, std::nullopt, func->attrs_);
+  const auto& group_directions = expose_hidden_group_params ? expanded_directions : func->param_directions_;
+  auto group_func =
+      std::make_shared<Function>(group_name, group_params, group_directions, func->return_types_, group_body,
+                                 func->span_, FunctionType::Group, std::nullopt, std::nullopt, func->attrs_);
 
-  return {aic_func, aiv_func, group_func};
+  return {aic_func, aiv_func, group_func, hidden_params};
 }
 
 // ============================================================================
@@ -1396,9 +1656,11 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 /// Rewrite a Group function's body, replacing calls to `incore_name` with
 /// an EvalStmt(Call(aic_name)) + AssignStmt/EvalStmt(Call(aiv_name)).
 FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string& incore_name,
-                               const std::string& aic_name, const std::string& aiv_name) {
+                               const std::string& aic_name, const std::string& aiv_name,
+                               const std::vector<VarPtr>& hidden_params) {
   auto stmts = FlattenBody(group_func->body_);
   std::vector<StmtPtr> new_stmts;
+  int hidden_counter = 0;
 
   for (const auto& stmt : stmts) {
     // Extract the Call targeting incore_name (from AssignStmt or EvalStmt)
@@ -1413,24 +1675,36 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
     if (call) {
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
       if (gv && gv->name_ == incore_name) {
+        std::vector<ExprPtr> split_call_args = call->args_;
+        for (const auto& hidden : hidden_params) {
+          auto local = std::make_shared<Var>(hidden->name_hint_ + "_" + std::to_string(hidden_counter++),
+                                             hidden->GetType(), stmt->span_);
+          new_stmts.push_back(std::make_shared<AssignStmt>(
+              local, CreateHiddenTensor(hidden->GetType(), stmt->span_), stmt->span_));
+          split_call_args.push_back(local);
+        }
+        auto split_call_attrs = AddNoDepIndices(call->attrs_, call->args_.size(), hidden_params.size());
         // Emit AIC call (always fire-and-forget). Original's leading_comments
         // attach here — AIC is the semantic front of the split pair.
         // Carry kwargs_ + attrs_ (e.g. kAttrDumpVars) onto both lanes: the
         // split reuses call->args_ unchanged, so dump/dep Var references stay
         // valid, and orchestration codegen matches them per-arg by identity.
-        auto aic_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_,
-                                               call->kwargs_, call->attrs_, GetUnknownType(), stmt->span_);
+        auto aic_call =
+            std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), split_call_args, call->kwargs_,
+                                   split_call_attrs, GetUnknownType(), stmt->span_);
         new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_, stmt->leading_comments_));
 
         // Emit AIV call: AssignStmt preserves return value, EvalStmt for void.
         // AIV is a continuation of the same logical op, so no comments attach.
         if (assign) {
-          auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
-                                                 call->kwargs_, call->attrs_, call->GetType(), stmt->span_);
+          auto aiv_call =
+              std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), split_call_args, call->kwargs_,
+                                     split_call_attrs, call->GetType(), stmt->span_);
           new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, aiv_call, stmt->span_));
         } else {
-          auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
-                                                 call->kwargs_, call->attrs_, GetUnknownType(), stmt->span_);
+          auto aiv_call =
+              std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), split_call_args, call->kwargs_,
+                                     split_call_attrs, GetUnknownType(), stmt->span_);
           new_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, stmt->span_));
         }
         continue;
@@ -1446,6 +1720,64 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
                                            group_func->span_, group_func->func_type_, group_func->level_,
                                            group_func->role_, group_func->attrs_);
   return result;
+}
+
+/// Append locally-created hidden tensors to calls of an internal Group. This
+/// keeps the user-visible orchestration signature unchanged while ensuring the
+/// Group's AIC/AIV call arguments are all backed by Group parameters.
+FunctionPtr MaterializeHiddenGroupCallArgs(
+    const FunctionPtr& caller,
+    const std::unordered_map<std::string, std::vector<VarPtr>>& hidden_params_by_group) {
+  if (hidden_params_by_group.empty()) return caller;
+
+  auto stmts = FlattenBody(caller->body_);
+  std::vector<StmtPtr> new_stmts;
+  int hidden_counter = 0;
+  bool changed = false;
+
+  for (const auto& stmt : stmts) {
+    CallPtr call;
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (eval) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+
+    auto gv = call ? std::dynamic_pointer_cast<const GlobalVar>(call->op_) : nullptr;
+    auto hidden_it = gv ? hidden_params_by_group.find(gv->name_) : hidden_params_by_group.end();
+    if (hidden_it == hidden_params_by_group.end()) {
+      new_stmts.push_back(stmt);
+      continue;
+    }
+
+    changed = true;
+    const auto& hidden_params = hidden_it->second;
+    std::vector<ExprPtr> call_args = call->args_;
+    for (const auto& hidden : hidden_params) {
+      auto local = std::make_shared<Var>(hidden->name_hint_ + "_" + std::to_string(hidden_counter++),
+                                         hidden->GetType(), stmt->span_);
+      new_stmts.push_back(std::make_shared<AssignStmt>(
+          local, CreateHiddenTensor(hidden->GetType(), stmt->span_), stmt->span_));
+      call_args.push_back(local);
+    }
+    auto call_attrs = AddNoDepIndices(call->attrs_, call->args_.size(), hidden_params.size());
+    auto rewritten = std::make_shared<Call>(call->op_, std::move(call_args), call->kwargs_,
+                                            std::move(call_attrs), call->GetType(), call->span_);
+    if (assign) {
+      new_stmts.push_back(
+          std::make_shared<AssignStmt>(assign->var_, rewritten, stmt->span_, stmt->leading_comments_));
+    } else {
+      new_stmts.push_back(std::make_shared<EvalStmt>(rewritten, stmt->span_, stmt->leading_comments_));
+    }
+  }
+
+  if (!changed) return caller;
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), caller->span_);
+  return std::make_shared<Function>(caller->name_, caller->params_, caller->param_directions_,
+                                    caller->return_types_, new_body, caller->span_, caller->func_type_,
+                                    caller->level_, caller->role_, caller->attrs_);
 }
 
 /// Check if a function body contains a call to a given function name.
@@ -1672,8 +2004,9 @@ struct NormalizedGroups {
   std::vector<FunctionPtr> functions;
 };
 
-NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
-                                               const std::vector<FunctionPtr>& functions) {
+NormalizedGroups NormalizeHandWrittenGroupAbis(
+    const ProgramPtr& program, const std::vector<FunctionPtr>& functions,
+    const std::unordered_set<std::string>& groups_with_compiler_local_args = {}) {
   KernelCallCounter call_counter;
   for (const auto& func : functions) {
     if (func && func->body_) call_counter.VisitStmt(func->body_);
@@ -1686,6 +2019,11 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
 
   for (const auto& group : functions) {
     if (!group || group->func_type_ != FunctionType::Group) continue;
+    // ExpandMixedKernel intentionally gives some generated Groups local hidden
+    // transfer/workspace tensors. Their AIC/AIV calls are already ABI-correct,
+    // but cannot be canonicalized onto the public Group parameters because the
+    // implementation-only tensors are not part of that signature.
+    if (groups_with_compiler_local_args.count(group->name_) > 0) continue;
 
     WrapperCallInfo aic;
     WrapperCallInfo aiv;
@@ -1787,8 +2125,11 @@ Pass ExpandMixedKernel() {
     struct RewriteInfo {
       std::string aic_name;
       std::string aiv_name;
+      std::vector<VarPtr> hidden_params;
     };
     std::unordered_map<std::string, RewriteInfo> rewrite_map;
+    std::unordered_map<std::string, std::vector<VarPtr>> exposed_group_hidden_params;
+    std::unordered_set<std::string> groups_with_compiler_local_args;
     std::vector<FunctionPtr> new_functions;
 
     for (const auto& [gvar, func] : program->functions_) {
@@ -1831,16 +2172,23 @@ Pass ExpandMixedKernel() {
       // original function name to resolve to a callable wrapper.
       bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
       bool needs_preserved_name = incore_with_preserved_name_caller.count(func->name_) > 0;
-      auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller);
+      auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller,
+                                          /*expose_hidden_group_params=*/needs_preserved_name);
 
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);
       if (expanded.group_func.has_value()) {
         new_functions.push_back(expanded.group_func.value());
+        if (needs_preserved_name && !expanded.hidden_params.empty()) {
+          exposed_group_hidden_params[func->name_] = expanded.hidden_params;
+        } else if (!expanded.hidden_params.empty()) {
+          groups_with_compiler_local_args.insert(expanded.group_func.value()->name_);
+        }
       }
 
       if (has_group_caller) {
-        rewrite_map[func->name_] = {expanded.aic_func->name_, expanded.aiv_func->name_};
+        rewrite_map[func->name_] = {expanded.aic_func->name_, expanded.aiv_func->name_,
+                                    expanded.hidden_params};
       }
     }
 
@@ -1849,16 +2197,26 @@ Pass ExpandMixedKernel() {
       if (func->func_type_ != FunctionType::Group) continue;
       for (const auto& [incore_name, info] : rewrite_map) {
         if (FunctionCallsFunction(func, incore_name)) {
-          func = RewriteGroupCaller(func, incore_name, info.aic_name, info.aiv_name);
+          func = RewriteGroupCaller(func, incore_name, info.aic_name, info.aiv_name, info.hidden_params);
+          if (!info.hidden_params.empty()) groups_with_compiler_local_args.insert(func->name_);
         }
       }
     }
 
+    // Callers of a preserved-name Group allocate the implementation-only GM
+    // transfer tensors and FFTS workspace. Rewrite every caller in one scan;
+    // the callee-name lookup avoids a functions × groups traversal.
+    for (auto& func : new_functions) {
+      func = MaterializeHiddenGroupCallArgs(func, exposed_group_hidden_params);
+    }
+
     // Phase 4: normalize hand-written mixed Groups to the runtime's one-shared-
-    // payload ABI. Rebuild a lookup program after the Phase 3 rewrites so the
-    // callee scan sees the final AIC/AIV functions.
+    // payload ABI. Rebuild a lookup program after the Phase 3 rewrites and
+    // hidden-argument materialization so the callee scan sees the final calls.
     auto rewritten_program = std::make_shared<Program>(new_functions, program->name_, program->span_);
-    new_functions = NormalizeHandWrittenGroupAbis(rewritten_program, new_functions).functions;
+    new_functions =
+        NormalizeHandWrittenGroupAbis(rewritten_program, new_functions, groups_with_compiler_local_args)
+            .functions;
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);
   };
