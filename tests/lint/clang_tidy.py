@@ -43,6 +43,17 @@ SOURCE_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx")
 HEADER_EXTENSIONS = (".h", ".hpp", ".hxx")
 DEFAULT_SOURCE_DIRS = ("src", "include")
 SELF_PATH = "tests/lint/clang_tidy.py"
+FULL_CHECK_PATHS = frozenset(
+    {
+        SELF_PATH,
+        ".clang-tidy",
+        ".github/workflows/ci.yml",
+        "3rdparty/libbacktrace",
+        "3rdparty/msgpack-c",
+        "runtime",
+    }
+)
+FULL_CHECK_PREFIXES = ("cmake/",)
 # Bound the *default* worker count: one clang-tidy process per core is wasteful on
 # a many-core dev box (each process holds a full TU in memory).  CI passes --jobs
 # explicitly and is not affected by this cap.
@@ -251,6 +262,17 @@ def _find_sources_including_headers(
     return dependent
 
 
+def _get_full_check_triggers(changed: set[str]) -> list[str]:
+    """Return changed lint/build infrastructure paths that require a full check."""
+    return sorted(
+        path
+        for path in changed
+        if path in FULL_CHECK_PATHS
+        or Path(path).name == "CMakeLists.txt"
+        or path.startswith(FULL_CHECK_PREFIXES)
+    )
+
+
 def _apply_diff_filter(
     files: list[str],
     headers: list[str],
@@ -265,9 +287,15 @@ def _apply_diff_filter(
         # git diff failed — lint everything
         return files, headers
 
-    # If this script itself changed, run a full check to validate the change.
-    if SELF_PATH in changed:
-        print("[clang-tidy] clang_tidy.py itself changed — running full check.")
+    # Diff filtering is safe only while the analysis configuration is unchanged.
+    # A runner/toolchain or CMake change can expose findings in any translation
+    # unit, so validate those changes with the same full-tree scan used on main.
+    full_check_triggers = _get_full_check_triggers(changed)
+    if full_check_triggers:
+        print(
+            "[clang-tidy] Lint/build infrastructure changed "
+            f"({', '.join(full_check_triggers)}) — running full check."
+        )
         return files, headers
 
     # Filter header files to only changed ones

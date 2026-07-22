@@ -225,6 +225,17 @@ class TestFloorDiv:
         result = simplifier(ir.FloorDiv(inner, ci(3), INT, S))
         assert_same_expr(result, x)
 
+    def test_nested_div_with_scale_reassociation(self):
+        """((x // 2) * 3) // 6 => x // 4"""
+        inner = ir.FloorDiv(x, ci(2), INT, S)
+        scaled = ir.Mul(inner, ci(3), INT, S)
+        result = simplifier(ir.FloorDiv(scaled, ci(6), INT, S))
+
+        assert isinstance(result, ir.FloorDiv), f"Expected FloorDiv, got {type(result).__name__}"
+        assert result.left is x
+        assert isinstance(result.right, ir.ConstInt)
+        assert result.right.value == 4
+
     def test_const_fold_div(self):
         """12 // 4 => 3"""
         result = simplifier(ir.FloorDiv(ci(12), ci(4), INT, S))
