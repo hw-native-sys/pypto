@@ -127,15 +127,16 @@ class TestManualScopeParsing:
         assert k2_deps[0].type.dtype == pl.TASK_ID
 
     @pytest.mark.parametrize(
-        "submit_expr",
+        ("submit_expr", "metadata_field"),
         [
-            "pl.submit(self.k2, x, deps=[a_tid])",
-            "pl.submit(self.k2, x, allow_early_resolve=True)",
-            "pl.submit(self.k2, a, deps=[a_tid], predicate=(a[0] > 0))",
-            "pl.spmd_submit(self.k2, x, core_num=2)",
+            ("pl.submit(self.k2, x, deps=[a_tid])", "deps"),
+            ("pl.submit(self.k2, x, allow_early_resolve=True)", "allow_early_resolve"),
+            ("pl.submit(self.k2, a, deps=[a_tid], predicate=(a[0] > 0))", "predicate"),
+            ("pl.spmd_submit(self.k2, x, core_num=2)", "core_num"),
+            ("pl.spmd_submit(self.k2, x, core_num=2, sync_start=True)", "sync_start"),
         ],
     )
-    def test_cluster_nested_submit_rejects_per_task_dispatch_metadata(self, submit_expr):
+    def test_cluster_nested_submit_rejects_per_task_dispatch_metadata(self, submit_expr, metadata_field):
         """Inner Submit controls cannot be represented by the outlined Group dispatch."""
         source = f"""
 @pl.program
@@ -155,8 +156,9 @@ class Prog:
             b, _ = {submit_expr}
         return b
 """
-        with pytest.raises(ParserSyntaxError, match="cannot carry per-task dispatch metadata"):
+        with pytest.raises(ParserSyntaxError, match="cannot carry per-task dispatch metadata") as exc_info:
             pl.parse_program(source)
+        assert metadata_field in str(exc_info.value)
 
     def test_submit_none_dep_entry_dropped(self):
         """A bare ``None`` entry in ``deps=`` contributes no edge."""
