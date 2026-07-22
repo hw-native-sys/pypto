@@ -114,12 +114,13 @@ inline std::vector<VarPtr> CollectDefVars(const StmtPtr& stmt) {
 /// Returns true if op_name is a compute tensor op (not a host-side memory/transfer/metadata op).
 ///
 /// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
-/// and metadata-only transforms (reshape, transpose at tensor level).
+/// and metadata-only transforms (reshape, reinterpret_view, transpose, view at tensor level).
 inline bool IsComputeTensorOp(const OpPtr& op) {
   if (!op || op->name_.compare(0, 7, "tensor.") != 0) return false;
   return !(IsOp(op, "tensor.create") || IsOp(op, "tensor.read") || IsOp(op, "tensor.write") ||
            IsOp(op, "tensor.slice") || IsOp(op, "tensor.assemble") || IsOp(op, "tensor.dim") ||
-           IsOp(op, "tensor.reshape") || IsOp(op, "tensor.transpose") || IsOp(op, "tensor.view"));
+           IsOp(op, "tensor.reshape") || IsOp(op, "tensor.reinterpret_view") ||
+           IsOp(op, "tensor.transpose") || IsOp(op, "tensor.view"));
 }
 
 // ============================================================================

@@ -33,8 +33,10 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/reinterpret_view_semantics.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -180,6 +182,64 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
                                         std::make_optional(std::move(tensor_view)));
   }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
+}
+
+TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
+                                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  constexpr const char* kOpName = "tensor.reinterpret_view";
+  CHECK(args.size() == 1 || args.size() == 2)
+      << kOpName << " requires 1 or 2 arguments (data[, shape]), but got " << args.size();
+  CHECK_SPAN(!As<DistributedTensorType>(args[0]->GetType()), args[0]->span_)
+      << kOpName << " does not support DistributedTensorType in the initial implementation";
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK_SPAN(tensor_type, args[0]->span_)
+      << kOpName << " requires data to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->shape_.empty(), args[0]->span_) << kOpName << " requires a tensor rank >= 1";
+
+  const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  const TensorLayout layout =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  CHECK_SPAN(layout != TensorLayout::NZ, args[0]->span_)
+      << kOpName << " does not support boxed/fractal NZ tensor layout";
+  CHECK_SPAN(layout != TensorLayout::DN || tensor_type->shape_.size() >= 2, args[0]->span_)
+      << kOpName << " requires rank >= 2 for DN layout";
+
+  bool preserve_explicit_stride = false;
+  if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+    const auto expected_stride =
+        tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, layout);
+    CHECK_SPAN(
+        tile_view_semantics::ShapeExprListsEquivalent(tensor_type->tensor_view_->stride, expected_stride),
+        args[0]->span_)
+        << kOpName << " only supports packed tensors with canonical strides for their layout";
+    preserve_explicit_stride = true;
+  }
+
+  std::optional<std::vector<ExprPtr>> requested_shape;
+  if (args.size() == 2) {
+    requested_shape = reinterpret_view_semantics::ExtractShape(args[1], kOpName);
+    CHECK_SPAN(layout != TensorLayout::DN || requested_shape->size() >= 2, args[1]->span_)
+        << kOpName << " requires target rank >= 2 for DN layout";
+  }
+
+  const size_t contiguous_axis =
+      layout == TensorLayout::DN ? tensor_type->shape_.size() - 2 : tensor_type->shape_.size() - 1;
+  const std::vector<ExprPtr> source_valid =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->valid_shape : std::vector<ExprPtr>{};
+  auto plan = reinterpret_view_semantics::Resolve(tensor_type->shape_, source_valid, tensor_type->dtype_,
+                                                  target_dtype, contiguous_axis, requested_shape, kOpName,
+                                                  args[0]->span_);
+
+  TensorView result_view;
+  result_view.layout = layout;
+  result_view.valid_shape = std::move(plan.valid_shape);
+  result_view.pad = tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  if (preserve_explicit_stride) {
+    result_view.stride = tensor_view_semantics::BuildLogicalStridesFromLayout(plan.shape, layout);
+  }
+  return std::make_shared<TensorType>(std::move(plan.shape), target_dtype, tensor_type->memref_,
+                                      std::make_optional(std::move(result_view)));
 }
 
 TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
@@ -525,6 +585,19 @@ REGISTER_OP("tensor.reshape")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorReshapeType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.reinterpret_view")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Zero-copy reinterpretation of a packed tensor with a different dtype and equal byte size")
+    .add_argument("data", "Input tensor (packed canonical TensorType)")
+    .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
+    .set_attr<DataType>("dtype")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorReinterpretViewType(args, kwargs);
     });
 
 REGISTER_OP("tensor.transpose")

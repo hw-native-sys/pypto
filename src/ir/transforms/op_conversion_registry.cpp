@@ -172,6 +172,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.expands", "tile.expands");
 
   RegisterSimple("tensor.reshape", "tile.reshape");
+  RegisterSimple("tensor.reinterpret_view", "tile.reinterpret_view");
 
   // tensor.transpose → tile.transpose(input, axis1, axis2). The pto.ttrans scratch is a pure
   // codegen detail, not a semantic operand: FlattenTileNdTo2D is the sole owner of scratch

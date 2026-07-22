@@ -2141,8 +2141,123 @@ class TestTileSliceReshapeOps:
         """Test that transform operators are registered."""
         assert ir.is_op_registered("tile.slice")
         assert ir.is_op_registered("tile.reshape")
+        assert ir.is_op_registered("tile.reinterpret_view")
         assert ir.is_op_registered("tile.transpose")
         assert ir.is_op_registered("tile.set_validshape")
+
+
+class TestTileReinterpretViewIR:
+    """IR semantics for tile.reinterpret_view before public DSL lowering."""
+
+    @staticmethod
+    def _var(
+        shape: list[int],
+        dtype: DataType,
+        view: ir.TileView | None = None,
+    ) -> ir.Var:
+        return ir.Var("src", ir.TileType(shape, dtype, tile_view=view), ir.Span.unknown())
+
+    @staticmethod
+    def _shape_values(result_type: ir.TileType) -> list[int]:
+        return [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+
+    def test_auto_shape_uses_row_major_contiguous_axis(self):
+        call = tile.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.INT16)
+
+        assert call.op.name == ir.get_op("tile.reinterpret_view").name
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT16
+        assert self._shape_values(call.type) == [8, 32]
+
+    def test_rank_one_auto_shape_uses_its_only_axis(self):
+        call = tile.reinterpret_view(self._var([16], DataType.FP32), DataType.INT16)
+
+        assert isinstance(call.type, ir.TileType)
+        assert self._shape_values(call.type) == [32]
+
+    def test_auto_shape_uses_col_major_contiguous_axis(self):
+        view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.none_box)
+        call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TileType)
+        assert self._shape_values(call.type) == [16, 16]
+        assert call.type.get_effective_tile_view().blayout == ir.TileLayout.col_major
+
+    def test_explicit_byte_equivalent_shape(self):
+        call = tile.reinterpret_view(
+            self._var([8, 16], DataType.FP32),
+            DataType.INT16,
+            shape=[4, 64],
+        )
+
+        assert isinstance(call.type, ir.TileType)
+        assert self._shape_values(call.type) == [4, 64]
+
+    def test_wider_dtype_requires_divisible_contiguous_extent(self):
+        with pytest.raises(ValueError, match=r"dimension 1 .*not divisible by 2"):
+            tile.reinterpret_view(self._var([8, 15], DataType.INT16), DataType.FP32)
+
+    def test_partial_valid_shape_scales_with_auto_shape(self):
+        view = ir.TileView(valid_shape=[4, 12])
+        call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TileType)
+        result_view = call.type.get_effective_tile_view()
+        assert [dim.value for dim in result_view.valid_shape if isinstance(dim, ir.ConstInt)] == [4, 24]
+
+    def test_rejects_mismatched_explicit_byte_size(self):
+        with pytest.raises(ValueError, match=r"equal source and target byte sizes.*512 bytes.*256 bytes"):
+            tile.reinterpret_view(
+                self._var([8, 16], DataType.FP32),
+                DataType.INT16,
+                shape=[8, 16],
+            )
+
+    def test_rejects_same_dtype(self):
+        with pytest.raises(ValueError, match="requires source and target dtypes to differ"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.FP32)
+
+    def test_rejects_boxed_tile(self):
+        boxed = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
+        with pytest.raises(ValueError, match="only supports flat tiles"):
+            tile.reinterpret_view(self._var([8, 16], DataType.FP32, boxed), DataType.INT16)
+
+
+class TestTileReinterpretViewDSL:
+    """Public ``pl.tile.reinterpret_view`` wrapper and export coverage."""
+
+    @staticmethod
+    def _tile() -> pl.Tile:
+        source = ir.Var("src", ir.TileType([8, 16], DataType.FP32), ir.Span.unknown())
+        return pl.Tile(expr=source)
+
+    def test_auto_shape_wrapper(self):
+        result = pl.tile.reinterpret_view(self._tile(), pl.INT16)
+
+        assert isinstance(result, pl.Tile)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == ir.get_op("tile.reinterpret_view").name
+        assert len(call.args) == 1
+        assert call.kwargs == {"dtype": DataType.INT16}
+        assert isinstance(call.type, ir.TileType)
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
+    def test_explicit_shape_wrapper(self):
+        result = pl.tile.reinterpret_view(self._tile(), pl.INT16, shape=[4, 64])
+
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert len(call.args) == 2
+        shape_arg = call.args[1]
+        assert isinstance(shape_arg, ir.MakeTuple)
+        assert [dim.value for dim in shape_arg.elements if isinstance(dim, ir.ConstInt)] == [4, 64]
+        assert isinstance(call.type, ir.TileType)
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [4, 64]
+
+    def test_exported_from_tile_namespace(self):
+        assert "reinterpret_view" in pl.tile.__all__
+        assert hasattr(pl.tile, "reinterpret_view")
 
 
 def _const_dims(span, *values):

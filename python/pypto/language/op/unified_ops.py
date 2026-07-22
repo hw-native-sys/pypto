@@ -57,6 +57,7 @@ __all__ = [
     "concat",
     "expands",
     "reshape",
+    "reinterpret_view",
     "transpose",
     "slice",
     "fillpad",
@@ -607,6 +608,31 @@ def reshape(input: T, shape: Sequence[IntLike]) -> T:
     if isinstance(input, Tile):
         return _tile.reshape(input, shape)
     raise TypeError(f"pl.reshape: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def reinterpret_view(
+    data: T,
+    dtype: DataType,
+    *,
+    shape: Sequence[IntLike] | None = None,
+) -> T:
+    """Reinterpret the same bytes with a different dtype.
+
+    Args:
+        data: Input tensor or tile.
+        dtype: Target element dtype, which must differ from the source dtype.
+        shape: Optional byte-equivalent target shape. When omitted, the
+            physically contiguous dimension is scaled according to the
+            source/target dtype byte ratio.
+
+    Returns:
+        A zero-copy view of the same kind as ``data``.
+    """
+    if isinstance(data, Tensor):
+        return _tensor.reinterpret_view(data, dtype, shape=shape)
+    if isinstance(data, Tile):
+        return _tile.reinterpret_view(data, dtype, shape=shape)
+    raise TypeError(f"pl.reinterpret_view: expected Tensor or Tile, got {type(data).__name__}")
 
 
 def transpose(input: T, axis1: int, axis2: int) -> T:

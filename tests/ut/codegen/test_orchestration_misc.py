@@ -143,6 +143,23 @@ class TestUnregisteredOpError:
         with pytest.raises(RuntimeError, match="Misplaced tensor op.*tensor.full"):
             codegen.generate_orchestration(program, orch_func)
 
+    def test_reinterpret_view_has_explicit_orchestration_error(self):
+        """Runtime Tensor views cannot change dtype; direct users get an actionable error."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+            x = orch_f.param("x", ir.TensorType([8, 16], pl.FP32))
+            viewed = ib.let("viewed", tensor_ops.reinterpret_view(x, pl.INT16))
+            orch_f.return_type(viewed.type)
+            ib.return_stmt(viewed)
+        orch_func = orch_f.get_result()
+        program = ir.Program([orch_func], "ReinterpretViewOrchestration", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="not supported in Orchestration functions.*InCore"):
+            codegen.generate_orchestration(program, orch_func)
+
 
 class TestLocalAllocWAWPromotion:
     """Test that locally allocated tensors get add_inout instead of add_output.

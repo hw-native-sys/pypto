@@ -1459,7 +1459,7 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 static bool IsLegalTileViewOp(const OpPtr& op) {
   return IsOp(op, "tile.reshape") || IsOp(op, "tile.extract") || IsOp(op, "tile.slice") ||
          IsOp(op, "tile.fillpad") || IsOp(op, "tile.fillpad_inplace") || IsOp(op, "tile.transpose_view") ||
-         IsOp(op, "tensor.slice");
+         IsOp(op, "tile.reinterpret_view") || IsOp(op, "tensor.slice");
 }
 
 struct HazardInputs {
@@ -1972,9 +1972,12 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     auto& indices = indices_binding;
     // Largest-first; ties broken by definition order for determinism and so that
     // equal-size workloads reproduce the prior definition-order grouping.
-    std::stable_sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
+    std::sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
       if (lifetimes[a].size != lifetimes[b].size) return lifetimes[a].size > lifetimes[b].size;
-      return lifetimes[a].def_point < lifetimes[b].def_point;
+      if (lifetimes[a].def_point != lifetimes[b].def_point) {
+        return lifetimes[a].def_point < lifetimes[b].def_point;
+      }
+      return a < b;
     });
 
     // First-fit-decreasing pack with the current per-group residue counts (pipeline_blocks reads the

@@ -296,6 +296,28 @@ int64_t StaticDimProduct(const std::vector<ExprPtr>& shape, int lo, int hi) {
   return p;
 }
 
+bool HasAutoEquivalentReinterpretShape(const CallPtr& call) {
+  INTERNAL_CHECK(call) << "Internal error: auto-shape comparison requires a non-null Call";
+  INTERNAL_CHECK_SPAN(IsOp(call, "tile.reinterpret_view"), call->span_)
+      << "Internal error: auto-shape comparison expects tile.reinterpret_view";
+  INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+      << "Internal error: explicit tile.reinterpret_view must carry data and shape arguments";
+
+  auto explicit_type = std::dynamic_pointer_cast<const TileType>(call->GetType());
+  INTERNAL_CHECK_SPAN(explicit_type, call->span_)
+      << "Internal error: tile.reinterpret_view must produce TileType";
+  auto auto_call =
+      OpRegistry::GetInstance().Create("tile.reinterpret_view", {call->args_[0]}, call->kwargs_, call->span_);
+  auto auto_type = std::dynamic_pointer_cast<const TileType>(auto_call->GetType());
+  INTERNAL_CHECK_SPAN(auto_type, call->span_)
+      << "Internal error: auto-shaped tile.reinterpret_view must produce TileType";
+  if (explicit_type->shape_.size() != auto_type->shape_.size()) return false;
+  for (size_t i = 0; i < explicit_type->shape_.size(); ++i) {
+    if (!AreExprsEqual(explicit_type->shape_[i], auto_type->shape_[i])) return false;
+  }
+  return true;
+}
+
 // Handle a tile.reshape whose input is an already-split tile. Reshape preserves
 // row-major element order, so the split partition (first half vs second half of
 // the input's split dim) lands on a specific result dimension; this finds it and
@@ -501,7 +523,21 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
 
+      // An explicit reinterpret shape may redistribute bytes across dimensions.
+      // The AIV split machinery deliberately tracks a physical axis, not a flat
+      // element interval, so only the canonical auto shape is safe to halve. An
+      // explicit spelling of that same shape is accepted and rewritten below;
+      // arbitrary byte-equivalent shapes must stay outside the split scope.
+      if (tt && IsOp(call, "tile.reinterpret_view") && call->args_.size() == 2) {
+        CHECK_SPAN(HasAutoEquivalentReinterpretShape(call), call->span_)
+            << "SplitVectorKernel: tile.reinterpret_view with an explicit shape inside a split kernel "
+               "must match its auto-inferred shape. Omit shape= (recommended), or move an arbitrary "
+               "byte-equivalent reinterpret_view outside the split scope.";
+      }
+
       // tile.reshape that moves the split axis to a different result dim.
+      // Do not route reinterpret_view through flat element-count migration: its
+      // accepted auto shape keeps the physical split axis at the same index.
       if (tt && IsOp(call, "tile.reshape") && in_split_dim >= 0 && in_tt) {
         if (auto migrated = TryMigrateReshapeSplit(call, assign, in_tt, in_split_dim, subblock_idx, tile_vars,
                                                    var_replacements)) {
@@ -519,24 +555,31 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         }
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[result_split_dim]);
 
-        // tile.reshape lifts a full (un-split) source tile -- typically a rank-1
-        // load that bypassed the split-specific load rewrite -- onto a 2D shape
-        // whose split axis spans the full width. Reshape is an offsetless view, so
-        // halving only its result type leaves BOTH AIV lanes reading the first
+        // tile.reshape or tile.reinterpret_view lifts a full (un-split) source
+        // tile -- typically a rank-1 load for reshape, or an untracked tile
+        // parameter for reinterpret_view -- onto a shape whose split axis spans
+        // the full width. These are offsetless views, so halving only the result
+        // type leaves BOTH AIV lanes reading the first
         // half of the full buffer; lane 1 then silently reuses lane 0's data
         // (observed as lane 1 applying the wrong half of the per-channel dequant
-        // scale in dsv4 proj_b's INT8 GEMM epilogue). Emit the reshape at full
+        // scale in dsv4 proj_b's INT8 GEMM epilogue). Emit the view at full
         // width and follow it with a per-subblock column slice so each lane reads
-        // its own half. Reshapes whose input is already split fall through to the
+        // its own half. Views whose input is already split fall through to the
         // plain result-halving below (their producer already partitioned the data).
-        if (IsOp(call, "tile.reshape")) {
+        if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) {
           auto input_var = AsVarLike(call->args_[0]);
           bool input_is_split = input_var && tile_vars.count(input_var.get()) != 0;
           auto half_const = std::dynamic_pointer_cast<const ConstInt>(half_dim_size);
+          if (!input_is_split && IsOp(call, "tile.reinterpret_view")) {
+            CHECK_SPAN(half_const != nullptr, call->span_)
+                << "SplitVectorKernel: tile.reinterpret_view over a full-width source requires a static "
+                   "split extent so the pass can materialize a per-lane slice. Split/load the source "
+                   "before reinterpret_view, or move reinterpret_view outside the split scope.";
+          }
           if (!input_is_split && half_const != nullptr) {
             auto full_var =
                 std::make_shared<Var>(assign->var_->name_hint_, call->GetType(), assign->var_->span_);
-            auto full_reshape = std::make_shared<AssignStmt>(full_var, call, assign->span_);
+            auto full_view = std::make_shared<AssignStmt>(full_var, call, assign->span_);
 
             std::vector<ExprPtr> shape_elems;
             std::vector<ExprPtr> offset_elems;
@@ -549,8 +592,15 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
                     MakeMul(subblock_idx, MakeIndexConst(half_const->value_, assign->span_), assign->span_));
               } else {
                 auto dim_const = std::dynamic_pointer_cast<const ConstInt>(tt->shape_[d]);
+                if (IsOp(call, "tile.reinterpret_view")) {
+                  CHECK_SPAN(dim_const != nullptr, call->span_)
+                      << "SplitVectorKernel: tile.reinterpret_view over a full-width source requires a "
+                         "static target shape so the pass can materialize a per-lane slice. Split/load "
+                         "the source before reinterpret_view, or move reinterpret_view outside the split "
+                         "scope.";
+                }
                 INTERNAL_CHECK_SPAN(dim_const != nullptr, assign->span_)
-                    << "SplitVectorKernel: tile.reshape non-split result dim " << d
+                    << "Internal error: tile.reshape non-split result dim " << d
                     << " must be static to slice the split axis";
                 shape_elems.push_back(MakeIndexConst(dim_const->value_, assign->span_));
                 offset_elems.push_back(MakeIndexConst(0, assign->span_));
@@ -572,8 +622,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             tile_vars[assign->var_.get()] = info;
             tile_vars[slice_var.get()] = info;
             var_replacements[assign->var_.get()] = slice_var;
-            return std::make_shared<SeqStmts>(std::vector<StmtPtr>{full_reshape, slice_assign},
-                                              assign->span_);
+            return std::make_shared<SeqStmts>(std::vector<StmtPtr>{full_view, slice_assign}, assign->span_);
           }
         }
 
@@ -581,7 +630,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         std::vector<ExprPtr> new_args = call->args_;
         if ((IsOp(call, "tile.full") || IsOp(call, "tile.create")) && call->args_.size() >= 1) {
           new_args[0] = HalveTupleElement(call->args_[0], result_split_dim);
-        } else if (IsOp(call, "tile.reshape") && call->args_.size() >= 2) {
+        } else if ((IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) &&
+                   call->args_.size() >= 2) {
           new_args[1] = HalveTupleElement(call->args_[1], result_split_dim);
         } else if (IsOp(call, "tile.slice") && call->args_.size() >= 3) {
           // tile.slice = (src, shape, offset[, valid_shape[, drop_dims]]). The

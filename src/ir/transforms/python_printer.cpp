@@ -939,6 +939,55 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     stream_ << op_name << "(";
   }
 
+  // Serialize ONLY op-call attrs that genuinely need to survive print -> parse,
+  // via an explicit allowlist. Most attrs are re-derived by the parser or have
+  // bespoke syntax. ``pipeline_membership`` has neither and must survive until
+  // MemoryReuse consumes it. Keep this helper available to special call forms
+  // below so an early return cannot silently drop the attr.
+  auto print_serialized_attrs = [&](bool need_comma) {
+    std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
+    for (const auto& kv : op->attrs_) {
+      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
+    }
+    if (serialized_attrs.empty()) return;
+
+    stream_ << (need_comma ? ", " : "") << "attrs={";
+    bool first_key = true;
+    for (const auto* kv : serialized_attrs) {
+      stream_ << (first_key ? "" : ", ");
+      first_key = false;
+      stream_ << std::quoted(kv->first) << ": ";
+      PrintAttrValue(kv->second, op->span_);
+    }
+    stream_ << "}";
+  };
+
+  // reinterpret_view keeps dtype as the second public-API input and shape as a
+  // keyword-only optional input, while the IR stores shape positionally and
+  // dtype in kwargs. Print the public ordering explicitly so both tensor and
+  // tile forms round-trip through their DSL wrappers.
+  if ((IsOp(op, "tile.reinterpret_view") || IsOp(op, "tensor.reinterpret_view")) &&
+      (op->args_.size() == 1 || op->args_.size() == 2)) {
+    VisitExpr(op->args_[0]);
+    bool found_dtype = false;
+    for (const auto& [key, value] : op->kwargs_) {
+      if (key != "dtype") continue;
+      stream_ << ", dtype=" << prefix_ << "."
+              << DataTypeToString(AnyCast<DataType>(value, op->op_->name_ + " dtype"));
+      found_dtype = true;
+      break;
+    }
+    INTERNAL_CHECK_SPAN(found_dtype, op->span_)
+        << "Internal error: " << op->op_->name_ << " is missing its required dtype kwarg";
+    if (op->args_.size() == 2) {
+      stream_ << ", shape=";
+      VisitExpr(op->args_[1]);
+    }
+    print_serialized_attrs(/*need_comma=*/true);
+    stream_ << ")";
+    return;
+  }
+
   // Special handling for tile.full / tensor.full: print as keyword args to match Python API
   // IR stores: args_=[shape, value_expr], kwargs_={"dtype": dtype}
   // Python API: full(shape, dtype, value) — print as full(shape, dtype=.., value=..)
@@ -1136,32 +1185,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
-  // Serialize ONLY op-call attrs that genuinely need to survive print -> parse,
-  // via an explicit allowlist. Most op-call attrs are either re-derived by the
-  // parser (e.g. ``dummy_task`` on ``system.task_dummy``) or surfaced through a
-  // bespoke kwarg (``deps=`` / ``device=``), so emitting them generically would
-  // either duplicate that surface or expose an internal marker the round-trip
-  // tests don't expect. ``pipeline_membership`` (set by LowerPipelineLoops, read
-  // by MemoryReuse) has no such surface and MUST round-trip, else the structural
-  // equality check after those passes fails. The matching reader is
-  // ``ast_parser`` (``_parse_op_attrs`` -> ``set_call_attrs``).
-  {
-    std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
-    for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr) serialized_attrs.push_back(&kv);
-    }
-    if (!serialized_attrs.empty()) {
-      stream_ << (need_comma ? ", " : "") << "attrs={";
-      bool first_key = true;
-      for (const auto* kv : serialized_attrs) {
-        stream_ << (first_key ? "" : ", ");
-        first_key = false;
-        stream_ << std::quoted(kv->first) << ": ";
-        PrintAttrValue(kv->second, op->span_);
-      }
-      stream_ << "}";
-    }
-  }
+  print_serialized_attrs(need_comma);
 
   stream_ << ")";
 }

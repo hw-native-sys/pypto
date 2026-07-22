@@ -58,7 +58,10 @@ class TileOps2DVerifier : public IRVisitor {
     const auto& name = call->op_->name_;
     if (name.substr(0, 5) != "tile.") return;
 
-    if (IsOp(call, "tile.load") || IsOp(call, "tile.store") || IsOp(call, "tile.reshape")) return;
+    if (IsOp(call, "tile.load") || IsOp(call, "tile.store") || IsOp(call, "tile.reshape") ||
+        IsOp(call, "tile.reinterpret_view")) {
+      return;
+    }
 
     auto result_tile = As<TileType>(call->GetType());
     if (result_tile && result_tile->shape_.size() > 2) {

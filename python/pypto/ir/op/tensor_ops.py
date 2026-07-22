@@ -1584,6 +1584,32 @@ def reshape(
     return _ir_core.create_op_call("tensor.reshape", args, {}, actual_span)
 
 
+def reinterpret_view(
+    data: Expr,
+    dtype: DataType,
+    *,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Reinterpret a tensor over the same bytes with a different dtype.
+
+    Args:
+        data: Input tensor expression
+        dtype: Target element dtype
+        shape: Optional target shape. When omitted, the physically contiguous
+            dimension is scaled according to the source/target dtype byte ratio
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for a byte-preserving tensor reinterpret view
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [data]
+    if shape is not None:
+        args.append(_to_make_tuple(shape, actual_span))
+    return _ir_core.create_op_call("tensor.reinterpret_view", args, {"dtype": dtype}, actual_span)
+
+
 def transpose(
     tensor: Expr,
     axis1: int | ConstInt,

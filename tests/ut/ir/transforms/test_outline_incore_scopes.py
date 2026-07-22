@@ -1026,6 +1026,18 @@ class TestSplitIncoreOrchVerifier:
         # verify_properties should NOT throw
         passes.verify_properties(self._split_incore_orch_props(), After, "test")
 
+    def test_reinterpret_view_is_classified_as_metadata(self):
+        """reinterpret_view is metadata-only and does not trigger the compute-op warning."""
+
+        @pl.program
+        class Input:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[8, 16], pl.FP32]) -> pl.Tensor[[8, 32], pl.INT16]:
+                return pl.tensor.reinterpret_view(x, pl.INT16)
+
+        diagnostics = passes.PropertyVerifierRegistry.verify(self._split_incore_orch_props(), Input)
+        assert all("tensor.reinterpret_view" not in diagnostic.message for diagnostic in diagnostics)
+
     def test_outline_does_not_throw_for_clean_program(self):
         """Running outline_incore_scopes on a clean program does not throw."""
 

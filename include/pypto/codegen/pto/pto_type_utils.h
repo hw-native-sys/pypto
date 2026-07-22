@@ -25,6 +25,13 @@ namespace codegen {
 /// Convert DataType to MLIR type string (e.g., FP32 -> "f32", INT32 -> "i32")
 std::string DataTypeToMLIR(DataType dtype);
 
+/// Return a tile_buf type identical to `tile_buf_type` except for its element dtype.
+///
+/// Used by ``pto.bitcast`` lowering, whose source/result configurations must
+/// match exactly apart from dtype. Deriving the target from the emitted source
+/// SSA type preserves dynamic/static valid extents as well as layout metadata.
+std::string ReplaceTileBufDType(const std::string& tile_buf_type, DataType dtype);
+
 /// Convert MemorySpace to PTO address space string (e.g., Vec -> "vec", DDR -> "gm")
 std::string MemorySpaceToMLIR(ir::MemorySpace space);
 

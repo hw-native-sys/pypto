@@ -481,6 +481,59 @@ class TestConvertTensorToTileOps:
         with pytest.raises(ValueError, match="result of an op lowered to Tile"):
             passes.convert_tensor_to_tile_ops()(program)
 
+    def test_reinterpret_view_auto_shape_lowers_to_tile(self):
+        """Packed ND tensor reinterpret lowers 1:1 and keeps auto-shape semantics."""
+        before, expected = _make_pair(
+            in_specs=[("x", [8, 16], DataType.FP32)],
+            out_shape=[8, 32],
+            out_dtype=DataType.INT16,
+            tensor_op=lambda ins: tensor_ops.reinterpret_view(ins[0], DataType.INT16),
+            tile_op=lambda tiles: tile_ops.reinterpret_view(tiles[0], DataType.INT16),
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_rank_one_reinterpret_view_lowers_to_tile(self):
+        """Rank-one ND tensors remain valid when lowered to physical 1xN tiles."""
+        before, expected = _make_pair(
+            in_specs=[("x", [16], DataType.FP32)],
+            out_shape=[32],
+            out_dtype=DataType.INT16,
+            tensor_op=lambda ins: tensor_ops.reinterpret_view(ins[0], DataType.INT16),
+            tile_op=lambda tiles: tile_ops.reinterpret_view(tiles[0], DataType.INT16),
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_reinterpret_view_explicit_shape_lowers_to_tile(self):
+        """An explicit byte-equivalent shape is preserved by tensor-to-tile lowering."""
+        before, expected = _make_pair(
+            in_specs=[("x", [2, 3], DataType.FP32)],
+            out_shape=[3, 4],
+            out_dtype=DataType.INT16,
+            tensor_op=lambda ins: tensor_ops.reinterpret_view(ins[0], DataType.INT16, shape=[3, 4]),
+            tile_op=lambda tiles: tile_ops.reinterpret_view(tiles[0], DataType.INT16, shape=[3, 4]),
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_reinterpret_view_rejects_dn_incore_lowering(self):
+        """DN tensor reinterpret is rejected before conversion loses its contiguous axis."""
+        span = ir.Span.unknown()
+        source_type = ir.TensorType(
+            [8, 16],
+            DataType.FP32,
+            None,
+            ir.TensorView([], ir.TensorLayout.DN),
+        )
+        ib = IRBuilder()
+        with ib.function("kernel", type=ir.FunctionType.InCore) as f:
+            x = f.param("x", source_type)
+            viewed = ib.let("viewed", tensor_ops.reinterpret_view(x, DataType.INT16))
+            f.return_type(viewed.type)
+            ib.return_stmt(viewed)
+        program = ir.Program([f.get_result()], "DnReinterpretView", span)
+
+        with pytest.raises(ValueError, match="only packed ND tensors"):
+            passes.convert_tensor_to_tile_ops()(program)
+
     def test_2d_tensor(self):
         """2D tensor -> correct offsets and shapes for load/store."""
         before, expected = _make_pair(

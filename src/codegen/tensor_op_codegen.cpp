@@ -364,6 +364,14 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
   return oss.str();
 }
 
+REGISTER_ORCHESTRATION_OP(tensor_reinterpret_view, ("tensor.reinterpret_view")) {
+  CHECK_SPAN(false, op->span_)
+      << "tensor.reinterpret_view is not supported in Orchestration functions because the runtime "
+         "Tensor API cannot change the element dtype of a view; place reinterpret_view inside an "
+         "InCore function";
+  return {};
+}
+
 REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
   // tensor.transpose(input, axis1, axis2) -> Tensor view with two axes swapped.
   // Lowered to runtime Tensor::transpose(x, y), a zero-copy metadata swap of the

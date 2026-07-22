@@ -110,6 +110,7 @@ __all__ = [
     "min",
     "slice",
     "reshape",
+    "reinterpret_view",
     "transpose",
     "transpose_view",
     "set_validshape",
@@ -1818,6 +1819,29 @@ def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
     """
     tile_expr = tile.unwrap()
     call_expr = _ir_ops.reshape(tile_expr, _normalize_intlike(shape))
+    return Tile(expr=call_expr)
+
+
+def reinterpret_view(
+    data: Tile,
+    dtype: DataType,
+    *,
+    shape: Sequence[IntLike] | None = None,
+) -> Tile:
+    """Reinterpret a tile over the same bytes with a different dtype.
+
+    Args:
+        data: Input tile.
+        dtype: Target element dtype, which must differ from the source dtype.
+        shape: Optional byte-equivalent target shape. When omitted, the
+            physically contiguous dimension is scaled according to the
+            source/target dtype byte ratio.
+
+    Returns:
+        Tile wrapping the zero-copy reinterpret-view operation.
+    """
+    normalized_shape = None if shape is None else _normalize_intlike(shape)
+    call_expr = _ir_ops.reinterpret_view(data.unwrap(), dtype, shape=normalized_shape)
     return Tile(expr=call_expr)
 
 

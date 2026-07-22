@@ -1476,6 +1476,157 @@ def test_tensor_reshape_dynamic():
     assert isinstance(result_type, ir.TensorType)
 
 
+class TestTensorReinterpretViewIR:
+    """IR semantics for tensor.reinterpret_view before public DSL lowering."""
+
+    @staticmethod
+    def _var(
+        shape: list[int],
+        dtype: DataType,
+        view: ir.TensorView | None = None,
+    ) -> ir.Var:
+        return ir.Var("src", ir.TensorType(shape, dtype, tensor_view=view), ir.Span.unknown())
+
+    @staticmethod
+    def _shape_values(result_type: ir.TensorType) -> list[int]:
+        return [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+
+    def test_registered_and_auto_shape_nd(self):
+        assert ir.is_op_registered("tensor.reinterpret_view")
+
+        call = tensor.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.INT16)
+
+        assert call.op.name == ir.get_op("tensor.reinterpret_view").name
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == DataType.INT16
+        assert self._shape_values(call.type) == [8, 32]
+
+    def test_rank_one_auto_shape(self):
+        call = tensor.reinterpret_view(self._var([16], DataType.FP32), DataType.INT16)
+
+        assert isinstance(call.type, ir.TensorType)
+        assert self._shape_values(call.type) == [32]
+
+    def test_auto_shape_dn_scales_penultimate_axis(self):
+        view = ir.TensorView([], ir.TensorLayout.DN)
+        call = tensor.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TensorType)
+        assert self._shape_values(call.type) == [16, 16]
+        assert call.type.tensor_view is not None
+        assert call.type.tensor_view.layout == ir.TensorLayout.DN
+
+    def test_preserves_explicit_packed_stride_in_target_elements(self):
+        view = ir.TensorView([1, 8], ir.TensorLayout.DN)
+        call = tensor.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.tensor_view is not None
+        assert [dim.value for dim in call.type.tensor_view.stride if isinstance(dim, ir.ConstInt)] == [1, 16]
+
+    def test_explicit_byte_equivalent_shape(self):
+        call = tensor.reinterpret_view(
+            self._var([8, 16], DataType.FP32),
+            DataType.INT16,
+            shape=[4, 64],
+        )
+
+        assert isinstance(call.type, ir.TensorType)
+        assert self._shape_values(call.type) == [4, 64]
+
+    def test_explicit_shape_does_not_require_auto_axis_divisibility(self):
+        call = tensor.reinterpret_view(
+            self._var([2, 3], DataType.INT16),
+            DataType.FP32,
+            shape=[1, 3],
+        )
+
+        assert isinstance(call.type, ir.TensorType)
+        assert self._shape_values(call.type) == [1, 3]
+
+    def test_dynamic_explicit_shape_equal_to_auto_shape(self):
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        dim16 = ir.ConstInt(16, DataType.INDEX, span)
+        dim32 = ir.ConstInt(32, DataType.INDEX, span)
+        src = ir.Var("src", ir.TensorType([n, dim16], DataType.FP32), span)
+
+        call = tensor.reinterpret_view(src, DataType.INT16, shape=[n, dim32])
+
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.shape[0] is n
+        assert isinstance(call.type.shape[1], ir.ConstInt)
+        assert call.type.shape[1].value == 32
+
+    def test_wider_dtype_auto_shape(self):
+        call = tensor.reinterpret_view(self._var([8, 16], DataType.INT16), DataType.FP32)
+
+        assert isinstance(call.type, ir.TensorType)
+        assert self._shape_values(call.type) == [8, 8]
+
+    def test_rejects_nondivisible_wider_dtype(self):
+        with pytest.raises(ValueError, match=r"dimension 1 .*not divisible by 2"):
+            tensor.reinterpret_view(self._var([8, 15], DataType.INT16), DataType.FP32)
+
+    def test_rejects_mismatched_explicit_byte_size(self):
+        with pytest.raises(ValueError, match=r"equal source and target byte sizes.*512 bytes.*256 bytes"):
+            tensor.reinterpret_view(
+                self._var([8, 16], DataType.FP32),
+                DataType.INT16,
+                shape=[8, 16],
+            )
+
+    def test_rejects_same_dtype(self):
+        with pytest.raises(ValueError, match="requires source and target dtypes to differ"):
+            tensor.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.FP32)
+
+    def test_rejects_unsupported_subbyte_dtype(self):
+        with pytest.raises(ValueError, match="does not support target dtype"):
+            tensor.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.INT4)
+
+    def test_rejects_strided_tensor(self):
+        view = ir.TensorView([32, 1], ir.TensorLayout.ND)
+        with pytest.raises(ValueError, match="only supports packed tensors"):
+            tensor.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+
+class TestTensorReinterpretViewDSL:
+    """Public ``pl.tensor.reinterpret_view`` wrapper and export coverage."""
+
+    @staticmethod
+    def _tensor() -> pl.Tensor:
+        source = ir.Var("src", ir.TensorType([8, 16], DataType.FP32), ir.Span.unknown())
+        return pl.Tensor(expr=source)
+
+    def test_auto_shape_wrapper(self):
+        result = pl.tensor.reinterpret_view(self._tensor(), pl.INT16)
+
+        assert isinstance(result, pl.Tensor)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == ir.get_op("tensor.reinterpret_view").name
+        assert len(call.args) == 1
+        assert call.kwargs == {"dtype": DataType.INT16}
+        assert isinstance(call.type, ir.TensorType)
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
+    def test_explicit_shape_wrapper(self):
+        result = pl.tensor.reinterpret_view(self._tensor(), pl.INT16, shape=[4, 64])
+
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert len(call.args) == 2
+        shape_arg = call.args[1]
+        assert isinstance(shape_arg, ir.MakeTuple)
+        assert [dim.value for dim in shape_arg.elements if isinstance(dim, ir.ConstInt)] == [4, 64]
+        assert isinstance(call.type, ir.TensorType)
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [4, 64]
+
+    def test_exported_from_tensor_namespace(self):
+        assert "reinterpret_view" in pl.tensor.__all__
+        assert hasattr(pl.tensor, "reinterpret_view")
+
+
 def test_tensor_transpose():
     """Test tensor.transpose operation."""
     span = ir.Span.unknown()

@@ -15,6 +15,7 @@ they produce structurally equal IR.
 """
 
 import pypto.language as pl
+import pypto.language.op as language_op
 import pytest
 from pypto import DataType, ir
 from pypto.language.op import unified_ops
@@ -256,6 +257,17 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_reinterpret_view(self):
+        """Tensor dispatch preserves the input kind and optional shape."""
+        span = ir.Span.unknown()
+        data = Tensor(expr=ir.Var("data", ir.TensorType([8, 16], DataType.FP32), span))
+
+        unified = pl.reinterpret_view(data, pl.INT16, shape=[4, 64])
+        explicit = pl.tensor.reinterpret_view(data, pl.INT16, shape=[4, 64])
+
+        assert isinstance(unified, Tensor)
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
     def test_row_min(self):
         @pl.function
         def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 1], pl.FP32]:
@@ -430,6 +442,17 @@ class TestUnifiedTensorDispatch:
 
 class TestUnifiedBlockDispatch:
     """pl.X with Tile args produces the same IR as pl.tile.X."""
+
+    def test_reinterpret_view(self):
+        """Tile dispatch preserves the input kind and auto-detected shape."""
+        span = ir.Span.unknown()
+        data = Tile(expr=ir.Var("data", ir.TileType([8, 16], DataType.FP32), span))
+
+        unified = pl.reinterpret_view(data, pl.INT16)
+        explicit = pl.tile.reinterpret_view(data, pl.INT16)
+
+        assert isinstance(unified, Tile)
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
 
     def test_add(self):
         @pl.function
@@ -1017,6 +1040,12 @@ class TestScalarAutoDispatch:
 class TestPromotedOps:
     """Promoted single-module ops produce the same IR as their explicit form."""
 
+    def test_reinterpret_view_exports(self):
+        assert pl.reinterpret_view is unified_ops.reinterpret_view
+        assert language_op.reinterpret_view is unified_ops.reinterpret_view
+        assert "reinterpret_view" in pl.__all__
+        assert "reinterpret_view" in language_op.__all__
+
     def test_promoted_create(self):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -1211,6 +1240,10 @@ class TestUnifiedOpsTypeErrors:
     def test_reshape_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):
             unified_ops.reshape(123, [4, 4])  # type: ignore
+
+    def test_reinterpret_view_invalid_input(self):
+        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+            unified_ops.reinterpret_view(123, DataType.INT16)  # type: ignore
 
     def test_matmul_invalid_lhs(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile operands"):

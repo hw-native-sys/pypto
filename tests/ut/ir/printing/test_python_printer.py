@@ -1652,5 +1652,59 @@ def test_attrs_structural_equality_is_order_insensitive():
     assert ir.structural_hash(prog_ab) == ir.structural_hash(prog_ba)
 
 
+def test_reinterpret_view_public_api_print_parse_roundtrip():
+    """Top-level tensor/tile calls round-trip with auto/explicit shapes.
+
+    The IR stores ``shape`` positionally and ``dtype`` as a kwarg, so this also
+    guards the printer's public argument ordering. The pipeline attr case
+    ensures the specialized printer does not bypass generic attr serialization.
+    """
+    source = textwrap.dedent("""\
+        @pl.program
+        class ReinterpretViews:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tensor_auto(
+                self, data: pl.Tensor[[8, 16], pl.FP32]
+            ) -> pl.Tensor[[8, 32], pl.INT16]:
+                return pl.reinterpret_view(data, pl.INT16)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tensor_explicit(
+                self, data: pl.Tensor[[8, 16], pl.FP32]
+            ) -> pl.Tensor[[4, 64], pl.INT16]:
+                return pl.reinterpret_view(data, pl.INT16, shape=[4, 64])
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_auto(
+                self, data: pl.Tile[[8, 16], pl.FP32]
+            ) -> pl.Tile[[8, 32], pl.INT16]:
+                return pl.reinterpret_view(data, pl.INT16)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_explicit(
+                self, data: pl.Tile[[8, 16], pl.FP32]
+            ) -> pl.Tile[[4, 64], pl.INT16]:
+                return pl.reinterpret_view(
+                    data,
+                    pl.INT16,
+                    shape=[4, 64],
+                    attrs={"pipeline_membership": "0:1"},
+                )
+    """)
+
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+
+    assert printed.count("reinterpret_view") == 4
+    assert "pl.tensor.reinterpret_view(data, dtype=pl.INT16)" in printed
+    assert "pl.tensor.reinterpret_view(data, dtype=pl.INT16, shape=[4, 64])" in printed
+    assert "pl.tile.reinterpret_view(data, dtype=pl.INT16)" in printed
+    assert 'attrs={"pipeline_membership": "0:1"}' in printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

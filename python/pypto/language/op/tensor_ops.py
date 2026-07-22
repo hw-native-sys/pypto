@@ -94,6 +94,7 @@ __all__ = [
     "assemble",
     "concat",
     "reshape",
+    "reinterpret_view",
     "transpose",
     "view",
     "scatter_update",
@@ -1619,6 +1620,29 @@ def reshape(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor:
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.reshape(tensor_expr, _normalize_intlike(shape))
+    return Tensor(expr=call_expr)
+
+
+def reinterpret_view(
+    data: Tensor,
+    dtype: DataType,
+    *,
+    shape: Sequence[IntLike] | None = None,
+) -> Tensor:
+    """Reinterpret a tensor over the same bytes with a different dtype.
+
+    Args:
+        data: Input tensor.
+        dtype: Target element dtype, which must differ from the source dtype.
+        shape: Optional byte-equivalent target shape. When omitted, the
+            physically contiguous dimension is scaled according to the
+            source/target dtype byte ratio.
+
+    Returns:
+        Tensor wrapping the zero-copy reinterpret-view operation.
+    """
+    normalized_shape = None if shape is None else _normalize_intlike(shape)
+    call_expr = _ir_ops.reinterpret_view(data.unwrap(), dtype, shape=normalized_shape)
     return Tensor(expr=call_expr)
 
 

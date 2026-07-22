@@ -69,6 +69,22 @@ bool IsPassthroughTensorOp(const CallPtr& call) {
   return IsOp(call, "tensor.dim") || IsOp(call, "tensor.view");
 }
 
+void CheckReinterpretViewIncoreLayout(const CallPtr& call) {
+  if (!IsOp(call, "tensor.reinterpret_view")) return;
+
+  INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
+      << "Internal error: tensor.reinterpret_view reached conversion without a data argument";
+  auto source_type = As<TensorType>(call->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(source_type, call->span_)
+      << "Internal error: tensor.reinterpret_view source must be TensorType before tile conversion";
+  const TensorLayout source_layout =
+      source_type->tensor_view_.has_value() ? source_type->tensor_view_->layout : TensorLayout::ND;
+  CHECK_SPAN(source_layout == TensorLayout::ND, call->span_)
+      << "tensor.reinterpret_view in an InCore function currently supports only packed ND tensors; "
+         "DN layout changes which logical axis is physically contiguous, and that information cannot "
+         "yet be preserved by tensor-to-tile lowering";
+}
+
 /**
  * @brief Visitor that collects tensor-typed variable names used directly by converted ops.
  *
@@ -521,6 +537,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // Pin this Var's address for the pass so a freed-then-reused address cannot
     // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
     RetainVar(op->var_);
+    CheckReinterpretViewIncoreLayout(As<Call>(op->value_));
     auto new_value = VisitExpr(op->value_);
     auto call = As<Call>(new_value);
 
@@ -592,6 +609,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    CheckReinterpretViewIncoreLayout(As<Call>(op->expr_));
     auto new_expr = VisitExpr(op->expr_);
     // Helper: return updated EvalStmt only when the expression actually changed.
     auto maybe_update = [&]() -> StmtPtr {

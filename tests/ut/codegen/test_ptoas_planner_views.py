@@ -183,6 +183,109 @@ def test_reshape_of_subview_folds_away_under_pypto_planner():
     assert "pto.treshape" not in mlir, mlir
 
 
+# ── reinterpret_view: bitcast vs byte-preserving treshape ───────────────────
+
+REINTERPRET_ROWS, REINTERPRET_COLS = 8, 16
+
+
+@pl.program
+class SameShapeReinterpretProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.INT32]],
+    ) -> pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.INT32]:
+        src: pl.Tile[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.FP32] = pl.load(
+            x, [0, 0], [REINTERPRET_ROWS, REINTERPRET_COLS]
+        )
+        view: pl.Tile[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.INT32] = pl.tile.reinterpret_view(
+            src, pl.INT32
+        )
+        return pl.store(view, [0, 0], out)
+
+
+@pl.program
+class WidthChangingReinterpretProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS * 2], pl.INT16]],
+    ) -> pl.Tensor[[REINTERPRET_ROWS, REINTERPRET_COLS * 2], pl.INT16]:
+        src: pl.Tile[[REINTERPRET_ROWS, REINTERPRET_COLS], pl.FP32] = pl.load(
+            x, [0, 0], [REINTERPRET_ROWS, REINTERPRET_COLS]
+        )
+        view: pl.Tile[[REINTERPRET_ROWS, REINTERPRET_COLS * 2], pl.INT16] = pl.tile.reinterpret_view(
+            src, pl.INT16
+        )
+        return pl.store(view, [0, 0], out)
+
+
+@pl.program
+class SubviewReinterpretProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, REINTERPRET_COLS], pl.FP32],
+        out: pl.Out[pl.Tensor[[5, REINTERPRET_COLS], pl.INT32]],
+    ) -> pl.Tensor[[5, REINTERPRET_COLS], pl.INT32]:
+        src: pl.Tile[[16, REINTERPRET_COLS], pl.FP32] = pl.load(x, [0, 0], [16, REINTERPRET_COLS])
+        sub: pl.Tile[[5, REINTERPRET_COLS], pl.FP32] = pl.tile.slice(src, [5, REINTERPRET_COLS], [0, 0])
+        view: pl.Tile[[5, REINTERPRET_COLS], pl.INT32] = pl.tile.reinterpret_view(sub, pl.INT32)
+        return pl.store(view, [0, 0], out)
+
+
+def test_same_shape_reinterpret_uses_bitcast_under_ptoas():
+    mlir = _emit_pto(SameShapeReinterpretProgram, passes.MemoryPlanner.PTOAS)
+    bitcast = _sole_line(mlir, "pto.bitcast")
+
+    assert "pto.treshape" not in mlir, mlir
+    source_type = _operand_type(bitcast)
+    result_type = _result_type(bitcast)
+    assert "dtype=f32" in source_type, bitcast
+    assert "dtype=i32" in result_type, bitcast
+    assert source_type.replace("dtype=f32", "dtype=i32") == result_type, bitcast
+
+
+def test_width_changing_reinterpret_uses_treshape_under_ptoas():
+    mlir = _emit_pto(WidthChangingReinterpretProgram, passes.MemoryPlanner.PTOAS)
+    treshape = _sole_line(mlir, "pto.treshape")
+
+    assert "pto.bitcast" not in mlir, mlir
+    assert "dtype=f32" in _operand_type(treshape), treshape
+    assert "dtype=i16" in _result_type(treshape), treshape
+    assert f"rows={REINTERPRET_ROWS}, cols={REINTERPRET_COLS * 2}" in _result_type(treshape), treshape
+
+
+def test_subview_reinterpret_bitcast_uses_subview_definition_type():
+    mlir = _emit_pto(SubviewReinterpretProgram, passes.MemoryPlanner.PTOAS)
+    subview = _sole_line(mlir, "pto.subview")
+    bitcast = _sole_line(mlir, "pto.bitcast")
+
+    assert _operand_type(bitcast) == _result_type(subview), f"{subview}\n{bitcast}"
+    assert _operand_type(bitcast).replace("dtype=f32", "dtype=i32") == _result_type(bitcast)
+
+
+@pytest.mark.parametrize(
+    ("program", "target_dtype"),
+    [(SameShapeReinterpretProgram, "dtype=i32"), (WidthChangingReinterpretProgram, "dtype=i16")],
+)
+def test_reinterpret_is_alloc_backed_alias_under_pypto_planner(program, target_dtype):
+    mlir = _emit_pto(program, passes.MemoryPlanner.PYPTO)
+
+    assert "pto.bitcast" not in mlir and "pto.treshape" not in mlir, mlir
+    source_allocs = [ln for ln in mlir.splitlines() if "= pto.alloc_tile" in ln and "dtype=f32" in ln]
+    target_allocs = [ln for ln in mlir.splitlines() if "= pto.alloc_tile" in ln and target_dtype in ln]
+    assert len(source_allocs) == 1 and len(target_allocs) == 1, mlir
+    source_alloc = source_allocs[0]
+    target_alloc = target_allocs[0]
+    source_addr = re.search(r"addr = ([^, ]+)", source_alloc)
+    target_addr = re.search(r"addr = ([^, ]+)", target_alloc)
+    assert source_addr is not None and target_addr is not None, f"{source_alloc}\n{target_alloc}"
+    assert source_addr.group(1) == target_addr.group(1), f"{source_alloc}\n{target_alloc}"
+
+
 # ── transposed matmul operand: the reinterpret needs its own SSA ─────────────
 
 QM, QK, KN = 16, 128, 128

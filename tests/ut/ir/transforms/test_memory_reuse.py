@@ -873,6 +873,55 @@ def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
 class TestViewOps:
     """Tests for view operations (reshape) with memory reuse."""
 
+    def test_reinterpret_view_chain_shares_exact_byte_memref(self):
+        """Cross-dtype reinterpret views keep one exact-byte MemRef alias chain."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                source: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [8, 16])
+                as_int16: pl.Tile[[8, 32], pl.INT16, pl.MemorySpace.Vec] = pl.tile.reinterpret_view(
+                    source, pl.INT16
+                )
+                round_trip: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reinterpret_view(
+                    as_int16, pl.FP32
+                )
+                result: pl.Tensor[[8, 16], pl.FP32] = pl.store(round_trip, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        func = After.get_function("main")
+        assert func is not None
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+
+        memrefs = {}
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in {
+                "source",
+                "as_int16",
+                "round_trip",
+            }:
+                tile_type = stmt.var.type
+                assert isinstance(tile_type, ir.TileType)
+                assert tile_type.memref is not None
+                memrefs[stmt.var.name_hint] = tile_type.memref
+
+        assert set(memrefs) == {"source", "as_int16", "round_trip"}
+        source_memref = memrefs["source"]
+        for name in ("as_int16", "round_trip"):
+            view_memref = memrefs[name]
+            assert view_memref.base_.name_hint == source_memref.base_.name_hint
+            assert isinstance(view_memref.byte_offset_, ir.ConstInt)
+            assert isinstance(source_memref.byte_offset_, ir.ConstInt)
+            assert view_memref.byte_offset_.value == source_memref.byte_offset_.value == 0
+            assert view_memref.size_ == source_memref.size_ == 8 * 16 * 4
+
     def test_subview_group_keeps_offsets_on_reuse(self):
         """Retargeting a sharing group must preserve per-member subview offsets (issue #1723).
 

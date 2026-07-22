@@ -44,6 +44,7 @@ from pypto.ir.op import tile_ops as T
 
 MS = ir.MemorySpace
 FP32 = DataType.FP32
+INT16 = DataType.INT16
 _IN = ir.ParamDirection.In
 _OUT = ir.ParamDirection.Out
 
@@ -608,6 +609,168 @@ def test_reshape_of_already_split_input_halves_shape_arg():
         ],
         [e_out.type],
         mode=ir.SplitMode.UP_DOWN,
+        sub=sub,
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_auto_reinterpret_view_of_split_input_scales_lane_local_shape():
+    """UP_DOWN: auto reinterpret keeps the tracked split axis and scales only the contiguous axis."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([16, 16]), span)
+    out_0 = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    load = T.load(data, [0, 0], [16, 16], target_memory=MS.Vec, span=span)
+    prev = ir.Var("prev", load.type, span)
+    reinterpret = T.reinterpret_view(prev, INT16, span=span)
+    bits = ir.Var("bits", reinterpret.type, span)
+    store = T.store(bits, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(prev, load, span),
+            ir.AssignStmt(bits, reinterpret, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+    )
+
+    sub = _sub_var()
+    e_data = ir.Var("data", _tensor([16, 16]), span)
+    e_out = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    e_load = T.load(e_data, [0 + sub * 8, 0], [8, 16], target_memory=MS.Vec, span=span)
+    e_prev = ir.Var("prev", e_load.type, span)
+    e_reinterpret = T.reinterpret_view(e_prev, INT16, span=span)
+    e_bits = ir.Var("bits", e_reinterpret.type, span)
+    e_store = T.store(e_bits, [0 + sub * 8, 0], e_out, span=span)
+    e_out_store = ir.Var("out_store", e_store.type, span)
+    expected = _expected_incore(
+        [(e_data, _IN), (e_out, _OUT)],
+        [
+            ir.AssignStmt(e_prev, e_load, span),
+            ir.AssignStmt(e_bits, e_reinterpret, span),
+            ir.AssignStmt(e_out_store, e_store, span),
+            ir.ReturnStmt([e_out_store], span),
+        ],
+        [e_out.type],
+        mode=ir.SplitMode.UP_DOWN,
+        sub=sub,
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_auto_equivalent_explicit_reinterpret_shape_is_halved_with_split_input():
+    """UP_DOWN: an explicit spelling of the auto shape is accepted and halved with the source."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([16, 16]), span)
+    out_0 = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    load = T.load(data, [0, 0], [16, 16], target_memory=MS.Vec, span=span)
+    prev = ir.Var("prev", load.type, span)
+    reinterpret = T.reinterpret_view(prev, INT16, shape=[16, 32], span=span)
+    bits = ir.Var("bits", reinterpret.type, span)
+    store = T.store(bits, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(prev, load, span),
+            ir.AssignStmt(bits, reinterpret, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+    )
+
+    sub = _sub_var()
+    e_data = ir.Var("data", _tensor([16, 16]), span)
+    e_out = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    e_load = T.load(e_data, [0 + sub * 8, 0], [8, 16], target_memory=MS.Vec, span=span)
+    e_prev = ir.Var("prev", e_load.type, span)
+    e_reinterpret = T.reinterpret_view(e_prev, INT16, shape=[8, 32], span=span)
+    e_bits = ir.Var("bits", e_reinterpret.type, span)
+    e_store = T.store(e_bits, [0 + sub * 8, 0], e_out, span=span)
+    e_out_store = ir.Var("out_store", e_store.type, span)
+    expected = _expected_incore(
+        [(e_data, _IN), (e_out, _OUT)],
+        [
+            ir.AssignStmt(e_prev, e_load, span),
+            ir.AssignStmt(e_bits, e_reinterpret, span),
+            ir.AssignStmt(e_out_store, e_store, span),
+            ir.ReturnStmt([e_out_store], span),
+        ],
+        [e_out.type],
+        mode=ir.SplitMode.UP_DOWN,
+        sub=sub,
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+def test_arbitrary_explicit_reinterpret_shape_is_rejected_under_split():
+    """A byte-equivalent shape that redistributes dimensions has no safe physical split-axis mapping."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([16, 16]), span)
+    out_0 = ir.Var("out_0", ir.TensorType([8, 64], INT16), span)
+    load = T.load(data, [0, 0], [16, 16], target_memory=MS.Vec, span=span)
+    prev = ir.Var("prev", load.type, span)
+    reinterpret = T.reinterpret_view(prev, INT16, shape=[8, 64], span=span)
+    bits = ir.Var("bits", reinterpret.type, span)
+    store = T.store(bits, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(prev, load, span),
+            ir.AssignStmt(bits, reinterpret, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+    )
+
+    with pytest.raises(ValueError, match="must match its auto-inferred shape"):
+        _lower(program)
+
+
+def test_reinterpret_view_of_full_source_is_sliced_per_subblock():
+    """LEFT_RIGHT: an untracked full tile param is reinterpreted, then sliced per lane."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tile([16, 16], mem=MS.Vec), span)
+    out_0 = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    reinterpret = T.reinterpret_view(data, INT16, span=span)
+    bits = ir.Var("bits", reinterpret.type, span)
+    store = T.store(bits, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    program = _incore_program(
+        [(data, _IN), (out_0, _OUT)],
+        [
+            ir.AssignStmt(bits, reinterpret, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        [out_0.type],
+        mode=ir.SplitMode.LEFT_RIGHT,
+    )
+
+    sub = _sub_var()
+    e_data = ir.Var("data", _tile([16, 16], mem=MS.Vec), span)
+    e_out = ir.Var("out_0", ir.TensorType([16, 32], INT16), span)
+    e_reinterpret = T.reinterpret_view(e_data, INT16, span=span)
+    e_bits_full = ir.Var("bits", e_reinterpret.type, span)
+    e_slice = T.slice(e_bits_full, [16, 16], [0, sub * 16], span=span)
+    e_bits = ir.Var("bits_1", e_slice.type, span)
+    e_store = T.store(e_bits, [0, 0 + sub * 16], e_out, span=span)
+    e_out_store = ir.Var("out_store", e_store.type, span)
+    expected = _expected_incore(
+        [(e_data, _IN), (e_out, _OUT)],
+        [
+            ir.AssignStmt(e_bits_full, e_reinterpret, span),
+            ir.AssignStmt(e_bits, e_slice, span),
+            ir.AssignStmt(e_out_store, e_store, span),
+            ir.ReturnStmt([e_out_store], span),
+        ],
+        [e_out.type],
+        mode=ir.SplitMode.LEFT_RIGHT,
         sub=sub,
     )
     ir.assert_structural_equal(_lower(program), expected)

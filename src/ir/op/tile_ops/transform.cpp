@@ -33,6 +33,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/reinterpret_view_semantics.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -338,6 +339,60 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  constexpr const char* kOpName = "tile.reinterpret_view";
+  CHECK(args.size() == 1 || args.size() == 2)
+      << kOpName << " requires 1 or 2 arguments (data[, shape]), but got " << args.size();
+
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK_SPAN(tile_type, args[0]->span_)
+      << kOpName << " requires data to be a TileType, but got " << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tile_type->shape_.empty(), args[0]->span_)
+      << kOpName << " requires a tile rank >= 1, but got " << tile_type->shape_.size();
+
+  const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+  CHECK_SPAN(source_view.slayout == TileLayout::none_box, args[0]->span_)
+      << kOpName << " only supports flat tiles with slayout=none_box; boxed/fractal tiles are unsupported";
+  CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
+             args[0]->span_)
+      << kOpName << " requires row_major or col_major blayout";
+  CHECK_SPAN(source_view.blayout != TileLayout::col_major || tile_type->shape_.size() >= 2, args[0]->span_)
+      << kOpName << " requires rank >= 2 for col_major layout";
+  if (tile_type->tile_view_.has_value()) {
+    CHECK_SPAN(tile_type->tile_view_->stride.empty(), args[0]->span_)
+        << kOpName << " only supports packed tiles without explicit strides";
+    if (auto offset = As<ConstInt>(tile_type->tile_view_->start_offset)) {
+      CHECK_SPAN(offset->value_ == 0, args[0]->span_)
+          << kOpName << " only supports tiles with zero start_offset, got " << offset->value_;
+    } else {
+      CHECK_SPAN(!tile_type->tile_view_->start_offset, args[0]->span_)
+          << kOpName << " only supports tiles without a dynamic start_offset";
+    }
+  }
+
+  std::optional<std::vector<ExprPtr>> requested_shape;
+  if (args.size() == 2) {
+    requested_shape = reinterpret_view_semantics::ExtractShape(args[1], kOpName);
+    CHECK_SPAN(source_view.blayout != TileLayout::col_major || requested_shape->size() >= 2, args[1]->span_)
+        << kOpName << " requires target rank >= 2 for col_major layout";
+  }
+
+  const size_t contiguous_axis = source_view.blayout == TileLayout::col_major ? tile_type->shape_.size() - 2
+                                                                              : tile_type->shape_.size() - 1;
+  auto plan = reinterpret_view_semantics::Resolve(tile_type->shape_, source_view.valid_shape,
+                                                  tile_type->dtype_, target_dtype, contiguous_axis,
+                                                  requested_shape, kOpName, args[0]->span_);
+
+  TileView result_view = source_view;
+  result_view.valid_shape = std::move(plan.valid_shape);
+  result_view.stride.clear();
+  result_view.start_offset = nullptr;
+  return std::make_shared<TileType>(std::move(plan.shape), target_dtype, std::nullopt,
+                                    std::make_optional(std::move(result_view)), tile_type->memory_space_);
+}
+
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // The optional tail `tmp` is a scratch buffer required by the 2D pto.ttrans codegen
@@ -474,6 +529,18 @@ REGISTER_OP("tile.reshape")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReshapeType(args, kwargs);
+    });
+
+REGISTER_OP("tile.reinterpret_view")
+    .set_op_category("TileOp")
+    .set_description("Zero-copy reinterpretation of a flat tile with a different dtype and equal byte size")
+    .add_argument("data", "Input tile (packed, flat TileType)")
+    .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
+    .set_attr<DataType>("dtype")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileReinterpretViewType(args, kwargs);
     });
 
 REGISTER_OP("tile.transpose")

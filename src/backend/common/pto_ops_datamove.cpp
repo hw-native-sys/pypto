@@ -787,8 +787,23 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
   return "";
 }
 
+// Resolve the exact tile_buf type carried by a view source's emitted SSA.
+static std::string GetViewSourceType(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg) {
+  std::string src_type = codegen.GetExprTypeAnnotation(src_arg);
+  if (src_type.empty()) {
+    // MemRef-less source (a view over a cross-core tpop slot): no SSA type was
+    // registered and GetExprTypeAnnotation's TileType arm requires a MemRef.
+    if (auto src_var = AsVarLike(src_arg)) {
+      if (auto tile_type = As<ir::TileType>(src_var->GetType())) {
+        src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+      }
+    }
+  }
+  return src_type;
+}
+
 // Emit a metadata-only `pto.treshape` reinterpret of `src_arg` into the current
-// result. Shared by the tile.reshape and tile.transpose_view codegen lambdas:
+// result. Shared by tile reshape/view codegen lambdas:
 // both lower a MemRef-less view (e.g. over a cross-core tpop slot) to a
 // pto.treshape that READS the source SSA — no data movement. `result_type` is the
 // result var's TileType buf-type (empty if none); when present a fresh temp
@@ -804,16 +819,7 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   // dims that `ExtractTileTypeInfo` renders as `v_row=?, v_col=?`: a `pto.subview`
   // def infers its valid from the slice `sizes`, so a reshape of a slice would
   // print `valid=?x?` at the use and MLIR rejects the def/use type mismatch.
-  std::string src_type = codegen.GetExprTypeAnnotation(src_arg);
-  if (src_type.empty()) {
-    // MemRef-less source (a view over a cross-core tpop slot): no SSA type was
-    // registered and GetExprTypeAnnotation's TileType arm requires a MemRef.
-    if (auto src_var = AsVarLike(src_arg)) {
-      if (auto tile_type = As<ir::TileType>(src_var->GetType())) {
-        src_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
-      }
-    }
-  }
+  std::string src_type = GetViewSourceType(codegen, src_arg);
   if (!result_type.empty()) {
     result_target = codegen.NewNamedTemp(temp_prefix);
     codegen.SetCurrentResultBuf(result_target);
@@ -824,6 +830,27 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   if (!src_type.empty() && !result_type.empty()) {
     oss << " : " << src_type << " -> " << result_type;
   }
+  codegen.Emit(oss.str());
+}
+
+// Emit a same-shape dtype reinterpret. PTOAS requires every tile_buf field
+// except dtype to match, so derive the result type from the source SSA type and
+// replace only its dtype field.
+static void EmitBitcastView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
+                            std::string result_target, DataType target_dtype,
+                            const std::string& temp_prefix) {
+  const std::string src = codegen.GetExprAsCode(src_arg);
+  const std::string src_type = GetViewSourceType(codegen, src_arg);
+  INTERNAL_CHECK_SPAN(!src_type.empty(), src_arg->span_)
+      << "Internal error: tile.reinterpret_view source has no PTO tile_buf type";
+  const std::string result_type = codegen::ReplaceTileBufDType(src_type, target_dtype);
+
+  result_target = codegen.NewNamedTemp(temp_prefix);
+  codegen.SetCurrentResultBuf(result_target);
+  codegen.RegisterTileBufType(result_target, result_type);
+
+  std::ostringstream oss;
+  oss << result_target << " = pto.bitcast " << src << " : " << src_type << " -> " << result_type;
   codegen.Emit(oss.str());
 }
 
@@ -1110,6 +1137,42 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     // Fallback: emit pto.treshape reading the source SSA.
     EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reshape_buf");
+    return std::string("");
+  });
+
+  reg("tile.reinterpret_view", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
+        << "Internal error: tile.reinterpret_view requires 1 or 2 arguments (data[, shape]), but got "
+        << op->args_.size();
+    auto& codegen = AsPto(codegen_base);
+    const std::string result_target = codegen.GetCurrentResultTarget();
+
+    auto source_tile = ir::As<ir::TileType>(op->args_[0]->GetType());
+    auto result_var = codegen.GetCurrentResultVar();
+    auto result_tile = result_var ? ir::As<ir::TileType>(result_var->GetType()) : nullptr;
+    INTERNAL_CHECK_SPAN(source_tile && result_tile, op->span_)
+        << "Internal error: tile.reinterpret_view requires TileType source and result";
+
+    const std::string result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
+    const bool result_has_memref = result_tile->memref_.has_value();
+    const std::string existing_type = codegen.GetSSATileBufType(result_target);
+
+    // With baked addresses, the result's own alloc_tile at the inherited
+    // address is already the typed alias. PTOAS-planner mode shares one handle,
+    // so it must materialize a typed SSA view below.
+    if (codegen.EmitTileAddr() && result_has_memref && !existing_type.empty() &&
+        existing_type == result_type) {
+      return std::string("");
+    }
+
+    const bool same_shape =
+        ir::tile_view_semantics::ShapeExprListsEquivalent(source_tile->shape_, result_tile->shape_);
+    if (same_shape) {
+      EmitBitcastView(codegen, op->args_[0], result_target, result_tile->dtype_, "reinterpret_view_buf");
+    } else {
+      const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile);
+      EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reinterpret_view_buf");
+    }
     return std::string("");
   });
 

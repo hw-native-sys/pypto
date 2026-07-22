@@ -299,6 +299,25 @@ class TestFlattenTileNdTo2DSingleInput:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_reinterpret_view_chain_is_recreated_from_flattened_source(self):
+        """Auto-shaped reinterpret views re-deduce their shapes from the flattened 2D input."""
+
+        def body(ib: IRBuilder, tiles: list[ir.Expr]) -> ir.Expr:
+            as_i16 = ib.let("as_i16", tile_ops.reinterpret_view(tiles[0], DataType.INT16))
+            return tile_ops.reinterpret_view(as_i16, DataType.FP32)
+
+        Before = _build_before_nd([("x", [2, 3, 4])], [2, 3, 4], DataType.FP32, body)
+        Expected = _build_expected_2d(
+            [("x", [2, 3, 4])],
+            [2, 3, 4],
+            [[6, 4]],
+            DataType.FP32,
+            body,
+        )
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 # ----------------------------------------------------------------------------
 # Two-input element-wise ops on ND tiles -> 2D
@@ -1027,6 +1046,30 @@ class TestFlattenTileNdTo2DPassProperties:
         props.insert(passes.IRProperty.TileOps2D)
         with pytest.raises(Exception, match="TileOps2D"):
             passes.verify_properties(props, Unflatten, "test_verifier_fails")
+
+    def test_verifier_allows_rank_raising_reinterpret_view(self):
+        """An explicit rank-raising metadata view is exempt, like tile.reshape."""
+        span = ir.Span.unknown()
+        source = ir.Var("source", ir.TileType([4, 8], DataType.FP32), span)
+        view_call = tile_ops.reinterpret_view(source, DataType.INT16, shape=[4, 1, 16], span=span)
+        view = ir.Var("view", view_call.type, span)
+        body = ir.SeqStmts(
+            [ir.AssignStmt(view, view_call, span), ir.ReturnStmt([view], span)],
+            span,
+        )
+        func = ir.Function(
+            "rank_raising_view",
+            [(source, ir.ParamDirection.In)],
+            [view_call.type],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "rank_raising_view", span)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+
+        passes.verify_properties(props, program, "test_rank_raising_reinterpret_view")
 
 
 # ----------------------------------------------------------------------------
