@@ -148,6 +148,15 @@ inline const PassProperties kFlattenTileNdTo2DProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
+// -- Legalize unsupported tile.cast pairs into native cast chains -------------
+//
+// Property-preserving: expands one tile.cast AssignStmt into a SeqStmts of
+// native tile.cast hops. Empty props (same rationale as LowerCompositeOps):
+// the rewrite stays inside the existing tile.cast vocabulary and does not
+// establish or destroy IRProperties. Pipeline position is FlattenTileNdTo2D
+// → LegalizeTileCast → AutoTileMatmulL0.
+inline const PassProperties kLegalizeTileCastProperties{};
+
 // -- Auto L0 matmul tiling pass -----------------------------------------------
 //
 // Property-preserving rewrite: replaces ``tile.matmul[_acc]`` over Mat-resident
