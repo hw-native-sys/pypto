@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -64,11 +65,18 @@ struct BranchChoice {
   }
 };
 
+struct RegionRepresentative {
+  size_t region = 0;
+  const Stmt* statement = nullptr;
+};
+
 struct AccessEndpoint {
   size_t region = 0;
   size_t statement_index = 0;
   size_t global_order = 0;
+  size_t resource_issue_index = 0;
   const Stmt* statement = nullptr;
+  std::vector<RegionRepresentative> region_representatives;
   RecognizedAccessRoute route;
   MemorySpace memory_space = MemorySpace::ScalarLocal;
   AccessKind access_kind = AccessKind::Read;
@@ -85,22 +93,23 @@ struct AllocationAccessSummary {
   size_t unsupported_accesses = 0;
 };
 
-using FrontierKey =
-    std::tuple<RecognizedMemoryClass, RecognizedMemoryClass, RecognizedAccessResource, MemorySpace,
-               std::vector<BranchChoice>, std::vector<size_t>, bool, uint64_t, uint64_t>;
+using FrontierKey = std::tuple<RecognizedAccessResource, MemorySpace, std::vector<BranchChoice>,
+                               std::vector<size_t>, bool, uint64_t, uint64_t>;
 
 FrontierKey GetFrontierKey(const AccessEndpoint& endpoint) {
-  return {endpoint.route.source, endpoint.route.destination, endpoint.route.resource,
-          endpoint.memory_space, endpoint.branch_path,       endpoint.loop_stack,
-          endpoint.range_known,  endpoint.byte_offset,       endpoint.byte_size};
+  return {endpoint.route.resource, endpoint.memory_space, endpoint.branch_path, endpoint.loop_stack,
+          endpoint.range_known,    endpoint.byte_offset,  endpoint.byte_size};
 }
 
-std::vector<AccessEndpoint> BuildTerminalFrontier(const AllocationAccessSummary& summary) {
+using CompletionOrdered = std::function<bool(const AccessEndpoint& earlier, const AccessEndpoint& later)>;
+
+std::vector<AccessEndpoint> BuildTerminalFrontier(const AllocationAccessSummary& summary,
+                                                  const CompletionOrdered& ordered) {
   std::map<FrontierKey, AccessEndpoint> terminal;
   for (const AccessEndpoint& endpoint : summary.accesses) {
     const FrontierKey key = GetFrontierKey(endpoint);
     const auto found = terminal.find(key);
-    if (found == terminal.end() || found->second.global_order <= endpoint.global_order) {
+    if (found == terminal.end() || found->second.resource_issue_index <= endpoint.resource_issue_index) {
       terminal[key] = endpoint;
     }
   }
@@ -110,24 +119,52 @@ std::vector<AccessEndpoint> BuildTerminalFrontier(const AllocationAccessSummary&
     static_cast<void>(key);
     result.push_back(endpoint);
   }
-  return result;
+  std::vector<AccessEndpoint> maximal;
+  maximal.reserve(result.size());
+  for (const AccessEndpoint& candidate : result) {
+    const bool dominated = std::any_of(result.begin(), result.end(), [&](const AccessEndpoint& other) {
+      return candidate.statement != other.statement && ordered(candidate, other);
+    });
+    if (!dominated) maximal.push_back(candidate);
+  }
+  return maximal;
 }
 
-std::vector<AccessEndpoint> BuildInitialWriteFrontier(const AllocationAccessSummary& summary) {
-  std::map<FrontierKey, AccessEndpoint> initial;
-  for (const AccessEndpoint& endpoint : summary.accesses) {
-    if (endpoint.access_kind != AccessKind::Write) continue;
-    const FrontierKey key = GetFrontierKey(endpoint);
-    const auto found = initial.find(key);
-    if (found == initial.end() || endpoint.global_order < found->second.global_order) {
-      initial[key] = endpoint;
-    }
-  }
+std::vector<AccessEndpoint> BuildInitialWriteFrontier(const AllocationAccessSummary& summary,
+                                                      const CompletionOrdered& ordered,
+                                                      bool* conservative_fallback) {
+  if (conservative_fallback != nullptr) *conservative_fallback = false;
+  if (summary.accesses.empty()) return {};
+
+  // A source-order "first access" is not sufficient inside structured
+  // control: two writes in opposite branches can both be minimal under the
+  // completion relation.  Keep the complete minimal antichain instead.
   std::vector<AccessEndpoint> result;
-  result.reserve(initial.size());
-  for (const auto& [key, endpoint] : initial) {
-    static_cast<void>(key);
-    result.push_back(endpoint);
+  result.reserve(summary.accesses.size());
+  for (const AccessEndpoint& candidate : summary.accesses) {
+    const bool has_predecessor =
+        std::any_of(summary.accesses.begin(), summary.accesses.end(), [&](const AccessEndpoint& other) {
+          return candidate.statement != other.statement && ordered(other, candidate);
+        });
+    if (!has_predecessor) result.push_back(candidate);
+  }
+
+  // Axiom A3 requires every minimal access to define the allocation.  A
+  // minimal read (or an access not covered by the computed antichain) is kept
+  // as a conservative anchor for reporting, but the resulting pair must not
+  // be promoted to a penalty edge.
+  if (std::any_of(result.begin(), result.end(),
+                  [](const AccessEndpoint& endpoint) { return endpoint.access_kind != AccessKind::Write; })) {
+    if (conservative_fallback != nullptr) *conservative_fallback = true;
+  }
+  for (const AccessEndpoint& access : summary.accesses) {
+    const bool covered = std::any_of(result.begin(), result.end(), [&](const AccessEndpoint& anchor) {
+      return anchor.statement == access.statement || ordered(anchor, access);
+    });
+    if (!covered) {
+      if (conservative_fallback != nullptr) *conservative_fallback = true;
+      result.push_back(access);
+    }
   }
   return result;
 }
@@ -301,8 +338,16 @@ std::optional<RecognizedAccessRoute> ClassifyOperationRoute(const CallPtr& call,
       static_cast<void>(var);
       if (memory != Memory::External && memory != Memory::Scalar) local_inputs.insert(memory);
     }
-    if (local_inputs.size() == 1 && *local_inputs.begin() != *result_class) {
-      return LookupTransferRoute(*local_inputs.begin(), *result_class);
+    // Mutating operations such as tile.assemble read their destination and
+    // return an updated value in that same memory class.  The destination-side
+    // read does not define the transfer engine; remove it before identifying
+    // the unique source->destination route.
+    std::set<Memory> transfer_sources = local_inputs;
+    transfer_sources.erase(*result_class);
+    if (transfer_sources.size() == 1) {
+      if (const auto transfer = LookupTransferRoute(*transfer_sources.begin(), *result_class)) {
+        return transfer;
+      }
     }
     const bool all_ub =
         *result_class == Memory::Ub && std::all_of(local_inputs.begin(), local_inputs.end(),
@@ -377,30 +422,48 @@ class AccessCollector : public IRVisitor {
     return cached->second.count(earlier) != 0;
   }
 
+  bool TransitivelyOrdered(const AccessEndpoint& earlier, const AccessEndpoint& later) {
+    // An access nested in structured control is represented by the enclosing
+    // If/For/While statement in its parent's dependency graph.  Compare the
+    // two accesses in their deepest common SeqStmts region so dependencies
+    // such as `if-result -> later consumer` are not lost at the region
+    // boundary.
+    for (auto earlier_it = earlier.region_representatives.rbegin();
+         earlier_it != earlier.region_representatives.rend(); ++earlier_it) {
+      const auto later_it =
+          std::find_if(later.region_representatives.rbegin(), later.region_representatives.rend(),
+                       [&](const RegionRepresentative& representative) {
+                         return representative.region == earlier_it->region;
+                       });
+      if (later_it == later.region_representatives.rend()) continue;
+      if (earlier_it->statement == nullptr || later_it->statement == nullptr ||
+          earlier_it->statement == later_it->statement) {
+        return false;
+      }
+      return TransitivelyOrdered(earlier_it->statement, later_it->statement);
+    }
+    return false;
+  }
+
  protected:
   void VisitStmt_(const SeqStmtsPtr& op) override {
     const size_t previous_region = current_region_;
     const size_t previous_index = current_statement_index_;
-    const bool previous_region_supported = current_region_supported_;
     current_region_ = next_region_++;
-    current_region_supported_ = std::all_of(op->stmts_.begin(), op->stmts_.end(), [](const StmtPtr& stmt) {
-      return As<AssignStmt>(stmt) || As<EvalStmt>(stmt) || As<YieldStmt>(stmt) || As<ReturnStmt>(stmt);
-    });
-
-    if (current_region_supported_) {
-      const stmt_dep::StmtDependencyGraph graph = stmt_dep::BuildStmtDependencyGraph(op);
-      for (const auto& [statement, predecessors] : graph.predecessors) {
-        predecessors_[statement].insert(predecessors.begin(), predecessors.end());
-      }
+    region_stack_.push_back({current_region_, nullptr});
+    const stmt_dep::StmtDependencyGraph graph = stmt_dep::BuildStmtDependencyGraph(op);
+    for (const auto& [statement, predecessors] : graph.predecessors) {
+      predecessors_[statement].insert(predecessors.begin(), predecessors.end());
     }
 
     for (size_t index = 0; index < op->stmts_.size(); ++index) {
       current_statement_index_ = index;
+      region_stack_.back().statement = op->stmts_[index].get();
       VisitStmt(op->stmts_[index]);
     }
+    region_stack_.pop_back();
     current_region_ = previous_region;
     current_statement_index_ = previous_index;
-    current_region_supported_ = previous_region_supported;
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -458,10 +521,11 @@ class AccessCollector : public IRVisitor {
   size_t current_region_ = 0;
   size_t current_statement_index_ = 0;
   size_t global_order_ = 0;
-  bool current_region_supported_ = false;
   size_t next_control_id_ = 0;
   std::vector<BranchChoice> branch_path_;
   std::vector<size_t> loop_stack_;
+  std::vector<RegionRepresentative> region_stack_;
+  std::map<RecognizedAccessResource, size_t> next_resource_issue_;
 
   std::optional<size_t> FindInterval(const VarPtr& var) const {
     if (!var) return std::nullopt;
@@ -556,7 +620,9 @@ class AccessCollector : public IRVisitor {
     read_endpoint.statement_index = current_statement_index_;
     read_endpoint.global_order = global_order_;
     read_endpoint.statement = statement;
+    read_endpoint.region_representatives = region_stack_;
     read_endpoint.route = *route;
+    read_endpoint.resource_issue_index = next_resource_issue_[route->resource]++;
     read_endpoint.access_kind = AccessKind::Read;
     read_endpoint.branch_path = branch_path_;
     read_endpoint.loop_stack = loop_stack_;
@@ -670,11 +736,28 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
 
   std::vector<std::vector<AccessEndpoint>> terminal_frontiers;
   std::vector<std::vector<AccessEndpoint>> initial_write_frontiers;
+  std::vector<bool> conservative_initial_anchors;
+  conservative_initial_anchors.reserve(summaries.size());
   terminal_frontiers.reserve(summaries.size());
   initial_write_frontiers.reserve(summaries.size());
+  const CompletionOrdered completion_ordered = [&](const AccessEndpoint& earlier,
+                                                   const AccessEndpoint& later) {
+    if (!ControlPathsCompatible(earlier, later, std::nullopt)) return false;
+    if (earlier.route.resource == later.route.resource) {
+      return earlier.resource_issue_index < later.resource_issue_index;
+    }
+    // SSA def-use is a required completion dependency: a consumer cannot
+    // execute before the value-producing operation completes.  Unlike
+    // lexical statement order, this relation is preserved by lower-level
+    // scheduling and synchronization.
+    return earlier.statement != later.statement && collector.TransitivelyOrdered(earlier, later);
+  };
   for (const AllocationAccessSummary& summary : summaries) {
-    terminal_frontiers.push_back(BuildTerminalFrontier(summary));
-    initial_write_frontiers.push_back(BuildInitialWriteFrontier(summary));
+    terminal_frontiers.push_back(BuildTerminalFrontier(summary, completion_ordered));
+    bool conservative_initial_anchor = false;
+    initial_write_frontiers.push_back(
+        BuildInitialWriteFrontier(summary, completion_ordered, &conservative_initial_anchor));
+    conservative_initial_anchors.push_back(conservative_initial_anchor);
   }
 
   std::set<std::pair<size_t, size_t>> separated;
@@ -704,8 +787,7 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
     const auto canonical_pair = std::minmax(prior, next);
     candidate_pairs.insert(canonical_pair);
     const bool same_operation = terminal.statement == initial.statement;
-    const bool ordered = !same_operation && terminal.region == initial.region &&
-                         collector.TransitivelyOrdered(terminal.statement, initial.statement);
+    const bool ordered = !same_operation && collector.TransitivelyOrdered(terminal, initial);
     if (ordered) ordered_pairs.insert(canonical_pair);
     const RecognizedReuseHazard hazard = terminal.route.resource == initial.route.resource
                                              ? RecognizedReuseHazard::SameResource
@@ -739,6 +821,7 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
                                  same_operation,
                                  partial_access,
                                  incomplete_access_set,
+                                 conservative_initial_anchors[next],
                                  nested_control,
                                  !terminal.loop_stack.empty() || !initial.loop_stack.empty(),
                                  loop_carried});
@@ -788,26 +871,27 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
   result.candidate_pairs = candidate_pairs.size();
   result.already_ordered_pairs = ordered_pairs.size();
 
-  std::sort(
-      result.candidates.begin(), result.candidates.end(),
-      [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
-        return std::tie(lhs.first_interval, lhs.second_interval, lhs.prior_interval, lhs.next_interval,
-                        lhs.prior_route.source, lhs.prior_route.destination, lhs.prior_route.resource,
-                        lhs.next_route.source, lhs.next_route.destination, lhs.next_route.resource,
-                        lhs.prior_memory_space, lhs.next_memory_space, lhs.dependence,
-                        lhs.ordered_by_logical_dag, lhs.prior_access_order, lhs.next_access_order,
-                        lhs.prior_byte_offset, lhs.prior_byte_size, lhs.next_byte_offset, lhs.next_byte_size,
-                        lhs.loop_id, lhs.requires_alias_contract, lhs.partial_access,
-                        lhs.incomplete_access_set, lhs.nested_control, lhs.in_loop, lhs.loop_carried) <
-               std::tie(rhs.first_interval, rhs.second_interval, rhs.prior_interval, rhs.next_interval,
-                        rhs.prior_route.source, rhs.prior_route.destination, rhs.prior_route.resource,
-                        rhs.next_route.source, rhs.next_route.destination, rhs.next_route.resource,
-                        rhs.prior_memory_space, rhs.next_memory_space, rhs.dependence,
-                        rhs.ordered_by_logical_dag, rhs.prior_access_order, rhs.next_access_order,
-                        rhs.prior_byte_offset, rhs.prior_byte_size, rhs.next_byte_offset, rhs.next_byte_size,
-                        rhs.loop_id, rhs.requires_alias_contract, rhs.partial_access,
-                        rhs.incomplete_access_set, rhs.nested_control, rhs.in_loop, rhs.loop_carried);
-      });
+  std::sort(result.candidates.begin(), result.candidates.end(),
+            [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
+              return std::tie(lhs.first_interval, lhs.second_interval, lhs.prior_interval, lhs.next_interval,
+                              lhs.prior_route.source, lhs.prior_route.destination, lhs.prior_route.resource,
+                              lhs.next_route.source, lhs.next_route.destination, lhs.next_route.resource,
+                              lhs.prior_memory_space, lhs.next_memory_space, lhs.dependence,
+                              lhs.ordered_by_logical_dag, lhs.prior_access_order, lhs.next_access_order,
+                              lhs.prior_byte_offset, lhs.prior_byte_size, lhs.next_byte_offset,
+                              lhs.next_byte_size, lhs.loop_id, lhs.requires_alias_contract,
+                              lhs.partial_access, lhs.incomplete_access_set, lhs.conservative_initial_anchor,
+                              lhs.nested_control, lhs.in_loop, lhs.loop_carried) <
+                     std::tie(rhs.first_interval, rhs.second_interval, rhs.prior_interval, rhs.next_interval,
+                              rhs.prior_route.source, rhs.prior_route.destination, rhs.prior_route.resource,
+                              rhs.next_route.source, rhs.next_route.destination, rhs.next_route.resource,
+                              rhs.prior_memory_space, rhs.next_memory_space, rhs.dependence,
+                              rhs.ordered_by_logical_dag, rhs.prior_access_order, rhs.next_access_order,
+                              rhs.prior_byte_offset, rhs.prior_byte_size, rhs.next_byte_offset,
+                              rhs.next_byte_size, rhs.loop_id, rhs.requires_alias_contract,
+                              rhs.partial_access, rhs.incomplete_access_set, rhs.conservative_initial_anchor,
+                              rhs.nested_control, rhs.in_loop, rhs.loop_carried);
+            });
   result.candidates.erase(
       std::unique(
           result.candidates.begin(), result.candidates.end(),
@@ -819,7 +903,8 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
                             lhs.ordered_by_logical_dag, lhs.prior_access_order, lhs.next_access_order,
                             lhs.prior_byte_offset, lhs.prior_byte_size, lhs.next_byte_offset,
                             lhs.next_byte_size, lhs.loop_id, lhs.requires_alias_contract, lhs.partial_access,
-                            lhs.incomplete_access_set, lhs.nested_control, lhs.in_loop, lhs.loop_carried) ==
+                            lhs.incomplete_access_set, lhs.conservative_initial_anchor, lhs.nested_control,
+                            lhs.in_loop, lhs.loop_carried) ==
                    std::tie(rhs.first_interval, rhs.second_interval, rhs.prior_interval, rhs.next_interval,
                             rhs.prior_route.source, rhs.prior_route.destination, rhs.prior_route.resource,
                             rhs.next_route.source, rhs.next_route.destination, rhs.next_route.resource,
@@ -827,7 +912,8 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
                             rhs.ordered_by_logical_dag, rhs.prior_access_order, rhs.next_access_order,
                             rhs.prior_byte_offset, rhs.prior_byte_size, rhs.next_byte_offset,
                             rhs.next_byte_size, rhs.loop_id, rhs.requires_alias_contract, rhs.partial_access,
-                            rhs.incomplete_access_set, rhs.nested_control, rhs.in_loop, rhs.loop_carried);
+                            rhs.incomplete_access_set, rhs.conservative_initial_anchor, rhs.nested_control,
+                            rhs.in_loop, rhs.loop_carried);
           }),
       result.candidates.end());
   for (const RecognizedReuseCandidate& candidate : result.candidates) {
@@ -845,6 +931,9 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
     if (candidate.requires_alias_contract) ++result.alias_contract_candidates;
     if (candidate.partial_access) ++result.partial_access_candidates;
     if (candidate.incomplete_access_set) ++result.incomplete_access_candidates;
+    if (candidate.conservative_initial_anchor) {
+      ++result.conservative_initial_anchor_candidates;
+    }
     if (candidate.nested_control) ++result.nested_control_candidates;
     if (candidate.in_loop) ++result.in_loop_candidates;
     if (candidate.loop_carried) ++result.loop_carried_candidates;
@@ -852,19 +941,29 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
   return result;
 }
 
-void ApplyExperimentalUnitPenaltyPolicy(ReusePenaltyRecognition* recognition) {
+void ConstructExperimentalPairEdges(ReusePenaltyRecognition* recognition) {
   if (recognition == nullptr) return;
-  recognition->penalties.clear();
+  recognition->edges.clear();
   std::set<std::pair<size_t, size_t>> promoted;
   for (const RecognizedReuseCandidate& candidate : recognition->candidates) {
     if (candidate.hazard != RecognizedReuseHazard::CrossResource || candidate.ordered_by_logical_dag ||
-        candidate.requires_alias_contract || candidate.partial_access || candidate.incomplete_access_set) {
+        candidate.requires_alias_contract || candidate.partial_access || candidate.incomplete_access_set ||
+        candidate.conservative_initial_anchor) {
       continue;
     }
-    if (candidate.nested_control || candidate.loop_carried) continue;
+    if (candidate.loop_carried) continue;
     if (!promoted.emplace(candidate.first_interval, candidate.second_interval).second) continue;
-    recognition->penalties.push_back(
-        {candidate.first_interval, candidate.second_interval, 1, candidate.hazard});
+    recognition->edges.push_back(
+        {candidate.first_interval, candidate.second_interval, candidate.hazard, candidate.nested_control});
+  }
+}
+
+void ApplyExperimentalUnitPenaltyWeights(ReusePenaltyRecognition* recognition) {
+  if (recognition == nullptr) return;
+  recognition->penalties.clear();
+  recognition->penalties.reserve(recognition->edges.size());
+  for (const RecognizedReuseEdge& edge : recognition->edges) {
+    recognition->penalties.push_back({edge.first_interval, edge.second_interval, 1, edge.hazard});
   }
 }
 

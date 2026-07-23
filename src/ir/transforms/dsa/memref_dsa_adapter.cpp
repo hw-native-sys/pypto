@@ -249,7 +249,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
 
   ReusePenaltyRecognition recognition =
       RecognizeReusePenaltyCandidates(func, allocation_plan, reuse_penalty_recognizer);
-  ApplyExperimentalUnitPenaltyPolicy(&recognition);
+  ConstructExperimentalPairEdges(&recognition);
+  ApplyExperimentalUnitPenaltyWeights(&recognition);
   if (reuse_penalty_recognizer != DsaReusePenaltyRecognizer::Disabled) {
     exported.document.metadata["reuse_penalty_recognizer"] = "quadratic_route_frontier_v3";
     exported.document.metadata["reuse_penalty_supported_allocations"] =
@@ -266,6 +267,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     }
     exported.document.metadata["recognized_access_routes_v1"] = observed_routes.str();
     exported.document.metadata["recognized_reuse_candidates"] = std::to_string(recognition.candidates.size());
+    exported.document.metadata["recognized_reuse_edges"] = std::to_string(recognition.edges.size());
     exported.document.metadata["recognized_cross_resource_candidates"] =
         std::to_string(recognition.cross_resource_candidates);
     exported.document.metadata["recognized_same_resource_candidates"] =
@@ -288,13 +290,19 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
         std::to_string(recognition.partial_access_candidates);
     exported.document.metadata["recognized_incomplete_access_candidates"] =
         std::to_string(recognition.incomplete_access_candidates);
+    exported.document.metadata["recognized_conservative_initial_anchor_candidates"] =
+        std::to_string(recognition.conservative_initial_anchor_candidates);
     exported.document.metadata["recognized_nested_control_candidates"] =
         std::to_string(recognition.nested_control_candidates);
     exported.document.metadata["recognized_in_loop_candidates"] =
         std::to_string(recognition.in_loop_candidates);
     exported.document.metadata["recognized_loop_carried_candidates"] =
         std::to_string(recognition.loop_carried_candidates);
-    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_resource_unit_v3";
+    exported.document.metadata["reuse_edge_construction_policy"] = "cross_resource_pair_v4";
+    exported.document.metadata["reuse_penalty_weight_model"] = "unit_v1";
+    // Compatibility key for experiment readers created before edge
+    // construction and weight assignment were separated.
+    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_resource_pair_unit_v4";
     std::ostringstream candidate_records;
     bool first_record = true;
     for (const RecognizedReuseCandidate& candidate : recognition.candidates) {
@@ -336,6 +344,9 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
                        << "," << (candidate.requires_alias_contract ? "same_operation" : "inter_operation")
                        << "," << (candidate.partial_access ? "partial_or_unknown" : "full_allocation") << ","
                        << (candidate.incomplete_access_set ? "incomplete_access_set" : "complete_access_set")
+                       << ","
+                       << (candidate.conservative_initial_anchor ? "conservative_initial_anchor"
+                                                                 : "verified_initial_write")
                        << "," << (candidate.in_loop ? "in_loop" : "outside_loop") << ","
                        << (candidate.loop_carried ? "distance_1" : "distance_0")
                        << ",sites=" << candidate.prior_access_order << "->" << candidate.next_access_order
@@ -344,6 +355,19 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
       if (candidate.loop_carried) detailed_records << ",loop=" << candidate.loop_id;
     }
     exported.document.metadata["recognized_reuse_candidate_records_v3"] = detailed_records.str();
+
+    std::ostringstream edge_records;
+    first_record = true;
+    for (const RecognizedReuseEdge& edge : recognition.edges) {
+      const auto& first = buffer_id_by_interval[edge.first_interval];
+      const auto& second = buffer_id_by_interval[edge.second_interval];
+      if (!first || !second) continue;
+      if (!first_record) edge_records << ";";
+      first_record = false;
+      edge_records << *first << "," << *second << ",cross_resource,"
+                   << (edge.nested_control ? "nested" : "flat");
+    }
+    exported.document.metadata["recognized_reuse_edge_records_v1"] = edge_records.str();
   }
   for (const RecognizedReusePenalty& source : recognition.penalties) {
     INTERNAL_CHECK(source.first_interval < buffer_id_by_interval.size() &&
@@ -363,7 +387,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     exported.document.profile = ::dsa::BenchmarkProfile::kPyptoResearchV1;
     exported.document.problem.objective = ::dsa::FitThenMinimizeReuseCostObjective();
     exported.document.metadata["experimental_features"] = "recognized_reuse_penalties";
-    exported.document.metadata["reuse_cost_model"] = "cross_resource_unit_candidate_v3";
+    exported.document.metadata["reuse_cost_model"] = "cross_resource_pair_v4+unit_v1";
     exported.document.metadata["recognized_reuse_penalties"] =
         std::to_string(exported.document.problem.cost_model->reuse_penalties.size());
   }

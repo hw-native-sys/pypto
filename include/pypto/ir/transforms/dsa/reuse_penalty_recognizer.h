@@ -92,9 +92,17 @@ struct RecognizedReuseCandidate {
   bool requires_alias_contract = false;
   bool partial_access = false;
   bool incomplete_access_set = false;
+  bool conservative_initial_anchor = false;
   bool nested_control = false;
   bool in_loop = false;
   bool loop_carried = false;
+};
+
+struct RecognizedReuseEdge {
+  size_t first_interval;
+  size_t second_interval;
+  RecognizedReuseHazard hazard;
+  bool nested_control = false;
 };
 
 struct RecognizedReusePenalty {
@@ -106,6 +114,7 @@ struct RecognizedReusePenalty {
 
 struct ReusePenaltyRecognition {
   std::vector<RecognizedReuseCandidate> candidates;
+  std::vector<RecognizedReuseEdge> edges;
   std::vector<RecognizedReusePenalty> penalties;
   std::vector<RecognizedAccessRoute> observed_routes;
   size_t supported_allocations = 0;
@@ -120,6 +129,7 @@ struct ReusePenaltyRecognition {
   size_t alias_contract_candidates = 0;
   size_t partial_access_candidates = 0;
   size_t incomplete_access_candidates = 0;
+  size_t conservative_initial_anchor_candidates = 0;
   size_t nested_control_candidates = 0;
   size_t in_loop_candidates = 0;
   size_t loop_carried_candidates = 0;
@@ -138,15 +148,28 @@ struct ReusePenaltyRecognition {
                                                                       DsaReusePenaltyRecognizer recognizer);
 
 /**
- * @brief Promote the experimental v2 subset to unit-weight pair penalties.
+ * @brief Construct the mechanically justified experimental pair-edge subset.
  *
  * Candidate recognition records mechanism evidence. This separate policy
- * promotes flat cross-resource candidates only when the recognizer has a
- * full-allocation handoff, no same-operation alias-contract question, and no
- * existing logical ordering evidence. Same-pipe, structured-control, and
- * uncertain candidates remain report-only pending validation.
+ * constructs one edge per qualifying cross-resource buffer pair when the
+ * recognizer has a complete, full-allocation handoff, a verified minimal-write
+ * antichain, no same-operation alias question, and no pre-existing completion
+ * relation. Each abstract resource is modeled as one completion-ordered issue
+ * chain; SSA def-use is also a completion dependency, but bare lexical
+ * statement order is not. Distance-zero handoffs in structured control are
+ * included; loop-carried, same-resource, partial-view, and uncertain
+ * candidates remain report-only.
  */
-void ApplyExperimentalUnitPenaltyPolicy(ReusePenaltyRecognition* recognition);
+void ConstructExperimentalPairEdges(ReusePenaltyRecognition* recognition);
+
+/**
+ * @brief Apply the experimental unit weight model to constructed pair edges.
+ *
+ * Edge construction and weight assignment are deliberately separate: changing
+ * a compiler- or device-specific cost model must not change which hazards were
+ * mechanically recognized.
+ */
+void ApplyExperimentalUnitPenaltyWeights(ReusePenaltyRecognition* recognition);
 
 }  // namespace dsa_adapter
 }  // namespace ir
