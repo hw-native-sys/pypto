@@ -54,25 +54,30 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 
 // Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
 //
-// Follows the InsertCommFence (PR #2076) memory consistency contract for
-// ptoas 0.50.  After the caller drains its TSTORE tile loop with
-// pipe_barrier(PIPE_ALL), RoundBarrier:
-//   1. dsb(DSB_DDR) — commit all prior DDR writes (equivalent to
-//      pto.fence.barrier_all after the caller already drained pipes).
+// Memory consistency for ring steps:
+//   1. dsb(DSB_DDR) — commit all prior DDR writes so the next rank's TLOAD
+//      (remote read) sees the committed data, not stale values.
 //   2. TNOTIFY(writer's signal slot = 1) — signal all peers.
 //   3. TWAIT(every peer's slot >= 1) — wait for peers.
-//   4. dcci(ENTIRE_DATA_CACHE) — invalidate the reader's data cache so
-//      the subsequent TLOAD fetches the peer's committed writes from DDR
-//      rather than stale cached data.
-//   5. pipe_barrier(PIPE_ALL) — drain MTE2+MTE3+FIX pipes.
+//   4. pipe_barrier(PIPE_ALL) — drain pipes before TLOAD.
 //
-// Future optimisation: once the kernel is rewritten to use a push model
-// (remote write via TPUT instead of remote read via TLOAD), the barrier can
-// be relaxed to O(1) — each rank only needs to notify its right neighbour
-// and wait on its left neighbour.  TPUT's write pipeline naturally handles
-// the DDR consistency, making the all-to-all round unnecessary.
+// Ring vs mesh: mesh allreduce does TSTORE locally per rank with no
+// cross-rank RAR chains.  The ring schedule introduces remote-read-after-
+// remote-write dependencies (rank N+1 reads from rank N's buffer after
+// rank N stores results from the previous step), which dsb guards.
+//
+// Future optimisation (ptoas 0.50): once the kernel moves to a TPUT push
+// model, dcci(ENTIRE_DATA_CACHE) + pto.fence.barrier_all can replace
+// dsb(DSB_DDR) and relax the barrier to O(1) per invocation
+// (NeighborBarrier: left/right only).  See PR #2076 / InsertCommFence pass.
 AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                 int nranks) {
+  // mem: dsb(DSB_DDR) prefixes the notify so every rank's DDR writes
+  // (TSTORE results from the previous ring step) are committed before
+  // the next rank executes its post-barrier TLOAD.  This is necessary
+  // because the ring schedule has remote-read-after-remote-write
+  // dependencies across consecutive steps that the mesh scheme
+  // (all-to-all load then accumulate) avoids.
   dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) {
@@ -89,8 +94,6 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
     pto::comm::Signal sig(signal_row + peer);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
-  dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
-  pipe_barrier(PIPE_MTE2);
   pipe_barrier(PIPE_ALL);
 }
 
@@ -197,7 +200,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
-    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_add_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Phase 2: allgather — (NR-1) ring steps.
@@ -235,7 +237,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
-    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Final cross-rank barrier: guarantee every rank has finished reading from
