@@ -22,6 +22,8 @@ You are a specialized testing agent. Build the project and run all tests to veri
 
 **When working in a git worktree**, always build and test from within the worktree — never copy `.so` files from the main repo. Create a build directory inside the worktree if one doesn't exist.
 
+**For sim Docker testing** (required for UT + single-node ST + distributed sim ST), follow the `-v` mount + `pip install -e` iteration loop — **never run raw `cmake --build build --parallel` inside Docker** (it saturates all host CPU cores and freezes the machine). See [`pypto-tooling/README.md` § Sim Dev Iteration Workflow](https://github.com/hw-native-sys/pypto-tooling) and [`pypto-3.0-notes/pr_plans/00-branch-and-pr-standards.md` § Sim Docker iteration loop](https://github.com/georgebisbas/pypto-3.0-notes).
+
 ```bash
 # 1. Activate environment (if testing.env exists)
 [ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
@@ -29,7 +31,7 @@ You are a specialized testing agent. Build the project and run all tests to veri
 # 2. Configure CMake if build is not configured (worktree, fresh clone)
 [ ! -f build/CMakeCache.txt ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
-# 3. Build project (parallel)
+# 3. Build project (parallel) — host only, NOT inside Docker
 cmake --build build --parallel
 
 # 4. Set PYTHONPATH
