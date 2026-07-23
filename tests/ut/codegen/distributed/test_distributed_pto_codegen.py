@@ -749,16 +749,15 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, (
         f"staging tile must be the [4, 32] chunk, got: {stage_alloc_line}"
     )
-    # The former unconditional `pto.barrier <PIPE_ALL>` drain after the tput is
-    # gone; put now emits its own peer-region `pto.cmo.cacheinvalid` + GM
-    # `pto.fence.barrier_all` (data-before-signal at the peer address) instead.
+    # After the tput: a tail `pto.barrier <PIPE_ALL>` to drain the DMA pipe (the GM
+    # fence does not drain the MTE pipe — without this, atomic/subregion put flakes
+    # on device), then the peer-region `pto.cmo.cacheinvalid` + GM
+    # `pto.fence.barrier_all` (data-before-signal at the peer address).
     lines = mlir.splitlines()
     tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput(" in line)
-    assert "pto.barrier <PIPE_ALL>" not in lines[tput_idx + 1], (
-        f"unexpected PIPE_ALL drain right after tput: {lines[tput_idx + 1]}"
-    )
-    assert "pto.cmo.cacheinvalid" in lines[tput_idx + 1], lines[tput_idx + 1]
-    assert "pto.fence.barrier_all #pto.fence_scope<gm>" in lines[tput_idx + 2], lines[tput_idx + 2]
+    assert "pto.barrier <PIPE_ALL>" in lines[tput_idx + 1], lines[tput_idx + 1]
+    assert "pto.cmo.cacheinvalid" in lines[tput_idx + 2], lines[tput_idx + 2]
+    assert "pto.fence.barrier_all #pto.fence_scope<gm>" in lines[tput_idx + 3], lines[tput_idx + 3]
 
 
 def test_put_pipeline_emits_two_staging_buffers_in_one_buf_group():

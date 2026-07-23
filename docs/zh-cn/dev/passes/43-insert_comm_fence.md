@@ -123,12 +123,13 @@ cacheinvalid，都会被识别且**不重复插入**，故本 pass 幂等。
 
 ## 与 Codegen 的关系
 
-`MakePutCodegenPTO` 中原先在每个 TPUT 之后无条件发射的 drain 屏障（PTOAS#872 的
-workaround）已移除。取而代之，`remote_store` 与 `put` 的 codegen 各自在 store 之后发一条
-自己的 peer 区域 `pto.cmo.cacheinvalid` + GM `pto.fence.barrier_all`（peer 偏移只有在这里
-才知道）—— 即远端写的 data-before-signal 释放标记，落在正确的 peer 地址上。TPUT/TGET 的
-**前置**屏障与 TGET 的**尾部**屏障与此无关（核内 RAW 排序，而非 data-before-signal），
-保留不动。
+`remote_store` 与 `put` 的 codegen 各自在 store 之后发一条自己的 peer 区域
+`pto.cmo.cacheinvalid` + GM `pto.fence.barrier_all`（peer 偏移只有在这里才知道）—— 即远端写的
+data-before-signal 释放标记，落在正确的 peer 地址上。`put` 额外在 TPUT 与其 cacheinvalid **之间**
+保留一条尾部 `pto.barrier <PIPE_ALL>`：TPUT 是 DMA，GM fence 只排序内存、并不 drain 发起 DMA 的
+MTE 管线，缺这条 barrier 时后面的 notify 可能在（原子）TPUT 真正落到 peer 之前就发出 ——
+`test_l3_put` 的 atomic-add / 子区域用例在真机上会 flaky（PTOAS#872 的 workaround，待 PTOAS 自行
+drain tput 后移除）。TPUT/TGET 的**前置**屏障与 TGET 的**尾部**屏障同样保留不动。
 
 ## 消费者
 

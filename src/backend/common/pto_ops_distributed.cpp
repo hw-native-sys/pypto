@@ -662,14 +662,19 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   tput << ") {atomicType = #pto<atomic_type " << atomic_attr << ">}";
   codegen.Emit(tput.str());
 
+  // Tail pipe barrier: drain the TPUT DMA pipe before the release markers. The GM
+  // fence below orders *memory* (DDR observability) but does NOT drain the MTE
+  // pipe that issued the DMA, so without this barrier the following notify can
+  // fire before the (possibly atomic) TPUT has landed at the peer — device tests
+  // (test_l3_put atomic_add / row_put) flake without it. (WORKAROUND for
+  // PTOAS#872; remove once PTOAS drains the tput itself.)
+  codegen.Emit("pto.barrier <PIPE_ALL>");
+
   // Data-before-signal (ptoas memory-consistency): clean+invalidate the
   // peer-addressed destination region, then a GM fence, so the write reaches DDR
   // before any later `pld.system.notify` releases it. The peer offset is only
   // known here (EmitCommRemoteView on `dst`), so InsertCommFence leaves remote
-  // writes to this codegen. This GM fence is also stronger than the former
-  // unconditional `pto.barrier <PIPE_ALL>` tail barrier — it adds the
-  // DDR-observability drain a pipe barrier alone cannot — and it only fires as
-  // part of the release marker rather than after every TPUT.
+  // writes to this codegen.
   codegen.Emit("pto.cmo.cacheinvalid " + dst_pview + " single_cache_line : " + partition_type);
   codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
   return "";

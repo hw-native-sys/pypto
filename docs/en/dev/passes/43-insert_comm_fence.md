@@ -142,13 +142,16 @@ recognized and **not duplicated**, so the pass is idempotent.
 
 ## Codegen interaction
 
-The former unconditional drain barrier emitted after every TPUT in
-`MakePutCodegenPTO` (a PTOAS#872 workaround) is removed. In its place, `remote_store`
-and `put` codegen each emit their own peer-region `pto.cmo.cacheinvalid` + GM
-`pto.fence.barrier_all` right after the store (the peer offset is only known
-there) — the data-before-signal release marker for the remote write, at the
-correct peer address. The TPUT/TGET **pre** barriers and the TGET **tail** barrier
-are unrelated (in-core RAW ordering, not data-before-signal) and are kept.
+`remote_store` and `put` codegen each emit their own peer-region
+`pto.cmo.cacheinvalid` + GM `pto.fence.barrier_all` right after the store (the peer
+offset is only known there) — the data-before-signal release marker for the remote
+write, at the correct peer address. `put` additionally keeps a tail
+`pto.barrier <PIPE_ALL>` **between** the TPUT and its cacheinvalid: TPUT is a DMA,
+and the GM fence orders memory but does not drain the MTE pipe that issued the DMA,
+so without this barrier the following notify can fire before the (possibly atomic)
+TPUT has landed at the peer — `test_l3_put` atomic-add / subregion flake on device
+without it (a PTOAS#872 workaround; remove once PTOAS drains the tput itself). The
+TPUT/TGET **pre** barriers and the TGET **tail** barrier are likewise kept.
 
 ## Consumers
 
