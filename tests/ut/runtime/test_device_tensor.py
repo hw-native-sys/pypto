@@ -113,6 +113,7 @@ class TestStackedDeviceTensorConstruction:
         s = StackedDeviceTensor(sh, (3, 4, 5), (0, 1, 2))
         assert s.shards == tuple(sh)
         assert s.full_shape == (3, 4, 5)
+        assert s.shape == (3, 4, 5)
         assert s.worker_ids == (0, 1, 2)
         assert s.dtype is torch.float32
 

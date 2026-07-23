@@ -104,6 +104,8 @@ class StackedDeviceTensor:
         shards: One :class:`DeviceTensor` per leading-dim index; ``shards[i]`` is
             resident on worker ``worker_ids[i]`` with shape ``full_shape[1:]``.
         full_shape: The logical stacked shape ``(B, *tail)``.
+        shape: Alias for ``full_shape``, matching the :class:`DeviceTensor`
+            interface.
         worker_ids: ``worker_ids[i]`` is the worker holding ``shards[i]``.
     """
 
@@ -158,6 +160,11 @@ class StackedDeviceTensor:
     def dtype(self) -> torch.dtype:
         """Element ``torch.dtype`` shared by all shards."""
         return self.shards[0].dtype
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Logical stacked shape, matching the ``DeviceTensor`` interface."""
+        return self.full_shape
 
     def __getitem__(self, idx: int | slice | tuple) -> DeviceTensor:
         """Return shard ``i`` for a leading-index ``i`` or ``(i, <full slices>)``.
