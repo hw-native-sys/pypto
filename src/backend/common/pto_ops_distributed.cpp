@@ -666,8 +666,10 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   // fence below orders *memory* (DDR observability) but does NOT drain the MTE
   // pipe that issued the DMA, so without this barrier the following notify can
   // fire before the (possibly atomic) TPUT has landed at the peer — device tests
-  // (test_l3_put atomic_add / row_put) flake without it. (WORKAROUND for
-  // PTOAS#872; remove once PTOAS drains the tput itself.)
+  // (test_l3_put atomic_add / row_put) flake without it. Device-verified: an
+  // MTE3-scoped barrier is NOT enough (TPUT issues on MTE3 but its cross-rank
+  // DMA/atomic completion involves another pipe) — only PIPE_ALL is stable.
+  // (WORKAROUND for PTOAS#872; remove once PTOAS drains the tput itself.)
   codegen.Emit("pto.barrier <PIPE_ALL>");
 
   // Data-before-signal (ptoas memory-consistency): clean+invalidate the
