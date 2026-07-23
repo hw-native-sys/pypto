@@ -155,7 +155,7 @@ any of the following holds:
 | -------- | --- |
 | Consumes a `tile.aiv_shard` result (transitively) | It is in the half-width dataflow by construction. |
 | A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
-| An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` — whose args reference the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. |
+| An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` — whose **address** args reference the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2) — a lane reference in a `shape` or `valid_shape` does not move the window, so it does not admit. |
 
 Anything else that classifies `VECTOR` is reported. Two consequences worth
 knowing:

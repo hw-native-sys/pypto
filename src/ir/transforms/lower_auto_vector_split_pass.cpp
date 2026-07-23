@@ -511,12 +511,22 @@ bool ReferencesLaneIndex(const std::vector<ExprPtr>& exprs,
   return false;
 }
 
-// Ops that carry an ADDRESS (a base offset into GM or into a larger tile), so a
-// lane-derived scalar among their args genuinely selects this lane's window. For
-// every other op a lane-derived operand is just a value and says nothing about
-// the result's width — see the laundering note at the use site.
-bool IsAddressingOp(const CallPtr& call) {
-  return IsOp(call, "tile.load") || IsOp(call, "tile.slice") || IsOp(call, "tile.extract");
+// The positional args that carry an op's ADDRESS — the base offset selecting
+// which window of the source this call reads. Empty for anything that is not an
+// addressing op.
+//
+// Only these args are consulted for a lane reference. A lane-derived scalar
+// anywhere ELSE in an addressing op — a shape, a valid_shape — does not localize
+// the window: ``tile.load(data, [0, 0], [64, 128], valid_shapes=[aiv_id + 1,
+// 128])`` mentions aiv_id, yet both lanes still read the same base rows. Scanning
+// every arg would admit it and then trust its consumers as half-width.
+std::vector<ExprPtr> AddressArgs(const CallPtr& call) {
+  const auto& args = call->args_;
+  auto at = [&args](size_t i) -> ExprPtr { return i < args.size() ? args[i] : nullptr; };
+  if (IsOp(call, "tile.load")) return {at(1)};            // (tensor, offsets, shapes, valid_shapes)
+  if (IsOp(call, "tile.slice")) return {at(2)};           // (input, shape, offset, valid_shape, drop_dims)
+  if (IsOp(call, "tile.extract")) return {at(1), at(2)};  // (src, index_row, index_col, shape)
+  return {};
 }
 
 // Track tiles that are part of the half-width boundary dataflow: results of
@@ -613,22 +623,20 @@ void ScanRegionHalfWidth(const std::vector<StmtPtr>& stmts, HalfWidthScan& scan)
           }
         }
         // Stays in the half-width dataflow when it either consumes a half tile,
-        // or is AUTHOR-LOCALIZED: an ADDRESS-carrying op whose argument
-        // expressions reference the region's lane index, so the author explicitly
-        // wrote it per-lane — e.g. a GM load at ``[kv0 + aiv_id * 64, 0]``. That
-        // is the same trust the pass already extends to tile.store, whose
-        // lane-dependent offset it never checks (a store returns a TensorType, so
-        // it never reaches this branch).
+        // or is AUTHOR-LOCALIZED: an op whose ADDRESS args reference the region's
+        // lane index, so the author explicitly wrote it per-lane — e.g. a GM load
+        // at ``[kv0 + aiv_id * 64, 0]``. That is the same trust the pass already
+        // extends to tile.store, whose lane-dependent offset it never checks (a
+        // store returns a TensorType, so it never reaches this branch).
         //
-        // Localization is trusted only on addressing ops. A lane reference means
-        // "I picked my lane's WINDOW" only where the op takes an address; for a
-        // non-addressing op a lane-derived scalar is just some operand and proves
-        // nothing about width. Without the restriction,
+        // Localization is trusted only via AddressArgs, and so only on addressing
+        // ops. On any other op a lane-derived scalar is just an operand and proves
+        // nothing about width; without that restriction
         // ``tile.set_validshape(full_width_tile, 1, valid_aiv)`` would launder a
         // full-width tile into the half-width dataflow and silence every
         // downstream check.
-        if (consumes_half || (!scan.lane_scalars.empty() && IsAddressingOp(leaf) &&
-                              ReferencesLaneIndex(leaf->args_, scan.lane_scalars))) {
+        if (consumes_half ||
+            (!scan.lane_scalars.empty() && ReferencesLaneIndex(AddressArgs(leaf), scan.lane_scalars))) {
           if (def_var) scan.half_tiles.insert(def_var.get());
         } else if (ClassifyCallAffinity(leaf) == CoreAffinity::VECTOR) {
           scan.full_width_vec_ops.push_back(leaf->op_->name_);

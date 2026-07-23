@@ -119,7 +119,7 @@ result = passes.lower_auto_vector_split()(program)
 | -------- | ---- |
 | （传递地）消费了 `tile.aiv_shard` 的结果 | 依构造即处于 half-width 数据流中。 |
 | 纯生成算子——`tile.full` / `tile.ci` / `tile.random`（以及 `tile.create`，它归类为 `SHARED`，本就不会被报告） | 其结果仅是自身属性的函数：不读取任何 tile、不读取内存，因此无论作者写的是什么 extent，per-lane 复制都是正确的。 |
-| 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract`——且其参数引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。 |
+| 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract`——且其**地址参数**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个）——出现在 `shape` 或 `valid_shape` 中的 lane 引用并不会移动窗口，因此不予接受。 |
 
 其余归类为 `VECTOR` 的算子都会被报告。有两点需要注意：
 
