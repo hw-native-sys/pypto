@@ -226,7 +226,8 @@ int GetGMPipeSlotCount(int dir_mask) {
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
-  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble");
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
+         ir::IsOp(op, "tile.tget_scale_addr");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {

@@ -114,7 +114,7 @@
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen；仅覆盖 PTOAS 编译（设备数值执行待完成，issue #1975） |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov 未支持；PR #1823 ST 暂下架 |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
@@ -141,8 +141,8 @@
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **量化** |  |  |  |  |  |  |  |  |
-| pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (issue #1975); PTOAS outs arity/attr follow-up |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (issue #1975); ST follow-up |
 | **固定管线** |  |  |  |  |  |  |  |  |
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.textract_fp | TEXTRACT_FP | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (FP variant) |
@@ -164,7 +164,7 @@
 | pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.trandom | TRANDOM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
+| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen；仅覆盖 PTOAS 编译（设备数值执行待完成，issue #1975） |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
 | pto.trowargmax | TROWARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |

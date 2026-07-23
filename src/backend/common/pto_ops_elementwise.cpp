@@ -434,6 +434,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.gemv",            "pto.tgemv",            2},
     // tile.gemv_acc has custom codegen (in-place accumulation)
     {"tile.gemv_bias",       "pto.tgemv.bias",       3},
+    // MX quant / scale-addr (A5). tile.tquant is multi-output — custom codegen.
+    // tile.tget_scale_addr is DPS (outs=dst_scale, ins=src) — custom codegen below.
+    {"tile.tdequant",        "pto.tdequant",         3},
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
     // tile.move has custom codegen (no-op elision for same-space same-address moves)

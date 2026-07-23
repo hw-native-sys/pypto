@@ -43,6 +43,10 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "Acc";
     case MemorySpace::Bias:
       return "Bias";
+    case MemorySpace::LeftScale:
+      return "LeftScale";
+    case MemorySpace::RightScale:
+      return "RightScale";
     case MemorySpace::ScalarLocal:
       return "ScalarLocal";
     default:
@@ -58,6 +62,8 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "Right") return MemorySpace::Right;
   if (str == "Acc") return MemorySpace::Acc;
   if (str == "Bias") return MemorySpace::Bias;
+  if (str == "LeftScale") return MemorySpace::LeftScale;
+  if (str == "RightScale") return MemorySpace::RightScale;
   if (str == "ScalarLocal") return MemorySpace::ScalarLocal;
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }

@@ -47,6 +47,7 @@ class DataType:
     FP4: DataType  # 4-bit floating point
     FP8E4M3FN: DataType  # 8-bit floating point (IEEE 754 e4m3fn format)
     FP8E5M2: DataType  # 8-bit floating point (IEEE 754 e5m2 format)
+    FP8E8M0: DataType  # 8-bit floating point (E8M0 MX block-scale exponent)
     FP16: DataType  # 16-bit floating point (IEEE 754 half precision)
     FP32: DataType  # 32-bit floating point (IEEE 754 single precision)
     BF16: DataType  # 16-bit brain floating point

@@ -121,7 +121,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; PTOAS compilation coverage only (device numerical execution pending, issue #1975) |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov unsupported; PR #1823 ST temporarily pulled |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
@@ -148,8 +148,8 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW frontend+codegen+ST; a2a3 hardware CI pending (watch ISA defects in irregular family) |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **Quantization** |  |  |  |  |  |  |  |  |
-| pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (issue #1975); PTOAS outs arity/attr follow-up |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (issue #1975); ST follow-up |
 | **Fixed pipeline** |  |  |  |  |  |  |  |  |
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.textract_fp | TEXTRACT_FP | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (FP variant) |
@@ -171,7 +171,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
 | pto.trandom | TRANDOM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
 | pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
-| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
+| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; PTOAS compilation coverage only (device numerical execution pending, issue #1975) |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
 | pto.trowargmax | TROWARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 index output + tmp tile; verified on a2a3 (feat-add-ptoas-argmax) |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 index output + tmp tile; verified on a2a3 (feat-add-ptoas-argmax) |

@@ -75,9 +75,10 @@ class DataType {
   static constexpr uint8_t kFp8e5m2Code = 0x32;
   static constexpr uint8_t kFp16Code = 0x33;
   static constexpr uint8_t kFp32Code = 0x34;
-  static constexpr uint8_t kFp64Code = 0x35;  // Reserved for future FP64 support
+  static constexpr uint8_t kFp64Code = 0x35;     // Reserved for future FP64 support
+  static constexpr uint8_t kFp8e8m0Code = 0x36;  // MX block-scale exponent (E8M0)
   static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
-  // 0x36-0x3F reserved for future IEEE float types
+  // 0x37-0x3F reserved for future IEEE float types
 
   // Brain/Hisilicon float types: 0x40-0x4F (16 slots reserved)
   static constexpr uint8_t kBrainFloatRangeStart = 0x40;
@@ -110,6 +111,7 @@ class DataType {
   static const DataType FP4;        // 4-bit floating point
   static const DataType FP8E4M3FN;  // 8-bit floating point (IEEE 754 e4m3fn format)
   static const DataType FP8E5M2;    // 8-bit floating point (IEEE 754 e5m2 format)
+  static const DataType FP8E8M0;    // 8-bit floating point (E8M0 MX block-scale exponent)
   static const DataType FP16;       // 16-bit floating point (IEEE 754 half precision)
   static const DataType FP32;       // 32-bit floating point (IEEE 754 single precision)
   static const DataType BF16;       // 16-bit brain floating point
@@ -160,6 +162,7 @@ class DataType {
       case kHf8Code:
       case kFp8e4m3fnCode:
       case kFp8e5m2Code:
+      case kFp8e8m0Code:
       case kUInt8Code:
       case kInt8Code:
         return 8;
@@ -227,6 +230,8 @@ class DataType {
         return "fp8e4m3fn";
       case kFp8e5m2Code:
         return "fp8e5m2";
+      case kFp8e8m0Code:
+        return "fp8e8m0";
       case kFp16Code:
         return "fp16";
       case kFp32Code:
@@ -284,6 +289,15 @@ class DataType {
         return "double";
       case kBf16Code:
         return "bfloat16_t";
+      case kFp8e4m3fnCode:
+        return "float8_e4m3_t";
+      case kFp8e5m2Code:
+        return "float8_e5m2_t";
+      case kFp8e8m0Code:
+        // Align with PTOAS EmitC for !pto.f8E8M0 → float8_e8m0_t.
+        return "float8_e8m0_t";
+      case kFp4Code:
+        return "float4_e2m1x2_t";
       default:
         return "unknown";
     }
@@ -376,6 +390,7 @@ inline constexpr DataType DataType::UINT64 = DataType(kUInt64Code);
 inline constexpr DataType DataType::FP4 = DataType(kFp4Code);
 inline constexpr DataType DataType::FP8E4M3FN = DataType(kFp8e4m3fnCode);
 inline constexpr DataType DataType::FP8E5M2 = DataType(kFp8e5m2Code);
+inline constexpr DataType DataType::FP8E8M0 = DataType(kFp8e8m0Code);
 inline constexpr DataType DataType::FP16 = DataType(kFp16Code);
 inline constexpr DataType DataType::FP32 = DataType(kFp32Code);
 inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
@@ -415,6 +430,7 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::FP4) return "FP4";
   if (dtype == DataType::FP8E4M3FN) return "FP8E4M3FN";
   if (dtype == DataType::FP8E5M2) return "FP8E5M2";
+  if (dtype == DataType::FP8E8M0) return "FP8E8M0";
   if (dtype == DataType::FP16) return "FP16";
   if (dtype == DataType::FP32) return "FP32";
   if (dtype == DataType::BF16) return "BF16";

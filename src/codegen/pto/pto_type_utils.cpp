@@ -36,6 +36,19 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "f16";
   } else if (dtype == DataType::BF16) {
     return "bf16";
+  } else if (dtype == DataType::FP8E4M3FN) {
+    // PTOAS v0.48 tile_buf dtype spelling (lowercase f8e4m3 does not parse).
+    return "f8E4M3FN";
+  } else if (dtype == DataType::FP8E5M2) {
+    return "f8E5M2";
+  } else if (dtype == DataType::FP8E8M0) {
+    // Bare `f8E8M0` does not parse; PTOAS v0.48+ requires the dialect type.
+    // EmitC maps loc=scaling + !pto.f8E8M0 → TileType::ScaleLeft/ScaleRight
+    // (ui8 would wrongly become Fixpipe TileType::Scaling).
+    return "!pto.f8E8M0";
+  } else if (dtype == DataType::FP4) {
+    // MXFP4 E2M1 packed form used by pto-isa / PTOAS for MX matmul.
+    return "f4E2M1x2";
   } else if (dtype == DataType::INT32) {
     return "i32";
   } else if (dtype == DataType::UINT32) {
@@ -87,6 +100,10 @@ std::string MemorySpaceToMLIR(ir::MemorySpace space) {
     return "acc";
   } else if (space == ir::MemorySpace::Bias) {
     return "bias";
+  } else if (space == ir::MemorySpace::LeftScale || space == ir::MemorySpace::RightScale) {
+    // PTOAS v0.48 exposes a single MLIR loc `scaling` for scale / fixpipe buffers
+    // (TileType::ScaleLeft/ScaleRight are not yet distinct tile_buf locs).
+    return "scaling";
   } else {
     throw ValueError("Invalid MemorySpace value");
   }

@@ -70,6 +70,13 @@ __all__ = [
     "matmul_acc",
     "batch_matmul_acc",
     "matmul_bias",
+    "matmul_mx",
+    "matmul_mx_acc",
+    "matmul_mx_bias",
+    "tquant",
+    "mx_quant",
+    "tdequant",
+    "tget_scale_addr",
     "gemv",
     "gemv_acc",
     "gemv_bias",
@@ -361,6 +368,7 @@ def load(
     valid_shapes: Sequence[IntLike] | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
     clamp: bool = False,
+    mx_layout: str = "none",
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -384,6 +392,7 @@ def load(
             load asserts ``offsets + valid_shapes`` stays inside the source and is
             rejected when that provably fails; ``clamp=True`` cuts the request back
             to the source edge instead.
+        mx_layout: MX scale-load layout (``none`` or ``mx_a_*`` / ``mx_b_*``).
 
     Returns:
         Tile wrapping the load operation
@@ -401,6 +410,7 @@ def load(
         _normalize_intlike(valid_shapes),
         target_memory,
         clamp=clamp,
+        mx_layout=mx_layout,
     )
     return Tile(expr=call_expr)
 
@@ -1183,6 +1193,55 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
         Tile wrapping the matmul_bias operation
     """
     call_expr = _ir_ops.matmul_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+    """MX block-scale matrix multiplication."""
+    call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+    """MX block-scale matmul with accumulation."""
+    call_expr = _ir_ops.matmul_mx_acc(
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+    )
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
+    """MX block-scale matmul with bias."""
+    call_expr = _ir_ops.matmul_mx_bias(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap()
+    )
+    return Tile(expr=call_expr)
+
+
+def tquant(src: Tile, *, mode: str = "mxfp8_e4m3") -> tuple[Tile, Tile]:
+    """MX block-32 dynamic quantization: returns (quantized, e8m0_scale)."""
+    call_expr = _ir_ops.tquant(src.unwrap(), mode=mode)
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def mx_quant(src: Tile, *, mode: str = "mxfp8_e4m3") -> tuple[Tile, Tile]:
+    """Convenience alias for :func:`tquant` with MX block-32 presets."""
+    return tquant(src, mode=mode)
+
+
+def tdequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
+    """Dequantize integer tile with per-row scale/offset."""
+    call_expr = _ir_ops.tdequant(src.unwrap(), scale.unwrap(), offset.unwrap())
+    return Tile(expr=call_expr)
+
+
+def tget_scale_addr(dst_scale: Tile, src: Tile) -> Tile:
+    """Bind MX scale-tile address from a Left/Right data tile (A5)."""
+    call_expr = _ir_ops.tget_scale_addr(dst_scale.unwrap(), src.unwrap())
     return Tile(expr=call_expr)
 
 

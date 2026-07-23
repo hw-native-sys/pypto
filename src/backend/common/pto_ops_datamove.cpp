@@ -573,6 +573,84 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+// Helper for tile.tquant (MX block-32 quant, two outputs):
+//   pto.tquant.mx ins(src : src_ty) outs(dst, scale : dst_ty, scale_ty)
+static std::string MakeTQuantCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 1) << "tile.tquant requires 1 argument (src), but got " << op->args_.size();
+
+  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+      << "Internal error: tile.tquant codegen requires current_result_var";
+
+  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
+  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+      << "Internal error: tile.tquant expects two TupleGetItemExpr consumers (dst, scale)";
+
+  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
+  for (size_t i = 0; i < 2; ++i) {
+    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
+        << "Internal error: tile.tquant element var " << i << " must have TileType with MemRef";
+    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
+  }
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetVarName(element_vars[0]);
+  std::string scale = codegen.GetVarName(element_vars[1]);
+  std::string dst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[0]);
+  std::string scale_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[1]);
+
+  std::ostringstream oss;
+  oss << "pto.tquant.mx ins(" << src;
+  if (!src_ty.empty()) {
+    oss << " : " << src_ty;
+  }
+  oss << ") outs(" << dst << ", " << scale;
+  if (!dst_ty.empty() || !scale_ty.empty()) {
+    oss << " : " << dst_ty << ", " << scale_ty;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper for tile.tget_scale_addr (DPS, A5):
+//   pto.tget_scale_addr ins(%src : src_ty) outs(%dst_scale : dst_ty)
+//
+// IR surface: (dst_scale, src) with set_output_reuses_input(0). ISA / PTOAS take
+// only src in ins(); dst is the outs() scale tile (address = src_addr >> SHIFT).
+static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.tget_scale_addr requires 2 arguments (dst_scale, src), but got "
+                               << op->args_.size();
+
+  std::string src = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
+
+  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
+  INTERNAL_CHECK(!dst.empty() && dst == input_ssa)
+      << "Internal error: tile.tget_scale_addr result SSA must alias the dst_scale input SSA, got dst=" << dst
+      << ", input=" << input_ssa;
+
+  std::ostringstream oss;
+  oss << "pto.tget_scale_addr ins(" << src;
+  if (!src_ty.empty()) {
+    oss << " : " << src_ty;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_ty.empty()) {
+    oss << " : " << dst_ty;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper for tile.scatter (TSCATTER index form, DPS):
 //   pto.tscatter ins(%src, %indexes : src_ty, idx_ty) outs(%dst : dst_ty)
 //
@@ -860,6 +938,11 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
   // TupleGetItemExpr consumers (parser desugars `dst, cdst = ...`).
   reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherCompareCodegenPTO(op, codegen);
+  });
+  reg("tile.tquant",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeTQuantCodegenPTO(op, codegen); });
+  reg("tile.tget_scale_addr", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTGetScaleAddrCodegenPTO(op, codegen);
   });
   // tile.scatter (TSCATTER index form, DPS): 3-input op (dst, src, indexes).
   reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

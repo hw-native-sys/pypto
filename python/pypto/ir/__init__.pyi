@@ -52,6 +52,7 @@ scalar_dir: ArgDirection
 FP4: DataType
 FP8E4M3FN: DataType
 FP8E5M2: DataType
+FP8E8M0: DataType
 FP16: DataType
 FP32: DataType
 BF16: DataType

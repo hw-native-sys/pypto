@@ -124,6 +124,21 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 `tensor.matmul` / `tensor.matmul_acc` 在任一操作数 rank > 2 时分派到该批量路径；后续由
 `FlattenTileNdTo2D` 将其展开为逐 batch 的 2D 操作。
 
+### MX 块缩放（Ascend950）
+
+MX 路径使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` 缩放 dtype：
+
+| IR / DSL | 说明 |
+| -------- | ---- |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；data 为 FP8E4M3FN / FP8E5M2 / FP4，scale 为 FP8E8M0，`K % 32 == 0` |
+| `tile.matmul_mx_acc` / `_bias` | 累加 / bias 变体 |
+| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 动态量化，返回 `TupleType{quant, scale}`；codegen 为 `pto.tquant.mx` |
+| `tile.tdequant` / `pl.tdequant` | 整型按行 dequant：`dst = (src - offset) * scale` |
+| `tile.tget_scale_addr` / `pl.tget_scale_addr` | 绑定 scale 地址（A5） |
+| `tile.load(..., mx_layout=...)` | 加载 MX scale 时指定 `mx_a_*` / `mx_b_*` layout（dtype 须为 FP8E8M0） |
+
+规范样例对齐 PTO-ISA a5 `tmatmul_mx` **case1** / PTOAS `pto.tmatmul.mx`：`M=128,K=64,N=64`，A/B=`FP8E5M2`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），GM scale layout `mx_a_zz` / `mx_b_nn`；对齐要求为 M↑16、K↑64、N↑32（fp8）。
+
 ## Python 用法
 
 ```python

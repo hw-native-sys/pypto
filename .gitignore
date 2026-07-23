@@ -204,3 +204,7 @@ coverage.xml
 # Package distributions
 dist/
 wheelhouse/
+
+# Local MX / PTOAS probe artifacts (do not commit)
+_mx_a5_kernels/
+_ptoas_v0.50_probe/

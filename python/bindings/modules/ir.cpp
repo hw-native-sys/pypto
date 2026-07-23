@@ -564,6 +564,8 @@ void BindIR(nb::module_& m) {
       .value("Right", MemorySpace::Right, "Right matrix operand buffer")
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
+      .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
 

@@ -99,6 +99,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/broadcast.cpp
     src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/tile_ops/matmul.cpp
+    src/ir/op/tile_ops/mx.cpp
     src/ir/op/tile_ops/memory.cpp
     src/ir/op/tile_ops/reduction.cpp
     src/ir/op/tile_ops/transform.cpp

@@ -130,6 +130,21 @@ INT32 for integer inputs (mirroring `tile.matmul_acc`). At conversion time
 this batched path whenever any operand has rank > 2; `FlattenTileNdTo2D`
 later unrolls the batched form into per-batch 2D ops.
 
+### MX block-scale (Ascend950)
+
+MX uses dedicated `LeftScale` / `RightScale` memory spaces and `FP8E8M0` scale dtype:
+
+| IR / DSL | Notes |
+| -------- | ----- |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; data FP8E4M3FN / FP8E5M2 / FP4; scale FP8E8M0; `K % 32 == 0` |
+| `tile.matmul_mx_acc` / `_bias` | Acc / bias variants |
+| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 dynamic quant → `TupleType{quant, scale}`; codegen `pto.tquant.mx` |
+| `tile.tdequant` / `pl.tdequant` | Integer per-row dequant: `dst = (src - offset) * scale` |
+| `tile.tget_scale_addr` / `pl.tget_scale_addr` | Bind scale address (A5) |
+| `tile.load(..., mx_layout=...)` | MX scale load layouts `mx_a_*` / `mx_b_*` (dtype must be FP8E8M0) |
+
+Canonical sample matches PTO-ISA a5 `tmatmul_mx` **case1** / PTOAS `pto.tmatmul.mx`: `M=128,K=64,N=64`, A/B=`FP8E5M2`, scale=`FP8E8M0` (`[128,2]` / `[2,64]`), GM scale layouts `mx_a_zz` / `mx_b_nn`; align M↑16, K↑64, N↑32 (fp8).
+
 ## Python Usage
 
 ```python
