@@ -23,10 +23,17 @@ Golden: torch. This is the on-device validation the unit / codegen / pto-verify 
 give (actual execution). Ascend910B (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
 the 910B bf16 ``pto.tinsert`` FIXPIPE path (the f32 accumulator is downcast into the bf16
 scratch); the a5 f32 converting-``pto.tmov`` assemble is a separate lowering.
+
+The Vec-left PV case additionally validates ``[32,128] @ [128,512]`` under both
+memory planners.  The Vector-resident left tile is staged once into Mat, the
+Right operand is N-tiled to ``[128,128]`` (32 KiB per stage), and two disjoint
+row-slice stores are distributed across the generated N tiles.
 """
 
 import dataclasses
+from typing import Any
 
+import pypto.language as pl
 import pytest
 import torch
 from examples.kernels.auto_tile_matmul import (
@@ -37,6 +44,7 @@ from examples.kernels.auto_tile_matmul import (
     mat_full_k,
     mat_split_k,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.pypto_core.passes import MemoryPlanner
 
 # AutoTileMatmulL0 predates memory_planner=PTOAS and was initially validated under
@@ -48,6 +56,67 @@ _PLANNERS = [pytest.param(None, id="pypto"), pytest.param(MemoryPlanner.PTOAS, i
 def _cfg(test_config, planner):
     """Base session config, overridden to a specific memory planner (None = PyPTO default)."""
     return test_config if planner is None else dataclasses.replace(test_config, memory_planner=planner)
+
+
+@pl.program
+class VecLeftPVProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[32, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 512], pl.BF16],
+        out: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+    ) -> pl.Tensor[[32, 512], pl.FP32]:
+        lhs_vec: pl.Tile[[32, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+            lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec
+        )
+        rhs_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+            rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+        )
+        result: pl.Tile[[32, 512], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_vec, rhs_mat)
+        upper: pl.Tile[[16, 512], pl.FP32, pl.Mem.Acc] = pl.tile.slice(result, [16, 512], [0, 0])
+        out_upper = pl.tile.store(upper, [0, 0], out)
+        lower: pl.Tile[[16, 512], pl.FP32, pl.Mem.Acc] = pl.tile.slice(result, [16, 512], [16, 0])
+        out_lower = pl.tile.store(lower, [16, 0], out_upper)
+        return out_lower
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        lhs: pl.Tensor[[32, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 512], pl.BF16],
+        out: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+    ) -> pl.Tensor[[32, 512], pl.FP32]:
+        out = self.kernel(lhs, rhs, out)
+        return out
+
+
+class VecLeftPVCase(PTOTestCase):
+    __test__ = False
+
+    def __init__(self, planner: MemoryPlanner, *, config=None):
+        super().__init__(config, memory_planner=planner)
+        self._planner = planner
+        if config is None:
+            self.config.rtol = 1e-2
+            self.config.atol = 1e-2
+
+    def get_name(self) -> str:
+        tag = "ptoas" if self._planner == MemoryPlanner.PTOAS else "pypto"
+        return f"auto_tile_vec_left_pv_{tag}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [32, 128], DataType.BF16, init_value=torch.randn),
+            TensorSpec("rhs", [128, 512], DataType.BF16, init_value=torch.randn),
+            TensorSpec("out", [32, 512], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return VecLeftPVProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        tensors["out"][:] = tensors["lhs"].float() @ tensors["rhs"].float()
 
 
 @pytest.mark.platforms("a2a3", "a2a3sim")
@@ -147,3 +216,15 @@ class TestAutoTileMatmulL0:
         assert rel_err < 5e-2, (
             f"{kernel.__name__} (fits-L0c cast-fold) Frobenius rel_err = {rel_err:.3e} exceeds 5e-2"
         )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+class TestAutoTileMatmulL0VecLeftPV:
+    @pytest.mark.parametrize(
+        "planner",
+        [MemoryPlanner.PYPTO, MemoryPlanner.PTOAS],
+        ids=["pypto", "ptoas"],
+    )
+    def test_vec_left_pv(self, test_runner, planner):
+        result = test_runner.run(VecLeftPVCase(planner))
+        assert result.passed, f"Vec-left PV ({planner}) failed: {result.error}"
