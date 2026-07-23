@@ -558,13 +558,12 @@ void BindPass(nb::module_& m) {
              "ForStmt, so orchestration codegen reads the carry lowering instead of re-deriving\n"
              "it from an alias fixpoint. Runs last, after materialize_runtime_scopes.");
   passes.def("insert_comm_fence", &pass::InsertCommFence,
-             "Insert the ptoas data-before-signal markers (all via system.cacheinvalid).\n"
-             "After each LOCAL publishing write (window-bound tile.store, or get into a\n"
-             "local dst): a region system.cacheinvalid + GM system.fence. After each wait:\n"
-             "a no-arg (whole-GM) system.cacheinvalid. The notify needs nothing. Remote\n"
-             "writes (remote_store / put) land at a peer-offset address and are left to\n"
-             "their codegen, which emits a peer-region cacheinvalid + fence. Idempotent.\n"
-             "Runs last, after all statement-reordering passes, so markers stay adjacent.");
+             "Insert the ptoas data-before-signal markers. Local publishing write\n"
+             "(window-bound tile.store, get into a local dst): a region system.cacheinvalid\n"
+             "+ GM system.fence. Remote write (remote_store / put): only system.fence — its\n"
+             "peer-region cacheinvalid is emitted by codegen (peer offset not yet\n"
+             "IR-expressible). After each wait: a whole-GM system.cacheinvalid. Notify:\n"
+             "nothing. Idempotent. Runs last, after all statement-reordering passes.");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,

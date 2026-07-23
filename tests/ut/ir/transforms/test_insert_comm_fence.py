@@ -79,9 +79,10 @@ def test_window_store_then_notify():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_remote_store_left_to_codegen():
-    # A remote_store lands at a peer-offset address the pass can't invalidate; it
-    # is left untouched here (its codegen emits the peer-region cacheinvalid).
+def test_remote_store_gets_fence_only():
+    # A remote_store lands at a peer-offset address the pass can't invalidate, so
+    # the pass inserts only the GM `system.fence` (the peer-region cacheinvalid is
+    # emitted by codegen — the peer offset is not yet IR-expressible).
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -96,7 +97,22 @@ def test_remote_store_left_to_codegen():
             pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
-    ir.assert_structural_equal(_apply(Before), Before)
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            dst: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.load(inp, [0, 0], [1, N])
+            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pl.system.fence()
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
 
 
 def test_plain_tensor_store_no_markers():

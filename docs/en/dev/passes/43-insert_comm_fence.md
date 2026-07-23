@@ -33,22 +33,24 @@ rules** — the *notify* itself needs no marker. A single structural traversal
 
 - **after each local publishing write** — a window-bound `tile.store`, or a `get`
   into a local destination: a whole-tensor **region** `system.cacheinvalid` of the
-  written target, **immediately followed by a `system.fence`**. ptoas ties the
-  release fence to this cacheinvalid; any later `tnotify` that publishes the data
-  is satisfied by it, so both markers land at the write site (one per address);
+  written target, **immediately followed by a `system.fence`**;
+- **after each remote publishing write** — `remote_store` / `put`: only a
+  `system.fence` (see the note below on where its cacheinvalid comes from);
 - **after each wait** — a **whole-GM** `system.cacheinvalid` (the consume-side
   invalidate before the next cacheable read);
-- **notify** — nothing;
-- **remote writes** `remote_store` / `put` — nothing here (see below).
+- **notify** — nothing.
 
 A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which
 is correct for a local-window store. The **remote** writes `remote_store` / `put`
 write to a **peer-offset** GM address (`local_ptr + delems(peer)`) that the local
 target view does not address — a local-target cacheinvalid would clean the wrong
-cache line and miss the peer's data. The peer offset is only known during codegen
-(`EmitCommRemoteView`), so this pass leaves remote writes alone and their codegen
-emits a correct peer-region `pto.cmo.cacheinvalid <peer_view> single_cache_line` +
-GM fence right after the store itself.
+line. The peer offset is only known during codegen (`EmitCommRemoteView`) and is
+**not yet expressible in the IR**, so the peer-region `pto.cmo.cacheinvalid
+<peer_view> single_cache_line` is emitted by the op's codegen as a **workaround**.
+The GM release **fence**, however, is always an explicit `system.fence` op inserted
+by this pass — the codegen must not embed it, keeping the release ordering
+IR-visible and uniform. (Giving the peer-region cacheinvalid a first-class IR
+representation, so the pass can own the whole marker, is a follow-up.)
 
 ```text
 store(win_a); store(win_b); notify        (local window stores)
@@ -102,31 +104,29 @@ this pass sees is exactly what codegen lowers.
 
 ## Which writes the pass marks
 
-The pass marks only **local** publishing writes — those whose written GM address is
-the local target view, so a region `cacheinvalid(target)` (which addresses the
-local base) is correct:
-
-| Case | Marked by | Target arg |
-| ---- | --------- | ---------- |
-| `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | **pass** | dst (arg 2) |
-| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | **pass** | dst (arg 0) |
-| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` (peer-offset write) | **codegen** (peer-region cacheinvalid + fence) | n/a |
+| Case | cacheinvalid | fence |
+| ---- | ------------ | ----- |
+| `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | pass (local region, dst arg 2) | pass |
+| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | pass (local region, dst arg 0) | pass |
+| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` (peer-offset write) | **codegen** (peer region — IR workaround) | **pass** |
 
 A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
 `Tensor` are **not** publishing writes — no marker at all.
 
 ## Algorithm — one structural traversal, no flow state
 
-Both rules are purely local, so the pass carries **no** control-flow state (no
-`pending` bool, no `if`/loop analysis, no notify classification):
+The pass carries **no** control-flow state (no `pending` bool, no `if`/loop
+analysis, no notify classification):
 
 - at each **local publishing write**, append `region cacheinvalid; fence`;
+- at each **remote publishing write** (`remote_store` / `put`), append `fence`
+  only (the peer-region cacheinvalid is codegen's — see below);
 - at each **wait**, append `cacheinvalid()`;
-- **notify** and **remote writes** are left untouched.
+- **notify** is left untouched.
 
 `if`/`for`/`while` bodies are visited normally; the only special handling is
 wrapping a bare single-statement body (a write/wait that is the sole body of an
-`if`/`for` without an enclosing `SeqStmts`) so its marker still lands. Because both
+`if`/`for` without an enclosing `SeqStmts`) so its marker still lands. Because the
 rules are local and append-only, control flow is irrelevant: a write inside one
 loop is correctly marked whether or not its notify lives in another.
 
@@ -142,16 +142,24 @@ recognized and **not duplicated**, so the pass is idempotent.
 
 ## Codegen interaction
 
-`remote_store` and `put` codegen each emit their own peer-region
-`pto.cmo.cacheinvalid` + GM `pto.fence.barrier_all` right after the store (the peer
-offset is only known there) — the data-before-signal release marker for the remote
-write, at the correct peer address. `put` additionally keeps a tail
-`pto.barrier <PIPE_ALL>` **between** the TPUT and its cacheinvalid: TPUT is a DMA,
-and the GM fence orders memory but does not drain the MTE pipe that issued the DMA,
-so without this barrier the following notify can fire before the (possibly atomic)
-TPUT has landed at the peer — `test_l3_put` atomic-add / subregion flake on device
-without it (a PTOAS#872 workaround; remove once PTOAS drains the tput itself). The
+`remote_store` and `put` codegen each emit their peer-region
+`pto.cmo.cacheinvalid <peer_view>` right after the store (the peer offset is only
+known there and is not yet expressible in the IR — a **workaround**; the pass
+supplies the paired GM fence as a `system.fence` op, so it does *not* emit the
+fence here). `put` additionally keeps a tail `pto.barrier <PIPE_ALL>` **between**
+the TPUT and its cacheinvalid: TPUT is a DMA, and the GM fence orders memory but
+does not drain the MTE pipe that issued the DMA, so without this barrier the
+following notify can fire before the (possibly atomic) TPUT has landed at the peer
+— `test_l3_put` atomic-add / subregion flake on device without it, and
+device-testing shows an MTE3-scoped barrier is not enough (only `PIPE_ALL` is
+stable). A PTOAS#872 workaround; remove once PTOAS drains the tput itself. The
 TPUT/TGET **pre** barriers and the TGET **tail** barrier are likewise kept.
+
+**Follow-up:** the peer-region cacheinvalid for remote writes is the one marker
+still emitted in codegen rather than as an IR op, because the peer address
+(`local_ptr + delems(peer)`) has no IR representation yet. A first-class IR form
+would let InsertCommFence own the complete remote-write marker (cacheinvalid +
+fence), matching the local-write path.
 
 ## Consumers
 

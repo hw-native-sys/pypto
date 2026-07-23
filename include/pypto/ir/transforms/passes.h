@@ -811,17 +811,18 @@ Pass StampTfreeSplit();
  * @brief Insert the ptoas data-before-signal markers around cross-rank publish
  *        and consume points (all via `system.cacheinvalid`).
  *
- * Verified on ptoas 0.50, the contract reduces to two purely-local rules — the
- * `pld.system.notify` itself needs no marker:
+ * The `pld.system.notify` itself needs no marker:
  *   - after each **local** publishing write (window-bound `tile.store`, or `get`
  *     into a local destination): a region `system.cacheinvalid` of the written
  *     region immediately followed by a GM `system.fence`;
+ *   - after each **remote** publishing write (`remote_store` / `put`): only a GM
+ *     `system.fence`. Its data lands at a peer-offset address whose offset is not
+ *     yet expressible in the IR, so the peer-region `pto.cmo.cacheinvalid` is
+ *     emitted by the op's codegen as a workaround; the release fence is always an
+ *     explicit `system.fence` op inserted here (codegen must not embed it);
  *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
  *
- * The **remote** writes `remote_store` / `put` land at a peer-offset address that
- * a local-target cacheinvalid cannot address, so they are left to their codegen,
- * which emits a correct peer-region `pto.cmo.cacheinvalid` + GM fence. The pass
- * carries no control-flow state and is idempotent. Runs last, after all
+ * The pass carries no control-flow state and is idempotent. Runs last, after all
  * statement-reordering passes, so the markers stay adjacent through codegen.
  */
 Pass InsertCommFence();

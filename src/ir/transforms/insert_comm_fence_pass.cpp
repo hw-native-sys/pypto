@@ -38,19 +38,21 @@
  *   - after each **local publishing write** (window-bound `tile.store`, or `get`
  *     into a local destination): a whole-tensor region `system.cacheinvalid` of
  *     the written region followed **immediately** by a GM `system.fence`.
+ *   - after each **remote publishing write** (`remote_store` / `put`): only a GM
+ *     `system.fence`. The data lands at a peer-offset GM address that a
+ *     local-target cacheinvalid cannot address; the peer offset is not yet
+ *     expressible in the IR, so the peer-region cacheinvalid is emitted by the
+ *     op's codegen as a WORKAROUND (see pto_ops_distributed.cpp). The GM release
+ *     fence, however, is always an explicit `system.fence` op inserted here — the
+ *     codegen must not embed it. (TODO: a first-class IR representation of the
+ *     peer-region cacheinvalid would let the pass own the whole marker.)
  *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
  *   - **notify**: nothing.
  *
- * The **remote** writes `remote_store` / `put` land at a peer-offset GM address
- * (`local_ptr + delems(peer)`) that a local-target cacheinvalid cannot address, so
- * this pass leaves them alone: their codegen emits a correct peer-region
- * `pto.cmo.cacheinvalid` + GM fence itself (the peer offset is only known there).
+ * Example shapes (`cacheinvalid(peer)` shown in brackets is codegen-only, not IR):
  *
- * Example shapes:
- *
- *   remote_store; notify         -> remote_store; cacheinvalid(dst); fence; notify
- *   for c: store; for p: notify   -> for c: (store; cacheinvalid; fence);
- *                                     for p: notify
+ *   remote_store; notify         -> remote_store; [cacheinvalid(peer)]; fence; notify
+ *   store(win); notify           -> store(win); cacheinvalid(win); fence; notify
  *   wait; read                   -> wait; cacheinvalid(); read
  *
  * The region cacheinvalid covers the whole target tensor (full shape at zero
@@ -127,16 +129,12 @@ Effect StmtEffect(const StmtPtr& stmt) {
   return Effect::kNone;
 }
 
-// The local destination tensor of a publishing write, whose cache lines must be
-// invalidated after it. The arg positions mirror each op's registration.
-//
-// Only writes to a *local* GM address are handled here — a region
-// `system.cacheinvalid(target)` addresses `target`'s local base, which is correct
-// for a local-window store (`tile.store`) or a peer-read-into-local (`get`). The
-// **remote** writes `remote_store` / `put` land at a peer-offset address
-// (`local_ptr + delems(peer)`) that the local target view does not address, so a
-// local-target cacheinvalid would miss them; their codegen emits a correct
-// peer-region `pto.cmo.cacheinvalid` + fence itself, and they return null here.
+// The local destination tensor of a publishing write, whose cache lines this pass
+// invalidates after it (a region `system.cacheinvalid(target)` addresses `target`'s
+// local base). Correct for a local-window store (`tile.store`) or a peer-read into
+// a local destination (`get`). The **remote** writes `remote_store` / `put` land at
+// a peer-offset address (`local_ptr + delems(peer)`) that a local-target
+// cacheinvalid cannot address, so they return null here — see `IsRemoteWrite`.
 ExprPtr PublishingWriteTarget(const CallPtr& call) {
   if (!call || !call->op_) return nullptr;
   if (IsOp(call, "pld.tile.get") || IsOp(call, "pld.tensor.get")) {
@@ -145,7 +143,19 @@ ExprPtr PublishingWriteTarget(const CallPtr& call) {
   if (IsOp(call, "tile.store")) {
     return call->args_.size() > 2 ? call->args_[2] : nullptr;  // (tile, indices, dst)
   }
-  return nullptr;  // remote_store / put -> peer-relative, handled by their codegen
+  return nullptr;  // remote_store / put -> remote write, see IsRemoteWrite
+}
+
+// True if `call` is a remote publishing write (`remote_store` / `put`). Its data
+// lands at a peer-offset GM address; the peer offset is only known during codegen
+// (`EmitCommRemoteView`) and is not yet expressible in the IR, so its codegen
+// emits the peer-region `pto.cmo.cacheinvalid` itself — a WORKAROUND pending a
+// first-class IR representation of the peer address. The GM release **fence**,
+// however, IS inserted here as an explicit `system.fence`, uniformly with the
+// local writes (codegen must not embed the fence).
+bool IsRemoteWrite(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  return IsOp(call, "pld.tile.remote_store") || IsOp(call, "pld.tile.put") || IsOp(call, "pld.tensor.put");
 }
 
 // A target tensor usable for cacheinvalid: a `Var`-like with a `TensorType`.
@@ -234,13 +244,19 @@ class InsertCommMarkers : public IRMutator {
       auto new_child = VisitStmt(child);
       if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
-      // Publish side: a region cacheinvalid + fence after each publishing write.
-      // ptoas requires the fence to immediately follow the release marker.
+      // Publish side, local write: a region cacheinvalid + fence after it.
       if (auto target = WriteTargetToInvalidate(child)) {
         const bool already = i + 2 < stmts.size() && IsCacheInvalidFor(stmts[i + 1], target) &&
                              IsLeafOp(stmts[i + 2], "system.fence");
         if (!already) {
           out.push_back(MakeCacheInvalid(target, child->span_));
+          out.push_back(MakeNoArgOp("system.fence", child->span_));
+          changed = true;
+        }
+      } else if (IsRemoteWrite(LeafCall(child))) {
+        // Remote write: codegen emits the peer-region cacheinvalid (peer offset is
+        // not IR-expressible yet); the pass inserts only the GM release fence.
+        if (!(i + 1 < stmts.size() && IsLeafOp(stmts[i + 1], "system.fence"))) {
           out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
         }
@@ -284,6 +300,8 @@ class InsertCommMarkers : public IRMutator {
     if (auto target = WriteTargetToInvalidate(body)) {
       out.push_back(MakeCacheInvalid(target, body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
+    } else if (IsRemoteWrite(LeafCall(body))) {
+      out.push_back(MakeNoArgOp("system.fence", body->span_));  // codegen emits the peer cacheinvalid
     }
     if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
     if (out.size() == 1) return visited;

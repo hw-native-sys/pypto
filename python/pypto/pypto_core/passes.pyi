@@ -695,20 +695,19 @@ def classify_iter_arg_carry() -> Pass:
 def insert_comm_fence() -> Pass:
     """Insert the ptoas data-before-signal markers (all via ``system.cacheinvalid``).
 
-    Verified on ptoas 0.50, the contract reduces to two purely-local rules — the
-    ``pld.system.notify`` itself needs no marker:
+    The ``pld.system.notify`` itself needs no marker:
 
     * After each **local** publishing write — a ``tile.store`` into a window-bound
       ``DistributedTensor`` (a peer can ``remote_load`` it), or a ``get`` into a
       local destination — a region ``system.cacheinvalid`` of the written region
       immediately followed by a GM ``system.fence``.
+    * After each **remote** publishing write (``remote_store`` / ``put``) — only a
+      GM ``system.fence``. Its peer-offset address is not yet expressible in the IR,
+      so the peer-region cacheinvalid is emitted by the op's codegen as a workaround;
+      the release fence is always an explicit ``system.fence`` op inserted here.
     * After each **wait** — a no-arg (whole-GM) ``system.cacheinvalid``.
 
-    The **remote** writes ``pld.tile.remote_store`` / ``pld.tile.put`` /
-    ``pld.tensor.put`` land at a peer-offset address that a local-target
-    cacheinvalid cannot address, so they are left to their codegen, which emits a
-    correct peer-region cacheinvalid + fence. The pass carries no control-flow
-    state and is idempotent.
+    The pass carries no control-flow state and is idempotent.
 
     Runs last in the Default pipeline, after all statement-reordering passes, so the
     inserted markers stay adjacent through codegen.

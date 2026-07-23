@@ -28,20 +28,20 @@
 一趟结构遍历（`InsertCommMarkers`），不带任何控制流状态，插入：
 
 - **每个本地发布写之后** —— window-bound `tile.store`，或写入本地目标的 `get`：一条覆盖
-  整张量的**区域** `system.cacheinvalid`，**紧跟一条 `system.fence`**。ptoas 把释放 fence
-  关联到该写的 cacheinvalid；任何随后发布该数据的 `tnotify` 都由它满足，因此两者都落在
-  写入点（每地址一条）；
+  整张量的**区域** `system.cacheinvalid`，**紧跟一条 `system.fence`**；
+- **每个远端发布写之后** —— `remote_store` / `put`：只插一条 `system.fence`（其 peer 区域
+  cacheinvalid 由 codegen 发,见下）；
 - **每个 wait 之后** —— 一条**全 GM** `system.cacheinvalid`（消费侧在下一次可缓存读之前
   的失效）；
-- **notify** —— 什么都不插；
-- **远端写** `remote_store` / `put` —— 此处不插（见下）。
+- **notify** —— 什么都不插。
 
 区域 `system.cacheinvalid(target)` 寻址的是 `target` 的**本地** base，这对本地窗口写是对的。
 但**远端写** `remote_store` / `put` 写到的是 **peer 偏移** GM 地址（`local_ptr +
-delems(peer)`），本地 target view 寻址不到 —— 本地 target 的 cacheinvalid 会 clean 错的
-cache line、漏掉 peer 数据。peer 偏移只有在 codegen 里才知道（`EmitCommRemoteView`），所以
-本 pass 不管远端写，由它们的 codegen 在 store 之后自己发一条正确的 peer 区域
-`pto.cmo.cacheinvalid <peer_view> single_cache_line` + GM fence。
+delems(peer)`），本地 target view 寻址不到。peer 偏移只有在 codegen 里才知道
+（`EmitCommRemoteView`）、**目前无法在 IR 上表示**，所以那条 peer 区域
+`pto.cmo.cacheinvalid <peer_view> single_cache_line` 是 codegen 发的**规避手段**;而配对的 GM
+释放 **fence** 始终由本 pass 插一条显式 `system.fence`（codegen 不得嵌入 fence），让释放排序在
+IR 上可见、与本地写路径统一。(后续:给 peer 区域 cacheinvalid 一个 IR 表达,让 pass 拥有完整标记。)
 
 ```text
 store(win_a); store(win_b); notify        （本地窗口写）
@@ -87,26 +87,23 @@ codegen 最终降级的 IR。
 
 ## 本 pass 标记哪些写
 
-本 pass 只标记**本地**发布写 —— 其写入 GM 地址就是本地 target view，故区域
-`cacheinvalid(target)`（寻址本地 base）正确：
-
-| 情形 | 由谁标记 | target arg |
-| ---- | -------- | ---------- |
-| 写入 window-bound `DistributedTensorType` 的 `tile.store`（peer 可 `remote_load`） | **pass** | dst（arg 2） |
-| `pld.tile.get` / `pld.tensor.get`（读 peer 到本地目标） | **pass** | dst（arg 0） |
-| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`（peer 偏移写） | **codegen**（peer 区域 cacheinvalid + fence） | 不适用 |
+| 情形 | cacheinvalid | fence |
+| ---- | ------------ | ----- |
+| 写入 window-bound `DistributedTensorType` 的 `tile.store`（peer 可 `remote_load`） | pass（本地区域,dst arg 2） | pass |
+| `pld.tile.get` / `pld.tensor.get`（读 peer 到本地目标） | pass（本地区域,dst arg 0） | pass |
+| `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`（peer 偏移写） | **codegen**（peer 区域,IR 规避） | **pass** |
 
 `remote_load`（结果是 tile、不写 GM）以及写入普通 `Tensor` 的 `tile.store` **不是**发布
 写 —— 完全不插标记。
 
 ## 算法 —— 一趟结构遍历，无流状态
 
-两条规则都是纯局部的，因此本 pass **不带**任何控制流状态（无 `pending` 布尔、无 `if`/循环
-分析、无 notify 分类）：
+本 pass **不带**任何控制流状态（无 `pending` 布尔、无 `if`/循环分析、无 notify 分类）：
 
 - 每个**本地发布写**处追加 `region cacheinvalid; fence`；
+- 每个**远端发布写**（`remote_store` / `put`）处只追加 `fence`（peer 区域 cacheinvalid 由 codegen 发,见下）；
 - 每个 **wait** 处追加 `cacheinvalid()`；
-- **notify** 与**远端写**保持不动。
+- **notify** 保持不动。
 
 `if`/`for`/`while` 的 body 正常递归访问；唯一的特殊处理是包裹裸单语句 body（作为 `if`/`for`
 唯一 body、且无外层 `SeqStmts` 的写/wait），使其标记也能落上。由于两条规则都是局部且只追加，
@@ -123,13 +120,18 @@ cacheinvalid，都会被识别且**不重复插入**，故本 pass 幂等。
 
 ## 与 Codegen 的关系
 
-`remote_store` 与 `put` 的 codegen 各自在 store 之后发一条自己的 peer 区域
-`pto.cmo.cacheinvalid` + GM `pto.fence.barrier_all`（peer 偏移只有在这里才知道）—— 即远端写的
-data-before-signal 释放标记，落在正确的 peer 地址上。`put` 额外在 TPUT 与其 cacheinvalid **之间**
-保留一条尾部 `pto.barrier <PIPE_ALL>`：TPUT 是 DMA，GM fence 只排序内存、并不 drain 发起 DMA 的
-MTE 管线，缺这条 barrier 时后面的 notify 可能在（原子）TPUT 真正落到 peer 之前就发出 ——
-`test_l3_put` 的 atomic-add / 子区域用例在真机上会 flaky（PTOAS#872 的 workaround，待 PTOAS 自行
-drain tput 后移除）。TPUT/TGET 的**前置**屏障与 TGET 的**尾部**屏障同样保留不动。
+`remote_store` 与 `put` 的 codegen 各自在 store 之后发一条 peer 区域
+`pto.cmo.cacheinvalid <peer_view>`（peer 偏移只有在这里才知道、且**目前无法在 IR 上表示** ——
+一种**规避手段**;配对的 GM fence 由本 pass 以 `system.fence` op 提供,所以这里**不**发 fence）。
+`put` 额外在 TPUT 与其 cacheinvalid **之间**保留一条尾部 `pto.barrier <PIPE_ALL>`：TPUT 是 DMA，
+GM fence 只排序内存、并不 drain 发起 DMA 的 MTE 管线，缺这条 barrier 时后面的 notify 可能在
+（原子）TPUT 真正落到 peer 之前就发出 —— `test_l3_put` 的 atomic-add / 子区域用例在真机上会
+flaky；且实测 MTE3 级 barrier 不够(只有 `PIPE_ALL` 稳)。PTOAS#872 的 workaround,待 PTOAS 自行
+drain tput 后移除。TPUT/TGET 的**前置**屏障与 TGET 的**尾部**屏障同样保留不动。
+
+**后续:** 远端写的 peer 区域 cacheinvalid 是唯一还留在 codegen(而非 IR op)的标记,因为 peer
+地址(`local_ptr + delems(peer)`)暂无 IR 表达。有了一等的 IR 表达后,InsertCommFence 就能像本地写
+那样拥有远端写的完整标记(cacheinvalid + fence)。
 
 ## 消费者
 
