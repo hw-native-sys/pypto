@@ -709,8 +709,28 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
     return std::nullopt;
   }
 
-  // Already L0-sized — nothing to do.
-  if (res.m == M && res.n == N && res.k == K) return std::nullopt;
+  // Already L0-sized.  Mat-fed matmuls need nothing.  A Vec-resident LHS still
+  // needs an explicit Vec→Mat ``tile.move`` so ExpandMixedKernel sees a
+  // ``CollectCVBoundaryMoves`` handshake (same as the K-tiled PV pattern).
+  // Without it InferTileMemorySpace inserts Vec→Left directly; on A5 the V→C
+  // ND→NZ adapt can then share the cast buffer and silently mis-transfer
+  // (prefill_indexer Hadamard / fused cast→matmul Left).
+  if (res.m == M && res.n == N && res.k == K) {
+    if (lhs_tile->GetMemorySpace() != MemorySpace::Vec) return std::nullopt;
+    MatmulTiling t;
+    t.assign = assign;
+    t.lhs = lhs;
+    t.rhs = rhs;
+    t.stage_lhs_to_mat = true;
+    t.acc_init = acc_var;
+    t.M = M;
+    t.N = N;
+    t.K = K;
+    t.m = M;
+    t.n = N;
+    t.k = K;
+    return t;
+  }
 
   if (!res.perf_hint.empty()) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-008",
@@ -747,6 +767,25 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
       << "); dbC=2 requires the full-K emitter";
   t.double_buffer_c = res.double_buffer_c;
   return t;
+}
+
+/// Stage-only rewrite for an already-L0-sized matmul whose LHS is Vec: insert
+/// ``tile.move``→Mat and rewrite the matmul to consume the Mat tile.  No K/M/N
+/// tiling — BuildKLoopRewrite requires ``k < K``.
+std::pair<std::vector<StmtPtr>, VarPtr> BuildStageOnlyVecLhs(const MatmulTiling& t) {
+  INTERNAL_CHECK_SPAN(t.stage_lhs_to_mat && t.m == t.M && t.n == t.N && t.k == t.K, t.assign->span_)
+      << "Internal error: BuildStageOnlyVecLhs expects full-size Vec→Mat staging";
+  const Span& sp = t.assign->span_;
+  const std::string& base = t.assign->var_->name_hint_;
+  std::vector<StmtPtr> out;
+  auto lhs_mat = BuildMoveToMat(t.lhs, base + "_l0_lmat", sp);
+  out.push_back(lhs_mat);
+  auto& reg = OpRegistry::GetInstance();
+  ExprPtr call = t.is_acc() ? reg.Create("tile.matmul_acc", {t.acc_init, lhs_mat->var_, t.rhs}, sp)
+                            : reg.Create("tile.matmul", {lhs_mat->var_, t.rhs}, sp);
+  auto cvar = std::make_shared<Var>(base, call->GetType(), sp);
+  out.push_back(std::make_shared<AssignStmt>(cvar, call, sp));
+  return {std::move(out), cvar};
 }
 
 /// Per-output-sub-tile origin offset ``base + delta``.  Folds the common
@@ -1487,9 +1526,18 @@ class AutoTileMutator : public IRMutator {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
         if (auto tiling = AnalyzeMatmul(assign, hints)) {
           if (!tiling->needs_mn_tiling()) {
-            // Whole output fits L0c — tile K only.  k < K here (k == K with
-            // m == M, n == N would be already-L0-sized and skipped above); the
-            // chooser may return a non-divisor k that BuildKLoopRewrite peels.
+            // Whole output fits L0c.  k == K is the already-L0 Vec-LHS stage-only
+            // path (Mat LHS returns nullopt from AnalyzeMatmul); k < K tiles K
+            // (chooser may return a non-divisor k that BuildKLoopRewrite peels).
+            if (tiling->k == tiling->K) {
+              INTERNAL_CHECK_SPAN(tiling->stage_lhs_to_mat, tiling->assign->span_)
+                  << "Internal error: full-K L0-sized rewrite expects Vec→Mat staging";
+              auto [stmts, ret] = BuildStageOnlyVecLhs(*tiling);
+              remap[assign->var_.get()] = ret;
+              for (auto& s : stmts) out.push_back(std::move(s));
+              changed = true;
+              continue;
+            }
             INTERNAL_CHECK_SPAN(tiling->k < tiling->K, tiling->assign->span_)
                 << "Internal error: K-only tiling expects k < K (K=" << tiling->K << ", k=" << tiling->k
                 << ")";

@@ -460,6 +460,12 @@ void BindPass(nb::module_& m) {
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"
              "E.g., tile [A, B, C] becomes [A*B, C]. Only converts 3D+ tiles.");
+  passes.def("legalize_tile_cast", &pass::LegalizeTileCast,
+             "Expand hardware-unsupported tile.cast pairs into native cast chains\n\n"
+             "Rewrites each non-native tile.cast into the shortest sequence of\n"
+             "pto.tcvt-supported casts for the active backend (A5 / A2A3).\n"
+             "Prefer same byte-width→float then adjust width (e.g. A5 INT32→FP16\n"
+             "becomes INT32→FP32→FP16). Already-native casts are left untouched.");
   passes.def("auto_tile_matmul_l0", &pass::AutoTileMatmulL0,
              "Create a pass that auto-tiles Mat-resident tile.matmul / tile.matmul_acc into a\n"
              "C-stationary K-loop\n\n"

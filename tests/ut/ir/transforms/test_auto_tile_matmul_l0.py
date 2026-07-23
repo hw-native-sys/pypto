@@ -477,6 +477,55 @@ class TestAutoTileMatmulL0KOnly:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_already_l0_sized_vec_lhs_staged_to_mat(self):
+        """Already-L0-sized gemm with a Vec LHS still gets a Vec→Mat stage.
+
+        ChooseL0Tile returns (M, N, K) so there is no K/M/N tiling, but the
+        fused-attention / cast→matmul Left path still needs an explicit
+        ``tile.move`` so ExpandMixedKernel sees a CV boundary (same as the
+        K-tiled PV pattern).  Without it InferTileMemorySpace inserts
+        Vec→Left directly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                lhs_vec: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(lhs, [0, 0], [64, 64])
+                rhs_mat: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[64, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                lhs_vec: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(lhs, [0, 0], [64, 64])
+                rhs_mat: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                )
+                lhs_mat: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.move(
+                    lhs_vec, target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_pass_idempotent(self):
         """Running the pass twice produces the same result as running it once.
 

@@ -193,6 +193,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp
+    src/ir/transforms/legalize_tile_cast_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/resolve_backend_op_layouts_pass.cpp
