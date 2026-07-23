@@ -97,14 +97,36 @@ dsa_export_dir="build/dsa-corpus")`。
 并优先保证覆盖率：它先根据
 已解析的 memory space 推导抽象 source/destination route，再对所有生命周期可复用的
 allocation pair 比较每种执行资源上的终止访问 frontier 和初始写
-frontier，并覆盖嵌套控制流和跨一次循环回边的交接。逻辑 SSA 可达性只作为证据保留，
-不被当作异步访问已经完成的证明。partial view 和同一操作内部的交接会被记录，但不会
-定价。实验性的 v3 promotion policy 会把符合条件的 cross-resource 记录聚合成单位
-权重 pair edge；same-resource，以及访问范围、操作 alias、结构化控制流或顺序语义
-不确定的记录只用于报告。
+frontier，并覆盖嵌套控制流和跨一次循环回边的交接。每个抽象执行资源被建模为一条
+按完成顺序发射的链；真实 SSA def-use 也是已有的完成依赖，而单纯的词法顺序不是。
+对于嵌套访问，分析会在最近的共同外层 region 中用其代表语句检查该依赖，因此
+`if`/loop 的结果在外部被消费时不会被误判为独立访问。初始 frontier 是这些关系下
+所有极小访问组成的 antichain，而不是词法上的第一次访问。
+partial view 和同一操作内部的交接会被记录，但不会定价。实验性的 v4 policy 先把
+符合条件的 cross-resource 记录聚合为每个 buffer pair 一条 soft edge，再通过独立的
+实验性模型赋予单位权重。结构化控制流内部完整的 distance-zero 交接可以构造 edge；
+这覆盖了设备实验中观察到的嵌套 M-to-MTE1 机制。same-resource、loop-carried、
+partial-range、同一操作、访问集合不完整、使用保守初始锚点或已有完成依赖的记录仍
+只用于报告。
 operation registry 中的 effect 会区分执行期访问、纯声明和仅修改元数据的 view；
 会修改数据的 inherit-input 操作以及 tuple 输出仍会进入 access frontier。
-权重标定属于独立建模问题。
+权重标定属于独立建模问题。该实现是在 PyPTO 阶段对“maximal access 到 first
+write” hazard 构造的近似：PyPTO 尚不具备 PTOAS 最终的 completion stream、已经插入
+的同步以及经标定的 stream-pair cost，因此不声称达到 post-scheduling vector-clock
+实现的精度。若目标在同一抽象资源中包含多个可独立完成的 channel，必须先拆分该
+资源，才能安全地构造 penalty edge。
+
+构造过程是确定性的：
+
+1. 收集每个物理 allocation 的执行期读写，并解析 tuple 结果、会修改数据的操作、
+   base allocation 和 byte range。
+2. 将每次访问映射到抽象 source/destination route 和执行资源。
+3. 保留极大的终止访问和完整的极小初始访问 antichain。只有所有极小访问都是已验证
+   写入时才能构造 edge；否则 candidate 只用于报告。
+4. 比较同一地址空间内生命周期不相交的 allocation，并覆盖兼容的嵌套控制流和显式的
+   distance-one 循环交接。
+5. 为每个 candidate 记录 WAR/WAW、route、range、控制流和顺序证据。只有完整、
+   full-range、distance-zero 的 cross-resource 证据会构造 pair edge；权重在之后赋值。
 
 对于受控 placement 实验，`dsa_reference_placement=COMPACT` 标记正常且已验证的
 DSA 结果；`LOOSE` 在不超过容量的前提下贪心减少物理地址复用。
@@ -163,10 +185,11 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    `external`、`UB`、`L1`、`L0` memory class 映射到抽象传输或计算资源，再针对所有
    lifetime 可复用 pair 比较 access frontier，并保留精确 arena、control path、loop 和
    byte range 上下文。末端读写后若出现首次写入，就记录 WAR 或 WAW candidate；SSA
-   reachability 只作为 evidence 保留，不能证明异步访问已经完成。实验性 v3 policy
-   只把信息完整、flat、cross-resource 的 candidate 转换成单位权重 `cross_pipe`
-   schema edge。same-resource、nested、loop-carried、partial-range 和不确定的 candidate
-   仅记录而不定价。
+   def-use 和同一资源的发射顺序属于已有完成依赖，而词法顺序本身不是。实验性 v4
+   policy 只把信息完整、full-range、distance-zero、cross-resource 的 candidate
+   转换成单位权重 `cross_pipe` schema edge。嵌套的 distance-zero candidate 可以构造
+   edge；same-resource、loop-carried、partial-range、使用保守初始锚点和不确定的
+   candidate 仅记录而不定价。
 7. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
    PyPTO-structured search。若未找到 capacity-fitting placement，则只删除
    `pipeline_stage` reason，保留所有 correctness reason，增加单位

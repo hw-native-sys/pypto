@@ -105,16 +105,46 @@ is the only enabled research mode and prioritizes coverage: it derives abstract
 source/destination routes from resolved
 memory spaces, then compares per-resource terminal-access and initial-write
 frontiers for all lifetime-compatible allocation pairs, including nested and
-distance-one loop handoffs. Logical SSA reachability is retained as evidence;
-it is not treated as proof that an asynchronous access completed. Partial-view
-and same-operation handoffs are reported but remain unpriced. The experimental
-v3 promotion policy aggregates qualifying cross-resource records into
-unit-weight pair edges. Same-resource records and records with uncertain range,
-operation-alias, structured-control, or ordering semantics remain report-only.
+distance-one loop handoffs. Each abstract resource is modeled as one
+completion-ordered issue chain. Real SSA def-use is also an existing completion
+dependency; for nested accesses it is tested through their representatives in
+the nearest common enclosing region, so an `if`/loop result consumed afterward
+is not mistaken for an independent access. Bare lexical statement order is not.
+The initial frontier is the complete antichain of accesses minimal under those
+relations, rather than the lexically first access. Partial-view and
+same-operation handoffs are reported
+but remain unpriced. The experimental v4 policy first constructs one soft edge
+per qualifying cross-resource buffer pair, then applies a separate experimental
+unit-weight model. Complete distance-zero handoffs inside structured control
+are eligible; this covers the nested M-to-MTE1 mechanism observed in device
+experiments. Same-resource, loop-carried, partial-range, same-operation,
+incompletely observed, conservatively anchored, and already completion-ordered
+records remain report-only.
 Operation-registry effects distinguish execution-time accesses from declarations
 and metadata-only views; mutating inherit-input operations and tuple outputs
 remain visible to the access frontier. Weight calibration is a separate modeling
-step.
+step. This is a PyPTO-stage approximation of maximal-access-to-first-write
+hazard construction: PyPTO does not yet have PTOAS's final completion streams,
+pre-existing inserted synchronizations, or calibrated stream-pair costs, so it
+does not claim the vector-clock precision of a post-scheduling implementation.
+Targets with multiple independently completing channels for one abstract
+resource will require that resource to be split before promotion.
+
+The construction is deterministic:
+
+1. Collect execution-time reads and writes for each physical allocation,
+   resolving tuple results, mutating operations, base allocations, and byte
+   ranges.
+2. Map each access to an abstract source/destination route and execution
+   resource.
+3. Retain maximal terminal accesses and the complete minimal initial-access
+   antichain. Require every minimal access to be a verified write; otherwise
+   keep the candidate report-only.
+4. Compare lifetime-disjoint allocations in the same address space, including
+   compatible nested control and explicit distance-one loop handoffs.
+5. Record every candidate with its WAR/WAW, route, range, control, and ordering
+   evidence. Construct a pair edge only from complete, full-range,
+   distance-zero cross-resource evidence; assign its weight afterward.
 
 For controlled placement studies, `dsa_reference_placement=COMPACT` labels the
 normal validated DSA result, while `LOOSE` greedily reduces physical reuse
@@ -187,10 +217,12 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    compares access frontiers for all lifetime-compatible pairs while preserving
    exact arenas, control-path, loop, and byte-range context. A terminal
    read or write followed by an initial write becomes a WAR or WAW candidate;
-   SSA reachability is retained as evidence rather than treated as asynchronous
-   completion. The experimental v3 policy promotes only complete, flat,
-   cross-resource candidates to unit `cross_pipe` schema edges. Same-resource, nested,
-   loop-carried, partial-range, and uncertain candidates remain report-only.
+   same-resource issue order and real SSA def-use are existing completion
+   dependencies, while lexical order alone is not. The experimental v4 policy
+   promotes only complete, full-range, distance-zero cross-resource candidates
+   to unit `cross_pipe` schema edges. Nested distance-zero candidates are
+   eligible; same-resource, loop-carried, partial-range, conservatively
+   anchored, and uncertain candidates remain report-only.
 7. Validate the strict schema/profile and try deterministic first-fit followed
    by bounded PyPTO-structured search. If no capacity-fitting placement is
    found, remove only the `pipeline_stage` reason, retain every correctness

@@ -1388,6 +1388,28 @@ def _dsa_nested_control_program():
     return passes.init_mem_ref()(Before)
 
 
+def _dsa_nested_cross_resource_program():
+    """A distance-zero cross-resource handoff inside a loop is an edge."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def nested_cross_resource(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            for _i in pl.range(1):
+                tile_a = pl.load(input_a, [0, 0], [64, 64])
+                _consumed = pl.add(tile_a, tile_a)
+                _later = pl.load(input_b, [0, 0], [64, 64])
+            result: pl.Tile[[64, 64], pl.FP32] = pl.tile.full([64, 64], dtype=pl.FP32, value=2.0)
+            return pl.store(result, [0, 0], output)
+
+    return passes.init_mem_ref()(Before)
+
+
 def _dsa_opposite_branch_loop_program():
     """Opposite branches can execute in consecutive loop iterations."""
 
@@ -1450,6 +1472,31 @@ def _dsa_assemble_hazard_program():
     return passes.init_mem_ref()(Before)
 
 
+def _dsa_cross_space_assemble_program():
+    """Acc-to-Mat assemble has one L0-to-L1 execution route."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cross_space_assemble(
+            self,
+            target_input: pl.Tensor[[16, 16], pl.FP32],
+            lhs: pl.Tensor[[16, 16], pl.BF16],
+            rhs: pl.Tensor[[16, 16], pl.BF16],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            target = pl.load(target_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs_l1 = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs_l1 = pl.load(rhs, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs_l0 = pl.move(lhs_l1, target_memory=pl.Mem.Left)
+            rhs_l0 = pl.move(rhs_l1, target_memory=pl.Mem.Right)
+            source = pl.matmul(lhs_l0, rhs_l0)
+            assembled = pl.tile.assemble(target, source, [0, 0])
+            return pl.store(assembled, [0, 0], output)
+
+    return passes.init_mem_ref()(Before)
+
+
 def _dsa_tuple_result_hazard_program():
     """Tuple elements written by one operation are physical DSA accesses."""
 
@@ -1497,6 +1544,32 @@ def _dsa_no_access_definition_program():
     return passes.init_mem_ref()(Before)
 
 
+def _dsa_branch_initial_writes_program():
+    """Both branch writers are minimal definitions of the if-phi allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def branch_initial_writes(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            cond: pl.Scalar[pl.BOOL],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            if cond:
+                loaded: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                selected = pl.yield_(loaded)
+            else:
+                filled: pl.Tile[[64, 64], pl.FP32] = pl.tile.full([64, 64], dtype=pl.FP32, value=1.0)
+                selected = pl.yield_(filled)
+            _consumed = pl.add(selected, selected)
+            later = pl.load(input_b, [0, 0], [64, 64])
+            return pl.store(later, [0, 0], output)
+
+    return passes.init_mem_ref()(Before)
+
+
 @requires_dsa
 def test_dsa_quadratic_reuse_recognizer_exports_cross_resource_edges(tmp_path):
     """The coverage recognizer finds adjacent and non-adjacent handoffs."""
@@ -1516,15 +1589,16 @@ def test_dsa_quadratic_reuse_recognizer_exports_cross_resource_edges(tmp_path):
     assert document["problem"]["objective"]["terms"] == [
         "capacity_overflow",
         "reuse_cost",
-        "total_peak",
-        "max_peak",
     ]
     assert document["metadata"]["recognized_reuse_penalties"] == str(len(expected_pairs))
     assert int(document["metadata"]["recognized_reuse_candidates"]) >= len(expected_pairs)
     assert int(document["metadata"]["recognized_cross_resource_candidates"]) >= len(expected_pairs)
     assert int(document["metadata"]["recognized_write_after_read_candidates"]) >= len(expected_pairs)
     assert document["metadata"]["recognized_nested_control_candidates"] == "0"
-    assert document["metadata"]["reuse_penalty_promotion_policy"] == "cross_resource_unit_v3"
+    assert document["metadata"]["recognized_reuse_edges"] == str(len(expected_pairs))
+    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_pair_v4"
+    assert document["metadata"]["reuse_penalty_weight_model"] == "unit_v1"
+    assert document["metadata"]["reuse_penalty_promotion_policy"] == "cross_resource_pair_unit_v4"
     assert "external->ub@inbound_dma" in document["metadata"]["recognized_reuse_candidate_records_v3"]
 
     solution = json.loads((export_dir / "pypto_reuse_recognizer.dsa.solution.json").read_text())
@@ -1551,6 +1625,21 @@ def test_dsa_quadratic_recognizer_records_tile_assemble_write(tmp_path):
     records = document["metadata"]["recognized_reuse_candidate_records_v3"]
     assert "ub->ub@vector_compute=>external->ub@inbound_dma" in records
     assert "write_after_write" in records
+
+
+@requires_dsa
+def test_dsa_quadratic_recognizer_classifies_acc_to_mat_assemble(tmp_path):
+    """An in-place Mat target must not hide the Acc-to-Mat transfer route."""
+    _allocate_with_dsa(
+        _dsa_cross_space_assemble_program(),
+        str(tmp_path),
+        reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
+    )
+
+    document = json.loads((tmp_path / "pypto_cross_space_assemble.dsa.json").read_text())
+    routes = set(document["metadata"]["recognized_access_routes_v1"].split(";"))
+    assert "l0->l1@l0_to_l1" in routes
+    assert document["metadata"]["reuse_penalty_partially_supported_allocations"] == "0"
 
 
 @requires_dsa
@@ -1585,6 +1674,29 @@ def test_dsa_quadratic_recognizer_ignores_no_access_definitions(tmp_path):
 
 
 @requires_dsa
+def test_dsa_quadratic_recognizer_keeps_all_branch_initial_writes(tmp_path):
+    """Branch writers stay minimal while the post-if consumer dominates their inputs."""
+    _allocate_with_dsa(
+        _dsa_branch_initial_writes_program(),
+        str(tmp_path),
+        reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
+    )
+
+    document = json.loads((tmp_path / "pypto_branch_initial_writes.dsa.json").read_text())
+    records = document["metadata"]["recognized_reuse_candidate_records_v3"]
+    assert "external->ub@inbound_dma" in records
+    assert "ub->ub@vector_compute" in records
+    assert document["metadata"]["recognized_conservative_initial_anchor_candidates"] == "0"
+    # Buffer 0 is loaded inside the then branch and consumed after the if.
+    # Its terminal frontier must use that post-if vector consumer, represented
+    # by the enclosing IfStmt in the parent dependency graph; retaining the
+    # branch-local load would create an extra inbound-DMA handoff to buffer 3.
+    pair_0_3_records = [record for record in records.split(";") if record.startswith("0,3,")]
+    assert len(pair_0_3_records) == 1
+    assert "ub->ub@vector_compute=>external->ub@inbound_dma" in pair_0_3_records[0]
+
+
+@requires_dsa
 def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp_path):
     """Same-resource candidates remain report-only under the experimental v3 policy."""
     _allocate_with_dsa(
@@ -1605,12 +1717,14 @@ def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp
     assert document["metadata"]["recognized_reuse_candidate_records_v1"] == (
         "0,1,same_pipe,write_after_write,flat"
     )
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
+    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert document["metadata"].get("recognized_reuse_penalties", "0") == "0"
 
 
 @requires_dsa
 def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promoting_it(tmp_path):
-    """SSA reachability is retained as evidence, not mistaken for completion."""
+    """Real SSA def-use is an existing completion dependency."""
     export_dir = tmp_path / "quadratic"
     _allocate_with_dsa(
         _dsa_directly_ordered_handoff_program(),
@@ -1626,12 +1740,14 @@ def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promotin
         document["metadata"]["recognized_ordered_evidence_candidates"]
         == document["metadata"]["recognized_reuse_candidates"]
     )
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
+    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert "cost_model" not in document["problem"]
 
 
 @requires_dsa
 def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path):
-    """Transitive SSA order is reported while the async completion question remains open."""
+    """Transitive SSA def-use suppresses redundant reuse penalties."""
     _allocate_with_dsa(
         _dsa_transitively_ordered_handoff_program(),
         str(tmp_path),
@@ -1646,6 +1762,8 @@ def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path)
         document["metadata"]["recognized_ordered_evidence_candidates"]
         == document["metadata"]["recognized_reuse_candidates"]
     )
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
+    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert "cost_model" not in document["problem"]
 
 
@@ -1661,6 +1779,7 @@ def test_dsa_reuse_recognizer_does_not_invent_partial_view_pairs(tmp_path):
     document = json.loads((tmp_path / "pypto_partial_view.dsa.json").read_text())
     assert document["metadata"]["reuse_penalty_supported_allocations"] == "1"
     assert document["metadata"]["recognized_reuse_candidates"] == "0"
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert "cost_model" not in document["problem"]
 
 
@@ -1682,7 +1801,43 @@ def test_dsa_quadratic_recognizer_reports_nested_candidates_without_promoting_th
     assert document["metadata"]["recognized_loop_carried_candidates"] == "1"
     assert "distance_0" in document["metadata"]["recognized_reuse_candidate_records_v3"]
     assert "distance_1" in document["metadata"]["recognized_reuse_candidate_records_v3"]
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
+    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert "cost_model" not in document["problem"]
+
+
+@requires_dsa
+def test_dsa_quadratic_recognizer_constructs_nested_cross_resource_edge(tmp_path):
+    """A complete distance-zero nested handoff is a mechanically constructed edge."""
+    _allocate_with_dsa(
+        _dsa_nested_cross_resource_program(),
+        str(tmp_path),
+        reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
+    )
+
+    document = json.loads((tmp_path / "pypto_nested_cross_resource.dsa.json").read_text())
+    # The load feeding the vector consumer is not maximal: the consumer's
+    # vector access dominates it.  Consequently (0, 3) is correctly absent.
+    expected_edges = {(0, 2), (1, 2), (2, 3)}
+    edge_records = document["metadata"]["recognized_reuse_edge_records_v1"].split(";")
+    assert {
+        (int(fields[0]), int(fields[1])) for fields in (record.split(",") for record in edge_records)
+    } == expected_edges
+    assert all(record.endswith(",cross_resource,nested") for record in edge_records)
+    assert document["metadata"]["recognized_reuse_edges"] == str(len(expected_edges))
+    assert document["metadata"]["recognized_reuse_penalties"] == str(len(expected_edges))
+    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_pair_v4"
+    assert document["metadata"]["reuse_penalty_weight_model"] == "unit_v1"
+    penalties = document["problem"]["cost_model"]["reuse_penalties"]
+    assert {(entry["first"], entry["second"]) for entry in penalties} == expected_edges
+    assert all(entry["reason"] == "cross_pipe" and entry["cost"] == 1 for entry in penalties)
+    # Pair (0, 1) has a cross-resource distance-one candidate, but no
+    # qualifying distance-zero record. Loop-carried evidence stays report-only.
+    assert (
+        "0,1,1->0,ub->ub@vector_compute=>external->ub@inbound_dma"
+        in document["metadata"]["recognized_reuse_candidate_records_v3"]
+    )
+    assert (0, 1) not in expected_edges
 
 
 @requires_dsa
@@ -1747,6 +1902,7 @@ def test_dsa_quadratic_recognizer_keeps_opposite_branches_across_iterations(tmp_
     document = json.loads((tmp_path / "pypto_opposite_branch_loop.dsa.json").read_text())
     assert int(document["metadata"]["recognized_loop_carried_candidates"]) >= 1
     assert "distance_1" in document["metadata"]["recognized_reuse_candidate_records_v3"]
+    assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert "cost_model" not in document["problem"]
 
 
