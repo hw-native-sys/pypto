@@ -54,15 +54,17 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 
 // Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
 //
-// The ring kernel uses a pull model (TLOAD/TSTORE) where each rank reads from
-// the left neighbor via remote LDMA and writes locally via STR.  The publish
-// fence follows the PTOAS fence.barrier_all pattern (pipe drain + dsb) with
-// the dsb(DSB_DDR) coupled directly to TNOTIFY: after the TSTORE tiling loop
-// completes, pipe_barrier(PIPE_ALL) drains the local pipes, then RoundBarrier's
-// internal dsb(DSB_DDR) commits the DDR writes before the HCCL notification
-// reaches the peer.  On the reader side, pipe_barrier(PIPE_MTE2) after TWAIT
-// ensures the caller's subsequent TLOAD enqueues fresh reads rather than
-// draining pipeline-buffered stale reads first.
+// Follows the InsertCommFence (PR #2076) memory consistency contract for
+// ptoas 0.50.  After the caller drains its TSTORE tile loop with
+// pipe_barrier(PIPE_ALL), RoundBarrier:
+//   1. dsb(DSB_DDR) — commit all prior DDR writes (equivalent to
+//      pto.fence.barrier_all after the caller already drained pipes).
+//   2. TNOTIFY(writer's signal slot = 1) — signal all peers.
+//   3. TWAIT(every peer's slot >= 1) — wait for peers.
+//   4. dcci(ENTIRE_DATA_CACHE) — invalidate the reader's data cache so
+//      the subsequent TLOAD fetches the peer's committed writes from DDR
+//      rather than stale cached data.
+//   5. pipe_barrier(PIPE_ALL) — drain MTE2+MTE3+FIX pipes.
 //
 // Future optimisation: once the kernel is rewritten to use a push model
 // (remote write via TPUT instead of remote read via TLOAD), the barrier can
@@ -87,6 +89,7 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
     pto::comm::Signal sig(signal_row + peer);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
+  dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
   pipe_barrier(PIPE_MTE2);
   pipe_barrier(PIPE_ALL);
 }
@@ -194,6 +197,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
+    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_add_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Phase 2: allgather — (NR-1) ring steps.
@@ -231,6 +235,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
+    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Final cross-rank barrier: guarantee every rank has finished reading from
