@@ -245,6 +245,14 @@ tracking) is all produced by `split_axis::ProcessStmts` / `ProcessStmt` —
 documented in detail in the shared machinery; the same facts are exercised by
 `tests/ut/ir/transforms/test_lower_auto_vector_split.py`.
 
+Automatic halving rejects the root generators `tile.ci` and `tile.random` when
+their split dimension is non-singleton. Their generated values depend on
+position, so changing only the result type is insufficient: a correct rewrite
+also needs lane-specific shape and generator state. Move the operation outside
+the split region, or author an explicit half-width call with lane-specific
+state. Singleton split dimensions and already-half-width explicit-boundary
+regions remain unchanged.
+
 ## The affinity gate
 
 Only **vector** work is halved; cube work stays full. Affinity is decided by

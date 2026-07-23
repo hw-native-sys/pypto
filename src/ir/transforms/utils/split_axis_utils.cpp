@@ -87,6 +87,10 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
   return false;
 }
 
+bool IsUnsupportedAutoSplitGenerator(const CallPtr& call) {
+  return IsOp(call, "tile.ci") || IsOp(call, "tile.random");
+}
+
 // Half-dim computation. Throws on odd ConstInt because silently floor-dividing
 // odd dims would drop data, and reliably padding the box requires
 // producer/consumer/slot-size co-ordination that lives outside this pass.
@@ -553,6 +557,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         if (IsSingletonDim(tt->shape_[result_split_dim])) {
           return stmt;
         }
+        CHECK_SPAN(!IsUnsupportedAutoSplitGenerator(call), call->span_)
+            << "SplitVectorKernel: automatic split-axis halving of '" << op_name
+            << "' is not supported because its generated values depend on position. Move the operation "
+               "outside the split region, or author an explicit half-width call with lane-specific "
+               "generator state.";
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[result_split_dim]);
 
         // tile.reshape or tile.reinterpret_view lifts a full (un-split) source

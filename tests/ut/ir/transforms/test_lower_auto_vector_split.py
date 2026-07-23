@@ -43,11 +43,11 @@ where the numerics are checked against torch.
 
 The per-op vector halving tests (load / slice / reshape / store offset /
 singleton / loop tracking / reduce-on-split-axis throw) were migrated here from
-``test_split_vector_kernel.py``: those facts are produced by the shared
-``split_axis::ProcessStmts`` machinery, which SplitVectorKernel's deleted per-op
-halving driver and this pass both call. The new pass routes each VECTOR-affine
-leaf statement through that same machinery, so the halving is identical (Stage 1
-proved byte-identity); only the entry point changed.
+``test_split_vector_kernel.py``; generator rejection is also covered here. Those
+facts are produced by the shared ``split_axis::ProcessStmts`` machinery, which
+SplitVectorKernel's deleted per-op halving driver and this pass both call. The new
+pass routes each VECTOR-affine leaf statement through that same machinery, so the
+halving is identical (Stage 1 proved byte-identity); only the entry point changed.
 """
 
 import pytest
@@ -75,6 +75,12 @@ def _tensor(shape):
 def _lower(program):
     with passes.PassContext([]):
         return passes.lower_auto_vector_split()(program)
+
+
+def _split_root_generator(op_name, shape, span):
+    if op_name == "tile.ci":
+        return T.ci(0, shape, dtype=DataType.INT32, span=span)
+    return T.random(1, 2, 3, 4, 5, 6, shape, span=span)
 
 
 def _incore_program(params, stmts, return_types, *, mode=ir.SplitMode.UP_DOWN, name="split_auto"):
@@ -900,6 +906,64 @@ def test_singleton_broadcast_tile_preserved():
             ir.ReturnStmt([e_out_store], span),
         ],
         [e_out.type],
+        mode=ir.SplitMode.UP_DOWN,
+        sub=sub,
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+
+
+@pytest.mark.parametrize(
+    ("op_name", "mode", "shape"),
+    [
+        pytest.param("tile.ci", ir.SplitMode.LEFT_RIGHT, [1, 64], id="ci-left-right"),
+        pytest.param("tile.random", ir.SplitMode.UP_DOWN, [128, 64], id="random-up-down"),
+        pytest.param("tile.random", ir.SplitMode.LEFT_RIGHT, [128, 64], id="random-left-right"),
+    ],
+)
+def test_position_dependent_root_generator_auto_halving_rejected(op_name, mode, shape):
+    """Root generators need lane-specific position state, not just a halved result type.
+
+    NEGATIVE test: a rejected transform produces no ``After`` IR, so
+    Before-After-Expected does not apply.
+    """
+    span = ir.Span.unknown()
+    generator = _split_root_generator(op_name, shape, span)
+    value = ir.Var("value", generator.type, span)
+    program = _incore_program(
+        [],
+        [ir.AssignStmt(value, generator, span), ir.ReturnStmt([value], span)],
+        [generator.type],
+        mode=mode,
+    )
+
+    with pytest.raises(ValueError, match="automatic split-axis halving") as exc_info:
+        _lower(program)
+    assert op_name in str(exc_info.value)
+
+
+@pytest.mark.parametrize("op_name", ["tile.ci", "tile.random"])
+def test_position_dependent_root_generator_singleton_split_dim_preserved(op_name):
+    """A singleton split dimension requires no generator-state rewrite."""
+    span = ir.Span.unknown()
+    generator = _split_root_generator(op_name, [1, 64], span)
+    value = ir.Var("value", generator.type, span)
+    program = _incore_program(
+        [],
+        [ir.AssignStmt(value, generator, span), ir.ReturnStmt([value], span)],
+        [generator.type],
+        mode=ir.SplitMode.UP_DOWN,
+    )
+
+    sub = _sub_var()
+    expected_generator = _split_root_generator(op_name, [1, 64], span)
+    expected_value = ir.Var("value", expected_generator.type, span)
+    expected = _expected_incore(
+        [],
+        [
+            ir.AssignStmt(expected_value, expected_generator, span),
+            ir.ReturnStmt([expected_value], span),
+        ],
+        [expected_generator.type],
         mode=ir.SplitMode.UP_DOWN,
         sub=sub,
     )

@@ -198,6 +198,11 @@ result = passes.lower_auto_vector_split()(program)
 `split_axis::ProcessStmts` / `ProcessStmt` 产生；同样的事实由
 `tests/ut/ir/transforms/test_lower_auto_vector_split.py` 验证。
 
+当拆分维不是单元素维时，自动折半会拒绝根生成器 `tile.ci` 和 `tile.random`。它们的
+生成值依赖位置，因此仅修改结果类型并不充分；正确改写还需要按 lane 调整 shape 与生成器
+状态。请将算子移到拆分区域之外，或显式编写带各 lane 专属状态的半宽调用。单元素拆分维与
+已有显式边界的半宽区域仍保持不变。
+
 ## 亲和性门控
 
 仅折半**向量**工作，cube 工作保持全尺寸。亲和性由
