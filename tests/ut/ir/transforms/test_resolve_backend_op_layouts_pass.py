@@ -443,6 +443,42 @@ class TestResolveBackendOpLayouts:
         After = _run_pass_without_backend(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_partial_valid_column_vector_repair_round_trips(self):
+        """A PARTIAL-valid ``[N, 1]`` column vector repaired through ``[1, N] row_major`` must
+        print->parse round-trip.
+
+        Regression for the reshape ``valid_shape`` drop: ``tile.reshape`` inferred a fully-valid
+        result (``valid_shape = new_shape``), discarding the input's partial valid. The pass restores
+        the original result view (``[3, 1]``) onto the repaired result var, so the reshape call's
+        inferred type (full) disagreed with the var's declared type (``[3, 1]``) — an internal
+        inconsistency the printer emits as the var annotation and the parser then re-derives, so
+        ``assert_structural_equal(After, parse(print(After)))`` failed at ``.value.type``. The fix
+        propagates the input valid through the vector reshape (``[3, 1] -> [1, 3] -> [3, 1]``).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                data: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, 0], [16, 256])
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                part: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)  # full-valid [16,1]
+                # A PARTIAL-valid [16,1] column vector (valid [3,1]) fed to a row-major-required op.
+                sl: pl.Tile[[16, 1], pl.FP32] = pl.slice(chunk, [16, 1], [0, 0], valid_shape=[3, 1])
+                upd: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(sl, part)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(upd, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        # The repaired IR must survive a print -> parse -> structural-equality round-trip.
+        ir.assert_structural_equal(After, pl.parse(str(After)))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
