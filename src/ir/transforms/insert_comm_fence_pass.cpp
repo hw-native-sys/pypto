@@ -338,6 +338,12 @@ class InsertCommMarkers : public IRMutator {
 Pass InsertCommFence() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
     if (!func || !func->body_) return func;
+    // The data-before-signal contract is an InCore-only concern: the publishing
+    // writes, waits, and the system.cacheinvalid / system.fence markers are
+    // InCore GM builtins. Orchestration / HOST functions only dispatch tasks —
+    // their cross-function calls are not GM publishing writes, and inserting an
+    // InCore builtin there is rejected by orchestration codegen.
+    if (!IsInCoreType(func->func_type_)) return func;
     InsertCommMarkers mutator;
     auto new_body = mutator.MarkTopLevel(func->body_);
     if (new_body.get() == func->body_.get()) return func;

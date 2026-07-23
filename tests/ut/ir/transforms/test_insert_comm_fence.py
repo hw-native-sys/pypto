@@ -556,6 +556,28 @@ def test_bare_barrier_notify_no_marker():
     ir.assert_structural_equal(_apply(Before), Before)
 
 
+def test_orchestration_function_untouched():
+    # The data-before-signal contract is InCore-only. An Orchestration function
+    # dispatches tasks via cross-function calls; those are not GM publishing
+    # writes, and inserting an InCore system.cacheinvalid there is rejected by
+    # orchestration codegen. The pass must leave such functions unchanged.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def worker(self, x: pl.Tensor[[1, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.FP32]]):
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, x: pl.Tensor[[1, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.FP32]]):
+            self.worker(x, out)
+
+    After = _apply(Before)
+    # The Orchestration `orch` must be byte-for-byte unchanged (no markers); the
+    # InCore `worker` (a plain store, not window-bound) is also unchanged.
+    ir.assert_structural_equal(After, Before)
+
+
 def test_opaque_cross_function_call_gets_whole_gm_marker():
     # A call to a user function is an opaque publishing write: its body is not
     # analysed here and it has no single addressable region, so the pass emits a
