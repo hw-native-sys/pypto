@@ -19,7 +19,7 @@ import warnings
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, codegen, ir
+from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -1897,6 +1897,95 @@ class TestSetValidShapeCodegen:
                 f"pto.set_validshape source tile_buf type must be dynamic "
                 f"(v_row=?, v_col=?); got line:\n{line}\n\nfull MLIR:\n{mlir}"
             )
+
+    def test_set_validshape_materializes_static_reshape_view(self):
+        """A static-valid treshape view must be copied to a dynamic alloc_tile first."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 8], pl.FP32],
+                dst: pl.Tensor[[1, 8], pl.FP32],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                src_tile = pl.load(src, [0, 0], [8, 8])
+                narrowed = pl.set_validshape(src_tile, 1, 8)
+                tmp = pl.tile.create([8, 8], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                reduced = pl.row_sum(narrowed, tmp)
+                row_view = pl.reshape(reduced, [1, 8])
+                scalar = pl.set_validshape(row_view, 1, 1)
+                return pl.store(scalar, [0, 0], dst)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+        func = next(f for f in optimized.functions.values() if f.name == "kernel")
+        mlir = codegen.PTOCodegen().generate(
+            ir.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        set_vs_lines = [line for line in mlir.splitlines() if "pto.set_validshape" in line]
+        assert len(set_vs_lines) == 2, f"expected the logical narrow and scalar set_validshape ops:\n{mlir}"
+        for line in set_vs_lines:
+            assert "v_row=?" in line and "v_col=?" in line, (
+                "set_validshape must receive a dynamic-valid alloc_tile source, "
+                f"not a static treshape view:\n{line}\n\nfull MLIR:\n{mlir}"
+            )
+
+        view_line = next((line for line in mlir.splitlines() if " = pto.treshape" in line), None)
+        assert view_line is not None, f"expected a treshape view in the reproducer:\n{mlir}"
+        view = view_line.strip().split(" = ", 1)[0]
+        materialize = next(
+            (
+                line
+                for line in mlir.splitlines()
+                if "pto.tmov" in line and f"ins({view}" in line and "outs(" in line
+            ),
+            None,
+        )
+        assert materialize is not None, (
+            f"static treshape view must be materialized before set_validshape:\n{mlir}"
+        )
+        assert "loc=vec" in materialize and "dtype=f32" in materialize, (
+            f"materialization must preserve memory space and dtype:\n{materialize}"
+        )
+
+    def test_inplace_op_preserves_reshape_ssa_static_valid_type(self):
+        """Reusing a reshape view must not rewrite its declaration-site type."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[8, 8], pl.FP32],
+                bias: pl.Tensor[[1, 64], pl.FP32],
+                dst: pl.Tensor[[1, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                src_tile = pl.load(src, [0, 0], [8, 8])
+                row_view = pl.reshape(src_tile, [1, 64])
+                bias_tile = pl.load(bias, [0, 0], [1, 64])
+                added = pl.add(row_view, bias_tile)
+                return pl.store(added, [0, 0], dst)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+        func = next(f for f in optimized.functions.values() if f.name == "kernel")
+        mlir = codegen.PTOCodegen().generate(
+            ir.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+
+        reshape_line = next(line for line in mlir.splitlines() if " = pto.treshape" in line)
+        view = reshape_line.strip().split(" = ", 1)[0]
+        add_line = next(line for line in mlir.splitlines() if "pto.tadd" in line)
+        assert f"outs({view} :" in add_line, f"expected the add to reuse the typed reshape SSA:\n{mlir}"
+        assert "v_row=1" in reshape_line and "v_col=64" in reshape_line
+        assert "v_row=1" in add_line and "v_col=64" in add_line, (
+            f"all uses of the reshape SSA must keep its static valid extents:\n{reshape_line}\n{add_line}"
+        )
 
     def test_set_validshape_updates_source_tile_and_aliases_result(self):
         """tile.set_validshape should mutate the source tile handle and alias the result to it."""

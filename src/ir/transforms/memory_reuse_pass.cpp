@@ -350,6 +350,32 @@ class TopDownRetargeter {
     return std::move(rewrites_);
   }
 
+  /// Coalesce an if-phi whose complete nested yield tree already denotes one
+  /// exact MemRef.  This is the address-less PTOAS form of a DPS update such
+  /// as:
+  ///
+  ///   if ...:
+  ///     dst = gather_row(dst, ...)
+  ///   else:
+  ///     if ...:
+  ///       dst = gather_row(dst, ...)
+  ///
+  /// InitMemRef makes every gather result reuse `dst`, but the intervening
+  /// IfStmt return_vars otherwise retain fresh MemRefs.  PTO codegen then has
+  /// no way to represent the phi except as Mat-to-Mat copies.  When every leaf
+  /// carries the *same MemRef region*, the phi is only an SSA name for that DPS
+  /// destination, so retyping each nested return_var onto it is exact and
+  /// copy-free.  Requiring the same allocation, byte range, and byte offset
+  /// deliberately excludes distinct subviews of one allocation; view-following
+  /// may legitimately clone otherwise-identical MemRef nodes.
+  std::map<VarPtr, TypePtr> CoalesceCommonMemRefIfPhis(const StmtPtr& func_body) {
+    DefMapVisitor def_v;
+    def_v.Run(func_body);
+    defs_ = std::move(def_v.defs);
+    VisitIfPhisForCommonMemRef(func_body);
+    return std::move(rewrites_);
+  }
+
  private:
   std::map<VarPtr, VarDef> defs_;
   std::map<VarPtr, TypePtr> rewrites_;
@@ -410,6 +436,73 @@ class TopDownRetargeter {
     } else if (auto scope = As<ScopeStmt>(stmt)) {
       VisitIfPhisForAccumulator(scope->body_);
     }
+  }
+
+  void VisitIfPhisForCommonMemRef(const StmtPtr& stmt) {
+    if (!stmt) return;
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) VisitIfPhisForCommonMemRef(s);
+    } else if (auto for_stmt = As<ForStmt>(stmt)) {
+      VisitIfPhisForCommonMemRef(for_stmt->body_);
+    } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      // Visit children first so all nested phis are independently planned;
+      // CommonYieldMemRef still traces the original def graph to the leaves,
+      // so correctness does not depend on traversal order.
+      VisitIfPhisForCommonMemRef(if_stmt->then_body_);
+      if (if_stmt->else_body_.has_value()) {
+        VisitIfPhisForCommonMemRef(if_stmt->else_body_.value());
+      }
+      if (!if_stmt->else_body_.has_value()) return;
+      for (const auto& rv : if_stmt->return_vars_) {
+        std::set<const Var*> visiting;
+        auto target = CommonYieldMemRef(rv, visiting);
+        if (!target.has_value()) continue;
+        auto rv_tile = GetTileTypeWithMemRef(rv->GetType());
+        if (!rv_tile) continue;
+        PlanRewrite(rv, *target, rv_tile->GetMemorySpace());
+      }
+    } else if (auto scope = As<ScopeStmt>(stmt)) {
+      VisitIfPhisForCommonMemRef(scope->body_);
+    }
+  }
+
+  std::optional<MemRefPtr> CommonYieldMemRef(const VarPtr& var, std::set<const Var*>& visiting) const {
+    if (!visiting.insert(var.get()).second) return std::nullopt;
+    struct Guard {
+      std::set<const Var*>* visiting;
+      const Var* var;
+      ~Guard() { visiting->erase(var); }
+    } guard{&visiting, var.get()};
+
+    auto def_it = defs_.find(var);
+    if (def_it == defs_.end() || def_it->second.kind != VarDef::kIfReturn) {
+      auto tile = GetTileTypeWithMemRef(var->GetType());
+      return tile ? std::optional<MemRefPtr>(GetDefinedMemRef(tile)) : std::nullopt;
+    }
+
+    auto if_stmt = As<IfStmt>(def_it->second.control_stmt);
+    if (!if_stmt || !if_stmt->else_body_.has_value()) return std::nullopt;
+    const size_t idx = def_it->second.return_idx;
+    std::optional<MemRefPtr> common;
+    for (const StmtPtr& body : {if_stmt->then_body_, if_stmt->else_body_.value()}) {
+      auto yield = FindYieldStmt(body);
+      if (!yield || idx >= yield->value_.size()) return std::nullopt;
+      auto yielded = AsVarLike(yield->value_[idx]);
+      if (!yielded) return std::nullopt;
+      auto candidate = CommonYieldMemRef(yielded, visiting);
+      if (!candidate.has_value()) return std::nullopt;
+      if (!common.has_value()) {
+        common = *candidate;
+      } else if (!SameMemRefRegion(*common, *candidate)) {
+        return std::nullopt;
+      }
+    }
+    return common;
+  }
+
+  static bool SameMemRefRegion(const MemRefPtr& lhs, const MemRefPtr& rhs) {
+    return MemRef::SameAllocation(lhs, rhs) && lhs->size_ == rhs->size_ &&
+           AreExprsEqual(lhs->byte_offset_, rhs->byte_offset_);
   }
 
   // True when `var` is produced by an in-place accumulator op: a Call whose op
@@ -2872,6 +2965,13 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // codegen path, so they still need the move.
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+    TopDownRetargeter phi_coalescer;
+    auto phi_rewrites = phi_coalescer.CoalesceCommonMemRefIfPhis(new_body);
+    if (!phi_rewrites.empty()) {
+      RetypeApplier applier(std::move(phi_rewrites));
+      new_body = applier.VisitStmt(new_body);
+    }
+
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
   }
