@@ -206,6 +206,10 @@ class PassManager:
             # the opportunistic lifetime coalescing (MemoryReuse) is skippable when
             # ptoas owns reuse (memory_planner=PTOAS).
             passes.materialize_semantic_aliases,
+            # PTOAS cannot infer instruction-level dst == dead-src legality
+            # from touching handle lifetimes. Encode only those local aliases;
+            # the pass is deliberately a no-op under the PyPTO planner.
+            passes.materialize_inplace_aliases,
             # MemoryReuse coalesces independent tile buffers by lifetime; on
             # Ascend910B split-AIV it also avoids the load + tpop_from_aic in-place
             # hazard so a separate legalisation pass is no longer needed.
@@ -302,10 +306,10 @@ class PassManager:
         # the opportunistic lifetime reuse (MemoryReuse) and address assignment
         # (AllocateMemoryAddr) so ptoas PlanMemory owns them (codegen emits no
         # `pto.alloc_tile addr` and ptoas runs at --pto-level=level2).
-        # MaterializeSemanticAliases still runs, so semantics-required aliasing
-        # (loop-carried accumulators, in-place ops) is preserved as a shared
-        # MemRef that codegen renders as one tile_buf handle — ptoas cannot
-        # recover that from independent addr-less allocs. Read here because
+        # MaterializeSemanticAliases still preserves semantics-required aliases,
+        # and MaterializeInplaceAliases encodes safe operation-boundary aliases
+        # that ptoas cannot recover from touching addr-less handle lifetimes.
+        # Read here because
         # __init__ runs inside the compile() PassContext (see compile.py).
         ctx = passes.PassContext.current()
         # The construction-time planner fixes the pass LIST (MemoryReuse +

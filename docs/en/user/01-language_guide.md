@@ -477,7 +477,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/42-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`
@@ -629,8 +629,10 @@ The `Default` strategy runs these passes in order:
 11. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
 12. **ExpandMixedKernel** — split mixed kernels when needed
 13. **InitMemRef** — assign memory spaces and insert buffer allocations
-14. **MemoryReuse** — share buffers with non-overlapping lifetimes
-15. **AllocateMemoryAddr** — assign concrete memory addresses
+14. **MaterializeSemanticAliases** — preserve semantics-required shared buffers
+15. **MaterializeInplaceAliases** — encode safe PTOAS operation-boundary aliases
+16. **MemoryReuse** — share buffers with non-overlapping lifetimes under PYPTO
+17. **AllocateMemoryAddr** — assign concrete memory addresses under PYPTO
 
 ### `JITFunction.compile()` (for `@pl.jit` kernels)
 

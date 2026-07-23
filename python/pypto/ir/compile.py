@@ -109,10 +109,12 @@ def compile(  # noqa: PLR0913
             ``MemoryPlanner.PTOAS`` skips the opportunistic lifetime reuse
             (MemoryReuse) and address assignment (AllocateMemoryAddr), emits no
             ``pto.alloc_tile addr``, and lets the ptoas PlanMemory pass do both at
-            ``--pto-level=level2``. MaterializeSemanticAliases still runs, so
-            semantics-required aliasing (loop-carried accumulators, in-place ops)
-            is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
-            buffer.
+            ``--pto-level=level2``. MaterializeSemanticAliases preserves
+            semantics-required aliasing, while MaterializeInplaceAliases encodes
+            safe ``dst == dead-src`` operation boundaries before PTOAS performs
+            the remaining packing. A codegen unit with a runtime-offset
+            ``tile.gather_row`` destination falls back to PyPTO planning and
+            level3 because PTOAS 0.48 level2 drops that subview offset.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
             under the PyPTO memory planner (experimental, default off). ``None``
             inherits the setting from an active outer ``PassContext`` (else
@@ -232,9 +234,11 @@ def compile(  # noqa: PLR0913
             "memory_planner=PTOAS: skipping PyPTO MemoryReuse + AllocateMemoryAddr; ptoas "
             "PlanMemory (--pto-level=level2) owns lifetime reuse and address assignment. "
             "MaterializeSemanticAliases still runs so semantics-required aliasing (loop-carried "
-            "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
-            "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
-            "resolution are deferred to ptoas — verify on-device."
+            "accumulators, in-place ops) is preserved as a shared tile_buf handle, and "
+            "MaterializeInplaceAliases encodes safe last-use operation aliases while applying "
+            "the registry and Ascend910B load+tpop guards. Reserve-buffer base resolution is "
+            "deferred to ptoas. Codegen units with runtime-offset tile.gather_row destinations "
+            "automatically fall back to PyPTO planning + level3 — verify on-device."
         )
 
     def _stage(name: str) -> AbstractContextManager[Any]:

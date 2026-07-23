@@ -15,7 +15,12 @@
 - 生命周期通过 def-use 分析确定
 - 共享完成后，已无引用的 MemRef 及其 alloc 语句会被清理
 
-**使用时机**：在 [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) 之后、AllocateMemoryAddr 之前运行。可减少内存分配开销。本 pass 只做**机会性**的生命周期合并；**语义强制**的 must-alias 重定向（循环 carry / 原地 —— 本 pass 原来的 "Step 0"）现在在 `MaterializeSemanticAliases` 里运行,因此 `MemoryReuse` 可以被独立跳过（例如 `memory_planner=PTOAS`,由 ptoas 接管生命周期复用）。
+**使用时机**：在 PYPTO 规划器下，运行于
+[`MaterializeInplaceAliases`](30-materialize_inplace_aliases.md)（该模式下为空操作）
+之后、[`AllocateMemoryAddr`](32-allocate_memory_addr.md) 之前。本 pass 只做
+**机会性**生命周期合并；语义强制 must-alias 由
+`MaterializeSemanticAliases` 处理，PTOAS 操作边界别名合法性则由
+`MaterializeInplaceAliases` 处理。
 
 ## API
 
