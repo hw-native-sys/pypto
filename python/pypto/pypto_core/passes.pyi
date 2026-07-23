@@ -705,6 +705,9 @@ def insert_comm_fence() -> Pass:
       GM ``system.fence``. Its peer-offset address is not yet expressible in the IR,
       so the peer-region cacheinvalid is emitted by the op's codegen as a workaround;
       the release fence is always an explicit ``system.fence`` op inserted here.
+    * After each **opaque** publishing write — a ``Submit`` or a call to an
+      unregistered user function (no single addressable region) — a conservative
+      whole-GM ``system.cacheinvalid`` + ``system.fence``.
     * After each **wait** — a no-arg (whole-GM) ``system.cacheinvalid``.
 
     The pass carries no control-flow state and is idempotent.

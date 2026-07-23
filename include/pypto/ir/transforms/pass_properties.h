@@ -348,8 +348,10 @@ inline const PassProperties kStampTfreeSplitProperties{.required = {IRProperty::
 
 // -- Insert data-before-signal comm markers (runs last, before codegen) -------
 //    After each local publishing write, a region system.cacheinvalid + GM
-//    system.fence; after each wait, a whole-GM system.cacheinvalid (the notify
-//    needs nothing; remote writes are handled by their codegen). Additive
+//    system.fence; after each opaque write (Submit / unregistered call), a
+//    whole-GM system.cacheinvalid + fence; after each wait, a whole-GM
+//    system.cacheinvalid (the notify needs nothing; remote writes are handled by
+//    their codegen). Additive
 //    statement insertion over already-lowered InCore IR; requires SplitIncoreOrch
 //    (held throughout) and touches no other property.
 inline const PassProperties kInsertCommFenceProperties{.required = {IRProperty::SplitIncoreOrch}};
