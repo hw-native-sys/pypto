@@ -1502,38 +1502,43 @@ class KernelCallCounter : public IRVisitor {
 /// zero-valid-shape replay on lane 1 so every hardware pipe handshake is
 /// balanced. Auto-expanded mixed kernels are stamped in ExpandMixedFunction;
 /// hand-written AIC/AIV Groups need the same inference here.
-class NoSplitCrossCorePipeCollector : public IRVisitor {
+class NoSplitCrossCoreTransportCollector : public IRVisitor {
  public:
-  [[nodiscard]] bool UsesNoSplitPipeOnly() const { return uses_pipe_ && !uses_split_pipe_; }
+  [[nodiscard]] bool UsesNoSplitTransportOnly() const { return uses_transport_ && !uses_split_transport_; }
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
-    if (op_predicates::IsInitializePipe(op)) {
-      uses_pipe_ = true;
-    } else if (op_predicates::IsTPush(op) || op_predicates::IsTPop(op) || op_predicates::IsTFree(op)) {
-      uses_pipe_ = true;
-      uses_split_pipe_ = uses_split_pipe_ || op->GetKwarg<int>("split", 0) != 0;
+    if (op_predicates::IsTPush(op) || op_predicates::IsTPop(op) || op_predicates::IsTFree(op)) {
+      uses_transport_ = true;
+      uses_split_transport_ = uses_split_transport_ || op->GetKwarg<int>("split", 0) != 0;
     }
     IRVisitor::VisitExpr_(op);
   }
 
  private:
-  bool uses_pipe_ = false;
-  bool uses_split_pipe_ = false;
+  bool uses_transport_ = false;
+  bool uses_split_transport_ = false;
 };
 
 bool NeedsInferredNoSplitDualAivDispatch(const FunctionPtr& func) {
-  if (!func || func->func_type_ != FunctionType::AIV || !pypto::backend::BackendConfig::IsConfigured() ||
-      !PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() ||
+  if (!func || func->func_type_ != FunctionType::AIV || !pypto::backend::BackendConfig::IsConfigured()) {
+    return false;
+  }
+  const auto* pass_context = PassContext::Current();
+  const auto* backend_handler = pass_context ? pass_context->GetBackendHandler()
+                                             : pypto::backend::BackendConfig::GetBackend()->GetHandler();
+  if (!backend_handler->RequiresNoSplitDualAivDispatch() ||
       func->GetAttr<bool>(kDualAivDispatchAttr, false) || func->HasAttr("external_source") ||
       func->requires_runtime_binding_) {
     return false;
   }
-  if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) return false;
+  if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
+    return false;
+  }
 
-  NoSplitCrossCorePipeCollector collector;
+  NoSplitCrossCoreTransportCollector collector;
   collector.VisitStmt(func->body_);
-  return collector.UsesNoSplitPipeOnly();
+  return collector.UsesNoSplitTransportOnly();
 }
 
 FunctionPtr WithDualAivDispatch(const FunctionPtr& func) {

@@ -960,6 +960,8 @@ class TestTensorReadWriteOffsetCodegen:
                 v2c_buf = pl.reserve_buffer(name="submit_v2c", size=4096, base=pl.AUTO)
                 c2v_peer = pl.import_peer_buffer(name="submit_c2v", peer_func="vec_side")
                 pl.aic_initialize_pipe(c2v_peer, v2c_buf, dir_mask=3, slot_size=512)
+                tile = pl.load(q, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                pl.tpush_to_aiv(tile, split=0)
                 return sink
 
             @pl.function(type=pl.FunctionType.AIV)
@@ -971,6 +973,8 @@ class TestTensorReadWriteOffsetCodegen:
                 c2v_buf = pl.reserve_buffer(name="submit_c2v", size=4096, base=pl.AUTO)
                 v2c_peer = pl.import_peer_buffer(name="submit_v2c", peer_func="cube_side")
                 pl.aiv_initialize_pipe(c2v_buf, v2c_peer, dir_mask=3, slot_size=512)
+                tile = pl.tpop_from_aic(shape=[16, 16], dtype=pl.FP32, split=0)
+                pl.tfree_to_aic(tile, split=0)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
