@@ -450,8 +450,8 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   }
 
   // input: flattened send buffer [NR*MAX_RECV, SIZE]
-  auto input_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(input_type) << "pld.tensor.all_to_all_v input must be a Tensor or DistributedTensor, got "
+  auto input_type = As<TensorType>(args[0]->GetType());
+  CHECK(input_type) << "pld.tensor.all_to_all_v input must be a plain Tensor, got "
                     << args[0]->GetType()->TypeName();
   CHECK(input_type->shape_.size() == 2)
       << "pld.tensor.all_to_all_v input must be 2D [NR*MAX_RECV, SIZE], got " << input_type->shape_.size()
@@ -464,6 +464,12 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.all_to_all_v target must be 2D [NR*MAX_RECV, SIZE], got " << target_type->shape_.size()
       << " dims";
+  // Dim 0 (NR*MAX_RECV): must agree when both are static; dim 1 (SIZE) is a
+  // literal, so use a strict structural check (same pattern as symmetric all_to_all).
+  CheckDimAgreesIfStatic(target_type->shape_[0], input_type->shape_[0], "pld.tensor.all_to_all_v", "target",
+                         "input");
+  CHECK(AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
+      << "pld.tensor.all_to_all_v target SIZE must equal input SIZE";
   CHECK(target_type->dtype_ == input_type->dtype_)
       << "pld.tensor.all_to_all_v target dtype " << target_type->dtype_.ToString()
       << " must match input dtype " << input_type->dtype_.ToString();
@@ -475,6 +481,15 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.all_to_all_v signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all_v signal must be 1D [NR] or 2D [NR, 1], got " << signal_type->shape_.size()
+      << " dims";
+  if (signal_type->shape_.size() == 2) {
+    auto signal_dim1 = As<ConstInt>(signal_type->shape_[1]);
+    CHECK(signal_dim1 && signal_dim1->value_ == 1)
+        << "pld.tensor.all_to_all_v signal second dimension must be 1, got "
+        << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
+  }
 
   // MAX_RECV = target[0] / signal[0] (deducer-enforced compile-time
   // constants; both dims must be static).
@@ -482,6 +497,8 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CHECK(target_dim0) << "pld.tensor.all_to_all_v target dim 0 (NR*MAX_RECV) must be a compile-time constant";
   auto signal_dim0 = As<ConstInt>(signal_type->shape_[0]);
   CHECK(signal_dim0) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be a compile-time constant";
+  CHECK(signal_dim0->value_ > 0) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be positive, got "
+                                 << signal_dim0->value_;
   CHECK(target_dim0->value_ % signal_dim0->value_ == 0)
       << "pld.tensor.all_to_all_v signal dim 0 (" << signal_dim0->value_ << ") must divide target dim 0 ("
       << target_dim0->value_ << ")";
