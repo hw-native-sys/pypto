@@ -98,14 +98,18 @@ REGISTER_OP("system.fence")
 //   - (tensor, shapes, offsets): invalidate one tensor sub-region; codegen
 //     dispatches on shapes: all-1 -> scalar-write ptr form (pto.addptr);
 //     otherwise -> tile-store partition-view form (pto.partition_view).
+// Variadic arity (0 or 3), like system.syncall below: the three arguments
+// below describe ONLY the region form; omitting all of them selects the
+// whole-GM form. The registry does not enforce argument count.
 REGISTER_OP("system.cacheinvalid")
     .set_description(
         "Invalidate cache lines: whole GM when called with no args, else a tensor sub-region "
         "(ptr form when the region is a single element, partition-view form otherwise)")
     .set_op_category("SyncOp")
-    .add_argument("tensor", "Target tensor whose sub-region is invalidated (omit for whole-GM invalidate)")
-    .add_argument("shapes", "Per-dimension region sizes (N-D tuple; all 1 selects the scalar/ptr form)")
-    .add_argument("offsets", "Per-dimension start offsets (N-D tuple matching tensor rank)")
+    .add_argument("tensor", "Region form: target tensor whose sub-region is invalidated")
+    .add_argument("shapes",
+                  "Region form: per-dimension region sizes (N-D tuple; all 1 selects the scalar/ptr form)")
+    .add_argument("offsets", "Region form: per-dimension start offsets (N-D tuple matching tensor rank)")
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.syncall (Cross-core all-participant barrier). Models

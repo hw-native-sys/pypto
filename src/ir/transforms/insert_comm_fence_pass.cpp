@@ -260,6 +260,17 @@ class InsertCommMarkers : public IRMutator {
           out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
         }
+      } else if (eff == Effect::kWrite) {
+        // Opaque publishing write with no single addressable region — a `Submit`
+        // (async task launch) or a call to an unregistered/un-analysed op. Be
+        // conservative: a whole-GM cacheinvalid + GM fence covers whatever it wrote.
+        const bool already =
+            i + 2 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]) && IsLeafOp(stmts[i + 2], "system.fence");
+        if (!already) {
+          out.push_back(MakeCacheInvalidAll(child->span_));
+          out.push_back(MakeNoArgOp("system.fence", child->span_));
+          changed = true;
+        }
       }
       // Consume side: a whole-GM cacheinvalid after each wait.
       if (eff == Effect::kWait && !(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
@@ -302,6 +313,10 @@ class InsertCommMarkers : public IRMutator {
       out.push_back(MakeNoArgOp("system.fence", body->span_));
     } else if (IsRemoteWrite(LeafCall(body))) {
       out.push_back(MakeNoArgOp("system.fence", body->span_));  // codegen emits the peer cacheinvalid
+    } else if (eff == Effect::kWrite) {
+      // Opaque write (Submit / unregistered op): conservative whole-GM ci + fence.
+      out.push_back(MakeCacheInvalidAll(body->span_));
+      out.push_back(MakeNoArgOp("system.fence", body->span_));
     }
     if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
     if (out.size() == 1) return visited;

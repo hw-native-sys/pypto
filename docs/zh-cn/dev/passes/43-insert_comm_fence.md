@@ -31,6 +31,8 @@
   整张量的**区域** `system.cacheinvalid`，**紧跟一条 `system.fence`**；
 - **每个远端发布写之后** —— `remote_store` / `put`：只插一条 `system.fence`（其 peer 区域
   cacheinvalid 由 codegen 发,见下）；
+- **每个不透明发布写之后** —— 一个 `Submit`，或对未注册用户函数（其函数体不在本 pass 内分析,
+  没有单一可寻址区域）的调用：保守地插一条**全 GM** `system.cacheinvalid()` + `system.fence`；
 - **每个 wait 之后** —— 一条**全 GM** `system.cacheinvalid`（消费侧在下一次可缓存读之前
   的失效）；
 - **notify** —— 什么都不插。

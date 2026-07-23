@@ -61,8 +61,6 @@ bool IsBuiltinOp(const std::string& op_name) {
          op_name.rfind("system.", 0) == 0 || op_name.rfind("array.", 0) == 0;
 }
 
-bool IsNotify(const CallPtr& call) { return IsOp(call, "pld.system.notify"); }
-
 bool IsPublishingWrite(const CallPtr& call) {
   if (!call || !call->op_) return false;
   // Remote writes always publish into a peer's window.

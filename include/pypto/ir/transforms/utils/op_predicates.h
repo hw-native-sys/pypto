@@ -58,10 +58,6 @@ bool IsBufferAliasingViewOp(const std::string& op_name);
 /// predicate that was previously copy-pasted across the IR and codegen layers.
 bool IsBuiltinOp(const std::string& op_name);
 
-/// True if the Call targets `pld.system.notify` — the cross-rank "release" signal
-/// that any preceding publishing write must be made visible to peers before.
-bool IsNotify(const CallPtr& call);
-
 /// True if the Call publishes data that a peer rank may read after a subsequent
 /// `pld.system.notify`, so a GM `system.fence` must separate it from that notify:
 ///   - remote writes: `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`;

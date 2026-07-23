@@ -36,6 +36,10 @@ rules** — the *notify* itself needs no marker. A single structural traversal
   written target, **immediately followed by a `system.fence`**;
 - **after each remote publishing write** — `remote_store` / `put`: only a
   `system.fence` (see the note below on where its cacheinvalid comes from);
+- **after each opaque publishing write** — a `Submit`, or a call to an
+  unregistered user function whose body is not analysed here (no single
+  addressable region): a conservative **whole-GM** `system.cacheinvalid()` +
+  `system.fence`;
 - **after each wait** — a **whole-GM** `system.cacheinvalid` (the consume-side
   invalidate before the next cacheable read);
 - **notify** — nothing.

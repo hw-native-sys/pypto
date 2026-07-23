@@ -556,6 +556,51 @@ def test_bare_barrier_notify_no_marker():
     ir.assert_structural_equal(_apply(Before), Before)
 
 
+def test_opaque_cross_function_call_gets_whole_gm_marker():
+    # A call to a user function is an opaque publishing write: its body is not
+    # analysed here and it has no single addressable region, so the pass emits a
+    # conservative whole-GM `cacheinvalid()` + `fence()` after it.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def helper(self, x: pl.Tensor[[1, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.FP32]]):
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            outp: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            self.helper(inp, outp)
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def helper(self, x: pl.Tensor[[1, N], pl.FP32], out: pl.Out[pl.Tensor[[1, N], pl.FP32]]):
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            outp: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            self.helper(inp, outp)
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_idempotent():
     # Re-running the pass on already-marked IR inserts nothing.
     @pl.program
