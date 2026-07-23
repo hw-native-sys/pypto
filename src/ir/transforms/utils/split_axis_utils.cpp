@@ -560,8 +560,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         CHECK_SPAN(!IsUnsupportedAutoSplitGenerator(call), call->span_)
             << "SplitVectorKernel: automatic split-axis halving of '" << op_name
             << "' is not supported because its generated values depend on position. Move the operation "
-               "outside the split region, or author an explicit half-width call with lane-specific "
-               "generator state.";
+               "outside the automatically-halved split region.";
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[result_split_dim]);
 
         // tile.reshape or tile.reinterpret_view lifts a full (un-split) source

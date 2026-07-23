@@ -941,21 +941,28 @@ def test_position_dependent_root_generator_auto_halving_rejected(op_name, mode, 
     assert op_name in str(exc_info.value)
 
 
-@pytest.mark.parametrize("op_name", ["tile.ci", "tile.random"])
-def test_position_dependent_root_generator_singleton_split_dim_preserved(op_name):
+@pytest.mark.parametrize(
+    ("op_name", "mode", "shape"),
+    [
+        pytest.param("tile.ci", ir.SplitMode.UP_DOWN, [1, 64], id="ci-up-down"),
+        pytest.param("tile.random", ir.SplitMode.UP_DOWN, [1, 64], id="random-up-down"),
+        pytest.param("tile.random", ir.SplitMode.LEFT_RIGHT, [128, 1], id="random-left-right"),
+    ],
+)
+def test_position_dependent_root_generator_singleton_split_dim_preserved(op_name, mode, shape):
     """A singleton split dimension requires no generator-state rewrite."""
     span = ir.Span.unknown()
-    generator = _split_root_generator(op_name, [1, 64], span)
+    generator = _split_root_generator(op_name, shape, span)
     value = ir.Var("value", generator.type, span)
     program = _incore_program(
         [],
         [ir.AssignStmt(value, generator, span), ir.ReturnStmt([value], span)],
         [generator.type],
-        mode=ir.SplitMode.UP_DOWN,
+        mode=mode,
     )
 
     sub = _sub_var()
-    expected_generator = _split_root_generator(op_name, [1, 64], span)
+    expected_generator = _split_root_generator(op_name, shape, span)
     expected_value = ir.Var("value", expected_generator.type, span)
     expected = _expected_incore(
         [],
@@ -964,7 +971,7 @@ def test_position_dependent_root_generator_singleton_split_dim_preserved(op_name
             ir.ReturnStmt([expected_value], span),
         ],
         [expected_generator.type],
-        mode=ir.SplitMode.UP_DOWN,
+        mode=mode,
         sub=sub,
     )
     ir.assert_structural_equal(_lower(program), expected)
