@@ -30,7 +30,7 @@ MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强
 | 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
 | ---- | -------------- | -------- | -------- |
 | `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
-| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 schema-v1 DSA solver：first-fit 初始化、受限 structured search，并且仅在严格问题无法装入容量时显式放宽流水线意图 | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
+| `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 schema-v1 DSA solver：first-fit 初始化、对显式识别的 reuse cost 使用 canonical greedy、其他情况使用受限 structured search，并且仅在严格问题无法装入容量时显式放宽流水线意图 | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
 DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.10 package，再让
@@ -190,10 +190,13 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    转换成单位权重 `cross_pipe` schema edge。嵌套的 distance-zero candidate 可以构造
    edge；same-resource、loop-carried、partial-range、使用保守初始锚点和不确定的
    candidate 仅记录而不定价。
-7. 验证 strict schema/profile，先尝试 deterministic first-fit，再尝试 bounded
-   PyPTO-structured search。若未找到 capacity-fitting placement，则只删除
-   `pipeline_stage` reason，保留所有 correctness reason，增加单位
-   `pipeline_serialization` penalty，并求解显式 research relaxation。
+7. 验证 strict schema/profile，并先尝试 deterministic first-fit。显式启用 reuse
+   recognizer 后，其 capacity-constrained cost problem 交给 canonical greedy；该
+   solver 会保留 first-fit 作为 feasible incumbent；bounded PyPTO-structured
+   search 仍是 no-fit fallback。其他搜索继续使用该 structured baseline。若未找到
+   capacity-fitting placement，则只删除 `pipeline_stage` reason，保留所有
+   correctness reason，增加单位 `pipeline_serialization` penalty，并求解显式
+   research relaxation。
 8. 针对大小、对齐、生命周期、pool、容量、reserved range 和 separation 独立验证
    每个 placement。relaxed solution 还会依据 strict problem 再次验证，避免 relaxed
    search 偶然找到 strict-valid placement 时产生 warning。

@@ -34,7 +34,7 @@ loop-carried values, and in-place operations retain their mandatory identities.
 | Mode | Input to this pass | Placement | Failure behavior |
 | ---- | ------------------ | --------- | ---------------- |
 | `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
-| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone schema-v1 DSA solver: first-fit initialization, bounded structured search, and an explicit pipeline-intent relaxation only when the strict problem does not fit | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
+| `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone schema-v1 DSA solver: first-fit initialization, canonical greedy for explicitly recognized reuse costs, bounded structured search otherwise, and explicit pipeline-intent relaxation only when the strict problem does not fit | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
 DSA support is an optional CMake dependency. Build and consume an installed
@@ -223,9 +223,12 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    to unit `cross_pipe` schema edges. Nested distance-zero candidates are
    eligible; same-resource, loop-carried, partial-range, conservatively
    anchored, and uncertain candidates remain report-only.
-7. Validate the strict schema/profile and try deterministic first-fit followed
-   by bounded PyPTO-structured search. If no capacity-fitting placement is
-   found, remove only the `pipeline_stage` reason, retain every correctness
+7. Validate the strict schema/profile and try deterministic first-fit. An
+   explicitly enabled reuse recognizer sends its capacity-constrained cost
+   problem to canonical greedy, which retains first-fit as a feasible
+   incumbent; bounded PyPTO-structured search remains a no-fit fallback. Other
+   searches retain that structured baseline. If no capacity-fitting placement
+   is found, remove only the `pipeline_stage` reason, retain every correctness
    reason, add unit `pipeline_serialization` penalties, and solve the explicit
    research relaxation.
 8. Validate

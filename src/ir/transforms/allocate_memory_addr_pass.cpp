@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #ifdef PYPTO_ENABLE_DSA_SOLVER
 #include "dsa/algorithms/pypto_structured_search_solver.h"
+#include "dsa/algorithms/reuse_penalty_baseline_solvers.h"
 #include "dsa/analysis/reuse_geometry.h"
 #include "dsa/model/model.h"
 #include "dsa/model/structured_problem.h"
@@ -542,16 +543,42 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
           !::dsa::ValidateSolution(strict_exported.document.problem, *run.result.solution).empty();
     }
   } else {
-    const ::dsa::PyptoStructuredSearchSolver solver(search_options);
+    const ::dsa::PyptoStructuredSearchSolver structured_solver(search_options);
+    ::dsa::CanonicalGreedyOptions canonical_options;
+    canonical_options.seed = search_options.seed;
+    canonical_options.random_restarts = search_options.restarts;
+    const ::dsa::CanonicalGreedySolver canonical_solver(canonical_options);
+    auto solve_search_problem = [&](const dsa_adapter::ExportedProblem& exported) {
+      const auto& objective_terms = exported.document.problem.objective.terms;
+      const bool minimizes_reuse = std::find(objective_terms.begin(), objective_terms.end(),
+                                             ::dsa::ObjectiveMetric::kReuseCost) != objective_terms.end();
+      const bool use_canonical = reuse_penalty_recognizer != DsaReusePenaltyRecognizer::Disabled &&
+                                 minimizes_reuse && exported.document.problem.cost_model &&
+                                 !exported.document.problem.cost_model->reuse_penalties.empty();
+      if (use_canonical) {
+        solver_name = canonical_solver.Name();
+        dsa_adapter::SolverRun canonical_run = dsa_adapter::Solve(exported, canonical_solver);
+        if (canonical_run.result.status == ::dsa::SolveStatus::kFeasible) return canonical_run;
+
+        dsa_adapter::SolverRun structured_run = dsa_adapter::Solve(exported, structured_solver);
+        if (structured_run.result.status == ::dsa::SolveStatus::kFeasible) {
+          solver_name = structured_solver.Name();
+          return structured_run;
+        }
+        return canonical_run;
+      }
+      solver_name = structured_solver.Name();
+      return dsa_adapter::Solve(exported, structured_solver);
+    };
+
     run = dsa_adapter::SolveWithFirstFit(solved_exported);
     solver_name = "first_fit";
     const bool has_reuse_cost = solved_exported.document.problem.cost_model &&
                                 !solved_exported.document.problem.cost_model->reuse_penalties.empty();
     if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit || has_reuse_cost) {
-      // Invoke bounded structured search when first-fit cannot fit or when the
-      // objective contains costs that first-fit does not optimize.
-      run = dsa_adapter::Solve(solved_exported, solver);
-      solver_name = solver.Name();
+      // Invoke a search solver when first-fit cannot fit or when the objective
+      // contains costs that first-fit does not optimize.
+      run = solve_search_problem(solved_exported);
     }
     if (run.result.status == ::dsa::SolveStatus::kBestEffortNoFit) {
       const ::dsa::PipelineIntentRelaxation relaxation =
@@ -559,8 +586,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithStandaloneDsa(
       if (relaxation.relaxed_separation_count != 0) {
         solved_exported.document = relaxation.document;
         relaxed_separation_count = relaxation.relaxed_separation_count;
-        run = dsa_adapter::Solve(solved_exported, solver);
-        solver_name = solver.Name();
+        run = solve_search_problem(solved_exported);
         if (run.result.status == ::dsa::SolveStatus::kFeasible && run.result.solution.has_value()) {
           // The relaxed search can occasionally discover a strict-feasible
           // ordering that the first search missed. In that case retain the hard

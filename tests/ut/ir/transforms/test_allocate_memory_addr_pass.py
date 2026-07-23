@@ -1602,7 +1602,7 @@ def test_dsa_quadratic_reuse_recognizer_exports_cross_resource_edges(tmp_path):
     assert "external->ub@inbound_dma" in document["metadata"]["recognized_reuse_candidate_records_v3"]
 
     solution = json.loads((export_dir / "pypto_reuse_recognizer.dsa.solution.json").read_text())
-    assert solution["metadata"]["solver"] == "pypto_structured_search"
+    assert solution["metadata"]["solver"] == "canonical_greedy"
     offsets = {entry["buffer"]: entry["offset"] for entry in solution["placements"]}
     sizes = {entry["id"]: entry["size"] for entry in document["problem"]["buffers"]}
     for first, second in expected_pairs:
@@ -1720,6 +1720,8 @@ def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp
     assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert document["metadata"].get("recognized_reuse_penalties", "0") == "0"
+    solution = json.loads((tmp_path / "pypto_same_resource_waw.dsa.solution.json").read_text())
+    assert solution["metadata"]["solver"] == "first_fit"
 
 
 @requires_dsa
