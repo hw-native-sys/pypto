@@ -268,7 +268,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // branch producers write the phi handle (they are re-bound to it below,
         // fix #1956) while the loop result and every post-if read still resolve
         // to the shared one, which no branch ever wrote.
-        std::string ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type));
+        std::string ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type), fields.type_str);
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already

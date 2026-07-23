@@ -323,7 +323,6 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   [[nodiscard]] bool UsesSubblockOp() const { return uses_subblock_op_; }
 
   [[nodiscard]] const std::set<const ir::Var*>& GetFFTSWorkspaceVars() const { return ffts_workspace_vars_; }
-
   void VisitExpr_(const VarPtr& op) override {
     if (iter_arg_ids_.count(op->UniqueId())) return;
     if (auto tile_type = ir::GetTileTypeWithMemRef(op->GetType())) {
@@ -574,7 +573,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
-    fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
+    fs_.ssa_to_tile_buf_type.emplace(ssa_name, type_str);
 
     // Also maintain fs_.memref_to_mlir for compatibility (first var per allocation)
     const ir::Var* base_ptr = memref->base_.get();
@@ -1066,9 +1065,11 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   }
 
   auto memref = ir::GetDefinedMemRef(tile_type);
-  if (memref && emit_tile_addr_) {
-    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+  if (memref) {
+    if (emit_tile_addr_) {
+      if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
+        fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+      }
     }
   }
   return fields;
@@ -1203,15 +1204,19 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   return name;
 }
 
-std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const {
+std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref,
+                                                  const std::string& required_type) const {
   if (emit_tile_addr_ || !memref) {
     return "";
   }
   const std::string ident = MemRefIdentityKey(memref);
-  // A mixed-type identity's handle already carries another var's type; re-typing
-  // it would make one SSA value have two types and ptoas would reject the module.
+  // A mixed identity can still reuse its canonical handle for a same-typed phi.
+  // Only a differently-typed view needs a distinct typed handle.
   if (fs_.memref_identity_mixed_types.count(ident) != 0) {
-    return "";
+    auto type_it = fs_.memref_identity_type.find(ident);
+    if (type_it == fs_.memref_identity_type.end() || type_it->second != required_type) {
+      return "";
+    }
   }
   auto it = fs_.memref_identity_to_mlir.find(ident);
   return it != fs_.memref_identity_to_mlir.end() ? it->second : std::string{};
@@ -1398,6 +1403,33 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
           } else {
             result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
           }
+
+          // PTOAS represents a physical allocation with one addr-less handle,
+          // but a zero-copy reshape/subview of that allocation has its own
+          // differently-typed SSA.  When MaterializeInplaceAliases makes an op
+          // result reuse a direct input view, write through that matching typed
+          // SSA rather than the allocation's canonical handle.  Otherwise MLIR
+          // sees one handle first as (for example) 16x1 col-major and later as
+          // 1x16 row-major and rejects the module.
+          if (!emit_tile_addr_) {
+            const auto result_memref = ir::GetDefinedMemRef(tile_type);
+            const std::string result_identity = MemRefIdentityKey(result_memref);
+            const std::string result_type = GetTileBufTypeStringFromTileType(tile_type);
+            for (const auto& arg : call->args_) {
+              auto input_var = AsVarLike(arg);
+              auto input_type = input_var ? ir::GetTileTypeWithMemRef(input_var->GetType()) : nullptr;
+              if (!input_type || MemRefIdentityKey(ir::GetDefinedMemRef(input_type)) != result_identity ||
+                  GetTileBufTypeStringFromTileType(input_type) != result_type) {
+                continue;
+              }
+              const std::string input_buf = GetVarName(input_var);
+              if (!input_buf.empty()) {
+                result_buf = input_buf;
+                BindVarToMlir(op->var_, result_buf);
+              }
+              break;
+            }
+          }
         }
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
@@ -1443,7 +1475,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       if (result_tile_type && !fs_.current_result_buf.empty() && fs_.current_result_buf == result_buf) {
         std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
         if (!var_type_str.empty()) {
-          fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;
+          // A view-producing op may already have declared this SSA with a
+          // more precise type (for example, static valid extents from
+          // pto.treshape).  A later in-place op reusing that view must keep
+          // the declaration-site type; overwriting it with the result Var's
+          // allocation-style dynamic-valid spelling makes one MLIR SSA appear
+          // with two different !pto.tile_buf types.
+          fs_.ssa_to_tile_buf_type.emplace(fs_.current_result_buf, var_type_str);
         }
       }
       fs_.current_result_var.reset();
