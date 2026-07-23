@@ -4254,20 +4254,48 @@ class TestConvertCrossCoreSplitOps:
         # AUTO path: a mixed InCore function whose V->C tile.move boundary
         # LowerAutoVectorSplit rewrites into tile.aic_gather. Built at the tile
         # level for the same reason as the shard oracle above.
-        vec = ir.Var("vec", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Vec), span)
-        out_0 = ir.Var("out_0", ir.TensorType([128, 128], DataType.FP32), span)
-        move = tile_ops.move(vec, MemorySpace.Mat, span=span)
+        #
+        # The gather source is VECTOR-PRODUCED (tile.add), not a parameter: the
+        # pass's precondition is that the V->C boundary source has already been
+        # halved by the affinity gate, so the gather doubles HALF -> FULL. Sourcing
+        # it from a param instead would leave it full-width and over-double
+        # ([256, 128] -> [512, 128]) while the placement move kept its original
+        # [256, 128] result type — an ill-typed move that misrepresents the pass.
+        # Hence the [256, 128] param: add halves it to the [128, 128] per-lane
+        # half, and the gather doubles that back to the [256, 128] FULL tile the
+        # explicit path also produces.
+        #
+        # The gathered tile is then CONSUMED (move -> Left, matmul, store of the
+        # Acc result — tile.store takes only {Vec, Acc}, never Mat). Leaving it
+        # dead would let a future DCE drop the synthesized gather.
+        vec = ir.Var("vec", ir.TileType([256, 128], DataType.FP32, None, None, MemorySpace.Vec), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP32, None, None, MemorySpace.Right), span)
+        out_0 = ir.Var("out_0", ir.TensorType([256, 128], DataType.FP32), span)
+        add = tile_ops.add(vec, vec, span)
+        vec_h = ir.Var("vec_h", add.type, span)
+        move = tile_ops.move(vec_h, MemorySpace.Mat, span=span)
         assert isinstance(move.type, ir.TileType)
         gathered = ir.Var("gathered", move.type, span)
-        store = tile_ops.store(vec, [0, 0], out_0, span=span)
+        to_left = tile_ops.move(gathered, MemorySpace.Left, span=span)
+        left = ir.Var("left", to_left.type, span)
+        matmul = tile_ops.matmul(left, rhs, span)
+        acc = ir.Var("acc", matmul.type, span)
+        store = tile_ops.store(acc, [0, 0], out_0, span=span)
         out_store = ir.Var("out_store", store.type, span)
         auto_func = ir.Function(
             "split_auto",
-            [(vec, ir.ParamDirection.In), (out_0, ir.ParamDirection.Out)],
+            [
+                (vec, ir.ParamDirection.In),
+                (rhs, ir.ParamDirection.In),
+                (out_0, ir.ParamDirection.Out),
+            ],
             [out_0.type],
             ir.SeqStmts(
                 [
+                    ir.AssignStmt(vec_h, add, span),
                     ir.AssignStmt(gathered, move, span),
+                    ir.AssignStmt(left, to_left, span),
+                    ir.AssignStmt(acc, matmul, span),
                     ir.AssignStmt(out_store, store, span),
                     ir.ReturnStmt([out_store], span),
                 ],
