@@ -76,6 +76,9 @@ namespace {
 struct LifetimeAnalysisResult {
   std::vector<LifetimeInterval> lifetimes;
   std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
+  /// Tile variable -> defining AssignStmt. Shared by the full reuse packer and
+  /// the PTOAS-only operation-boundary in-place alias materializer.
+  std::map<VarPtr, StmtPtr> var_def_stmt;
   // var -> per-(scf.if, slot) phi family ids (see LifetimeAnalyzer).
   std::map<const Var*, std::set<int>> phi_family_ids;
   // var -> its individual [def, last_use] interval (with phi/loop extension), for
@@ -1478,6 +1481,7 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
 
   return {lifetimes,
           var_sharing_groups,
+          std::move(result.var_def_stmt),
           std::move(result.phi_family_ids),
           std::move(var_liveness),
           std::move(pipeline_membership),
@@ -1756,7 +1760,7 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  * on real kernels (groups few, depth 2–4) — so this stays the same O(M^2) class as
  * the prior greedy in practice; the FFD base was already O(M^2) pre-#1475.
  */
-// Cross-group shed objective (see docs/en/dev/passes/29-memory_reuse.md, pipeline-stage guard): when a
+// Cross-group shed objective (see docs/en/dev/passes/31-memory_reuse.md, pipeline-stage guard): when a
 // space overflows at every group's max-affordable depth,
 // the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
 // selects **which** group loses a level — lower score sheds first; ties always break by lowest group id
@@ -2983,6 +2987,274 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
                                           func->level_, func->role_, func->attrs_);
 }
 
+/**
+ * @brief Select legal operation-boundary input/output aliases for PTOAS.
+ *
+ * PTOAS owns general non-overlapping-lifetime reuse, but it cannot infer that
+ * an instruction permits dst == src at the statement where the input dies and
+ * the output is born. This collector makes only that local decision. It reuses
+ * the same lifetime, no-alias, pipeline, phi, and backend-hazard analyses as
+ * MemoryReuse and never packs independent intervals.
+ */
+class InplaceAliasDecisionCollector : public IRVisitor {
+ public:
+  InplaceAliasDecisionCollector(const LifetimeAnalysisResult& analysis, const HazardInputs& hazard,
+                                const ForbidAliasMap& forbid_alias)
+      : analysis_(analysis), hazard_(hazard), forbid_alias_(forbid_alias) {
+    // Lifetime intervals are already merged by physical MemRef sharing group.
+    // Index every group member once so candidate last-use checks remain O(log N).
+    for (const auto& interval : analysis_.lifetimes) {
+      if (auto tile = GetTileTypeWithMemRef(interval.variable->GetType())) {
+        const Var* base = GetDefinedMemRef(tile)->base_.get();
+        auto [it, inserted] = base_last_use_.emplace(base, interval.last_use_point);
+        if (!inserted) it->second = std::max(it->second, interval.last_use_point);
+      }
+      auto group_it = analysis_.var_sharing_groups.find(interval.variable);
+      if (group_it == analysis_.var_sharing_groups.end()) {
+        group_last_use_[interval.variable.get()] = interval.last_use_point;
+        member_to_rep_[interval.variable.get()] = interval.variable.get();
+        continue;
+      }
+      for (const auto& member : group_it->second) {
+        group_last_use_[member.get()] = interval.last_use_point;
+        member_to_rep_[member.get()] = interval.variable.get();
+      }
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // MaterializeSemanticAliases has already made each non-scalar loop carry a
+    // single mutable allocation.  Those buffers are semantic state, not
+    // ordinary dead-at-an-op inputs: remapping either a carried producer or a
+    // consumer onto another operand can disconnect the body write from the
+    // iter_arg handle (and turn the loop into a silent no-op under PTOAS).
+    //
+    // Protect the carry allocations only while visiting this loop's body, so
+    // unrelated straight-line values remain eligible for local in-place reuse.
+    std::vector<const Var*> protected_here;
+    auto protect = [&](const ExprPtr& expr) {
+      auto var = AsVarLike(expr);
+      auto tile = var ? GetTileTypeWithMemRef(var->GetType()) : nullptr;
+      if (!tile) return;
+      const Var* base = GetDefinedMemRef(tile)->base_.get();
+      ++active_carry_bases_[base];
+      protected_here.push_back(base);
+    };
+    for (const auto& iter_arg : op->iter_args_) {
+      protect(iter_arg);
+      protect(iter_arg->initValue_);
+    }
+    for (const auto& return_var : op->return_vars_) protect(return_var);
+
+    IRVisitor::VisitStmt_(op);
+
+    for (const Var* base : protected_here) {
+      auto it = active_carry_bases_.find(base);
+      INTERNAL_CHECK(it != active_carry_bases_.end() && it->second > 0);
+      if (--it->second == 0) active_carry_bases_.erase(it);
+    }
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    auto output_type = GetTileTypeWithMemRef(op->var_->GetType());
+    if (!call || !call->op_ || !output_type) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    const auto& registry = OpRegistry::GetInstance();
+    if (!registry.IsRegistered(call->op_->name_)) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+    const auto& entry = registry.GetEntry(call->op_->name_);
+
+    // Semantics-required aliases were handled by the preceding pass. Do not
+    // second-guess them, and never alias an op that forbids general in-place use.
+    if (!entry.IsInplaceSafe() || entry.GetOutputReusesInputArg().has_value()) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    const Var* original_output_base = TileMemRefBase(op->var_);
+    if (original_output_base != nullptr && active_carry_bases_.count(original_output_base) != 0) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    auto out_live = analysis_.var_liveness.find(op->var_.get());
+    if (out_live == analysis_.var_liveness.end() || analysis_.phi_family_ids.count(op->var_.get()) != 0) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    const int output_def = out_live->second.first;
+    const auto output_pipeline = PipelineMembership(op->var_);
+    for (const auto& arg : call->args_) {
+      auto candidate = AsVarLike(arg);
+      auto candidate_type = candidate ? GetTileTypeWithMemRef(candidate->GetType()) : nullptr;
+      if (!candidate_type || !Compatible(*output_type, *candidate_type)) continue;
+
+      auto last_use = CandidateLastUse(candidate);
+      if (!last_use.has_value() || *last_use != output_def) continue;
+      if (analysis_.phi_family_ids.count(candidate.get()) != 0) continue;
+      const Var* candidate_original_base = TileMemRefBase(candidate);
+      if (candidate_original_base != nullptr && active_carry_bases_.count(candidate_original_base) != 0) {
+        continue;
+      }
+      if (PipelineMembershipsConflict(output_pipeline, PipelineMembership(candidate))) continue;
+      if (HazardBlocks(op->var_, candidate)) continue;
+      if (ForbidBlocks(op->var_, candidate)) continue;
+
+      // ApplyMemRefSharing consumes a direct output -> source Var map; it does
+      // not chase a chain such as prob -> exp -> score.  Canonicalize that
+      // chain here so every member is retyped straight onto the root MemRef.
+      VarPtr alias_target = candidate;
+      std::set<const Var*> seen;
+      while (seen.insert(alias_target.get()).second) {
+        auto target_it = reuse_target_.find(alias_target.get());
+        if (target_it == reuse_target_.end()) break;
+        alias_target = target_it->second;
+      }
+
+      const Var* old_base = PhysicalBase(op->var_);
+      const Var* input_base = PhysicalBase(alias_target);
+      if (old_base == nullptr || input_base == nullptr || old_base == input_base) break;
+
+      reuse_map_[op->var_] = alias_target;
+      reuse_target_[op->var_.get()] = alias_target;
+      base_remap_[old_base] = input_base;
+      break;
+    }
+
+    IRVisitor::VisitStmt_(op);
+  }
+
+  std::map<VarPtr, VarPtr> Take() { return std::move(reuse_map_); }
+
+ private:
+  static bool Compatible(const TileType& output, const TileType& input) {
+    if (!output.memref_.has_value() || !input.memref_.has_value()) return false;
+    if (output.GetMemorySpace() != input.GetMemorySpace() || output.dtype_ != input.dtype_ ||
+        output.memref_.value()->size_ != input.memref_.value()->size_) {
+      return false;
+    }
+    const TileView out_view = tile_view_semantics::GetEffectiveTileView(output);
+    const TileView in_view = tile_view_semantics::GetEffectiveTileView(input);
+    return out_view.blayout == in_view.blayout && out_view.slayout == in_view.slayout &&
+           out_view.fractal == in_view.fractal && out_view.pad == in_view.pad;
+  }
+
+  std::optional<int> CandidateLastUse(const VarPtr& candidate) const {
+    auto direct = group_last_use_.find(candidate.get());
+    if (direct != group_last_use_.end()) return direct->second;
+
+    // For/While return_vars are intentionally not registered as independent
+    // lifetime defs: their post-loop reads extend the initValue allocation
+    // instead.  They are nevertheless ordinary input values after the loop
+    // and may legally die at an in-place op boundary.  Resolve those wrappers
+    // through the physical allocation's already-merged interval.  This is
+    // conservative for views because the base interval covers every region
+    // sharing the allocation.
+    const Var* base = TileMemRefBase(candidate);
+    auto by_base = base_last_use_.find(base);
+    if (by_base == base_last_use_.end()) return std::nullopt;
+    return by_base->second;
+  }
+
+  std::vector<std::pair<int32_t, int32_t>> PipelineMembership(const VarPtr& var) const {
+    auto def_it = analysis_.var_def_stmt.find(var);
+    if (def_it == analysis_.var_def_stmt.end()) return {};
+    auto assign = As<AssignStmt>(def_it->second);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!call) return {};
+    return ParsePipelineMembership(call->GetAttr<std::string>(kPipelineMembershipAttr, std::string()));
+  }
+
+  const Var* ResolveBase(const Var* base) const {
+    while (base != nullptr) {
+      auto it = base_remap_.find(base);
+      if (it == base_remap_.end() || it->second == base) break;
+      base = it->second;
+    }
+    return base;
+  }
+
+  const Var* PhysicalBase(const VarPtr& var) const { return ResolveBase(TileMemRefBase(var)); }
+
+  bool HazardBlocks(const VarPtr& output, const VarPtr& candidate) const {
+    return hazard_.reads_tpop.count(output.get()) != 0 && hazard_.load_derived.count(candidate.get()) != 0;
+  }
+
+  bool ForbidBlocks(const VarPtr& output, const VarPtr& candidate) const {
+    auto rep_it = member_to_rep_.find(output.get());
+    const Var* output_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
+    auto forbid_it = forbid_alias_.find(output_key);
+    if (forbid_it == forbid_alias_.end()) return false;
+    const Var* candidate_base = PhysicalBase(candidate);
+    for (const auto& forbidden : forbid_it->second) {
+      if (PhysicalBase(forbidden) == candidate_base) return true;
+    }
+    return false;
+  }
+
+  const LifetimeAnalysisResult& analysis_;
+  const HazardInputs& hazard_;
+  const ForbidAliasMap& forbid_alias_;
+  std::map<const Var*, int> group_last_use_;
+  std::map<const Var*, int> base_last_use_;
+  std::map<const Var*, const Var*> member_to_rep_;
+  std::map<const Var*, const Var*> base_remap_;
+  std::map<const Var*, VarPtr> reuse_target_;
+  std::map<const Var*, size_t> active_carry_bases_;
+  std::map<VarPtr, VarPtr> reuse_map_;
+};
+
+FunctionPtr TransformMaterializeInplaceAliases(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "MaterializeInplaceAliases cannot run on null function";
+
+  const auto* ctx = PassContext::Current();
+  if (ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS ||
+      func->func_type_ == FunctionType::Orchestration) {
+    return func;
+  }
+
+  auto analysis = ComputeLifetimes(func->body_);
+  if (analysis.lifetimes.empty()) return func;
+
+  HazardInputs hazard;
+  if (NeedsLoadTpopHazardGuard(func)) {
+    HazardInputCollector hazard_collector;
+    hazard_collector.VisitStmt(func->body_);
+    hazard = hazard_collector.Take();
+  }
+
+  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  auto forbid_alias = forbid_collector.Take();
+
+  InplaceAliasDecisionCollector collector(analysis, hazard, forbid_alias);
+  collector.VisitStmt(func->body_);
+  auto reuse_map = collector.Take();
+
+  StmtPtr new_body = func->body_;
+  if (!reuse_map.empty()) {
+    new_body = ApplyMemRefSharing(new_body, reuse_map, analysis.var_sharing_groups);
+    auto used_bases = memref_collectors::CollectUsedBasePtrs(new_body);
+    new_body = RemoveUnusedAllocStatements(new_body, used_bases);
+  }
+
+  // Under PTOAS, MemoryReuse is absent, so this pass is the final consumer of
+  // pipeline membership metadata.
+  new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+  if (new_body == func->body_) return func;
+
+  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                          func->return_types_, new_body, func->span_, func->func_type_,
+                                          func->level_, func->role_, func->attrs_);
+}
+
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
 
@@ -3098,6 +3370,10 @@ namespace pass {
 Pass MaterializeSemanticAliases() {
   return CreateFunctionPass(TransformMaterializeSemanticAliases, "MaterializeSemanticAliases",
                             kMaterializeSemanticAliasesProperties);
+}
+Pass MaterializeInplaceAliases() {
+  return CreateFunctionPass(TransformMaterializeInplaceAliases, "MaterializeInplaceAliases",
+                            kMaterializeInplaceAliasesProperties);
 }
 Pass MemoryReuse() { return CreateFunctionPass(TransformMemoryReuse, "MemoryReuse", kMemoryReuseProperties); }
 }  // namespace pass

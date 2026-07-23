@@ -159,6 +159,17 @@ Pass InitMemRef();
 Pass MaterializeSemanticAliases();
 
 /**
+ * @brief Materialize safe operation-boundary in-place aliases for PTOAS
+ *
+ * When memory_planner=PTOAS, retargets a tile-producing operation's output
+ * MemRef onto a compatible input only when that input dies at the operation.
+ * Reuses MemoryReuse's lifetime, no-alias, pipeline, phi, and backend-hazard
+ * analyses. It is a no-op for the PyPTO planner and does not perform general
+ * lifetime packing.
+ */
+Pass MaterializeInplaceAliases();
+
+/**
  * @brief Create a memory reuse pass
  *
  * Uses dependency analysis to identify memory reuse opportunities.

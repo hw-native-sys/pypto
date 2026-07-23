@@ -291,21 +291,28 @@ Who assigns the physical `addr` is selected by the `memory_planner` option
 | Mode | Pipeline | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | -------- | ---------------- | -------------------- | ----- |
 | `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
-| `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
+| `PTOAS` | runs `MaterializeSemanticAliases` + `MaterializeInplaceAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
-Memory planning is split into two passes: **`MaterializeSemanticAliases`**
+Memory planning is split across three passes: **`MaterializeSemanticAliases`**
 forces *semantics-required* aliasing (loop-carried accumulators, in-place ops)
-to share one MemRef, while **`MemoryReuse`** does *opportunistic* lifetime-based
-coalescing of independent buffers. `InitMemRef` + `MaterializeSemanticAliases`
-run in both modes, so the must-alias buffers survive; in `PTOAS` mode codegen
-renders those shared MemRefs as a single `tile_buf` handle with an in-place
-`outs(%acc)`, and ptoas `PlanMemory` (which `level2` requires, rejecting any
-`addr` operand) does the lifetime reuse and address assignment.
+to share one MemRef; **`MaterializeInplaceAliases`** encodes safe
+`dst == dead-src` operation boundaries only for PTOAS; and **`MemoryReuse`**
+does global opportunistic lifetime coalescing for PYPTO. In `PTOAS` mode,
+codegen renders the two kinds of selected aliases as shared `tile_buf` handles,
+while ptoas `PlanMemory` (required by `level2`, which rejects `addr`) does all
+remaining packing and address assignment.
 
-> **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
-> hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution
-> (`AllocateMemoryAddr`); those are deferred to ptoas. `compile()` emits a
-> warning — verify affected kernels on-device.
+> **Caveat:** `PTOAS` mode still defers reserve-buffer base resolution
+> (`AllocateMemoryAddr`) to ptoas. `compile()` emits a warning — verify affected
+> kernels on-device.
+
+PTOAS 0.48 level2 drops a runtime destination offset from an addr-less
+`pto.subview`. Therefore, if a codegen unit (one kernel or one whole
+Cube/Vector group) contains `tile.gather_row` with a non-constant destination
+offset, the backend side-plans that unit with `MemoryReuse` +
+`AllocateMemoryAddr` and invokes ptoas at level3. Other units in the same
+program remain on PTOAS level2. Constant-offset gathers do not trigger this
+compatibility fallback.
 
 ### Load Operation Transformation
 

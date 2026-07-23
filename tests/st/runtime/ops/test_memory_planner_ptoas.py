@@ -166,6 +166,128 @@ class ColVecIfPhiCarryProgram:
         return out
 
 
+_GATHER_ROWS = 16
+_GATHER_COLS = 128
+_GATHER_OUT_COLS = 16
+
+
+@pl.program
+class NestedGatherRowIfPhiProgram:
+    """Nested DPS if-phis that must preserve one L1/Mat destination handle."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        q: pl.Tensor[[_GATHER_ROWS, _GATHER_COLS], pl.BF16],
+        src0: pl.Tensor[[256, _GATHER_COLS], pl.BF16],
+        src1: pl.Tensor[[256, _GATHER_COLS], pl.BF16],
+        flag0: pl.Scalar[pl.INT32],
+        flag1: pl.Scalar[pl.INT32],
+        flag2: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[_GATHER_ROWS, _GATHER_OUT_COLS], pl.FP32]],
+    ) -> pl.Tensor[[_GATHER_ROWS, _GATHER_OUT_COLS], pl.FP32]:
+        kv: pl.Tile[[_GATHER_ROWS, _GATHER_COLS], pl.BF16, pl.Mem.Mat] = pl.create_tile(
+            [_GATHER_ROWS, _GATHER_COLS],
+            pl.BF16,
+            target_memory=pl.Mem.Mat,
+        )
+        for r in pl.range(_GATHER_ROWS):
+            if flag0 == 0:
+                if flag1 == 0:
+                    kv = pl.tile.gather_row(kv, src0, [r, 0], [r, 0], [1, _GATHER_COLS])
+                else:
+                    kv = pl.tile.gather_row(kv, src1, [r, 0], [r, 0], [1, _GATHER_COLS])
+            else:  # noqa: PLR5501 - keep a nested IfStmt for the phi regression
+                if flag2 == 0:
+                    kv = pl.tile.gather_row(kv, src0, [r, 0], [0, 0], [1, _GATHER_COLS])
+                else:  # noqa: PLR5501 - keep a deeper nested IfStmt
+                    if flag1 == 0:
+                        kv = pl.tile.gather_row(kv, src1, [r, 0], [0, 0], [1, _GATHER_COLS])
+                    else:
+                        kv = pl.tile.gather_row(kv, src0, [r, 0], [r, 0], [1, _GATHER_COLS])
+        q_mat: pl.Tile[[_GATHER_ROWS, _GATHER_COLS], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+            q,
+            [0, 0],
+            [_GATHER_ROWS, _GATHER_COLS],
+            target_memory=pl.Mem.Mat,
+        )
+        q_left: pl.Tile[[_GATHER_ROWS, _GATHER_COLS], pl.BF16, pl.Mem.Left] = pl.move(
+            q_mat,
+            target_memory=pl.Mem.Left,
+        )
+        kv_t: pl.Tile[[_GATHER_COLS, _GATHER_ROWS], pl.BF16, pl.Mem.Mat] = pl.tile.transpose_view(kv)
+        kv_right: pl.Tile[[_GATHER_COLS, _GATHER_ROWS], pl.BF16, pl.Mem.Right] = pl.move(
+            kv_t,
+            target_memory=pl.Mem.Right,
+        )
+        result: pl.Tile[[_GATHER_ROWS, _GATHER_OUT_COLS], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(
+            q_left,
+            kv_right,
+        )
+        return pl.store(result, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        q: pl.Tensor[[_GATHER_ROWS, _GATHER_COLS], pl.BF16],
+        src0: pl.Tensor[[256, _GATHER_COLS], pl.BF16],
+        src1: pl.Tensor[[256, _GATHER_COLS], pl.BF16],
+        flag0_tensor: pl.Tensor[[1], pl.INT32],
+        flag1_tensor: pl.Tensor[[1], pl.INT32],
+        flag2_tensor: pl.Tensor[[1], pl.INT32],
+        out: pl.Out[pl.Tensor[[_GATHER_ROWS, _GATHER_OUT_COLS], pl.FP32]],
+    ) -> pl.Tensor[[_GATHER_ROWS, _GATHER_OUT_COLS], pl.FP32]:
+        flag0: pl.Scalar[pl.INT32] = pl.tensor.read(flag0_tensor, [0])
+        flag1: pl.Scalar[pl.INT32] = pl.tensor.read(flag1_tensor, [0])
+        flag2: pl.Scalar[pl.INT32] = pl.tensor.read(flag2_tensor, [0])
+        out = self.kernel(q, src0, src1, flag0, flag1, flag2, out)
+        return out
+
+
+@pl.program
+class InplaceSoftmaxChainProgram:
+    """Three 64 KiB full-tile transforms that require legal op-boundary aliases.
+
+    Without ``MaterializeInplaceAliases`` PTOAS keeps ``score``, ``score_exp``,
+    ``score_prob``, ``kv``, and ``weighted`` as distinct touching-lifetime
+    handles and exceeds the 192 KiB Vec capacity. Legal last-use aliases reduce
+    the full-size live set to the two persistent state buffers.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        score_in: pl.Tensor[[128, 128], pl.FP32],
+        kv_in: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        score: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+            score_in, [0, 0], [128, 128], target_memory=pl.Mem.Vec
+        )
+        kv: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+            kv_in, [0, 0], [128, 128], target_memory=pl.Mem.Vec
+        )
+        score_max: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.tile.col_max(score)
+        score_exp: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_expdif(score, score_max)
+        score_sum: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.tile.col_sum(score_exp)
+        score_inv: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.tile.recip(score_sum)
+        score_prob: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(score_exp, score_inv)
+        weighted: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.mul(kv, score_prob)
+        pooled: pl.Tile[[1, 128], pl.FP32, pl.Mem.Vec] = pl.tile.col_sum(weighted)
+        result = pl.tile.store(pooled, [0, 0], out)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        score_in: pl.Tensor[[128, 128], pl.FP32],
+        kv_in: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        out = self.kernel(score_in, kv_in, out)
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Test cases (parametrized by memory planner)
 # ---------------------------------------------------------------------------
@@ -267,6 +389,76 @@ class ColVecIfPhiCarryCase(PTOTestCase):
         tensors["acc"][:] = torch.from_numpy(s.astype(np.float32))
 
 
+class NestedGatherRowIfPhiCase(PTOTestCase):
+    """Nested gather-row destination-preserving phi under either planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+        if config is None:
+            self.config.rtol = 1e-2
+            self.config.atol = 1e-2
+
+    def get_name(self) -> str:
+        return f"memplan_nested_gather_row_ifphi_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("q", [_GATHER_ROWS, _GATHER_COLS], DataType.BF16, init_value=torch.randn),
+            TensorSpec("src0", [256, _GATHER_COLS], DataType.BF16, init_value=torch.randn),
+            TensorSpec("src1", [256, _GATHER_COLS], DataType.BF16, init_value=torch.randn),
+            # Select the deepest branch and copy rows 0..15 from src0.
+            TensorSpec("flag0_tensor", [1], DataType.INT32, init_value=1),
+            TensorSpec("flag1_tensor", [1], DataType.INT32, init_value=1),
+            TensorSpec("flag2_tensor", [1], DataType.INT32, init_value=1),
+            TensorSpec(
+                "out",
+                [_GATHER_ROWS, _GATHER_OUT_COLS],
+                DataType.FP32,
+                is_output=True,
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return NestedGatherRowIfPhiProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        tensors["out"][:] = torch.matmul(
+            tensors["q"].float(),
+            tensors["src0"][:_GATHER_ROWS, :].float().mT,
+        )
+
+
+class InplaceSoftmaxChainCase(PTOTestCase):
+    """Ratio-128-shaped full-tile alias chain under either memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+        if config is None:
+            self.config.rtol = 2e-3
+            self.config.atol = 2e-3
+
+    def get_name(self) -> str:
+        return f"memplan_inplace_softmax_chain_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("score_in", [128, 128], DataType.FP32, init_value=torch.randn),
+            TensorSpec("kv_in", [128, 128], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [1, 128], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return InplaceSoftmaxChainProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        score = tensors["score_in"]
+        score_exp = torch.exp(score - score.amax(dim=0, keepdim=True))
+        score_prob = score_exp / score_exp.sum(dim=0, keepdim=True)
+        tensors["out"][:] = (tensors["kv_in"] * score_prob).sum(dim=0, keepdim=True)
+
+
 # ---------------------------------------------------------------------------
 # pytest wrappers
 # ---------------------------------------------------------------------------
@@ -298,6 +490,16 @@ class TestMemoryPlannerPtoas:
         # not the shared ``[1, N]`` op-result buffer.
         result = test_runner.run(ColVecIfPhiCarryCase(planner))
         assert result.passed, f"colvec if-phi carry ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_nested_gather_row_ifphi(self, test_runner, planner):
+        result = test_runner.run(NestedGatherRowIfPhiCase(planner))
+        assert result.passed, f"nested gather-row if-phi ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_inplace_softmax_chain(self, test_runner, planner):
+        result = test_runner.run(InplaceSoftmaxChainCase(planner))
+        assert result.passed, f"in-place softmax chain ({_planner_tag(planner)}) failed: {result.error}"
 
 
 if __name__ == "__main__":
