@@ -191,6 +191,96 @@ class GatherRank2SmallerLeadingProgram:
 
 
 @pl.program
+class GatherRank2ExpandProgram:
+    """Rank-2 expand gather: ``index`` cols (64) > ``input`` cols (32).
+
+    Mirrors the DeepSeek rope cos/sin interleave pattern (column expand via
+    ``j >> 1`` indices). On A5 this exercises the full-tile flat-index path.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[4, 32], pl.FP32],
+        idx: pl.Tensor[[4, 64], pl.INT32],
+        output: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+    ) -> pl.Tensor[[4, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherRank2SwapProgram:
+    """Rank-2 swap gather: adjacent-pair swap via ``j ^ 1`` indices.
+
+    Mirrors the DeepSeek rope swap pattern on the last dim.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[4, 64], pl.FP32],
+        idx: pl.Tensor[[4, 64], pl.INT32],
+        output: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+    ) -> pl.Tensor[[4, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherRank2Swap16RowProgram:
+    """Rank-2 swap gather with 16 source rows (j^1 indices).
+
+    16 rows spans two A5 FP32 vector boxes, so this exercises the A5 full-tile
+    flat-index gather beyond the one-box (<=8-row) case that the 4-row variant
+    covers. Regression for the A5 ``pto.tgather`` >8-row index-tile corruption.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[16, 64], pl.FP32],
+        idx: pl.Tensor[[16, 64], pl.INT32],
+        output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherRank2Swap16RowStridedProgram:
+    """Rank-2 swap gather over a STRIDED column slice of a wider tile.
+
+    Mirrors DeepSeek sparse_attn inverse-RoPE exactly: the source is a [16, 128]
+    tile whose columns [64:128] (ROPE_DIM=64) are gathered, so the gather source
+    is a non-contiguous column slice with row stride 128, not 64. With a [16, 64]
+    swap index this is the shape that corrupted on A5. The contiguous [16, 64]
+    variant (GatherRank2Swap16RowProgram) does NOT reproduce it.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[16, 128], pl.FP32],
+        idx: pl.Tensor[[16, 64], pl.INT32],
+        output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            local = pl.create_tensor([16, 128], dtype=pl.FP32)
+            local = pl.assemble(local, inp, [0, 0])
+            rope = local[:, 64:128]
+            out = pl.tensor.gather(rope, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
 class GatherRank3LastDimProgram:
     """Rank-3 + dim=-1. Lowering collapses leading dims via ``tile.reshape``.
 
@@ -412,9 +502,6 @@ class _GatherBaseTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
 
 class GatherRank2LastDimTestCase(_GatherBaseTestCase):
     def get_name(self) -> str:
@@ -530,6 +617,104 @@ class GatherRank2SmallerLeadingTestCase(_GatherBaseTestCase):
         inp = tensors["inp"][: tensors["idx"].shape[0]]
         idx = tensors["idx"].to(torch.int64)
         tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+def _expand_indices_4x64() -> torch.Tensor:
+    """Per-row interleave indices: ``idx[r, j] = j >> 1`` (32 → 64 expand)."""
+    j = torch.arange(64, dtype=torch.int32)
+    return (j >> 1).unsqueeze(0).expand(4, -1).contiguous()
+
+
+def _swap_indices_4x64() -> torch.Tensor:
+    """Per-row adjacent swap: ``idx[r, j] = j ^ 1``."""
+    j = torch.arange(64, dtype=torch.int32)
+    return (j ^ 1).unsqueeze(0).expand(4, -1).contiguous()
+
+
+def _swap_indices_16x64() -> torch.Tensor:
+    """Per-row adjacent swap over 16 rows: ``idx[r, j] = j ^ 1``."""
+    j = torch.arange(64, dtype=torch.int32)
+    return (j ^ 1).unsqueeze(0).expand(16, -1).contiguous()
+
+
+class GatherRank2ExpandTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_expand"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [4, 32], DataType.FP32, init_value=torch.randn),
+            TensorSpec("idx", [4, 64], DataType.INT32, init_value=_expand_indices_4x64),
+            TensorSpec("output", [4, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2ExpandProgram
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+class GatherRank2SwapTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_swap"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [4, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("idx", [4, 64], DataType.INT32, init_value=_swap_indices_4x64),
+            TensorSpec("output", [4, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2SwapProgram
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+class GatherRank2Swap16RowTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_swap_16row"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [16, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("idx", [16, 64], DataType.INT32, init_value=_swap_indices_16x64),
+            TensorSpec("output", [16, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2Swap16RowProgram
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+class GatherRank2Swap16RowStridedTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_swap_16row_strided"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [16, 128], DataType.FP32, init_value=torch.randn),
+            TensorSpec("idx", [16, 64], DataType.INT32, init_value=_swap_indices_16x64),
+            TensorSpec("output", [16, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2Swap16RowStridedProgram
+
+    def compute_expected(self, tensors, params=None):
+        rope = tensors["inp"][:, 64:128]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(rope, dim=-1, index=idx)
 
 
 class GatherRank3LastDimTestCase(_GatherBaseTestCase):
@@ -770,6 +955,34 @@ class TestGatherIndex:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank2_smaller_leading(self, test_runner, platform):
         result = test_runner.run(GatherRank2SmallerLeadingTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", [pytest.param("a5sim", id="a5sim"), pytest.param("a5", id="a5")])
+    def test_gather_rank2_expand(self, test_runner, platform):
+        """A5-focused expand gather (K>S1) — rope-style interleave indices."""
+        result = test_runner.run(GatherRank2ExpandTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", [pytest.param("a5sim", id="a5sim"), pytest.param("a5", id="a5")])
+    def test_gather_rank2_swap(self, test_runner, platform):
+        """A5-focused swap gather (j^1) — rope-style adjacent swap."""
+        result = test_runner.run(GatherRank2SwapTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", [pytest.param("a5sim", id="a5sim"), pytest.param("a5", id="a5")])
+    def test_gather_rank2_swap_16row(self, test_runner, platform):
+        """A5 swap gather over 16 rows (>8) — regression for tgather >8-row corruption."""
+        result = test_runner.run(GatherRank2Swap16RowTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", [pytest.param("a5sim", id="a5sim"), pytest.param("a5", id="a5")])
+    def test_gather_rank2_swap_16row_strided(self, test_runner, platform):
+        """A5 swap gather over a strided column slice — mirrors sparse_attn inverse-RoPE."""
+        result = test_runner.run(GatherRank2Swap16RowStridedTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
