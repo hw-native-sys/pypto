@@ -78,7 +78,7 @@ result = passes.lower_auto_vector_split()(program)
 到同级区域或区域外的全宽算子。任何区域**之外**的语句以全宽发出。所有区域下降后，作用域
 包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
 [`ExpandMixedKernel`](19-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
-改由 pass 21 用每个区域正确的拆分轴校验各自的转置风险）。
+改由本 pass 用每个区域正确的拆分轴校验各自的转置风险）。
 
 函数级 AUTO split（`optimizations=[pl.split(mode)]`）与显式 `pl.split_aiv` 区域是
 **互斥**的——同时携带二者的作用域会被拒绝。该检查在更早的
@@ -137,6 +137,39 @@ result = passes.lower_auto_vector_split()(program)
 由于区域经由通用的 `BeginScope`/`EndScope` 构建且不被提取，它可**嵌套**在 `pl.range` /
 `pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句，找到并下降每个区域，同时保留
 外围控制流。
+
+### 区域必须不被 scope 包裹
+
+区域下降会递归进入 `ForStmt` / `WhileStmt` / `IfStmt` / `SeqStmts`，但**刻意不**进入
+`ScopeStmt`：scope 携带提取（outlining）与名字可见性语义，区域局部的折半不应跨越它。因此本
+pass 运行时每个区域都必须已不被 scope 包裹——通常由
+[`OutlineIncoreScopes`](08-outline_incore_scopes.md)（pass 8）保证，它会把外围的 `InCore`
+scope 提取为独立函数。
+
+该保证存在一个缺口，故本 pass 选择强制校验而非假定成立。pass 8 只对 `Opaque` /
+`Orchestration` 函数提取 scope，而解析器无论外围函数类型如何，都会把顶层的
+`for aiv_id in pl.split_aiv(...)` 包进一个 `InCore` scope。因此直接把函数声明为
+`pl.FunctionType.InCore` 时，到达此处的区域仍被 scope 包裹：
+
+```python
+@pl.function(type=pl.FunctionType.InCore)   # pass 8 会跳过该函数
+def f(self, a: pl.Tensor[[128, 128], pl.FP32],
+      c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):   # 被包进 InCore scope
+        base = aiv_id * 64
+        c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    return c
+```
+
+下降完成后，`LowerExplicitRegionFunction` 会重新扫描函数体，对任何存活下来的区域抛出
+`ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：改用普通的 `@pl.function` /
+`@pl.jit`（Opaque）让 pass 8 提取该 scope，或把区域移出外围 scope。
+
+该守卫也正是 `split_aiv_region_validated` 标记可信的依据：只有当每个区域都确实被消费后才写入
+attrs，因此 [`ExpandMixedKernel`](19-expand_mixed_kernel.md) 凭该标记跳过自身的 func-mode
+检查时，背后总有一次真实的逐区域校验。若无此守卫，被 scope 包裹的区域会既未下降、又未校验，
+却仍被标记为“已完成区域校验”，问题要到很晚才以 PTO codegen 的内部断言
+（`SplitAivScopeStmt reached PTO codegen`）暴露。
 
 ## 拆分轴分派
 

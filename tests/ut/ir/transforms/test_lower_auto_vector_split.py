@@ -21,25 +21,26 @@ These tests hand-build a minimal mixed InCore function at the
 post-InferTileMemorySpace level (memory spaces already assigned) and run the pass
 in isolation with verification disabled.
 
-Why these tests hand-build IR instead of using the ``@pl.program`` DSL (the
-project's default transform-test style): it is NOT that the DSL cannot express
-the shapes involved — it can author both this pass's tile-level input and, via
-the outlined boundary form (``pl.aiv_shard(qk, split=1)``), its lowered output.
-The blocker is that the DSL wraps a top-level ``for aiv_id in pl.split_aiv(...)``
-in an enclosing ``pl.at``/``ScopeStmt``, and this pass does not descend into a
-ScopeStmt — by the time it runs (pass 18) OutlineIncoreScopes has long since
-removed those. So on DSL-authored input the region is never visited: it survives
-unlowered and ``ValidateMixedExplicitRegion`` never runs, which would make every
-guard test here vacuous. Reproducing pass 18's real input from the DSL needs the
-whole upstream prefix, turning a unit test into an integration test.
+Why the transform-output tests hand-build IR instead of using the ``@pl.program``
+DSL (the project's default transform-test style): it is NOT that the DSL cannot
+express the shapes involved — it can author both this pass's tile-level input
+and, via the outlined boundary form (``pl.aiv_shard(qk, split=1)``), its lowered
+output. The reason is narrower: the pass runs at the tile level
+(post-InferTileMemorySpace), so writing an explicit ``Expected`` lowered program
+in the DSL means spelling out every assigned memory space and memref, which the
+hand-built helpers express directly. Each transform-output test therefore builds
+both the ``Before`` program and an explicit ``Expected`` lowered program with the
+same helpers and asserts ``ir.assert_structural_equal`` between the pass result
+and ``Expected``. Negative tests keep ``pytest.raises`` because a rejected
+transform produces no ``After`` IR. End-to-end DSL coverage of this authoring
+form lives in ``tests/st/codegen/torch/test_torch_codegen_cross_core.py``
+(``SplitAivShardProgram``), where the numerics are checked against torch.
 
-Each transform-output test therefore hand-builds both the ``Before`` program and
-an explicit ``Expected`` lowered program with the same helpers and asserts
-``ir.assert_structural_equal`` between the pass result and ``Expected``. Negative
-tests keep ``pytest.raises`` because a rejected transform produces no ``After``
-IR. End-to-end DSL coverage of this authoring form lives in
-``tests/st/codegen/torch/test_torch_codegen_cross_core.py`` (``SplitAivShardProgram``),
-where the numerics are checked against torch.
+The scope-nesting tests at the bottom of this file are the exception: they are
+authored in the DSL because the DSL is what produces the shape under test (the
+parser's ``InCore`` scope wrapper). A DSL-authored program *can* reach the
+region guards in general — declare the function ``@pl.function`` (Opaque) and
+prefix ``passes.outline_incore_scopes()`` so the wrapper is outlined first.
 
 The per-op vector halving tests (load / slice / reshape / store offset /
 singleton / loop tracking / reduce-on-split-axis throw) were migrated here from
@@ -50,6 +51,7 @@ leaf statement through that same machinery, so the halving is identical (Stage 1
 proved byte-identity); only the entry point changed.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir.op import tile_ops as T
@@ -2063,6 +2065,108 @@ def test_region_rejects_lane_reference_on_non_addressing_op():
     test_mixed_explicit_implicit_region_rejected above.)"""
     with pytest.raises(ValueError, match=r"mixes explicit.*tile\.set_validshape"):
         _lower(_admission_program(ir.Span.unknown(), _laundering_body, wrap=True))
+
+
+# ---------------------------------------------------------------------------
+# Scope-nested regions are rejected, not silently passed through.
+#
+# Region lowering walks for / while / if / seq but deliberately NOT ScopeStmt: a
+# scope carries outlining and name-visibility semantics that region-local
+# halving must not reach through. A region behind a scope therefore cannot be
+# lowered, and the pass must say so instead of stamping
+# ``split_aiv_region_validated`` on a function whose region guards never ran.
+#
+# These are the only tests here authored in the ``@pl.program`` DSL, because the
+# DSL is what produces the shape: the parser wraps a top-level
+# ``for aiv_id in pl.split_aiv(...)`` in an InCore ScopeStmt, and
+# OutlineIncoreScopes only outlines scopes out of Opaque / Orchestration
+# functions — so the wrapper survives into a function declared
+# ``pl.FunctionType.InCore``.
+# ---------------------------------------------------------------------------
+
+_SCOPE_NESTED_MSG = "nested inside a scope"
+
+
+def test_scope_nested_region_rejected():
+    """A region behind a ScopeStmt is rejected with an actionable diagnostic."""
+
+    @pl.program
+    class Nested:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            # The parser wraps this top-level region in an InCore ScopeStmt.
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                base = aiv_id * 64
+                c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+            return c
+
+    with pytest.raises(ValueError, match=_SCOPE_NESTED_MSG):
+        _lower(Nested)
+
+
+def test_scope_nested_region_guards_not_bypassed():
+    """The guard fires even for a body that would trip a per-region check.
+
+    Before the guard, this body's ``ValidateMixedExplicitRegion`` violation (a
+    full-width ``tile.load`` alongside an explicit ``tile.aiv_shard``) went
+    completely unchecked because the region was never visited.
+    """
+
+    @pl.program
+    class NestedMixed:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            a_left: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Left],
+            b_right: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Right],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            qk = pl.matmul(a_left, b_right)
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):  # noqa: B007
+                qk_h = pl.aiv_shard(qk)  # noqa: F841 - explicit boundary
+                t = pl.load(data, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)  # full width
+                out_0 = pl.tile.store(t, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(ValueError, match=_SCOPE_NESTED_MSG):
+        _lower(NestedMixed)
+
+
+def test_outlined_region_still_lowers_and_stamps():
+    """The canonical Opaque form is unaffected: pass 7 outlines, pass 18 lowers.
+
+    Guards the boundary of the rejection above — the scope must be gone by the
+    time this pass runs, and when it is, the region lowers and the function is
+    stamped as before.
+    """
+
+    @pl.program
+    class Canonical:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                base = aiv_id * 64
+                c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+            return c
+
+    with passes.PassContext([]):
+        outlined = passes.outline_incore_scopes()(Canonical)
+        after = _lower(outlined)
+
+    incore = [f for f in after.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(incore) == 1, "OutlineIncoreScopes should have produced one InCore function"
+    assert "pl.split_aiv" not in ir.python_print(after), "region must be erased"
+    for key, value in _REGION_ATTRS.items():
+        assert incore[0].attrs.get(key) == value, f"expected {key}={value}"
 
 
 if __name__ == "__main__":

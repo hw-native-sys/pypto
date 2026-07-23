@@ -93,7 +93,7 @@ using split_axis::TileInfo;
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 constexpr const char* kSplitAivAttr = "split_aiv";
-// Stamped by the explicit-region path so ExpandMixedKernel (pass 21) skips its
+// Stamped by the explicit-region path so ExpandMixedKernel (pass 19) skips its
 // single-func-mode transpose-hazard check (validated per-region here instead).
 constexpr const char* kSplitAivRegionValidatedAttr = "split_aiv_region_validated";
 
@@ -754,27 +754,41 @@ std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
   return result;
 }
 
-// Detect any live ``SplitAivScopeStmt`` in a body (O(N) single walk).
-class HasSplitAivScopeFinder : public IRVisitor {
+// Find the first live ``SplitAivScopeStmt`` in a body (O(N) single walk), so a
+// caller can point a diagnostic at the author's ``for aiv_id in
+// pl.split_aiv(...)`` line via the returned node's span. Unlike the hand-rolled
+// walks above this is an IRVisitor, so it descends into ScopeStmt bodies too —
+// that asymmetry is exactly what the post-lowering guard below exists to catch.
+class SplitAivScopeFinder : public IRVisitor {
  public:
-  bool found_ = false;
+  SplitAivScopeStmtPtr found_;
 
  protected:
-  void VisitStmt_(const SplitAivScopeStmtPtr& op) override { found_ = true; }
+  void VisitStmt_(const SplitAivScopeStmtPtr& op) override {
+    if (!found_) found_ = op;
+  }
 };
 
-bool BodyContainsSplitAivScope(const StmtPtr& body) {
-  if (!body) return false;
-  HasSplitAivScopeFinder finder;
+SplitAivScopeStmtPtr FindFirstSplitAivScope(const StmtPtr& body) {
+  if (!body) return nullptr;
+  SplitAivScopeFinder finder;
   finder.VisitStmt(body);
   return finder.found_;
 }
+
+bool BodyContainsSplitAivScope(const StmtPtr& body) { return FindFirstSplitAivScope(body) != nullptr; }
 
 // Lower an InCore function that carries explicit ``SplitAivScopeStmt`` regions:
 // halve only the vector compute inside each region (region-local), leave
 // out-of-region compute full-width, drop each scope wrapper, and stamp
 // ``split_aiv`` (idempotent — already bridged at OutlineIncoreScopes) plus
-// ``split_aiv_region_validated`` (signals pass 21 to skip its func-mode check).
+// ``split_aiv_region_validated`` (signals ExpandMixedKernel (pass 19) to skip its func-mode check).
+//
+// Region lowering deliberately does NOT cross a ``ScopeStmt``: a scope carries
+// outlining and name-visibility semantics that region-local halving must not
+// reach through. So every region must already be scope-free by the time this
+// runs, and the guard below enforces that instead of letting an unreachable one
+// ride through — unlowered and un-validated, yet stamped "region validated".
 FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
   auto stmts = transform_utils::FlattenToStmts(func->body_);
   // Seed the reservation set with every name visible in the function body (params
@@ -785,9 +799,35 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
   auto new_stmts = LowerExplicitRegions(stmts, used_names);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
+
+  // Every region must have been consumed. A surviving one means it sat behind a
+  // scope the lowering walk does not enter — reachable today because the parser
+  // wraps a top-level ``pl.split_aiv`` in an InCore ScopeStmt while
+  // OutlineIncoreScopes only outlines scopes out of Opaque / Orchestration
+  // functions, so the wrapper reaches this pass intact inside a function the
+  // author declared ``pl.FunctionType.InCore``. Reject it here, pointing at the
+  // region; passing it through would skip every region guard and then fail far
+  // downstream as an internal assertion in PTO codegen.
+  //
+  // Span safety: the check fails exactly when ``survivor`` is non-null, so the
+  // dereference in the span argument is only evaluated when it is valid.
+  auto survivor = FindFirstSplitAivScope(new_body);
+  CHECK_SPAN(!survivor, survivor->span_)
+      << "LowerAutoVectorSplit: this pl.split_aiv region is nested inside a scope and cannot be "
+         "lowered — region lowering does not cross a scope boundary. The scope may be one you "
+         "wrote ('with pl.at(...)') or the InCore scope the parser adds around a top-level "
+         "pl.split_aiv. OutlineIncoreScopes only outlines scopes out of Opaque / Orchestration "
+         "functions, so a scope inside a function declared pl.FunctionType.InCore reaches this "
+         "pass intact. Fix it one of two ways: (1) declare the enclosing function with plain "
+         "@pl.function / @pl.jit so the scope is outlined before this pass runs; or (2) move the "
+         "pl.split_aiv region out of the enclosing scope.";
+
   auto [cloned_body, clone_map_unused] = DeepClone(new_body);
   (void)clone_map_unused;
 
+  // Earned only now: the guard above proves every region was actually lowered,
+  // so ``split_aiv_region_validated`` is a true claim and pass 19
+  // (SplitVectorKernel) may skip its own single-func-mode check on its strength.
   auto attrs = func->attrs_;
   attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
                              [](const auto& kv) {

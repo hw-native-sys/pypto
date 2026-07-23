@@ -96,7 +96,7 @@ an out-of-region full-width op. Statements **outside** any region are emitted
 full-width. After all regions are lowered, the scope wrappers are dropped and the
 function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signals
 [`ExpandMixedKernel`](19-expand_mixed_kernel.md) to skip its single-func-mode
-transpose check — pass 21 validates each region's transpose hazard with the
+transpose check — this pass validates each region's transpose hazard with the
 correct per-region split axis instead).
 
 A function-level AUTO split (`optimizations=[pl.split(mode)]`) and explicit
@@ -177,6 +177,44 @@ Because the region is built via the generic `BeginScope`/`EndScope` and is
 non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an
 `if`; the region path recurses into compound statements to find and lower every
 region while preserving the surrounding control flow.
+
+### Regions must be scope-free
+
+Region lowering recurses into `ForStmt` / `WhileStmt` / `IfStmt` / `SeqStmts` but
+deliberately **not** into a `ScopeStmt`: a scope carries outlining and
+name-visibility semantics that region-local halving must not reach through. Every
+region must therefore already be scope-free when this pass runs — normally
+guaranteed by [`OutlineIncoreScopes`](08-outline_incore_scopes.md) (pass 8), which
+lifts the enclosing `InCore` scope into its own function.
+
+That guarantee has a hole, so the pass enforces it rather than assuming it. Pass 7
+only outlines scopes out of `Opaque` / `Orchestration` functions, while the parser
+wraps a top-level `for aiv_id in pl.split_aiv(...)` in an `InCore` scope
+regardless of the enclosing function's type. Declaring the function
+`pl.FunctionType.InCore` directly therefore delivers a scope-wrapped region here:
+
+```python
+@pl.function(type=pl.FunctionType.InCore)   # pass 8 skips this function
+def f(self, a: pl.Tensor[[128, 128], pl.FP32],
+      c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):   # wrapped in an InCore scope
+        base = aiv_id * 64
+        c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    return c
+```
+
+After lowering, `LowerExplicitRegionFunction` re-scans the body and rejects any
+surviving region with a `ValueError` pointing at the `pl.split_aiv` line. Use
+plain `@pl.function` / `@pl.jit` (Opaque) so pass 8 outlines the scope, or move
+the region out of the enclosing scope.
+
+The guard is also what makes the `split_aiv_region_validated` stamp trustworthy:
+the attrs are written only once every region has actually been consumed, so
+[`ExpandMixedKernel`](19-expand_mixed_kernel.md) skipping its own func-mode check
+on the strength of that stamp is always backed by a real per-region validation.
+Without it a scope-nested region passed through unlowered *and* un-validated
+while still being stamped "region validated", and the failure surfaced much later
+as an internal assertion in PTO codegen (`SplitAivScopeStmt reached PTO codegen`).
 
 ## Split-axis dispatch
 
