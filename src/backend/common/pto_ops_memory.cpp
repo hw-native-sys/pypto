@@ -106,13 +106,36 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_) << "tile.load requires assignment target (tile_buf)";
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
+
+  // MX scale loads: default EmitMakeTensorViews uses layout=nd, but PTOAS
+  // InferPTOLayout prefers mx_a_zz/mx_b_nn for !pto.f8E8M0 Mat+fractal=32 and
+  // rejects the ND/user conflict. Rebind a make_tensor_view with the MX layout
+  // (same physical ND strides) so EmitC yields Layout::MX_* for TLoadMxCube*.
+  const std::string mx_layout = op->GetKwarg<std::string>("mx_layout", "none");
+  const bool is_mx_load = (mx_layout == "mx_a_zz" || mx_layout == "mx_b_nn");
+  std::string tensor_view;
+  if (is_mx_load) {
+    INTERNAL_CHECK_SPAN(tensor_type->shape_.size() == 2, op->span_)
+        << "tile.load mx_layout requires a 2D tensor, got rank " << tensor_type->shape_.size();
+    std::string src_ptr = codegen.GetTensorBasePtr(tensor);
+    std::string rows_code = codegen.GetExprAsCode(tensor_type->shape_[0]);
+    std::string cols_code = codegen.GetExprAsCode(tensor_type->shape_[1]);
+    std::string one_code = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+    tensor_view = codegen.NewNamedTemp(tensor->name_hint_ + "_mx_view");
+    std::ostringstream mv;
+    mv << tensor_view << " = pto.make_tensor_view " << src_ptr << ", shape = [" << rows_code << ", "
+       << cols_code << "], strides = [" << cols_code << ", " << one_code << "] {layout = #pto.layout<"
+       << mx_layout << ">}: " << tensor_view_type;
+    codegen.Emit(mv.str());
+  } else {
+    tensor_view = codegen.GetOrCreateTensorView(tensor);
+  }
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
   // canonical coordinates (matching the source TensorType's shape). There is
@@ -129,6 +152,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
+  if (is_mx_load) {
+    tload_line << " {layout = #pto.layout<" << mx_layout << ">}";
+  }
   codegen.Emit(tload_line.str());
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`

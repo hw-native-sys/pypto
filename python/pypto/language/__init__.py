@@ -131,11 +131,15 @@ from .op.tile_ops import (
     log,
     lrelu,
     matmul_bias,
+    matmul_mx,
+    matmul_mx_acc,
+    matmul_mx_bias,
     max,
     maximums,
     min,
     minimums,
     move,
+    mx_quant,
     not_,
     or_,
     ors,
@@ -152,6 +156,9 @@ from .op.tile_ops import (
     store,
     subc,
     subsc,
+    tdequant,
+    tget_scale_addr,
+    tquant,
     xor,
     xors,
 )
@@ -243,6 +250,7 @@ NZ = TensorLayout.NZ
 FP4 = DataType.FP4
 FP8E4M3FN = DataType.FP8E4M3FN
 FP8E5M2 = DataType.FP8E5M2
+FP8E8M0 = DataType.FP8E8M0
 FP16 = DataType.FP16
 FP32 = DataType.FP32
 BF16 = DataType.BF16
@@ -377,6 +385,13 @@ __all__ = [
     "relu",
     "matmul_acc",
     "matmul_bias",
+    "matmul_mx",
+    "matmul_mx_acc",
+    "matmul_mx_bias",
+    "tquant",
+    "mx_quant",
+    "tdequant",
+    "tget_scale_addr",
     "gemv",
     "gemv_acc",
     "gemv_bias",
@@ -476,6 +491,7 @@ __all__ = [
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",
+    "FP8E8M0",
     "FP16",
     "FP32",
     "BF16",

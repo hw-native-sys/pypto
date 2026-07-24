@@ -68,7 +68,7 @@ For each `ForStmt` with `return_vars_`, after visiting the body the analyzer cop
 
 | Producer kind | Resolved memory space |
 | ------------- | --------------------- |
-| Unregistered cube ops (`tile.matmul_mx*`) | `Acc` |
+| `tile.matmul_mx*` (registered) | `Acc` (from REGISTER_OP `set_output_memory`) |
 | Other unregistered ops | `Vec` |
 | Registered op with no `MemorySpec` | Read from `Call` return type if set & not `DDR`; else `Vec` |
 | Registered op with `deduce_output_memory` returning `Some(s)` (e.g. `tile.matmul → Acc`) | `s` |

@@ -17,6 +17,7 @@ from pypto import (
     DT_FP4,
     DT_FP8E4M3FN,
     DT_FP8E5M2,
+    DT_FP8E8M0,
     DT_FP16,
     DT_FP32,
     DT_HF4,
@@ -52,6 +53,7 @@ class TestDataTypeEnum:
         # Floating point
         assert hasattr(DataType, "FP8E4M3FN")
         assert hasattr(DataType, "FP8E5M2")
+        assert hasattr(DataType, "FP8E8M0")
         assert hasattr(DataType, "FP16")
         assert hasattr(DataType, "FP32")
         assert hasattr(DataType, "BF16")
@@ -89,6 +91,7 @@ class TestDataTypeEnum:
             DataType.FP4,
             DataType.FP8E4M3FN,
             DataType.FP8E5M2,
+            DataType.FP8E8M0,
             DataType.FP16,
             DataType.FP32,
             DataType.BF16,
@@ -123,6 +126,7 @@ class TestDataTypeEnum:
         assert DT_FP4 == DataType.FP4
         assert DT_FP8E4M3FN == DataType.FP8E4M3FN
         assert DT_FP8E5M2 == DataType.FP8E5M2
+        assert DT_FP8E8M0 == DataType.FP8E8M0
         assert DT_FP16 == DataType.FP16
         assert DT_FP32 == DataType.FP32
         assert DT_BF16 == DataType.BF16
@@ -146,6 +150,7 @@ class TestDataTypeEnum:
         assert hasattr(pypto, "DT_FP4")
         assert hasattr(pypto, "DT_FP8E4M3FN")
         assert hasattr(pypto, "DT_FP8E5M2")
+        assert hasattr(pypto, "DT_FP8E8M0")
         assert hasattr(pypto, "DT_FP16")
         assert hasattr(pypto, "DT_FP32")
         assert hasattr(pypto, "DT_BF16")
@@ -176,6 +181,7 @@ class TestDataTypeBit:
         assert pypto.DT_UINT8.get_bit() == 8
         assert pypto.DT_FP8E4M3FN.get_bit() == 8
         assert pypto.DT_FP8E5M2.get_bit() == 8
+        assert pypto.DT_FP8E8M0.get_bit() == 8
         assert pypto.DT_HF8.get_bit() == 8
 
     def test_16bit_types(self):
@@ -221,6 +227,7 @@ class TestDataTypeString:
         assert pypto.DT_FP4.to_string() == "fp4"
         assert pypto.DT_FP8E4M3FN.to_string() == "fp8e4m3fn"
         assert pypto.DT_FP8E5M2.to_string() == "fp8e5m2"
+        assert pypto.DT_FP8E8M0.to_string() == "fp8e8m0"
         assert pypto.DT_FP16.to_string() == "fp16"
         assert pypto.DT_FP32.to_string() == "fp32"
         assert pypto.DT_BF16.to_string() == "bfloat16"
@@ -244,6 +251,7 @@ class TestDataTypePredicates:
         assert pypto.DT_FP4.is_float() is True
         assert pypto.DT_FP8E4M3FN.is_float() is True
         assert pypto.DT_FP8E5M2.is_float() is True
+        assert pypto.DT_FP8E8M0.is_float() is True
         assert pypto.DT_FP16.is_float() is True
         assert pypto.DT_FP32.is_float() is True
         assert pypto.DT_BF16.is_float() is True

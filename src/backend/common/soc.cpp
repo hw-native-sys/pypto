@@ -162,11 +162,13 @@ const SoC& Create950SoC() {
   static SoC soc = []() {
     // AIC (CUBE) core configuration
     Core aic_core(ir::CoreType::CUBE, {
-                                          Mem(ir::MemorySpace::Mat, 512ULL * 1024, 128),  // 512KB Mat
-                                          Mem(ir::MemorySpace::Left, 64ULL * 1024, 64),   // 64KB Left
-                                          Mem(ir::MemorySpace::Right, 64ULL * 1024, 64),  // 64KB Right
-                                          Mem(ir::MemorySpace::Acc, 256ULL * 1024, 128),  // 256KB Acc
-                                          Mem(ir::MemorySpace::Bias, 4ULL * 1024, 64)     // 4KB Bias
+                                          Mem(ir::MemorySpace::Mat, 512ULL * 1024, 128),     // 512KB Mat
+                                          Mem(ir::MemorySpace::Left, 64ULL * 1024, 64),      // 64KB Left
+                                          Mem(ir::MemorySpace::Right, 64ULL * 1024, 64),     // 64KB Right
+                                          Mem(ir::MemorySpace::Acc, 256ULL * 1024, 128),     // 256KB Acc
+                                          Mem(ir::MemorySpace::Bias, 4ULL * 1024, 64),       // 4KB Bias
+                                          Mem(ir::MemorySpace::LeftScale, 4ULL * 1024, 32),  // 4KB L0A scale
+                                          Mem(ir::MemorySpace::RightScale, 4ULL * 1024, 32)  // 4KB L0B scale
                                       });
 
     // AIV (VECTOR) core configuration.
@@ -188,7 +190,8 @@ const SoC& Create950SoC() {
     std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
     mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat};
     mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR};
-    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right};
+    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right,
+                                       ir::MemorySpace::LeftScale, ir::MemorySpace::RightScale};
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat, ir::MemorySpace::DDR};
 
     return SoC(die, 2, std::move(mem_graph));

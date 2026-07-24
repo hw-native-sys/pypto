@@ -71,6 +71,16 @@ for _name in ("uint16", "uint32", "uint64"):
     if _torch_dtype is not None:
         _DATATYPE_TO_TORCH[_name] = _torch_dtype
 del _name, _torch_dtype
+# Float8 / MX scale dtypes (PyTorch 2.1+ / 2.3+); map IR string → torch.dtype.
+for _ir_name, _torch_name in (
+    ("fp8e4m3fn", "float8_e4m3fn"),
+    ("fp8e5m2", "float8_e5m2"),
+    ("fp8e8m0", "float8_e8m0fnu"),
+):
+    _torch_dtype = getattr(torch, _torch_name, None)
+    if _torch_dtype is not None:
+        _DATATYPE_TO_TORCH[_ir_name] = _torch_dtype
+del _ir_name, _torch_name, _torch_dtype
 
 # IR DataType -> ctypes scalar constructor mapping.
 # Used to wrap Python int/float/bool values into the correct ctypes scalar
@@ -117,7 +127,7 @@ class _ParamInfo:
 _STR_TO_DATATYPE: dict[str, DataType] = {}
 for _dt_name in (
     "BOOL", "INT4", "INT8", "INT16", "INT32", "INT64", "UINT4", "UINT8", "UINT16",
-    "UINT32", "UINT64", "FP4", "FP8E4M3FN", "FP8E5M2", "FP16", "FP32", "BF16",
+    "UINT32", "UINT64", "FP4", "FP8E4M3FN", "FP8E5M2", "FP8E8M0", "FP16", "FP32", "BF16",
     "HF4", "HF8", "INDEX", "TASK_ID",
 ):  # fmt: skip
     _dt = getattr(DataType, _dt_name, None)

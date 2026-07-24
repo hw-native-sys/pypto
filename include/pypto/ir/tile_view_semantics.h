@@ -72,6 +72,18 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
       case MemorySpace::Right:
         implicit_view.slayout = TileLayout::col_major;
         break;
+      case MemorySpace::LeftScale:
+        // ISA TileLeftScale: RowMajor / RowMajor, MX scale fractal size 32.
+        implicit_view.blayout = TileLayout::row_major;
+        implicit_view.slayout = TileLayout::row_major;
+        implicit_view.fractal = 32;
+        break;
+      case MemorySpace::RightScale:
+        // ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
+        implicit_view.blayout = TileLayout::col_major;
+        implicit_view.slayout = TileLayout::col_major;
+        implicit_view.fractal = 32;
+        break;
       case MemorySpace::Acc:
         implicit_view.blayout = TileLayout::col_major;
         implicit_view.slayout = TileLayout::row_major;

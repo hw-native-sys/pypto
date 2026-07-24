@@ -17,7 +17,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -50,10 +49,6 @@ namespace ir {
 using transform_utils::GetLastYieldStmt;
 
 namespace {
-
-// Unregistered cube ops (not yet registered via REGISTER_OP but still need Acc output)
-const std::unordered_set<std::string> kUnregisteredCubeOps = {"tile.matmul_mx", "tile.matmul_mx_acc",
-                                                              "tile.matmul_mx_bias"};
 
 // Look up input constraints for an op. Returns nullptr if none.
 const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::string& op_name) {
@@ -285,7 +280,6 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     // Handle unregistered ops (backward compat)
     if (!registry.IsRegistered(op_name)) {
-      if (kUnregisteredCubeOps.count(op_name) > 0) return MemorySpace::Acc;
       return MemorySpace::Vec;
     }
 

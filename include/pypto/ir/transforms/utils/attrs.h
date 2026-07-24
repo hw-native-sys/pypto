@@ -95,8 +95,8 @@ inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffe
 /// iteration i's compute); compute intermediates of different stages may still
 /// coalesce, because forbidding *all* cross-stage reuse (depth = F) overflows the
 /// on-chip budget on real kernels (e.g. stage=4 RMSNorm). The L0 matmul spaces
-/// (Left/Right/Acc/Bias) are exempt entirely — they are matmul-managed and
-/// capacity-bound.
+/// (Left/Right/Acc/Bias/LeftScale/RightScale) are exempt entirely — they are
+/// matmul-managed and capacity-bound.
 ///
 /// Value encoding (``std::string`` — round-trip-safe via the existing
 /// python-printer / ast-parser string-attr codec, with no integer-width

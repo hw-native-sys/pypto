@@ -143,6 +143,16 @@ def _get_torch() -> Any:
                     torch.bool: DataType.BOOL,
                 }
             )
+            # Optional float8 dtypes (PyTorch 2.1+ / 2.3+); required for MX DSL ST.
+            for _torch_name, _pto_dt in (
+                ("float8_e4m3fn", DataType.FP8E4M3FN),
+                ("float8_e5m2", DataType.FP8E5M2),
+                ("float8_e8m0fnu", DataType.FP8E8M0),
+            ):
+                _td = getattr(torch, _torch_name, None)
+                if _td is not None:
+                    _TORCH_DTYPE_MAP[_td] = _pto_dt
+
         except ImportError:
             _TORCH_CACHE.append(None)
     return _TORCH_CACHE[0]

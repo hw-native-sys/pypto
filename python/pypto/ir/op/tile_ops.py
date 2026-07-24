@@ -167,6 +167,7 @@ def load(
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
     clamp: bool = False,
+    mx_layout: str = "none",
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -193,6 +194,9 @@ def load(
             load asserts that ``offsets + valid_shapes`` stays inside the source
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
+        mx_layout: MX scale-load layout (``none`` default, or ``mx_a_zz`` /
+            ``mx_a_nd`` / ``mx_a_dn`` / ``mx_b_nn`` / ``mx_b_nd`` / ``mx_b_dn``).
+            Non-``none`` requires FP8E8M0 source dtype and targets Mat by default.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -217,6 +221,8 @@ def load(
     kwargs: dict[str, Any] = {"target_memory": target_memory}
     if clamp:
         kwargs["clamp"] = True
+    if mx_layout and mx_layout != "none":
+        kwargs["mx_layout"] = mx_layout
 
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:
@@ -1705,6 +1711,66 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
+
+
+def matmul_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+
+
+def matmul_mx_acc(
+    acc: Expr,
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matmul with accumulation."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], {}, actual_span
+    )
+
+
+def matmul_mx_bias(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    bias: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matmul with bias."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.matmul_mx_bias", [lhs, lhs_scale, rhs, rhs_scale, bias], {}, actual_span
+    )
+
+
+def tquant(src: Expr, *, mode: str = "mxfp8_e4m3", span: Span | None = None) -> Call:
+    """MX block-32 dynamic quantization. Returns TupleType{quantized, e8m0_scale}."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tquant", [src], {"mode": mode}, actual_span)
+
+
+def tdequant(src: Expr, scale: Expr, offset: Expr, span: Span | None = None) -> Call:
+    """Dequantize integer tile with per-row scale/offset."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tdequant", [src, scale, offset], {}, actual_span)
+
+
+def tget_scale_addr(dst_scale: Expr, src: Expr, span: Span | None = None) -> Call:
+    """Bind MX scale-tile address from a Left/Right data tile (A5)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tget_scale_addr", [dst_scale, src], {}, actual_span)
 
 
 def batch_matmul(
