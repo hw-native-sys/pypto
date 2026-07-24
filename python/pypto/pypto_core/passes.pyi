@@ -693,30 +693,6 @@ def classify_iter_arg_carry() -> Pass:
     exactly the IR codegen lowers.
     """
 
-def insert_comm_fence() -> Pass:
-    """Insert the ptoas data-before-signal markers (all via ``system.cacheinvalid``).
-
-    The ``pld.system.notify`` itself needs no marker:
-
-    * After each **local** publishing write — a ``tile.store`` into a window-bound
-      ``DistributedTensor`` (a peer can ``remote_load`` it), or a ``get`` into a
-      local destination — a region ``system.cacheinvalid`` of the written region
-      immediately followed by a GM ``system.fence``.
-    * After each **remote** publishing write (``remote_store`` / ``put``) — only a
-      GM ``system.fence``. Its peer-offset address is not yet expressible in the IR,
-      so the peer-region cacheinvalid is emitted by the op's codegen as a workaround;
-      the release fence is always an explicit ``system.fence`` op inserted here.
-    * After each **opaque** publishing write — a ``Submit`` or a call to an
-      unregistered user function (no single addressable region) — a conservative
-      whole-GM ``system.cacheinvalid`` + ``system.fence``.
-    * After each **wait** — a no-arg (whole-GM) ``system.cacheinvalid``.
-
-    The pass carries no control-flow state and is idempotent.
-
-    Runs last in the Default pipeline, after all statement-reordering passes, so the
-    inserted markers stay adjacent through codegen.
-    """
-
 class NestedCallErrorType(Enum):
     """Nested call verification error types."""
 

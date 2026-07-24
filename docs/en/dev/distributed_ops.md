@@ -366,8 +366,8 @@ arithmetic — are:
 
 | Helper | Role |
 | ------ | ---- |
-| `EmitCommRemoteOffsetInline` | inlines the `(ctx, peer)` → peer-vs-local **element offset** arithmetic (CommContext `pto.load_scalar` reads + byte→element `arith.divsi`) at the call site. Inlined (not a `func.call` to a per-dtype helper) because ptoas' `pto-memory-consistency` pass rejects a `func.call` to a callee holding the CommContext reads |
-| `EmitCommRemoteView` | emits the inline offset + `addptr` + `make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
+| `CommRemoteOffset_<dtype>` | per-dtype MLIR helper (emitted once by `PTOCodegen::EmitCommRemoteOffsetHelpers`) that turns `(ctx, peer)` into the byte offset of the peer's window slice |
+| `EmitCommRemoteView` | emits `CommRemoteOffset + addptr + make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
 | `EmitPartitionViewPTO` | wraps a tensor view in a full-slice `partition_view` with given offsets/sizes (used by every op for both local and peer operands) |
 | `ResolveDistTensorBinding` | resolves a `DistributedTensor` arg to its codegen binding (type + window var) |
 | `AsTensorTypeLike` | kind-trait downcast accepting both `TensorType` and `DistributedTensorType` where a view's element/shape info is read uniformly |

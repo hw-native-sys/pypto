@@ -806,26 +806,6 @@ Pass ClassifyIterArgCarry();
 Pass StampTfreeSplit();
 
 /**
- * @brief Insert the ptoas data-before-signal markers around cross-rank publish
- *        and consume points (all via `system.cacheinvalid`).
- *
- * The `pld.system.notify` itself needs no marker:
- *   - after each **local** publishing write (window-bound `tile.store`, or `get`
- *     into a local destination): a region `system.cacheinvalid` of the written
- *     region immediately followed by a GM `system.fence`;
- *   - after each **remote** publishing write (`remote_store` / `put`): only a GM
- *     `system.fence`. Its data lands at a peer-offset address whose offset is not
- *     yet expressible in the IR, so the peer-region `pto.cmo.cacheinvalid` is
- *     emitted by the op's codegen as a workaround; the release fence is always an
- *     explicit `system.fence` op inserted here (codegen must not embed it);
- *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
- *
- * The pass carries no control-flow state and is idempotent. Runs last, after all
- * statement-reordering passes, so the markers stay adjacent through codegen.
- */
-Pass InsertCommFence();
-
-/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws
