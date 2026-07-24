@@ -27,7 +27,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _fingerprint(problem: dict[str, Any]) -> str:
-    canonical = (json.dumps(problem, indent=2, sort_keys=True) + "\n").encode()
+    """Match dsa::FingerprintStructuredProblem's semantic projection."""
+    semantic = copy.deepcopy(problem)
+    structure = semantic.get("problem", {}).get("pypto_structure")
+    if structure is not None:
+        for alias_class in structure.get("alias_classes", []):
+            alias_class["members"] = [f"member_{index}" for index, _ in enumerate(alias_class["members"])]
+    canonical = (json.dumps(semantic, indent=2, sort_keys=True) + "\n").encode()
     value = _FNV_OFFSET
     for byte in canonical:
         value ^= byte

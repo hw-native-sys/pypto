@@ -111,6 +111,16 @@ def _solution(ablation: ModuleType, problem: dict) -> dict:
     }
 
 
+def test_fingerprint_canonicalizes_alias_member_labels(ablation: ModuleType):
+    original = _problem(with_cost=True)
+    renamed = _problem(with_cost=True)
+    renamed["problem"]["pypto_structure"]["alias_classes"][0]["members"] = ["generated_inline_437"]
+    assert ablation._fingerprint(original) == ablation._fingerprint(renamed)
+
+    renamed["problem"]["pypto_structure"]["alias_classes"][0]["members"].append("another_member")
+    assert ablation._fingerprint(original) != ablation._fingerprint(renamed)
+
+
 def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleType, tmp_path: Path):
     hard = _problem(with_cost=False)
     target = _problem(with_cost=True)
