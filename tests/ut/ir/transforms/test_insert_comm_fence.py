@@ -11,13 +11,21 @@
 """Unit tests for the ``InsertCommFence`` pass, as Before/Expected structural comparisons.
 
 The pass enforces the ptoas data-before-signal contract with two purely-local
-rules (verified on ptoas 0.50); the ``notify`` itself needs no marker:
+rules; the ``notify`` itself needs no marker:
 
 * **After every local publishing write** — a window-bound ``pl.store`` (or ``get``
-  into a local destination): a whole-tensor region
-  ``pl.system.cacheinvalid(target, shape, [0, ...])`` immediately followed by
-  ``pl.system.fence()``.
+  into a local destination): ``pl.system.fence()``.
+* **After every opaque publishing write** (a ``Submit`` / un-analysed call, with no
+  single addressable region): a whole-GM ``pl.system.cacheinvalid()`` + a fence.
 * **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args).
+
+The local publishing write should also carry a whole-tensor *region*
+``pl.system.cacheinvalid(target, shape, [0, ...])`` before its fence, but no shipped
+ptoas lowers that form into working code — 0.50 emits nothing for it and 0.51 emits
+a kernel that fails to compile — so the pass currently emits the fence alone. See
+the ``insert_comm_fence_pass.cpp`` header for the full rationale
+(hw-native-sys/PTOAS#995); these expectations gain the region marker back once
+ptoas supports it.
 
 The **remote** writes ``remote_store`` / ``put`` land at a peer-offset address and
 are left untouched by the pass — their codegen emits a correct peer-region
@@ -72,7 +80,6 @@ def test_window_store_then_notify():
         ):
             local = pl.load(inp, [0, 0], [1, N])
             pl.store(local, [0, 0], win)
-            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
@@ -134,7 +141,7 @@ def test_plain_tensor_store_no_markers():
     ir.assert_structural_equal(_apply(Before), Before)
 
 
-def test_multiple_window_stores_each_get_cacheinvalid_and_fence():
+def test_multiple_window_stores_each_get_fence():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -162,17 +169,15 @@ def test_multiple_window_stores_each_get_cacheinvalid_and_fence():
         ):
             local = pl.load(inp, [0, 0], [1, N])
             pl.store(local, [0, 0], win)
-            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             pl.store(local, [0, 0], win)
-            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
-def test_two_distinct_windows_each_gets_cacheinvalid():
+def test_two_distinct_windows_each_gets_fence():
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
@@ -202,10 +207,8 @@ def test_two_distinct_windows_each_gets_cacheinvalid():
         ):
             local = pl.load(inp, [0, 0], [1, N])
             pl.store(local, [0, 0], win_a)
-            pl.system.cacheinvalid(win_a, [1, N], [0, 0])
             pl.system.fence()
             pl.store(local, [0, 0], win_b)
-            pl.system.cacheinvalid(win_b, [1, N], [0, 0])
             pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
@@ -245,7 +248,6 @@ def test_write_inside_if_branch():
             local = pl.load(inp, [0, 0], [1, N])
             if cond:
                 pl.store(local, [0, 0], win)
-                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
@@ -286,7 +288,6 @@ def test_notify_inside_if_write_before():
         ):
             local = pl.load(inp, [0, 0], [1, N])
             pl.store(local, [0, 0], win)
-            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             if cond:
                 pld.system.notify(
@@ -326,7 +327,6 @@ def test_notify_inside_loop_after_write():
         ):
             local = pl.load(inp, [0, 0], [1, N])
             pl.store(local, [0, 0], win)
-            pl.system.cacheinvalid(win, [1, N], [0, 0])
             pl.system.fence()
             for i in pl.range(N):
                 pld.system.notify(target=signal, peer=i, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
@@ -370,7 +370,6 @@ def test_loop_back_edge_notify_then_write():
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
                 pl.store(local, [0, 0], win)
-                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
 
     ir.assert_structural_equal(_apply(Before), Expected)
@@ -416,7 +415,6 @@ def test_combo_ring_barrier_idiom():
                             target=signal, peer=p, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                         )
                 pl.store(local, [0, 0], win)
-                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
 
     ir.assert_structural_equal(_apply(Before), Expected)
@@ -462,14 +460,12 @@ def test_combo_two_phase_loops():
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
                 pl.store(local, [0, 0], win)
-                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
             for _t in pl.range(N):
                 pld.system.notify(
                     target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
                 )
                 pl.store(local, [0, 0], win)
-                pl.system.cacheinvalid(win, [1, N], [0, 0])
                 pl.system.fence()
 
     ir.assert_structural_equal(_apply(Before), Expected)

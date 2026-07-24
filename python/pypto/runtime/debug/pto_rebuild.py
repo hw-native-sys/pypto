@@ -29,10 +29,10 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
+from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
 
 __all__ = ["rebuild_kernel_cpp_from_pto", "PTOAS_BODY_BEGIN", "PTOAS_BODY_END"]
@@ -50,15 +50,6 @@ PTOAS_BODY_END = "// --- Kernel entry point ---"
 # <name>(...)``. Capturing the name here lets us discover which kernel cpps
 # each .pto feeds without persisting a map at compile time.
 _PTOAS_FUNC_DEF_RE = re.compile(r"(?:__global__\s+)?AICORE\s+void\s+(\w+)\s*\(")
-
-
-def _ptoas_binary() -> str | None:
-    """Locate the ``ptoas`` executable, or return None when unavailable."""
-    root = os.environ.get("PTOAS_ROOT")
-    if root:
-        cand = os.path.join(root, "ptoas")
-        return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
-    return shutil.which("ptoas")
 
 
 def _disabled_via_env() -> bool:

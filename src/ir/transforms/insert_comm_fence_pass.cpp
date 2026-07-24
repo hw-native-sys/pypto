@@ -36,8 +36,9 @@
  * So a single structural traversal inserts, per op, with no control-flow state:
  *
  *   - after each **local publishing write** (window-bound `tile.store`, or `get`
- *     into a local destination): a whole-tensor region `system.cacheinvalid` of
- *     the written region followed **immediately** by a GM `system.fence`.
+ *     into a local destination): only a GM `system.fence`. The publish-side region
+ *     cacheinvalid this rule calls for is currently NOT emitted — see the
+ *     "region cacheinvalid suspended" note below.
  *   - after each **remote publishing write** (`remote_store` / `put`): only a GM
  *     `system.fence`. The data lands at a peer-offset GM address that a
  *     local-target cacheinvalid cannot address; the peer offset is not yet
@@ -46,23 +47,42 @@
  *     fence, however, is always an explicit `system.fence` op inserted here — the
  *     codegen must not embed it. (TODO: a first-class IR representation of the
  *     peer-region cacheinvalid would let the pass own the whole marker.)
+ *   - after each **opaque publishing write** (`Submit`, or a write with no single
+ *     addressable region): a whole-GM `system.cacheinvalid` + a GM `system.fence`.
  *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`.
  *   - **notify**: nothing.
  *
  * Example shapes (`cacheinvalid(peer)` shown in brackets is codegen-only, not IR):
  *
  *   remote_store; notify         -> remote_store; [cacheinvalid(peer)]; fence; notify
- *   store(win); notify           -> store(win); cacheinvalid(win); fence; notify
+ *   store(win); notify           -> store(win); fence; notify
  *   wait; read                   -> wait; cacheinvalid(); read
  *
- * The region cacheinvalid covers the whole target tensor (full shape at zero
- * offsets), reusing the tensor type's dim exprs; narrowing to the precise written
- * sub-region is a planned follow-up.
+ * ## Region cacheinvalid suspended (publish side, local writes)
  *
- * Idempotent: a write already followed by its region cacheinvalid + fence, and a
- * wait already followed by a whole-GM cacheinvalid, are left alone. Runs last in
- * the Default pipeline (after all statement-reordering passes) so the inserted ops
- * stay adjacent through codegen.
+ * The publish-side marker should be a whole-tensor region `system.cacheinvalid` of
+ * the written target, which lowers to
+ * `pto.cmo.cacheinvalid %pview single_cache_line : !pto.partition_tensor_view<...>`.
+ * No shipped ptoas turns that into working code:
+ *
+ *   - ptoas 0.50 parses it and emits **nothing** — the marker never reached the
+ *     device, so this pass's publish-side invalidate has always been a no-op.
+ *   - ptoas 0.51 emits `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)`, but that
+ *     helper is `dcci((__gm__ void*)ptr, ...)` and a `GlobalTensor` has no
+ *     conversion to `__gm__ void*` in any pto-isa revision, so the kernel fails to
+ *     compile.
+ *
+ * Reported as hw-native-sys/PTOAS#995.
+ *
+ * Emitting only the fence therefore reproduces exactly what runs today, and is the
+ * only form that compiles under 0.51. The whole-GM form is unaffected (identical,
+ * working lowering on both) and is still emitted after waits and opaque writes.
+ * Restore `MakeCacheInvalid` (see git history) once ptoas lowers the region form.
+ *
+ * Idempotent: a write already followed by its fence, and a wait already followed by
+ * a whole-GM cacheinvalid, are left alone. Runs last in the Default pipeline (after
+ * all statement-reordering passes) so the inserted ops stay adjacent through
+ * codegen.
  */
 
 #include <cstddef>
@@ -178,40 +198,10 @@ bool IsLeafOp(const StmtPtr& stmt, const char* op_name) {
   return call && IsOp(call, op_name);
 }
 
-// True if `stmt` is a region `system.cacheinvalid` whose target Var is `target`.
-bool IsCacheInvalidFor(const StmtPtr& stmt, const ExprPtr& target) {
-  auto call = LeafCall(stmt);
-  if (!call || !IsOp(call, "system.cacheinvalid") || call->args_.empty()) return false;
-  auto have = AsVarLike(call->args_[0]);
-  auto want = AsVarLike(target);
-  return have && want && have.get() == want.get();
-}
-
 // True if `stmt` is a whole-GM `system.cacheinvalid` (the no-argument form).
 bool IsCacheInvalidAll(const StmtPtr& stmt) {
   auto call = LeafCall(stmt);
   return call && IsOp(call, "system.cacheinvalid") && call->args_.empty();
-}
-
-// Whole-tensor cacheinvalid for `target`: region = the target's full shape at
-// all-zero offsets. Reuses the tensor type's dim exprs (in scope — the target
-// was just written), so no per-write offset SSA is needed.
-StmtPtr MakeCacheInvalid(const ExprPtr& target, const Span& span) {
-  auto var = AsInvalidatableTarget(target);
-  INTERNAL_CHECK_SPAN(var, span)
-      << "Internal error: cacheinvalid target must be a tensor Var (checked before insert)";
-  auto tensor_type = AsTensorTypeLike(var->GetType());
-  std::vector<ExprPtr> shape_elems = tensor_type->shape_;
-  std::vector<ExprPtr> zero_offsets;
-  zero_offsets.reserve(shape_elems.size());
-  for (size_t i = 0; i < shape_elems.size(); ++i) {
-    zero_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, span));
-  }
-  auto shapes_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), span);
-  auto offsets_tuple = std::make_shared<MakeTuple>(std::move(zero_offsets), span);
-  auto call =
-      OpRegistry::GetInstance().Create("system.cacheinvalid", {target, shapes_tuple, offsets_tuple}, span);
-  return std::make_shared<EvalStmt>(call, span);
 }
 
 StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
@@ -244,18 +234,12 @@ class InsertCommMarkers : public IRMutator {
       auto new_child = VisitStmt(child);
       if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
-      // Publish side, local write: a region cacheinvalid + fence after it.
-      if (auto target = WriteTargetToInvalidate(child)) {
-        const bool already = i + 2 < stmts.size() && IsCacheInvalidFor(stmts[i + 1], target) &&
-                             IsLeafOp(stmts[i + 2], "system.fence");
-        if (!already) {
-          out.push_back(MakeCacheInvalid(target, child->span_));
-          out.push_back(MakeNoArgOp("system.fence", child->span_));
-          changed = true;
-        }
-      } else if (IsRemoteWrite(LeafCall(child))) {
-        // Remote write: codegen emits the peer-region cacheinvalid (peer offset is
-        // not IR-expressible yet); the pass inserts only the GM release fence.
+      // Publish side, addressable write: only the GM release fence.
+      //   - local write: its region cacheinvalid is suspended (see the file header);
+      //   - remote write: codegen emits the peer-region cacheinvalid, since the peer
+      //     offset is not IR-expressible yet.
+      // Either way the pass owns the fence and nothing else.
+      if (WriteTargetToInvalidate(child) || IsRemoteWrite(LeafCall(child))) {
         if (!(i + 1 < stmts.size() && IsLeafOp(stmts[i + 1], "system.fence"))) {
           out.push_back(MakeNoArgOp("system.fence", child->span_));
           changed = true;
@@ -308,11 +292,10 @@ class InsertCommMarkers : public IRMutator {
     const Effect eff = StmtEffect(body);
     auto visited = VisitStmt(body);
     std::vector<StmtPtr> out{visited};
-    if (auto target = WriteTargetToInvalidate(body)) {
-      out.push_back(MakeCacheInvalid(target, body->span_));
+    if (WriteTargetToInvalidate(body) || IsRemoteWrite(LeafCall(body))) {
+      // Fence only: local region cacheinvalid is suspended, the peer-region one is
+      // emitted by codegen. See the file header.
       out.push_back(MakeNoArgOp("system.fence", body->span_));
-    } else if (IsRemoteWrite(LeafCall(body))) {
-      out.push_back(MakeNoArgOp("system.fence", body->span_));  // codegen emits the peer cacheinvalid
     } else if (eff == Effect::kWrite) {
       // Opaque write (Submit / unregistered op): conservative whole-GM ci + fence.
       out.push_back(MakeCacheInvalidAll(body->span_));

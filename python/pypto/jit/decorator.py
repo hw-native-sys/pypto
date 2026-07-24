@@ -57,12 +57,12 @@ import functools
 import inspect
 import os
 import re
-import shutil
 import textwrap
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 from pypto._external_source import external_source_digest
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.pypto_core import DataType
 from pypto.pypto_core import passes as _passes
 
@@ -160,10 +160,7 @@ def _torch_dtype_to_pypto(torch_dtype: Any) -> DataType:
 
 def _ptoas_available() -> bool:
     """Return True if the ptoas binary is available on this machine."""
-    ptoas_root = os.environ.get("PTOAS_ROOT")
-    if ptoas_root:
-        return os.path.isfile(os.path.join(ptoas_root, "ptoas"))
-    return shutil.which("ptoas") is not None
+    return find_ptoas_binary() is not None
 
 
 def _is_tensor(obj: Any) -> bool:

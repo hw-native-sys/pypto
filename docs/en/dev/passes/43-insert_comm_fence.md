@@ -32,8 +32,9 @@ rules** — the *notify* itself needs no marker. A single structural traversal
 (`InsertCommMarkers`), with no control-flow state, inserts:
 
 - **after each local publishing write** — a window-bound `tile.store`, or a `get`
-  into a local destination: a whole-tensor **region** `system.cacheinvalid` of the
-  written target, **immediately followed by a `system.fence`**;
+  into a local destination: only a `system.fence`. This rule calls for a whole-tensor
+  **region** `system.cacheinvalid` of the written target before that fence, but the
+  region form is currently **suspended** — see [Region cacheinvalid suspended](#region-cacheinvalid-suspended);
 - **after each remote publishing write** — `remote_store` / `put`: only a
   `system.fence` (see the note below on where its cacheinvalid comes from);
 - **after each opaque publishing write** — a `Submit`, or a call to an
@@ -58,33 +59,56 @@ representation, so the pass can own the whole marker, is a follow-up.)
 
 ```text
 store(win_a); store(win_b); notify        (local window stores)
-  -> store(win_a); cacheinvalid(win_a); fence; store(win_b); cacheinvalid(win_b); fence; notify
+  -> store(win_a); fence; store(win_b); fence; notify
 
 for c: store; for p: notify                 (write and notify in separate loops)
-  -> for c: (store; cacheinvalid; fence);
+  -> for c: (store; fence);
      for p: notify
 
 wait; read
   -> wait; cacheinvalid(); read
 ```
 
+### Region cacheinvalid suspended
+
+The publish-side marker for a local write should be a whole-tensor region
+`system.cacheinvalid`, which lowers to
+`pto.cmo.cacheinvalid %pview single_cache_line : !pto.partition_tensor_view<…>`.
+**No shipped ptoas turns that into working code**, so the pass emits the fence alone:
+
+| ptoas | Behaviour on the region form |
+| ----- | ---------------------------- |
+| 0.50 | Parses it, then emits **nothing** — the marker never reaches the device, so this pass's publish-side invalidate has always been a no-op |
+| 0.51 | Emits `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)`, whose body is `dcci((__gm__ void*)ptr, …)`. `GlobalTensor` has no conversion to `__gm__ void*` in any pto-isa revision, so the kernel **fails to compile** |
+
+Reported as [hw-native-sys/PTOAS#995](https://github.com/hw-native-sys/PTOAS/issues/995).
+
+Emitting only the fence therefore reproduces exactly what runs today and is the only
+form that compiles under 0.51. The **whole-GM** form is unaffected — identical,
+working lowering on both versions — and is still emitted after waits and opaque
+writes. The pointer form (`pto.addptr` feeding a `cmo.cacheinvalid`) is not an
+alternative either: both versions reject it, 0.50 and 0.51 alike.
+
+Restore the region marker (`MakeCacheInvalid`, see git history) once ptoas lowers
+the region form correctly.
+
 Why the notify needs no marker, and the fence sits at the write: ptoas associates
 the required release fence with a publishing write's `cacheinvalid`, not with the
 notify. So a `tnotify` that releases data written earlier — even in a *different*
-loop — is already satisfied by that write's `cacheinvalid; fence`; the fence does
+loop — is already satisfied by that write's release `fence`; the fence does
 **not** need to sit next to the notify. A pure barrier notify (no data at all)
 requires nothing. (This was verified by removing the notify-side markers from the
 ring-allreduce `.pto` and confirming ptoas 0.50 still accepts it; removing the
 wait-side `cacheinvalid all`, by contrast, is rejected.)
 
-The region cacheinvalid currently covers the **whole target tensor** (region
-`[0, …]` offsets over the tensor's full shape), reusing the tensor type's dim
-exprs. Narrowing to the precise written sub-region — the write's own
+When the region cacheinvalid is restored it will cover the **whole target tensor**
+(region `[0, …]` offsets over the tensor's full shape), reusing the tensor type's
+dim exprs. Narrowing to the precise written sub-region — the write's own
 `(shapes, offsets)` are right there at the write site — is a planned follow-up.
 
 ### Markers land where the write / wait / notify is (always in scope)
 
-Placing the region cacheinvalid immediately after its write means the target `Var`
+Placing each marker immediately after its write means the target `Var`
 is trivially in scope (the write just used it) — whether it is a window parameter,
 an alias (`dv = pl.tensor.view(win); remote_store(dv)`), a loop-carried `iter_arg`,
 or a value defined inside a branch. There is **no cross-scope tracking and nothing
@@ -110,8 +134,8 @@ this pass sees is exactly what codegen lowers.
 
 | Case | cacheinvalid | fence |
 | ---- | ------------ | ----- |
-| `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | pass (local region, dst arg 2) | pass |
-| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | pass (local region, dst arg 0) | pass |
+| `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | **suspended** (local region — see above) | pass |
+| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | **suspended** (local region — see above) | pass |
 | `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` (peer-offset write) | **codegen** (peer region — IR workaround) | **pass** |
 
 A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
@@ -122,7 +146,8 @@ A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
 The pass carries **no** control-flow state (no `pending` bool, no `if`/loop
 analysis, no notify classification):
 
-- at each **local publishing write**, append `region cacheinvalid; fence`;
+- at each **local publishing write**, append `fence` (the region cacheinvalid is
+  suspended — see above);
 - at each **remote publishing write** (`remote_store` / `put`), append `fence`
   only (the peer-region cacheinvalid is codegen's — see below);
 - at each **wait**, append `cacheinvalid()`;
@@ -135,13 +160,13 @@ rules are local and append-only, control flow is irrelevant: a write inside one
 loop is correctly marked whether or not its notify lives in another.
 
 ```text
-store(win); notify                   -> store(win); cacheinvalid(win); fence; notify
-store(win); for: notify               -> store(win); cacheinvalid(win); fence; for: notify
-for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid(win); fence }
+store(win); notify                   -> store(win); fence; notify
+store(win); for: notify               -> store(win); fence; for: notify
+for: { notify; store(win) }           -> for: { notify; store(win); fence }
 ```
 
-An existing region `cacheinvalid` **immediately followed by a fence** after a
-write, and an existing whole-GM cacheinvalid immediately after a wait, are
+An existing `fence` immediately after a write, and an existing whole-GM
+cacheinvalid immediately after a wait, are
 recognized and **not duplicated**, so the pass is idempotent.
 
 ## Codegen interaction

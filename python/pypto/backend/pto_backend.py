@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import textwrap
 import time
@@ -39,6 +38,8 @@ except ImportError:  # pragma: no cover - fallback for older interpreters
 from typing import Any
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, decode_external_include_dirs
+from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
+from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
 from pypto.pypto_core import backend as _backend_core
@@ -168,7 +169,8 @@ def _run_ptoas(
 ) -> None:
     """Run the ptoas tool to compile a .pto file to C++.
 
-    Locates ptoas via PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``) or PATH fallback.
+    Locates ptoas via the PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``, falling back
+    to ``$PTOAS_ROOT/bin/ptoas`` for the v0.51+ layout) or PATH fallback.
 
     Args:
         pto_path: Path to the input .pto file
@@ -179,20 +181,19 @@ def _run_ptoas(
         FileNotFoundError: If the ptoas binary cannot be found
         RuntimeError: If ptoas compilation fails
     """
-    ptoas_root = os.environ.get("PTOAS_ROOT")
-    if ptoas_root:
-        ptoas_bin = os.path.join(ptoas_root, "ptoas")
-        if not (os.path.isfile(ptoas_bin) and os.access(ptoas_bin, os.X_OK)):
+    ptoas_bin = _find_ptoas_binary()
+    if ptoas_bin is None:
+        ptoas_root = os.environ.get("PTOAS_ROOT")
+        if ptoas_root:
+            tried = ", ".join(f"'{os.path.join(ptoas_root, rel)}'" for rel in _PTOAS_RELATIVE_PATHS)
             raise FileNotFoundError(
-                f"PTOAS_ROOT is set to '{ptoas_root}' but '{ptoas_bin}' does not exist or is not executable. "
+                f"PTOAS_ROOT is set to '{ptoas_root}' but no executable ptoas was found there. "
+                f"Tried: {tried}."
             )
-    else:
-        ptoas_bin = shutil.which("ptoas")
-        if not ptoas_bin:
-            raise FileNotFoundError(
-                "ptoas binary not found. Set PTOAS_ROOT to the extracted release directory, "
-                f"or add ptoas to your PATH.\nDownload from: {_PTOAS_RELEASE_URL}"
-            )
+        raise FileNotFoundError(
+            "ptoas binary not found. Set PTOAS_ROOT to the extracted release directory, "
+            f"or add ptoas to your PATH.\nDownload from: {_PTOAS_RELEASE_URL}"
+        )
 
     cmd = [ptoas_bin, pto_path, "-o", output_path]
     if ptoas_flags:
