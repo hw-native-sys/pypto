@@ -832,38 +832,21 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
     const std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
 
-    // A region of all-ones sizes is a single element (scalar write): flatten the
-    // N-D offsets into a linear element offset and invalidate through a raw ptr.
-    // Any larger dimension (or a dynamic size) is a tile store: address the region
-    // through a partition_tensor_view, matching tile.store's outs() operand.
-    bool is_scalar_write = true;
-    for (const auto& size : shapes_tuple->elements_) {
-      auto size_const = As<ir::ConstInt>(size);
-      if (!size_const || size_const->value_ != 1) {
-        is_scalar_write = false;
-        break;
-      }
-    }
-
-    if (is_scalar_write) {
-      const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
-      const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
-      const std::string off = GetFlatOffsetSSA(offsets_tuple, tensor_type->shape_, codegen);
-      const std::string write_ptr = codegen.NewTemp();
-      codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " +
-                   ptr_type);
-      codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line");
-    } else {
-      const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
-      const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-      const std::string partition_type =
-          MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
-      const std::string payload_view =
-          EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
-                               GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
-                               GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
-      codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
-    }
+    // Address the invalidated region through a partition_tensor_view, matching
+    // tile.store's outs() operand. PTOAS level3 lowering rejects
+    // pto.cmo.cacheinvalid on a raw !pto.ptr ("addptr must feed
+    // make_tensor_view / load / store_scalar"), so a single-element region
+    // (all-ones sizes) takes the partition view path too — not a flattened
+    // addptr + bare pointer.
+    const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
+    const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+    const std::string partition_type =
+        MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+    const std::string payload_view =
+        EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
+                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                             GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
+    codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
     return std::string("");
   });
 }
