@@ -1690,7 +1690,9 @@ class TestEscapingVariables:
                 acc: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(4):
                     k0 = i * 8
-                    chunk: pl.Tensor[[64], pl.FP32] = pl.add(x, k0)
+                    # ``k0`` is an INDEX scalar; cast it before use as a tensor
+                    # scalar operand (index is not a legal t*s operand type).
+                    chunk: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(k0, pl.INT32))
                     acc = pl.add(acc, chunk)
                 result: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
                 return result
@@ -1704,7 +1706,7 @@ class TestEscapingVariables:
                 acc_0 = x_0
                 for i_0, (acc_iter_1,) in pl.range(0, 4, 1, init_values=(acc_0,)):
                     k0_0 = i_0 * 8
-                    chunk_0 = pl.add(x_0, k0_0)
+                    chunk_0 = pl.add(x_0, pl.cast(k0_0, pl.INT32))
                     acc_2 = pl.add(acc_iter_1, chunk_0)
                     acc_1 = pl.yield_(acc_2)
                 result_0 = pl.mul(acc_1, 2.0)

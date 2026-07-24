@@ -3489,6 +3489,131 @@ def test_tensor_scatter_update_invalid_dim():
         ir.op.tensor.scatter_update(input_var, 0, index_var, src_var)
 
 
+def _operand_dtype(expr: ir.Expr) -> DataType:
+    """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
+    assert isinstance(expr, (ir.ConstInt, ir.ConstFloat)), f"expected a constant, got {type(expr).__name__}"
+    return expr.dtype
+
+
+def _tensor_result_dtype(call: ir.Call) -> DataType:
+    """Return a tensor call's result element dtype, narrowing ``Type``."""
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    return result_type.dtype
+
+
+class TestTensorScalarOperandDtype:
+    """A constant scalar operand of a tensor x scalar op adopts the tensor dtype.
+
+    The tensor path is stricter than the tile path: ``DeduceTensorOpElementwiseScalarType``
+    runs the scalar dtype through ``PromoteDataTypes``, so an ``index`` placeholder
+    does not just break codegen -- it silently retypes the *result* tensor. The
+    wrappers must re-stamp the placeholder to the tensor element dtype, reject
+    non-constant ``index`` values, and preserve genuine promotion (int tensor +
+    float literal -> float result).
+    """
+
+    _TENSOR_SCALAR_WRAPPERS = [
+        ("add", tensor.add),
+        ("sub", tensor.sub),
+        ("mul", tensor.mul),
+        ("div", tensor.div),
+        ("adds", tensor.adds),
+        ("subs", tensor.subs),
+        ("muls", tensor.muls),
+        ("divs", tensor.divs),
+        ("maximum", tensor.maximum),
+        ("minimum", tensor.minimum),
+        ("cmp", tensor.cmp),
+    ]
+
+    @staticmethod
+    def _tensor(dtype=DataType.INT32, shape=(64, 64)):
+        return ir.Var("x", ir.TensorType(list(shape), dtype), ir.Span.unknown())
+
+    def test_dsl_int_literal_adopts_tensor_dtype(self):
+        """`pl.add(x, 5)` yields a scalar operand at the tensor dtype, not index."""
+        for dtype in (DataType.INT32, DataType.INT16, DataType.FP16, DataType.FP32):
+            call = tensor.add(self._tensor(dtype), 5)
+            assert _operand_dtype(call.args[1]) == dtype
+
+    def test_result_tensor_dtype_preserved(self):
+        """The tensor-specific severity: an int literal must not retype the result.
+
+        Before the fix, `tensor.adds(x_i32, 5)` had an index scalar that promoted
+        the whole result tensor to `index`.
+        """
+        for dtype in (DataType.INT32, DataType.INT16, DataType.FP16):
+            call = tensor.adds(self._tensor(dtype), 5)
+            assert _tensor_result_dtype(call) == dtype
+
+    def test_no_index_survives_any_tensor_scalar_op(self):
+        """No wrapper leaves an index-typed constant operand."""
+        for name, fn in self._TENSOR_SCALAR_WRAPPERS:
+            call = fn(self._tensor(DataType.INT32), 5)
+            assert _operand_dtype(call.args[1]) != DataType.INDEX, f"{name} left an index operand"
+
+    def test_int_literal_on_float_tensor_is_const_float(self):
+        """An int literal on a float tensor becomes a ConstFloat at the tensor dtype."""
+        for dtype in (DataType.FP16, DataType.FP32):
+            call = tensor.adds(self._tensor(dtype), 5)
+            rhs = call.args[1]
+            assert isinstance(rhs, ir.ConstFloat)
+            assert rhs.dtype == dtype
+
+    def test_float_literal_on_int_tensor_still_promotes(self):
+        """A float literal keeps FP32 and promotion still lifts the result to float."""
+        call = tensor.muls(self._tensor(DataType.INT32), 2.5)
+        rhs = call.args[1]
+        assert isinstance(rhs, ir.ConstFloat)
+        assert rhs.dtype == DataType.FP32
+        assert _tensor_result_dtype(call) == DataType.FP32
+
+    def test_ir_level_restamps_index_const(self):
+        """A hand-built ConstInt(INDEX) operand (parser output) is re-stamped."""
+        span = ir.Span.unknown()
+        call = tensor.adds(self._tensor(DataType.INT16), ir.ConstInt(5, DataType.INDEX, span))
+        assert _operand_dtype(call.args[1]) == DataType.INT16
+        assert _tensor_result_dtype(call) == DataType.INT16
+
+    def test_explicitly_typed_const_is_not_restamped(self):
+        """An explicit pl.const(v, dtype) is a user annotation, left untouched."""
+        span = ir.Span.unknown()
+        typed = ir.ConstInt(5, DataType.INT32, span)
+        call = tensor.adds(self._tensor(DataType.INT16), typed)
+        assert _operand_dtype(call.args[1]) == DataType.INT32
+
+    def test_typed_scalar_param_passes_through(self):
+        """A typed pl.Scalar operand is not re-stamped."""
+        span = ir.Span.unknown()
+        k = ir.Var("k", ir.ScalarType(DataType.INT32), span)
+        call = tensor.adds(self._tensor(DataType.INT16), k)
+        assert call.args[1] is k
+
+    def test_tensor_rhs_untouched(self):
+        """A tensor rhs dispatches to the tensor-tensor op, operand unchanged."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("a", ir.TensorType([64, 64], DataType.INT32), span)
+        rhs = ir.Var("b", ir.TensorType([64, 64], DataType.INT32), span)
+        call = tensor.add(lhs, rhs)
+        assert call.op.name == ir.get_op("tensor.add").name
+        assert call.args[1] is rhs
+
+    def test_expands_adopts_target_dtype(self):
+        """tensor.expands re-stamps its scalar to the target tensor dtype (not FP32)."""
+        call = tensor.expands(self._tensor(DataType.INT32), 5)
+        assert _operand_dtype(call.args[1]) == DataType.INT32
+
+    def test_index_scalar_value_is_rejected(self):
+        """A non-constant index scalar operand is rejected, pointing at pl.cast."""
+        span = ir.Span.unknown()
+        idx = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises((ValueError, TypeError), match="index"):
+            tensor.adds(self._tensor(DataType.INT32), idx)
+        with pytest.raises((ValueError, TypeError), match="pl.cast"):
+            tensor.adds(self._tensor(DataType.INT32), idx)
+
+
 class TestTensorFormatShapeError:
     """Regression tests for issue #824: FormatShape prints readable shapes, not pointer addresses."""
 

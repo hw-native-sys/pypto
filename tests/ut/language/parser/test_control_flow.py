@@ -26,7 +26,8 @@ class TestForLoops:
             init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (sum_val,) in pl.range(10, init_values=(init,)):
-                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, i)
+                # ``i`` is an INDEX loop var; cast before use as a scalar operand.
+                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, pl.cast(i, pl.INT32))
                 result = pl.yield_(new_sum)
 
             return result
@@ -43,7 +44,7 @@ class TestForLoops:
             init2: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (val1, val2) in pl.range(5, init_values=(init1, init2)):
-                new1: pl.Tensor[[1], pl.INT32] = pl.add(val1, i)
+                new1: pl.Tensor[[1], pl.INT32] = pl.add(val1, pl.cast(i, pl.INT32))
                 new2: pl.Tensor[[1], pl.INT32] = pl.mul(val2, 2)
                 out1, out2 = pl.yield_(new1, new2)
 
@@ -59,7 +60,7 @@ class TestForLoops:
             init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (acc,) in pl.range(0, 10, 2, init_values=(init,)):
-                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, i)
+                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, pl.cast(i, pl.INT32))
                 result = pl.yield_(new_acc)
 
             return result
@@ -250,7 +251,7 @@ class TestParallelForLoops:
             init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (sum_val,) in pl.parallel(10, init_values=(init,)):
-                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, i)
+                new_sum: pl.Tensor[[1], pl.INT32] = pl.add(sum_val, pl.cast(i, pl.INT32))
                 result = pl.yield_(new_sum)
 
             return result
@@ -279,7 +280,7 @@ class TestParallelForLoops:
             init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (acc,) in pl.parallel(0, 10, 2, init_values=(init,)):
-                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, i)
+                new_acc: pl.Tensor[[1], pl.INT32] = pl.add(acc, pl.cast(i, pl.INT32))
                 result = pl.yield_(new_acc)
 
             return result

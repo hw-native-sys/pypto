@@ -17,6 +17,19 @@ from pypto import DataType, ir
 from pypto.ir.op import tile
 
 
+def _operand_dtype(expr: ir.Expr) -> DataType:
+    """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
+    assert isinstance(expr, (ir.ConstInt, ir.ConstFloat)), f"expected a constant, got {type(expr).__name__}"
+    return expr.dtype
+
+
+def _tile_result_dtype(call: ir.Call) -> DataType:
+    """Return a tile call's result element dtype, narrowing ``Type``."""
+    result_type = call.type
+    assert isinstance(result_type, ir.TileType)
+    return result_type.dtype
+
+
 class TestTileElementwiseOps:
     """Test suite for tile-level element-wise operators (tile-tile and tile-scalar)."""
 
@@ -3264,6 +3277,167 @@ class TestTileBitwiseArithmeticOps:
 
         ir_str = str(Program)
         assert "tile.sel" in ir_str
+
+
+class TestTileScalarOperandDtype:
+    """A constant scalar operand of a tile x scalar op adopts the tile dtype.
+
+    Regression: a DSL bare int literal is parsed to ``ConstInt(v, INDEX)``, and
+    ``index`` is not a legal operand type for any ``pto.t*s`` instruction. The
+    tile scalar wrappers must re-stamp such placeholders to the tile element
+    dtype (``_normalize_scalar_operand``), reject non-constant ``index`` values,
+    and leave already-typed / non-constant operands untouched.
+    """
+
+    # Every tile x scalar wrapper that normalizes a constant operand. Each entry
+    # builds a 2-arg call ``fn(tile, 5)`` (extra positional args are appended).
+    _INT_TILE_WRAPPERS = [
+        ("adds", tile.adds, ()),
+        ("subs", tile.subs, ()),
+        ("muls", tile.muls, ()),
+        ("divs", tile.divs, ()),
+        ("maximums", tile.maximums, ()),
+        ("minimums", tile.minimums, ()),
+        ("cmps", tile.cmps, ()),
+        ("ands", tile.ands, ()),
+        ("ors", tile.ors, ()),
+        ("shls", tile.shls, ()),
+        ("shrs", tile.shrs, ()),
+    ]
+
+    @staticmethod
+    def _int_tile(dtype=DataType.INT32, shape=(32, 32)):
+        return ir.Var("t", ir.TileType(list(shape), dtype), ir.Span.unknown())
+
+    def test_dsl_int_literal_adopts_tile_dtype(self):
+        """`pl.add(tile_i32, 5)` yields an INT32 scalar operand, not index."""
+        for dtype in (DataType.INT32, DataType.INT16, DataType.INT8):
+            for fn in (tile.add, tile.sub, tile.mul):
+                call = fn(self._int_tile(dtype), 5)
+                rhs = call.args[1]
+                assert isinstance(rhs, ir.ConstInt)
+                assert rhs.dtype == dtype, f"{fn.__name__} on {dtype}: {rhs.dtype}"
+
+    def test_no_index_survives_any_tile_scalar_op(self):
+        """The direct regression: no wrapper leaves an index-typed constant."""
+        for name, fn, extra in self._INT_TILE_WRAPPERS:
+            call = fn(self._int_tile(DataType.INT32), 5, *extra)
+            dtype = _operand_dtype(call.args[1])
+            assert dtype != DataType.INDEX, f"{name} left an index operand"
+            assert dtype == DataType.INT32, f"{name}: {dtype}"
+
+    def test_int_literal_on_float_tile_becomes_const_float(self):
+        """An int literal on a float tile becomes a ConstFloat at the tile dtype.
+
+        Codegen dispatches on the node kind, so an int operand on a float tile
+        must be a ConstFloat or MLIR receives ``arith.constant 5 : f32``.
+        """
+        for dtype in (DataType.FP16, DataType.FP32, DataType.BF16):
+            call = tile.adds(ir.Var("t", ir.TileType([32, 32], dtype), ir.Span.unknown()), 5)
+            rhs = call.args[1]
+            assert isinstance(rhs, ir.ConstFloat)
+            assert rhs.dtype == dtype
+
+    def test_float_literal_on_int_tile_keeps_fp32(self):
+        """A float literal on an int tile keeps FP32 (promotion is preserved)."""
+        call = tile.adds(self._int_tile(DataType.INT32), 2.5)
+        rhs = call.args[1]
+        assert isinstance(rhs, ir.ConstFloat)
+        assert rhs.dtype == DataType.FP32
+        # The tile op still deduces its result at the tile dtype.
+        assert _tile_result_dtype(call) == DataType.INT32
+
+    def test_float_literal_on_float_tile_adopts_tile_dtype(self):
+        """A float literal on a low-precision float tile adopts the tile dtype.
+
+        `tile.adds(fp16_tile, 2.5)` -> ConstFloat(fp16) (previously fp32); the
+        scalar follows the tile element dtype rather than defaulting to FP32.
+        """
+        for dtype in (DataType.FP16, DataType.BF16):
+            call = tile.adds(ir.Var("t", ir.TileType([32, 32], dtype), ir.Span.unknown()), 2.5)
+            rhs = call.args[1]
+            assert isinstance(rhs, ir.ConstFloat)
+            assert rhs.dtype == dtype
+
+    def test_bitwise_literal_adopts_tile_dtype(self):
+        """Bitwise scalar ops re-stamp the literal to the tile dtype."""
+        for fn in (tile.ands, tile.ors):
+            call = fn(self._int_tile(DataType.INT16), 255)
+            assert _operand_dtype(call.args[1]) == DataType.INT16
+
+    def test_narrow_shift_literal_adopts_tile_dtype(self):
+        """Shift counts follow the tile dtype, including narrow int tiles.
+
+        `DeduceTileOpIntScalarBinaryType` permits any integer width for the
+        shift operand ("codegen casts to i32"), and an i8/i16 shift count is
+        accepted end-to-end by ptoas, so narrowing here is safe.
+        """
+        for dtype in (DataType.INT8, DataType.INT16):
+            for fn in (tile.shls, tile.shrs):
+                call = fn(self._int_tile(dtype), 3)
+                assert _operand_dtype(call.args[1]) == dtype, f"{fn.__name__} on {dtype}"
+
+    def test_ir_level_restamps_index_const(self):
+        """A hand-built ConstInt(INDEX) operand (parser output) is re-stamped."""
+        span = ir.Span.unknown()
+        call = tile.adds(self._int_tile(DataType.INT16), ir.ConstInt(5, DataType.INDEX, span))
+        assert _operand_dtype(call.args[1]) == DataType.INT16
+
+    def test_explicitly_typed_const_is_not_restamped(self):
+        """An explicit pl.const(v, dtype) is a user annotation, left untouched."""
+        span = ir.Span.unknown()
+        typed = ir.ConstInt(5, DataType.INT32, span)
+        call = tile.adds(ir.Var("t", ir.TileType([32, 32], DataType.INT16), span), typed)
+        # INT32 constant preserved even though the tile is INT16.
+        assert _operand_dtype(call.args[1]) == DataType.INT32
+
+    def test_index_scalar_value_is_rejected(self):
+        """A non-constant index scalar (loop var, dim) is rejected with a hint."""
+        span = ir.Span.unknown()
+        idx = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises((ValueError, TypeError), match="index"):
+            tile.adds(self._int_tile(DataType.INT32), idx)
+
+    def test_index_scalar_reject_hint_names_cast(self):
+        """The rejection points the user at pl.cast."""
+        span = ir.Span.unknown()
+        idx = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        with pytest.raises((ValueError, TypeError), match="pl.cast"):
+            tile.adds(self._int_tile(DataType.INT32), idx)
+
+    def test_typed_scalar_param_passes_through(self):
+        """A typed pl.Scalar operand is not re-stamped."""
+        span = ir.Span.unknown()
+        k = ir.Var("k", ir.ScalarType(DataType.INT32), span)
+        call = tile.adds(ir.Var("t", ir.TileType([32, 32], DataType.INT16), span), k)
+        assert call.args[1] is k
+
+    def test_tile_rhs_untouched(self):
+        """A tile rhs dispatches to the tile-tile op, operand unchanged."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("a", ir.TileType([32, 32], DataType.INT32), span)
+        rhs = ir.Var("b", ir.TileType([32, 32], DataType.INT32), span)
+        call = tile.add(lhs, rhs)
+        assert call.op.name == ir.get_op("tile.add").name
+        assert call.args[1] is rhs
+
+    def test_expands_literal_adopts_target_dtype(self):
+        """tile.expands re-stamps its scalar to the target tile dtype (not FP32)."""
+        call = tile.expands(self._int_tile(DataType.INT32), 5)
+        assert _operand_dtype(call.args[1]) == DataType.INT32
+
+    def test_lrelu_slope_stays_fp32(self):
+        """tile.lrelu keeps its slope at FP32 and never leaves it index."""
+        call = tile.lrelu(ir.Var("t", ir.TileType([32, 32], DataType.FP32), ir.Span.unknown()), 1)
+        assert _operand_dtype(call.args[1]) == DataType.FP32
+
+    def test_sels_mode_stays_int32(self):
+        """tile.sels keeps its select-mode flag at INT32 and never index."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("a", ir.TileType([32, 32], DataType.FP32), span)
+        rhs = ir.Var("b", ir.TileType([32, 32], DataType.FP32), span)
+        call = tile.sels(lhs, rhs, 1)
+        assert _operand_dtype(call.args[2]) == DataType.INT32
 
 
 class TestTileLoadOp:

@@ -31,7 +31,15 @@ from pypto.pypto_core.ir import (
     TileLayout,
 )
 
-from ..utils import _get_span_or_capture, _normalize_expr, _to_int32_scalar, _to_make_tuple, resolve_cast_mode
+from ..utils import (
+    _get_span_or_capture,
+    _normalize_const_to_dtype,
+    _normalize_expr,
+    _normalize_scalar_operand,
+    _to_int32_scalar,
+    _to_make_tuple,
+    resolve_cast_mode,
+)
 from ._pad_value import normalize_pad_value
 
 
@@ -54,15 +62,6 @@ def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _i
         raise ValueError("offsets and shapes must have at least one dimension")
 
 
-def _normalize_tile_binary_rhs(rhs: int | float | Expr, span: Span) -> Expr:
-    """Normalize a tile binary-op rhs into an IR expression."""
-    return (
-        _normalize_expr(rhs, span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-
-
 def _create_tile_binary_call(
     tile_op_name: str,
     scalar_op_name: str,
@@ -71,7 +70,7 @@ def _create_tile_binary_call(
     span: Span,
 ) -> Call:
     """Create a tile binary call with scalar auto-dispatch."""
-    rhs_expr = _normalize_tile_binary_rhs(rhs, span)
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, span)
     if isinstance(rhs_expr.type, ScalarType):
         return _ir_core.create_op_call(scalar_op_name, [lhs, rhs_expr], {}, span)
     return _ir_core.create_op_call(tile_op_name, [lhs, rhs_expr], {}, span)
@@ -839,11 +838,7 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
         Call expression for element-wise remainder with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
@@ -952,11 +947,7 @@ def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise floating-point remainder with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.fmods", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -988,16 +979,16 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount (int/Expr with INT32 ScalarType); must be >= 0
+        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
+            to the lhs element dtype (the IR permits any integer width -- codegen
+            casts the shift count to i32); a typed Expr is used as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise left shift with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.shls", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1029,16 +1020,16 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount (int/Expr with INT32 ScalarType); must be >= 0
+        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
+            to the lhs element dtype (the IR permits any integer width -- codegen
+            casts the shift count to i32); a typed Expr is used as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise right shift with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.shrs", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1073,9 +1064,7 @@ def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise AND with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.ands", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1110,9 +1099,7 @@ def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise bitwise OR with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.ors", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1149,9 +1136,7 @@ def xors(lhs: Expr, rhs: int | Expr, tmp: Expr, span: Span | None = None) -> Cal
         Call expression for element-wise bitwise XOR with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32) if not isinstance(rhs, Expr) else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.xors", [lhs, rhs_expr, tmp], {}, actual_span)
 
 
@@ -1224,11 +1209,7 @@ def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         Call expression for element-wise tile-scalar-tile addition
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.addsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
@@ -1247,11 +1228,7 @@ def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         Call expression for element-wise tile-scalar-tile subtraction
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.subsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
@@ -1269,11 +1246,8 @@ def lrelu(tile: Expr, slope: int | float | Expr, span: Span | None = None) -> Ca
         Call expression for element-wise leaky ReLU
     """
     actual_span = _get_span_or_capture(span)
-    slope_expr = (
-        _normalize_expr(slope, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(slope, Expr)
-        else slope
-    )
+    # The slope is a float coefficient fixed by the op, not a tile element value.
+    slope_expr = _normalize_const_to_dtype(slope, DataType.FP32, actual_span)
     return _ir_core.create_op_call("tile.lrelu", [tile, slope_expr], {}, actual_span)
 
 
@@ -1313,11 +1287,8 @@ def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | Non
         Call expression for tile select
     """
     actual_span = _get_span_or_capture(span)
-    select_mode_expr = (
-        _normalize_expr(select_mode, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(select_mode, Expr)
-        else select_mode
-    )
+    # select_mode is a mode flag interpreted by codegen, not a tile element value.
+    select_mode_expr = _normalize_const_to_dtype(select_mode, DataType.INT32, actual_span)
     return _ir_core.create_op_call("tile.sels", [lhs, rhs, select_mode_expr], {}, actual_span)
 
 
@@ -1333,11 +1304,7 @@ def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise multiplication with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.muls", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1353,11 +1320,7 @@ def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise addition with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.adds", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1373,11 +1336,7 @@ def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise division with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.divs", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1393,11 +1352,7 @@ def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise subtraction with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.subs", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1443,11 +1398,7 @@ def cmps(
         Use tile.sel with an explicit tmp tile to materialize values.
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     kwargs: dict[str, Any] = {"cmp_type": cmp_type}
     return _ir_core.create_op_call("tile.cmps", [lhs, rhs_expr], kwargs, actual_span)
 
@@ -2098,11 +2049,7 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
         Call expression for scalar expansion
     """
     actual_span = _get_span_or_capture(span)
-    scalar_expr = (
-        _normalize_expr(scalar, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(scalar, Expr)
-        else scalar
-    )
+    scalar_expr = _normalize_scalar_operand(target, scalar, actual_span, fallback_int_dtype=DataType.FP32)
     return _ir_core.create_op_call("tile.expands", [target, scalar_expr], {}, actual_span)
 
 
@@ -2154,11 +2101,7 @@ def maximums(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Ca
         Call expression for element-wise maximum with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.maximums", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -2176,11 +2119,7 @@ def minimums(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Ca
         Call expression for element-wise minimum with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     return _ir_core.create_op_call("tile.minimums", [lhs, rhs_expr], {}, actual_span)
 
 

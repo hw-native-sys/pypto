@@ -55,7 +55,7 @@ class TestBinopConstantFolding:
         ROPE_DIM = 8
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, ROPE_DIM // 2)
             return result
 
@@ -74,7 +74,7 @@ class TestBinopConstantFolding:
         B = 20
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, A + B)
             return result
 
@@ -93,7 +93,7 @@ class TestBinopConstantFolding:
         FACTOR = 2
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, BASE * FACTOR)
             return result
 
@@ -110,7 +110,7 @@ class TestBinopConstantFolding:
         M = 5
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, N % M)
             return result
 
@@ -128,7 +128,7 @@ class TestBinopConstantFolding:
         C = 4
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, (A + B) // C)
             return result
 
@@ -167,7 +167,7 @@ class TestUnaryopConstantFolding:
         VAL = 42
 
         @pl.function
-        def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def func(x: pl.Tensor[[64], pl.INT32]) -> pl.Tensor[[64], pl.INT32]:
             result = pl.mul(x, -VAL)
             return result
 
@@ -194,10 +194,10 @@ class TestMixedExpressionFallback:
         @pl.function
         def func(
             x: pl.Tensor[[64], pl.FP32],
-            cfg: pl.Tensor[[1], pl.INDEX],
+            cfg: pl.Tensor[[1], pl.INT32],
         ) -> pl.Tensor[[64], pl.FP32]:
-            idx: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
-            shifted: pl.Scalar[pl.INDEX] = idx + OFFSET
+            idx: pl.Scalar[pl.INT32] = pl.tensor.read(cfg, [0])
+            shifted: pl.Scalar[pl.INT32] = idx + OFFSET
             result = pl.mul(x, shifted)
             return result
 
@@ -301,7 +301,9 @@ class TestScopeShadowingSafety:
             cfg: pl.Tensor[[1], pl.INDEX],
         ) -> pl.Tensor[[64], pl.FP32]:
             N: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
-            result = pl.mul(x, N // 2)
+            # ``N // 2`` is an INDEX scalar; a tensor scalar operand may not carry
+            # `index`, so cast it explicitly (folding behaviour is unaffected).
+            result = pl.mul(x, pl.cast(N // 2, pl.INT32))
             return result
 
         assert isinstance(func, ir.Function)
@@ -310,8 +312,11 @@ class TestScopeShadowingSafety:
         mul_calls = _collect_call_args(func, "tensor.muls")
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
+        # Look through the explicit cast to the folded-or-not expression.
+        assert isinstance(scalar_arg, ir.Cast)
+        inner = scalar_arg.operand
         # Must NOT be ConstInt(4) — N is a DSL runtime variable
-        assert not isinstance(scalar_arg, ir.ConstInt) or scalar_arg.value != 4, (
+        assert not isinstance(inner, ir.ConstInt) or inner.value != 4, (
             "Folding incorrectly used closure value for DSL-scoped variable N"
         )
 
@@ -325,16 +330,20 @@ class TestScopeShadowingSafety:
             cfg: pl.Tensor[[1], pl.INDEX],
         ) -> pl.Tensor[[64], pl.FP32]:
             idx: pl.Scalar[pl.INDEX] = pl.tensor.read(cfg, [0])
-            result = pl.mul(x, idx + M)
+            # ``idx + M`` is an INDEX scalar; a tensor scalar operand may not carry
+            # `index`, so cast it explicitly (folding behaviour is unaffected).
+            result = pl.mul(x, pl.cast(idx + M, pl.INT32))
             return result
 
         assert isinstance(func, ir.Function)
         mul_calls = _collect_call_args(func, "tensor.muls")
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
-        # idx + M must remain an Add node, not a folded constant
-        assert isinstance(scalar_arg, ir.Add), (
-            f"Expected ir.Add for mixed DSL+closure expression, got {type(scalar_arg).__name__}"
+        # Look through the explicit cast: idx + M must remain an Add node,
+        # not a folded constant.
+        assert isinstance(scalar_arg, ir.Cast)
+        assert isinstance(scalar_arg.operand, ir.Add), (
+            f"Expected ir.Add for mixed DSL+closure expression, got {type(scalar_arg.operand).__name__}"
         )
 
 
