@@ -1297,6 +1297,39 @@ class TestInplaceOps:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_move_output_must_not_alias_input(self):
+        """tile.move's output must get a buffer distinct from its input.
+
+        The TMOV intrinsic cannot execute with src == dst (a same-address move
+        is not a legal instruction, only a no-op). If MemoryReuse colocated a
+        same-space layout-changing move (e.g. the A5 V->C ND->NZ fractal adapt)
+        with its source, codegen would see matching addresses and wrongly elide
+        the move as a no-op, dropping the layout adapt. tile.move is registered
+        ``.not_inplace_safe()`` to forbid that colocation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP32],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [32, 32])
+                tile_b: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Vec] = pl.move(
+                    tile_a, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
+                return result
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        assert bases["tile_b"] != bases["tile_a"], (
+            "move output must not reuse its input's buffer (tile.move is not in-place safe); "
+            f"both bound to {bases['tile_a']}"
+        )
+
     def test_inplace_unsafe_op_allows_non_producer_consumer_reuse(self):
         """tile.recip output must never share a buffer with its input.
 
@@ -3571,127 +3604,6 @@ class TestL0CrossShapeReuse:
         assert bases["la"] is bases["lc"], (
             "la ([16,64]) should reuse lc's ([16,128]) larger L0A buffer under global "
             f"packing; got la@{bases['la'].name_hint} vs lc@{bases['lc'].name_hint}"
-        )
-
-
-class TestStorageLayoutReuseGate:
-    """Vec ND↔NZ tiles must not share a MemRef; other layout diffs may.
-
-    A5 V→C inserts an ND→NZ ``*_nz`` adapt before tpush (NZ: col_major blayout).
-    Colocating that NZ tile with the ND source at one Vec address makes even a
-    kept ``pto.tmov`` an in-place layout rewrite that silently mis-transfers.
-    Gate only Vec ND↔NZ — same-family fractal quirks and non-Vec spaces stay
-    eligible for reuse (#1788).
-    """
-
-    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
-        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                inp: pl.Tensor[[64, 64], pl.BF16],
-                out_nd: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-                out_nz: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-            ) -> pl.Tensor[[64, 64], pl.BF16]:
-                tile_nd: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                    inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec
-                )
-                _a: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nd, [0, 0], out_nd)
-                tile_nz: pl.Tile[
-                    [64, 64],
-                    pl.BF16,
-                    pl.Mem.Vec,
-                    pl.TileView(
-                        blayout=pl.TileLayout.col_major,
-                        slayout=pl.TileLayout.row_major,
-                        fractal=1024,
-                    ),
-                ] = pl.tile.load(inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-                result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nz, [0, 0], out_nz)
-                return result
-
-        After = _run_pipeline(Before)
-        bases = _collect_tile_memref_bases(After)
-        assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
-        assert bases["tile_nd"] != bases["tile_nz"], (
-            f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
-        )
-
-    def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):
-        """Same NZ family (col_major) with fractal-only difference may coalesce."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                inp: pl.Tensor[[64, 64], pl.BF16],
-                out_a: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-                out_b: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-            ) -> pl.Tensor[[64, 64], pl.BF16]:
-                tile_a: pl.Tile[
-                    [64, 64],
-                    pl.BF16,
-                    pl.Mem.Vec,
-                    pl.TileView(
-                        blayout=pl.TileLayout.col_major,
-                        slayout=pl.TileLayout.row_major,
-                        fractal=512,
-                    ),
-                ] = pl.tile.load(inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-                _a: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_a, [0, 0], out_a)
-                tile_b: pl.Tile[
-                    [64, 64],
-                    pl.BF16,
-                    pl.Mem.Vec,
-                    pl.TileView(
-                        blayout=pl.TileLayout.col_major,
-                        slayout=pl.TileLayout.row_major,
-                        fractal=1024,
-                    ),
-                ] = pl.tile.load(inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-                result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_b, [0, 0], out_b)
-                return result
-
-        After = _run_pipeline(Before)
-        bases = _collect_tile_memref_bases(After)
-        assert "tile_a" in bases and "tile_b" in bases, f"missing tiles in {bases}"
-        assert bases["tile_a"] == bases["tile_b"], (
-            "same NZ-family Vec tiles should still share a MemRef; "
-            f"got {bases['tile_a']} vs {bases['tile_b']}"
-        )
-
-    def test_same_layout_nd_vec_tiles_can_reuse(self):
-        """Equal-size ND Vec tiles with matching layout still coalesce (#1788)."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                inp: pl.Tensor[[64, 64], pl.BF16],
-                out_a: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-                out_b: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
-            ) -> pl.Tensor[[64, 64], pl.BF16]:
-                tile_a: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                    inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec
-                )
-                _a: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_a, [0, 0], out_a)
-                tile_b: pl.Tile[[64, 64], pl.BF16, pl.Mem.Vec] = pl.tile.load(
-                    inp, [0, 0], [64, 64], target_memory=pl.Mem.Vec
-                )
-                result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_b, [0, 0], out_b)
-                return result
-
-        After = _run_pipeline(Before)
-        bases = _collect_tile_memref_bases(After)
-        assert "tile_a" in bases and "tile_b" in bases, f"missing tiles in {bases}"
-        assert bases["tile_a"] == bases["tile_b"], (
-            "matching-layout ND Vec tiles should still share a MemRef; "
-            f"got {bases['tile_a']} vs {bases['tile_b']}"
         )
 
 

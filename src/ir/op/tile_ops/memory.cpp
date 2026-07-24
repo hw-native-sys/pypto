@@ -924,6 +924,12 @@ REGISTER_OP("tile.move")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<TileLayout>("blayout")
     .set_attr<TileLayout>("slayout")
+    // The TMOV intrinsic does not support src == dst (same-address move is not a
+    // legal instruction, only a no-op). Forbid MemoryReuse from landing the
+    // output on the input's buffer so a same-space layout-changing move (e.g.
+    // the A5 V->C ND->NZ fractal adapt) is never colocated with its source and
+    // then wrongly elided as a no-op.
+    .not_inplace_safe()
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
