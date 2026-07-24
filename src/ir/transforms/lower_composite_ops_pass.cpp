@@ -1483,6 +1483,121 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   return target;
 }
 
+// ============================================================================
+// LowerTensorAllToAllVRule — pld.tensor.all_to_all_v (variable-size all-to-all)
+//
+// Variable-size all-to-all (MPI_Alltoallv pattern).  Each rank can send a
+// different number of rows to each peer; rows beyond the actual send count
+// must be zero-padded to MAX_RECV by the caller.  The 3-arg API signature
+// (input, target, signal) matches the symmetric all_to_all's window-as-result
+// pattern: the intrinsic returns target, and the caller reads back from the
+// window with tile.load.
+//
+// 2-phase push-based decomposition:
+//
+//   Phase 1 (push):
+//     For each dest ∈ [0, NR), for each row r ∈ [0, MAX_RECV), push one
+//     [1, SIZE] row from input[dest*MAX_RECV+r, :] to peer dest's target
+//     window at target[my_rank*MAX_RECV+r, :] via pld.tile.put (TPUT).
+//
+//   Phase 2a: notify-all (Set 1)
+//   Phase 2b: wait-all  (Ge 1)
+//
+// MAX_RECV = target.shape[0] / NR (both must be compile-time constants).
+// ============================================================================
+
+ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 3, span)
+      << "pld.tensor.all_to_all_v rule expects 3 args (input, target, signal), got " << args.size();
+  const auto& input = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+
+  auto input_type = As<TensorType>(input->GetType());
+  INTERNAL_CHECK_SPAN(input_type, span)
+      << "pld.tensor.all_to_all_v input must be TensorType, got " << input->GetType()->TypeName();
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.all_to_all_v target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all_v target must be 2D [NR*MAX_RECV, SIZE]";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // SIZE = target[1].
+  auto size_expr = target_type->shape_[1];
+  auto chunk_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr}, span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+  // MAX_RECV = target[0] / NR.  NR is extracted from signal[0]
+  // (deducer-enforced compile-time constant).
+  auto total_rows_c = As<ConstInt>(target_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(total_rows_c, span) << "target dim 0 must be a compile-time constant";
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  INTERNAL_CHECK_SPAN(signal_type, span) << "signal must be DistributedTensorType";
+  auto nr_c = As<ConstInt>(signal_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(nr_c, span) << "signal dim 0 (NR) must be a compile-time constant";
+  int64_t max_recv_value = total_rows_c->value_ / nr_c->value_;
+  INTERNAL_CHECK_SPAN(max_recv_value * nr_c->value_ == total_rows_c->value_, span)
+      << "target dim 0 (" << total_rows_c->value_ << ") must be divisible by NR (" << nr_c->value_ << ")";
+  auto max_recv_expr = std::make_shared<ConstInt>(max_recv_value, DataType::INDEX, span);
+
+  // ---- Phase 1: push per-destination chunks to peer windows ----
+  // One shared [1, SIZE] VEC staging tile reused across all destinations,
+  // mirroring allgather/all_to_all's per-peer put pattern.
+  // Flat row index: dest*MAX_RECV+r in the source, my_rank*MAX_RECV+r in the target.
+  auto put_stage =
+      b.Bind("aav_stage",
+             reg.Create("tile.create", {chunk_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  b.EmitFor(
+      "dest", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& dest_var) {
+        auto dest_base = MakeMul(dest_var, max_recv_expr, span);
+        auto my_base = MakeMul(comm.my_rank, max_recv_expr, span);
+        body.EmitFor(
+            "r", zero_idx, max_recv_expr, one_idx,
+            [&](LoweringBuilder& inner_body, const VarPtr& r_var) {
+              // 2D source offsets: input[dest * MAX_RECV + r, :]
+              auto src_row = MakeAdd(dest_base, r_var, span);
+              auto src_offsets = std::make_shared<MakeTuple>(
+                  std::vector<ExprPtr>{src_row, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+              // 2D target offsets: target[my_rank * MAX_RECV + r, :]
+              auto dst_row = MakeAdd(my_base, r_var, span);
+              auto dst_offsets = std::make_shared<MakeTuple>(
+                  std::vector<ExprPtr>{dst_row, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+              inner_body.Bind(
+                  "aav_put",
+                  reg.Create("pld.tile.put",
+                             {target, dest_var, input, put_stage, dst_offsets, src_offsets, chunk_shape},
+                             {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                  span);
+            },
+            span);
+      },
+      span);
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kSet, one_i32, "", span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, one_i32, "", span);
+
+  // Window-as-result: target[src*MAX_RECV+r, :] now holds the chunk from
+  // rank src, offset r. The caller reads back from the window with tile.load.
+  return target;
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -1510,6 +1625,7 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"pld.tensor.barrier", &LowerTensorBarrierRule},
       {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
       {"pld.tensor.all_to_all", &LowerTensorAllToAllRule},
+      {"pld.tensor.all_to_all_v", &LowerTensorAllToAllVRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;
@@ -1656,7 +1772,8 @@ class LowerCompositeOpsMutator : public IRMutator {
     // uniformly here so the flag alone governs which functions defer lowering.
     return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
            IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
-           IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all");
+           IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all") ||
+           IsOp(call, "pld.tensor.all_to_all_v");
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {

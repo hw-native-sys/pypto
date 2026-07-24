@@ -434,6 +434,99 @@ REGISTER_OP("pld.tensor.all_to_all")
     .f_deduce_type(DeduceTensorAllToAllType);
 
 // ============================================================================
+// pld.tensor.all_to_all_v — variable-size all-to-all (3-arg InCore composite)
+// ============================================================================
+
+namespace {
+
+TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  (void)kwargs;
+  CHECK(args.size() == 3) << "pld.tensor.all_to_all_v requires 3 args (input, target, signal), "
+                             "but got "
+                          << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << "pld.tensor.all_to_all_v positional argument #" << i << " must not be null";
+  }
+
+  // input: flattened send buffer [NR*MAX_RECV, SIZE]
+  auto input_type = As<TensorType>(args[0]->GetType());
+  CHECK(input_type) << "pld.tensor.all_to_all_v input must be a plain Tensor, got "
+                    << args[0]->GetType()->TypeName();
+  CHECK(input_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all_v input must be 2D [NR*MAX_RECV, SIZE], got " << input_type->shape_.size()
+      << " dims";
+
+  // target: DistributedTensor [NR*MAX_RECV, SIZE] — flat 2D for pld.tile.put compatibility
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(target_type) << "pld.tensor.all_to_all_v target must be a DistributedTensor (window-bound), got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(target_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all_v target must be 2D [NR*MAX_RECV, SIZE], got " << target_type->shape_.size()
+      << " dims";
+  // Dim 0 (NR*MAX_RECV): must agree when both are static; dim 1 (SIZE) is a
+  // literal, so use a strict structural check (same pattern as symmetric all_to_all).
+  CheckDimAgreesIfStatic(target_type->shape_[0], input_type->shape_[0], "pld.tensor.all_to_all_v", "target",
+                         "input");
+  CHECK(AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
+      << "pld.tensor.all_to_all_v target SIZE must equal input SIZE";
+  CHECK(target_type->dtype_ == input_type->dtype_)
+      << "pld.tensor.all_to_all_v target dtype " << target_type->dtype_.ToString()
+      << " must match input dtype " << input_type->dtype_.ToString();
+
+  // signal: DistributedTensor INT32
+  auto signal_type = As<DistributedTensorType>(args[2]->GetType());
+  CHECK(signal_type) << "pld.tensor.all_to_all_v signal must be a DistributedTensor (window-bound), got "
+                     << args[2]->GetType()->TypeName();
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << "pld.tensor.all_to_all_v signal must have INT32 element type, got dtype "
+      << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all_v signal must be 1D [NR] or 2D [NR, 1], got " << signal_type->shape_.size()
+      << " dims";
+  if (signal_type->shape_.size() == 2) {
+    auto signal_dim1 = As<ConstInt>(signal_type->shape_[1]);
+    CHECK(signal_dim1 && signal_dim1->value_ == 1)
+        << "pld.tensor.all_to_all_v signal second dimension must be 1, got "
+        << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
+  }
+
+  // MAX_RECV = target[0] / signal[0] (deducer-enforced compile-time
+  // constants; both dims must be static).
+  auto target_dim0 = As<ConstInt>(target_type->shape_[0]);
+  CHECK(target_dim0) << "pld.tensor.all_to_all_v target dim 0 (NR*MAX_RECV) must be a compile-time constant";
+  auto signal_dim0 = As<ConstInt>(signal_type->shape_[0]);
+  CHECK(signal_dim0) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be a compile-time constant";
+  CHECK(signal_dim0->value_ > 0) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be positive, got "
+                                 << signal_dim0->value_;
+  CHECK(target_dim0->value_ % signal_dim0->value_ == 0)
+      << "pld.tensor.all_to_all_v signal dim 0 (" << signal_dim0->value_ << ") must divide target dim 0 ("
+      << target_dim0->value_ << ")";
+
+  // Window-as-result: return target
+  return target_type;
+}
+
+}  // namespace
+
+REGISTER_OP("pld.tensor.all_to_all_v")
+    .set_description(
+        "All-to-all: variable-size personalized exchange (push-based, "
+        "window-as-result).  Each rank spreads its data across all peers "
+        "via ``pld.tile.put`` into a 2D staging window "
+        "[NR*MAX_RECV, SIZE] using flat row-index arithmetic "
+        "``dest*MAX_RECV+r``.  Returns the target window so the caller "
+        "can read back via ``tile.load`` — same pattern as the symmetric "
+        "``pld.tensor.all_to_all`` intrinsic.")
+    .set_op_category("DistributedOp")
+    .add_argument("input", "Plain Tensor [NR*MAX_RECV, SIZE] with per-destination chunks (Input)")
+    .add_argument("target",
+                  "Window-bound DistributedTensor [NR*MAX_RECV, SIZE] — staging area for exchange (InOut)")
+    .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .no_memory_spec()
+    .f_deduce_type(DeduceTensorAllToAllVType);
+
+// ============================================================================
 // pld.tensor.reduce_scatter — reduce + scatter chunks across ranks
 // ============================================================================
 
