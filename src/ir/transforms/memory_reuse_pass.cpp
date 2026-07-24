@@ -3146,7 +3146,7 @@ class InplaceAliasDecisionCollector : public IRVisitor {
            out_view.fractal == in_view.fractal && out_view.pad == in_view.pad;
   }
 
-  std::optional<int> CandidateLastUse(const VarPtr& candidate) const {
+  [[nodiscard]] std::optional<int> CandidateLastUse(const VarPtr& candidate) const {
     auto direct = group_last_use_.find(candidate.get());
     if (direct != group_last_use_.end()) return direct->second;
 
@@ -3163,7 +3163,7 @@ class InplaceAliasDecisionCollector : public IRVisitor {
     return by_base->second;
   }
 
-  std::vector<std::pair<int32_t, int32_t>> PipelineMembership(const VarPtr& var) const {
+  [[nodiscard]] std::vector<std::pair<int32_t, int32_t>> PipelineMembership(const VarPtr& var) const {
     auto def_it = analysis_.var_def_stmt.find(var);
     if (def_it == analysis_.var_def_stmt.end()) return {};
     auto assign = As<AssignStmt>(def_it->second);
@@ -3181,13 +3181,13 @@ class InplaceAliasDecisionCollector : public IRVisitor {
     return base;
   }
 
-  const Var* PhysicalBase(const VarPtr& var) const { return ResolveBase(TileMemRefBase(var)); }
+  [[nodiscard]] const Var* PhysicalBase(const VarPtr& var) const { return ResolveBase(TileMemRefBase(var)); }
 
-  bool HazardBlocks(const VarPtr& output, const VarPtr& candidate) const {
+  [[nodiscard]] bool HazardBlocks(const VarPtr& output, const VarPtr& candidate) const {
     return hazard_.reads_tpop.count(output.get()) != 0 && hazard_.load_derived.count(candidate.get()) != 0;
   }
 
-  bool ForbidBlocks(const VarPtr& output, const VarPtr& candidate) const {
+  [[nodiscard]] bool ForbidBlocks(const VarPtr& output, const VarPtr& candidate) const {
     auto rep_it = member_to_rep_.find(output.get());
     const Var* output_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
     auto forbid_it = forbid_alias_.find(output_key);
