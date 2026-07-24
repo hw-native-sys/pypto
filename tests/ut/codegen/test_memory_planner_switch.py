@@ -120,6 +120,7 @@ def test_pypto_pipeline_runs_allocation_passes():
     assert "AllocateMemoryAddr" in pass_names
     assert "InitMemRef" in pass_names
     assert "MaterializeSemanticAliases" in pass_names
+    assert "MaterializeInplaceAliases" in pass_names
 
 
 def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
@@ -129,8 +130,13 @@ def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
     # Semantics-required aliasing is preserved; only opportunistic reuse + addr
     # assignment are handed off to ptoas PlanMemory.
     assert "MaterializeSemanticAliases" in pass_names
+    assert "MaterializeInplaceAliases" in pass_names
     assert "MemoryReuse" not in pass_names
     assert "AllocateMemoryAddr" not in pass_names
+
+    semantic_idx = pass_names.index("MaterializeSemanticAliases")
+    inplace_idx = pass_names.index("MaterializeInplaceAliases")
+    assert inplace_idx == semantic_idx + 1
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +161,22 @@ def test_ptoas_codegen_omits_alloc_tile_addr():
     assert alloc_lines, f"expected at least one pto.alloc_tile:\n{mlir}"
     assert all("addr =" not in line for line in alloc_lines), (
         f"PTOAS mode must not emit an addr operand (ptoas --pto-level=level2 rejects it):\n{mlir}"
+    )
+
+
+def test_ptoas_materializes_safe_last_use_add_alias():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    tadd = next((line for line in mlir.splitlines() if "pto.tadd" in line), None)
+    assert tadd is not None, f"expected a pto.tadd:\n{mlir}"
+
+    ins = tadd.split("ins(")[1].split(")")[0]
+    out = tadd.split("outs(")[1].split(")")[0]
+    out_handle = out.split(":")[0].strip()
+    in_handles = [token.strip() for token in ins.split(":")[0].split(",")]
+    assert out_handle in in_handles, (
+        "PTOAS operation-boundary aliasing must place the add result on a compatible "
+        f"last-use input; got inputs {in_handles}, output {out_handle}:\n{tadd}"
     )
 
 

@@ -4,11 +4,12 @@ Initializes MemRef for all variables and creates alloc operations with unallocat
 
 ## Overview
 
-This pass performs three tasks:
+This pass performs four tasks:
 
 1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
-2. **Initializes MemRef** for TileType and TensorType variables
-3. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
+2. **Legalizes static view handles before `tile.set_validshape`**
+3. **Initializes MemRef** for TileType and TensorType variables
+4. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
 Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
@@ -44,14 +45,15 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+2. **Legalize static view handles**: When `tile.set_validshape` consumes a zero-copy view with a statically valid-shaped PTO handle (for example, a `tile.reshape`), insert a fresh same-space `tile.move` first. The move produces the dynamic handle that PTO's mutating `set_validshape` requires. `tile.move` forbids output/input buffer aliasing, so either memory planner preserves this materialization.
+3. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
-3. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-4. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
-5. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
+6. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
 
 ## Example
 
@@ -119,6 +121,7 @@ Pass InitMemRef();
 **Implementation**: `src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
+- `MaterializeStaticViewValidShape` inserts a fresh same-space move when a static zero-copy view feeds `tile.set_validshape`
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
   - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), tile aliases (`a = b`), and ForStmt/IfStmt yield values
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs

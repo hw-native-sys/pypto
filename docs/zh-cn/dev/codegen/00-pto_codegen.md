@@ -283,18 +283,23 @@ print(pto_code)
 | 模式 | 流水线 | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | ------ | ---------------- | -------------------- | ----- |
 | `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
-| `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
+| `PTOAS` | 运行 `MaterializeSemanticAliases` + `MaterializeInplaceAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
-内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
-（循环累加器、原地算子）归一到同一 MemRef；**`MemoryReuse`** 只做**机会性**的、
-基于生命周期的独立 buffer 合并。`InitMemRef` + `MaterializeSemanticAliases`
-两种模式都跑,所以强制别名得以保留;`PTOAS` 模式下 codegen 把这些共享 MemRef
-渲染成单个 `tile_buf` handle、原地 `outs(%acc)`,由 ptoas `PlanMemory`
-(level2 强制要求、拒绝任何 `addr` 操作数)完成生命周期复用与地址分配。
+内存规划拆成三个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
+（循环累加器、原地算子）归一到同一 MemRef；**`MaterializeInplaceAliases`**
+仅在 PTOAS 下编码安全的 `dst == dead-src` 操作边界；**`MemoryReuse`** 在 PYPTO
+下执行全局机会性生命周期合并。PTOAS 模式的 codegen 会把前两类已选择的别名
+渲染成共享 `tile_buf` 句柄，其余装箱和地址分配仍由 level2 的 PTOAS
+`PlanMemory` 完成。
 
-> **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910B `load + tpop_from_aic`
-> 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由
-> ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
+> **注意：** `PTOAS` 模式仍把 `AllocateMemoryAddr` 的 reserve-buffer 基址解析
+> 交给 ptoas。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
+
+PTOAS 0.48 level2 会丢失无 `addr` 的 `pto.subview` 动态目标偏移。因此，当一个
+codegen 单元（单个 kernel，或整个 Cube/Vector group）包含目标偏移非常量的
+`tile.gather_row` 时，后端会只对该单元补跑 `MemoryReuse` +
+`AllocateMemoryAddr`，并改用 ptoas level3；同一程序中的其他单元仍使用 PTOAS
+level2。常量偏移的 gather 不触发该兼容回退。
 
 ### 加载操作转换
 

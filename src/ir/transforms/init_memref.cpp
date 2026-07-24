@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -32,10 +33,12 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -96,6 +99,85 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   if (!registry.IsRegistered(op_name)) return std::nullopt;
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
+
+// PTO set_validshape mutates a tile handle whose type must carry dynamic
+// valid-row/valid-col fields. A zero-copy view such as tile.reshape instead
+// lowers to a statically typed pto.treshape handle, so applying set_validshape
+// directly to it would make the PTO IR ill-typed. Materialize only that boundary
+// into a fresh, same-space tile.move; ordinary set_validshape remains in-place.
+class MaterializeStaticViewValidShape : public IRMutator {
+ public:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    if (!call || !call->op_) return op;
+
+    if (IsOp(call, "tile.set_validshape") && !call->args_.empty()) {
+      auto source = AsVarLike(call->args_[0]);
+      if (source && static_view_handles_.count(source.get()) != 0) {
+        return Materialize(op, call, source);
+      }
+    }
+
+    // set_validshape itself keeps the dynamic handle of its input. Other
+    // buffer-aliasing view ops produce a statically typed PTO view handle.
+    if (!IsOp(call, "tile.set_validshape") && op_predicates::IsBufferAliasingViewOp(call->op_->name_) &&
+        HasStaticValidShape(op->var_)) {
+      static_view_handles_.insert(op->var_.get());
+    }
+    return op;
+  }
+
+ private:
+  static bool HasStaticValidShape(const VarPtr& var) {
+    auto tile_type = var ? As<TileType>(var->GetType()) : nullptr;
+    if (!tile_type) return false;
+    const auto& valid_shape = tile_view_semantics::GetEffectiveTileView(*tile_type).valid_shape;
+    return valid_shape.size() == 2 && As<ConstInt>(valid_shape[0]) && As<ConstInt>(valid_shape[1]);
+  }
+
+  static std::vector<std::pair<std::string, std::any>> PipelineMembershipAttrs(const CallPtr& call) {
+    std::vector<std::pair<std::string, std::any>> attrs;
+    if (!call) return attrs;
+    for (const auto& [key, value] : call->attrs_) {
+      if (key == kPipelineMembershipAttr) attrs.emplace_back(key, value);
+    }
+    return attrs;
+  }
+
+  StmtPtr Materialize(const AssignStmtPtr& assign, const CallPtr& set_validshape, const VarPtr& source) {
+    auto tile_type = As<TileType>(source->GetType());
+    INTERNAL_CHECK_SPAN(tile_type && tile_type->memory_space_.has_value(), assign->span_)
+        << "InitMemRef requires tile memory inference before set_validshape view materialization";
+
+    auto& registry = OpRegistry::GetInstance();
+    std::vector<std::pair<std::string, std::any>> move_kwargs = {
+        {"target_memory",
+         std::any(tile_type->memory_space_.value())}};  // NOLINT(bugprone-unchecked-optional-access)
+    auto inferred_move = registry.Create("tile.move", {source}, move_kwargs, assign->span_);
+    auto move_call = std::make_shared<Call>(inferred_move->op_, inferred_move->args_, inferred_move->kwargs_,
+                                            PipelineMembershipAttrs(set_validshape), inferred_move->GetType(),
+                                            inferred_move->span_);
+    auto moved =
+        std::make_shared<Var>(source->name_hint_ + "_validshape_buffer_" + std::to_string(next_id_++),
+                              move_call->GetType(), assign->span_);
+
+    auto new_args = set_validshape->args_;
+    new_args[0] = moved;
+    auto inferred_set_validshape =
+        registry.Create("tile.set_validshape", new_args, set_validshape->kwargs_, set_validshape->span_);
+    auto new_set_validshape = std::make_shared<Call>(
+        inferred_set_validshape->op_, inferred_set_validshape->args_, inferred_set_validshape->kwargs_,
+        set_validshape->attrs_, inferred_set_validshape->GetType(), inferred_set_validshape->span_);
+
+    auto move_assign = std::make_shared<AssignStmt>(moved, move_call, assign->span_);
+    auto set_validshape_assign =
+        std::make_shared<AssignStmt>(assign->var_, new_set_validshape, assign->span_);
+    return SeqStmts::Flatten(std::vector<StmtPtr>{move_assign, set_validshape_assign}, assign->span_);
+  }
+
+  std::set<const Var*> static_view_handles_;
+  uint64_t next_id_ = 0;
+};
 
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
@@ -578,20 +660,25 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
-  // Step 2: Mutate variables to initialize their MemRef
+  // Step 2: Materialize static PTO view handles before a mutating
+  // set_validshape, then initialize every variable's MemRef.
+  MaterializeStaticViewValidShape view_legalizer;
+  auto legalized_func = MutableCopy(normalized_func);
+  legalized_func->body_ = view_legalizer.VisitStmt(normalized_func->body_);
+
   InitMemRefMutator mutator;
 
   std::vector<VarPtr> new_params;
-  new_params.reserve(normalized_func->params_.size());
-  for (const auto& var : normalized_func->params_) {
+  new_params.reserve(legalized_func->params_.size());
+  for (const auto& var : legalized_func->params_) {
     auto new_param = mutator.GetNewVar(var);
     INTERNAL_CHECK_SPAN(new_param, var->span_) << "Failed to get new param";
     new_params.push_back(new_param);
   }
 
-  auto new_body = mutator.VisitStmt(normalized_func->body_);
+  auto new_body = mutator.VisitStmt(legalized_func->body_);
 
-  auto result_func = MutableCopy(normalized_func);
+  auto result_func = legalized_func;
   result_func->params_ = new_params;
   result_func->body_ = new_body;
 

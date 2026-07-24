@@ -200,7 +200,7 @@ inline constexpr const char* kAttrCompilerAutoManualScopeCandidate = "__compiler
 //
 // The rebind attr is stamped for **every** iter_arg (even when false) so its
 // presence proves the pass ran; the array-size attr is stamped only when
-// positive. See ``docs/en/dev/passes/42-classify_iter_arg_carry.md``.
+// positive. See ``docs/en/dev/passes/43-classify_iter_arg_carry.md``.
 
 /// Prefix of the per-iter_arg ``bool`` "needs a materialised carry" attr.
 inline constexpr const char* kIterArgRebindAttrPrefix = "iter_arg_rebind_";

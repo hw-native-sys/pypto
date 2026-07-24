@@ -503,6 +503,7 @@ _SPMD_BLOCK_OPS = frozenset(
     {_ir_core.get_op("tile.get_block_idx").name, _ir_core.get_op("tile.get_block_num").name}
 )
 _SUBBLOCK_OPS = frozenset({_ir_core.get_op("tile.get_subblock_idx").name})
+_GATHER_ROW_OP = _ir_core.get_op("tile.gather_row").name
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -528,6 +529,37 @@ def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> boo
             super().visit_call(op)
 
     finder = _OpFinder()
+    finder.visit_stmt(func.body)
+    return finder.found
+
+
+def _function_has_dynamic_gather_destination(func: _ir_core.Function) -> bool:
+    """Return whether ``func`` gathers into a runtime-offset tile subview.
+
+    PTOAS 0.48 level2 currently drops the runtime destination offset while
+    lowering an addr-less ``pto.subview``.  Static destination offsets are not
+    affected, so keep those on the normal PTOAS planner path.
+    """
+
+    class _DynamicGatherFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.found = False
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if self.found:
+                return
+            ir_op = getattr(op, "op", None)
+            if isinstance(ir_op, _ir_core.Op) and ir_op.name == _GATHER_ROW_OP:
+                dst_offsets = op.args[2] if len(op.args) > 2 else None
+                if not isinstance(dst_offsets, _ir_core.MakeTuple) or any(
+                    not isinstance(offset, _ir_core.ConstInt) for offset in dst_offsets.elements
+                ):
+                    self.found = True
+                    return
+            super().visit_call(op)
+
+    finder = _DynamicGatherFinder()
     finder.visit_stmt(func.body)
     return finder.found
 
@@ -1078,6 +1110,7 @@ class _CodegenUnit:
     funcs: list[_ir_core.Function]
     is_group: bool
     stage_record: StageRecord  # profiling record (started in Phase 1)
+    memory_planner: _passes.MemoryPlanner
 
 
 @dataclass
@@ -1094,7 +1127,6 @@ def _emit_unit(
     unit: _CodegenUnit,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
 ) -> _EmitResult:
     """Run ptoas + wrapper generation for one codegen unit.
 
@@ -1106,11 +1138,22 @@ def _emit_unit(
     try:
         if unit.is_group:
             _emit_group_output(
-                local_files, unit.name, unit.funcs, unit.pto_code, output_dir, skip_ptoas, memory_planner
+                local_files,
+                unit.name,
+                unit.funcs,
+                unit.pto_code,
+                output_dir,
+                skip_ptoas,
+                unit.memory_planner,
             )
         else:
             _emit_single_function_output(
-                local_files, unit.funcs[0], unit.pto_code, output_dir, skip_ptoas, memory_planner
+                local_files,
+                unit.funcs[0],
+                unit.pto_code,
+                output_dir,
+                skip_ptoas,
+                unit.memory_planner,
             )
         ptoas_record.end = time.perf_counter()
         return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
@@ -1153,20 +1196,17 @@ def _run_ptoas_phase(
     prof: CompileProfiler | None,
     result_files: dict[str, str],
     errors: list[tuple[str, Exception]],
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
 ) -> None:
     """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
     max_workers = _get_max_workers()
 
     if max_workers == 1 or len(units) <= 1:
         for unit in units:
-            result = _emit_unit(unit, output_dir, skip_ptoas, memory_planner)
+            result = _emit_unit(unit, output_dir, skip_ptoas)
             _collect_emit_result(result, unit, prof, result_files, errors)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(_emit_unit, unit, output_dir, skip_ptoas, memory_planner) for unit in units
-            ]
+            futures = [executor.submit(_emit_unit, unit, output_dir, skip_ptoas) for unit in units]
             for unit, future in zip(units, futures):
                 result = future.result()  # exceptions caught inside _emit_unit
                 _collect_emit_result(result, unit, prof, result_files, errors)
@@ -1489,6 +1529,29 @@ def _generate_multi_chip(
     return result_files
 
 
+def _materialize_pypto_memory_fallback(program: _ir_core.Program) -> _ir_core.Program:
+    """Add lifetime reuse and physical addresses to an already-lowered program.
+
+    The normal PTOAS pipeline deliberately skips these two passes.  Running
+    them on a side copy lets codegen select level3 only for a codegen unit that
+    needs the dynamic-subview compatibility fallback, without moving unrelated
+    kernels away from PTOAS level2 planning.
+    """
+    pipeline = _passes.PassPipeline()
+    pipeline.add_pass(_passes.memory_reuse())
+    pipeline.add_pass(_passes.allocate_memory_addr())
+    # ``program`` is already the output of the full verified pipeline. Re-running
+    # pipeline-input verification here would apply pre-pipeline orchestration
+    # checks (for example InOutUseDiscipline) to post-lowering IR even though
+    # both side passes operate only on InCore MemRefs.
+    with _passes.PassContext(
+        [],
+        verification_level=_passes.VerificationLevel.NONE,
+        memory_planner=_passes.MemoryPlanner.PYPTO,
+    ):
+        return pipeline.run(program)
+
+
 def _generate_single_chip(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -1519,6 +1582,41 @@ def _generate_single_chip(
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
+    dynamic_gather_funcs = {
+        func.name
+        for func in transformed_program.functions.values()
+        if _ir_core.is_incore_type(func.func_type) and _function_has_dynamic_gather_destination(func)
+    }
+    fallback_program = None
+    if memory_planner == _passes.MemoryPlanner.PTOAS and dynamic_gather_funcs:
+        fallback_program = _materialize_pypto_memory_fallback(transformed_program)
+
+    def _plan_codegen_unit(
+        unit_name: str,
+        funcs: list[_ir_core.Function],
+    ) -> tuple[list[_ir_core.Function], _passes.MemoryPlanner]:
+        affected = sorted(func.name for func in funcs if func.name in dynamic_gather_funcs)
+        if memory_planner != _passes.MemoryPlanner.PTOAS or not affected:
+            return funcs, memory_planner
+        assert fallback_program is not None
+        fallback_funcs: list[_ir_core.Function] = []
+        for func in funcs:
+            fallback_func = fallback_program.get_function(func.name)
+            if fallback_func is None:
+                raise RuntimeError(
+                    f"PTOAS dynamic-subview fallback lost function '{func.name}' from codegen unit "
+                    f"'{unit_name}'"
+                )
+            fallback_funcs.append(fallback_func)
+        logger.warning(
+            "PTOAS level2 cannot preserve runtime tile.gather_row destination offsets; "
+            "codegen unit '%s' (affected function(s): %s) uses PyPTO memory planning "
+            "and --pto-level=level3 instead.",
+            unit_name,
+            ", ".join(affected),
+        )
+        return fallback_funcs, _passes.MemoryPlanner.PYPTO
+
     # External kernels are referenced at their original path in the manifest
     # (kept beside their sibling sources so relative #include "../..." resolve),
     # so PyPTO neither codegens nor copies them.
@@ -1539,7 +1637,8 @@ def _generate_single_chip(
     # generation) and runs sequentially so that we don't contend on the GIL.
     # When ptoas owns memory planning, omit the physical `pto.alloc_tile addr`
     # so ptoas runs at --pto-level=level2 (which rejects any addr operand).
-    emit_tile_addr = memory_planner == _passes.MemoryPlanner.PYPTO
+    # A codegen unit containing a runtime-offset gather is selected from the
+    # side-planned program above and emitted at level3 instead.
     units: list[_CodegenUnit] = []
 
     # Grouped functions: one MLIR module per group
@@ -1558,13 +1657,26 @@ def _generate_single_chip(
                         f"(DSL members: {dsl}). A group must be all-external or all-DSL."
                     )
                 continue
-            grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
+            codegen_members, unit_planner = _plan_codegen_unit(group_name, members)
+            grouped_program = _ir_core.Program(codegen_members, group_name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(grouped_program, emit_tile_addr=emit_tile_addr)
+            pto_code = _codegen_core.PTOCodegen().generate(
+                grouped_program,
+                emit_tile_addr=unit_planner == _passes.MemoryPlanner.PYPTO,
+            )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
-            units.append(_CodegenUnit(group_name, pto_code, members, is_group=True, stage_record=stage))
+            units.append(
+                _CodegenUnit(
+                    group_name,
+                    pto_code,
+                    codegen_members,
+                    is_group=True,
+                    stage_record=stage,
+                    memory_planner=unit_planner,
+                )
+            )
         except Exception as e:
             func_names = ", ".join(m.name for m in members)
             logger.error("Failed to compile group '%s' [%s]: %s", group_name, func_names, e)
@@ -1582,13 +1694,27 @@ def _generate_single_chip(
                 peer_func = transformed_program.get_function(name)
                 if peer_func is not None:
                     peer_funcs.append(peer_func)
-            single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
+            codegen_funcs, unit_planner = _plan_codegen_unit(func.name, [*peer_funcs, func])
+            codegen_func = codegen_funcs[-1]
+            single_program = _ir_core.Program(codegen_funcs, func.name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(single_program, emit_tile_addr=emit_tile_addr)
+            pto_code = _codegen_core.PTOCodegen().generate(
+                single_program,
+                emit_tile_addr=unit_planner == _passes.MemoryPlanner.PYPTO,
+            )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
-            units.append(_CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage))
+            units.append(
+                _CodegenUnit(
+                    func.name,
+                    pto_code,
+                    [codegen_func],
+                    is_group=False,
+                    stage_record=stage,
+                    memory_planner=unit_planner,
+                )
+            )
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
             errors.append((func.name, e))
@@ -1597,7 +1723,7 @@ def _generate_single_chip(
     # Each _emit_unit call runs the ptoas subprocess and generates the
     # kernel wrapper.  These are data-independent and subprocess-heavy, so
     # a thread pool gives real parallelism (subprocess.run releases the GIL).
-    _run_ptoas_phase(units, output_dir, skip_ptoas, prof, result_files, errors, memory_planner)
+    _run_ptoas_phase(units, output_dir, skip_ptoas, prof, result_files, errors)
 
     # Orchestration + config
     if orch_func is not None:

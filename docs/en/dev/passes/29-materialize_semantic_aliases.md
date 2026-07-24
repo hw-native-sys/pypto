@@ -16,13 +16,14 @@ Memory planning distinguishes two kinds of buffer sharing:
   lifetimes *may* share storage to save memory. This is optimization.
 
 This pass handles only the **must-alias** case. It was split out of
-[`MemoryReuse`](30-memory_reuse.md) (it is that pass's former "Step 0") so that
+[`MemoryReuse`](31-memory_reuse.md) (it is that pass's former "Step 0") so that
 the opportunistic lifetime coalescing can be skipped independently — e.g. when
 ptoas owns lifetime reuse under `compile(memory_planner=MemoryPlanner.PTOAS)`.
 
 **When to use**: Run after [`InitMemRef`](28-init_memref.md) (which creates the
-MemRefs) and before [`MemoryReuse`](30-memory_reuse.md). It always runs; only the
-opportunistic reuse is skippable.
+MemRefs) and before
+[`MaterializeInplaceAliases`](30-materialize_inplace_aliases.md). It always
+runs; only the planner-specific may-alias stages are conditional.
 
 ## API
 
@@ -70,3 +71,5 @@ doing the lifetime reuse and address assignment itself. See
   are never merged into a must-alias buffer — only exact same-allocation vars are.
 - In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
   behavior of the former single `MemoryReuse` pass (byte-identical output).
+- Under `PTOAS`, `MaterializeInplaceAliases` follows this pass and encodes only
+  legal `dst == dead-src` operation boundaries before PTOAS performs packing.

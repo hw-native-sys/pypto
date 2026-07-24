@@ -19,7 +19,7 @@ signal，并继续由 [`LowerCompositeOps`](12-lower_composite_ops.md) lower。
 ... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify（最终）
 ```
 
-它运行在 [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md)
+它运行在 [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md)
 之前，此时 host 侧 `alloc_window_buffer` / `window` / dispatch 链路仍然可见。
 随后 comm-domain materialization 会把合成的 signal buffer 当成普通 window
 allocation 处理，并放入 allreduce data buffer 所属的通信域。

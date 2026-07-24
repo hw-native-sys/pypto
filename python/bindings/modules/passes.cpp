@@ -330,6 +330,12 @@ void BindPass(nb::module_& m) {
              "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
              "so it can run without the opportunistic lifetime-reuse phase (memory_planner=PTOAS).");
 
+  passes.def("materialize_inplace_aliases", &pass::MaterializeInplaceAliases,
+             "Create the PTOAS operation-boundary in-place alias materialization pass\n\n"
+             "Retargets an output onto a compatible input only when that input dies at the operation,\n"
+             "while preserving registry no-alias, pipeline, phi, and backend-hazard constraints.\n"
+             "This pass is a no-op unless memory_planner=PTOAS.");
+
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"
              "Uses lifetime analysis over the full IR to identify memory reuse opportunities.\n"

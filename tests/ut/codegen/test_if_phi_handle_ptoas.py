@@ -26,6 +26,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir as _ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend.pto_backend import generate
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -68,13 +69,19 @@ class IfPhiPassThroughProgram:
         return pl.store(r, [0, 0], out)
 
 
-def _ptoas_pto(program) -> str:
+def _ptoas_optimized(program) -> _ir.Program:
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
-    func = next(f for f in optimized.functions.values() if f.name == "kernel")
-    return codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span), emit_tile_addr=False)
+        return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+
+
+def _ptoas_pto(program, function_name: str = "kernel") -> str:
+    optimized = _ptoas_optimized(program)
+    func = next(f for f in optimized.functions.values() if f.name == function_name)
+    return codegen.PTOCodegen().generate(
+        _ir.Program([func], function_name, optimized.span), emit_tile_addr=False
+    )
 
 
 def _sole_line(mlir: str, needle: str) -> str:
@@ -146,6 +153,112 @@ class LoopCarriedIfPhiProgram:
             else:
                 acc = pl.mul(acc, 2.0)
         return pl.store(acc, [0, 0], out)
+
+
+@pl.program
+class NestedGatherRowIfPhiProgram:
+    """Nested if-phis whose leaves all update one L1 destination in place."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        q: pl.Tensor[[16, 128], pl.BF16],
+        src0: pl.Tensor[[256, 128], pl.BF16],
+        src1: pl.Tensor[[256, 128], pl.BF16],
+        flag0: pl.Scalar[pl.INT32],
+        flag1: pl.Scalar[pl.INT32],
+        flag2: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        kv = pl.create_l1([16, 128], pl.BF16)
+        for r in pl.range(16):
+            if flag0 == 0:
+                if flag1 == 0:
+                    kv = pl.gather_row(kv, src0, [r, 0], [r, 0], [1, 128])
+                else:
+                    kv = pl.gather_row(kv, src1, [r, 0], [r, 0], [1, 128])
+            else:  # noqa: PLR5501 - keep a nested IfStmt for the phi regression
+                if flag2 == 0:
+                    kv = pl.gather_row(kv, src0, [r, 0], [0, 0], [1, 128])
+                else:  # noqa: PLR5501 - keep a deeper nested IfStmt
+                    if flag1 == 0:
+                        kv = pl.gather_row(kv, src1, [r, 0], [0, 0], [1, 128])
+                    else:
+                        kv = pl.gather_row(kv, src0, [r, 0], [r, 0], [1, 128])
+        # b_trans lowers to a differently-shaped transpose_view of kv, making
+        # its MemRef identity mixed-type. The same-typed gather phis must still
+        # reuse the canonical Mat handle.
+        return pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+
+
+@pl.program
+class StaticGatherRowProgram:
+    """A constant destination subview remains safe for PTOAS level2."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        q: pl.Tensor[[16, 128], pl.BF16],
+        src: pl.Tensor[[256, 128], pl.BF16],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        kv = pl.create_l1([16, 128], pl.BF16)
+        kv = pl.gather_row(kv, src, [0, 0], [0, 0], [1, 128])
+        return pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+
+
+def test_nested_gather_row_if_phi_shares_one_mat_handle():
+    """Every nested DPS leaf must write a subview of the one carried Mat tile."""
+    mlir = _ptoas_pto(NestedGatherRowIfPhiProgram)
+
+    mat_allocs = [
+        ln
+        for ln in mlir.splitlines()
+        if "pto.alloc_tile" in ln and "loc=mat" in ln and re.search(r"%kv\S*\s*=", ln)
+    ]
+    assert len(mat_allocs) == 1, f"expected one Mat alloc_tile for the gather destination:\n{mlir}"
+    mat_handle = _first_group(r"^\s*(%[A-Za-z0-9_]+)\s*=", mat_allocs[0])
+
+    loads = [
+        ln for ln in mlir.splitlines() if "pto.tload" in ln and "loc=mat" in ln and "outs(%q__" not in ln
+    ]
+    assert len(loads) == 5, f"expected one GM-to-Mat tload per gather branch:\n{mlir}"
+    for load in loads:
+        target = _first_group(r"outs\((%[A-Za-z0-9_]+)", load)
+        assert f"{target} = pto.subview {mat_handle}" in mlir, (
+            f"gather tload target {target} must be a subview of {mat_handle}:\n{mlir}"
+        )
+
+    mat_to_mat = [
+        ln
+        for ln in mlir.splitlines()
+        if "pto.tmov" in ln and "loc=mat" in ln.split("ins(", 1)[-1] and "loc=mat" in ln.split("outs(", 1)[-1]
+    ]
+    assert not mat_to_mat, "nested DPS phi must not emit Mat-to-Mat tmov:\n" + "\n".join(mat_to_mat)
+
+
+def test_backend_falls_back_only_for_dynamic_gather_destination(tmp_path, caplog):
+    """Dynamic gather units get addresses/level3; constant gathers stay level2."""
+    dynamic = _ptoas_optimized(NestedGatherRowIfPhiProgram)
+    dynamic_files = generate(
+        dynamic,
+        str(tmp_path / "dynamic"),
+        skip_ptoas=True,
+        memory_planner=passes.MemoryPlanner.PTOAS,
+    )
+    dynamic_pto = next(content for path, content in dynamic_files.items() if path.endswith(".pto"))
+    assert " addr = " in dynamic_pto
+    assert "runtime tile.gather_row destination offsets" in caplog.text
+
+    caplog.clear()
+    static = _ptoas_optimized(StaticGatherRowProgram)
+    static_files = generate(
+        static,
+        str(tmp_path / "static"),
+        skip_ptoas=True,
+        memory_planner=passes.MemoryPlanner.PTOAS,
+    )
+    static_pto = next(content for path, content in static_files.items() if path.endswith(".pto"))
+    assert " addr = " not in static_pto
+    assert "runtime tile.gather_row destination offsets" not in caplog.text
 
 
 def test_loop_carried_if_phi_shares_the_accumulator_handle():

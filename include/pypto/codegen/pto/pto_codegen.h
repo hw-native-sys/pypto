@@ -657,9 +657,11 @@ class PTOCodegen : public CodegenBase {
    * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
    * where variables denoting the same buffer must share one handle because
    * there is no baked `addr` to alias through. Returns "" when addresses are
-   * baked, when `memref` is null, or when no handle is bound yet.
+   * baked, when `memref` is null, when no handle is bound yet, or when a
+   * mixed-view identity's canonical handle type differs from `required_type`.
    */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref,
+                                                      const std::string& required_type) const;
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.

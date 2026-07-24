@@ -25,7 +25,7 @@
 ```
 
 本 pass 跑在默认 pipeline 的末尾阶段，位于
-[`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) 和最后一次
+[`LowerHostTensorCollectives`](40-lower_host_tensor_collectives.md) 和最后一次
 `Simplify` 之前。从 `InlineFunctions` 到这里之间的所有 pass 都不会触碰
 host_orch 的 alloc / window / dispatch 链：host_orch 本身不会被 tile lower，
 L2（chip 级）orchestration 也永远不会被 inline 进 L3，所以本 pass 需要的
@@ -95,7 +95,7 @@ pass 运行之后：
   `window_buffer_` 字段指向对应的 `WindowBuffer`。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
   `pld.tensor.allreduce` 都已经有两个位置参数（在
-  [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) 运行之后）。
+  [`SynthesizeAllReduceSignals`](38-synthesize_allreduce_signals.md) 运行之后）。
   用户省略 signal 时，第二个参数是前置
   `pld.tensor.window` 赋值语句产生的合成 Var。
 - 同一 alloc 的多个 view 共享同一 `shared_ptr<const WindowBuffer>`——指针
