@@ -6,6 +6,8 @@
 
 由 `ConvertTensorToTileOps` + [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 生成的 Mat-resident matmul 通常带有完整的 `(M, N, K)` 操作数形状——几乎一定大于 cube unit 的 L0a/L0b/L0c 容量。本 pass 选取一个能放进 L0 的 `(m, n, k)`，并把该 matmul 改写成一个 K-loop：循环体内用 `tile.extract` 把 `[m, k]` 与 `[k, n]` 的切片送入 `Left` / `Right`，并把累加器写入 `Acc`-resident 的 iter-arg。该循环带有 `ForKind::Pipeline` 与 `pipeline_stages=2`，使下游 [`LowerPipelineLoops`](26-lower_pipeline_loops.md) 可对每次迭代的操作数 `tile.extract` 生成 2 级 ping-pong。
 
+本 pass 也处理已经切好 L0 tile 的形式：用户编写的静态 `pl.pipeline(stage=2)`，每次迭代恰有一个 `tile.matmul(Left, Right)`，且结果直接由 `tile.store` 或 `tile.assemble` 排出。当两块静态 Acc 结果 tile 能同时放入 L0C 时，AutoTile 会给该循环启用 L0C 双缓冲。既有的 pipeline lowering 随后产生两块同时存活的累加器，并按 `matmul, matmul, drain, drain` 排序，使 tile *i* 的 FIXPIPE drain 与 tile *i+1* 的 MAD 重叠。循环不变量操作数继续共享；只有流水线中每次迭代移动的操作数和两块 Acc 结果做 ping-pong。若循环体含多个 matmul、嵌套控制流、结果被间接使用，或 Acc tile 大于 L0C/2，则保持不变。
+
 **K 切分 vs M/N 切分。** 当 chooser 返回 `m == M` 且 `n == N` 时，输出已能放进 L0c，因此只切分 K 维（一个 K-loop）。当返回 `m < M` 或 `n < N` 时，`[M, N]` 输出 Acc 会超过 L0c。由于操作数已经是 Mat-resident，*只有*输出溢出：本 pass 把**输出**切成 `ceil(M/m) × ceil(N/n)` 的 `[m, n]` 子块网格（边界处为部分块——`m`/`n` 不必整除 `M`/`N`），每个子块用同样的流水化 K-loop 计算，并把每个 `[m, n]` 的 Acc 子块直接 store 到 `out[mi:, ni:]`（direct-store / 输出落 DDR 的路径）。这样每个 Acc tile 都 ≤ L0c，matmul 能顺利通过 `AllocateMemoryAddr` 而不溢出。输出张量以 SSA 形式在各子块 store 间串联（`out → out_t0 → out_t1 → …`）。
 
 **Fits-L0c 链式 cast-fold（cast 折叠）。** 当链式 matmul 的 `[M, N]` 结果*能放进* L0c（无需 M/N 切分），但经一次降精度后再喂给第二个 matmul —— `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` —— 消费者需要 bf16 中间值位于 **Mat**（L1）。若不处理，`tile.cast` 会 lower 成 **Vector** 的 `pto.tcvt`（一次 cube→vector→cube 往返，在 `[128, 128]` 形状下会撑爆 Vec buffer）。本 pass 改为把 cast 折叠成**一次整窗**的 Acc→Mat `tile.assemble` —— 与超大 Mat-scratch 路径用的是同一个 `MatScratchPlacer`，只是单次 `PlaceAt` 于偏移 `(0, 0)` 而非一个网格 —— 从而让降精度留在 cube 上，作为 FIXPIPE 的 `pto.tinsert`。这是一个与 K 切分无关的 cast-peephole：无论 producer 是保持整体（`k == K`）还是被 K-loop 切分（`k < K`）都会触发，且仅当 cast 结果的每一处使用都是矩阵乘操作数时才折叠（非矩阵乘消费者保留 Vector cast）。折叠还严格对齐 FIXPIPE 能复现的能力——即 **`f32 → bf16/f16`** 降精度、且舍入模式为 **`rint`**（就近、**取偶**），这是 FIXPIPE 固定的 tie 规则——A2/A3 与 A5 一致（pto-isa 的 CPU 参考实现用 `std::bfloat16_t` 降精度、无 arch 分支，且 `pto.tinsert` 不带 `rmode`；两个 backend 仅 scratch dtype 不同，舍入相同）。若源不是 `f32`（例如 `int32` 矩阵乘结果，需要带 scale 的 *dequant*）、为 cast 默认的 **`round`** 模式（就近、**远离零**），或为有方向/截断的模式（`none`/`floor`/`ceil`/`trunc`/`odd`），则都保留 Vector `pto.tcvt`——只有它才会遵循所请求的 `rmode`——并由本 pass 发出指向 `mode="rint"` 的 `PH-AT-010` 提示。同一道 gate（`CastFoldableToFixpipeMat`）也用于下面的超大 Mat-scratch 折叠。超大结果不会到达这个 peephole——它们的 cast 由上面的 M/N 路径逐子块折叠。
@@ -18,7 +20,7 @@
 
 **失效属性 (Invalidated)**：无。
 
-**何时使用**：一律在默认 tile 阶段流水线中运行。如果不存在超过 backend L0 容量的 Mat-resident matmul，本 pass 是 no-op。
+**何时使用**：一律在默认 tile 阶段流水线中运行。如果没有需要切分或折叠 cast 的 Mat-resident matmul，且没有符合自动累加器双缓冲条件的已有 2 阶段 L0 流水线，本 pass 是 no-op。
 
 ## API
 
@@ -57,6 +59,8 @@ program_tiled = l0_tile_pass(program)
    > **后续工作 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。要让它们的 L0 操作数缓冲复用同一空间，目前两者需要**相同的缓冲形状**：A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而双缓冲消费者的两块半大缓冲无法与之打包，因为 `AllocateMemoryAddr` 只是把各复用类顺序堆叠、从不细分已释放区域（一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者半缓冲会浪费 32 KB，另一半溢出 → L0 超限）。因此本 pass 强制 Mat-scratch 生产者使用缓冲形状与消费者匹配的 **output-stationary**。在分配器中做**按生命周期的偏移打包**（把每块缓冲放在其生命周期内可用的最低偏移）后即可允许 operand-stationary 生产者；该工作由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
 7. **改写所在 `SeqStmts`** —— 把原 matmul 的 `Var`（K 切分）或消费 store 的结果（M/N 切分）用法改成新的 `return_var`。替换作用域只限当前 `SeqStmts`，不会泄漏到兄弟区域。
 
+8. **识别已有的 2 阶段 L0 流水线** —— 独立于 chooser 驱动的改写，检查每个静态、至少两次迭代、`pipeline_stages=2` 的 `ForKind::Pipeline`。若其直接循环体没有嵌套控制流，恰有一个普通 `tile.matmul` 且操作数是静态 `Left`/`Right`，产生不大于 `L0C/2` 的静态 2D Acc tile，并且该结果只被直接的 `tile.store` 或 `tile.assemble` 使用一次，则附加 `pipeline_double_buffer_c=true` 与 `pipeline_overlap_stores=false`。已有显式属性的循环保持不变。这是局部容量与调度决策；含多个独立 matmul 的循环体需要联合缓冲规划，因此暂不处理。
+
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
 ## Cost model & design space (`ChooseL0Tile`)
@@ -74,6 +78,8 @@ program_tiled = l0_tile_pass(program)
 - **dbC** `{1, 2}` —— 是否对 L0C 累加器做双缓冲，以便把 FIXPIPE drain 与下一个 tile 的计算重叠。
 
 一个**可实现掩码（realizable mask）**（即 `allow_a_stationary` / `allow_b_stationary` / `allow_double_buffer_c` 这些配置开关）把**被枚举并发射**的设计点限制为已有 lowering 支持的那些——被关闭的轴**不会**被探索（也不打分）；打开某个开关即把对应设计点加入搜索。本 pass 打开 **A/B-stationary** 开关：被钉住的操作数在整个移动网格上以**单缓冲**形式占满 L0 缓冲（`k == K`），由 `BuildFullKPipelined` 中的 `ForKind::Sequential` 外层循环实现（外层若用 `Pipeline` 会把被钉操作数双缓冲 → 2× 满 L0 预算 → 溢出）。因此本 pass 发射 **output-stationary 或 operand-stationary**。**dbC=2**（双累加器 L0C ping-pong：tile *i* 的 FIXPIPE drain 与 tile *i+1* 的 MAD 重叠）在 `memory_planner=PTOAS` 下无条件打开，在 PyPTO planner 下作为**实验性开关**打开（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭，待设备验证数值与 drain 掩盖收益）：`cfg.allow_double_buffer_c = ptoas_planner || (pypto_planner && flag)`。两种 planner 下都由 `BuildFullKPipelined` 给移动循环打上 `kPipelineDoubleBufferCAttr`，`CanonicalizeIOOrder` 把**两个** store 都浮到**两个** matmul 之下（`matmul, matmul, store, store`——共存生命周期，而非默认的 `matmul, store, …` 不相交生命周期）。两个共存累加器随后按 planner 以不同方式在分配阶段存活：**PTOAS** 下因为它跳过 `MemoryReuse`（`InitMemRef` 给两个 stage 分配不同的 L0C 基址，ptoas 再放到不同 offset）；**PyPTO** 下因为 [`LowerPipelineLoops`](26-lower_pipeline_loops.md) 给 dbC 累加器一个**扁平 depth-2** 的 `pipeline_membership`——只有移动（dbC）循环给它打标记，外层循环跳过它（因为 cube 串行化 MAD）——于是 `MemoryReuse` 的容量门控（#1475）恰好分配两块共存 L0C 缓冲，而不再合并它们（后者是其原本行为，会把 tile 缩到 L0C/2 且没有第二块缓冲）。dbC=2 要求 full-K 且 ≥2×2 网格；Mat-scratch（`Acc→Mat`，`tile.assemble`）的 drain 以同样方式浮动。若 `PassManager` 在一个 planner 下构造却在另一个下运行，会**显式报错**（pass 列表的 `MemoryReuse`-跳过与 chooser 的 dbC 门控必须一致）。代价模型的公式本身与这些开关无关。参见 [`27-canonicalize_io_order.md`](27-canonicalize_io_order.md) 的共存浮动，以及运行时设备验证的数值与 `{0, L0C/2}` 两个不同 offset。
+
+上段的 full-K 与 ≥2×2 限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器要求循环至少两次迭代，并在确认 `Acc bytes ≤ L0C/2` 后于任一 planner 下直接复用相同的双 Acc 机制；它不改变 chooser 的设计空间。
 
 > **这是模型驱动的 tile 选择变更，并非行为中立的重构。** roofline 目标替换了此前以流量最小化为目标的闭式 chooser，因此对 MAD-bound 形状所选的 `(m, n, k)` 与之前不同。代表性形状的前后 tile 在 `test_l0_tile_chooser.py::TestL0TilingRooflineMigration` 中固定下来。
 

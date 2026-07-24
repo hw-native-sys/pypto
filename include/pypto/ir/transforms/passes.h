@@ -468,6 +468,15 @@ Pass LegalizeTileCast();
  * opt-in.  Chained Mat-scratch producers remain output-stationary to avoid the
  * allocator offset-packing limitation tracked by issue #1908.
  *
+ * The pass also recognizes a user-authored, static stage-2 pipeline containing
+ * exactly one already-L0 ``tile.matmul`` whose Acc result is directly drained
+ * by ``tile.store`` or ``tile.assemble``, with one loop-invariant operand and
+ * one operand produced in the loop body.  When two result tiles fit in L0C, it
+ * enables the existing two-accumulator drain-overlap schedule automatically
+ * under either memory planner.  Explicit loop policies, nested control flow,
+ * multiple cube matmuls, indirect uses, and accumulators larger than L0C/2 stay
+ * unchanged.
+ *
  * Eligible calls require static 2D operands with B in Mat and A in Mat or Vec.
  * When the chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is
  * needed, although a chained result may still be remapped to Mat by the
