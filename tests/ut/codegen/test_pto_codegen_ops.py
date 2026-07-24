@@ -2994,8 +2994,9 @@ class TestCacheInvalidCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    def test_cacheinvalid_scalar_write_emits_ptr(self):
-        """All-ones shapes (scalar write) lower to pto.addptr + a ptr-form cmo."""
+    def test_cacheinvalid_scalar_write_emits_scalar_view(self):
+        """All-ones shapes (scalar write) lower to pto.addptr + a 1-element
+        ``pto.make_tensor_view`` fed into ``pto.cmo.cacheinvalid``."""
 
         @pl.program
         class Prog:
@@ -3012,10 +3013,33 @@ class TestCacheInvalidCodegen:
 
         mlir = self._generate_mlir(Prog)
         assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
+        # Scalar cacheinvalid wraps the pointer in a 1-element tensor_view
+        # with shape = [%c1_index], strides = [%c1_index] — not a raw
+        # pointer operand (PTOAS 0.50+ requirement).
+        assert "pto.make_tensor_view" in mlir, f"pto.make_tensor_view not found in MLIR:\n{mlir}"
         cmo_line = _cmo_cacheinvalid_line(mlir)
-        # The ptr form emits a bare pointer operand, no partition_tensor_view annotation.
         assert "single_cache_line" in cmo_line
-        assert "partition_tensor_view" not in cmo_line, f"unexpected partition view in ptr form: {cmo_line}"
+        assert "partition_tensor_view" not in cmo_line, (
+            f"unexpected partition view in scalar form: {cmo_line}"
+        )
+        # PTOAS 0.50+ requires a typed view operand, not a bare pointer.
+        assert ": !pto.tensor_view<1x" in cmo_line, (
+            f"cacheinvalid line missing typed view operand, got: {cmo_line}"
+        )
+        # PTOAS 0.50+ requires SSA index constants for shape/strides — raw
+        # integer literals like ``[1]`` are rejected by the parser.
+        # The scalar view has shape/strides = [%c1_index] (1-D, 1 element);
+        # parameter views may have larger rank — match the 1-D scalar form.
+        scalar_tv_lines = [
+            line.strip()
+            for line in mlir.splitlines()
+            if "pto.make_tensor_view" in line and "shape = [%c1_index]" in line
+        ]
+        assert scalar_tv_lines, "make_tensor_view with scalar shape = [%c1_index] not found in MLIR:\n" + mlir
+        scalar_tv_line = scalar_tv_lines[0]
+        assert "strides = [%c1_index]" in scalar_tv_line, (
+            f"make_tensor_view missing SSA strides constant, got: {scalar_tv_line}"
+        )
 
     def test_cacheinvalid_region_emits_partition_view(self):
         """A multi-element region (tile store) lowers to a partition_tensor_view cmo."""
