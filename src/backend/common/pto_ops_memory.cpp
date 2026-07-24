@@ -858,7 +858,11 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
       const std::string write_ptr = codegen.NewTemp();
       codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " +
                    ptr_type);
-      codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line : " + ptr_type);
+      const std::string scalar_view = codegen.NewTemp();
+      const std::string view_type = "!pto.tensor_view<1x" + dtype_str + ">";
+      codegen.Emit(scalar_view + " = pto.make_tensor_view " + write_ptr +
+                   ", shape = [1], strides = [1] : " + view_type);
+      codegen.Emit("pto.cmo.cacheinvalid " + scalar_view + " single_cache_line : " + view_type);
     } else {
       const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
       const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
