@@ -184,6 +184,66 @@ def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleTyp
     assert (tmp_path / "out" / "separate_b" / "pypto_other.dsa.solution.json").is_file()
 
 
+def test_prepare_address_control_preserves_exact_overlap_geometry(ablation: ModuleType, tmp_path: Path):
+    problem = _problem(with_cost=True)
+    problem["problem"]["pools"][0]["capacity"] = 512
+    problem["problem"]["buffers"][2]["live_intervals"] = [{"lower": 4, "upper": 6}]
+    problem_path = tmp_path / "problem.json"
+    solution_path = tmp_path / "solution.json"
+    spec_path = tmp_path / "spec.json"
+    _write(problem_path, problem)
+    _write(solution_path, _solution(ablation, problem))
+    move = [{"buffer": 1, "from_offset": 0, "name": "b", "to_offset": 64}]
+    _write(
+        spec_path,
+        {
+            "cases": [
+                {
+                    "instance": "sample",
+                    "name": "case",
+                    "variants": [
+                        {
+                            "base": "base",
+                            "hypothesis": "primary",
+                            "moves": move,
+                            "name": "primary",
+                        },
+                        {
+                            "base": "base",
+                            "control_for": "primary",
+                            "hypothesis": "translated control",
+                            "moves": move,
+                            "name": "control",
+                            "role": "address_control",
+                            "translate_overlap_components": {
+                                "delta": 192,
+                                "seed_buffers": [1],
+                            },
+                        },
+                    ],
+                }
+            ],
+            "experiment": "test",
+            "schema_version": 1,
+        },
+    )
+
+    summary = ablation.prepare(
+        problem_path,
+        spec_path,
+        {"base": solution_path},
+        {"base": problem_path},
+        tmp_path / "out",
+        case_name="case",
+    )
+
+    control = summary["variants"][1]
+    assert control["control_geometry_matches"] is True
+    assert control["control_for"] == "primary"
+    assert control["translated_buffers"] == [1]
+    assert control["translation_delta"] == 192
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

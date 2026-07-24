@@ -86,6 +86,30 @@ def _placement_map(solution: dict[str, Any]) -> dict[int, dict[str, int]]:
     return placements
 
 
+def _overlap_component_buffers(
+    problem: dict[str, Any],
+    solution: dict[str, Any],
+    seeds: set[int],
+) -> set[int]:
+    placements = _placement_map(solution)
+    unknown = seeds - placements.keys()
+    if unknown:
+        raise ValueError(f"address control references unknown seed buffers {sorted(unknown)}")
+    adjacency: dict[int, set[int]] = {buffer_id: set() for buffer_id in placements}
+    for first, second in _overlap_geometry(problem, solution):
+        adjacency[first].add(second)
+        adjacency[second].add(first)
+    selected: set[int] = set()
+    pending = list(seeds)
+    while pending:
+        buffer_id = pending.pop()
+        if buffer_id in selected:
+            continue
+        selected.add(buffer_id)
+        pending.extend(adjacency[buffer_id] - selected)
+    return selected
+
+
 def _validate_solution(problem: dict[str, Any], solution: dict[str, Any]) -> None:
     body = problem["problem"]
     constraints = body["constraints"]
@@ -272,11 +296,26 @@ def _apply_variant(
             )
         placements[buffer_id]["offset"] = move["to_offset"]
 
+    translated_buffers: list[int] = []
+    control = variant.get("translate_overlap_components")
+    if control is not None:
+        delta = control["delta"]
+        if not isinstance(delta, int) or delta == 0:
+            raise ValueError(f"variant {variant['name']!r} requires a nonzero integer translation")
+        seeds = set(control["seed_buffers"])
+        translated_buffers = sorted(_overlap_component_buffers(problem, result, seeds))
+        for buffer_id in translated_buffers:
+            placements[buffer_id]["offset"] += delta
+
     result["metadata"] = {
         "base": variant["base"],
         "experiment": "expert_dsa_rp_ablation_v1",
         "variant": variant["name"],
     }
+    if "control_for" in variant:
+        result["metadata"]["control_for"] = variant["control_for"]
+    if "role" in variant:
+        result["metadata"]["role"] = variant["role"]
     _validate_envelope(problem, result)
     before = _overlap_geometry(problem, base_solution)
     after = _overlap_geometry(problem, result)
@@ -305,6 +344,13 @@ def _apply_variant(
             for pair in sorted(after.keys() - before.keys())
         ],
     }
+    if translated_buffers:
+        report["translated_buffers"] = translated_buffers
+        report["translation_delta"] = control["delta"]
+    if "control_for" in variant:
+        report["control_for"] = variant["control_for"]
+    if "role" in variant:
+        report["role"] = variant["role"]
     expected = variant.get("expected", {})
     actual = {
         **report["statistics"],
@@ -373,6 +419,8 @@ def prepare(
     )
     output_root.mkdir(parents=True, exist_ok=True)
     reports: list[dict[str, Any]] = []
+    variant_reports: dict[str, dict[str, Any]] = {}
+    variant_solutions: dict[str, dict[str, Any]] = {}
     endpoint_directories: dict[str, Path] = {}
     for name, solution in sorted(bases.items()):
         endpoint = output_root / name
@@ -384,6 +432,24 @@ def prepare(
         if variant["base"] not in bases:
             raise ValueError(f"variant {variant['name']!r} requires missing base {variant['base']!r}")
         solution, report = _apply_variant(problem, bases[variant["base"]], variant)
+        control_for = variant.get("control_for")
+        if control_for is not None:
+            if control_for not in variant_solutions:
+                raise ValueError(
+                    f"address control {variant['name']!r} references unknown or later variant {control_for!r}"
+                )
+            if variant_reports[control_for]["base"] != report["base"]:
+                raise ValueError(
+                    f"address control {variant['name']!r} and {control_for!r} use different bases"
+                )
+            if _overlap_geometry(problem, solution) != _overlap_geometry(
+                problem, variant_solutions[control_for]
+            ):
+                raise ValueError(
+                    f"address control {variant['name']!r} does not preserve the exact overlap geometry "
+                    f"of {control_for!r}"
+                )
+            report["control_geometry_matches"] = True
         endpoint = output_root / variant["name"]
         endpoint_directories[variant["name"]] = endpoint
         output = endpoint / f"pypto_{problem['instance']}.dsa.solution.json"
@@ -391,6 +457,8 @@ def prepare(
         output.write_text(json.dumps(solution, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         report["solution"] = str(output.relative_to(output_root))
         reports.append(report)
+        variant_reports[variant["name"]] = report
+        variant_solutions[variant["name"]] = solution
 
     for endpoint in endpoint_directories.values():
         for name, sibling in siblings.items():
