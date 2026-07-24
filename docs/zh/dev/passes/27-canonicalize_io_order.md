@@ -53,6 +53,8 @@ result = passes.canonicalize_io_order()(program)
 
 每一步在 `ready`（所有前驱已发射）的语句中，发射 `(tier, stage, sub, original_index)` 最小者 —— `tier` 为标量 compute=0、load=1、tile-compute/store=2；`stage` 取语句的 `pipeline_membership`（这样 tile 定义与消费它的 store 共享同一 stage）；`sub` 为 compute=0、store=1。于是 load（tier 1）聚集在所有 compute/store 之前，而 compute/store 这一档里每个 stage 的 compute 先于其 store、再到下一个 stage。非流水线区域无 membership（`stage` 为空），tier/sub 排序退化为原先的 标量 → load → compute → store 阶梯。
 
+对于带 `pipeline_double_buffer_c=true` 的循环，compute/store key 改为按 `stage/2` 分组，并在每组内让 compute 先于 drain。于是深度 4 的源流水线发射 `M0 M1 S0 S1 M2 M3 S2 S3`：操作数 membership 仍保留深度 4，而 cube 产生的 Acc membership 在调度后对 2 取模，使 `MemoryReuse` 恰好保留两块 L0C。
+
 示例 —— 输入 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]`，每个克隆的 load 读其 scalar、每个 compute 读其 load、每个 store 读其 scalar 与 compute：
 
 ```text

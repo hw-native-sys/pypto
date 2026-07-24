@@ -66,9 +66,12 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// ``false``): when ``true``, ``CanonicalizeIOOrder`` floats the Acc-draining ops
 /// into a tier *above all compute* in the loop body, so every sibling-iteration
 /// drain sorts after every matmul — ``matmul_i, matmul_{i+1}, drain_i, drain_{i+1}``
-/// instead of ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``. The drain op is
-/// ``tile.store`` on the direct-store (Acc→GM) path and ``tile.assemble`` on the
-/// Mat-scratch (Acc→Mat) path.
+/// instead of ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``. For a source
+/// pipeline deeper than two, this ordering repeats in depth-two chunks
+/// (``MMSS MMSS ...``), so operand prefetch depth remains user-selected while
+/// L0C membership still rotates over two stage residues in each fully
+/// replicated group. The drain op is ``tile.store`` on the direct-store
+/// (Acc→GM) path and ``tile.assemble`` on the Mat-scratch (Acc→Mat) path.
 ///
 /// This is a *stronger* float than ``pipeline_overlap_stores`` (which only orders
 /// store-after-compute *within* a stage — the compute/store tier is shared and
@@ -81,8 +84,9 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
 /// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
 /// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
-/// recognizes a user-authored stage-2 pipeline containing one directly-drained
-/// L0 matmul whose accumulator fits in L0C/2. Consumed (stripped) by
+/// recognizes a user-authored pipeline containing one canonical directly-drained
+/// L0 matmul and whose conservative whole-function Acc footprint still fits
+/// after adding the extra slot. Consumed (stripped) by
 /// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
 /// ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";

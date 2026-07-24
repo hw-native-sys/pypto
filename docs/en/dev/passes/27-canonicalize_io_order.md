@@ -53,6 +53,8 @@ Cross-core `tpush`/`tpop` carry no special category — they fall through to `Ti
 
 At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(tier, stage, sub, original_index)` — where `tier` is 0 for scalar compute, 1 for load, 2 for tile-compute/store; `stage` is the statement's `pipeline_membership` (so a tile def, and the store that consumes it, share a stage); and `sub` is 0 for compute, 1 for store. Loads (tier 1) thus cluster before all compute/store, and within the compute/store tier each stage's compute precedes its store before the next stage begins. Non-pipeline regions carry no membership (`stage` empty), so the tier/sub ordering reduces to the prior scalar → load → compute → store ladder.
 
+For a loop carrying `pipeline_double_buffer_c=true`, the compute/store key instead groups stages by `stage/2` and orders compute before drain inside each group. A depth-4 source pipeline therefore emits `M0 M1 S0 S1 M2 M3 S2 S3`: operand memberships retain depth 4, while cube-produced Acc memberships are rotated modulo 2 after scheduling so `MemoryReuse` preserves exactly two L0C buffers.
+
 Worked example — input `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]` with each clone's load reading its scalar, each compute reading its load, each store reading both its scalar and compute:
 
 ```text

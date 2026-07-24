@@ -13,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <tuple>
@@ -40,6 +41,28 @@
 namespace pypto {
 namespace ir {
 namespace {
+
+std::optional<int32_t> InnermostPipelineStage(const std::string& packed) {
+  auto memberships = ParsePipelineMembership(packed);
+  if (memberships.empty()) return std::nullopt;
+  // LowerPipelineLoops lowers nested pipelines inside-out.  Their membership
+  // is therefore appended first; it is the stage controlled by the nearest
+  // enclosing pipeline currently being canonicalized.
+  return memberships.front().second;
+}
+
+std::string RotateInnermostPipelineStage(const std::string& packed, int32_t depth) {
+  auto memberships = ParsePipelineMembership(packed);
+  if (memberships.empty() || depth <= 0) return packed;
+  auto& stage = memberships.front().second;
+  stage = ((stage % depth) + depth) % depth;
+  std::string result;
+  for (const auto& [group, member_stage] : memberships) {
+    if (!result.empty()) result += ";";
+    result += std::to_string(group) + ":" + std::to_string(member_stage);
+  }
+  return result;
+}
 
 /// IO category used for priority during the topological sort. Lower is emitted first.
 ///
@@ -269,9 +292,10 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   bool overlap_stores_ = true;
 
   /// dbC=2 policy of the nearest enclosing `ForKind::Pipeline` loop
-  /// (saved/restored across nested pipelines). True ⇒ lift stores to a tier above
-  /// all compute so both iterations' L0C accumulators stay co-live (the
-  /// double-buffered-L0C ping-pong). See `kPipelineDoubleBufferCAttr`.
+  /// (saved/restored across nested pipelines). True ⇒ order compute/drain in
+  /// depth-two chunks so adjacent iterations' L0C accumulators stay co-live
+  /// without multiplying L0C usage by a larger operand pipeline depth. See
+  /// `kPipelineDoubleBufferCAttr`.
   bool double_buffer_c_ = false;
 
   /// Stable, priority-aware topological sort.
@@ -362,9 +386,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
       return {};
     };
 
-    // Ready-set as a min-heap keyed by (tier, stage, sub, original_index):
-    //   tier 0 ScalarCompute, tier 1 Load, tier 2 TileCompute/Store, tier 3 Store
-    //   (dbC=2 only). Scalars (address arith) lift to the top so sibling-clone
+    // Ready-set as a min-heap. Scalars (address arith) lift to the top so sibling-clone
     // loads become ready together; loads then cluster (prefetch / double-
     // buffering). Within the compute/store tier we order by *stage* first, then
     // compute (sub 0) before store (sub 1) — so a replicated ``pl.pipeline`` body
@@ -374,26 +396,40 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     // stage, cutting on-chip pressure and the cross-iteration load↔store
     // coupling. The original index is the final tiebreaker (stable FIFO).
     //
-    // Exception — dbC=2 (double_buffer_c_): stores lift to tier 3, *above* all
-    // compute, so both iterations' matmuls precede both stores
-    // (``compute_s0 compute_s1 store_s0 store_s1``). This keeps the two L0C
-    // accumulators co-live for the double-buffered-L0C ping-pong (the chooser
-    // budgeted them at L0C/2 and the ptoas planner places them on distinct
-    // offsets). Tier-3 stores carry no stage — they order by index among stores.
-    using HeapKey = std::tuple<int, std::string, int, size_t>;
+    // Exception — dbC=2 (double_buffer_c_): stage F is partitioned into
+    // depth-two chunks and the key becomes (tier, stage/2, compute-before-store,
+    // stage, index). Thus F=4 emits
+    // ``compute_s0 compute_s1 store_s0 store_s1 compute_s2 compute_s3
+    // store_s2 store_s3``. L0A/L0B may still use the requested depth F, while
+    // L0C rotates over two slots.
+    // Keep the pre-dbC ordering byte-for-byte for ordinary pipelines:
+    // ``(tier, full packed membership, sub, index)``. Only a dbC loop switches
+    // to the numeric ``(tier, group=stage/2, sub, stage, index)`` order. The
+    // extra tuple fields are constants in the inactive mode.
+    using HeapKey = std::tuple<int, std::string, int32_t, int, int32_t, size_t>;
     std::priority_queue<HeapKey, std::vector<HeapKey>, std::greater<>> ready;
     std::vector<int> tier(sort_count);
     std::vector<int> sub(sort_count);
-    std::vector<std::string> stage(sort_count);
+    std::vector<std::string> packed_stage(sort_count);
+    std::vector<int32_t> group(sort_count, -1);
+    std::vector<int32_t> stage(sort_count, -1);
     for (size_t i = 0; i < sort_count; ++i) {
-      tier[i] = (cats[i] == IOCategory::ScalarCompute)               ? 0
-                : (cats[i] == IOCategory::Load)                      ? 1
-                : (cats[i] == IOCategory::Store && double_buffer_c_) ? 3
-                                                                     : 2;
+      tier[i] = (cats[i] == IOCategory::ScalarCompute) ? 0 : (cats[i] == IOCategory::Load) ? 1 : 2;
       sub[i] = (cats[i] == IOCategory::Store) ? 1 : 0;
-      if (tier[i] == 2) stage[i] = stage_key(stmts[i]);
+      if (tier[i] == 2) {
+        packed_stage[i] = stage_key(stmts[i]);
+        if (double_buffer_c_) {
+          if (auto value = InnermostPipelineStage(packed_stage[i])) {
+            stage[i] = *value;
+            group[i] = *value / 2;
+          }
+        }
+      }
     }
-    auto key_for = [&](size_t i) -> HeapKey { return {tier[i], stage[i], sub[i], i}; };
+    auto key_for = [&](size_t i) -> HeapKey {
+      if (double_buffer_c_) return {tier[i], std::string(), group[i], sub[i], stage[i], i};
+      return {tier[i], packed_stage[i], 0, sub[i], 0, i};
+    };
     for (size_t i = 0; i < sort_count; ++i) {
       if (remaining[i] == 0) ready.push(key_for(i));
     }
@@ -401,7 +437,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     std::vector<StmtPtr> out;
     out.reserve(N);
     while (!ready.empty()) {
-      size_t i = std::get<3>(ready.top());
+      size_t i = std::get<5>(ready.top());
       ready.pop();
       out.push_back(stmts[i]);
       for (size_t j : successors[i]) {
@@ -412,6 +448,30 @@ class CanonicalizeIOOrderMutator : public IRMutator {
         << "CanonicalizeIOOrder: dependency graph appears cyclic — should be impossible "
            "for an SSA region under the InOut-use discipline";
     if (has_terminator) out.push_back(stmts.back());
+
+    // Scheduling needed the full source stage, but the physical dbC policy is
+    // always depth two. Rewrite only cube-produced Acc memberships to stage%2
+    // before MemoryReuse consumes them. Operand memberships retain the user's
+    // full pipeline depth.
+    if (double_buffer_c_) {
+      for (StmtPtr& stmt : out) {
+        auto assign = As<AssignStmt>(stmt);
+        auto call = assign ? As<Call>(assign->value_) : nullptr;
+        auto tile = assign ? As<TileType>(assign->var_->GetType()) : nullptr;
+        if (!call || !call->op_ || !tile || tile->GetMemorySpace() != MemorySpace::Acc ||
+            call->op_->name_.rfind("tile.matmul", 0) != 0) {
+          continue;
+        }
+        const std::string packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+        const std::string rotated = RotateInnermostPipelineStage(packed, /*depth=*/2);
+        if (rotated == packed) continue;
+        auto attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+        attrs.emplace_back(kPipelineMembershipAttr, rotated);
+        auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                               call->GetType(), call->span_);
+        stmt = std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+      }
+    }
 
     // No-op detection.
     bool changed = false;

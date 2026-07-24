@@ -131,6 +131,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
@@ -780,9 +781,11 @@ class SiblingUseCounter : public IRVisitor {
  public:
   std::unordered_map<const Var*, int> counts;               ///< all reads
   std::unordered_map<const Var*, int> matmul_operand_uses;  ///< reads at a matmul-operand position
+  std::unordered_map<const Var*, VarPtr> vars;              ///< owning pointers for type inspection
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
+    vars.emplace(op.get(), op);
     ++counts[op.get()];
     if (in_matmul_operand_) ++matmul_operand_uses[op.get()];
   }
@@ -1337,19 +1340,102 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   return std::make_pair(std::move(stmts), scratch);
 }
 
-/// True for cube MAD-family calls that can produce an L0C accumulator. The
-/// pipeline dbC recognizer below accepts only a plain ``tile.matmul`` but
-/// rejects a body containing any second MAD-family call: two independent
-/// accumulators need a joint capacity/schedule decision rather than two local
-/// half-L0C decisions.
-bool IsCubeMatmulCall(const CallPtr& call) {
-  return call &&
-         (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.matmul_bias") ||
-          IsOp(call, "tile.batch_matmul") || IsOp(call, "tile.batch_matmul_acc"));
+/// Static physical footprint of a tile, rounded exactly as the active memory
+/// allocator rounds one buffer in @p space.  Unknown/dynamic shapes and
+/// arithmetic overflow return nullopt: an automatic capacity decision must
+/// never guess low.
+std::optional<uint64_t> StaticAlignedTileBytes(const TileTypePtr& tile, MemorySpace space,
+                                               const MemoryAllocatorPolicy& policy) {
+  if (!tile || tile->GetMemorySpace() != space) return std::nullopt;
+  const uint64_t elem_bytes = DTypeBytes(tile->dtype_);
+  if (elem_bytes == 0) return std::nullopt;
+  uint64_t bytes = elem_bytes;
+  for (const auto& dim : tile->shape_) {
+    auto value = As<ConstInt>(dim);
+    if (!value || value->value_ <= 0) return std::nullopt;
+    const uint64_t extent = static_cast<uint64_t>(value->value_);
+    if (bytes > std::numeric_limits<uint64_t>::max() / extent) return std::nullopt;
+    bytes *= extent;
+  }
+  const uint64_t aligned = policy.AlignAddress(bytes, space);
+  if (aligned < bytes) return std::nullopt;  // alignment arithmetic overflow
+  return aligned;
 }
 
-/// Recognize an already-L0, directly-drained matmul in a stage-2 pipeline and
-/// opt that loop into the existing two-accumulator drain-overlap schedule.
+/// Whole-function conservative L0C inventory.  Every distinct Acc SSA value is
+/// counted once even when liveness would let MemoryReuse coalesce it.  This is
+/// intentionally an upper bound: the automatic dbC plan below may safely add
+/// one extra slot for every eligible loop without depending on a second,
+/// subtly different liveness implementation inside AutoTile.
+class AccFootprintCollector : public IRVisitor {
+ public:
+  explicit AccFootprintCollector(const MemoryAllocatorPolicy& policy) : policy_(policy) {}
+
+  bool valid = true;
+  uint64_t total_bytes = 0;
+  std::unordered_map<const Var*, uint64_t> bytes_by_var;
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override { Record(op); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    Record(op->var_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    for (const auto& iter_arg : op->iter_args_) Record(iter_arg);
+    for (const auto& return_var : op->return_vars_) Record(return_var);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void Record(const VarPtr& var) {
+    if (!var || bytes_by_var.count(var.get()) != 0) return;
+    auto tile = As<TileType>(var->GetType());
+    if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return;
+    auto bytes = StaticAlignedTileBytes(tile, MemorySpace::Acc, policy_);
+    if (!bytes || total_bytes > std::numeric_limits<uint64_t>::max() - *bytes) {
+      valid = false;
+      return;
+    }
+    bytes_by_var.emplace(var.get(), *bytes);
+    total_bytes += *bytes;
+  }
+
+  const MemoryAllocatorPolicy& policy_;
+};
+
+/// True for any call whose result occupies L0C. This future-proofs the
+/// recognizer against new MAD-family operations: a candidate body may have one
+/// Acc producer in total, and that producer must be the plain matmul selected
+/// below.
+bool ProducesAcc(const CallPtr& call) {
+  auto tile = call ? As<TileType>(call->GetType()) : nullptr;
+  return tile && tile->GetMemorySpace() == MemorySpace::Acc;
+}
+
+/// A per-iteration Mat->L0 transfer that the pipeline already replicates.  This
+/// proves the "moving" side of the stationary-panel pattern; an arbitrary local
+/// assignment is not sufficient evidence that the operand is a prefetchable
+/// pipeline input.
+bool IsMovingMatmulOperandProducer(const CallPtr& call, MemorySpace target_space) {
+  if (!call || call->args_.empty()) return false;
+  auto out = As<TileType>(call->GetType());
+  auto source = As<TileType>(call->args_[0]->GetType());
+  if (!out || out->GetMemorySpace() != target_space || !source ||
+      source->GetMemorySpace() != MemorySpace::Mat) {
+    return false;
+  }
+  return IsOp(call, "tile.extract") || IsOp(call, "tile.move");
+}
+
+struct PipelineAccumulatorCandidate {
+  uint64_t aligned_acc_bytes = 0;
+};
+
+/// Recognize an already-L0, directly-drained matmul in a software pipeline and
+/// return the extra accumulator slot it would need.
 ///
 /// This is the user-authored-pipeline counterpart of the M/N tiler's dbC mode:
 ///
@@ -1358,30 +1444,35 @@ bool IsCubeMatmulCall(const CallPtr& call) {
 ///     c_l0 = tile.matmul(a_l0, b_l0)  # Acc
 ///     out  = tile.store(c_l0, ..., out)
 ///
-/// Success means that two adjacent iterations' accumulator tiles fit in L0C.
-/// ``LowerPipelineLoops`` then gives the two Acc clones distinct pipeline
-/// memberships and ``CanonicalizeIOOrder`` emits ``matmul, matmul, drain,
-/// drain``. L0A/L0B policy is unchanged: the enclosing pipeline continues to
-/// double-buffer only the operands it already moves per iteration, while a
-/// loop-invariant operand remains shared.
+/// Success proves the local schedule and dataflow.  Whole-function L0C capacity
+/// is checked separately by ``BuildPipelineDbCPlan`` before any loop is marked.
+/// ``LowerPipelineLoops`` gives adjacent Acc clones two rotating memberships,
+/// and ``CanonicalizeIOOrder`` emits depth-two chunks
+/// ``matmul, matmul, drain, drain``.  A user-selected pipeline depth greater
+/// than two still controls operand prefetch depth; L0C remains a two-slot
+/// ping-pong rather than growing to one accumulator per stage.
 ///
 /// Keep the recognition deliberately conservative:
-///   * static stage-2 loop with at least two iterations;
+///   * static pipeline with stage >= 2 and a trip count divisible by the stage
+///     count (no separately lowered tail group);
 ///   * no nested control flow in the candidate body;
 ///   * exactly one cube MAD, and it is plain ``tile.matmul`` over Left/Right;
-///   * exactly one matmul operand is loop-invariant and one is defined in the
-///     loop body;
-///   * static 2D Acc result occupying at most half of L0C;
-///   * exactly one use of that result, by a direct ``tile.store`` or
-///     ``tile.assemble`` drain in the same body.
+///   * exactly one operand is a recognized per-iteration Mat->L0 transfer; the
+///     stationary operand is defined outside the loop and is not an IterArg;
+///   * no other Acc definition/read or store-like operation in the body;
+///   * one canonical loop-carried ``tile.store`` or ``tile.assemble`` chain:
+///     the drain targets IterArg i and its result is yielded at index i.
 ///
 /// The direct-body scans are disjoint across nested loops, so this remains
 /// linear in program size.
-bool CanDoubleBufferPipelineAccumulator(const ForStmtPtr& loop) {
+std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(const ForStmtPtr& loop,
+                                                                       const MemoryAllocatorPolicy& policy) {
+  const int stages = loop ? loop->GetAttr<int>(kPipelineStagesAttr, 0) : 0;
+  const int64_t trip_count = loop ? transform_utils::EvalConstTripCount(loop) : -1;
   if (!loop || loop->kind_ != ForKind::Pipeline || loop->HasAttr(kPipelineOverlapStoresAttr) ||
-      loop->HasAttr(kPipelineDoubleBufferCAttr) || loop->GetAttr<int>(kPipelineStagesAttr, 0) != 2 ||
-      transform_utils::EvalConstTripCount(loop) < 2) {
-    return false;
+      loop->HasAttr(kPipelineDoubleBufferCAttr) || stages < 2 || trip_count < stages ||
+      trip_count % stages != 0) {
+    return std::nullopt;
   }
 
   std::vector<StmtPtr> body_stmts;
@@ -1394,25 +1485,27 @@ bool CanDoubleBufferPipelineAccumulator(const ForStmtPtr& loop) {
   AssignStmtPtr candidate;
   CallPtr candidate_call;
   std::unordered_set<const Var*> direct_defs;
-  int cube_matmuls = 0;
+  std::unordered_map<const Var*, CallPtr> direct_call_defs;
+  int acc_producers = 0;
   for (const auto& stmt : body_stmts) {
     // A nested region could contain another use or cube operation that needs a
     // joint schedule. Defer instead of trying to summarize it locally.
     if (As<ForStmt>(stmt) || As<IfStmt>(stmt) || As<WhileStmt>(stmt) || As<ScopeStmt>(stmt)) {
-      return false;
+      return std::nullopt;
     }
     auto assign = As<AssignStmt>(stmt);
     if (assign) direct_defs.insert(assign->var_.get());
-    auto call = assign ? As<Call>(assign->value_) : nullptr;
-    if (!IsCubeMatmulCall(call)) continue;
-    ++cube_matmuls;
-    if (IsOp(call, "tile.matmul")) {
+    auto call = transform_utils::GetCallFromStmt(stmt);
+    if (assign && call) direct_call_defs.emplace(assign->var_.get(), call);
+    if (!ProducesAcc(call)) continue;
+    ++acc_producers;
+    if (assign && IsOp(call, "tile.matmul")) {
       candidate = assign;
       candidate_call = call;
     }
   }
-  if (cube_matmuls != 1 || !candidate || !candidate_call || candidate_call->args_.size() != 2) {
-    return false;
+  if (acc_producers != 1 || !candidate || !candidate_call || candidate_call->args_.size() != 2) {
+    return std::nullopt;
   }
 
   auto lhs = AsVarLike(candidate_call->args_[0]);
@@ -1425,35 +1518,34 @@ bool CanDoubleBufferPipelineAccumulator(const ForStmtPtr& loop) {
   int64_t N = 0;
   if (!IsStatic2DInSpaces(lhs_ty, {MemorySpace::Left}, M, K_lhs) ||
       !IsStatic2DInSpaces(rhs_ty, {MemorySpace::Right}, K_rhs, N) || K_lhs != K_rhs) {
-    return false;
+    return std::nullopt;
   }
-  // Match the one-stationary/one-moving construction from #2131. The
-  // loop-invariant operand is shared, while the operand defined in the body is
-  // already ping-ponged by the stage-2 pipeline. If both or neither move, the
-  // load schedule needs a broader profitability/capacity decision.
+
+  std::unordered_set<const Var*> iter_args;
+  for (const auto& iter_arg : loop->iter_args_) iter_args.insert(iter_arg.get());
+  // Match the stationary-panel construction from #2131.  A direct definition
+  // proves movement only when it is the result of a Mat->Left/Right transfer;
+  // the other operand must be a true outside-loop value, not loop-carried state.
   const bool lhs_moves = direct_defs.count(lhs.get()) != 0;
   const bool rhs_moves = direct_defs.count(rhs.get()) != 0;
-  if (lhs_moves == rhs_moves) return false;
+  if (lhs_moves == rhs_moves) return std::nullopt;
+  const VarPtr& moving = lhs_moves ? lhs : rhs;
+  const VarPtr& stationary = lhs_moves ? rhs : lhs;
+  const MemorySpace moving_space = lhs_moves ? MemorySpace::Left : MemorySpace::Right;
+  auto producer = direct_call_defs.find(moving.get());
+  if (producer == direct_call_defs.end() || !IsMovingMatmulOperandProducer(producer->second, moving_space) ||
+      direct_defs.count(stationary.get()) != 0 || iter_args.count(stationary.get()) != 0) {
+    return std::nullopt;
+  }
 
   auto acc_ty = As<TileType>(candidate->var_->GetType());
   int64_t acc_m = 0;
   int64_t acc_n = 0;
   if (!IsStatic2DInSpaces(acc_ty, {MemorySpace::Acc}, acc_m, acc_n) || acc_m != M || acc_n != N) {
-    return false;
+    return std::nullopt;
   }
-  const uint64_t elem_bytes = DTypeBytes(acc_ty->dtype_);
-  if (elem_bytes == 0 || acc_m <= 0 || acc_n <= 0) return false;
-  const uint64_t um = static_cast<uint64_t>(acc_m);
-  const uint64_t un = static_cast<uint64_t>(acc_n);
-  if (um > std::numeric_limits<uint64_t>::max() / un ||
-      um * un > std::numeric_limits<uint64_t>::max() / elem_bytes) {
-    return false;
-  }
-  const uint64_t acc_bytes = um * un * elem_bytes;
-  const auto* ctx = PassContext::Current();
-  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
-  const uint64_t l0c_bytes = handler ? handler->GetL0cCapacityBytes() : 0;
-  if (l0c_bytes == 0 || acc_bytes > l0c_bytes / 2) return false;
+  auto acc_bytes = StaticAlignedTileBytes(acc_ty, MemorySpace::Acc, policy);
+  if (!acc_bytes) return std::nullopt;
 
   // Count all uses in the direct body, excluding assignment LHS definitions.
   // Compound statements were rejected above, so this scan cannot descend into
@@ -1461,35 +1553,157 @@ bool CanDoubleBufferPipelineAccumulator(const ForStmtPtr& loop) {
   SiblingUseCounter uses;
   for (const auto& stmt : body_stmts) uses.VisitStmt(stmt);
   auto use_it = uses.counts.find(candidate->var_.get());
-  if (use_it == uses.counts.end() || use_it->second != 1) return false;
-
-  int direct_drains = 0;
+  if (use_it == uses.counts.end() || use_it->second != 1) return std::nullopt;
+  // Any other Acc read is loop-carried/external L0C state whose lifetime and
+  // aliasing would be changed by the loop-wide drain reorder.
+  for (const auto& [raw, var] : uses.vars) {
+    if (raw == candidate->var_.get()) continue;
+    auto tile = As<TileType>(var->GetType());
+    if (tile && tile->GetMemorySpace() == MemorySpace::Acc) return std::nullopt;
+  }
+  // Likewise reject every other Acc definition, including non-MAD data
+  // movement such as tile.extract(..., target_memory=Acc).
   for (const auto& stmt : body_stmts) {
     auto assign = As<AssignStmt>(stmt);
-    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!assign || assign.get() == candidate.get()) continue;
+    auto tile = As<TileType>(assign->var_->GetType());
+    if (tile && tile->GetMemorySpace() == MemorySpace::Acc) return std::nullopt;
+  }
+
+  AssignStmtPtr drain_assign;
+  CallPtr drain_call;
+  int store_like_calls = 0;
+  for (const auto& stmt : body_stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    auto call = transform_utils::GetCallFromStmt(stmt);
     if (!call) continue;
-    if (IsOp(call, "tile.store") && call->args_.size() == 3) {
-      auto source = AsVarLike(call->args_[0]);
-      if (source && source.get() == candidate->var_.get()) ++direct_drains;
-    } else if (IsOp(call, "tile.assemble") && call->args_.size() == 3) {
-      auto source = AsVarLike(call->args_[1]);
-      if (source && source.get() == candidate->var_.get()) ++direct_drains;
+    const bool is_store = IsOp(call, "tile.store");
+    const bool is_assemble = IsOp(call, "tile.assemble");
+    if (!is_store && !is_assemble && !IsOp(call, "tile.write")) continue;
+    ++store_like_calls;
+    if (!assign || call->args_.size() != 3) return std::nullopt;
+    const size_t source_index = is_assemble ? 1 : 0;
+    auto source = AsVarLike(call->args_[source_index]);
+    if (!source || source.get() != candidate->var_.get()) return std::nullopt;
+    if (drain_assign) return std::nullopt;
+    drain_assign = assign;
+    drain_call = call;
+  }
+  if (store_like_calls != 1 || !drain_assign || !drain_call) return std::nullopt;
+
+  // Canonical loop-carried drain: target IterArg i -> drain result -> yield i.
+  auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+  if (!yield || yield->value_.size() != loop->iter_args_.size()) return std::nullopt;
+  std::optional<size_t> yield_index;
+  for (size_t i = 0; i < yield->value_.size(); ++i) {
+    auto value = AsVarLike(yield->value_[i]);
+    if (value && value.get() == drain_assign->var_.get()) {
+      if (yield_index) return std::nullopt;
+      yield_index = i;
     }
   }
-  return direct_drains == 1;
+  if (!yield_index || *yield_index >= loop->iter_args_.size()) return std::nullopt;
+  const size_t target_index = IsOp(drain_call, "tile.assemble") ? 0 : 2;
+  auto target = AsVarLike(drain_call->args_[target_index]);
+  if (!target || target.get() != loop->iter_args_[*yield_index].get()) return std::nullopt;
+  if (uses.counts[drain_assign->var_.get()] != 1 || uses.counts[target.get()] != 1) {
+    return std::nullopt;
+  }
+  if (IsOp(drain_call, "tile.assemble")) {
+    auto target_ty = As<TileType>(target->GetType());
+    auto result_ty = As<TileType>(drain_assign->var_->GetType());
+    if (!target_ty || target_ty->GetMemorySpace() != MemorySpace::Mat || !result_ty ||
+        result_ty->GetMemorySpace() != MemorySpace::Mat) {
+      return std::nullopt;
+    }
+  }
+  return PipelineAccumulatorCandidate{*acc_bytes};
+}
+
+/// Select all structurally eligible loops only when their worst-case combined
+/// L0C footprint fits.  The base footprint counts every Acc SSA value once; the
+/// extra term adds one slot per loop this pass will mark.  This intentionally
+/// over-approximates liveness but guarantees that the loop-wide schedule change
+/// cannot turn a previously fitting function into an L0C overflow.
+std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
+  std::unordered_set<const ForStmt*> empty;
+  const auto* ctx = PassContext::Current();
+  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  // #2131 explicitly targets the PyPTO planner. PTOAS already gives the
+  // reproduced loop four distinct Acc placements and showed no measurable
+  // benefit from this source-level marker.
+  if (planner != MemoryPlanner::PyPTO) return empty;
+
+  auto policy = pypto::backend::BackendConfig::IsConfigured()
+                    ? pypto::backend::GetBackend()->CreateMemoryAllocatorPolicy()
+                    : std::make_unique<DefaultMemoryAllocatorPolicy>();
+  if (!policy) return empty;
+
+  AccFootprintCollector footprint(*policy);
+  footprint.VisitFunction(func);
+  if (!footprint.valid) return empty;
+
+  class CandidateCollector : public IRVisitor {
+   public:
+    explicit CandidateCollector(const MemoryAllocatorPolicy& policy) : policy_(policy) {}
+    std::unordered_map<const ForStmt*, PipelineAccumulatorCandidate> candidates;
+
+   protected:
+    void VisitStmt_(const ForStmtPtr& op) override {
+      if (auto candidate = AnalyzePipelineAccumulator(op, policy_)) {
+        candidates.emplace(op.get(), *candidate);
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    const MemoryAllocatorPolicy& policy_;
+  } candidates(*policy);
+  candidates.VisitStmt(func->body_);
+  if (candidates.candidates.empty()) return empty;
+
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  const uint64_t l0c_bytes = handler ? handler->GetL0cCapacityBytes() : 0;
+  if (l0c_bytes == 0) return empty;
+
+  uint64_t worst_case = footprint.total_bytes;
+  if (ctx && ctx->GetEnablePyptoL0cDoubleBuffer()) {
+    // The chooser may also double-buffer any other Acc result in this function;
+    // reserve a second slot for the full inventory rather than trying to
+    // duplicate its profitability decision here.
+    if (worst_case > std::numeric_limits<uint64_t>::max() - footprint.total_bytes) return empty;
+    worst_case += footprint.total_bytes;
+  } else {
+    for (const auto& [loop, candidate] : candidates.candidates) {
+      (void)loop;
+      if (worst_case > std::numeric_limits<uint64_t>::max() - candidate.aligned_acc_bytes) return empty;
+      worst_case += candidate.aligned_acc_bytes;
+    }
+  }
+  if (worst_case > l0c_bytes) return empty;
+
+  for (const auto& [loop, candidate] : candidates.candidates) {
+    (void)candidate;
+    empty.insert(loop);
+  }
+  return empty;
 }
 
 class AutoTileMutator : public IRMutator {
  public:
+  explicit AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)) {}
+
   std::vector<Diagnostic> hints;
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    const bool should_double_buffer_c = pipeline_dbc_plan_.count(op.get()) != 0;
     // Recurse first: nested pipelines make their own local dbC decision. An
     // enclosing pipeline does not inherit the marker and therefore does not
     // multiply the accumulator buffering depth.
     auto visited = IRMutator::VisitStmt_(op);
     auto loop = As<ForStmt>(visited);
-    if (!CanDoubleBufferPipelineAccumulator(loop)) return visited;
+    if (!should_double_buffer_c || !loop) return visited;
 
     auto result = MutableCopy(loop);
     result->attrs_ =
@@ -1749,12 +1963,15 @@ class AutoTileMutator : public IRMutator {
     if (!changed) return op;
     return SeqStmts::Flatten(std::move(out), op->span_);
   }
+
+ private:
+  std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
   if (!func || !func->body_) return func;
   if (!IsInCoreType(func->func_type_)) return func;
-  AutoTileMutator mutator;
+  AutoTileMutator mutator(BuildPipelineDbCPlan(func));
   auto new_body = mutator.VisitStmt(func->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == func->body_) return func;
