@@ -151,7 +151,8 @@ class MaterializeStaticViewValidShape : public IRMutator {
 
     auto& registry = OpRegistry::GetInstance();
     std::vector<std::pair<std::string, std::any>> move_kwargs = {
-        {"target_memory", std::any(*tile_type->memory_space_)}};
+        {"target_memory",
+         std::any(tile_type->memory_space_.value())}};  // NOLINT(bugprone-unchecked-optional-access)
     auto inferred_move = registry.Create("tile.move", {source}, move_kwargs, assign->span_);
     auto move_call = std::make_shared<Call>(inferred_move->op_, inferred_move->args_, inferred_move->kwargs_,
                                             PipelineMembershipAttrs(set_validshape), inferred_move->GetType(),
