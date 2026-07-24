@@ -32,7 +32,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
+from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
 
 __all__ = ["rebuild_kernel_cpp_from_pto", "PTOAS_BODY_BEGIN", "PTOAS_BODY_END"]
@@ -218,7 +218,7 @@ def rebuild_kernel_cpp_from_pto(work_dir: Path | str) -> list[str]:
     if not scan_dirs:
         return []
 
-    ptoas_bin = _find_ptoas_binary()
+    ptoas_bin = _ptoas_binary()
     if ptoas_bin is None:
         print("[pto->cpp] skipped: ptoas binary not found (set PTOAS_ROOT or PATH)")
         return []
