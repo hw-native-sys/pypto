@@ -473,8 +473,9 @@ Pass LegalizeTileCast();
  * ``tile.matmul`` whose Acc result is directly drained
  * by ``tile.store`` or ``tile.assemble``, with one loop-invariant operand and
  * one operand produced by a per-iteration Mat-to-L0 transfer.  When the
- * conservative whole-function Acc footprint plus one slot per eligible loop
- * fits in L0C, it
+ * conservative whole-function Acc footprint (including the physical stage
+ * multiplicity of other pipelined Acc producers) plus one slot per eligible
+ * loop fits in L0C, it
  * enables the existing two-accumulator drain-overlap schedule automatically
  * under the PyPTO memory planner.  Deeper operand pipelines are scheduled in
  * depth-two compute/drain chunks and still rotate only two L0C slots.  Explicit

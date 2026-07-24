@@ -467,7 +467,9 @@ void BindPass(nb::module_& m) {
              "on-chip Mat scratch for chained matmul consumers; compatible f32->bf16/f16 rint\n"
              "casts fold into the FIXPIPE writeback. Full-K grids support output-, A-, and\n"
              "B-stationary schedules. dbC=2 is enabled under PTOAS and available as a PyPTO\n"
-             "planner opt-in. Already-L0-sized and unsupported regimes are left untouched;\n"
+             "planner opt-in. Under PyPTO, a canonical already-L0 stationary-panel pipeline\n"
+             "may automatically use two L0C slots when its post-lowering Acc footprint fits.\n"
+             "Other already-L0-sized and unsupported regimes are left untouched;\n"
              "useful deferred cases emit PerfHint diagnostics. tile.matmul_bias is deferred.");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"

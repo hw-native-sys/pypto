@@ -1362,48 +1362,105 @@ std::optional<uint64_t> StaticAlignedTileBytes(const TileTypePtr& tile, MemorySp
   return aligned;
 }
 
-/// Whole-function conservative L0C inventory.  Every distinct Acc SSA value is
-/// counted once even when liveness would let MemoryReuse coalesce it.  This is
-/// intentionally an upper bound: the automatic dbC plan below may safely add
-/// one extra slot for every eligible loop without depending on a second,
-/// subtly different liveness implementation inside AutoTile.
+/// Whole-function conservative L0C inventory after accounting for pipeline
+/// replication.  LowerPipelineLoops gives every non-cube Acc producer one
+/// physical-membership request per source stage (and the product of the stage
+/// depths under nested pipelines).  Counting only the pre-lowering SSA value
+/// would therefore underestimate the placement that MemoryReuse may preserve.
+///
+/// Cube matmul accumulators are normally serialized and left untagged, so they
+/// need one slot.  An already-marked dbC pipeline is conservatively charged at
+/// its full source depth; a newly selected candidate is charged separately by
+/// BuildPipelineDbCPlan as one existing slot plus one extra ping-pong slot.
+///
+/// This remains an intentional upper bound: sequential values and independent
+/// pipeline groups may later coalesce, but the automatic dbC plan must not
+/// force an existing pipeline to shed buffering depth merely because its
+/// post-lowering multiplicity was omitted here.
 class AccFootprintCollector : public IRVisitor {
  public:
   explicit AccFootprintCollector(const MemoryAllocatorPolicy& policy) : policy_(policy) {}
 
   bool valid = true;
   uint64_t total_bytes = 0;
-  std::unordered_map<const Var*, uint64_t> bytes_by_var;
 
  protected:
-  void VisitVarLike_(const VarPtr& op) override { Record(op); }
+  void VisitVarLike_(const VarPtr& op) override { Record(op, /*copies=*/1); }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    Record(op->var_);
+    uint64_t copies = 1;
+    auto tile = As<TileType>(op->var_->GetType());
+    if (tile && tile->GetMemorySpace() == MemorySpace::Acc) {
+      auto call = As<Call>(op->value_);
+      const bool is_cube_matmul = call && call->op_ && call->op_->name_.rfind("tile.matmul", 0) == 0;
+      // The lowering tagger skips ordinary cube accumulators because the cube
+      // serializes them. Every other Acc producer is replicated across all
+      // enclosing source pipeline stages. An explicit dbC marker makes the
+      // cube accumulator replicated too; charging the full depth is safe even
+      // when CanonicalizeIOOrder later rotates it over only two slots.
+      if (!is_cube_matmul || explicit_dbc_depth_ != 0) copies = pipeline_depth_;
+    }
+    Record(op->var_, copies);
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) Record(iter_arg);
-    for (const auto& return_var : op->return_vars_) Record(return_var);
+    const uint64_t saved_pipeline_depth = pipeline_depth_;
+    const int saved_explicit_dbc_depth = explicit_dbc_depth_;
+    if (op && op->kind_ == ForKind::Pipeline) {
+      const int stages = op->GetAttr<int>(kPipelineStagesAttr, 0);
+      if (stages <= 0 ||
+          pipeline_depth_ > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(stages)) {
+        valid = false;
+      } else {
+        pipeline_depth_ *= static_cast<uint64_t>(stages);
+      }
+      if (op->GetAttr<bool>(kPipelineDoubleBufferCAttr, false)) ++explicit_dbc_depth_;
+    }
     IRVisitor::VisitStmt_(op);
+    pipeline_depth_ = saved_pipeline_depth;
+    explicit_dbc_depth_ = saved_explicit_dbc_depth;
   }
 
  private:
-  void Record(const VarPtr& var) {
-    if (!var || bytes_by_var.count(var.get()) != 0) return;
+  struct Entry {
+    uint64_t bytes = 0;
+    uint64_t copies = 0;
+  };
+
+  void Record(const VarPtr& var, uint64_t copies) {
+    if (!valid || !var || copies == 0) return;
     auto tile = As<TileType>(var->GetType());
     if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return;
     auto bytes = StaticAlignedTileBytes(tile, MemorySpace::Acc, policy_);
-    if (!bytes || total_bytes > std::numeric_limits<uint64_t>::max() - *bytes) {
+    if (!bytes || copies > std::numeric_limits<uint64_t>::max() / *bytes) {
       valid = false;
       return;
     }
-    bytes_by_var.emplace(var.get(), *bytes);
-    total_bytes += *bytes;
+    auto [it, inserted] = entries_.try_emplace(var.get(), Entry{*bytes, 0});
+    if (!inserted && it->second.bytes != *bytes) {
+      valid = false;
+      return;
+    }
+    if (copies <= it->second.copies) return;
+    const uint64_t added_copies = copies - it->second.copies;
+    if (added_copies > std::numeric_limits<uint64_t>::max() / *bytes) {
+      valid = false;
+      return;
+    }
+    const uint64_t added_bytes = added_copies * *bytes;
+    if (total_bytes > std::numeric_limits<uint64_t>::max() - added_bytes) {
+      valid = false;
+      return;
+    }
+    it->second.copies = copies;
+    total_bytes += added_bytes;
   }
 
   const MemoryAllocatorPolicy& policy_;
+  uint64_t pipeline_depth_ = 1;
+  int explicit_dbc_depth_ = 0;
+  std::unordered_map<const Var*, Entry> entries_;
 };
 
 /// True for any call whose result occupies L0C. This future-proofs the

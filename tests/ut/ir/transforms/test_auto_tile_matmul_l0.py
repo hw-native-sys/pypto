@@ -2241,6 +2241,77 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         After = passes.auto_tile_matmul_l0()(Before)
         assert "pipeline_double_buffer_c" not in ir.python_print(After)
 
+    @pytest.mark.parametrize(
+        ("staged_rows", "staged_cols", "expected_marked"),
+        [
+            (112, 256, True),  # 2 * 56 KiB + 2 * 8 KiB = 128 KiB
+            (128, 240, False),  # 2 * 60 KiB + 2 * 8 KiB = 136 KiB
+        ],
+    )
+    def test_accounts_for_pipeline_replicated_non_cube_acc_footprint(
+        self, staged_rows, staged_cols, expected_marked
+    ):
+        """Capacity admission charges every physical stage copy of another Acc."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        staged_width = 2 * staged_cols
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                staged_src: pl.Tensor[[staged_rows, staged_width], pl.BF16],
+                staged_out: pl.Out[pl.Tensor[[staged_rows, staged_width], pl.BF16]],
+                q: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 512], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[staged_rows, staged_width], pl.BF16],
+                pl.Tensor[[16, 512], pl.FP32],
+            ]:
+                staged_mat: pl.Tile[[staged_rows, staged_width], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    staged_src,
+                    [0, 0],
+                    [staged_rows, staged_width],
+                    target_memory=pl.Mem.Mat,
+                )
+                for sj, (staged_i,) in pl.pipeline(
+                    0, staged_width, staged_cols, stage=2, init_values=(staged_out,)
+                ):
+                    staged_acc: pl.Tile[[staged_rows, staged_cols], pl.BF16, pl.Mem.Acc] = pl.tile.extract(
+                        staged_mat,
+                        0,
+                        sj,
+                        [staged_rows, staged_cols],
+                        target_memory=pl.Mem.Acc,
+                    )
+                    staged_s: pl.Tensor[[staged_rows, staged_width], pl.BF16] = pl.store(
+                        staged_acc, [0, sj], staged_i
+                    )
+                    staged_r = pl.yield_(staged_s)
+
+                q_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    q, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                q_l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    q_mat, target_memory=pl.Mem.Left
+                )
+                b_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+                )
+                for ni, (out_i,) in pl.pipeline(0, 512, 128, stage=2, init_values=(out,)):
+                    b_l0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, ni, [128, 128], target_memory=pl.Mem.Right
+                    )
+                    c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
+                    out_s: pl.Tensor[[16, 512], pl.FP32] = pl.store(c, [0, ni], out_i)
+                    out_r = pl.yield_(out_s)
+                return staged_r, out_r
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        assert ("pipeline_double_buffer_c" in ir.python_print(After)) is expected_marked
+
     def test_rejects_other_acc_definition(self):
         """The marker is loop-wide, so unrelated Acc state defers it."""
         _backend.reset_for_testing()

@@ -478,6 +478,11 @@ def auto_tile_matmul_l0() -> Pass:
     cast-fold placement above. Other unsupported regimes are left untouched;
     useful deferred cases emit ``PerfHint`` diagnostics. ``tile.matmul_bias``
     is deferred.
+
+    Under the PyPTO planner, a canonical static already-L0 pipeline containing
+    one stationary-panel ``tile.matmul`` and one direct store or assemble drain
+    may automatically use two L0C slots when its conservative post-lowering
+    Acc footprint fits.
     """
 
 def canonicalize_tile_slice() -> Pass:
