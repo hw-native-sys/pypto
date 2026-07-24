@@ -54,30 +54,30 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 
 // Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
 //
-// Memory consistency for ring steps:
-//   1. dsb(DSB_DDR) — commit all prior DDR writes so the next rank's TLOAD
-//      (remote read) sees the committed data, not stale values.
-//   2. TNOTIFY(writer's signal slot = 1) — signal all peers.
-//   3. TWAIT(every peer's slot >= 1) — wait for peers.
-//   4. pipe_barrier(PIPE_ALL) — drain pipes before TLOAD.
+// Follows the InsertCommFence (PR #2076) two-sided memory consistency
+// contract for ptoas ≥ 0.50:
 //
-// Ring vs mesh: mesh allreduce does TSTORE locally per rank with no
-// cross-rank RAR chains.  The ring schedule introduces remote-read-after-
-// remote-write dependencies (rank N+1 reads from rank N's buffer after
-// rank N stores results from the previous step), which dsb guards.
+//   Publish side (caller's responsibility, before RoundBarrier):
+//     pipe_barrier(PIPE_ALL); dcci(region, SINGLE_CACHE_LINE);
 //
-// Future optimisation (ptoas 0.50): once the kernel moves to a TPUT push
-// model, dcci(ENTIRE_DATA_CACHE) + pto.fence.barrier_all can replace
-// dsb(DSB_DDR) and relax the barrier to O(1) per invocation
-// (NeighborBarrier: left/right only).  See PR #2076 / InsertCommFence pass.
+//   Consume side (RoundBarrier):
+//     1. dsb(DSB_DDR) — fence.barrier_all; commits publisher's writes to DDR.
+//     2. TNOTIFY / TWAIT — all-to-all signal round-trip.
+//     3. dcci(ENTIRE_DATA_CACHE) — invalidate reader's data cache so the
+//        subsequent TLOAD discovers the peer's committed DDR writes.
+//     4. pipe_barrier(PIPE_ALL) — drain pipes before TLOAD.
+//
+// Wire safety: dsb(DSB_DDR) prefixes the notify so every rank's TSTORE
+// results are committed before the next rank's post-barrier TLOAD.  The
+// ring schedule introduces remote-read-after-remote-write chains across
+// consecutive steps that the mesh scheme (all-to-all load then accumulate)
+// avoids.
+//
+// Future optimisation: once the kernel moves to a TPUT push model, the
+// barrier can be relaxed to O(1) per invocation (NeighborBarrier:
+// left/right only).  TPUT's write pipeline handles the DDR ordering.
 AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                 int nranks) {
-  // mem: dsb(DSB_DDR) prefixes the notify so every rank's DDR writes
-  // (TSTORE results from the previous ring step) are committed before
-  // the next rank executes its post-barrier TLOAD.  This is necessary
-  // because the ring schedule has remote-read-after-remote-write
-  // dependencies across consecutive steps that the mesh scheme
-  // (all-to-all load then accumulate) avoids.
   dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) {
@@ -94,6 +94,7 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
     pto::comm::Signal sig(signal_row + peer);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
+  dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
   pipe_barrier(PIPE_ALL);
 }
 
@@ -200,6 +201,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
+    // Publish: invalidate the chunk we just wrote so the next step's
+    // dsb(DSB_DDR) in RoundBarrier can flush it to DDR for the peer.
+    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_add_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Phase 2: allgather — (NR-1) ring steps.
@@ -237,6 +241,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
     pipe_barrier(PIPE_ALL);
+    // Publish: invalidate the chunk we just wrote.
+    dcci((__gm__ void *)(chunks + static_cast<size_t>(recv_idx * chunk_elems)), SINGLE_CACHE_LINE);
   }
 
   // Final cross-rank barrier: guarantee every rank has finished reading from
