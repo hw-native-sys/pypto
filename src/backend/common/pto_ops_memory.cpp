@@ -852,17 +852,18 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     }
 
     if (is_scalar_write) {
-      const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
-      const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
-      const std::string off = GetFlatOffsetSSA(offsets_tuple, tensor_type->shape_, codegen);
-      const std::string write_ptr = codegen.NewTemp();
-      codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " +
-                   ptr_type);
-      const std::string scalar_view = codegen.NewTemp();
-      const std::string view_type = "!pto.tensor_view<1x" + dtype_str + ">";
-      codegen.Emit(scalar_view + " = pto.make_tensor_view " + write_ptr +
-                   ", shape = [1], strides = [1] : " + view_type);
-      codegen.Emit("pto.cmo.cacheinvalid " + scalar_view + " single_cache_line : " + view_type);
+      // ptoas 0.50 rejects make_tensor_view → cmo.cacheinvalid on a
+      // raw addptr; use the partition-view path instead which creates
+      // a sub-view of the existing tensor view.
+      const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
+      const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+      const std::string partition_type =
+          MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+      const std::string payload_view =
+          EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
+                               GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                               GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
+      codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
     } else {
       const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
       const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
