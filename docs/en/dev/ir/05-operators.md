@@ -267,7 +267,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
-| - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A constant scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts); a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
+| - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |

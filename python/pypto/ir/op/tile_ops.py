@@ -979,7 +979,9 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount (int/Expr with INT32 ScalarType); must be >= 0
+        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
+            to the lhs element dtype (the IR permits any integer width -- codegen
+            casts the shift count to i32); a typed Expr is used as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1018,7 +1020,9 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount (int/Expr with INT32 ScalarType); must be >= 0
+        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
+            to the lhs element dtype (the IR permits any integer width -- codegen
+            casts the shift count to i32); a typed Expr is used as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

@@ -3365,6 +3365,18 @@ class TestTileScalarOperandDtype:
             call = fn(self._int_tile(DataType.INT16), 255)
             assert _operand_dtype(call.args[1]) == DataType.INT16
 
+    def test_narrow_shift_literal_adopts_tile_dtype(self):
+        """Shift counts follow the tile dtype, including narrow int tiles.
+
+        `DeduceTileOpIntScalarBinaryType` permits any integer width for the
+        shift operand ("codegen casts to i32"), and an i8/i16 shift count is
+        accepted end-to-end by ptoas, so narrowing here is safe.
+        """
+        for dtype in (DataType.INT8, DataType.INT16):
+            for fn in (tile.shls, tile.shrs):
+                call = fn(self._int_tile(dtype), 3)
+                assert _operand_dtype(call.args[1]) == dtype, f"{fn.__name__} on {dtype}"
+
     def test_ir_level_restamps_index_const(self):
         """A hand-built ConstInt(INDEX) operand (parser output) is re-stamped."""
         span = ir.Span.unknown()
