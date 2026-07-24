@@ -533,10 +533,17 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
 
     The codegen routes every chip dispatch through this wrapper — rank-pinned
     dispatches pass their rank, comm-less dispatches pass ``-1``.
+
+    A comm-less dispatch (``worker < 0``) has no pinned rank: it routes to the
+    local chip worker 0 — the sole chip worker of a comm-less L3 program —
+    because simpler requires an explicit non-negative NEXT_LEVEL worker id at
+    submit time. The negative value still drives the DFX ``rank_local`` label
+    below.
     """
+    submit_worker = worker if worker >= 0 else 0
     base = config.output_prefix
     if not base:
-        return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+        return orch.submit_next_level(callable_id, task_args, config, worker=submit_worker)
     idx_map = getattr(orch, "_dfx_dispatch_idx", None)
     if idx_map is None:
         # Defensive: a caller that bypassed ``orch_fn`` (no reset) still gets
@@ -550,7 +557,7 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     idx_map[rank_label] = k + 1
     config.output_prefix = f"{base}/{rank_label}/d{k}"
     try:
-        return orch.submit_next_level(callable_id, task_args, config, worker=worker)
+        return orch.submit_next_level(callable_id, task_args, config, worker=submit_worker)
     finally:
         config.output_prefix = base
 

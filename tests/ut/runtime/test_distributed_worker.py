@@ -1256,8 +1256,10 @@ class TestSubmitChip:
             "/work/dfx_outputs/rank_local/d0",
             "/work/dfx_outputs/rank_local/d1",
         ]
-        # worker is still forwarded as -1 (unconstrained) to the runtime.
-        assert [c[1] for c in orch.calls] == [-1, -1]
+        # A comm-less worker (<0) routes to the local chip worker 0 (simpler
+        # requires a non-negative NEXT_LEVEL worker id); the DFX namespace stays
+        # rank_local.
+        assert [c[1] for c in orch.calls] == [0, 0]
         assert cfg.output_prefix == "/work/dfx_outputs"
 
     def test_distinct_unconstrained_workers_share_one_counter(self):

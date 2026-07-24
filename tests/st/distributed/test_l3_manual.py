@@ -166,7 +166,7 @@ class TestL3Manual:
             chip_ta.add_tensor(make_tensor_arg(a), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(b), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(f), TensorArgType.OUTPUT_EXISTING)
-            orch.submit_next_level(chip_cid, chip_ta, call_config)
+            orch.submit_next_level(chip_cid, chip_ta, call_config, worker=0)
 
             verify_ta = TaskArgs()
             verify_ta.add_tensor(make_tensor_arg(f), TensorArgType.INPUT)

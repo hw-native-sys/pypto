@@ -2980,7 +2980,7 @@ def _cmo_cacheinvalid_line(mlir: str) -> str:
 
 
 class TestCacheInvalidCodegen:
-    """Tests that pl.system.cacheinvalid lowers to a ptr or partition-view cmo."""
+    """Tests that pl.system.cacheinvalid lowers to a partition-view cmo."""
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -2994,8 +2994,13 @@ class TestCacheInvalidCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    def test_cacheinvalid_scalar_write_emits_ptr(self):
-        """All-ones shapes (scalar write) lower to pto.addptr + a ptr-form cmo."""
+    def test_cacheinvalid_scalar_write_emits_partition_view(self):
+        """All-ones shapes (single-element region) lower to a partition_tensor_view cmo.
+
+        PTOAS level3 lowering rejects pto.cmo.cacheinvalid on a raw !pto.ptr
+        ("addptr must feed make_tensor_view / load / store_scalar"), so even a
+        single element must go through partition_view, not addptr + bare ptr.
+        """
 
         @pl.program
         class Prog:
@@ -3011,11 +3016,11 @@ class TestCacheInvalidCodegen:
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
+        assert "pto.partition_view" in mlir, f"pto.partition_view not found in MLIR:\n{mlir}"
+        assert "pto.addptr" not in mlir, f"scalar write must not emit addptr/bare ptr:\n{mlir}"
         cmo_line = _cmo_cacheinvalid_line(mlir)
-        # The ptr form emits a bare pointer operand, no partition_tensor_view annotation.
         assert "single_cache_line" in cmo_line
-        assert "partition_tensor_view" not in cmo_line, f"unexpected partition view in ptr form: {cmo_line}"
+        assert "partition_tensor_view" in cmo_line, f"partition view not in cmo line: {cmo_line}"
 
     def test_cacheinvalid_region_emits_partition_view(self):
         """A multi-element region (tile store) lowers to a partition_tensor_view cmo."""
@@ -3041,7 +3046,7 @@ class TestCacheInvalidCodegen:
         assert "partition_tensor_view" in cmo_line, f"partition view not in cmo line: {cmo_line}"
 
     def test_cacheinvalid_dynamic_offset(self):
-        """A runtime offset expression (loop-var arithmetic) reaches the flattened ptr offset."""
+        """A runtime offset expression feeds the partition_view offsets."""
 
         @pl.program
         class Prog:
@@ -3059,8 +3064,8 @@ class TestCacheInvalidCodegen:
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        # The dynamic row index feeds the flattened offset, then pto.addptr.
-        assert "pto.addptr" in mlir, f"pto.addptr not found in MLIR:\n{mlir}"
+        # The dynamic row index feeds the partition_view offset operand.
+        assert "pto.partition_view" in mlir, f"pto.partition_view not found in MLIR:\n{mlir}"
         assert "pto.cmo.cacheinvalid" in mlir, f"pto.cmo.cacheinvalid not found in MLIR:\n{mlir}"
         assert "single_cache_line" in mlir, f"single_cache_line not found in MLIR:\n{mlir}"
 

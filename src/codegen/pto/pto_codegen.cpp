@@ -1001,9 +1001,9 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       case ir::TensorLayout::ND:
         break;
     }
-    stream_ << " {layout = #pto.layout<" << layout_str << ">}";
+    stream_ << " {layout = #pto.layout<" << layout_str << ">} : ";
 
-    stream_ << ": !pto.tensor_view<";
+    stream_ << "!pto.tensor_view<";
     for (size_t j = 0; j < rank; ++j) {
       if (j > 0) stream_ << "x";
       stream_ << "?";
