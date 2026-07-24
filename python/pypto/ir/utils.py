@@ -215,10 +215,166 @@ def _to_int32_scalar(value: int | _ir.Expr, span: _ir.Span) -> _ir.Expr:
     return _ir.ConstInt(value, DataType.INT32, span)
 
 
+def _elem_dtype(operand: _ir.Expr) -> DataType | None:
+    """Element dtype of a tile/tensor operand, or None if not statically known."""
+    operand_type = operand.type
+    if isinstance(operand_type, (_ir.TileType, _ir.TensorType, _ir.DistributedTensorType)):
+        return operand_type.dtype
+    return None
+
+
+def _check_not_index_scalar(scalar: _ir.Expr, target: DataType | None) -> None:
+    """Reject a non-constant ``index`` scalar operand with an actionable hint.
+
+    ``index`` is never a legal operand type for a ``pto.t*s`` instruction. A
+    *constant* carrying it is merely the parser's placeholder and is re-typed
+    silently, but a *value* -- a loop variable, ``pl.dim(...)``, an offset -- needs
+    a real conversion whose target only the user can choose.
+
+    Raises:
+        ValueError: If ``scalar`` is an ``index``-typed scalar expression.
+    """
+    scalar_type = scalar.type
+    if not isinstance(scalar_type, _ir.ScalarType) or scalar_type.dtype != DataType.INDEX:
+        return
+
+    # Codegen lowers index<->int via arith.index_cast but rejects index<->float
+    # outright (pto_scalar_expr_codegen.cpp), so a float operand needs two steps.
+    if target is not None and target.is_float():
+        hint = f"pl.cast(pl.cast(<value>, pl.INT32), pl.{str(target).upper()})"
+        why = "; `index` cannot convert to a float dtype in one step"
+    else:
+        name = str(target).upper() if target is not None else "INT32"
+        hint = f"pl.cast(<value>, pl.{name})"
+        why = ""
+    raise ValueError(
+        f"Scalar operand has dtype `index`, which tile/tensor scalar instructions do "
+        f"not accept. Convert it explicitly: {hint}{why}."
+    )
+
+
+def _const_at_dtype(value: int | float, dtype: DataType, span: _ir.Span) -> _ir.Expr:
+    """Build a scalar constant carrying exactly ``dtype``.
+
+    The node kind follows ``dtype``, not the Python type of ``value``: codegen
+    dispatches on ConstInt vs ConstFloat, so an int paired with a float dtype
+    must become a ConstFloat or MLIR receives ``arith.constant 5 : f32``.
+    """
+    if dtype.is_float():
+        return _ir.ConstFloat(float(value), dtype, span)
+    return _ir.ConstInt(int(value), dtype, span)
+
+
+def _placeholder_value(scalar: int | float | _ir.Expr, hint_dtype: DataType | None) -> int | float | None:
+    """Numeric value of a re-typable scalar placeholder, or ``None`` to pass through.
+
+    A scalar is a re-typable placeholder when it is a raw Python literal or the
+    parser's ``ConstInt(v, INDEX)`` -- these carry no deliberate dtype, so a caller
+    may stamp one on. Any other expression already declares its dtype and is
+    signalled with ``None`` so the caller keeps it unchanged; the sole exception is
+    a non-constant ``index`` value, rejected here via ``_check_not_index_scalar``
+    (``hint_dtype`` shapes the ``pl.cast`` hint).
+
+    Returns:
+        The literal/placeholder value to re-stamp, or ``None`` for an already-typed
+        expression that must be left as-is.
+    """
+    if not isinstance(scalar, _ir.Expr):
+        return scalar  # raw Python literal
+    if isinstance(scalar, _ir.ConstInt) and scalar.dtype == DataType.INDEX:
+        return scalar.value  # parser's INDEX placeholder
+    _check_not_index_scalar(scalar, hint_dtype)
+    return None  # already-typed expr -- leave untouched
+
+
+def _normalize_scalar_operand(
+    operand: _ir.Expr,
+    scalar: int | float | _ir.Expr,
+    span: _ir.Span,
+    *,
+    fallback_int_dtype: DataType = DataType.INT32,
+    fallback_float_dtype: DataType = DataType.FP32,
+) -> _ir.Expr:
+    """Normalize an untyped scalar constant to the paired tile/tensor element dtype.
+
+    The DSL parser turns every bare int literal into ``ConstInt(v, INDEX)``
+    (``ast_parser.parse_constant``). ``index`` is not a legal operand type for any
+    ``pto.t*s`` instruction, and at the tensor level it also propagates through
+    ``PromoteDataTypes`` into the *result* tensor dtype. ``INDEX`` is therefore
+    treated as "dtype not yet decided" and re-stamped to the ``operand`` element
+    dtype, alongside raw Python literals which carry no dtype at all.
+
+    Any constant that already carries a real dtype is left untouched -- an explicit
+    ``pl.const(42, pl.INT32)`` is a deliberate user annotation, not a placeholder.
+    A float literal paired with an integer operand keeps ``fallback_float_dtype``
+    so existing promotion semantics (``int32_tensor * 2.5 -> fp32``) are preserved.
+
+    Args:
+        operand: The tile/tensor the scalar is paired with.
+        scalar: Python int/float, or an existing IR expression.
+        span: Span for any constant created here.
+        fallback_int_dtype: Int dtype used when ``operand`` is not statically typed.
+        fallback_float_dtype: Float dtype used when ``operand`` is not statically typed.
+
+    Returns:
+        An expression whose dtype matches the operand element dtype where the rule
+        above applies; otherwise ``scalar`` unchanged.
+
+    Raises:
+        ValueError: If ``scalar`` is a non-constant ``index`` value (see
+            ``_check_not_index_scalar``) -- convert it with ``pl.cast``.
+    """
+    target = _elem_dtype(operand)
+    value = _placeholder_value(scalar, target)
+    if value is None:
+        assert isinstance(scalar, _ir.Expr)  # _placeholder_value returns None only for exprs
+        return scalar  # already-typed expr, kept as-is
+
+    # Unknown operand type, or a float constant on an integer operand: fall back
+    # to the literal-kind default so promotion behaviour is unchanged.
+    if target is None or (isinstance(value, float) and target.is_int()):
+        target = fallback_float_dtype if isinstance(value, float) else fallback_int_dtype
+
+    if target.is_float() or target.is_int():
+        return _const_at_dtype(value, target, span)
+
+    # Neither int nor float (e.g. BOOL): keep prior behaviour.
+    return _normalize_expr(scalar, span, int_dtype=fallback_int_dtype, float_dtype=fallback_float_dtype)
+
+
+def _normalize_const_to_dtype(
+    scalar: int | float | _ir.Expr,
+    dtype: DataType,
+    span: _ir.Span,
+    *,
+    float_dtype: DataType = DataType.FP32,
+) -> _ir.Expr:
+    """Re-stamp an untyped scalar constant whose dtype is fixed by the operator.
+
+    For operands that do *not* follow a tile/tensor element dtype -- a mode flag
+    or float coefficient. Shares the placeholder rule via ``_placeholder_value``
+    (only the parser's ``INDEX`` constants and raw Python literals are re-typed),
+    and a float literal paired with an integer ``dtype`` keeps ``float_dtype``.
+
+    Raises:
+        ValueError: If ``scalar`` is a non-constant ``index`` value (see
+            ``_check_not_index_scalar``) -- convert it with ``pl.cast``.
+    """
+    value = _placeholder_value(scalar, dtype)
+    if value is None:
+        assert isinstance(scalar, _ir.Expr)  # _placeholder_value returns None only for exprs
+        return scalar  # already-typed expr, kept as-is
+
+    target = float_dtype if (isinstance(value, float) and dtype.is_int()) else dtype
+    return _const_at_dtype(value, target, span)
+
+
 __all__ = [
     "CAST_MODE_NAMES",
     "_get_span_or_capture",
+    "_normalize_const_to_dtype",
     "_normalize_expr",
+    "_normalize_scalar_operand",
     "_normalize_shape",
     "_to_int32_scalar",
     "_to_make_tuple",
