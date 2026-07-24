@@ -763,8 +763,8 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
       if (j > 0) oss << ", ";
       oss << stride_names[j];
     }
-    oss << "] {layout = #pto.layout<" << layout_str << ">}";
-    oss << ": !pto.tensor_view<";
+    oss << "] {layout = #pto.layout<" << layout_str << ">} : ";
+    oss << "!pto.tensor_view<";
     for (size_t j = 0; j < rank; ++j) {
       if (j > 0) oss << "x";
       oss << "?";

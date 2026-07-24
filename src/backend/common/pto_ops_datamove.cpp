@@ -416,7 +416,7 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // DN view: shape [C, R], strides [1, C] -> DN[i, j] aliases src[j, i].
     mv << dn_view << " = pto.make_tensor_view " << src_ptr << ", shape = [" << cols_code << ", " << rows_code
        << "], strides = [" << one_code << ", " << cols_code
-       << "] {layout = #pto.layout<dn>}: " << src_view_type;
+       << "] {layout = #pto.layout<dn>} : " << src_view_type;
     codegen.Emit(mv.str());
     // Read src[phys, col_off : col_off + c] presented as the DN column [c, 1]:
     // offsets [col_off, phys] (swapped), sizes [c, r] (swapped).
