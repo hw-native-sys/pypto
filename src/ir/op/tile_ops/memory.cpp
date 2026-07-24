@@ -445,6 +445,35 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);
 }
 
+TypePtr DeduceTileAllocMultiType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  // alloc_multi signature: (shape) with kwargs {dtype, target_memory?, count}.
+  // The result is the per-slot TileType; the physical buffer holds `count` such
+  // slots laid out contiguously (see ptoas pto.alloc_multi_tile). Selecting a
+  // slot for a given iteration is done by tile.multi_get. The [2, 16] bound
+  // mirrors the ptoas multi_tile_buf verifier.
+  const int count = GetKwarg<int>(kwargs, "count", 0);
+  CHECK(count >= 2 && count <= 16) << op_name << " count (multi-buffer depth) must be in [2, 16], got "
+                                   << count;
+  return DeduceTileCreateTileType(args, kwargs, op_name);
+}
+
+TypePtr DeduceTileMultiGetType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  // multi_get signature: (multi_tile, index) -> per-slot TileType (identical to
+  // the multi-buffer's slot type). The runtime `index` (typically loop_var %
+  // count) selects the physical slot and is NOT part of the result type.
+  CHECK(args.size() == 2) << "The operator " << op_name
+                          << " requires exactly 2 arguments (multi_tile, index), but got " << args.size();
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << "The operator " << op_name
+                   << " requires its first argument to be a tile (from tile.alloc_multi), but got "
+                   << args[0]->TypeName();
+  return args[0]->GetType();
+}
+
 TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -945,6 +974,51 @@ REGISTER_OP("tile.alloc")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAllocType(args, kwargs, "tile.alloc");
+    });
+
+// tile.alloc_multi / tile.multi_get implement intra-core multi-buffering for
+// pipelined loops under the PTOAS memory planner: one alloc_multi reserves
+// `count` physical slots of a shared slot shape (1:1 with ptoas
+// pto.alloc_multi_tile); each iteration selects a slot via multi_get
+// (1:1 with ptoas pto.multi_tile_get). SHARED affinity mirrors tile.create.
+REGISTER_OP("tile.alloc_multi")
+    .set_op_category("TileOp")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .set_description(
+        "Allocate a multi-buffer of `count` physical tile slots sharing one slot shape; "
+        "index per iteration via tile.multi_get. Maps to pto.alloc_multi_tile.")
+    .add_argument("shape", "Per-slot shape dimensions (TupleType of ConstInt)")
+    .set_attr<DataType>("dtype")
+    .set_attr<MemorySpace>("target_memory")
+    .set_attr<int>("count")
+    // No fallback: when target_memory is absent, memory_space stays unresolved and
+    // InferTileMemorySpace picks the space from consumer demand (mirrors tile.create).
+    .set_output_memory_from_kwarg("target_memory")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileAllocMultiType(args, kwargs, "tile.alloc_multi");
+    });
+
+REGISTER_OP("tile.multi_get")
+    .set_op_category("TileOp")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .set_description(
+        "Select physical slot `index` from a multi-buffer produced by tile.alloc_multi "
+        "(index is typically loop_var % count). Maps to pto.multi_tile_get.")
+    .add_argument("multi_tile", "Multi-buffer tile (result of tile.alloc_multi)")
+    .add_argument("index", "Physical slot index (index/int scalar), typically loop_var % count")
+    .set_attr<int>("count")
+    // Each selected slot is a DISTINCT physical buffer, so the result gets its
+    // own MemRef identity (NOT a shared view of the multi-buffer base) — sharing
+    // one identity would collapse every slot onto a single codegen handle and
+    // defeat the rotation. The runtime slot address is materialized by codegen as
+    // pto.multi_tile_get %mtb[%idx], never as a constant-offset view. The output
+    // memory space rides on the deduced slot TileType (inherited from the
+    // multi-buffer), so no separate memory spec is needed.
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMultiGetType(args, kwargs, "tile.multi_get");
     });
 
 REGISTER_OP("tile.full")

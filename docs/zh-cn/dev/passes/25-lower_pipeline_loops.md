@@ -79,6 +79,21 @@ for i in pl.pipeline(64, stage=4):
 
   每个分支 body 为 `k` 份克隆体组成的裸 `SeqStmts`（若源循环存在 `iter_args` 则追加一条 `YieldStmt`）。外层 `IfStmt` 携带 `return_vars`：最外层即原循环的 `return_vars`，内层级联分支使用新鲜变量，通过一系列 `YieldStmt` 向上传递。SSA 依然干净：每个分支自包含，任何条件定义的变量都不会逃出其 IfStmt。
 
+### PTOAS planner —— 片内多缓冲路径
+
+在 `MemoryPlanner.PTOAS` 下，**携带 tile 的** pipeline 循环改为降级到基于 `factor` 个 slot 的多缓冲（ptoas `pto.alloc_multi_tile`），是跨核 `slot_num` 环形缓冲的片内对应物。循环体不再展开 `F` 份，而是让 carry 在 `F` 个物理 slot 间轮转，由 ptoas 规划并重叠这些 slot。
+
+`CanLowerToMultiTile` 决定是否走此路径；不支持的形态回退到上面的展开路径（不会回退功能）。v1 要求：`factor ∈ [2, 16]`（ptoas `multi_tile_buf` count 上界）、单个已解析内存空间的 tile `iter_arg`、单个 `return_var`、静态边界且 `start == 0` / `step == 1`，以及由顶层 yield producer 产生的 carry。
+
+改写方式（`trip` 次迭代，`F = factor`）：
+
+- 循环前提升 `%mtb = tile.alloc_multi(shape, count=F)`。
+- **剥离第 0 次迭代** —— 直接读初值，写 slot `0`。
+- `k ∈ [1, trip)` 的 rolled 循环：读 slot `(k-1) mod F`（`tile.multi_get`），写 slot `k mod F`。
+- 将最终 slot `(trip-1) mod F` 绑定到原 `return_var`。
+
+每个 `tile.multi_get` slot 都是独立物理缓冲；carry producer 被打上 `kMultiBufferAliasSlotAttr` 标记，`InitMemRef` 据此将其 MemRef 重定向到所选 slot（codegen 随后让 producer 写 `outs(<slot>)`）。参见 [InitMemRef](28-init_memref.md)。
+
 ## 约束
 
 | 约束 | 原因 |

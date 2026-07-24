@@ -1105,6 +1105,72 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
 }
 
+void PTOCodegen::EmitAllocMultiTile(const ir::VarPtr& mtb_var, const ir::CallPtr& call) {
+  auto tile_type = ir::GetTileTypeWithMemRef(mtb_var->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, mtb_var->span_)
+      << "Internal error: tile.alloc_multi result must be a tile with a MemRef";
+  const int count = call->GetKwarg<int>("count");
+  INTERNAL_CHECK_SPAN(count >= 2 && count <= 16, call->span_)
+      << "Internal error: tile.alloc_multi count must be in [2, 16], got " << count;
+
+  auto var_key = GetVarKey(mtb_var);
+  auto mlir_it = fs_.var_to_mlir.find(var_key);
+  INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), mtb_var->span_)
+      << "Internal error: multi-buffer var " << mtb_var->name_hint_ << " not found in fs_.var_to_mlir";
+  const std::string mtb = mlir_it->second;
+
+  // One def per handle (mirrors EmitAllocTileForVar's dedup).
+  fs_.emitted_tile_alloc_vars.insert(var_key);
+  if (!fs_.emitted_tile_alloc_names.insert(mtb).second) return;
+
+  // ComputeAllocTileFields yields the per-slot tile_buf type string plus the
+  // (optional) addr and the valid_row/valid_col operands — all identical to a
+  // single-slot alloc_tile. Only the result type differs: it is wrapped in the
+  // multi_tile_buf envelope carrying the slot count.
+  AllocTileFields fields = ComputeAllocTileFields(tile_type);
+  const std::string mtb_type = FormatMultiTileBufTypeString(fields.type_str, count);
+
+  std::ostringstream line;
+  line << mtb << " = pto.alloc_multi_tile";
+  if (!fields.addr_ssa.empty()) line << " addr = " << fields.addr_ssa;
+  if (!fields.valid_row_ssa.empty()) line << " valid_row = " << fields.valid_row_ssa;
+  if (!fields.valid_col_ssa.empty()) line << " valid_col = " << fields.valid_col_ssa;
+  line << " : " << mtb_type;
+  Emit(line.str());
+
+  fs_.ssa_to_tile_buf_type[mtb] = mtb_type;
+}
+
+void PTOCodegen::EmitMultiTileGet(const ir::VarPtr& slot_var, const ir::CallPtr& call) {
+  INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+      << "Internal error: tile.multi_get expects (multi_tile, index)";
+  auto slot_type = As<TileType>(slot_var->GetType());
+  INTERNAL_CHECK_SPAN(slot_type, slot_var->span_)
+      << "Internal error: tile.multi_get result must be a TileType";
+  const int count = call->GetKwarg<int>("count");
+
+  auto var_key = GetVarKey(slot_var);
+  auto mlir_it = fs_.var_to_mlir.find(var_key);
+  INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), slot_var->span_)
+      << "Internal error: multi_get result var " << slot_var->name_hint_ << " not found in fs_.var_to_mlir";
+  const std::string slot = mlir_it->second;
+
+  const std::string mtb = GetExprAsCode(call->args_[0]);
+  // The slot index feeds the ptoas `[ %idx ]` operand, which must be `index`
+  // typed — EmitCastToIndex casts integer operands and rejects floats.
+  const std::string idx = EmitCastToIndex(call->args_[1], GetExprAsCode(call->args_[1]));
+
+  const std::string slot_type_str = GetTileBufTypeStringFromTileType(slot_type);
+  const std::string mtb_type = FormatMultiTileBufTypeString(slot_type_str, count);
+  Emit(slot + " = pto.multi_tile_get " + mtb + " [ " + idx + " ] : " + mtb_type + " -> " + slot_type_str);
+  fs_.ssa_to_tile_buf_type[slot] = slot_type_str;
+
+  // The multi_tile_get declares the slot handle. A producer retargeted onto this
+  // slot (InitMemRef kMultiBufferAliasSlotAttr) shares the handle, so suppress
+  // the redundant per-var pto.alloc_tile the default path would emit for it.
+  fs_.emitted_tile_alloc_names.insert(slot);
+}
+
 // ========================================================================
 // Private helpers
 // ========================================================================
@@ -1360,6 +1426,19 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
+
+  // Intra-core multi-buffer ops are emitted 1:1 as ptoas pto.alloc_multi_tile /
+  // pto.multi_tile_get rather than through the per-var alloc_tile path. Handle
+  // them up front so the default tile buffer declaration below is skipped.
+  if (ir::IsOp(call, "tile.alloc_multi")) {
+    EmitAllocMultiTile(op->var_, call);
+    return;
+  }
+  if (ir::IsOp(call, "tile.multi_get")) {
+    EmitMultiTileGet(op->var_, call);
+    return;
+  }
+
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);

@@ -81,6 +81,21 @@ With trip count `T = (stop - start) / step`:
 
   Each branch body is a bare `SeqStmts` of `k` cloned bodies (followed by a `YieldStmt` when the source loop has `iter_args`). The enclosing `IfStmt` carries `return_vars`; at the outermost level these are the original outer loop's `return_vars`, at inner levels they are fresh vars fed upward via successive `YieldStmt`s. SSA stays clean: each branch is self-contained; no conditionally-defined var escapes its IfStmt.
 
+### PTOAS planner — intra-core multi-buffer path
+
+Under `MemoryPlanner.PTOAS`, a **tile-carried** pipeline loop is instead lowered to a rolled loop over a `factor`-slot multi-buffer (ptoas `pto.alloc_multi_tile`), the intra-core counterpart of the cross-core `slot_num` ring buffer. Rather than replicating the body `F` times, the carry rotates through `F` physical slots and ptoas plans/overlaps the slots.
+
+`CanLowerToMultiTile` gates this path; unsupported shapes fall back to the unroll path above (no regression). v1 requires: `factor ∈ [2, 16]` (the ptoas `multi_tile_buf` count bound), a single tile `iter_arg` with a resolved memory space, one `return_var`, static bounds with `start == 0` / `step == 1`, and a carry produced by a top-level yield producer.
+
+The rewrite (for `trip` iterations, `F = factor`):
+
+- Hoist `%mtb = tile.alloc_multi(shape, count=F)` before the loop.
+- **Peel iteration 0** — reads the init directly, writes slot `0`.
+- Rolled loop for `k ∈ [1, trip)`: reads slot `(k-1) mod F` (`tile.multi_get`), writes slot `k mod F`.
+- Bind the final slot `(trip-1) mod F` to the original `return_var`.
+
+Each `tile.multi_get` slot is a distinct physical buffer; the carry producer is tagged with `kMultiBufferAliasSlotAttr` so `InitMemRef` retargets its MemRef onto the selected slot (codegen then emits the producer writing `outs(<slot>)`). See [InitMemRef](28-init_memref.md).
+
 ## Constraints
 
 | Constraint | Reason |

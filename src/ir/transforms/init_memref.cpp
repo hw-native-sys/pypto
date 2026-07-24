@@ -17,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -336,6 +338,31 @@ class InitMemRefMutator : public IRMutator {
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
+    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+
+    // Intra-core multi-buffer (ptoas multi_tile_buf): a `tile.multi_get` slot
+    // gets its own fresh MemRef (a distinct physical slot); record it by name so
+    // a producer aliased to it can be retargeted. A producer carrying
+    // kMultiBufferAliasSlotAttr shares the named slot's MemRef, so codegen emits
+    // the op writing `outs(<slot>)` — the carry physically lives in the slot.
+    // (Name-keyed, not VarPtr-keyed: name_hint_ survives the var cloning that
+    // intervening passes may do, whereas a stale pass-emitted VarPtr would not
+    // resolve against this pass's own input IR.)
+    if (call) {
+      if (IsOp(call, "tile.multi_get")) {
+        auto new_var = GetNewVar(op->var_);
+        mb_slot_by_name_[new_var->name_hint_] = new_var;
+        return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+      }
+      if (call->HasAttr(kMultiBufferAliasSlotAttr)) {
+        const std::string slot_name = call->GetAttr<std::string>(kMultiBufferAliasSlotAttr);
+        auto it = mb_slot_by_name_.find(slot_name);
+        INTERNAL_CHECK_SPAN(it != mb_slot_by_name_.end(), op->span_)
+            << "Internal error: multi-buffer producer names slot '" << slot_name
+            << "' that was not materialized before it";
+        if (auto result = ShareMemRefFrom(it->second, op, new_value)) return result;
+      }
+    }
 
     // A tile that owns no general-pool buffer — a cross-core tpop result (its
     // data lives in the reserved C2V/V2C slot, addressed via the pipe), or a
@@ -349,7 +376,7 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Check if the RHS is a Call expression
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
+    if (call) {
       LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
                 << call->op_->name_;
 
@@ -542,6 +569,12 @@ class InitMemRefMutator : public IRMutator {
 
   std::map<VarPtr, VarPtr> var_map_;
   uint64_t next_id_ = 0;
+
+  // Intra-core multi-buffer support: maps a `tile.multi_get` slot var's name to
+  // its (MemRef-bearing) new var, so a producer carrying kMultiBufferAliasSlotAttr
+  // can be retargeted onto that slot's buffer. Slots are always processed before
+  // the producer that names them (LowerToMultiTile emits the multi_get first).
+  std::unordered_map<std::string, VarPtr> mb_slot_by_name_;
 };
 
 // Insert alloc statements at the beginning of a function body.
