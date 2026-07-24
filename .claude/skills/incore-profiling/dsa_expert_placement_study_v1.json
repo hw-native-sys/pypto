@@ -30,7 +30,7 @@
           "control_for": "mtp_store_source",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 36864,
+            "max_peak": 36896,
             "removed_pairs": 9,
             "reuse_cost": 33
           },
@@ -46,7 +46,7 @@
           "name": "mtp_store_source_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 32768,
+            "delta": 32800,
             "seed_buffers": [
               9
             ]
@@ -82,7 +82,7 @@
           "control_for": "mtp_load_destinations",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 40992,
+            "max_peak": 41024,
             "removed_pairs": 28,
             "reuse_cost": 22
           },
@@ -104,7 +104,7 @@
           "name": "mtp_load_destinations_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 32768,
+            "delta": 32800,
             "seed_buffers": [
               11,
               15
@@ -149,7 +149,7 @@
           "control_for": "hca_post_loop_handoffs",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 49376,
+            "max_peak": 49408,
             "removed_pairs": 32,
             "reuse_cost": 46
           },
@@ -171,7 +171,7 @@
           "name": "hca_post_loop_handoffs_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 32768,
+            "delta": 32800,
             "seed_buffers": [
               30,
               31
@@ -202,7 +202,7 @@
           "control_for": "hca_remove_mte3_vector_reuse",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 53600,
+            "max_peak": 53632,
             "removed_pairs": 9,
             "reuse_cost": 0
           },
@@ -218,7 +218,7 @@
           "name": "hca_remove_mte3_vector_reuse_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 32768,
+            "delta": 32800,
             "seed_buffers": [
               34
             ]
@@ -268,7 +268,7 @@
           "control_for": "down_initial_mat_phases",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 333824,
+            "max_peak": 333856,
             "removed_pairs": 15,
             "reuse_cost": 20
           },
@@ -296,7 +296,7 @@
           "name": "down_initial_mat_phases_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 131072,
+            "delta": 131104,
             "seed_buffers": [
               0,
               2,
@@ -340,7 +340,7 @@
           "control_for": "down_post_loop_mat_phases",
           "expected": {
             "added_pairs": 0,
-            "max_peak": 333824,
+            "max_peak": 333856,
             "removed_pairs": 15,
             "reuse_cost": 17
           },
@@ -368,7 +368,7 @@
           "name": "down_post_loop_mat_phases_address_control",
           "role": "address_control",
           "translate_overlap_components": {
-            "delta": 131072,
+            "delta": 131104,
             "seed_buffers": [
               20,
               22,
