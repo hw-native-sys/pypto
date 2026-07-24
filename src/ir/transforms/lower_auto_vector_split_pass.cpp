@@ -292,7 +292,10 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
               std::make_shared<Call>(shard->op_, shard->args_, shard->kwargs_, half_type, shard->span_);
           if (auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
               tt && split_dim < static_cast<int>(tt->shape_.size())) {
-            TileInfo info{HalfDimExtent(tt->shape_[split_dim])};
+            // Record split_dim too: the V->C arm now gathers along the tracked
+            // dim, so a C->V shard result fed straight into a V->C boundary must
+            // carry the real dim (LEFT_RIGHT => 1), not the default 0.
+            TileInfo info{HalfDimExtent(tt->shape_[split_dim]), split_dim};
             tile_vars[assign->var_.get()] = info;
             tile_vars[new_var.get()] = info;
           }

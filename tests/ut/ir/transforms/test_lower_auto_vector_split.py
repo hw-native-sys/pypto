@@ -1135,6 +1135,49 @@ def test_vc_boundary_gathers_on_the_migrated_split_axis():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_vc_boundary_gathers_left_right_shard_fed_directly():
+    """LEFT_RIGHT: a C->V shard result fed straight into a V->C boundary gathers
+    on dim 1 (``split=2``), not dim 0.
+
+    The C->V arm seeds ``tile_vars`` with the shard's own ``split_dim``; if that
+    defaulted to 0, the gather would double rows (``[128, 64] -> [256, 64]``)
+    instead of columns and trip the shape invariant. ``popped`` is used directly
+    as the V->C operand (no intervening compute), so this exercises the shard
+    arm's seeding rather than the per-op halving path.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            popped = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+            back = pl.tile.move(popped, target_memory=pl.Mem.Mat)  # noqa: F841 - V->C boundary
+            out_store = pl.tile.store(popped, [0, 0], out_0)
+            return out_store
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True},
+        )
+        def split_auto(
+            qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            subblock_idx = pl.tile.get_subblock_idx()
+            popped = pl.tile.aiv_shard(qk, split=2)
+            back_mat = pl.tile.aic_gather(popped, split=2)
+            back = pl.tile.move(back_mat, target_memory=pl.Mem.Mat)  # noqa: F841
+            out_store = pl.tile.store(popped, [0, 0 + subblock_idx * 64], out_0)
+            return out_store
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 def test_pure_vector_split_is_left_untouched():
     """A PURE-vector ``pl.split`` function (no cube boundary) is NOT lowered.
 
