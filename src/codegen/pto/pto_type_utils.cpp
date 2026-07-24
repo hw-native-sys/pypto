@@ -122,6 +122,12 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
   return oss.str();
 }
 
+std::string FormatMultiTileBufTypeString(const std::string& slot_tile_buf_str, int count) {
+  std::ostringstream oss;
+  oss << "!pto.multi_tile_buf<" << slot_tile_buf_str << ", count = " << count << ">";
+  return oss.str();
+}
+
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override) {
   TileTypeComponents c;
   c.dtype_str = dtype_str_override.empty() ? DataTypeToMLIR(tile_type.dtype_) : dtype_str_override;

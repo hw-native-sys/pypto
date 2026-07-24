@@ -350,6 +350,26 @@ class PTOCodegen : public CodegenBase {
   void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
+   * @brief Emit a `pto.alloc_multi_tile` for a `tile.alloc_multi` result.
+   *
+   * The result Var carries the per-slot TileType; the op's `count` kwarg gives
+   * the number of physical slots. Reserves `count` contiguous slots (ptoas
+   * subdivides from the base `addr`). Under the PTOAS planner (level2) no `addr`
+   * is emitted and ptoas plans the reservation. Maps 1:1 to ptoas
+   * pto.alloc_multi_tile.
+   */
+  void EmitAllocMultiTile(const ir::VarPtr& mtb_var, const ir::CallPtr& call);
+
+  /**
+   * @brief Emit a `pto.multi_tile_get` for a `tile.multi_get` result.
+   *
+   * Selects the physical slot `index` (arg 1, typically loop_var % count) from
+   * the multi-buffer (arg 0) and binds the result to the per-slot tile handle.
+   * Maps 1:1 to ptoas pto.multi_tile_get.
+   */
+  void EmitMultiTileGet(const ir::VarPtr& slot_var, const ir::CallPtr& call);
+
+  /**
    * @brief Resolve the DPS element vars of a tuple-returning op call
    *
    * Multi-output ops (e.g. tile.gather_compare) return a TupleType. The parser

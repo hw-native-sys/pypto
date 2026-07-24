@@ -46,6 +46,12 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
                                     uint64_t fractal, ir::PadValue pad, int64_t v_row, int64_t v_col,
                                     bool v_row_dynamic = false, bool v_col_dynamic = false);
 
+/// Wrap a per-slot `!pto.tile_buf<...>` string in a multi-buffer envelope:
+/// `!pto.multi_tile_buf<<slot_tile_buf_str>, count = N>` (ptoas MultiTileBufType,
+/// consumed by pto.alloc_multi_tile / pto.multi_tile_get). `count` is the number
+/// of physical slots and must satisfy the ptoas bound (2..16).
+std::string FormatMultiTileBufTypeString(const std::string& slot_tile_buf_str, int count);
+
 /// Intermediate result holder for ExtractTileTypeInfo.
 struct TileTypeComponents {
   std::string dtype_str = "f32";

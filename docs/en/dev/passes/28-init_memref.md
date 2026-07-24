@@ -108,6 +108,10 @@ ForStmt has four loop-carry related variables with specific MemRef sharing rules
 
 Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by MemoryReuse (which inserts `tile.move` if needed).
 
+## Multi-buffer slot retargeting (PTOAS planner)
+
+When `LowerPipelineLoops` lowers a tile carry to a multi-buffer under the PTOAS planner (see [LowerPipelineLoops](25-lower_pipeline_loops.md)), InitMemRef gives each `tile.multi_get` slot its own fresh MemRef (a distinct physical slot). A carry producer tagged with `kMultiBufferAliasSlotAttr` (the slot Var's name) is then retargeted via `ShareMemRefFrom` onto that slot's MemRef, so codegen emits the producer writing `outs(<slot>)` — the carry physically lives in the rotating slot. Slots are recorded by name (`name_hint_` survives the var cloning intervening passes may do) and are always materialized before the producer that names them.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

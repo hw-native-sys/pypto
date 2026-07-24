@@ -24,15 +24,18 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -275,6 +278,21 @@ class LowerPipelineMutator : public IRMutator {
 
     auto start_const = TryGetConstInt(op->start_);
     auto stop_const = TryGetConstInt(op->stop_);
+
+    // Under the PTOAS memory planner, a supported tile loop-carry is lowered to
+    // an intra-core multi-buffer (ptoas multi_tile_buf): the loop stays rolled
+    // and the carry rotates through `factor` physical slots, letting ptoas
+    // overlap iterations (the counterpart of the cross-core slot_num ring
+    // buffer). Unsupported shapes fall through to the unroll path below, so
+    // nothing regresses.
+    const auto* ctx = PassContext::Current();
+    if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS && stop_const.has_value() &&
+        CanLowerToMultiTile(op, factor, start_const, stop_const, step)) {
+      // CanLowerToMultiTile pins start==0 / step==1, so the loop var equals the
+      // iteration number and the trip count is just the (static) stop bound.
+      return LowerToMultiTile(op, inner_body, factor, *stop_const);
+    }
+
     // Cross-core loops are skewed/demoted to Sequential by the earlier
     // SkewCrossCorePipeline pass, so by here only same-core pipeline loops
     // (GM->L1, L1->L0, nested matmul stage loops) remain Pipeline-marked. They
@@ -301,6 +319,177 @@ class LowerPipelineMutator : public IRMutator {
     cleaned->kind_ = ForKind::Sequential;
     cleaned->attrs_ = StripAttr(op->attrs_, kPipelineStagesAttr);
     return cleaned;
+  }
+
+  // ====================================================================
+  // PTOAS-planner intra-core multi-buffer lowering (ptoas multi_tile_buf)
+  // ====================================================================
+
+  /// Monotonic id for uniquely naming multi-buffer temporaries in a function.
+  int32_t next_multi_tile_id_ = 0;
+
+  /// Find the top-level `AssignStmt` in `body` that defines `var` (nullptr if
+  /// the definer is nested / absent — such bodies are not multi-buffer lowerable).
+  static const AssignStmt* TopLevelDefiner(const StmtPtr& body, const Var* var) {
+    if (auto as = std::dynamic_pointer_cast<const AssignStmt>(body)) {
+      return as->var_.get() == var ? as.get() : nullptr;
+    }
+    auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
+    if (!seq) return nullptr;
+    for (const auto& s : seq->stmts_) {
+      if (auto as = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+        if (as->var_.get() == var) return as.get();
+      }
+    }
+    return nullptr;
+  }
+
+  /// Whether `op` is a single-tile-carry pipeline loop this pass can rewrite to a
+  /// multi_tile_buf. v1 supports: factor in [2,16] (ptoas count bound), one tile
+  /// iter_arg with a resolved memory space, one return_var, static bounds with
+  /// start==0 / step==1, and a carry produced by a top-level yield producer.
+  /// Everything else falls back to the unroll path (no regression).
+  bool CanLowerToMultiTile(const ForStmtPtr& op, int64_t factor, const std::optional<int64_t>& start_const,
+                           const std::optional<int64_t>& stop_const, int64_t step) {
+    if (factor < 2 || factor > 16) return false;
+    if (!start_const.has_value() || !stop_const.has_value()) return false;
+    if (*start_const != 0 || step != 1 || *stop_const <= 0) return false;
+    if (op->iter_args_.size() != 1 || op->return_vars_.size() != 1) return false;
+    auto carry_type = std::dynamic_pointer_cast<const TileType>(op->iter_args_[0]->GetType());
+    if (!carry_type || !carry_type->memory_space_.has_value()) return false;
+    auto [body_no_yield, yields] = SplitBodyYield(op->body_);
+    if (yields.size() != 1) return false;
+    auto yield_var = std::dynamic_pointer_cast<const Var>(yields[0]);
+    if (!yield_var) return false;
+    return TopLevelDefiner(op->body_, yield_var.get()) != nullptr;
+  }
+
+  /// Wrap a synthesized op Call in a fresh named Var + AssignStmt.
+  std::pair<VarPtr, StmtPtr> BindCall(const CallPtr& call, const std::string& name, const Span& sp) {
+    auto var = std::make_shared<Var>(name, call->GetType(), sp);
+    return {var, std::make_shared<AssignStmt>(var, call, sp)};
+  }
+
+  /// `%var = tile.alloc_multi(shape) {dtype, target_memory, count}` -> (var, stmt).
+  std::pair<VarPtr, StmtPtr> MakeAllocMulti(const std::shared_ptr<const TileType>& slot_type, int64_t factor,
+                                            const std::string& name, const Span& sp) {
+    Attrs kwargs;
+    kwargs.emplace_back("dtype", slot_type->dtype_);
+    // Guaranteed present by CanLowerToMultiTile; guarded to satisfy the
+    // unchecked-optional-access lint (matches the tile.create build idiom).
+    if (const auto& ms = slot_type->memory_space_) {
+      kwargs.emplace_back("target_memory", *ms);
+    }
+    kwargs.emplace_back("count", static_cast<int>(factor));
+    auto call = OpRegistry::GetInstance().Create(
+        "tile.alloc_multi", {tile_conversion_utils::MakeShapeTuple(slot_type->shape_, sp)}, kwargs, sp);
+    return BindCall(call, name, sp);
+  }
+
+  /// `%var = tile.multi_get(mtb, index) {count}` -> (var, stmt).
+  std::pair<VarPtr, StmtPtr> MakeMultiGet(const VarPtr& mtb, const ExprPtr& index, int64_t factor,
+                                          const std::string& name, const Span& sp) {
+    Attrs kwargs;
+    kwargs.emplace_back("count", static_cast<int>(factor));
+    auto call = OpRegistry::GetInstance().Create("tile.multi_get", {mtb, index}, kwargs, sp);
+    return BindCall(call, name, sp);
+  }
+
+  /// Rebuild `body`, stamping the producer of `yield_var` with the slot-alias
+  /// attr so InitMemRef retargets its buffer onto `slot_name`.
+  StmtPtr StampProducerSlot(const StmtPtr& body, const Var* yield_var, const std::string& slot_name) {
+    auto rebuild = [&](const AssignStmtPtr& as) -> StmtPtr {
+      auto call = std::dynamic_pointer_cast<const Call>(as->value_);
+      INTERNAL_CHECK_SPAN(call, as->span_) << "Internal error: multi-buffer carry producer must be a Call";
+      Attrs attrs = call->attrs_;
+      attrs.emplace_back(kMultiBufferAliasSlotAttr, slot_name);
+      auto stamped = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                            call->GetType(), call->span_);
+      return std::make_shared<AssignStmt>(as->var_, stamped, as->span_);
+    };
+    if (auto as = std::dynamic_pointer_cast<const AssignStmt>(body)) {
+      return as->var_.get() == yield_var ? rebuild(as) : body;
+    }
+    auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
+    INTERNAL_CHECK(seq) << "Internal error: multi-buffer body must be a SeqStmts or AssignStmt";
+    std::vector<StmtPtr> out;
+    out.reserve(seq->stmts_.size());
+    for (const auto& s : seq->stmts_) {
+      auto as = std::dynamic_pointer_cast<const AssignStmt>(s);
+      out.push_back(as && as->var_.get() == yield_var ? rebuild(as) : s);
+    }
+    return std::make_shared<SeqStmts>(std::move(out), seq->span_);
+  }
+
+  /// Clone `inner_body` with (loop_var -> loop_var_val, carry -> carry_read),
+  /// strip its yield, and stamp the yield producer to alias `slot_name`.
+  StmtPtr CloneIterBody(const ForStmtPtr& op, const StmtPtr& inner_body, const ExprPtr& loop_var_val,
+                        const ExprPtr& carry_read, const std::string& slot_name, const Span& sp) {
+    std::unordered_map<const Var*, ExprPtr> sub;
+    sub[op->loop_var_.get()] = loop_var_val;
+    sub[op->iter_args_[0].get()] = carry_read;
+    auto cloned = DeepClone(inner_body, sub, /*clone_def_vars=*/true);
+    auto [body_no_yield, yields] = SplitBodyYield(cloned.cloned_body);
+    INTERNAL_CHECK_SPAN(yields.size() == 1, sp)
+        << "Internal error: multi-buffer body must yield exactly 1 value";
+    auto yield_var = std::dynamic_pointer_cast<const Var>(yields[0]);
+    INTERNAL_CHECK_SPAN(yield_var, sp) << "Internal error: multi-buffer yield must be a Var";
+    return StampProducerSlot(body_no_yield, yield_var.get(), slot_name);
+  }
+
+  /// Lower a single-tile-carry pipeline loop (start==0, step==1, `trip`
+  /// iterations) to a rolled loop over a `factor`-slot multi_tile_buf. Iteration
+  /// k reads slot `(k-1) mod factor` (or the init for k==0, peeled out) and
+  /// writes slot `k mod factor`; the loop result is the final slot, aliased to
+  /// the original return_var.
+  StmtPtr LowerToMultiTile(const ForStmtPtr& op, const StmtPtr& inner_body, int64_t factor, int64_t trip) {
+    Span sp = op->span_;
+    const std::string pfx = "__mtb" + std::to_string(next_multi_tile_id_++);
+    auto carry_iter = op->iter_args_[0];
+    auto carry_type = std::dynamic_pointer_cast<const TileType>(carry_iter->GetType());
+    const ExprPtr init_val = carry_iter->initValue_;
+    const VarPtr return_var = op->return_vars_[0];
+
+    std::vector<StmtPtr> result;
+
+    // 1. Hoisted multi-buffer allocation.
+    auto [mtb_var, mtb_stmt] = MakeAllocMulti(carry_type, factor, pfx, sp);
+    result.push_back(mtb_stmt);
+
+    // 2. Peeled first iteration (k == 0): reads the init directly, writes slot 0.
+    {
+      auto [sc0, sc0_stmt] = MakeMultiGet(mtb_var, MakeConstIndex(0, sp), factor, pfx + "_s0", sp);
+      auto body0 = CloneIterBody(op, inner_body, MakeConstIndex(0, sp), init_val, sc0->name_hint_, sp);
+      result.push_back(sc0_stmt);
+      result.push_back(body0);
+    }
+
+    // 3. Rolled remainder loop for k in [1, trip): reads slot (k-1)%F, writes k%F.
+    if (trip > 1) {
+      VarPtr new_loop_var = CloneLoopVar(op->loop_var_);
+      ExprPtr cur_idx = MakeFloorMod(new_loop_var, MakeConstIndex(factor, sp), sp);
+      ExprPtr prev_idx = MakeFloorMod(MakeAdd(new_loop_var, MakeConstIndex(factor - 1, sp), sp),
+                                      MakeConstIndex(factor, sp), sp);
+      auto [sp_var, sp_stmt] = MakeMultiGet(mtb_var, prev_idx, factor, pfx + "_sp", sp);
+      auto [sc_var, sc_stmt] = MakeMultiGet(mtb_var, cur_idx, factor, pfx + "_sc", sp);
+      auto bodyL = CloneIterBody(op, inner_body, new_loop_var, sp_var, sc_var->name_hint_, sp);
+      auto loop_body = SeqStmts::Flatten(std::vector<StmtPtr>{sp_stmt, sc_stmt, bodyL}, sp);
+      auto loop = std::make_shared<ForStmt>(new_loop_var, MakeConstIndex(1, sp), MakeConstIndex(trip, sp),
+                                            MakeConstIndex(1, sp), std::vector<IterArgPtr>{}, loop_body,
+                                            std::vector<VarPtr>{}, sp, ForKind::Sequential, Attrs{},
+                                            op->leading_comments_);
+      result.push_back(loop);
+    }
+
+    // 4. Bind the final slot ((trip-1) mod F) to the original return_var so
+    //    downstream consumers read the last write (trip >= 1 is guaranteed).
+    auto [res_var, res_stmt] =
+        MakeMultiGet(mtb_var, MakeConstIndex((trip - 1) % factor, sp), factor, pfx + "_res", sp);
+    result.push_back(res_stmt);
+    result.push_back(
+        std::make_shared<AssignStmt>(return_var, std::static_pointer_cast<const Expr>(res_var), sp));
+
+    return SeqStmts::Flatten(std::move(result), sp);
   }
 
   /**

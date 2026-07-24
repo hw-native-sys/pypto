@@ -106,6 +106,15 @@ inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffe
 /// record both memberships and stay separated at every level.
 inline constexpr const char* kPipelineMembershipAttr = "pipeline_membership";
 
+/// Marks a producer Call whose result tile must physically live in a specific
+/// multi-buffer slot (a `tile.multi_get` result), used by the PTOAS-planner
+/// intra-core multi-buffer lowering of pipelined tile carries. Set by
+/// `LowerPipelineLoops` on the yield producer; consumed by `InitMemRef`, which
+/// retargets the producer's MemRef onto the named slot's MemRef so codegen emits
+/// the op writing `outs(<slot>)`. Value: the slot Var's `name_hint_` (a string —
+/// stable across var cloning, unlike a raw VarPtr).
+inline constexpr const char* kMultiBufferAliasSlotAttr = "multi_buffer_alias_slot";
+
 /// Append a ``group:stage`` membership pair to a ``pipeline_membership`` string,
 /// preserving any memberships already present (an inner-loop tag survives when
 /// an enclosing loop re-tags the same tile).
