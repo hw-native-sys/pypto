@@ -118,9 +118,20 @@ def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleTyp
     target_path = tmp_path / "target.json"
     base_path = tmp_path / "base.solution.json"
     spec_path = tmp_path / "spec.json"
+    sibling_problem_dir = tmp_path / "sibling-problems"
+    sibling_solution_dir = tmp_path / "sibling-solutions"
+    sibling_problem_dir.mkdir()
+    sibling_solution_dir.mkdir()
     _write(hard_path, hard)
     _write(target_path, target)
     _write(base_path, _solution(ablation, hard))
+    sibling_problem = _problem(with_cost=True)
+    sibling_problem["instance"] = "other"
+    sibling_solution = _solution(ablation, sibling_problem)
+    sibling_solution["instance"] = "other"
+    sibling_solution["problem_fingerprint"] = ablation._fingerprint(sibling_problem)
+    _write(sibling_problem_dir / "pypto_other.dsa.json", sibling_problem)
+    _write(sibling_solution_dir / "pypto_other.dsa.solution.json", sibling_solution)
     _write(
         spec_path,
         {
@@ -156,6 +167,8 @@ def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleTyp
         {"compact": hard_path},
         tmp_path / "out",
         case_name="case",
+        sibling_problem_dir=sibling_problem_dir,
+        sibling_solution_dir=sibling_solution_dir,
     )
 
     variant = json.loads(
@@ -166,6 +179,9 @@ def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleTyp
     assert summary["variants"][0]["statistics"]["reuse_cost"] == 0
     assert summary["variants"][0]["removed_overlaps"] == [{"first": 0, "second": 1, "bytes": 64}]
     assert summary["variants"][0]["solution"] == "separate_b/pypto_sample.dsa.solution.json"
+    assert summary["sibling_solutions"] == ["pypto_other.dsa.solution.json"]
+    assert (tmp_path / "out" / "compact" / "pypto_other.dsa.solution.json").is_file()
+    assert (tmp_path / "out" / "separate_b" / "pypto_other.dsa.solution.json").is_file()
 
 
 @pytest.mark.parametrize(
@@ -249,6 +265,42 @@ def test_prepare_rejects_incompatible_hard_geometry(ablation: ModuleType, tmp_pa
             {"base": source_path},
             tmp_path / "out",
             case_name="case",
+        )
+
+
+def test_prepare_rejects_incomplete_sibling_solution_set(ablation: ModuleType, tmp_path: Path):
+    problem = _problem(with_cost=True)
+    problem_path = tmp_path / "problem.json"
+    solution_path = tmp_path / "solution.json"
+    spec_path = tmp_path / "spec.json"
+    sibling_problem_dir = tmp_path / "sibling-problems"
+    sibling_solution_dir = tmp_path / "sibling-solutions"
+    sibling_problem_dir.mkdir()
+    sibling_solution_dir.mkdir()
+    _write(problem_path, problem)
+    _write(solution_path, _solution(ablation, problem))
+    _write(
+        spec_path,
+        {
+            "cases": [{"instance": "sample", "name": "case", "variants": []}],
+            "experiment": "test",
+            "schema_version": 1,
+        },
+    )
+    sibling = _problem(with_cost=True)
+    sibling["instance"] = "other"
+    _write(sibling_problem_dir / "pypto_other.dsa.json", sibling)
+
+    with pytest.raises(ValueError, match="has no matching solution"):
+        ablation.prepare(
+            problem_path,
+            spec_path,
+            {"base": solution_path},
+            {"base": problem_path},
+            tmp_path / "out",
+            case_name="case",
+            sibling_problem_dir=sibling_problem_dir,
+            sibling_solution_dir=sibling_solution_dir,
         )
 
 

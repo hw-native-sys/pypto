@@ -162,6 +162,41 @@ def _validate_envelope(problem: dict[str, Any], solution: dict[str, Any]) -> Non
     _validate_solution(problem, solution)
 
 
+def _load_sibling_solutions(
+    problem_dir: Path | None,
+    solution_dir: Path | None,
+    *,
+    target_instance: str,
+) -> dict[str, dict[str, Any]]:
+    if (problem_dir is None) != (solution_dir is None):
+        raise ValueError("--sibling-problem-dir and --sibling-solution-dir must be provided together")
+    if problem_dir is None or solution_dir is None:
+        return {}
+
+    siblings: dict[str, dict[str, Any]] = {}
+    for solution_path in sorted(solution_dir.glob("*.dsa.solution.json")):
+        problem_name = solution_path.name.replace(".dsa.solution.json", ".dsa.json")
+        problem_path = problem_dir / problem_name
+        if not problem_path.is_file():
+            raise ValueError(f"sibling solution {solution_path} has no matching problem {problem_path}")
+        sibling_problem = _read_json(problem_path)
+        sibling_solution = _read_json(solution_path)
+        _validate_envelope(sibling_problem, sibling_solution)
+        if sibling_problem["instance"] == target_instance:
+            continue
+        if solution_path.name in siblings:
+            raise ValueError(f"sibling solution set repeats {solution_path.name}")
+        siblings[solution_path.name] = sibling_solution
+    for problem_path in sorted(problem_dir.glob("*.dsa.json")):
+        sibling_problem = _read_json(problem_path)
+        if sibling_problem["instance"] == target_instance:
+            continue
+        solution_name = problem_path.name.replace(".dsa.json", ".dsa.solution.json")
+        if solution_name not in siblings:
+            raise ValueError(f"sibling problem {problem_path} has no matching solution")
+    return siblings
+
+
 def _overlap_geometry(problem: dict[str, Any], solution: dict[str, Any]) -> dict[tuple[int, int], int]:
     body = problem["problem"]
     buffers = {buffer["id"]: buffer for buffer in body["buffers"]}
@@ -294,6 +329,8 @@ def prepare(
     output_root: Path,
     *,
     case_name: str,
+    sibling_problem_dir: Path | None = None,
+    sibling_solution_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Prepare one case's placement variants and return its validation report."""
     problem = _read_json(problem_path)
@@ -329,21 +366,38 @@ def prepare(
         _validate_envelope(problem, rebound)
         bases[name] = rebound
 
+    siblings = _load_sibling_solutions(
+        sibling_problem_dir,
+        sibling_solution_dir,
+        target_instance=problem["instance"],
+    )
     output_root.mkdir(parents=True, exist_ok=True)
     reports: list[dict[str, Any]] = []
+    endpoint_directories: dict[str, Path] = {}
     for name, solution in sorted(bases.items()):
-        output = output_root / name / f"pypto_{problem['instance']}.dsa.solution.json"
+        endpoint = output_root / name
+        endpoint_directories[name] = endpoint
+        output = endpoint / f"pypto_{problem['instance']}.dsa.solution.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(solution, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for variant in case["variants"]:
         if variant["base"] not in bases:
             raise ValueError(f"variant {variant['name']!r} requires missing base {variant['base']!r}")
         solution, report = _apply_variant(problem, bases[variant["base"]], variant)
-        output = output_root / variant["name"] / f"pypto_{problem['instance']}.dsa.solution.json"
+        endpoint = output_root / variant["name"]
+        endpoint_directories[variant["name"]] = endpoint
+        output = endpoint / f"pypto_{problem['instance']}.dsa.solution.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(solution, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         report["solution"] = str(output.relative_to(output_root))
         reports.append(report)
+
+    for endpoint in endpoint_directories.values():
+        for name, sibling in siblings.items():
+            (endpoint / name).write_text(
+                json.dumps(sibling, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
     summary = {
         "schema_version": 1,
@@ -351,6 +405,7 @@ def prepare(
         "case": case,
         "problem": str(problem_path),
         "problem_fingerprint": _fingerprint(problem),
+        "sibling_solutions": sorted(siblings),
         "bases": {name: _statistics(problem, solution) for name, solution in sorted(bases.items())},
         "variants": reports,
     }
@@ -367,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case", required=True)
     parser.add_argument("--base-solution", action="append", default=[], metavar="NAME=PATH")
     parser.add_argument("--base-problem", action="append", default=[], metavar="NAME=PATH")
+    parser.add_argument("--sibling-problem-dir", type=Path)
+    parser.add_argument("--sibling-solution-dir", type=Path)
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -377,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
             _parse_named_paths(args.base_problem, "--base-problem"),
             args.output_root,
             case_name=args.case,
+            sibling_problem_dir=args.sibling_problem_dir,
+            sibling_solution_dir=args.sibling_solution_dir,
         )
     except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
         parser.error(str(error))
