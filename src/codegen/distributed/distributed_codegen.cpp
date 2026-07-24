@@ -1080,9 +1080,10 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // CHIP Worker: dispatch via ``_submit_chip`` (wraps orch.submit_next_level).
     // N7: thread the dispatch ``device=`` attr (N3 parser) into the simpler
     // runtime's ``worker=`` kwarg — a rank-pinned dispatch passes its rank; a
-    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``-1``
-    // (unconstrained; see simpler/python/simpler/orchestrator.py). ``_submit_chip``
-    // owns the per-dispatch DFX ``output_prefix`` namespacing — see its docstring.
+    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``-1`` as a
+    // sentinel. ``_submit_chip`` resolves the sentinel to the local chip worker
+    // (simpler requires an explicit non-negative NEXT_LEVEL worker id) and owns
+    // the per-dispatch DFX ``output_prefix`` namespacing — see its docstring.
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "-1" : rank_expr;
     emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
