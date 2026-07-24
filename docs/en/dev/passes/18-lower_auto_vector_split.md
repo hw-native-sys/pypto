@@ -338,10 +338,42 @@ gathered tile keeps the FULL `[128, 128]` `Mat` shape — the cube side never
 sees a halved tile:
 
 ```python
-gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Mat]  = pl.tile.aic_gather(vec, split=1)
+# `v` is the per-lane HALF the affinity gate produced, e.g. [64, 128].
+gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
                                                                       target_memory=pl.Mem.Mat)
 ```
+
+**The operand must be a per-lane half.** `tile.aic_gather` is declared
+HALF → FULL, so the gather doubles `[64, 128] → [128, 128]`, which is exactly the
+FULL result type the cube placement move keeps. That agreement is a
+*precondition*, not a guarantee: a VECTOR value can reach the boundary un-halved
+— a `Vec` parameter used directly, or a tile whose split dim is a singleton the
+affinity gate deliberately preserves. Doubling such an operand would produce a
+`[256, 128]` gather feeding a move still typed `[128, 128]`, contradicting
+`tile.move`'s shape-preserving contract and yielding IR that does not survive
+print→parse. There is no correct gather for a value with no half, so the pass
+**rejects** it with an actionable `ValueError`:
+
+```text
+LowerAutoVectorSplit: the V->C boundary tile.move here carries a full-width
+vector operand 'vec'. tile.aic_gather reassembles the two AIV lanes' per-lane
+halves into the full tile the cube expects, so its operand must be a value the
+split halving produced (a tile.load / tile.slice / elementwise result inside the
+vector sub-region). An un-halved value has no half to gather — either derive the
+per-lane half first (load or slice the value inside the split function) and move
+that to the cube side, or, if the split axis is a singleton that cannot be
+halved, keep the value on the vector side.
+```
+
+**The gather follows the operand's split axis, not the function's.** A
+`tile.reshape` can migrate the split axis — the rms_norm `[N, 1] ↔ [1, N]` column
+reshape moves it from dim 0 to dim 1 — and `TileInfo::split_dim` tracks where it
+ended up. The gather is emitted with the `split` encoding of *that* dim
+(`dim 0 → 1`, `dim 1 → 2`), so a `[1, 8]` lane-local operand under an `UpDown`
+function gathers to `[1, 16]` via `split=2`, matching the move. Doubling the
+function axis instead would yield `[2, 8]`. A tracked split dim outside `{0, 1}`
+cannot be expressed as a `split` attr on a 2D gather and is rejected.
 
 The gather result is `Mat`, not `Vec`: the declared type of a boundary op names
 the **consuming** lane's space, and AIC pops a V→C transfer into L1. (`Vec` would
