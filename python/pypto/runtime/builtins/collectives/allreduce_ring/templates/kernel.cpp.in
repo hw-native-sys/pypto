@@ -54,33 +54,20 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 
 // Per-round barrier row: AtomicAdd(0→1) / WaitGe(1), single-shot per row.
 //
-// Follows the InsertCommFence (PR #2076) two-sided memory consistency
-// contract for ptoas ≥ 0.50:
-//
-//   Publish side: dcci(ENTIRE_DATA_CACHE) then dsb(DSB_DDR) (fence.barrier_all).
-//      The dcci invalidates the local data cache so the following dsb flushes
-//      dirty lines (TSTORE results) to DDR, making them visible to peers.
-//   Consume side: the same dcci(ENTIRE_DATA_CACHE) also invalidates the
-//      reader's data cache so the subsequent TLOAD discovers peer writes.
-//
-//   RoundBarrier:
-//     1. dcci(ENTIRE_DATA_CACHE) — publish + consume cache invalidate.
-//     2. dsb(DSB_DDR) — fence.barrier_all; commits publisher's writes to DDR.
-//     3. TNOTIFY / TWAIT — all-to-all signal round-trip.
-//     4. pipe_barrier(PIPE_ALL) — drain pipes before TLOAD.
-//
-// Wire safety: dsb(DSB_DDR) after dcci ensures every rank's TSTORE results
-// are flushed to DDR before the next rank's post-barrier TLOAD.  The ring
-// schedule introduces remote-read-after-remote-write chains across
-// consecutive steps that the mesh scheme avoids.
+// RoundBarrier follows the simpler repo's ring collective pattern
+// (tests/st/worker/collectives/allreduce/kernels/aiv/allreduce_ibing_kernel.cpp):
+// TNOTIFY / TWAIT + pipe_barrier(PIPE_ALL) without dcci / dsb.  Each AICore
+// step body drains MTE pipes (pipe_barrier(PIPE_ALL)) before reaching
+// RoundBarrier, so TSTORE results are committed by the time TNOTIFY fires.
+// TWAIT ensures the peer has also reached the barrier, and the trailing
+// pipe_barrier drains any in-flight TNOTIFY / TWAIT traffic before the next
+// TLOAD reads the peer's buffer.
 //
 // Future optimisation: once the kernel moves to a TPUT push model, the
 // barrier can be relaxed to O(1) per invocation (NeighborBarrier:
 // left/right only).  TPUT's write pipeline handles the DDR ordering.
 AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                 int nranks) {
-  dcci((__gm__ void *)0, ENTIRE_DATA_CACHE);
-  dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) {
       continue;
