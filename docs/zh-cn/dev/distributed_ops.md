@@ -318,8 +318,8 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 
 | 辅助函数 | 作用 |
 | -------- | ---- |
-| `EmitCommRemoteOffsetInline` | 在调用点**内联** `(ctx, peer)` → peer 相对本地的**元素偏移**运算（CommContext 的 `pto.load_scalar` 读取 + 字节→元素 `arith.divsi`）。之所以内联而非 `func.call` 一个按 dtype 的辅助函数,是因为 ptoas 的 `pto-memory-consistency` pass 拒绝对持有 CommContext 读取的被调用者发 `func.call` |
-| `EmitCommRemoteView` | 在调用点发出内联偏移 + `addptr` + `make_tensor_view`,得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
+| `CommRemoteOffset_<dtype>` | 按 dtype 的 MLIR 辅助函数（由 `PTOCodegen::EmitCommRemoteOffsetHelpers` 一次性发出）,把 `(ctx, peer)` 转为 peer 窗口切片的字节偏移 |
+| `EmitCommRemoteView` | 在调用点发出 `CommRemoteOffset + addptr + make_tensor_view`,得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
 | `EmitPartitionViewPTO` | 用给定 offsets/sizes 把 tensor view 包成全切片 `partition_view`（被每个算子的本地与 peer 操作数使用） |
 | `ResolveDistTensorBinding` | 把 `DistributedTensor` 实参解析为其 codegen 绑定（类型 + 窗口变量） |
 | `AsTensorTypeLike` | kind-trait 向下转换,在统一读取视图 element/shape 信息处同时接受 `TensorType` 与 `DistributedTensorType` |

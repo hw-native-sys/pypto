@@ -65,7 +65,6 @@ TENSOR_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
-    "InsertCommFence",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -108,7 +107,6 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "Simplify",
     "MaterializeRuntimeScopes",
     "ClassifyIterArgCarry",
-    "InsertCommFence",
 ]
 
 
