@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -588,6 +589,25 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
   return out;
 }
 
+// Emit ``pto.addptr`` + ``pto.make_tensor_view`` for a 1-element scalar
+// view rooted at ``base_ptr + off``, returning the view SSA and its MLIR
+// type.  Used by ``system.cacheinvalid`` (scalar write path) and any other
+// op that needs a typed single-element tensor_view from a computed pointer.
+static std::pair<std::string, std::string> EmitScalarTensorViewPTO(const std::string& base_ptr,
+                                                                   const std::string& off,
+                                                                   const std::string& ptr_type,
+                                                                   const std::string& dtype_str,
+                                                                   codegen::PTOCodegen& codegen) {
+  const std::string write_ptr = codegen.NewTemp();
+  codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " + ptr_type);
+  const std::string c1_index = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+  const std::string scalar_view = codegen.NewTemp();
+  const std::string view_type = "!pto.tensor_view<1x" + dtype_str + ">";
+  codegen.Emit(scalar_view + " = pto.make_tensor_view " + write_ptr + ", shape = [" + c1_index +
+               "], strides = [" + c1_index + "] {layout = #pto.layout<nd>} : " + view_type);
+  return {scalar_view, view_type};
+}
+
 void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -838,10 +858,12 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
 
     const std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
 
-    // A region of all-ones sizes is a single element (scalar write): flatten the
-    // N-D offsets into a linear element offset and invalidate through a raw ptr.
-    // Any larger dimension (or a dynamic size) is a tile store: address the region
-    // through a partition_tensor_view, matching tile.store's outs() operand.
+    // A region of all-ones sizes is a single element (scalar write): compute
+    // a flat element offset and emit a 1-element typed tensor_view rooted at
+    // the resulting pointer via EmitScalarTensorViewPTO. Any larger dimension
+    // (or a dynamic size) is a tile store: address the region through a
+    // partition_tensor_view, matching tile.store's outs() operand.
+    // Both paths converge to a single ``pto.cmo.cacheinvalid`` emit.
     bool is_scalar_write = true;
     for (const auto& size : shapes_tuple->elements_) {
       auto size_const = As<ir::ConstInt>(size);
@@ -851,25 +873,24 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
       }
     }
 
+    std::string view_ssa;
+    std::string view_type;
+
     if (is_scalar_write) {
       const std::string base_ptr = codegen.GetTensorBasePtr(tensor_var);
       const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
       const std::string off = GetFlatOffsetSSA(offsets_tuple, tensor_type->shape_, codegen);
-      const std::string write_ptr = codegen.NewTemp();
-      codegen.Emit(write_ptr + " = pto.addptr " + base_ptr + ", " + off + " : " + ptr_type + " -> " +
-                   ptr_type);
-      codegen.Emit("pto.cmo.cacheinvalid " + write_ptr + " single_cache_line");
+      std::tie(view_ssa, view_type) = EmitScalarTensorViewPTO(base_ptr, off, ptr_type, dtype_str, codegen);
     } else {
       const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
       const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-      const std::string partition_type =
-          MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
-      const std::string payload_view =
-          EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
-                               GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
-                               GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
-      codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
+      view_type = MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+      view_ssa = EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, view_type,
+                                      GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
+                                      GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
     }
+
+    codegen.Emit("pto.cmo.cacheinvalid " + view_ssa + " single_cache_line : " + view_type);
     return std::string("");
   });
 }
