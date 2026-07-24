@@ -66,6 +66,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -311,11 +312,41 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // move). Resolve it to the halved var so aic_gather doubles HALF -> FULL;
           // using the original full-typed reference would over-double to 2x FULL.
           auto src = call->args_[0];
-          if (auto src_var = AsVarLike(src)) {
-            auto it = var_replacements.find(src_var.get());
-            if (it != var_replacements.end()) src = it->second;
+          auto src_var = AsVarLike(src);
+          auto tracked = src_var ? tile_vars.find(src_var.get()) : tile_vars.end();
+          // Precondition, not a guarantee: a Vec param moved straight to cube, or a
+          // singleton split dim the affinity gate preserves, reaches here un-halved.
+          // Reject rather than emit a doubled operand under a FULL-typed move.
+          CHECK_SPAN(tracked != tile_vars.end(), call->span_)
+              << "LowerAutoVectorSplit: the V->C boundary tile.move here carries a full-width "
+              << "vector operand" << (src_var ? " '" + src_var->name_hint_ + "'" : "")
+              << ". tile.aic_gather reassembles the two AIV lanes' per-lane halves into the full "
+              << "tile the cube expects, so its operand must be a value the split halving "
+              << "produced (a tile.load / tile.slice / elementwise result inside the vector "
+              << "sub-region). An un-halved value has no half to gather — either derive the "
+              << "per-lane half first (load or slice the value inside the split function) and "
+              << "move that to the cube side, or, if the split axis is a singleton that cannot "
+              << "be halved, keep the value on the vector side.";
+          if (auto it = var_replacements.find(src_var.get()); it != var_replacements.end()) {
+            src = it->second;
           }
-          auto gather = MakeReshapeOpCall("tile.aic_gather", src, split_int, call->span_);
+          // Gather along the OPERAND's own split axis, not the function/region mode:
+          // a tile.reshape can migrate the split axis (the rms_norm [N,1]<->[1,N]
+          // column reshape moves it from dim 0 to dim 1), and TileInfo::split_dim
+          // tracks where it actually ended up. Doubling the function axis instead
+          // would reassemble the wrong dimension — for a [1,8] operand under UP_DOWN
+          // it yields [2,8] where the cube-placement move expects [1,16].
+          const int tracked_split_dim = tracked->second.split_dim;
+          CHECK_SPAN(tracked_split_dim == 0 || tracked_split_dim == 1, call->span_)
+              << "LowerAutoVectorSplit: the V->C boundary operand"
+              << (src_var ? " '" + src_var->name_hint_ + "'" : "") << " carries its split on dim "
+              << tracked_split_dim
+              << ", but tile.aic_gather reassembles a 2D tile along dim 0 or dim 1 only. Cross to "
+              << "the cube side before the op that moved the split axis there.";
+          // SplitMode encoding: dim 0 -> UP_DOWN(1), dim 1 -> LEFT_RIGHT(2), matching
+          // DeduceSplitReshape's `axis = (split == 1) ? 0 : 1`.
+          const int gather_split = tracked_split_dim == 0 ? 1 : 2;
+          auto gather = MakeReshapeOpCall("tile.aic_gather", src, gather_split, call->span_);
           // Gather result: full shape, with the memory space OpRegistry::Create
           // fills in from tile.aic_gather's set_output_memory declaration — Mat, the
           // CONSUMING (cube) lane, which is the space ExpandMixedKernel pops the
@@ -331,7 +362,25 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           auto full_mat_var =
               std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
           result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
-          // Original cube placement move, now on the FULL gathered tile.
+          // Original cube placement move, now on the FULL gathered tile. Keeping the
+          // move's original result type is only valid if the gather reassembled back
+          // to exactly that shape — now a genuine invariant, since the gather doubles
+          // the operand's own tracked split axis and both user-facing preconditions
+          // (operand halved; split dim gatherable) are enforced above. Compare shapes
+          // only: the gather type deliberately drops layout.
+          auto gathered_tile = As<TileType>(gather_type);
+          auto move_tile = As<TileType>(call->GetType());
+          INTERNAL_CHECK_SPAN(gathered_tile && move_tile, call->span_)
+              << "Internal error: a V->C boundary tile.move and its aic_gather must both be tiles";
+          INTERNAL_CHECK_SPAN(gathered_tile->shape_.size() == move_tile->shape_.size(), call->span_)
+              << "Internal error: aic_gather result rank " << gathered_tile->shape_.size()
+              << " does not match the cube-placement move's rank " << move_tile->shape_.size();
+          for (size_t i = 0; i < gathered_tile->shape_.size(); ++i) {
+            INTERNAL_CHECK_SPAN(structural_equal(gathered_tile->shape_[i], move_tile->shape_[i]), call->span_)
+                << "Internal error: aic_gather result dim " << i
+                << " does not match the cube-placement move's result type; the V->C boundary "
+                << "would emit a tile.move whose result shape contradicts its operand";
+          }
           std::vector<ExprPtr> move_args = call->args_;
           move_args[0] = full_mat_var;
           auto new_move = std::make_shared<Call>(call->op_, std::move(move_args), call->kwargs_,

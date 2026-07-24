@@ -280,10 +280,38 @@ V→C `tile.move` 变为 `tile.aic_gather`；对折叠后 tile 的 cube 放置 m
 `[128, 128]` `Mat`——cube 侧绝不会看到折半 tile：
 
 ```python
-gathered_mat: pl.Tile[[..], pl.FP32, pl.Mem.Mat]  = pl.tile.aic_gather(vec, split=1)
+# `v` 是 affinity gate 产出的每 lane 折半 tile，例如 [64, 128]。
+gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
                                                                       target_memory=pl.Mem.Mat)
 ```
+
+**操作数必须是每 lane 的折半 tile。** `tile.aic_gather` 声明为 HALF → FULL，因此
+gather 把 `[64, 128]` 加倍为 `[128, 128]`，恰好等于 cube 放置 move 所保留的全尺寸
+结果类型。这种一致性是**前置条件**而非保证：向量值可能以未折半的形式到达边界——
+例如直接使用的 `Vec` 参数，或 split 维为 1 而被 affinity gate 特意保留的 tile。对
+这类操作数做加倍会得到 `[256, 128]` 的 gather，而其后的 move 仍是 `[128, 128]`，
+这与 `tile.move` 的保形契约矛盾，且产生的 IR 无法通过 print→parse 往返。既然没有
+折半就不存在正确的 gather，本 pass 会以可操作的 `ValueError` **拒绝**它：
+
+```text
+LowerAutoVectorSplit: the V->C boundary tile.move here carries a full-width
+vector operand 'vec'. tile.aic_gather reassembles the two AIV lanes' per-lane
+halves into the full tile the cube expects, so its operand must be a value the
+split halving produced (a tile.load / tile.slice / elementwise result inside the
+vector sub-region). An un-halved value has no half to gather — either derive the
+per-lane half first (load or slice the value inside the split function) and move
+that to the cube side, or, if the split axis is a singleton that cannot be
+halved, keep the value on the vector side.
+```
+
+**gather 沿操作数自身的 split 轴，而非函数的 split 轴。** `tile.reshape` 可能迁移
+split 轴——rms_norm 的 `[N, 1] ↔ [1, N]` 列 reshape 会把它从 dim 0 移到 dim 1——
+而 `TileInfo::split_dim` 记录了它最终所在的位置。gather 使用**该维度**对应的
+`split` 编码发射（`dim 0 → 1`，`dim 1 → 2`），因此在 `UpDown` 函数中，lane 本地
+的 `[1, 8]` 操作数经由 `split=2` gather 为 `[1, 16]`，与 move 一致；若改为对函数
+轴加倍则会得到 `[2, 8]`。若追踪到的 split 维不在 `{0, 1}` 内，则无法表示为 2D
+gather 的 `split` 属性，会被拒绝。
 
 gather 结果是 `Mat` 而非 `Vec`：边界算子声明的类型指的是**消费侧** lane 的空间，
 而 AIC 会把 V→C 传输 pop 进 L1。（`Vec` 指的是*生产侧* lane，与镜像算子
