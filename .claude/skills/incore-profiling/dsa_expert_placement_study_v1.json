@@ -1,0 +1,180 @@
+{
+  "cases": [
+    {
+      "instance": "mtp_projection_quant",
+      "name": "mtp_projection_quant",
+      "program": "models/deepseek/v4/decode_mtp.py",
+      "standalone_kernel": "mtp_projection_quant",
+      "variants": [
+        {
+          "base": "compact",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 4128,
+            "removed_pairs": 9,
+            "reuse_cost": 33
+          },
+          "hypothesis": "Isolate the first-loop outbound-DMA source from later inbound-DMA destinations.",
+          "moves": [
+            {
+              "buffer": 9,
+              "from_offset": 0,
+              "name": "mem_vec_19",
+              "to_offset": 1024
+            }
+          ],
+          "name": "mtp_store_source"
+        },
+        {
+          "base": "compact",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 8224,
+            "removed_pairs": 28,
+            "reuse_cost": 22
+          },
+          "hypothesis": "Isolate the second-loop inbound-DMA destinations while preserving their mutual temporal reuse.",
+          "moves": [
+            {
+              "buffer": 11,
+              "from_offset": 32,
+              "name": "mem_vec_22",
+              "to_offset": 4128
+            },
+            {
+              "buffer": 15,
+              "from_offset": 0,
+              "name": "mem_vec_28",
+              "to_offset": 4128
+            }
+          ],
+          "name": "mtp_load_destinations"
+        }
+      ]
+    },
+    {
+      "instance": "prefill_hca_c128_rmsnorm_rope",
+      "name": "prefill_hca_c128_rmsnorm_rope",
+      "program": "models/deepseek/v4/prefill_attention_hca.py",
+      "standalone_kernel": "prefill_hca_c128_rmsnorm_rope",
+      "variants": [
+        {
+          "base": "compact",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 16608,
+            "removed_pairs": 32,
+            "reuse_cost": 46
+          },
+          "hypothesis": "Remove two post-loop outbound-to-inbound DMA handoff families without adopting the global loose layout.",
+          "moves": [
+            {
+              "buffer": 30,
+              "from_offset": 0,
+              "name": "mem_vec_44",
+              "to_offset": 14432
+            },
+            {
+              "buffer": 31,
+              "from_offset": 2304,
+              "name": "mem_vec_45",
+              "to_offset": 16480
+            }
+          ],
+          "name": "hca_post_loop_handoffs"
+        },
+        {
+          "base": "rp",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 20832,
+            "removed_pairs": 9,
+            "reuse_cost": 0
+          },
+          "hypothesis": "Remove the loose layout's suspected outbound-DMA source to vector gather reuse.",
+          "moves": [
+            {
+              "buffer": 34,
+              "from_offset": 4096,
+              "name": "mem_vec_48",
+              "to_offset": 18784
+            }
+          ],
+          "name": "hca_remove_mte3_vector_reuse"
+        }
+      ]
+    },
+    {
+      "instance": "down_dual_proj",
+      "name": "down_dual_proj",
+      "program": "models/qwen3/14b/decode_layer_a8w8.py",
+      "standalone_kernel": "down_dual_proj",
+      "variants": [
+        {
+          "base": "compact",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 202752,
+            "removed_pairs": 15,
+            "reuse_cost": 20
+          },
+          "hypothesis": "Isolate the initial MAT phases to test whether their MTE1-to-MTE2 handoffs are latency-visible.",
+          "moves": [
+            {
+              "buffer": 0,
+              "from_offset": 0,
+              "name": "mem_mat_3",
+              "to_offset": 135168
+            },
+            {
+              "buffer": 2,
+              "from_offset": 0,
+              "name": "mem_mat_5",
+              "to_offset": 137216
+            },
+            {
+              "buffer": 5,
+              "from_offset": 0,
+              "name": "mem_mat_8",
+              "to_offset": 169984
+            }
+          ],
+          "name": "down_initial_mat_phases"
+        },
+        {
+          "base": "compact",
+          "expected": {
+            "added_pairs": 0,
+            "max_peak": 202752,
+            "removed_pairs": 15,
+            "reuse_cost": 17
+          },
+          "hypothesis": "Isolate the post-loop MAT phases while leaving the initial phases compact.",
+          "moves": [
+            {
+              "buffer": 20,
+              "from_offset": 0,
+              "name": "mem_mat_25",
+              "to_offset": 135168
+            },
+            {
+              "buffer": 22,
+              "from_offset": 0,
+              "name": "mem_mat_27",
+              "to_offset": 137216
+            },
+            {
+              "buffer": 24,
+              "from_offset": 0,
+              "name": "mem_mat_29",
+              "to_offset": 169984
+            }
+          ],
+          "name": "down_post_loop_mat_phases"
+        }
+      ]
+    }
+  ],
+  "experiment": "expert_dsa_rp_ablation_v1",
+  "schema_version": 1
+}
