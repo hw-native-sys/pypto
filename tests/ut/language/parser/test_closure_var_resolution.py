@@ -105,7 +105,8 @@ class TestClosureVarAsPositionalArg:
 
         @pl.function
         def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, M)  # type: ignore[arg-type]
+            # ``M`` is a DynVar (INDEX); cast before use as a tensor scalar operand.
+            result: pl.Tensor[[64], pl.FP32] = pl.mul(x, pl.cast(M, pl.INT32))  # type: ignore[arg-type]
             return result
 
         assert isinstance(func, ir.Function)

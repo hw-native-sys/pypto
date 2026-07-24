@@ -82,16 +82,18 @@ class TestBasicUnroll:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.unroll(3):
-                    x = pl.add(x, i)
+                    # ``i`` is an INDEX loop var; a tile/tensor scalar operand may
+                    # not carry ``index``, so cast it (see _normalize_scalar_operand).
+                    x = pl.add(x, pl.cast(i, pl.INT32))
                 return x
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 0)
-                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1)
-                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 2)
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(pl.const(0, pl.INDEX), pl.INT32))
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, pl.cast(pl.const(1, pl.INDEX), pl.INT32))
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, pl.cast(pl.const(2, pl.INDEX), pl.INT32))
                 return x_2
 
         After = _unroll_and_ssa(Before)
@@ -134,16 +136,17 @@ class TestBasicUnroll:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.unroll(6, 0, -2):
-                    x = pl.add(x, i)
+                    # ``i`` is an INDEX loop var; cast before use as a scalar operand.
+                    x = pl.add(x, pl.cast(i, pl.INT32))
                 return x
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 6)
-                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 4)
-                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 2)
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(pl.const(6, pl.INDEX), pl.INT32))
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, pl.cast(pl.const(4, pl.INDEX), pl.INT32))
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, pl.cast(pl.const(2, pl.INDEX), pl.INT32))
                 return x_2
 
         After = _unroll_and_ssa(Before)

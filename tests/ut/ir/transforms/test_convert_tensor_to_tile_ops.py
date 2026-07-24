@@ -3836,7 +3836,8 @@ class TestSpmdBlockIdentityConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 idx: pl.Scalar[pl.INDEX] = pl.tensor.get_block_idx()
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, idx)
+                # ``idx`` is INDEX; cast before use as a tensor scalar operand.
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(idx, pl.INT32))
                 return y
 
             @pl.function
@@ -3854,7 +3855,7 @@ class TestSpmdBlockIdentityConversion:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 idx = pl.tile.get_block_idx()
-                y__tile = pl.tile.adds(x__tile, idx)
+                y__tile = pl.tile.adds(x__tile, pl.cast(idx, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
                 return ret0__store
 
@@ -3873,7 +3874,8 @@ class TestSpmdBlockIdentityConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 idx: pl.Scalar[pl.INDEX] = pl.tensor.get_subblock_idx()
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, idx)
+                # ``idx`` is INDEX; cast before use as a tensor scalar operand.
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(idx, pl.INT32))
                 return y
 
             @pl.function
@@ -3891,7 +3893,7 @@ class TestSpmdBlockIdentityConversion:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 idx = pl.tile.get_subblock_idx()
-                y__tile = pl.tile.adds(x__tile, idx)
+                y__tile = pl.tile.adds(x__tile, pl.cast(idx, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
                 return ret0__store
 
@@ -3910,7 +3912,8 @@ class TestSpmdBlockIdentityConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 n: pl.Scalar[pl.INDEX] = pl.tensor.get_block_num()
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, n)
+                # ``n`` is INDEX; cast before use as a tensor scalar operand.
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(n, pl.INT32))
                 return y
 
             @pl.function
@@ -3928,7 +3931,7 @@ class TestSpmdBlockIdentityConversion:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec)
                 n = pl.tile.get_block_num()
-                y__tile = pl.tile.adds(x__tile, n)
+                y__tile = pl.tile.adds(x__tile, pl.cast(n, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
                 return ret0__store
 
@@ -3952,7 +3955,8 @@ class TestSpmdBlockIdentityConversion:
                 i: pl.Scalar[pl.INDEX] = pl.get_block_idx()
                 s: pl.Scalar[pl.INDEX] = pl.get_subblock_idx()
                 n: pl.Scalar[pl.INDEX] = pl.get_block_num()
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, i + s + n)
+                # ``i + s + n`` is an INDEX scalar; cast before use as an operand.
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, pl.cast(i + s + n, pl.INT32))
                 return y
 
             @pl.function
@@ -3972,7 +3976,7 @@ class TestSpmdBlockIdentityConversion:
                 i = pl.tile.get_block_idx()
                 s = pl.tile.get_subblock_idx()
                 n = pl.tile.get_block_num()
-                y__tile = pl.tile.adds(x__tile, i + s + n)
+                y__tile = pl.tile.adds(x__tile, pl.cast(i + s + n, pl.INT32))
                 ret0__store = pl.store(y__tile, [0], ret0__out)
                 return ret0__store
 
