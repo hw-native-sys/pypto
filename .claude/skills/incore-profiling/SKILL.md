@@ -71,6 +71,11 @@ deterministic standalone ABI inputs: full `enable_dump_args=2` capture can
 overrun the DFX collector before it finalizes. Captured model inputs remain an
 optional validation path for small workloads.
 
+For ablations, run `prepare_dsa_ablation.py --help` with `dsa_expert_placement_study_v1.json`.
+It verifies fingerprints, hard geometry, exact moves, and placement legality,
+then writes replay-ready directories and an overlap/objective report. PyPTO
+replay remains the authoritative C++ validator before codegen.
+
 Generate and build both cases separately:
 
 ```bash
