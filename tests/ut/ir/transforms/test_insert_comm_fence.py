@@ -23,8 +23,9 @@ The local publishing write should also carry a whole-tensor *region*
 ``pl.system.cacheinvalid(target, shape, [0, ...])`` before its fence, but no shipped
 ptoas lowers that form into working code — 0.50 emits nothing for it and 0.51 emits
 a kernel that fails to compile — so the pass currently emits the fence alone. See
-the ``insert_comm_fence_pass.cpp`` header for the full rationale; these expectations
-gain the region marker back once ptoas supports it.
+the ``insert_comm_fence_pass.cpp`` header for the full rationale
+(hw-native-sys/PTOAS#995); these expectations gain the region marker back once
+ptoas supports it.
 
 The **remote** writes ``remote_store`` / ``put`` land at a peer-offset address and
 are left untouched by the pass — their codegen emits a correct peer-region

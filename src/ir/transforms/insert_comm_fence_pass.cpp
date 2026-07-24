@@ -72,6 +72,8 @@
  *     conversion to `__gm__ void*` in any pto-isa revision, so the kernel fails to
  *     compile.
  *
+ * Reported as hw-native-sys/PTOAS#995.
+ *
  * Emitting only the fence therefore reproduces exactly what runs today, and is the
  * only form that compiles under 0.51. The whole-GM form is unaffected (identical,
  * working lowering on both) and is still emitted after waits and opaque writes.

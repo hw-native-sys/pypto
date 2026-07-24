@@ -69,6 +69,8 @@ wait; read
 | 0.50 | 能解析，但**不产出任何指令** —— 该标记从未到达设备，即本 pass 的发布侧失效一直是 no-op |
 | 0.51 | 产出 `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)`，而该模板体是 `dcci((__gm__ void*)ptr, …)`；`GlobalTensor` 在任何 pto-isa 版本中都没有到 `__gm__ void*` 的转换，故 kernel **编译失败** |
 
+已上报 [hw-native-sys/PTOAS#995](https://github.com/hw-native-sys/PTOAS/issues/995)。
+
 因此只插 fence 恰好复现今天实际运行的行为，也是 0.51 下唯一能编过的形态。**全 GM** 形态不受
 影响 —— 两个版本降级完全一致且工作正常 —— 仍在 wait 与不透明写之后照常插入。指针形态
 （`pto.addptr` 喂给 `cmo.cacheinvalid`）也不是替代方案：0.50 与 0.51 同样拒绝。

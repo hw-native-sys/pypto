@@ -81,6 +81,8 @@ The publish-side marker for a local write should be a whole-tensor region
 | 0.50 | Parses it, then emits **nothing** — the marker never reaches the device, so this pass's publish-side invalidate has always been a no-op |
 | 0.51 | Emits `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)`, whose body is `dcci((__gm__ void*)ptr, …)`. `GlobalTensor` has no conversion to `__gm__ void*` in any pto-isa revision, so the kernel **fails to compile** |
 
+Reported as [hw-native-sys/PTOAS#995](https://github.com/hw-native-sys/PTOAS/issues/995).
+
 Emitting only the fence therefore reproduces exactly what runs today and is the only
 form that compiles under 0.51. The **whole-GM** form is unaffected — identical,
 working lowering on both versions — and is still emitted after waits and opaque
