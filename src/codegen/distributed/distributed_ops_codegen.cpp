@@ -223,6 +223,24 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce, "builtin.tensor.allreduce") {
 }
 
 // ============================================================================
+// builtin.tensor.allreduce_ring: host ring allreduce chip dispatch.
+// ============================================================================
+REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce_ring, "builtin.tensor.allreduce_ring") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce_ring codegen requires DistributedCodegen";
+  const int reduce_op = op->GetAttr<int>("op");
+  const auto dtype = op->GetAttr<DataType>("dtype");
+  const std::string variant = MangleTensorAllReduceVariant(op->op_->name_, reduce_op, dtype);
+
+  if (dist_codegen->MarkBuiltinEmitted(variant)) {
+    dist_codegen->RecordBuiltinNextLevel(
+        op, variant, {{"op_cpp", AllReduceOpCpp(reduce_op)}, {"dtype_cpp", AllReduceDTypeCpp(dtype)}});
+  }
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  return "";
+}
+
+// ============================================================================
 // builtin.tensor.barrier: compiler-generated host collective chip dispatch.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(builtin_tensor_barrier, "builtin.tensor.barrier") {
