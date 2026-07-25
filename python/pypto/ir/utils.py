@@ -238,18 +238,16 @@ def _check_not_index_scalar(scalar: _ir.Expr, target: DataType | None) -> None:
     if not isinstance(scalar_type, _ir.ScalarType) or scalar_type.dtype != DataType.INDEX:
         return
 
-    # Codegen lowers index<->int via arith.index_cast but rejects index<->float
-    # outright (pto_scalar_expr_codegen.cpp), so a float operand needs two steps.
-    if target is not None and target.is_float():
-        hint = f"pl.cast(pl.cast(<value>, pl.INT32), pl.{str(target).upper()})"
-        why = "; `index` cannot convert to a float dtype in one step"
+    # Codegen lowers index->int via arith.index_cast but rejects index<->float
+    # outright (pto_scalar_expr_codegen.cpp), so a float operand routes via INT32 --
+    # an integer scalar against a float tile is accepted by the hardware ops.
+    if target is not None and target.is_int():
+        hint = f"pl.cast(<value>, pl.{str(target).upper()})"
     else:
-        name = str(target).upper() if target is not None else "INT32"
-        hint = f"pl.cast(<value>, pl.{name})"
-        why = ""
+        hint = "pl.cast(<value>, pl.INT32)"
     raise ValueError(
         f"Scalar operand has dtype `index`, which tile/tensor scalar instructions do "
-        f"not accept. Convert it explicitly: {hint}{why}."
+        f"not accept. Convert it explicitly, e.g. {hint}."
     )
 
 
