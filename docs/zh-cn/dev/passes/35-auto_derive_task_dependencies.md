@@ -134,7 +134,6 @@ deps，并保持 AUTO tracking。已实现的 fallback 触发条件包括：
 ## 参考
 
 - Source: [pass source][pass-source]
-- Proposal: [Automatic Task Dependency Derivation](../proposals/auto_task_dependencies.md)
 - Lowering: [Orchestration Code Generation][orchestration-lowering]
 
 [pass-source]: ../../../../src/ir/transforms/auto_derive_task_dependencies_pass.cpp

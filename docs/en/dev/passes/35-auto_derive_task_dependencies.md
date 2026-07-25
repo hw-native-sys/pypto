@@ -154,7 +154,6 @@ scopes: `Input -> NoDep` for covered read-only inputs and
 ## References
 
 - Source: [pass source][pass-source]
-- Proposal: [Automatic Task Dependency Derivation](../proposals/auto_task_dependencies.md)
 - Lowering: [Orchestration Code Generation][orchestration-lowering]
 
 [pass-source]: ../../../../src/ir/transforms/auto_derive_task_dependencies_pass.cpp
