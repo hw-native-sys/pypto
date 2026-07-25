@@ -1006,6 +1006,85 @@ class TestSpmdOptimizations:
         incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
         assert incore.split == ir.SplitMode.UP_DOWN
 
+    def test_with_spmd_cross_core_slot_alone_wraps_call_in_incore(self):
+        """``with pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)]):``
+        wraps the single call in an ``InCoreScopeStmt`` carrying ``slot_num``.
+
+        Regression: the wrapper-less direct-dispatch fast path keys on "no split
+        mode". The slot count lands on the *InCore* scope (OutlineIncoreScopes
+        reads ``slot_num`` off ``InCoreScopeStmt`` only), so a slot-count-only
+        scope must still get the wrapper or the value is silently discarded and
+        the kernel falls back to the default ring depth.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(a, a)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4)]):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split is None
+        assert incore.attrs.get("slot_num") == 4
+        # No round-trip assertion here: the plain with-form's printer emits the
+        # wrapper as a nested `with pl.at(...)`, which no longer reparses as a
+        # single call. That gap is pre-existing and identical for
+        # optimizations=[pl.split(MODE)] (see
+        # test_with_spmd_split_wraps_call_in_incore, which likewise asserts only
+        # the IR shape). The `as tid` form does round-trip — covered below.
+
+    def test_with_spmd_as_tid_cross_core_slot_alone_wraps_call_in_incore(self):
+        """Same regression on the ``as tid`` with-form, which shares
+        ``_emit_spmd_body``'s dispatch."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(a, a)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=8)]) as tid:
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.attrs.get("slot_num") == 8
+        printed = Prog.as_python()
+        assert "optimizations=[pl.cross_core_slot(slot_num=8)]" in printed
+        assert Prog.as_python() == parse_program(printed).as_python()
+
     def test_with_spmd_split_splits_name_hint(self):
         """``with pl.spmd(..., name_hint=, optimizations=[pl.split]):`` routes hints like for-form."""
 

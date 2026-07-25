@@ -3961,15 +3961,17 @@ class ASTParser:
         The two forms differ only in ``scope_attrs`` (the ``as tid`` form adds
         ``task_id_var`` / ``manual_dep_edges``); the body dispatch is identical:
 
-        * single call + no split → ``SpmdScopeStmt(body=Call)`` with no inner InCore
-          wrapper — the historical direct-dispatch shape (the callee is a pre-defined
-          kernel that reads the block index internally). This is also the shape
-          ``OutlineIncoreScopes`` leaves behind once an inline body is outlined, so
-          the IR round-trips identically across passes.
-        * inline multi-statement body, or single-call + split → wrap in
-          ``InCoreScopeStmt(split, <body>)`` for ``OutlineIncoreScopes`` to outline
-          into a synthetic per-block kernel, exactly like ``for i in pl.spmd(n):``.
-          Such an inline body must read the per-block index (see below).
+        * single call + no split and no slot count → ``SpmdScopeStmt(body=Call)``
+          with no inner InCore wrapper — the historical direct-dispatch shape (the
+          callee is a pre-defined kernel that reads the block index internally).
+          This is also the shape ``OutlineIncoreScopes`` leaves behind once an
+          inline body is outlined, so the IR round-trips identically across passes.
+        * inline multi-statement body, or single-call carrying any
+          ``optimizations=`` entry → wrap in ``InCoreScopeStmt(split, <body>)`` for
+          ``OutlineIncoreScopes`` to outline into a synthetic per-block kernel,
+          exactly like ``for i in pl.spmd(n):``. Both entries lower onto the InCore
+          scope (``split_`` and the ``slot_num`` attr), so either one forces the
+          wrapper. Such an inline body must read the per-block index (see below).
         """
         # A single body statement whose value is a Call — Assign/AnnAssign/Expr all
         # expose a `.value`, so one membership test covers the three call-carrying
@@ -3990,10 +3992,17 @@ class ASTParser:
                 hint="Add `i = pl.tile.get_block_idx()` inside the scope, or use "
                 "`for i in pl.spmd(n):` to bind the block index automatically.",
             )
-        if is_single_call and split_mode is None:
+        if is_single_call and split_mode is None and split_slot_num is None:
             # Historical no-InCore-wrapper shape. Any ``scope_attrs``
             # (allow_early_resolve, and for the ``as tid`` form task_id_var /
             # manual_dep_edges) ride on the SpmdScopeStmt.
+            #
+            # ``split_slot_num`` is checked alongside ``split_mode``: the slot
+            # count lands on the *InCore* scope (OutlineIncoreScopes reads
+            # ``slot_num`` off InCoreScopeStmt only), so taking this wrapper-less
+            # path with a slot count set would silently discard it. Before
+            # pl.cross_core_slot existed the two were coupled — slot_num could
+            # only arrive via pl.split(mode, slot_num=N), which always set a mode.
             self._parse_scope_body(
                 stmt,
                 scope_kind,
