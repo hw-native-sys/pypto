@@ -205,3 +205,17 @@ a function-level representative `split`, which would silently collide with the
 user's `pl.split`). See
 [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) for how the surviving
 mechanism is lowered.
+
+**Any** `pl.split(...)` is rejected, `SplitMode.NONE` included (RFC #1820). NONE
+carries no split of its own, but writing it on a scope that also holds regions
+still reads as "auto and manual split mixed on one scope". The exemption that
+used to allow it existed only because the cross-core slot count had no carrier
+other than `pl.split(..., slot_num=N)`; it now has one —
+`optimizations=[pl.cross_core_slot(slot_num=N)]`, which is orthogonal to
+splitting and coexists with regions freely. The three states read distinctly:
+
+| Annotation | Meaning |
+| ---------- | ------- |
+| `optimizations=[pl.split(MODE)]` | AUTO split — the compiler partitions the vector work |
+| `for aiv_id in pl.split_aiv(2, mode=...)` | Manual split — the author partitions it per region |
+| `optimizations=[pl.cross_core_slot(slot_num=N)]` | Neither — just sizes the cross-core pipe |

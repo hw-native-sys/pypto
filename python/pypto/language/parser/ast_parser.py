@@ -27,6 +27,7 @@ from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
+from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core import arith as _arith
 
@@ -422,8 +423,9 @@ class _AtKwargState:
     # ``Submit`` by the outliner (mirrors ``pl.submit(..., allow_early_resolve=)``).
     allow_early_resolve: bool = False
     split_mode: "ir.SplitMode | None" = None
-    # Optional cross-core ring-buffer depth from ``pl.split(mode, slot_num=N)``.
-    # Stored on the scope attrs and propagated to the outlined function attr.
+    # Optional cross-core pipe slot count from ``pl.cross_core_slot(slot_num=N)``
+    # (or the deprecated ``pl.split(mode, slot_num=N)`` spelling). Stored on the
+    # scope attrs and propagated to the outlined function attr.
     split_slot_num: "int | None" = None
     # Tracks the ``optimizations=`` kwarg AST so a duplicate ``optimizations=``
     # can be rejected in ``_handle_at_optimizations_kw``.
@@ -3217,9 +3219,11 @@ class ASTParser:
     ) -> tuple["ir.SplitMode | None", "int | None"]:
         """Parse ``optimizations=[...]`` for ``pl.at`` or ``pl.spmd``.
 
-        Each entry must be ``pl.split(MODE)`` — set the cross-core split mode.
-        The fully qualified form (``pl.optimizations.split(MODE)``) is also
-        accepted.
+        Two entries are recognised, freely combinable because they are
+        orthogonal — ``pl.split(MODE)`` sets the cross-core split mode, and
+        ``pl.cross_core_slot(slot_num=N)`` sets the cross-core pipe slot count.
+        The fully qualified forms (``pl.optimizations.split(MODE)`` etc.) are
+        also accepted.
 
         Args:
             owner: API name used in error messages (e.g. ``"pl.at"``, ``"pl.spmd"``).
@@ -3232,7 +3236,7 @@ class ASTParser:
         if list_hint is None:
             list_hint = "Use optimizations=[pl.split(pl.SplitMode.NONE)]."
         if entry_hint is None:
-            entry_hint = "Each entry must be pl.split(pl.SplitMode.X)."
+            entry_hint = "Each entry must be pl.split(pl.SplitMode.X) or pl.cross_core_slot(slot_num=N)."
         if not isinstance(value, ast.List):
             raise ParserSyntaxError(
                 f"{owner}(optimizations=...) must be a list literal",
@@ -3243,6 +3247,11 @@ class ASTParser:
         split_mode: ir.SplitMode | None = None
         split_slot_num: int | None = None
         seen_split = False
+        seen_cross_core_slot = False
+        # Tracks whether split_slot_num came from the deprecated
+        # ``pl.split(slot_num=)`` spelling, so a list carrying both sources for
+        # one value is rejected instead of letting entry order decide.
+        slot_num_from_split = False
 
         for entry in value.elts:
             if (parsed := self._try_parse_pl_split(entry)) is not None:
@@ -3253,10 +3262,30 @@ class ASTParser:
                     )
                 seen_split = True
                 split_mode, slot_num = parsed
-                # slot_num is valid with any split mode, including SplitMode.NONE:
-                # a NONE mixed kernel still drives a cube->vector cross-core pipe
-                # (on a2a3 via dual-AIV dispatch), and ExpandMixedKernel sizes
-                # that ring from slot_num regardless of split mode.
+                if slot_num is not None:
+                    if seen_cross_core_slot:
+                        raise ParserSyntaxError(
+                            "optimizations=[...] sets the cross-core slot count twice: via the "
+                            "deprecated pl.split(slot_num=...) and via pl.cross_core_slot(...)",
+                            span=self.span_tracker.get_span(entry),
+                            hint="Keep only pl.cross_core_slot(slot_num=N).",
+                        )
+                    split_slot_num = slot_num
+                    slot_num_from_split = True
+            elif (slot_num := self._try_parse_pl_cross_core_slot(entry)) is not None:
+                if seen_cross_core_slot:
+                    raise ParserSyntaxError(
+                        "Duplicate 'pl.cross_core_slot(...)' in optimizations=[...]",
+                        span=self.span_tracker.get_span(entry),
+                    )
+                if slot_num_from_split:
+                    raise ParserSyntaxError(
+                        "optimizations=[...] sets the cross-core slot count twice: via the "
+                        "deprecated pl.split(slot_num=...) and via pl.cross_core_slot(...)",
+                        span=self.span_tracker.get_span(entry),
+                        hint="Drop slot_num= from pl.split(...) and keep pl.cross_core_slot(slot_num=N).",
+                    )
+                seen_cross_core_slot = True
                 split_slot_num = slot_num
             else:
                 raise ParserSyntaxError(
@@ -3276,44 +3305,55 @@ class ASTParser:
             value,
             owner="pl.spmd",
             list_hint="Use optimizations=[pl.split(pl.SplitMode.NONE)].",
-            entry_hint="Each entry must be pl.split(pl.SplitMode.X).",
+            entry_hint="Each entry must be pl.split(pl.SplitMode.X) or pl.cross_core_slot(slot_num=N).",
+        )
+
+    def _is_pl_optimization_call(self, node: ast.expr, name: str) -> bool:
+        """True when ``node`` is ``pl.<name>(...)`` or ``pl.optimizations.<name>(...)``."""
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != name:
+            return False
+        # pl.<name>(...)
+        if isinstance(func.value, ast.Name) and func.value.id == "pl":
+            return True
+        # pl.optimizations.<name>(...)
+        return (
+            isinstance(func.value, ast.Attribute)
+            and func.value.attr == "optimizations"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "pl"
         )
 
     def _try_parse_pl_split(self, node: ast.expr) -> "tuple[ir.SplitMode, int | None] | None":
         """Return ``(SplitMode, slot_num)`` if the AST node is ``pl.split(MODE)``; else None.
 
-        ``slot_num`` is ``None`` unless the optional ``slot_num=N`` keyword is
+        ``slot_num`` is ``None`` unless the deprecated ``slot_num=N`` keyword is
         given. Also accepts the fully qualified form
         ``pl.optimizations.split(MODE)``.
         """
-        if not isinstance(node, ast.Call):
+        if not self._is_pl_optimization_call(node, "split"):
             return None
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr != "split":
-            return None
-        # pl.split(...)
-        if isinstance(func.value, ast.Name) and func.value.id == "pl":
-            pass
-        # pl.optimizations.split(...)
-        elif (
-            isinstance(func.value, ast.Attribute)
-            and func.value.attr == "optimizations"
-            and isinstance(func.value.value, ast.Name)
-            and func.value.value.id == "pl"
-        ):
-            pass
-        else:
-            return None
+        assert isinstance(node, ast.Call)  # narrowed by _is_pl_optimization_call
 
         slot_num: int | None = None
         for kw in node.keywords:
             if kw.arg == "slot_num":
-                slot_num = self._eval_pl_split_slot_num(kw.value)
+                slot_num = self._eval_slot_num_literal(
+                    kw.value,
+                    "pl.split(slot_num=...)",
+                    hint="Use e.g. pl.cross_core_slot(slot_num=16).",
+                )
+                # Deprecated spelling: the slot count is orthogonal to the split
+                # mode, so it has its own entry now. Warn rather than reject so
+                # existing kernels keep working.
+                warnings.warn(SPLIT_SLOT_NUM_DEPRECATION, DeprecationWarning, stacklevel=2)
             else:
                 raise ParserSyntaxError(
                     f"Unknown keyword argument '{kw.arg}' in pl.split()",
                     span=self.span_tracker.get_span(kw),
-                    hint="pl.split() accepts only the optional slot_num= keyword.",
+                    hint="pl.split() accepts only the deprecated slot_num= keyword.",
                 )
         if len(node.args) != 1:
             raise ParserSyntaxError(
@@ -3324,8 +3364,51 @@ class ASTParser:
         mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
         return mode, slot_num
 
-    def _eval_pl_split_slot_num(self, value: ast.expr) -> int:
-        """Evaluate ``slot_num=`` in ``pl.split(...)`` as a positive int literal."""
+    def _try_parse_pl_cross_core_slot(self, node: ast.expr) -> "int | None":
+        """Return the slot count if the node is ``pl.cross_core_slot(slot_num=N)``; else None.
+
+        Also accepts ``pl.optimizations.cross_core_slot(slot_num=N)``. The
+        ``slot_num=`` keyword is required and is the only accepted argument.
+        """
+        if not self._is_pl_optimization_call(node, "cross_core_slot"):
+            return None
+        assert isinstance(node, ast.Call)  # narrowed by _is_pl_optimization_call
+
+        usage_hint = "Use pl.cross_core_slot(slot_num=4)."
+        if node.args:
+            raise ParserSyntaxError(
+                f"pl.cross_core_slot() takes no positional arguments, got {len(node.args)}",
+                span=self.span_tracker.get_span(node),
+                hint=usage_hint,
+            )
+        slot_num: int | None = None
+        for kw in node.keywords:
+            if kw.arg == "slot_num":
+                slot_num = self._eval_slot_num_literal(
+                    kw.value, "pl.cross_core_slot(slot_num=...)", hint=usage_hint
+                )
+            else:
+                raise ParserSyntaxError(
+                    f"Unknown keyword argument '{kw.arg}' in pl.cross_core_slot()",
+                    span=self.span_tracker.get_span(kw),
+                    hint=usage_hint,
+                )
+        if slot_num is None:
+            raise ParserSyntaxError(
+                "pl.cross_core_slot() requires the slot_num= keyword argument",
+                span=self.span_tracker.get_span(node),
+                hint=usage_hint,
+            )
+        return slot_num
+
+    def _eval_slot_num_literal(self, value: ast.expr, api: str, *, hint: str) -> int:
+        """Evaluate a ``slot_num=`` argument as a positive int literal.
+
+        Args:
+            value: The keyword's value AST node.
+            api: API spelling used in error messages (e.g. ``"pl.cross_core_slot(slot_num=...)"``).
+            hint: Usage hint attached to the "not an integer literal" error.
+        """
         # bool is a subclass of int — reject it explicitly.
         if (
             not isinstance(value, ast.Constant)
@@ -3333,13 +3416,13 @@ class ASTParser:
             or not isinstance(value.value, int)
         ):
             raise ParserSyntaxError(
-                "pl.split(slot_num=...) must be an integer literal",
+                f"{api} must be an integer literal",
                 span=self.span_tracker.get_span(value),
-                hint="Use e.g. pl.split(pl.SplitMode.UP_DOWN, slot_num=16).",
+                hint=hint,
             )
         if value.value <= 0:
             raise ParserSyntaxError(
-                f"pl.split(slot_num=...) must be positive, got {value.value}",
+                f"{api} must be positive, got {value.value}",
                 span=self.span_tracker.get_span(value),
             )
         return value.value
@@ -4549,10 +4632,14 @@ class ASTParser:
 
         is_core_group = level == ir.Level.CORE_GROUP
 
-        if split_mode is not None and not is_core_group:
+        # Both optimizations= entries lower onto the InCore scope: pl.split(...)
+        # into split_, pl.cross_core_slot(...) into the slot_num attr. Neither
+        # has a meaning on a Hierarchy scope, so reject either at a non-CORE_GROUP
+        # level rather than silently attaching a dead attr.
+        if (split_mode is not None or state.split_slot_num is not None) and not is_core_group:
             raise ParserSyntaxError(
-                "split mode is only supported with level=pl.Level.CORE_GROUP "
-                "(via optimizations=[pl.split(...)])",
+                "optimizations=[pl.split(...)] / optimizations=[pl.cross_core_slot(...)] are only "
+                "supported with level=pl.Level.CORE_GROUP",
                 span=span,
                 hint="Use pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]).",
             )
@@ -4636,11 +4723,11 @@ class ASTParser:
     def _append_split_slot_num_attr(
         attrs: "list[tuple[str, Any]] | None", slot_num: "int | None"
     ) -> "list[tuple[str, Any]] | None":
-        """Append the ``slot_num`` scope attr (from ``pl.split(mode, slot_num=N)``).
+        """Append the ``slot_num`` scope attr (from ``pl.cross_core_slot(slot_num=N)``).
 
         Appended last so a print -> reparse cycle reproduces the same attr order
-        (``optimizations=[pl.split(...)]`` is printed alongside ``deps=`` /
-        ``dumps=``, and slot_num always lands at the tail here on both passes).
+        (``optimizations=[...]`` is printed alongside ``deps=`` / ``dumps=``, and
+        slot_num always lands at the tail here on both passes).
         Returns ``attrs`` unchanged when ``slot_num`` is ``None``.
         """
         if slot_num is None:

@@ -514,6 +514,19 @@ with pl.at(level=pl.Level.CORE_GROUP,
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
+如需指定自动跨核 pipe 的槽位数（环深），使用 `pl.cross_core_slot(...)`。它只决定数据
+通道的大小，而不划分计算，因此与 split 模式相互独立，二者可自由组合：
+
+```python
+# 把环收缩到 4 槽，以腾出 buffer 空间给更大的 tile：
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
+                          pl.cross_core_slot(slot_num=4)]):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+```
+
+省略该条目时沿用默认值（单向生效时 8 槽，双向时每方向 4 槽）。
+
 ## 内存与数据搬运
 
 ### 内存层次结构

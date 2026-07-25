@@ -1506,6 +1506,83 @@ class TestOutlineNoDepArgs:
             with pytest.raises(ValueError, match="mutually exclusive"):
                 passes.outline_incore_scopes()(ssa)
 
+    def test_function_split_none_with_split_aiv_region_rejected(self):
+        """``optimizations=[pl.split(pl.SplitMode.NONE)]`` on a scope holding
+        pl.split_aiv region(s) is rejected too (RFC #1820).
+
+        NONE carries no split of its own, so this combination used to be
+        exempted — but writing it still reads as "auto and manual split mixed on
+        one scope". The exemption existed only because the cross-core slot count
+        had no carrier other than ``pl.split(..., slot_num=N)``; it now has one
+        (see test_cross_core_slot_with_split_aiv_region_accepted), so the
+        exemption is gone."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="k",
+                    optimizations=[pl.split(pl.SplitMode.NONE)],
+                ):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        offset = aiv_id * 128
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                        out = pl.store(t, [offset, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            ssa = passes.convert_to_ssa()(Before)
+            with pytest.raises(ValueError, match="mutually exclusive"):
+                passes.outline_incore_scopes()(ssa)
+
+    def test_cross_core_slot_with_split_aiv_region_accepted(self):
+        """``optimizations=[pl.cross_core_slot(slot_num=N)]`` coexists with
+        pl.split_aiv region(s): sizing the cross-core ring is orthogonal to
+        partitioning work across the AIV lanes.
+
+        This is the migration path off the rejected
+        ``pl.split(pl.SplitMode.NONE, slot_num=N)`` idiom — the outlined function
+        carries both the slot count and the region-derived split_aiv marker."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="k",
+                    optimizations=[pl.cross_core_slot(slot_num=4)],
+                ):
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        offset = aiv_id * 128
+                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                        out = pl.store(t, [offset, 0], out)
+                return out
+
+        # BEFORE_AND_AFTER rather than the default roundtrip level: the python
+        # printer does not emit the InCoreScopeStmt `split_aiv` marker, so a
+        # print->parse roundtrip of a split_aiv program spuriously fails — same
+        # caveat as test_outline_propagates_split_aiv_attr.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            ssa = passes.convert_to_ssa()(Before)
+            After = passes.outline_incore_scopes()(ssa)
+
+        outlined = next(f for gv, f in After.functions.items() if f.func_type == ir.FunctionType.InCore)
+        assert outlined.attrs["slot_num"] == 4
+        assert outlined.attrs["split_aiv"] is True
+        # The region's mode is still bridged to a function-level representative.
+        assert outlined.attrs["split"] == pl.SplitMode.UP_DOWN.value
+
     def test_outline_multi_mode_regions_omits_func_split(self):
         """Two sibling pl.split_aiv regions with DIFFERING modes (UP_DOWN +
         LEFT_RIGHT) in one CORE_GROUP scope: the outlined function gets

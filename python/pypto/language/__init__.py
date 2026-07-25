@@ -222,7 +222,7 @@ from .op.unified_ops import (
     transpose,
     write,
 )
-from .optimizations import split
+from .optimizations import cross_core_slot, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
@@ -304,6 +304,7 @@ __all__ = [
     "split_aiv",
     "optimizations",
     "split",
+    "cross_core_slot",
     "adir",
     "array",
     "tile",

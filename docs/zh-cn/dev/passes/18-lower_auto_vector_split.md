@@ -80,8 +80,10 @@ result = passes.lower_auto_vector_split()(program)
 [`ExpandMixedKernel`](19-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由本 pass 用每个区域正确的拆分轴校验各自的转置风险）。
 
-函数级 AUTO split（`optimizations=[pl.split(mode)]`）与显式 `pl.split_aiv` 区域是
-**互斥**的——同时携带二者的作用域会被拒绝。该检查在更早的
+函数级 AUTO split（`optimizations=[pl.split(mode)]`，包括 `SplitMode.NONE`）与显式
+`pl.split_aiv` 区域是**互斥**的——同时携带二者的作用域会被拒绝。若需在携带区域的作用域上
+指定自定义跨核槽位数，请使用 `optimizations=[pl.cross_core_slot(slot_num=N)]`：它只决定
+pipe 大小，不标注任何拆分。该检查在更早的
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md) 中执行，那里作用域自身的 `split_`
 （用户的 `pl.split`）与其区域都仍可见；否则本区域路径会按区域下降并静默丢弃函数级 split。
 （提取后二者会无法区分地合并：**单个** `pl.split_aiv` 区域会合法地派生出一个函数级代表

@@ -147,20 +147,21 @@ Setup is derived from the split bodies:
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
 
-### Overriding the ring depth (`slot_num`)
+### Overriding the slot count (`slot_num`)
 
-The default ring depth (8 / 4) can be tuned per split scope with the optional
-`slot_num=` argument on `pl.split`:
+The default slot count (8 / 4) can be tuned per scope with the
+`pl.cross_core_slot(slot_num=N)` optimization entry:
 
 ```python
-# Shrink the auto-inserted cube->vector ring to free buffer space for a larger
-# vector tile (e.g. grow the vec tile past the default-8-slot ceiling).
-with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=4)]):
+# Shrink the auto-inserted ring to free buffer space for a larger vector tile
+# (e.g. grow the vec tile past the default-8-slot ceiling).
+with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4)]):
     ...
 
-# Or on the pl.at form:
+# Or on the pl.at form, alongside an independent split mode:
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=16)]):
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
+                          pl.cross_core_slot(slot_num=16)]):
     ...
 ```
 
@@ -168,11 +169,20 @@ The value is carried as the `slot_num` scope attr, propagated by
 `OutlineIncoreScopes` to the outlined function's `slot_num` attr, and read here.
 When set it drives **both** the reserved buffer (`slot_size * slot_num`) and the
 emitted `initialize_pipe` `slot_num` attribute, so PTOAS and the auto-reserved
-buffer stay consistent. Omitting it keeps the PTOAS-derived default. `slot_num`
-must be positive and applies to any split scope, including `SplitMode.NONE`: a
-NONE mixed kernel still drives a cube->vector pipe (on a2a3 via dual-AIV
-dispatch — see below), so its ring is sized from `slot_num` too. It is ignored
-only when the outlined scope ends up with no cross-core ops.
+buffer stay consistent. Omitting the entry keeps the PTOAS-derived default.
+`slot_num` must be positive and is **orthogonal to splitting** — it sizes a data
+channel, it does not partition work. It applies in whichever directions the
+scope actually uses (cube->vector, vector->cube, or both), and to any scope that
+drives a pipe: a kernel with no split at all still drives one (on a2a3 via
+dual-AIV dispatch — see below). It is ignored only when the outlined scope ends
+up with no cross-core ops.
+
+**Deprecated:** `pl.split(MODE, slot_num=N)` still accepts the slot count and
+emits a `DeprecationWarning`. That spelling forced authors to name a split mode
+they did not want — the `pl.split(pl.SplitMode.NONE, slot_num=N)` idiom — which
+`OutlineIncoreScopes` now rejects on any scope carrying `pl.split_aiv` regions.
+Move the value to `pl.cross_core_slot(slot_num=N)`; the printer already
+normalises to that form.
 
 > Decoupling the logical ring depth from a smaller local resident window
 > (`local_slot_num < slot_num`, an a2/a3-only optimisation) is not yet exposed

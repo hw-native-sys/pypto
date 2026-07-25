@@ -74,15 +74,6 @@ std::string SplitModeToPythonString(SplitMode mode) {
   throw pypto::TypeError("Unknown SplitMode");
 }
 
-/// True when a scope must emit a ``pl.split(...)`` optimization entry: it carries
-/// a concrete split mode (UP_DOWN / LEFT_RIGHT) or a ``slot_num`` ring depth.
-/// ``slot_num`` is valid with ``SplitMode.None`` too (a NONE mixed kernel still
-/// drives a cube->vector pipe), so a bare ``slot_num`` forces the entry.
-bool ScopeHasSplitInfo(const std::optional<SplitMode>& split, const ScopeStmtPtr& slot_holder) {
-  const bool has_mode = split.has_value() && split.value() != SplitMode::None;
-  return has_mode || (slot_holder && slot_holder->HasAttr("slot_num"));
-}
-
 /// Convert cast round mode integer to its string name for printing.
 /// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
@@ -390,15 +381,16 @@ class IRPythonPrinter : public IRVisitor {
   // Emit ``windowize=True`` for an explicitly opted-in InCore scope.
   bool PrintScopeWindowizeAttr(const ScopeStmtPtr& op);
 
-  // Emit ``pl.split(pl.SplitMode.X[, slot_num=N])`` (a single optimizations list
-  // entry, no leading comma / wrapper), reading the optional ``slot_num`` ring
-  // depth from ``slot_num_holder``'s attrs (the scope carrying it).
-  void PrintSplitCall(SplitMode split, const ScopeStmtPtr& slot_num_holder);
-
-  // Emit ``, optimizations=[pl.split(pl.SplitMode.X[, slot_num=N])]`` for a
-  // split scope. Used by the flattened spmd with-tid / for-loop forms; the
-  // nested-scope forms round-trip slot_num via the InCoreScopeStmt printer.
-  void PrintSplitOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder);
+  // Emit ``, optimizations=[...]`` for a scope carrying a concrete split mode
+  // (UP_DOWN / LEFT_RIGHT) and/or a ``slot_num`` cross-core slot count, read
+  // from ``slot_num_holder``'s attrs (the scope carrying it). The two are
+  // independent entries — ``pl.split(pl.SplitMode.X)`` and
+  // ``pl.cross_core_slot(slot_num=N)`` — so a bare slot count never fabricates
+  // a ``pl.SplitMode.NONE`` (which OutlineIncoreScopes rejects on a scope
+  // holding pl.split_aiv regions). Emits nothing when the scope carries
+  // neither. Used by the flattened spmd with-tid / for-loop forms; the
+  // nested-scope forms round-trip via the InCoreScopeStmt printer.
+  void PrintScopeOptimizations(const std::optional<SplitMode>& split, const ScopeStmtPtr& slot_num_holder);
 
   // Emit `` as <tid>`` if the scope carries ``kAttrTaskIdVar``. The caller is
   // responsible for placing the ``)`` before and the ``:\n`` after this call.
@@ -1772,17 +1764,20 @@ bool IRPythonPrinter::PrintScopeDepsAttr(const ScopeStmtPtr& op) {
   return PrintScopeVarListKwarg(op, kAttrManualDepEdges, "deps");
 }
 
-void IRPythonPrinter::PrintSplitCall(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
-  stream_ << prefix_ << ".split(" << prefix_ << ".SplitMode." << SplitModeToPythonString(split);
-  if (slot_num_holder && slot_num_holder->HasAttr("slot_num")) {
-    stream_ << ", slot_num=" << slot_num_holder->GetAttr<int>("slot_num", 0);
-  }
-  stream_ << ")";
-}
-
-void IRPythonPrinter::PrintSplitOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
+void IRPythonPrinter::PrintScopeOptimizations(const std::optional<SplitMode>& split,
+                                              const ScopeStmtPtr& slot_num_holder) {
+  const bool has_mode = split.has_value() && split.value() != SplitMode::None;
+  const bool has_slot_num = slot_num_holder && slot_num_holder->HasAttr("slot_num");
+  if (!has_mode && !has_slot_num) return;
   stream_ << ", optimizations=[";
-  PrintSplitCall(split, slot_num_holder);
+  if (has_mode) {
+    stream_ << prefix_ << ".split(" << prefix_ << ".SplitMode." << SplitModeToPythonString(split.value())
+            << ")";
+  }
+  if (has_slot_num) {
+    if (has_mode) stream_ << ", ";
+    stream_ << prefix_ << ".cross_core_slot(slot_num=" << slot_num_holder->GetAttr<int>("slot_num", 0) << ")";
+  }
   stream_ << "]";
 }
 
@@ -1877,14 +1872,11 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
-  // Emit the surviving ``optimizations=[pl.split(mode[, slot_num=N])]`` form
-  // whenever there is a slot_num (a NONE mixed kernel still drives a
-  // cube->vector pipe and carries a ring depth) or a non-None split mode. A
-  // plain InCore with no split prints as ``pl.at(level=...)`` with no
+  // Emit ``optimizations=[...]`` for a non-None split mode and/or a slot_num
+  // (a NONE mixed kernel still drives a cross-core pipe and carries a slot
+  // count). A plain InCore with neither prints as ``pl.at(level=...)`` with no
   // optimizations list.
-  if (op->HasAttr("slot_num") || (op->split_.has_value() && op->split_.value() != SplitMode::None)) {
-    PrintSplitOptimizations(op->split_.value_or(SplitMode::None), op);
-  }
+  PrintScopeOptimizations(op->split_, op);
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
@@ -1938,8 +1930,8 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore && ScopeHasSplitInfo(incore->split_, incore)) {
-      PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
+    if (incore) {
+      PrintScopeOptimizations(incore->split_, incore);
     }
     PrintScopeDepsAttr(op);
     PrintScopeAllowEarlyResolveAttr(op);
@@ -1978,8 +1970,8 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore && ScopeHasSplitInfo(incore->split_, incore)) {
-      PrintSplitOptimizations(incore->split_.value_or(SplitMode::None), incore);
+    if (incore) {
+      PrintScopeOptimizations(incore->split_, incore);
     }
     PrintScopeAllowEarlyResolveAttr(op);
     PrintScopePredicateAttr(op);

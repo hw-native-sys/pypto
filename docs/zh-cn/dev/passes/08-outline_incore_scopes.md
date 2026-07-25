@@ -197,3 +197,15 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 作用域共存。本 Pass 会拒绝该组合（它会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
 [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md)。
+
+**任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
+携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
+拆分"。此前之所以对它豁免，只是因为跨核槽位数除了 `pl.split(..., slot_num=N)` 之外没有
+别的承载方式；现在它有了自己的条目——`optimizations=[pl.cross_core_slot(slot_num=N)]`，
+与拆分正交，可自由地与区域共存。三种标注由此语义分明：
+
+| 标注 | 含义 |
+| ---- | ---- |
+| `optimizations=[pl.split(MODE)]` | AUTO 拆分——由编译器划分向量计算 |
+| `for aiv_id in pl.split_aiv(2, mode=...)` | 手动拆分——由作者按区域划分 |
+| `optimizations=[pl.cross_core_slot(slot_num=N)]` | 都不是——仅决定跨核 pipe 的大小 |

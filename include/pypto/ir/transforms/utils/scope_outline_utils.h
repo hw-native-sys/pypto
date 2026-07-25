@@ -915,19 +915,26 @@ class ScopeOutliner : public IRMutator {
       // are both visible only at outline time; post-outline they merge
       // indistinguishably into the function's split / split_aiv attrs (a single
       // pl.split_aiv region legitimately yields a derived function-level split).
-      CHECK_SPAN(!(incore_split.has_value() && incore_split.value() != SplitMode::None), op->span_)
+      //
+      // ANY pl.split(...) is rejected, SplitMode::None included (RFC #1820).
+      // NONE carries no split of its own, but writing it here still reads as
+      // "auto and manual split mixed on one scope". The cross-core slot count
+      // that used to force the NONE spelling now has its own orthogonal entry,
+      // pl.cross_core_slot(slot_num=N), so nothing needs the exemption.
+      CHECK_SPAN(!incore_split.has_value(), op->span_)
           << "scope combines a function-level pl.split(...) (optimizations=[pl.split(...)]) with "
              "pl.split_aiv region(s); these are mutually exclusive AIV-split mechanisms. Remove "
              "optimizations=[pl.split(...)] or the pl.split_aiv region(s) — the function-level "
-             "split would otherwise be silently dropped (the per-region split governs the lanes).";
+             "split would otherwise be silently dropped (the per-region split governs the lanes). "
+             "To pin a custom cross-core slot count, use "
+             "optimizations=[pl.cross_core_slot(slot_num=N)], which is orthogonal to splitting.";
       outlined_attrs.emplace_back("split_aiv", true);
       // Stamp a function-level representative ``split`` mode ONLY when all regions
-      // share one mode (``uniform_mode``) AND the scope carries no AUTO cross-core
-      // split (which has a separate meaning). Differing sibling modes have no
-      // single representative: leave the function-level mode unset — the
-      // authoritative per-region mode rides ``node->split_`` (consumed at pass 21).
-      if (finder.uniform_mode.has_value() &&
-          (!incore_split.has_value() || incore_split.value() == SplitMode::None)) {
+      // share one mode (``uniform_mode``). Differing sibling modes have no single
+      // representative: leave the function-level mode unset — the authoritative
+      // per-region mode rides ``node->split_`` (consumed at pass 21). No need to
+      // re-check incore_split here: the CHECK above guarantees it is unset.
+      if (finder.uniform_mode.has_value()) {
         outlined_attrs.emplace_back("split", static_cast<int>(finder.uniform_mode.value()));
       }
     };

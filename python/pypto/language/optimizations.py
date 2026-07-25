@@ -20,13 +20,49 @@ Available entries:
           with pl.at(level=pl.Level.CORE_GROUP,
                      optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
               ...
+
+    - ``pl.cross_core_slot(slot_num=N)`` — Slot count (ring depth) for the
+      automatic cross-core pipe. Orthogonal to splitting; combine freely::
+
+          with pl.at(level=pl.Level.CORE_GROUP,
+                     optimizations=[pl.split(pl.SplitMode.UP_DOWN),
+                                    pl.cross_core_slot(slot_num=4)]):
+              ...
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 from pypto.pypto_core.ir import SplitMode
+
+# Shared by the ``pl.split()`` factory and the AST parser's ``pl.split(...)``
+# matcher so both deprecation paths say exactly the same thing.
+SPLIT_SLOT_NUM_DEPRECATION = (
+    "pl.split(slot_num=...) is deprecated: the cross-core slot count is orthogonal to the "
+    "split mode, and spelling it here forces a split mode you may not want (the "
+    "pl.split(pl.SplitMode.NONE, slot_num=N) idiom). Use "
+    "optimizations=[pl.cross_core_slot(slot_num=N)] instead, optionally alongside "
+    "pl.split(MODE)."
+)
+
+
+def _validate_slot_num(slot_num: int, api: str) -> None:
+    """Validate a cross-core slot count.
+
+    Args:
+        slot_num: Candidate slot count.
+        api: API name used in the error message (e.g. ``"pl.cross_core_slot"``).
+
+    Raises:
+        ValueError: If ``slot_num`` is not a positive integer.
+    """
+    # bool is a subclass of int — reject it so True/False can't pose as a count.
+    if not isinstance(slot_num, int) or isinstance(slot_num, bool):
+        raise ValueError(f"{api} slot_num must be a positive integer, got {slot_num!r}")
+    if slot_num <= 0:
+        raise ValueError(f"{api} slot_num must be a positive integer, got {slot_num}")
 
 
 class Optimization:
@@ -45,16 +81,9 @@ class Split(Optimization):
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
             ``SplitMode.LEFT_RIGHT``).
-        slot_num: Optional cross-core ring-buffer depth for the automatic
-            cube→vector pipe inserted by ``ExpandMixedKernel``. ``None`` keeps
-            the PTOAS-derived default (8 unidirectional, 4 per direction
-            bidirectional). When set, both the reserved buffer
-            (``slot_size * slot_num``) and the emitted ``initialize_pipe``
-            ``slot_num`` attribute use this value. Valid with any ``mode``,
-            including ``SplitMode.NONE``: a NONE mixed kernel still drives a
-            cube→vector pipe (on Ascend910B via dual-AIV dispatch), so
-            ``slot_num`` sizes that ring regardless of split mode. It is ignored
-            only when the outlined scope ends up with no cross-core ops.
+        slot_num: **Deprecated** — use ``pl.cross_core_slot(slot_num=N)``, which
+            carries the same value without naming a split mode. Kept as an alias
+            so existing kernels keep working; see :class:`CrossCoreSlot`.
     """
 
     mode: SplitMode
@@ -67,9 +96,8 @@ def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
     Args:
         mode: Split mode. May be ``SplitMode.NONE``,
             ``SplitMode.UP_DOWN``, or ``SplitMode.LEFT_RIGHT``.
-        slot_num: Optional cross-core ring-buffer depth for the automatic
-            cube→vector pipe. Must be positive when set. Omit to keep the
-            PTOAS-derived default (8 unidirectional, 4 bidirectional).
+        slot_num: **Deprecated** — use ``pl.cross_core_slot(slot_num=N)``.
+            Must be positive when set. Emits a ``DeprecationWarning``.
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
@@ -78,16 +106,59 @@ def split(mode: SplitMode, *, slot_num: int | None = None) -> Split:
         ValueError: If ``slot_num`` is set but not positive.
     """
     if slot_num is not None:
-        # bool is a subclass of int — reject it so True/False can't pose as a depth.
-        if not isinstance(slot_num, int) or isinstance(slot_num, bool):
-            raise ValueError(f"pl.split slot_num must be a positive integer, got {slot_num!r}")
-        if slot_num <= 0:
-            raise ValueError(f"pl.split slot_num must be a positive integer, got {slot_num}")
+        _validate_slot_num(slot_num, "pl.split")
+        warnings.warn(SPLIT_SLOT_NUM_DEPRECATION, DeprecationWarning, stacklevel=2)
     return Split(mode=mode, slot_num=slot_num)
 
 
+@dataclass(frozen=True)
+class CrossCoreSlot(Optimization):
+    """Slot count (ring depth) for the automatic cross-core pipe.
+
+    Orthogonal to splitting — it sizes a data channel, it does not partition
+    work. Sets the ``slot_num`` scope attr, which ``OutlineIncoreScopes``
+    propagates to the outlined function and ``ExpandMixedKernel`` reads to size
+    **both** the reserved buffer (``slot_size * slot_num``) and the emitted
+    ``initialize_pipe`` ``slot_num`` attribute, in whichever directions the
+    scope actually uses (cube→vector, vector→cube, or both).
+
+    Omitting the entry keeps the PTOAS-derived default: 8 when one direction is
+    live, 4 per direction when both are. The value is ignored when the outlined
+    scope ends up with no cross-core ops.
+
+    Args:
+        slot_num: Ring depth. Must be a positive integer.
+    """
+
+    slot_num: int
+
+
+def cross_core_slot(*, slot_num: int) -> CrossCoreSlot:
+    """Create a ``CrossCoreSlot`` optimization entry.
+
+    Args:
+        slot_num: Cross-core pipe slot count (ring depth). Must be positive.
+
+    Returns:
+        ``CrossCoreSlot`` instance for use in ``pl.at(..., optimizations=[...])``.
+
+    Raises:
+        ValueError: If ``slot_num`` is not a positive integer.
+
+    Examples:
+        >>> # Shrink the auto-inserted ring to free buffer space for a larger tile
+        >>> with pl.at(level=pl.Level.CORE_GROUP,
+        ...            optimizations=[pl.cross_core_slot(slot_num=4)]):
+        ...     ...
+    """
+    _validate_slot_num(slot_num, "pl.cross_core_slot")
+    return CrossCoreSlot(slot_num=slot_num)
+
+
 __all__ = [
+    "CrossCoreSlot",
     "Optimization",
     "Split",
+    "cross_core_slot",
     "split",
 ]

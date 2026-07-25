@@ -99,9 +99,11 @@ function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signa
 transpose check — this pass validates each region's transpose hazard with the
 correct per-region split axis instead).
 
-A function-level AUTO split (`optimizations=[pl.split(mode)]`) and explicit
-`pl.split_aiv` regions are **mutually exclusive** — a scope carrying both is
-rejected. This is enforced earlier, at
+A function-level AUTO split (`optimizations=[pl.split(mode)]`, `SplitMode.NONE`
+included) and explicit `pl.split_aiv` regions are **mutually exclusive** — a
+scope carrying both is rejected. To pin a custom cross-core slot count on a
+region-carrying scope, use `optimizations=[pl.cross_core_slot(slot_num=N)]`,
+which sizes the pipe without annotating a split. This is enforced earlier, at
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md), where the scope's own
 `split_` (the user's `pl.split`) and its regions are both still visible; the
 combination is rejected there because this region path would otherwise lower per

@@ -534,6 +534,21 @@ with pl.at(level=pl.Level.CORE_GROUP,
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
+To pin the slot count (ring depth) of the automatic cross-core pipe, use
+`pl.cross_core_slot(...)`. It sizes a data channel rather than partitioning work,
+so it is independent of the split mode and the two combine freely:
+
+```python
+# Shrink the ring to 4 slots to free buffer space for a larger tile:
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
+                          pl.cross_core_slot(slot_num=4)]):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+```
+
+Omit the entry to keep the default (8 slots when one direction is live, 4 per
+direction when both are).
+
 ## Memory and Data Movement
 
 ### Memory Hierarchy

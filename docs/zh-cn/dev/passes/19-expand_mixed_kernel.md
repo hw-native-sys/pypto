@@ -119,29 +119,37 @@ Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布�
 
 当跨核方向使用了不同大小的 tile 时，Pass 会取所有观察到的 tile 字节大小的最大值作为 `initialize_pipe` 的公共 `slot_size`。较小 tile 写入时不会填满整个槽位，但不影响硬件正确性。用户手写程序仍然可以通过给 `initialize_pipe` 以及匹配的 `tpush` / `tpop` / `tfree` 传入不同 `id` 来创建多条独立 pipe。
 
-### 覆盖环形缓冲深度（`slot_num`）
+### 覆盖槽位数（`slot_num`）
 
-默认环深（8 / 4）可以通过 `pl.split` 上可选的 `slot_num=` 参数按拆分 scope 调整：
+默认槽位数（8 / 4）可以通过 `pl.cross_core_slot(slot_num=N)` 优化条目按 scope 调整：
 
 ```python
-# 收缩自动插入的 cube->vector 环以腾出 buffer 空间给更大的 vector tile
+# 收缩自动插入的环以腾出 buffer 空间给更大的 vector tile
 # （例如让 vec tile 突破默认 8 槽的上限）。
-with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=4)]):
+with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4)]):
     ...
 
-# 也支持 pl.at 形式：
+# 也支持 pl.at 形式，并可与彼此独立的 split 模式组合：
 with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN, slot_num=16)]):
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
+                          pl.cross_core_slot(slot_num=16)]):
     ...
 ```
 
 该值作为 `slot_num` scope 属性记录，由 `OutlineIncoreScopes` 传播到被 outline
 函数的 `slot_num` 属性，并在此 Pass 读取。设置后它同时决定保留 buffer 的大小
 （`slot_size * slot_num`）与发射的 `initialize_pipe` 的 `slot_num` 属性，使 PTOAS
-与自动保留的 buffer 保持一致。省略时沿用 PTOAS 推导的默认值。`slot_num` 必须为
-正数，且适用于任意 split scope，包括 `SplitMode.NONE`：NONE mixed kernel 仍会驱动
-cube->vector pipe（a2a3 上通过双 AIV 派发——见下文），其环深同样由 `slot_num`
-决定。仅当被 outline 的 scope 最终没有跨核操作时才会被忽略。
+与自动保留的 buffer 保持一致。省略该条目时沿用 PTOAS 推导的默认值。`slot_num`
+必须为正数，且与拆分**正交**——它只决定数据通道的大小，不划分计算。它对 scope 实际
+使用的方向都生效（cube->vector、vector->cube 或双向），并适用于任何驱动 pipe 的
+scope：完全没有 split 的内核同样会驱动一条（a2a3 上通过双 AIV 派发——见下文）。
+仅当被 outline 的 scope 最终没有跨核操作时才会被忽略。
+
+**已废弃：** `pl.split(MODE, slot_num=N)` 仍接受该槽位数，但会发出
+`DeprecationWarning`。该写法迫使作者写出并不需要的 split 模式——即
+`pl.split(pl.SplitMode.NONE, slot_num=N)` 惯用法——而 `OutlineIncoreScopes`
+现在会在任何携带 `pl.split_aiv` 区域的 scope 上拒绝它。请把该值迁移到
+`pl.cross_core_slot(slot_num=N)`；打印器已统一输出为该形式。
 
 > 将逻辑环深与更小的本地驻留窗口解耦（`local_slot_num < slot_num`，仅 a2/a3 的
 > 优化）目前尚未在自动拆分路径暴露——如需该能力请使用手动的
