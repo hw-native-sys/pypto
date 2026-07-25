@@ -970,9 +970,9 @@ def _synthetic_chunk(cpp_type: str, count: int, rng: np.random.Generator) -> np.
         return rng.uniform(-0.125, 0.125, size=count).astype(np.float32)
     dtype = _SYNTHETIC_INTEGER_DTYPES.get(cpp_type)
     if dtype is not None:
-        # Zero is the safest generic value for index/control tensors: it avoids
-        # manufacturing out-of-range dynamic addresses while still exercising
-        # the exact kernel control flow selected by explicit scalar arguments.
+        # Zero is a deterministic conservative default, not a proof of valid
+        # control flow. Callers must override pointers whose values are shifted,
+        # use sentinels, or otherwise select data-dependent addresses.
         return np.zeros(count, dtype=dtype)
     raise ValueError(f"unsupported synthetic-input ABI type {cpp_type!r}")
 

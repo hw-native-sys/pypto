@@ -71,6 +71,14 @@ deterministic standalone ABI inputs: full `enable_dump_args=2` capture can
 overrun the DFX collector before it finalizes. Captured model inputs remain an
 optional validation path for small workloads.
 
+The input `kernel.cpp` must contain the synchronization that will execute on
+device. Prefer the `.cpp` emitted by the normal PyPTO/PTOAS compile. If starting
+from a pre-InsertSync level-3 `.pto`, regenerate the source with
+`--enable-insert-sync`; in the same PTOAS invocation, write an InsertSync
+summary and require it to match the topology being studied. Timing a source
+generated from pre-sync PTO without this flag is invalid even when it happens
+to run correctly.
+
 For ablations, run `prepare_dsa_ablation.py --help` with `dsa_expert_placement_study_v1.json`.
 It verifies fingerprints, hard geometry, exact moves, and placement legality,
 then writes full replay-ready solution sets and an overlap/objective report. PyPTO
@@ -103,9 +111,11 @@ python .claude/skills/incore-profiling/standalone_compare.py \
 
 Synthetic inputs are bounded, deterministic, finite, and emitted in chunks, so
 full-size model kernels do not require a multi-gigabyte in-memory tensor. Integer
-pointer inputs are zeroed to avoid invalid dynamic indices. Every scalar ABI
-argument is mandatory in NPU mode. For kernels with data-dependent pointer
-controls, pass `--input-dir` with one exact `<ABI-name>.bin` per pointer instead.
+pointer inputs default to zero, but zero is not universally valid: kernels may
+subtract a base, use sentinels, require positive extents, or interpret the value
+as a data-dependent address. Inspect every integer use and replace invalid
+defaults through `--input-dir`. Every scalar ABI argument is mandatory in NPU
+mode and must satisfy all tensor-view bounds, including the final loop tile.
 
 Mixed AIC/AIV inputs are launched as one co-scheduled group. They require
 `--ptoas-root`; the generator reuses PTOAS's validation-harness wrapper, which
