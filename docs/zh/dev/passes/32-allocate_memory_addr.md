@@ -189,7 +189,14 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    policy 只把信息完整、full-range、distance-zero、cross-resource 的 candidate
    转换成单位权重 `cross_pipe` schema edge。嵌套的 distance-zero candidate 可以构造
    edge；same-resource、loop-carried、partial-range、使用保守初始锚点和不确定的
-   candidate 仅记录而不定价。
+   candidate 仅记录而不定价。元数据 `recognized_reuse_candidate_records_v4`
+   记录 policy 过滤前的全部 raw candidate。已有顺序的记录携带确定性的
+   `dag_path`（使用 recognizer 同一 SSA 依赖图中的 region/statement 坐标），无此
+   顺序的记录携带 `dag_path=none`。实验必须筛选这些 raw record，而不是
+   `cost_model.reuse_penalties`；后者只包含已经过滤的 edge。生命周期端点不是依赖
+   edge，不能用来重建 ordering witness。可使用
+   `python -m pypto.tools.dsa_reuse_candidates PROBLEM.dsa.json` 解析并验证这些
+   metadata，并按 hazard 和 ordering 筛选。
 7. 验证 strict schema/profile，并先尝试 deterministic first-fit。显式启用 reuse
    recognizer 后，其 capacity-constrained cost problem 交给 canonical greedy；该
    solver 会保留 first-fit 作为 feasible incumbent；bounded PyPTO-structured
@@ -223,6 +230,13 @@ offset，而不是在 buffer 生命周期中调整其大小。
 artifact 是 solver/PTOAS A/B 实验的受控接口：不要编辑 IR 或 problem；使用
 `dsa-bench --solution-output` 生成匹配的 solution，再通过 `dsa_solution_dir`
 回放。
+
+设置 `ptoas_sync_summary_dir` 后，PTOAS 会为每个 function 写一条 JSONL 记录。因此
+mixed AIC/AIV codegen unit 会生成多行。请使用
+`python -m pypto.tools.ptoas_sync_summary BASELINE CANDIDATE` 按显式
+`function` 字段比较；不得按行号配对或合并成一个 kernel 总数。一个 module 含多个
+function 时，PTOAS debug 文本可能交错；除非 PTOAS 输出结构化 function key，否则
+该文本不能可靠地进行逐 function group 归因。
 
 **地址分配（默认策略）**：
 

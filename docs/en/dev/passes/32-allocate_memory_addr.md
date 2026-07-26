@@ -222,7 +222,16 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    promotes only complete, full-range, distance-zero cross-resource candidates
    to unit `cross_pipe` schema edges. Nested distance-zero candidates are
    eligible; same-resource, loop-carried, partial-range, conservatively
-   anchored, and uncertain candidates remain report-only.
+   anchored, and uncertain candidates remain report-only. Metadata
+   `recognized_reuse_candidate_records_v4` contains the raw candidates before
+   this policy filter. An ordered record carries a deterministic `dag_path` in
+   region/statement coordinates from the same SSA dependency graph used by the
+   recognizer; an unordered record carries `dag_path=none`. Experiments must
+   screen these raw records rather than `cost_model.reuse_penalties`, which
+   contains only the already-filtered edges. Lifetime endpoints are not
+   dependency edges and must not be used to reconstruct ordering witnesses.
+   `python -m pypto.tools.dsa_reuse_candidates PROBLEM.dsa.json` parses and
+   validates this metadata and can filter it by hazard and ordering.
 7. Validate the strict schema/profile and try deterministic first-fit. An
    explicitly enabled reuse recognizer sends its capacity-constrained cost
    problem to canonical greedy, which retains first-fit as a feasible
@@ -264,6 +273,15 @@ into the standalone corpus. The solution artifact is the controlled seam for
 solver/PTOAS A/B experiments: edit neither the compiler IR nor the problem;
 generate a matching solution with `dsa-bench --solution-output`, then replay it
 through `dsa_solution_dir`.
+
+When `ptoas_sync_summary_dir` is set, PTOAS writes one JSONL record per
+function. A mixed AIC/AIV codegen unit therefore produces multiple rows.
+Compare these files by their explicit `function` field with
+`python -m pypto.tools.ptoas_sync_summary BASELINE CANDIDATE`; never zip rows
+by position or merge them into one kernel total. PTOAS debug text can
+interleave when a module contains multiple functions, so it is not a reliable
+source for per-function group attribution unless PTOAS emits a structured
+function key.
 
 **Address allocation (default policy)**:
 

@@ -61,6 +61,11 @@ struct RecognizedAccessRoute {
   RecognizedAccessResource resource = RecognizedAccessResource::ScalarAccess;
 };
 
+struct RecognizedDependencyNode {
+  size_t region = 0;
+  size_t statement_index = 0;
+};
+
 [[nodiscard]] std::string RecognizedMemoryClassToString(RecognizedMemoryClass memory_class);
 [[nodiscard]] std::string RecognizedAccessResourceToString(RecognizedAccessResource resource);
 [[nodiscard]] std::string RecognizedAccessRouteToString(const RecognizedAccessRoute& route);
@@ -89,6 +94,7 @@ struct RecognizedReuseCandidate {
   uint64_t next_byte_size = 0;
   size_t loop_id = std::numeric_limits<size_t>::max();
   bool ordered_by_logical_dag = false;
+  std::vector<RecognizedDependencyNode> logical_order_witness;
   bool requires_alias_contract = false;
   bool partial_access = false;
   bool incomplete_access_set = false;
