@@ -323,38 +323,56 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     exported.document.metadata["recognized_reuse_candidate_records_v1"] = candidate_records.str();
 
     std::ostringstream detailed_records;
-    first_record = true;
+    std::ostringstream witnessed_records;
+    bool first_detailed_record = true;
     for (const RecognizedReuseCandidate& candidate : recognition.candidates) {
       const auto& first = buffer_id_by_interval[candidate.first_interval];
       const auto& second = buffer_id_by_interval[candidate.second_interval];
       const auto& prior = buffer_id_by_interval[candidate.prior_interval];
       const auto& next = buffer_id_by_interval[candidate.next_interval];
       if (!first || !second || !prior || !next) continue;
-      if (!first_record) detailed_records << ";";
-      first_record = false;
-      detailed_records << *first << "," << *second << "," << *prior << "->" << *next << ","
-                       << RecognizedAccessRouteToString(candidate.prior_route) << "=>"
-                       << RecognizedAccessRouteToString(candidate.next_route)
-                       << ",arenas=" << MemorySpaceToString(candidate.prior_memory_space) << "->"
-                       << MemorySpaceToString(candidate.next_memory_space) << ","
-                       << (candidate.dependence == RecognizedReuseDependence::WriteAfterRead
-                               ? "write_after_read"
-                               : "write_after_write")
-                       << "," << (candidate.ordered_by_logical_dag ? "logical_order" : "no_logical_order")
-                       << "," << (candidate.requires_alias_contract ? "same_operation" : "inter_operation")
-                       << "," << (candidate.partial_access ? "partial_or_unknown" : "full_allocation") << ","
-                       << (candidate.incomplete_access_set ? "incomplete_access_set" : "complete_access_set")
-                       << ","
-                       << (candidate.conservative_initial_anchor ? "conservative_initial_anchor"
-                                                                 : "verified_initial_write")
-                       << "," << (candidate.in_loop ? "in_loop" : "outside_loop") << ","
-                       << (candidate.loop_carried ? "distance_1" : "distance_0")
-                       << ",sites=" << candidate.prior_access_order << "->" << candidate.next_access_order
-                       << ",ranges=" << candidate.prior_byte_offset << "+" << candidate.prior_byte_size
-                       << "->" << candidate.next_byte_offset << "+" << candidate.next_byte_size;
-      if (candidate.loop_carried) detailed_records << ",loop=" << candidate.loop_id;
+      std::ostringstream record;
+      record << *first << "," << *second << "," << *prior << "->" << *next << ","
+             << RecognizedAccessRouteToString(candidate.prior_route) << "=>"
+             << RecognizedAccessRouteToString(candidate.next_route)
+             << ",arenas=" << MemorySpaceToString(candidate.prior_memory_space) << "->"
+             << MemorySpaceToString(candidate.next_memory_space) << ","
+             << (candidate.dependence == RecognizedReuseDependence::WriteAfterRead ? "write_after_read"
+                                                                                   : "write_after_write")
+             << "," << (candidate.ordered_by_logical_dag ? "logical_order" : "no_logical_order") << ","
+             << (candidate.requires_alias_contract ? "same_operation" : "inter_operation") << ","
+             << (candidate.partial_access ? "partial_or_unknown" : "full_allocation") << ","
+             << (candidate.incomplete_access_set ? "incomplete_access_set" : "complete_access_set") << ","
+             << (candidate.conservative_initial_anchor ? "conservative_initial_anchor"
+                                                       : "verified_initial_write")
+             << "," << (candidate.in_loop ? "in_loop" : "outside_loop") << ","
+             << (candidate.loop_carried ? "distance_1" : "distance_0")
+             << ",sites=" << candidate.prior_access_order << "->" << candidate.next_access_order
+             << ",ranges=" << candidate.prior_byte_offset << "+" << candidate.prior_byte_size << "->"
+             << candidate.next_byte_offset << "+" << candidate.next_byte_size;
+      if (candidate.loop_carried) record << ",loop=" << candidate.loop_id;
+      if (!first_detailed_record) {
+        detailed_records << ";";
+        witnessed_records << ";";
+      }
+      first_detailed_record = false;
+      detailed_records << record.str();
+      witnessed_records << record.str() << ",hazard="
+                        << (candidate.hazard == RecognizedReuseHazard::CrossResource ? "cross_resource"
+                                                                                     : "same_resource")
+                        << ",dag_path=";
+      if (candidate.logical_order_witness.empty()) {
+        witnessed_records << "none";
+      } else {
+        for (size_t index = 0; index < candidate.logical_order_witness.size(); ++index) {
+          if (index != 0) witnessed_records << ">";
+          const RecognizedDependencyNode& node = candidate.logical_order_witness[index];
+          witnessed_records << "r" << node.region << "s" << node.statement_index;
+        }
+      }
     }
     exported.document.metadata["recognized_reuse_candidate_records_v3"] = detailed_records.str();
+    exported.document.metadata["recognized_reuse_candidate_records_v4"] = witnessed_records.str();
 
     std::ostringstream edge_records;
     first_record = true;

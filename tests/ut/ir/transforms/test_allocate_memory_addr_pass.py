@@ -1739,6 +1739,7 @@ def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp
     assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
     assert document["metadata"].get("recognized_reuse_penalties", "0") == "0"
+    assert "dag_path=none" in document["metadata"]["recognized_reuse_candidate_records_v4"]
     solution = json.loads((tmp_path / "pypto_same_resource_waw.dsa.solution.json").read_text())
     assert solution["metadata"]["solver"] == "first_fit"
 
@@ -1763,6 +1764,10 @@ def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promotin
     )
     assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
+    witnessed_records = document["metadata"]["recognized_reuse_candidate_records_v4"].split(";")
+    assert witnessed_records
+    assert all("logical_order" in record and "dag_path=none" not in record for record in witnessed_records)
+    assert all(re.search(r"dag_path=r\d+s\d+>r\d+s\d+", record) for record in witnessed_records)
     assert "cost_model" not in document["problem"]
 
 
@@ -1785,7 +1790,27 @@ def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path)
     )
     assert document["metadata"]["recognized_reuse_edges"] == "0"
     assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
+    witnessed_records = document["metadata"]["recognized_reuse_candidate_records_v4"].split(";")
+    paths = [record.rsplit("dag_path=", 1)[1] for record in witnessed_records]
+    assert paths and all(path != "none" for path in paths)
+    assert any(path.count(">") >= 2 for path in paths)
     assert "cost_model" not in document["problem"]
+
+
+@requires_dsa
+def test_dsa_reuse_recognizer_dependency_witness_is_deterministic(tmp_path):
+    """Region/statement paths are stable across equivalent clean exports."""
+    records = []
+    for run in ("first", "second"):
+        export_dir = tmp_path / run
+        _allocate_with_dsa(
+            _dsa_transitively_ordered_handoff_program(),
+            str(export_dir),
+            reuse_penalty_recognizer=passes.DsaReusePenaltyRecognizer.QUADRATIC,
+        )
+        document = json.loads((export_dir / "pypto_transitively_ordered_handoff.dsa.json").read_text())
+        records.append(document["metadata"]["recognized_reuse_candidate_records_v4"])
+    assert records[0] == records[1]
 
 
 @requires_dsa

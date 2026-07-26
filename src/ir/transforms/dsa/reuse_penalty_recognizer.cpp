@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -404,24 +405,84 @@ class AccessCollector : public IRVisitor {
   const std::vector<AllocationAccessSummary>& Summaries() const { return summaries_; }
 
   bool TransitivelyOrdered(const Stmt* earlier, const Stmt* later) {
-    auto cached = transitive_predecessors_.find(later);
-    if (cached == transitive_predecessors_.end()) {
-      std::unordered_set<const Stmt*> ancestors;
-      std::vector<const Stmt*> worklist{later};
-      while (!worklist.empty()) {
-        const Stmt* current = worklist.back();
-        worklist.pop_back();
-        const auto found = predecessors_.find(current);
-        if (found == predecessors_.end()) continue;
-        for (const Stmt* predecessor : found->second) {
-          if (ancestors.insert(predecessor).second) worklist.push_back(predecessor);
-        }
-      }
-      cached = transitive_predecessors_.emplace(later, std::move(ancestors)).first;
-    }
-    return cached->second.count(earlier) != 0;
+    return GetReachability(later).ancestors.count(earlier) != 0;
   }
 
+  std::vector<RecognizedDependencyNode> TransitiveOrderingWitness(const Stmt* earlier, const Stmt* later) {
+    const DependencyReachability& reachability = GetReachability(later);
+    if (reachability.ancestors.count(earlier) == 0) return {};
+
+    std::vector<RecognizedDependencyNode> witness;
+    const Stmt* current = earlier;
+    while (current != nullptr) {
+      const auto location = node_locations_.find(current);
+      if (location == node_locations_.end()) return {};
+      witness.push_back(location->second);
+      if (current == later) return witness;
+      const auto successor = reachability.successor_toward_target.find(current);
+      if (successor == reachability.successor_toward_target.end()) return {};
+      current = successor->second;
+    }
+    return {};
+  }
+
+  std::vector<RecognizedDependencyNode> TransitiveOrderingWitness(const AccessEndpoint& earlier,
+                                                                  const AccessEndpoint& later) {
+    for (auto earlier_it = earlier.region_representatives.rbegin();
+         earlier_it != earlier.region_representatives.rend(); ++earlier_it) {
+      const auto later_it =
+          std::find_if(later.region_representatives.rbegin(), later.region_representatives.rend(),
+                       [&](const RegionRepresentative& representative) {
+                         return representative.region == earlier_it->region;
+                       });
+      if (later_it == later.region_representatives.rend()) continue;
+      if (earlier_it->statement == nullptr || later_it->statement == nullptr ||
+          earlier_it->statement == later_it->statement) {
+        return {};
+      }
+      return TransitiveOrderingWitness(earlier_it->statement, later_it->statement);
+    }
+    return {};
+  }
+
+ private:
+  struct DependencyReachability {
+    std::unordered_set<const Stmt*> ancestors;
+    std::unordered_map<const Stmt*, const Stmt*> successor_toward_target;
+  };
+
+  const DependencyReachability& GetReachability(const Stmt* later) {
+    auto cached = transitive_predecessors_.find(later);
+    if (cached == transitive_predecessors_.end()) {
+      DependencyReachability reachability;
+      std::deque<const Stmt*> worklist{later};
+      while (!worklist.empty()) {
+        const Stmt* current = worklist.front();
+        worklist.pop_front();
+        const auto found = predecessors_.find(current);
+        if (found == predecessors_.end()) continue;
+        std::vector<const Stmt*> predecessors(found->second.begin(), found->second.end());
+        std::sort(predecessors.begin(), predecessors.end(), [&](const Stmt* lhs, const Stmt* rhs) {
+          const auto lhs_location = node_locations_.find(lhs);
+          const auto rhs_location = node_locations_.find(rhs);
+          INTERNAL_CHECK(lhs_location != node_locations_.end() && rhs_location != node_locations_.end())
+              << "dependency-graph node is missing its stable region location";
+          return std::tie(lhs_location->second.region, lhs_location->second.statement_index) <
+                 std::tie(rhs_location->second.region, rhs_location->second.statement_index);
+        });
+        for (const Stmt* predecessor : predecessors) {
+          if (reachability.ancestors.insert(predecessor).second) {
+            reachability.successor_toward_target.emplace(predecessor, current);
+            worklist.push_back(predecessor);
+          }
+        }
+      }
+      cached = transitive_predecessors_.emplace(later, std::move(reachability)).first;
+    }
+    return cached->second;
+  }
+
+ public:
   bool TransitivelyOrdered(const AccessEndpoint& earlier, const AccessEndpoint& later) {
     // An access nested in structured control is represented by the enclosing
     // If/For/While statement in its parent's dependency graph.  Compare the
@@ -451,6 +512,9 @@ class AccessCollector : public IRVisitor {
     const size_t previous_index = current_statement_index_;
     current_region_ = next_region_++;
     region_stack_.push_back({current_region_, nullptr});
+    for (size_t index = 0; index < op->stmts_.size(); ++index) {
+      node_locations_[op->stmts_[index].get()] = {current_region_, index};
+    }
     const stmt_dep::StmtDependencyGraph graph = stmt_dep::BuildStmtDependencyGraph(op);
     for (const auto& [statement, predecessors] : graph.predecessors) {
       predecessors_[statement].insert(predecessors.begin(), predecessors.end());
@@ -516,7 +580,8 @@ class AccessCollector : public IRVisitor {
   TupleResultElements tuple_results_;
   std::vector<AllocationAccessSummary> summaries_;
   std::unordered_map<const Stmt*, std::unordered_set<const Stmt*>> predecessors_;
-  std::unordered_map<const Stmt*, std::unordered_set<const Stmt*>> transitive_predecessors_;
+  std::unordered_map<const Stmt*, DependencyReachability> transitive_predecessors_;
+  std::unordered_map<const Stmt*, RecognizedDependencyNode> node_locations_;
   size_t next_region_ = 0;
   size_t current_region_ = 0;
   size_t current_statement_index_ = 0;
@@ -788,6 +853,9 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
     candidate_pairs.insert(canonical_pair);
     const bool same_operation = terminal.statement == initial.statement;
     const bool ordered = !same_operation && collector.TransitivelyOrdered(terminal, initial);
+    const std::vector<RecognizedDependencyNode> ordering_witness =
+        ordered ? collector.TransitiveOrderingWitness(terminal, initial)
+                : std::vector<RecognizedDependencyNode>{};
     if (ordered) ordered_pairs.insert(canonical_pair);
     const RecognizedReuseHazard hazard = terminal.route.resource == initial.route.resource
                                              ? RecognizedReuseHazard::SameResource
@@ -818,6 +886,7 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
                                  initial.byte_size,
                                  loop_carried ? crossed_loop->first : std::numeric_limits<size_t>::max(),
                                  ordered,
+                                 ordering_witness,
                                  same_operation,
                                  partial_access,
                                  incomplete_access_set,
