@@ -84,6 +84,20 @@ It verifies fingerprints, hard geometry, exact moves, and placement legality,
 then writes full replay-ready solution sets and an overlap/objective report. PyPTO
 replay remains the authoritative C++ validator before codegen.
 
+For a single buffer-pair experiment, construct the disjoint/overlapping pair
+and its translated address control jointly:
+
+```bash
+python .claude/skills/incore-profiling/construct_dsa_pair_isolation.py \
+  --problem <problem.dsa.json> --base-solution <base.dsa.solution.json> \
+  --first-buffer <id> --second-buffer <id> --output-root <out>
+```
+
+The constructor preserves each target's complete overlap signature with every
+unrelated buffer and emits `D0`, `O0`, `D1`, and `O1` only when the two disjoint
+geometries and two overlapping geometries match exactly. Replay still provides
+the authoritative compiler-side validation.
+
 Generate and build both cases separately:
 
 ```bash
