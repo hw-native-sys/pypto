@@ -2039,12 +2039,13 @@ def create_l1(shape: Sequence[IntLike], dtype: DataType, transpose: bool = False
     return Tensor(expr=call_expr)
 
 
-def gather_row(
+def gather_row(  # noqa: PLR0913
     acc: Tensor,
     src: Tensor,
     dst_offset: Sequence[IntLike],
     src_offset: Sequence[IntLike],
     shapes: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
     transpose: bool = False,
 ) -> Tensor:
     """Gather one GM row into a sub-region of an on-chip accumulator (DPS).
@@ -2062,11 +2063,17 @@ def gather_row(
         dst_offset: ``[row, col]`` slot within ``acc`` to write.
         src_offset: ``[row, col]`` physical offset within the GM ``src``.
         shapes: GM row window ``[r, c]`` (typically ``[1, size]``).
+            Must be compile-time constant.
+        valid_shape: How much of that window to actually transfer, defaulting to
+            all of it. May hold runtime ``Scalar`` values, so a dynamic row count
+            leaves the accumulator's allocation and layout untouched. Not
+            supported together with ``transpose=True``.
         transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]`` — use
             for a matmul B-operand whose consumer would otherwise need ``b_trans``.
 
     Returns:
         Tensor aliasing ``acc`` (written in place).
+
     """
     call_expr = _ir_ops.gather_row(
         acc.unwrap(),
@@ -2074,6 +2081,7 @@ def gather_row(
         _normalize_intlike(dst_offset),
         _normalize_intlike(src_offset),
         _normalize_intlike(shapes),
+        _normalize_intlike(valid_shape) if valid_shape is not None else None,
         transpose,
     )
     return Tensor(expr=call_expr)

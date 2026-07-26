@@ -24,6 +24,14 @@
  * Destination-Preserve-Source (DPS): the op writes into its first argument in
  * place (``set_output_reuses_input(0)``), so a loop-carried accumulator is
  * updated row by row without copying the whole tile.
+ *
+ * ``shapes`` vs the optional ``valid_shape``: ptoas types ``pto.subview``'s
+ * ``sizes`` as a static ``I64ArrayAttr``, so the window shape can never be
+ * dynamic. ``valid_shape`` carries the *runtime* transfer extent instead — it
+ * feeds the subview's ``Optional<Index> valid_row/valid_col`` operands and the
+ * GM ``pto.partition_view`` sizes, both of which accept dynamic SSA values. A
+ * dynamic row count therefore costs nothing in allocation or box alignment: the
+ * tile stays statically ``shapes``-sized and only the copy length varies.
  */
 
 #include <any>
@@ -32,19 +40,22 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 
 static TypePtr DeduceTileGatherRowType(const std::vector<ExprPtr>& args,
-                                       const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs,
                                        const std::string& op_name) {
-  CHECK(args.size() == 5) << "The operator " << op_name
-                          << " requires 5 arguments (dst, src, dst_offset, src_offset, shapes), but got "
-                          << args.size();
+  CHECK(args.size() == 5 || args.size() == 6)
+      << "The operator " << op_name
+      << " requires 5-6 arguments (dst, src, dst_offset, src_offset, shapes[, valid_shape]), but got "
+      << args.size();
 
   auto dst_type = As<TileType>(args[0]->GetType());
   CHECK(dst_type) << "The operator " << op_name << " requires dst to be a TileType, but got "
@@ -57,7 +68,12 @@ static TypePtr DeduceTileGatherRowType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires dst and src to share dtype, but got "
       << dst_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();
 
-  // DPS: the result is the destination accumulator, written in place.
+  CheckGatherRowOperands(args, kwargs, op_name);
+
+  // DPS: the result is the destination accumulator, written in place. The
+  // optional valid_shape narrows only *this* transfer — the accumulator keeps
+  // its full extent (its other rows hold previously gathered data), so it must
+  // NOT propagate into the result type.
   return dst_type;
 }
 
@@ -72,6 +88,9 @@ REGISTER_OP("tile.gather_row")
     .add_argument("dst_offset", "Destination [row, col] offset (TupleType of ScalarType)")
     .add_argument("src_offset", "Source [row, col] offset within the GM tensor (TupleType of ScalarType)")
     .add_argument("shapes", "GM row window shape [r, c] (TupleType of ScalarType)")
+    .add_argument("valid_shape",
+                  "Optional runtime transfer extent [r, c] within shapes (TupleType of ScalarType). "
+                  "May be a runtime Scalar[INDEX]; defaults to shapes.")
     .set_attr<bool>("transpose")
     .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,

@@ -12,6 +12,7 @@
 #include "pypto/ir/type_inference.h"
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -21,7 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
@@ -387,6 +390,53 @@ std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<Ex
     }
   }
   return errors;
+}
+
+void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name) {
+  auto shapes = As<MakeTuple>(args[4]);
+  CHECK(shapes) << "The operator " << op_name << " requires shapes to be a literal tuple, but got "
+                << args[4]->TypeName();
+  for (size_t i = 0; i < shapes->elements_.size(); ++i) {
+    CHECK(As<ConstInt>(shapes->elements_[i]))
+        << "The operator " << op_name << " requires shapes[" << i
+        << "] to be a compile-time constant (it sizes pto.subview, whose sizes is a static attribute), "
+           "but got a runtime value. Pass a dynamic row count through valid_shape instead — it keeps "
+           "the window (and so the tile allocation and box alignment) static while varying only the "
+           "transfer length.";
+  }
+  if (args.size() < 6) return;
+
+  auto valid = As<MakeTuple>(args[5]);
+  CHECK(valid) << "The operator " << op_name << " requires valid_shape to be a literal tuple, but got "
+               << args[5]->TypeName();
+
+  bool transpose = false;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
+  }
+  if (transpose) {
+    for (const auto& elem : valid->elements_) {
+      CHECK(As<ConstInt>(elem))
+          << "The operator " << op_name
+          << " does not support a dynamic valid_shape together with transpose=True (the DN2NZ per-row "
+             "path would need a runtime column extent on a boxed NZ tile). Use a static valid_shape "
+             "with transpose=True, or gather without transpose and read the operand with "
+             "matmul(b_trans=True).";
+    }
+  }
+
+  // Report every violation at once rather than only the first — the messages
+  // already carry the op name and dimension index.
+  const auto errors = ValidateValidShapeBounds(valid->elements_, shapes->elements_, op_name);
+  if (errors.empty()) return;
+  std::ostringstream msg;
+  for (size_t i = 0; i < errors.size(); ++i) {
+    if (i > 0) msg << "; ";
+    msg << errors[i].message;
+  }
+  throw ValueError(msg.str());
 }
 
 void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::string& op_name,

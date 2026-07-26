@@ -21,6 +21,7 @@
 #ifndef PYPTO_IR_TYPE_INFERENCE_H_
 #define PYPTO_IR_TYPE_INFERENCE_H_
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -223,6 +224,37 @@ struct ValidShapeBoundsError {
 std::vector<ValidShapeBoundsError> ValidateValidShapeBounds(const std::vector<ExprPtr>& valid,
                                                             const std::vector<ExprPtr>& physical,
                                                             const std::string& type_kind);
+
+/**
+ * @brief Validate the operand contract of ``tile.gather_row`` / ``tensor.gather_row``
+ *
+ * Shared by the two deducers (tile and tensor level) so the contract is stated
+ * once and the user hits it at trace time rather than in a pass or the backend.
+ * Enforces, for ``args = (dst, src, dst_offset, src_offset, shapes[, valid_shape])``:
+ *
+ * - every ``shapes`` element is a ``ConstInt`` — it sizes ``pto.subview``, whose
+ *   ``sizes`` ptoas types as a static ``I64ArrayAttr``, so a dynamic window is
+ *   not expressible at all;
+ * - ``valid_shape``, when present, matches ``shapes`` in rank and violates
+ *   ``0 <= valid_shape[i] <= shapes[i]`` in no *provable* way — a symbolic extent
+ *   that cannot be decided is accepted, since that dynamic case is the whole
+ *   point of the operand;
+ * - ``valid_shape`` is fully static when ``transpose=True``, because that path
+ *   lowers through a DN2NZ ``pto.tload`` that would need a runtime column extent
+ *   on a boxed NZ tile.
+ *
+ * Note the bounds check cannot be left to ``TypeChecker``'s
+ * ``ValidateValidShapeBounds`` sweep: gather_row's ``valid_shape`` narrows only
+ * the transfer and never reaches the result ``TileType``/``TensorType``, so the
+ * verifier has nothing to inspect.
+ *
+ * @param args Operand list, 5 or 6 entries
+ * @param kwargs Operator kwargs, read for ``transpose``
+ * @param op_name Operator name used in diagnostics
+ */
+void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs,
+                            const std::string& op_name);
 
 /**
  * @brief Read the elements of a tuple-typed operand

@@ -466,12 +466,13 @@ def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def gather_row(
+def gather_row(  # noqa: PLR0913
     dst: Tile,
     src: Tensor,
     dst_offset: Sequence[IntLike],
     src_offset: Sequence[IntLike],
     shapes: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
     transpose: bool = False,
 ) -> Tile:
     """Load one GM row directly into a sub-region of an on-chip tile (DPS).
@@ -491,6 +492,11 @@ def gather_row(
         dst_offset: ``[row, col]`` slot within ``dst`` to write.
         src_offset: ``[row, col]`` physical offset within the GM ``src``.
         shapes: GM row window shape ``[r, c]`` (typically ``[1, size]``).
+            Must be compile-time constant.
+        valid_shape: How much of that window to actually transfer, defaulting to
+            all of it. May hold runtime ``Scalar`` values, so a dynamic row count
+            leaves the tile's allocation and layout untouched. Not supported
+            together with ``transpose=True``.
         transpose: Place the GM row ``[r, c]`` as an on-chip column ``[c, r]`` —
             fills a matmul ``b_trans`` B-operand without a GM round-trip
             (Mat/L1 only).
@@ -504,6 +510,7 @@ def gather_row(
         _normalize_intlike(dst_offset),
         _normalize_intlike(src_offset),
         _normalize_intlike(shapes),
+        _normalize_intlike(valid_shape) if valid_shape is not None else None,
         transpose,
     )
     return Tile(expr=call_expr)

@@ -106,5 +106,125 @@ def test_gather_row_no_transpose_keeps_nd_source_view():
     assert "layout = #pto.layout<dn>" not in mlir
 
 
+STATIC_ROWS = ROWS // 2
+
+
+def _build_dynamic_valid_program():
+    """Gather the whole ROWS-row window in one call, transferring only ``n`` rows.
+
+    ``shapes`` stays the static [ROWS, HEAD_DIM] window (it sizes pto.subview);
+    only the transfer length varies, and here it is read from a GM scalar at
+    runtime — the case the operand exists for.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[NSRC, HEAD_DIM], pl.BF16],
+            a: pl.Tensor[[MM, ROWS], pl.BF16],
+            n: pl.Tensor[[1], pl.INT32],
+        ) -> pl.Tensor[[MM, HEAD_DIM], pl.FP32]:
+            rows = pl.cast(pl.read(n, [0]), pl.INDEX)
+            kv = pl.create_l1([ROWS, HEAD_DIM], pl.BF16)
+            kv = pl.gather_row(kv, src, [0, 0], [0, 0], [ROWS, HEAD_DIM], valid_shape=[rows, HEAD_DIM])
+            return pl.matmul(a, kv, out_dtype=pl.FP32)
+
+        @pl.function
+        def main(
+            self,
+            src: pl.Tensor[[NSRC, HEAD_DIM], pl.BF16],
+            a: pl.Tensor[[MM, ROWS], pl.BF16],
+            n: pl.Tensor[[1], pl.INT32],
+        ) -> pl.Tensor[[MM, HEAD_DIM], pl.FP32]:
+            r = self.kernel(src, a, n)
+            return r
+
+    return Program
+
+
+def _build_static_valid_program():
+    """Same kernel shape, but with a compile-time constant transfer extent.
+
+    A separate builder rather than a flag on the dynamic one because the two
+    kernels differ in signature — the dynamic case needs the ``n`` scalar operand
+    to read the extent from, and threading an unused one through here would
+    obscure that this path has no runtime input at all.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[NSRC, HEAD_DIM], pl.BF16],
+            a: pl.Tensor[[MM, ROWS], pl.BF16],
+        ) -> pl.Tensor[[MM, HEAD_DIM], pl.FP32]:
+            kv = pl.create_l1([ROWS, HEAD_DIM], pl.BF16)
+            kv = pl.gather_row(kv, src, [0, 0], [0, 0], [ROWS, HEAD_DIM], valid_shape=[STATIC_ROWS, HEAD_DIM])
+            return pl.matmul(a, kv, out_dtype=pl.FP32)
+
+        @pl.function
+        def main(
+            self,
+            src: pl.Tensor[[NSRC, HEAD_DIM], pl.BF16],
+            a: pl.Tensor[[MM, ROWS], pl.BF16],
+        ) -> pl.Tensor[[MM, HEAD_DIM], pl.FP32]:
+            r = self.kernel(src, a)
+            return r
+
+    return Program
+
+
+def _subview_result_type(mlir: str) -> str:
+    """The gather_row subview's *result* tile_buf type (the text after ``->``).
+
+    Asserting on the whole module would be meaningless for v_row/v_col: a plain
+    (non-subview) tile type always renders as ``v_row=?, v_col=?`` regardless of
+    its IR valid_shape, so the parent operand type on the very same line reads
+    ``?`` in both the static and dynamic cases.
+    """
+    lines = [ln for ln in mlir.splitlines() if "gather_row_view = pto.subview" in ln]
+    assert len(lines) == 1, f"expected exactly one gather_row subview, got {len(lines)}"
+    return lines[0].split("->", 1)[1].strip()
+
+
+def test_gather_row_dynamic_valid_shape_emits_dynamic_subview_and_partition():
+    """A runtime row count narrows the transfer without making the window dynamic.
+
+    ptoas types pto.subview's `sizes` as a static I64ArrayAttr but `valid_row` /
+    `valid_col` as Optional<Index> SSA operands, so the dynamic extent must land
+    on the valid side and on the GM partition, while `sizes` keeps the static
+    window (and with it the tile allocation and NZ box alignment).
+    """
+    mlir = _codegen_incore(_build_dynamic_valid_program())
+    subview = [ln for ln in mlir.splitlines() if "gather_row_view = pto.subview" in ln][0]
+    # Static window survives in `sizes`; the L1 tile allocation is unaffected.
+    assert f"sizes [{ROWS}, {HEAD_DIM}]" in subview
+    # The row extent is an SSA operand, not a folded constant.
+    assert f"valid [%2, %c{HEAD_DIM}_index]" in subview
+    # Per-dim result valid: dynamic row, static col. SubViewOp::verify's
+    # expectedValidDim marks only the non-constant operand kDynamic and rejects a
+    # result type that disagrees per dim, so these must NOT both be `?`.
+    result_type = _subview_result_type(mlir)
+    assert f"v_row=?, v_col={HEAD_DIM}" in result_type
+    # GM side carries the same dynamic extent.
+    assert f"!pto.partition_tensor_view<?x{HEAD_DIM}xbf16>" in mlir
+    assert "pto.tload" in mlir
+
+
+def test_gather_row_static_valid_shape_stays_static():
+    """A constant valid_shape keeps both the subview result type and the partition static."""
+    mlir = _codegen_incore(_build_static_valid_program())
+    subview = [ln for ln in mlir.splitlines() if "gather_row_view = pto.subview" in ln][0]
+    assert f"sizes [{ROWS}, {HEAD_DIM}]" in subview
+    assert f"valid [%c{STATIC_ROWS}_index, %c{HEAD_DIM}_index]" in subview
+    result_type = _subview_result_type(mlir)
+    assert f"v_row={STATIC_ROWS}, v_col={HEAD_DIM}" in result_type
+    assert "v_row=?" not in result_type
+    assert f"!pto.partition_tensor_view<{STATIC_ROWS}x{HEAD_DIM}xbf16>" in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -290,19 +290,27 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
 
 // tile.gather_row: load one GM row directly into a sub-region of the destination
 // (Mat/Vec) accumulator. Lowering (no pto.tmov):
-//   1. %dst_view = pto.subview %dst[row, col] sizes [R, C] valid [R, C] : ... -> ...
-//   2. %src_pview = pto.partition_view %src_view, offsets = [...], sizes = [r, c] : ... -> ...
+//   1. %dst_view = pto.subview %dst[row, col] sizes [R, C] valid [vr, vc] : ... -> ...
+//   2. %src_pview = pto.partition_view %src_view, offsets = [...], sizes = [vr, vc] : ... -> ...
 //   3. pto.tload ins(%src_pview) outs(%dst_view)
 // Filling an L1 (Mat) tile is only valid via GM->Mat tload (MAT->MAT tmov is
 // unsupported on a2a3), so the row is written straight into the accumulator
 // sub-region. DPS: %dst is the in-place result target. ``transpose`` swaps the
 // destination subview dims (GM row [r, c] -> L1 column [c, r]) for the matmul
 // B-operand layout.
+//
+// The optional 6th operand ``valid_shape`` carries the *runtime* transfer extent
+// [vr, vc]; without it the transfer covers the whole [R, C] window and the emitted
+// text is byte-identical to the pre-valid_shape lowering. The split matters
+// because ptoas types pto.subview's `sizes` as a static I64ArrayAttr while
+// `valid_row`/`valid_col` are Optional<Index> SSA operands (PTOOps.td SubViewOp) —
+// so only the valid side, and the GM partition_view sizes, can be dynamic.
 static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 5) << "tile.gather_row requires 5 arguments "
-                                  "(dst, src, dst_offset, src_offset, shapes), got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 5 || op->args_.size() == 6)
+      << "tile.gather_row requires 5-6 arguments "
+         "(dst, src, dst_offset, src_offset, shapes[, valid_shape]), got "
+      << op->args_.size();
 
   auto dst_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(dst_tile_type, op->span_) << "tile.gather_row dst must be a TileType";
@@ -321,18 +329,41 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
       op->span_)
       << "tile.gather_row offsets and shapes must have at least 2 elements";
 
+  // Optional valid_shape: the runtime transfer extent inside the static window.
+  // Absent => the whole window, which reproduces the original 5-arg lowering.
+  auto valid = shapes;
+  if (op->args_.size() == 6) {
+    valid = ir::As<ir::MakeTuple>(op->args_[5]);
+    INTERNAL_CHECK_SPAN(valid && valid->elements_.size() >= 2, op->span_)
+        << "tile.gather_row valid_shape must be a literal tuple with at least 2 elements";
+  }
+
   bool transpose = false;
   for (const auto& [k, v] : op->kwargs_) {
     if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
   }
 
+  // Constant `shapes`, and static valid under transpose, are op preconditions the
+  // deducer already rejected with a user-facing message (DeduceTileGatherRowType).
+  // Reaching codegen without them means a pass built the call, i.e. a compiler bug.
   auto r_const = ir::As<ir::ConstInt>(shapes->elements_[0]);
   auto c_const = ir::As<ir::ConstInt>(shapes->elements_[1]);
   INTERNAL_CHECK_SPAN(r_const && c_const, op->span_)
-      << "tile.gather_row shapes must be compile-time constants for pto.subview sizes";
+      << "Internal error: tile.gather_row shapes must be compile-time constants for pto.subview sizes";
   // Destination subview shape: transpose maps a GM row [r, c] to an L1 column [c, r].
   const int64_t sv_rows = transpose ? c_const->value_ : r_const->value_;
   const int64_t sv_cols = transpose ? r_const->value_ : c_const->value_;
+
+  // Transfer extent in *GM partition* order. transpose presents the GM row [r, c]
+  // as a DN column, so the source order is swapped there — and that swap makes
+  // the first two entries the destination subview's [valid_row, valid_col] in
+  // both cases (same rule as sv_rows/sv_cols above).
+  const std::vector<ExprPtr> xfer_elems =
+      transpose ? std::vector<ExprPtr>{valid->elements_[1], valid->elements_[0]} : valid->elements_;
+  auto vr_const = ir::As<ir::ConstInt>(xfer_elems[0]);
+  auto vc_const = ir::As<ir::ConstInt>(xfer_elems[1]);
+  INTERNAL_CHECK_SPAN(!transpose || (vr_const && vc_const), op->span_)
+      << "Internal error: tile.gather_row transpose=True requires a static valid_shape";
 
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
@@ -349,9 +380,11 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // be a whole number of boxes per dim (ptoas: "boxed layout subview sizes must
   // be multiples of inner shape"). A per-row gather writes a single row, so we
   // carve a box-aligned physical sub-region (size = phys_rows x phys_cols) but
-  // mark only the real extent valid (valid = sv_rows x sv_cols); the tload then
-  // fills just that row. ND tiles (Vec, slayout=none_box) have no inner box and
-  // use the exact per-row size.
+  // mark only the real extent valid; the tload then fills just that row. ND tiles
+  // (Vec, slayout=none_box) have no inner box and use the exact per-row size.
+  // Alignment is computed from the *static* window (sv_rows/sv_cols), never from
+  // valid_shape, so a dynamic transfer extent leaves the physical carve-out — and
+  // hence this box-multiple invariant — untouched.
   const bool boxed = view_info.slayout != ir::TileLayout::none_box;
   auto round_up = [](int64_t n, int64_t mult) { return ((n + mult - 1) / mult) * mult; };
   // NZ fractal granularity: M0 = 16 rows; the C0 lane count along columns is
@@ -367,35 +400,54 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   view_info.rows = phys_rows;
   view_info.cols = phys_cols;
-  view_info.v_row = sv_rows;
-  view_info.v_row_dynamic = false;
-  view_info.v_col = sv_cols;
-  view_info.v_col_dynamic = false;
+  // Per-dim static/dynamic, deliberately NOT promoted together — see the same
+  // handling in tile.slice below for why PTOAS requires this.
+  view_info.v_row_dynamic = vr_const == nullptr;
+  view_info.v_col_dynamic = vc_const == nullptr;
+  if (vr_const) view_info.v_row = vr_const->value_;
+  if (vc_const) view_info.v_col = vc_const->value_;
   std::string view_type = codegen::FormatTileBufTypeString(
       codegen::MemorySpaceToMLIR(dst_space), view_info.dtype_str, view_info.rows, view_info.cols,
       view_info.blayout, view_info.slayout, view_info.fractal, view_info.pad, view_info.v_row,
       view_info.v_col, view_info.v_row_dynamic, view_info.v_col_dynamic);
 
-  std::string valid_rows = codegen.GetOrEmitConstant(sv_rows, DataType::INDEX);
-  std::string valid_cols = codegen.GetOrEmitConstant(sv_cols, DataType::INDEX);
+  // Coerce the extent to `index` once, then feed both consumers from it:
+  // pto.subview's valid_row/valid_col are Optional<Index> and partition_view sizes
+  // are index-typed, and EmitCastToIndex is not memoized — computing these twice
+  // would emit a second, identical arith.index_cast into the kernel body for a
+  // runtime extent.
+  const std::vector<std::string> xfer_codes = GetSizeCodes(xfer_elems, codegen);
   std::string dst_view = codegen.NewNamedTemp("gather_row_view");
   std::ostringstream sv;
   sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << phys_rows
-     << ", " << phys_cols << "] valid [" << valid_rows << ", " << valid_cols << "]";
+     << ", " << phys_cols << "] valid [" << xfer_codes[0] << ", " << xfer_codes[1] << "]";
   if (!dst_type.empty() && !view_type.empty()) {
     sv << " : " << dst_type << " -> " << view_type;
   }
   codegen.Emit(sv.str());
   if (!view_type.empty()) codegen.RegisterTileBufType(dst_view, view_type);
 
-  // GM source window [r, c] -> partition_view, then tload into the subview.
+  // GM source window -> partition_view, then tload into the subview. The
+  // partition carries the *transfer extent*, not the static window — same as
+  // tile.load, which likewise builds its partition type and sizes from
+  // valid_shapes. GetDimStrings renders a non-ConstInt extent as `?`, which
+  // TLoadOp::verify accepts on the src partition shape.
+  //
+  // Narrowing the partition is LOAD-BEARING, not tidiness: on a2a3 the GM->L1
+  // fractal path `TLoadGm2L1Nd2nz` takes `validRow`/`validCol` and never reads
+  // them, deriving the DMA extent solely from the GlobalTensor shape — and unlike
+  // its non-fractal `TLoadGm2L1Nd2nd` sibling it has no PTO_ASSERT cross-checking
+  // the two. Setting only the subview's `valid [...]` would move the whole window
+  // with no error anywhere. (a5 mirrors this: its tilelang tload template reads
+  // `dst.valid_shape` instead.) Feeding both is what makes a dynamic extent
+  // correct on either arch; tests/st/runtime/ops/test_gather_row_dynamic_valid_shape.py
+  // is the on-device sentinel guarding it.
   std::string dtype_str = codegen.GetTypeString(src_tensor_type->dtype_);
   std::string src_view_type = codegen.GetTensorViewTypeString(src_tensor_type.get());
-  const auto& shape_elems = shapes->elements_;
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(xfer_elems), dtype_str);
   const auto& soff_elems = src_off->elements_;
 
   std::string src_pview;
-  std::string partition_type;
   if (transpose) {
     // Transposing per-row gather: the GM row [r=1, c] must land as the L1 column
     // [c, 1]. pto.tload itself does NOT transpose, so we feed it a DN-strided
@@ -419,19 +471,15 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
        << "] {layout = #pto.layout<dn>}: " << src_view_type;
     codegen.Emit(mv.str());
     // Read src[phys, col_off : col_off + c] presented as the DN column [c, 1]:
-    // offsets [col_off, phys] (swapped), sizes [c, r] (swapped).
+    // offsets [col_off, phys] (swapped). xfer_elems/xfer_codes are already in
+    // this swapped source order.
     std::vector<ExprPtr> tr_off = {soff_elems[1], soff_elems[0]};
-    std::vector<ExprPtr> tr_shape = {shape_elems[1], shape_elems[0]};
-    partition_type = MakePartitionTensorViewType(GetDimStrings(tr_shape), dtype_str);
-    src_pview =
-        EmitPartitionViewPTO(src->name_hint_, dn_view, src_view_type, partition_type,
-                             GetIndexOffsetCodes(tr_off, codegen), GetSizeCodes(tr_shape, codegen), codegen);
+    src_pview = EmitPartitionViewPTO(src->name_hint_, dn_view, src_view_type, partition_type,
+                                     GetIndexOffsetCodes(tr_off, codegen), xfer_codes, codegen);
   } else {
     std::string src_view = codegen.GetOrCreateTensorView(src);
-    partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
     src_pview = EmitPartitionViewPTO(src->name_hint_, src_view, src_view_type, partition_type,
-                                     GetIndexOffsetCodes(soff_elems, codegen),
-                                     GetSizeCodes(shape_elems, codegen), codegen);
+                                     GetIndexOffsetCodes(soff_elems, codegen), xfer_codes, codegen);
   }
 
   std::ostringstream tload_line;

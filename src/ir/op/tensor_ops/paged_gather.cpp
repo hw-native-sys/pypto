@@ -42,6 +42,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -231,11 +232,12 @@ TypePtr DeduceTensorCreateL1Type(const std::vector<ExprPtr>& args,
 }
 
 TypePtr DeduceTensorGatherRowType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const std::string& op_name) {
-  CHECK(args.size() == 5) << "The operator " << op_name
-                          << " requires 5 arguments (acc, src, dst_offset, src_offset, shapes), but got "
-                          << args.size();
+  CHECK(args.size() == 5 || args.size() == 6)
+      << "The operator " << op_name
+      << " requires 5-6 arguments (acc, src, dst_offset, src_offset, shapes[, valid_shape]), but got "
+      << args.size();
   auto acc_type = As<TensorType>(args[0]->GetType());
   CHECK(acc_type) << "The operator " << op_name
                   << " requires acc to be a TensorType (from tensor.create_l1), but got "
@@ -246,7 +248,12 @@ TypePtr DeduceTensorGatherRowType(const std::vector<ExprPtr>& args,
   CHECK(acc_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires acc and src to share dtype, but got "
       << acc_type->dtype_.ToString() << " and " << src_type->dtype_.ToString();
-  // DPS: result is the accumulator, written in place.
+
+  CheckGatherRowOperands(args, kwargs, op_name);
+
+  // DPS: result is the accumulator, written in place. The optional valid_shape
+  // narrows only this transfer, so it must NOT propagate into the result type —
+  // the accumulator keeps the full extent it was allocated with.
   return args[0]->GetType();
 }
 
@@ -275,6 +282,9 @@ REGISTER_OP("tensor.gather_row")
     .add_argument("dst_offset", "[row, col] offset within acc (TupleType of ScalarType)")
     .add_argument("src_offset", "[row, col] offset within the GM src (TupleType of ScalarType)")
     .add_argument("shapes", "GM row window shape [r, c] (TupleType of ScalarType)")
+    .add_argument("valid_shape",
+                  "Optional runtime transfer extent [r, c] within shapes (TupleType of ScalarType). "
+                  "May be a runtime Scalar[INDEX]; defaults to shapes.")
     .set_attr<bool>("transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

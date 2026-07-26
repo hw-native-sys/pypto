@@ -1885,9 +1885,9 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
       "tensor.gather_row",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        INTERNAL_CHECK_SPAN(args.size() == 5, span)
-            << "tensor.gather_row conversion expects 5 args (acc, src, dst_offset, src_offset, shapes), "
-               "but got "
+        INTERNAL_CHECK_SPAN(args.size() == 5 || args.size() == 6, span)
+            << "tensor.gather_row conversion expects 5-6 args (acc, src, dst_offset, src_offset, "
+               "shapes[, valid_shape]), but got "
             << args.size();
         auto& op_reg = OpRegistry::GetInstance();
         bool transpose = false;
@@ -1895,8 +1895,9 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
           if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
         }
         std::vector<std::pair<std::string, std::any>> gr_kwargs = {{"transpose", transpose}};
-        auto gr_call =
-            op_reg.Create("tile.gather_row", {args[0], args[1], args[2], args[3], args[4]}, gr_kwargs, span);
+        // tile.gather_row shares the 5-or-6 arg signature, so the optional
+        // valid_shape (args[5]) forwards verbatim.
+        auto gr_call = op_reg.Create("tile.gather_row", args, gr_kwargs, span);
         return ConversionResult{gr_call};
       });
 }

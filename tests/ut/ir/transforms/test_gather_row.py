@@ -190,6 +190,135 @@ def test_gather_row_rejects_dtype_mismatch():
                 return kv
 
 
+def test_gather_row_forwards_valid_shape_to_tile_op():
+    """The optional valid_shape rides through ConvertTensorToTileOps verbatim.
+
+    ``shapes`` sizes the pto.subview (a static attribute in the PTO dialect), so a
+    dynamic transfer length has to travel as a separate operand. Here both are
+    static, which makes the forwarded 6th operand assertable in printed IR.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+            kv0 = pl.create_l1([16, 128], pl.BF16)
+            # Window is 4 rows; only 3 of them are actually transferred.
+            kv1 = pl.gather_row(kv0, src, [0, 0], [0, 0], [4, 128], valid_shape=[3, 128])
+            return kv1
+
+        @pl.function
+        def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+            r = self.kernel(src)
+            return r
+
+    text = _print_after_convert(Program)
+    assert "pl.tile.gather_row(" in text
+    assert "[0, 0], [0, 0], [4, 128], [3, 128], transpose=False)" in text
+
+
+def test_gather_row_valid_shape_roundtrips():
+    """A dynamic valid_shape survives print -> parse.
+
+    The runtime extent is a genuine SSA operand (not an attr) precisely so it can
+    be a runtime value; this pins that the printer emits it positionally and the
+    parser threads it back to the same IR.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, src: pl.Tensor[[256, 128], pl.BF16], n: pl.Tensor[[1], pl.INT32]
+        ) -> pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat]:
+            rows = pl.cast(pl.read(n, [0]), pl.INDEX)
+            kv0 = pl.tile.create([16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+            kv1 = pl.tile.gather_row(kv0, src, [0, 0], [0, 0], [16, 128], valid_shape=[rows, 128])
+            return kv1
+
+        @pl.function
+        def main(
+            self, src: pl.Tensor[[256, 128], pl.BF16], n: pl.Tensor[[1], pl.INT32]
+        ) -> pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat]:
+            return self.kernel(src, n)
+
+    text = ir.python_print(Program, format=False)
+    assert "pl.tile.gather_row(" in text
+    reparsed = pl.parse(text)
+    ir.assert_structural_equal(Program, reparsed)
+
+
+def test_gather_row_rejects_valid_shape_exceeding_shapes():
+    """A provable valid_shape > shapes is rejected at type deduction."""
+    with pytest.raises(Exception, match="provably exceeds physical shape extent"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+                kv = pl.create_l1([16, 128], pl.BF16)
+                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [4, 128], valid_shape=[5, 128])
+                return kv
+
+
+def test_gather_row_rejects_valid_shape_rank_mismatch():
+    """valid_shape must have the same rank as shapes."""
+    with pytest.raises(Exception, match="valid_shape rank mismatch"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+                kv = pl.create_l1([16, 128], pl.BF16)
+                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [4, 128], valid_shape=[4])
+                return kv
+
+
+def test_gather_row_rejects_dynamic_shapes_at_trace_time():
+    """A runtime `shapes` fails where the user wrote it, and names valid_shape as the fix.
+
+    `shapes` sizes the pto.subview, whose `sizes` the PTO dialect types as a static
+    attribute, so a dynamic window is unrepresentable. Catching it in the deducer
+    (rather than in the backend) is what makes the error land on the pl.gather_row
+    line.
+    """
+    with pytest.raises(Exception, match="Pass a dynamic row count through valid_shape instead"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[256, 128], pl.BF16], n: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                rows = pl.cast(pl.read(n, [0]), pl.INDEX)
+                kv = pl.create_l1([16, 128], pl.BF16)
+                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [rows, 128])
+                return kv
+
+
+def test_gather_row_rejects_dynamic_valid_shape_with_transpose():
+    """Dynamic valid_shape + transpose=True is refused, at trace time.
+
+    The transposing gather lowers through a DN2NZ tload, which would need a runtime
+    *column* extent on a boxed NZ tile — unverified on device, so it is rejected
+    rather than silently emitted.
+    """
+    with pytest.raises(Exception, match="does not support a dynamic valid_shape together with transpose"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self, src: pl.Tensor[[256, 128], pl.BF16], n: pl.Tensor[[1], pl.INT32]
+            ) -> pl.Tensor[[128, 16], pl.BF16]:
+                rows = pl.cast(pl.read(n, [0]), pl.INDEX)
+                kv = pl.create_l1([128, 16], pl.BF16, transpose=True)
+                kv = pl.gather_row(
+                    kv, src, [0, 0], [0, 0], [16, 128], valid_shape=[rows, 128], transpose=True
+                )
+                return kv
+
+
 def test_create_l1_rejects_non_positive_shape():
     """create_l1 shape dims must be positive compile-time ConstInt."""
     with pytest.raises(Exception, match="positive compile-time ConstInt"):

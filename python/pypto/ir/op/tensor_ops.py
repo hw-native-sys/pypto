@@ -2188,6 +2188,7 @@ def gather_row(  # noqa: PLR0913
     dst_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     src_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
@@ -2205,7 +2206,10 @@ def gather_row(  # noqa: PLR0913
         src: Source tensor in GM.
         dst_offset: ``[row, col]`` offset within ``acc``, or a MakeTuple.
         src_offset: ``[row, col]`` offset within the GM ``src``, or a MakeTuple.
-        shapes: GM row window shape ``[r, c]`` (typically ``[1, size]``), or a MakeTuple.
+        shapes: GM row window shape ``[r, c]``, or a MakeTuple. Must be
+            compile-time constant.
+        valid_shape: Runtime transfer extent within ``shapes``, or a MakeTuple.
+            May hold runtime ``Scalar[INDEX]`` values. Defaults to ``shapes``.
         transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]`` (for a
             matmul B-operand the consumer reads with ``b_trans``).
         span: Optional source span (auto-captured if not provided).
@@ -2217,9 +2221,10 @@ def gather_row(  # noqa: PLR0913
     dst_off = _to_make_tuple(dst_offset, actual_span)
     src_off = _to_make_tuple(src_offset, actual_span)
     shapes_tuple = _to_make_tuple(shapes, actual_span)
-    return _ir_core.create_op_call(
-        "tensor.gather_row", [acc, src, dst_off, src_off, shapes_tuple], {"transpose": transpose}, actual_span
-    )
+    args: list[Any] = [acc, src, dst_off, src_off, shapes_tuple]
+    if valid_shape is not None:
+        args.append(_to_make_tuple(valid_shape, actual_span))
+    return _ir_core.create_op_call("tensor.gather_row", args, {"transpose": transpose}, actual_span)
 
 
 # ============================================================================

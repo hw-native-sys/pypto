@@ -157,9 +157,23 @@ for i in [0, rows):                                    # ForStmt，iter_arg = ac
 | 算子 | 下降到 | 作用 |
 | ---- | ------ | ---- |
 | `tensor.create_l1(shape, dtype, transpose=...)` | `tile.create(target_memory=Mat, transpose=...)` | 初始化循环携带的 L1 累加器 |
-| `tensor.gather_row(acc, src, dst_off, src_off, shapes, transpose=...)` | `tile.gather_row`（DPS） | 把一条**调用方寻址**的 GM 行 DMA 进 `acc` |
+| `tensor.gather_row(acc, src, dst_off, src_off, shapes, valid_shape=..., transpose=...)` | `tile.gather_row`（DPS） | 把一条**调用方寻址**的 GM 行 DMA 进 `acc` |
 
 两者都推导出 `TensorType`，因此聚合结果可与张量级 `tensor.matmul` / softmax 组合；两者都注册为 self-loading（`src` 保持为 GM）。调用方自行计算 `src_off` 与 `dst_off` 槽位，在自己的循环里逐行填充累加器。
+
+**动态传输长度（`valid_shape`）。** `shapes` 必须是编译期常量：它会成为 `pto.subview` 的 `sizes`，而 PTO 方言把该字段定义为静态的 `I64ArrayAttr`（`PTOOps.td` 中的 `SubViewOp`）。可选的 `valid_shape` 承载*运行期*范围——它填入 subview 的 `valid_row` / `valid_col`（声明为 `Optional<Index>` SSA 操作数），以及 GM 侧 `pto.partition_view` 的 sizes（接受动态 `?` 维）。因此动态行数既不改变内存分配，也不影响下文的 box 对齐：子区域仍然按 `shapes` 静态定尺寸，只有拷贝长度可变。省略 `valid_shape` 即传输整个窗口，与既有行为一致。
+
+这样一来，长度只有运行期才知道的连续行区间只需一次调用，而不必写成带条件的逐行循环：
+
+```python
+kv = pl.create_l1([128, HEAD_DIM], pl.BF16)
+# r1 是运行期 Scalar[INDEX]——例如页边界的切分点
+kv = pl.gather_row(kv, pool, [0, 0],  [b0, 0], [128, HEAD_DIM], valid_shape=[r1, HEAD_DIM])
+kv = pl.gather_row(kv, pool, [r1, 0], [b1, 0], [128, HEAD_DIM], valid_shape=[128 - r1, HEAD_DIM])
+oi = pl.matmul(q, kv, b_trans=True)
+```
+
+`valid_shape` 之所以是位置操作数而非 attr，正是因为它可能是运行期值：它必须留在 use-def 链上，SSA / 活跃性分析才会保住这个标量。它与 `transpose=True` 互斥（见下文）——那条路径需要在 boxed NZ tile 上给出运行期*列*范围，尚未在设备上验证。类型推导会拒绝任何*可证明*违反 `0 <= valid_shape[i] <= shapes[i]` 的情形；无法判定的符号范围则予以接受，而这正是该操作数存在的意义。
 
 **转置（ZN）以构造 `b_trans` matmul 操作数。** `transpose=True` 让聚合后的 tile 直接成为转置的 matmul B 操作数，无需 GM 往返：
 

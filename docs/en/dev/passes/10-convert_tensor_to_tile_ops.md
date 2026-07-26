@@ -166,9 +166,23 @@ Only the small index / page-table metadata is scalar-read from GM; the bulk KV d
 | Op | Lowers to | Role |
 | -- | --------- | ---- |
 | `tensor.create_l1(shape, dtype, transpose=...)` | `tile.create(target_memory=Mat, transpose=...)` | seed the loop-carried L1 accumulator |
-| `tensor.gather_row(acc, src, dst_off, src_off, shapes, transpose=...)` | `tile.gather_row` (DPS) | DMA one **caller-addressed** GM row into `acc` |
+| `tensor.gather_row(acc, src, dst_off, src_off, shapes, valid_shape=..., transpose=...)` | `tile.gather_row` (DPS) | DMA one **caller-addressed** GM row into `acc` |
 
 Both deduce a `TensorType`, so the gathered result composes with tensor-level `tensor.matmul` / softmax; both are registered self-loading (`src` stays GM). The caller computes `src_off` and the `dst_off` slot, then fills the accumulator row by row in its own loop.
+
+**Dynamic transfer length (`valid_shape`).** `shapes` must stay compile-time constant: it becomes `pto.subview`'s `sizes`, which the PTO dialect types as a static `I64ArrayAttr` (`SubViewOp` in `PTOOps.td`). The optional `valid_shape` carries the *runtime* extent instead — it feeds the subview's `valid_row` / `valid_col`, declared `Optional<Index>` SSA operands, and the GM `pto.partition_view` sizes, which accept a dynamic `?` dim. So a dynamic row count changes neither the allocation nor the box alignment below: the sub-region stays statically `shapes`-sized and only the copy length varies. Omitting `valid_shape` transfers the whole window, which is the pre-existing behaviour.
+
+This turns a run of consecutive rows whose length is only known at runtime into one call instead of a guarded per-row loop:
+
+```python
+kv = pl.create_l1([128, HEAD_DIM], pl.BF16)
+# r1 is a runtime Scalar[INDEX] — e.g. a page-boundary split point
+kv = pl.gather_row(kv, pool, [0, 0],  [b0, 0], [128, HEAD_DIM], valid_shape=[r1, HEAD_DIM])
+kv = pl.gather_row(kv, pool, [r1, 0], [b1, 0], [128, HEAD_DIM], valid_shape=[128 - r1, HEAD_DIM])
+oi = pl.matmul(q, kv, b_trans=True)
+```
+
+`valid_shape` is a positional operand rather than an attr precisely because it may be a runtime value: it has to stay in the use-def chain so SSA/liveness keep the scalar alive. It is rejected together with `transpose=True` (see below) — that path would need a runtime *column* extent on a boxed NZ tile, which is unverified on device. The deducer rejects any *provable* violation of `0 <= valid_shape[i] <= shapes[i]`; a symbolic extent it cannot decide is accepted, which is the case the operand exists for.
 
 **Transpose (ZN) for a `b_trans` matmul operand.** `transpose=True` makes the gathered tile a transposed matmul B-operand without a GM round-trip:
 
