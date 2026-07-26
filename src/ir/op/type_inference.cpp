@@ -418,6 +418,16 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
   CHECK(valid->elements_.size() == shapes->elements_.size())
       << "The operator " << op_name << " requires valid_shape to have the same rank as shapes ("
       << shapes->elements_.size() << "), but got rank " << valid->elements_.size();
+  // The bounds proofs below return "unknown" for a non-integer scalar rather than
+  // rejecting it, so a literal like [1.5, 128] would otherwise reach lowering as a
+  // fractional transfer extent.
+  for (size_t i = 0; i < valid->elements_.size(); ++i) {
+    auto dtype = ExtractDataType(valid->elements_[i]->GetType());
+    CHECK(dtype.has_value() && !dtype->IsFloat())
+        << "The operator " << op_name << " requires valid_shape[" << i
+        << "] to be an integer extent, but got "
+        << (dtype.has_value() ? dtype->ToString() : valid->elements_[i]->GetType()->TypeName());
+  }
 
   bool transpose = false;
   for (const auto& [k, v] : kwargs) {

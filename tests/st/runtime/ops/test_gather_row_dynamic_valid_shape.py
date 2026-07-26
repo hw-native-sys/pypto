@@ -149,6 +149,60 @@ class GatherRowDynamicValidShapeTestCase(PTOTestCase):
         tensors["output"][:] = _gather_row_dynamic_golden(tensors["src"], self._valid_rows).to(torch.float32)
 
 
+@pl.program
+class GatherRowTwoRunProgram:
+    """Two contiguous runs into one accumulator, split at a runtime row ``r1``.
+
+    The motivating shape: a page-aligned KV window that straddles a block boundary
+    is 1-2 contiguous runs whose split point is only known at runtime. Run 2 writes
+    at the runtime offset ``r1``, so its static ``shapes`` window spans rows
+    ``[r1, r1 + ROWS)`` — past the end of the tile. Only ``ROWS - r1`` rows are
+    actually transferred, so the *write* stays in bounds, but whether the declared
+    window is tolerated is a device question, which is what this exercises.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[POOL_ROWS, HEAD_DIM], pl.FP16],
+        n: pl.Tensor[[1], pl.INT32],
+        eye: pl.Tensor[[ROWS, ROWS], pl.FP16],
+        output: pl.Out[pl.Tensor[[ROWS, HEAD_DIM], pl.FP32]],
+    ) -> pl.Tensor[[ROWS, HEAD_DIM], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            r1 = pl.cast(pl.read(n, [0]), pl.INDEX)
+            kv = pl.create_l1([ROWS, HEAD_DIM], pl.FP16)
+            # Run 1: pool rows [0, r1) -> slots [0, r1).
+            kv = pl.gather_row(kv, src, [0, 0], [0, 0], [ROWS, HEAD_DIM], valid_shape=[r1, HEAD_DIM])
+            # Run 2: pool rows [SENT_BASE, SENT_BASE + ROWS - r1) -> slots [r1, ROWS).
+            kv = pl.gather_row(
+                kv, src, [r1, 0], [SENT_BASE, 0], [ROWS, HEAD_DIM], valid_shape=[ROWS - r1, HEAD_DIM]
+            )
+            result = pl.matmul(eye, kv, out_dtype=pl.FP32)
+            output = pl.assemble(output, result, [0, 0])
+        return output
+
+
+class GatherRowTwoRunTestCase(GatherRowDynamicValidShapeTestCase):
+    """Two-run split at a runtime boundary."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"gather_row_two_run_r{self._valid_rows}"
+
+    def get_program(self) -> Any:
+        return GatherRowTwoRunProgram
+
+    def compute_expected(self, tensors, params=None):
+        r = self._valid_rows
+        src = tensors["src"]
+        out = torch.empty(ROWS, HEAD_DIM, dtype=torch.float16)
+        out[:r, :] = src[:r, :HEAD_DIM]
+        out[r:, :] = src[SENT_BASE : SENT_BASE + (ROWS - r), :HEAD_DIM]
+        tensors["output"][:] = out.to(torch.float32)
+
+
 class TestGatherRowDynamicValidShape:
     """A runtime valid_shape limits a GM -> L1 gather on real hardware."""
 
@@ -156,6 +210,13 @@ class TestGatherRowDynamicValidShape:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_row_dynamic_valid_shape(self, test_runner, platform, valid_rows):
         result = test_runner.run(GatherRowDynamicValidShapeTestCase(valid_rows, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("valid_rows", [1, 63, 127])
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_row_two_run_split(self, test_runner, platform, valid_rows):
+        """Two runs split at a runtime row — the page-boundary shape this exists for."""
+        result = test_runner.run(GatherRowTwoRunTestCase(valid_rows, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

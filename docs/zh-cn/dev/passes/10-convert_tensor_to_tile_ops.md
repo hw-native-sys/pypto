@@ -173,7 +173,9 @@ kv = pl.gather_row(kv, pool, [r1, 0], [b1, 0], [128, HEAD_DIM], valid_shape=[128
 oi = pl.matmul(q, kv, b_trans=True)
 ```
 
-`valid_shape` 之所以是位置操作数而非 attr，正是因为它可能是运行期值：它必须留在 use-def 链上，SSA / 活跃性分析才会保住这个标量。它与 `transpose=True` 互斥（见下文）——那条路径需要在 boxed NZ tile 上给出运行期*列*范围，尚未在设备上验证。类型推导会拒绝任何*可证明*违反 `0 <= valid_shape[i] <= shapes[i]` 的情形；无法判定的符号范围则予以接受，而这正是该操作数存在的意义。
+**边界约束的是被写区域，而非窗口。** `shapes` 决定静态 `pto.subview` 的尺寸，因此当 `dst_offset` 为运行期值时，声明出的窗口可能越过目标末尾——上例中 run 2 在 128 行的 tile 上声明了 `[r1, r1 + 128)`。这之所以成立，是因为传输长度由 `valid_shape` 而非 `shapes` 界定：实际写入的行是 `[r1, r1 + (128 - r1))`，仍在范围内。因此调用方的义务是逐维满足 `dst_offset + valid_shape <= dst.shape`，而 `dst_offset + shapes` 无需成立。上述两段式写法已由 `test_gather_row_two_run_split` 在设备上覆盖。
+
+`valid_shape` 在 DSL 中是仅关键字参数——第 6 个位置参数早已属于 `transpose`，占用它会静默改变既有 `gather_row(..., shapes, True)` 调用的含义。在 IR 层它是位置操作数而非 attr，正是因为它可能是运行期值：它必须留在 use-def 链上，SSA / 活跃性分析才会保住这个标量。它与 `transpose=True` 互斥（见下文）——那条路径需要在 boxed NZ tile 上给出运行期*列*范围，尚未在设备上验证。类型推导会拒绝任何*可证明*违反 `0 <= valid_shape[i] <= shapes[i]` 的情形；无法判定的符号范围则予以接受，而这正是该操作数存在的意义。
 
 **转置（ZN）以构造 `b_trans` matmul 操作数。** `transpose=True` 让聚合后的 tile 直接成为转置的 matmul B 操作数，无需 GM 往返：
 

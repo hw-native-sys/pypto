@@ -182,7 +182,9 @@ kv = pl.gather_row(kv, pool, [r1, 0], [b1, 0], [128, HEAD_DIM], valid_shape=[128
 oi = pl.matmul(q, kv, b_trans=True)
 ```
 
-`valid_shape` is a positional operand rather than an attr precisely because it may be a runtime value: it has to stay in the use-def chain so SSA/liveness keep the scalar alive. It is rejected together with `transpose=True` (see below) — that path would need a runtime *column* extent on a boxed NZ tile, which is unverified on device. The deducer rejects any *provable* violation of `0 <= valid_shape[i] <= shapes[i]`; a symbolic extent it cannot decide is accepted, which is the case the operand exists for.
+**Bounds are on the written region, not the window.** `shapes` sizes the static `pto.subview`, so with a runtime `dst_offset` the declared window may reach past the destination — in the example above run 2 declares rows `[r1, r1 + 128)` on a 128-row tile. That is sound only because the transfer is bounded by `valid_shape`, not by `shapes`: the rows actually written are `[r1, r1 + (128 - r1))`, which stay inside. The caller's obligation is therefore `dst_offset + valid_shape <= dst.shape` per dimension; `dst_offset + shapes` need not fit. The two-run form above is covered on device by `test_gather_row_two_run_split`.
+
+`valid_shape` is keyword-only in the DSL — `transpose` already owned the sixth positional slot, and taking it would silently reinterpret an existing `gather_row(..., shapes, True)` call. At the IR level it is a positional operand rather than an attr precisely because it may be a runtime value: it has to stay in the use-def chain so SSA/liveness keep the scalar alive. It is rejected together with `transpose=True` (see below) — that path would need a runtime *column* extent on a boxed NZ tile, which is unverified on device. The deducer rejects any *provable* violation of `0 <= valid_shape[i] <= shapes[i]`; a symbolic extent it cannot decide is accepted, which is the case the operand exists for.
 
 **Transpose (ZN) for a `b_trans` matmul operand.** `transpose=True` makes the gathered tile a transposed matmul B-operand without a GM round-trip:
 

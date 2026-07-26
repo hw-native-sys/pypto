@@ -313,6 +313,25 @@ def test_gather_row_valid_shape_is_keyword_only():
         assert "valid_shape" in keyword_only, f"{name}: valid_shape must be keyword-only"
 
 
+def test_gather_row_rejects_non_integer_valid_shape():
+    """A fractional extent is rejected rather than reaching lowering.
+
+    The bounds proofs answer "unknown" for a non-integer scalar instead of
+    rejecting it, so without an explicit dtype check `valid_shape=[1.5, 128]`
+    would pass deduction.
+    """
+    with pytest.raises(Exception, match="valid_shape\\[0\\] to be an integer extent"):
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+                kv = pl.create_l1([16, 128], pl.BF16)
+                # Deliberately ill-typed: this asserts the *runtime* rejection.
+                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [4, 128], valid_shape=[1.5, 128])  # type: ignore[list-item]
+                return kv
+
+
 def test_gather_row_rejects_dynamic_shapes_at_trace_time():
     """A runtime `shapes` fails where the user wrote it, and names valid_shape as the fix.
 
