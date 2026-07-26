@@ -23,11 +23,17 @@ transposed Mat (ZN) fractal and gather_row places each GM row [r, c] as an L1
 column [c, r].
 """
 
+import inspect
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.backend import BackendType, is_backend_configured, set_backend_type
+from pypto.ir.op import tensor_ops as _ir_tensor_ops
+from pypto.ir.op import tile_ops as _ir_tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.op import tensor_ops as _dsl_tensor_ops
+from pypto.language.op import tile_ops as _dsl_tile_ops
 
 
 def _build_program(
@@ -214,7 +220,10 @@ def test_gather_row_forwards_valid_shape_to_tile_op():
 
     text = _print_after_convert(Program)
     assert "pl.tile.gather_row(" in text
-    assert "[0, 0], [0, 0], [4, 128], [3, 128], transpose=False)" in text
+    # valid_shape prints as a kwarg: `transpose` owns the 6th positional slot in
+    # the DSL, so the operand cannot be emitted positionally without changing what
+    # an existing `gather_row(..., shapes, True)` call means.
+    assert "[0, 0], [0, 0], [4, 128], valid_shape=[3, 128], transpose=False)" in text
 
 
 def test_gather_row_valid_shape_roundtrips():
@@ -261,17 +270,47 @@ def test_gather_row_rejects_valid_shape_exceeding_shapes():
                 return kv
 
 
-def test_gather_row_rejects_valid_shape_rank_mismatch():
-    """valid_shape must have the same rank as shapes."""
-    with pytest.raises(Exception, match="valid_shape rank mismatch"):
+@pytest.mark.parametrize("valid_shape", [[4], []])
+def test_gather_row_rejects_valid_shape_rank_mismatch(valid_shape):
+    """valid_shape must match the rank of shapes.
+
+    The empty case matters on its own: ValidateValidShapeBounds reads an empty
+    valid shape as "implicitly fully valid" and accepts it, which is right for a
+    type but wrong for an explicit operand — without the rank check it would reach
+    the backend and trip an INTERNAL_CHECK instead of telling the user.
+    """
+    with pytest.raises(Exception, match="valid_shape to have the same rank as shapes"):
 
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
             def main(self, src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
                 kv = pl.create_l1([16, 128], pl.BF16)
-                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [4, 128], valid_shape=[4])
+                kv = pl.gather_row(kv, src, [0, 0], [0, 0], [4, 128], valid_shape=valid_shape)
                 return kv
+
+
+def test_gather_row_valid_shape_is_keyword_only():
+    """Adding valid_shape must not re-bind an existing positional `transpose`.
+
+    `gather_row(..., shapes, True)` was a valid call before valid_shape existed.
+    Had valid_shape taken the 6th slot, that call would silently pass `True` as a
+    shape and fail with an opaque "'Scalar' object is not iterable", so it is
+    keyword-only in all four wrappers. Asserted on the signatures because that is
+    the contract an external caller binds against.
+    """
+    wrappers = [
+        (_dsl_tensor_ops.gather_row, "pl.gather_row"),
+        (_dsl_tile_ops.gather_row, "pl.tile.gather_row"),
+        (_ir_tensor_ops.gather_row, "ir.op.tensor_ops.gather_row"),
+        (_ir_tile_ops.gather_row, "ir.op.tile_ops.gather_row"),
+    ]
+    for fn, name in wrappers:
+        params = list(inspect.signature(fn).parameters.values())
+        positional = [p.name for p in params if p.kind is p.POSITIONAL_OR_KEYWORD]
+        keyword_only = [p.name for p in params if p.kind is p.KEYWORD_ONLY]
+        assert positional[5] == "transpose", f"{name}: 6th positional is {positional[5]!r}, not 'transpose'"
+        assert "valid_shape" in keyword_only, f"{name}: valid_shape must be keyword-only"
 
 
 def test_gather_row_rejects_dynamic_shapes_at_trace_time():

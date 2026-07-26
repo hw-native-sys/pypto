@@ -297,9 +297,10 @@ def gather_row(  # noqa: PLR0913
     dst_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     src_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     transpose: bool = False,
     span: Span | None = None,
+    *,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
 ) -> Call:
     """Load one GM row directly into a sub-region of an on-chip (Mat/Vec) tile.
 

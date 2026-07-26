@@ -472,8 +472,9 @@ def gather_row(  # noqa: PLR0913
     dst_offset: Sequence[IntLike],
     src_offset: Sequence[IntLike],
     shapes: Sequence[IntLike],
-    valid_shape: Sequence[IntLike] | None = None,
     transpose: bool = False,
+    *,
+    valid_shape: Sequence[IntLike] | None = None,
 ) -> Tile:
     """Load one GM row directly into a sub-region of an on-chip tile (DPS).
 
@@ -510,8 +511,8 @@ def gather_row(  # noqa: PLR0913
         _normalize_intlike(dst_offset),
         _normalize_intlike(src_offset),
         _normalize_intlike(shapes),
-        _normalize_intlike(valid_shape) if valid_shape is not None else None,
         transpose,
+        valid_shape=_normalize_intlike(valid_shape) if valid_shape is not None else None,
     )
     return Tile(expr=call_expr)
 

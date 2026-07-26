@@ -2188,9 +2188,10 @@ def gather_row(  # noqa: PLR0913
     dst_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     src_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     transpose: bool = False,
     span: Span | None = None,
+    *,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
 ) -> Call:
     """Gather one GM row into a sub-region of an on-chip accumulator (tensor-level, DPS).
 

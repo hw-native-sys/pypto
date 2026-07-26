@@ -411,6 +411,13 @@ void CheckGatherRowOperands(const std::vector<ExprPtr>& args,
   auto valid = As<MakeTuple>(args[5]);
   CHECK(valid) << "The operator " << op_name << " requires valid_shape to be a literal tuple, but got "
                << args[5]->TypeName();
+  // Rank must be checked here, not left to ValidateValidShapeBounds: that helper
+  // reads an *empty* valid shape as "implicitly fully valid" and accepts it, which
+  // is right for a type's valid_shape but wrong for an explicit operand — an empty
+  // one would sail past deduction and trip an INTERNAL_CHECK in the backend.
+  CHECK(valid->elements_.size() == shapes->elements_.size())
+      << "The operator " << op_name << " requires valid_shape to have the same rank as shapes ("
+      << shapes->elements_.size() << "), but got rank " << valid->elements_.size();
 
   bool transpose = false;
   for (const auto& [k, v] : kwargs) {

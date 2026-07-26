@@ -1060,8 +1060,16 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
+  // gather_row's optional 6th operand is keyword-only in the DSL: `transpose`
+  // already owned the 6th positional slot before valid_shape existed, and taking
+  // it would silently reinterpret an existing `gather_row(..., shapes, True)` as
+  // a shape. Print it as a kwarg so the round-trip matches the Python signature.
+  const bool gather_row_kw_valid =
+      (IsOp(op, "tile.gather_row") || IsOp(op, "tensor.gather_row")) && op->args_.size() == 6;
+
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (gather_row_kw_valid && i == 5) continue;
     if (i > 0) stream_ << ", ";
 
     // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
@@ -1080,6 +1088,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
+  if (gather_row_kw_valid) {
+    stream_ << ", valid_shape=";
+    VisitExpr(op->args_[5]);
+    need_comma = true;
+  }
   if (IsOp(op, "system.task_dummy")) {
     const std::vector<VarPtr>* deps_to_print = nullptr;
     for (const auto& [k, v] : op->attrs_) {
