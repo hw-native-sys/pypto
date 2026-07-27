@@ -773,6 +773,35 @@ class BlockExample:
         return result
 ```
 
+### Explicit Tile Buffer Slots
+
+Use `create_tile_buffers` when different loop levels must rotate physical
+buffers independently. Indexing is tuple-like, but the underlying IR type is a
+homogeneous `TileBufferSetType` and the index may be a runtime scalar.
+
+```python
+l1 = pl.create_tile_buffers(2, [32, 256], pl.BF16, pl.Mem.Mat)
+l0b = pl.create_tile_buffers(2, [32, 128], pl.BF16, pl.Mem.Right)
+l0c = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+
+for stack in pl.pipeline(0, 2, 1, stage=2):
+    l1_slot = l1[stack % 2]
+    block = pl.load(source, [stack * 32, 0], [32, 256], out=l1_slot)
+    for col in pl.pipeline(0, 256, 128, stage=2):
+        index = (col // 128) % 2
+        right = pl.tile.extract(
+            block, 0, col, [32, 128], target_memory=pl.Mem.Right, out=l0b[index]
+        )
+        acc = pl.tile.matmul(lhs, right, out=l0c[index])
+        pl.tile.store(acc, [stack * 16, col], output)
+        pl.tile.release(right)  # Optional lifetime shortening.
+```
+
+`out=` is supported by `pl.load`, `pl.tile.extract`, `pl.tile.move`,
+`pl.tile.matmul`, and `pl.tile.matmul_acc`. Dynamic indices must be integer;
+runtime range safety is the user's responsibility, so `% len(buffers)` is the
+normal form. `release` is optional, but using an alias after release is invalid.
+
 ## SSA-Style Control Flow
 
 `pl.yield_()` creates SSA phi nodes for if/for statements:

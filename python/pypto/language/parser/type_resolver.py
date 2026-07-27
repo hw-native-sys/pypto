@@ -1742,6 +1742,8 @@ class TypeResolver:
                 ast.Add: "__add__",
                 ast.Sub: "__sub__",
                 ast.Mult: "__mul__",
+                ast.FloorDiv: "__floordiv__",
+                ast.Mod: "__mod__",
             }
             method = op_map.get(type(node.op))
             if method is not None:

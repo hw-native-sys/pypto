@@ -14,6 +14,8 @@
 - 只有在同一内存空间中的变量才能共享 MemRef
 - 生命周期通过 def-use 分析确定
 - 共享完成后，已无引用的 MemRef 及其 alloc 语句会被清理
+- 显式 `TileBufferSetType` 的 group root 和 slot 不会与自动 tile 或另一个
+  显式 group 合并
 
 **使用时机**：在 [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) 之后、AllocateMemoryAddr 之前运行。可减少内存分配开销。本 pass 只做**机会性**的生命周期合并；**语义强制**的 must-alias 重定向（循环 carry / 原地 —— 本 pass 原来的 "Step 0"）现在在 `MaterializeSemanticAliases` 里运行,因此 `MemoryReuse` 可以被独立跳过（例如 `memory_planner=PTOAS`,由 ptoas 接管生命周期复用）。
 
@@ -55,6 +57,8 @@ program_optimized = reuse_pass(program)
 
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
+- 两个候选都不属于显式 tile buffer set。显式 group 表达用户选择的物理 slot
+  identity，即使按程序顺序观察到生命周期不重叠，也保持不可合并。
 - 缓冲区大小取其**最大**成员；由于按最大优先装箱，后纳入的成员都不大于代表，故无需显式字节大小检查（复用方向也不再被限制为「先定义且更大」）
 - **No-alias 守护**（算子语义）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区——因为硬件在**写输出的同时读取**这些输入,原地写会中途破坏该算子。三个来源汇入同一个"每个输出禁止 alias 的输入集合"（`ForbidAliasCollector`）：
   - `not_inplace_safe()` —— 该算子无法以 `src == dst` 运行，因此其输出不得 alias **任何**输入操作数。

@@ -45,6 +45,10 @@ program_with_memrefs = init_pass(program)
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
 2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+   - **Tile buffer sets**: create one group MemRef sized as
+     `count * aligned_slot_size`. A selected slot shares the group base and
+     carries symbolic byte offset `index * aligned_slot_size`; destination-form
+     results inherit that slot MemRef.
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
@@ -89,6 +93,11 @@ Key observations:
 - `tile.store` result shares MemRef with the output tensor parameter (via `output_reuses_input_arg` registry attribute)
 - Reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`) share MemRef with their designated input, preventing redundant allocs
 - Alloc statements are placed at the beginning of the function body's top-level `SeqStmts`
+
+For `TileBufferSetType`, only the complete group is an allocation root. Dynamic
+offsets may contain integer `+`, `-`, `*`, `//`, and `%` expressions and survive
+print/parse round trips. The PyPTO planner later assigns the group address;
+under PTOAS planning the address remains absent for `PlanMemory`.
 
 ## ForStmt Loop-Carry Variables
 

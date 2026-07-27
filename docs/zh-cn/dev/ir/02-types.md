@@ -260,6 +260,22 @@ nested = ir.TupleType([
 ])
 ```
 
+### TileBufferSetType
+
+`TileBufferSetType` 表示一个包含 `count` 个物理 tile slot 的同构分配组。它记录
+单个 slot 的 shape、dtype、tile view、memory space，以及可选的组级 `MemRef`。
+与 `TupleType` 不同，各 slot 共享同一个分配身份，并支持运行时整数下标。
+
+```python
+buffers = ir.TileBufferSetType(
+    [16, 128], DataType.FP32, 2, memory_space=ir.MemorySpace.Acc
+)
+```
+
+`count` 必须位于 `[2, 16]`；各维必须静态且为正；memory space 必须是片上空间
+（`Vec`、`Mat`、`Left`、`Right`、`Acc` 或 `Bias`）。`tile.buffer_slot`
+把选中的 slot 转换为普通 `TileType`。
+
 ### PipeType
 
 硬件执行流水线或同步屏障。

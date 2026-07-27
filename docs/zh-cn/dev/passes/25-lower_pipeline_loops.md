@@ -48,6 +48,11 @@ for i in pl.pipeline(64, stage=4):
 
 - **主循环**：步长为 `F*step`，循环体为 `F` 份副本组成的 `SeqStmts`，kind 仍为 `ForKind::Pipeline`，属性下调为 `1`（降级后的标记位）。kind 与属性成对保留以维持 `PipelineLoopValid` 不变量，使 IR 在 print/parse 往返中保持一致（输出形式为 `pl.pipeline(..., stage=1)`）。
 - **克隆细节**：每份副本通过 `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)` 生成。每个副本拥有新鲜的定义变量，既保持 SSA，又给 `MemoryReuse` 提供独立的 tile 身份。
+- **显式 slot**：循环外定义的 buffer set 在所有克隆中保持同一个分配身份。依赖
+  分析会把 `(i // step) % count` 一类表达式规范化为公共 base 加常量 stage
+  residue。不同 residue 可以重叠执行；关系无法证明时，保守保留 RAW、WAR 和
+  WAW 边。destination-form load/extract 进入 load tier；显式 Acc destination
+  支持 `matmul, matmul, store, store` 调度。
 
 `stage=1` 是无操作触发：本 Pass 保留循环原样（kind 与属性都不动），仅递归进入循环体处理嵌套 pipeline。`CanonicalizeIOOrder` 随后基于该标记位完成 IO 重排并降级 kind / 移除属性。用户手写的 `pl.pipeline(stage=1)` 与 `factor>1` 路径输出后的循环走相同流程 —— 都需要 IO 重排但无需进一步复制；这也使再次运行 `LowerPipelineLoops` 自然幂等。
 
@@ -135,6 +140,10 @@ else:
 ```
 
 本 Pass 之后，`CanonicalizeIOOrder` 作用于全程序的每一个 `SeqStmts`，将 load 上拉、store 下沉，使各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。主循环与尾部克隆都能从 ping-pong 缓冲中受益。
+
+嵌套 pipeline 可以使用不同的 set 和轮转节奏，例如外层 Mat set 使用
+`stack % 2`，内层 Right/Acc set 使用 `(col // tile_n) % 2`。set identity 是
+依赖 key 的组成部分，因此外层 L1 轮转不会串行化内层 L0 轮转。
 
 ## 相关
 

@@ -269,6 +269,23 @@ nested = ir.TupleType([
 ])
 ```
 
+### TileBufferSetType
+
+`TileBufferSetType` describes one homogeneous allocation group containing
+`count` physical tile slots. It stores the per-slot shape, dtype, tile view,
+memory space, and an optional group `MemRef`. Unlike `TupleType`, its elements
+share one allocation identity and support runtime integer indexing.
+
+```python
+buffers = ir.TileBufferSetType(
+    [16, 128], DataType.FP32, 2, memory_space=ir.MemorySpace.Acc
+)
+```
+
+`count` must be in `[2, 16]`; dimensions must be static and positive; memory
+space must be on-chip (`Vec`, `Mat`, `Left`, `Right`, `Acc`, or `Bias`).
+`tile.buffer_slot` converts a selected slot to an ordinary `TileType`.
+
 ### PipeType
 
 Hardware execution pipelines or synchronization barriers.

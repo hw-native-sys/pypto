@@ -45,6 +45,9 @@ program_with_memrefs = init_pass(program)
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
 2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+   - **Tile buffer set**：创建一个大小为 `count * aligned_slot_size` 的组级
+     MemRef。选中的 slot 共享组 base，并携带符号 byte offset
+     `index * aligned_slot_size`；destination-form 返回值继承该 slot MemRef。
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
@@ -89,6 +92,11 @@ def main(
 - `tile.store` 结果与输出张量参数共享 MemRef（通过 `output_reuses_input_arg` 注册表属性指定）
 - 复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）与指定输入共享 MemRef，避免冗余 alloc
 - Alloc 语句放置在函数体顶层 `SeqStmts` 的开头
+
+对于 `TileBufferSetType`，只有整个 group 是分配 root。动态 offset 可以包含整数
+`+`、`-`、`*`、`//` 和 `%` 表达式，并能通过 print/parse roundtrip。PyPTO
+planner 随后为 group 分配地址；使用 PTOAS planner 时保留无地址状态，交给
+`PlanMemory`。
 
 ## ForStmt 循环携带变量
 

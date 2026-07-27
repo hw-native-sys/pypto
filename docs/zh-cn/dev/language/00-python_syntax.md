@@ -744,6 +744,33 @@ class BlockExample:
         return result
 ```
 
+### 显式 Tile Buffer Slot
+
+当不同循环层级需要独立轮转物理 buffer 时，使用 `create_tile_buffers`。下标语法
+类似 tuple，但底层 IR 类型是同构的 `TileBufferSetType`，下标可以是运行时标量。
+
+```python
+l1 = pl.create_tile_buffers(2, [32, 256], pl.BF16, pl.Mem.Mat)
+l0b = pl.create_tile_buffers(2, [32, 128], pl.BF16, pl.Mem.Right)
+l0c = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+
+for stack in pl.pipeline(0, 2, 1, stage=2):
+    l1_slot = l1[stack % 2]
+    block = pl.load(source, [stack * 32, 0], [32, 256], out=l1_slot)
+    for col in pl.pipeline(0, 256, 128, stage=2):
+        index = (col // 128) % 2
+        right = pl.tile.extract(
+            block, 0, col, [32, 128], target_memory=pl.Mem.Right, out=l0b[index]
+        )
+        acc = pl.tile.matmul(lhs, right, out=l0c[index])
+        pl.tile.store(acc, [stack * 16, col], output)
+        pl.tile.release(right)  # 可选：缩短生命周期。
+```
+
+`pl.load`、`pl.tile.extract`、`pl.tile.move`、`pl.tile.matmul` 和
+`pl.tile.matmul_acc` 支持 `out=`。动态下标必须是整数；运行时越界由用户负责，
+因此通常写成 `% len(buffers)`。`release` 可以省略，但 release 后不得再使用其别名。
+
 ## SSA 风格控制流
 
 `pl.yield_()` 为 if/for 语句创建 SSA phi 节点:

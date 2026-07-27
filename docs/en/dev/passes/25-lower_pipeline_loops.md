@@ -50,6 +50,12 @@ For `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F}, start, stop, step, bod
 
 - **Main loop**: stride `F*step`, body is a `SeqStmts` of `F` clones, kind still `ForKind::Pipeline` (marker), attr downgraded to `1`. The (kind, attr) pair stays together so `PipelineLoopValid` holds and the IR survives print/parse round-trip (renders as `pl.pipeline(..., stage=1)`).
 - **Cloning**: each clone uses `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)`. Fresh def-vars per clone keep SSA intact and give `MemoryReuse` distinct tile identities to work with.
+- **Explicit slots**: buffer sets defined outside the loop retain one allocation
+  identity in every clone. Dependency analysis normalizes expressions such as
+  `(i // step) % count` into a common base plus a constant stage residue.
+  Different residues may overlap; unknown relations conservatively retain RAW,
+  WAR, and WAW edges. Destination-form loads/extracts enter the load tier, while
+  explicit Acc destinations enable `matmul, matmul, store, store` scheduling.
 
 `stage=1` is a no-op trigger: the pass leaves the loop intact (kind and attr stay) and only recurses into the body to lower nested pipelines. `CanonicalizeIOOrder` then scopes on the kept marker, applies the IO reorder, and demotes/strips on exit. The same path handles user-written `pl.pipeline(stage=1)` and the post-lowering output of a `factor>1` invocation — both ask for IO reorder without further replication, so re-running `LowerPipelineLoops` is naturally idempotent.
 
@@ -137,6 +143,11 @@ else:
 ```
 
 After this pass, `CanonicalizeIOOrder` runs scoped to the pipeline loop's body, clusters loads at the top and stores at the bottom, and demotes the outer loop's `kind_` to `Sequential` — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers. Ping-pong buffering applies to both the bulk main loop and the tail clones.
+
+Nested pipelines may use separate sets and cadences, for example an outer Mat
+set indexed by `stack % 2` and inner Right/Acc sets indexed by
+`(col // tile_n) % 2`. Set identity is part of the dependency key, so the outer
+L1 rotation does not serialize the inner L0 rotation.
 
 ## Related
 

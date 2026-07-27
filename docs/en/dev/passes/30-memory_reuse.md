@@ -14,6 +14,8 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 - Only variables in the same memory space can share MemRef
 - Lifetime is determined by def-use analysis
 - After sharing, MemRefs that become unreferenced are cleaned up along with their alloc statements
+- Explicit `TileBufferSetType` group roots and slots are never coalesced with
+  automatic tiles or another explicit group
 
 **When to use**: Run after [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) and before AllocateMemoryAddr. Reduces memory allocation overhead. This pass does the *opportunistic* lifetime coalescing only; the *semantics-required* must-alias retarget (loop-carry / in-place — this pass's former "Step 0") now runs in `MaterializeSemanticAliases`, so `MemoryReuse` can be skipped independently (e.g. `memory_planner=PTOAS`, where ptoas owns lifetime reuse).
 
@@ -55,6 +57,9 @@ program_optimized = reuse_pass(program)
 
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
+- Neither candidate belongs to an explicit tile buffer set. Explicit groups
+  encode user-selected physical slot identity and remain non-coalescible even
+  when program-order lifetimes appear disjoint.
 - A buffer is sized to its **largest** member; because packing is largest-first, every member admitted later is no larger than the representative, so no explicit byte-size check is needed (and the reuse direction is no longer constrained to "earlier-and-larger only")
 - **No-alias guard** (op-semantic): the op that defines the reusing variable may forbid its output from sharing a buffer with one or more of its input operands, because the hardware reads those inputs *while* writing the output — an in-place write would corrupt the op mid-flight. Three sources feed one per-output forbidden-input set (`ForbidAliasCollector`):
   - `not_inplace_safe()` — the op cannot run with `src == dst`, so its output must not alias **any** input operand.

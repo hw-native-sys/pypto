@@ -266,6 +266,9 @@ with ib.function("tensor_example") as f:
 | **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
+| - | `tile.create_buffer_set` | Create a homogeneous group of 2–16 physical tile slots |
+| - | `tile.buffer_slot` | Select a constant or runtime integer slot as a `TileType` |
+| - | `tile.release` | Optional end-of-lease marker; emits no PTO instruction |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
@@ -283,6 +286,12 @@ with ib.function("tensor_example") as f:
 `tile.reshape` preserves dtype and element count; `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views.
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
+
+Destination-form operations write directly into a selected slot:
+`tile.load_into`, `tile.extract_into`, `tile.move_into`, `tile.matmul_into`, and
+`tile.matmul_acc_into`. Their result aliases the destination. Shape, dtype,
+valid shape, layout, and memory space must match the producer result. A use
+after `tile.release` is rejected by the structural verifier.
 
 ### Mask patterns
 

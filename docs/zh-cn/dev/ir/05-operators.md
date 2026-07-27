@@ -260,6 +260,9 @@ with ib.function("tensor_example") as f:
 | **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
 | - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
 | - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
+| - | `tile.create_buffer_set` | 创建包含 2–16 个物理 tile slot 的同构分配组 |
+| - | `tile.buffer_slot` | 用常量或运行时整数下标选择一个 `TileType` slot |
+| - | `tile.release` | 可选的 lease 结束标记；不生成 PTO 指令 |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
@@ -277,6 +280,12 @@ with ib.function("tensor_example") as f:
 `tile.reshape` 保持 dtype 和元素总数；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
+
+destination-form 算子会直接写入选中的 slot：`tile.load_into`、
+`tile.extract_into`、`tile.move_into`、`tile.matmul_into` 和
+`tile.matmul_acc_into`。返回值与 destination 别名；shape、dtype、valid shape、
+layout 和 memory space 必须与生产结果一致。结构验证器会拒绝在 `tile.release`
+之后继续使用该 lease。
 
 ### 掩码模式
 
