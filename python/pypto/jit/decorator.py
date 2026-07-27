@@ -143,6 +143,18 @@ def _get_torch() -> Any:
                     torch.bool: DataType.BOOL,
                 }
             )
+            # Optional low-precision MX dtypes (PyTorch 2.1+/2.3+/2.7+); required
+            # for MX DSL ST. float4_e2m1fn_x2 is the packed MXFP4 weight dtype.
+            for _torch_name, _pto_dt in (
+                ("float8_e4m3fn", DataType.FP8E4M3FN),
+                ("float8_e5m2", DataType.FP8E5M2),
+                ("float8_e8m0fnu", DataType.FP8E8M0),
+                ("float4_e2m1fn_x2", DataType.FP4),
+            ):
+                _td = getattr(torch, _torch_name, None)
+                if _td is not None:
+                    _TORCH_DTYPE_MAP[_td] = _pto_dt
+
         except ImportError:
             _TORCH_CACHE.append(None)
     return _TORCH_CACHE[0]
@@ -153,7 +165,8 @@ def _torch_dtype_to_pypto(torch_dtype: Any) -> DataType:
     if torch_dtype not in _TORCH_DTYPE_MAP:
         raise TypeError(
             f"Unsupported torch dtype {torch_dtype}. "
-            "Supported: float16, float32, bfloat16, int8/16/32/64, uint8, bool."
+            "Supported: float16, float32, bfloat16, int8/16/32/64, uint8, bool, "
+            "float8_e4m3fn/e5m2/e8m0fnu, float4_e2m1fn_x2 (where torch supports them)."
         )
     return _TORCH_DTYPE_MAP[torch_dtype]
 

@@ -17,9 +17,10 @@ Complete reference for the `pypto.language` (`pl`) module.
 | `pl.FP16` | 16 | IEEE half-precision float |
 | `pl.BF16` | 16 | Brain float 16 |
 | `pl.FP32` | 32 | IEEE single-precision float |
-| `pl.FP4` | 4 | 4-bit float |
-| `pl.FP8E4M3FN` | 8 | 8-bit float (e4m3fn) |
-| `pl.FP8E5M2` | 8 | 8-bit float (e5m2) |
+| `pl.FP4` | 4 | 4-bit float (packed MXFP4 E2M1×2; PTOAS `!pto.f4E2M1x2`) |
+| `pl.FP8E4M3FN` | 8 | 8-bit float (e4m3fn); MXFP8 data |
+| `pl.FP8E5M2` | 8 | 8-bit float (e5m2); MXFP8 data |
+| `pl.FP8E8M0` | 8 | MX block-scale exponent (E8M0); PTOAS `!pto.f8E8M0` / pto-isa `float8_e8m0_t` |
 | `pl.HF4` / `pl.HF8` | 4/8 | Hisilicon float formats |
 | `pl.INDEX` | 64 | Index type for index computations — loop vars, dimensions |
 

@@ -17,9 +17,10 @@
 | `pl.FP16` | 16 | IEEE 半精度浮点 |
 | `pl.BF16` | 16 | Brain Float 16 |
 | `pl.FP32` | 32 | IEEE 单精度浮点 |
-| `pl.FP4` | 4 | 4 位浮点 |
-| `pl.FP8E4M3FN` | 8 | 8 位浮点（e4m3fn） |
-| `pl.FP8E5M2` | 8 | 8 位浮点（e5m2） |
+| `pl.FP4` | 4 | 4 位浮点（打包 MXFP4 E2M1×2；PTOAS `!pto.f4E2M1x2`） |
+| `pl.FP8E4M3FN` | 8 | 8 位浮点（e4m3fn）；MXFP8 数据 |
+| `pl.FP8E5M2` | 8 | 8 位浮点（e5m2）；MXFP8 数据 |
+| `pl.FP8E8M0` | 8 | MX 块缩放指数（E8M0）；PTOAS `!pto.f8E8M0` / pto-isa `float8_e8m0_t` |
 | `pl.HF4` / `pl.HF8` | 4/8 | 昇腾浮点格式 |
 | `pl.INDEX` | 64 | 索引计算类型 —— 循环变量、维度 |
 
