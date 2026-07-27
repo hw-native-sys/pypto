@@ -74,6 +74,38 @@ std::string SplitModeToPythonString(SplitMode mode) {
   throw pypto::TypeError("Unknown SplitMode");
 }
 
+/// Detects a ``tile.get_block_idx`` read anywhere in a statement subtree.
+class BlockIdxReadDetector : public IRVisitor {
+ public:
+  void VisitExpr_(const CallPtr& op) override {
+    if (IsOp(op, "tile.get_block_idx")) found_ = true;
+    IRVisitor::VisitExpr_(op);
+  }
+
+  [[nodiscard]] bool found() const { return found_; }
+
+ private:
+  bool found_ = false;
+};
+
+/// True when re-parsing ``with pl.spmd(...):`` with ``incore``'s statements printed
+/// inline would rebuild the InCore carrier.
+///
+/// The with-form parser synthesises a carrier only for a body that carries an
+/// ``optimizations=`` entry (a concrete split mode or a ``slot_num`` slot count —
+/// the same pair ``PrintScopeOptimizations`` emits) or reads the per-block index.
+/// For any other body the sugar is lossy: the carrier must be spelled out as a
+/// nested ``pl.at(level=pl.Level.CORE_GROUP)`` instead, or the round-trip silently
+/// drops it.
+bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
+  if (!incore) return false;
+  const bool has_mode = incore->split_.has_value() && incore->split_.value() != SplitMode::None;
+  if (has_mode || incore->HasAttr("slot_num")) return true;
+  BlockIdxReadDetector detector;
+  detector.VisitStmt(incore->body_);
+  return detector.found();
+}
+
 /// Convert cast round mode integer to its string name for printing.
 /// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
@@ -1920,10 +1952,8 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   // Detect the ``for i in pl.spmd(...):`` desugaring emitted by the parser:
   // SpmdScopeStmt(body=InCoreScopeStmt(body=<AssignStmt(i, Call(tile.get_block_idx)), ...>)).
-  // Printing it back as a for-loop keeps round-trips stable (the
-  // with-form parser enforces a single kernel call, so printing a
-  // multi-statement InCore-wrapped body as `with pl.spmd():` would fail
-  // to reparse).
+  // Printing it back as a for-loop keeps round-trips stable: the for-form binds the
+  // loop variable to the leading get_block_idx read, which the with-form does not.
   auto incore = As<InCoreScopeStmt>(op->body_);
   auto incore_seq = incore ? As<SeqStmts>(incore->body_) : nullptr;
 
@@ -1953,17 +1983,23 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     PrintScopeTaskIdVarSuffix(op);
     stream_ << ":\n";
     IncreaseIndent();
-    if (incore_seq && !incore_seq->stmts_.empty()) {
+    if (!SpmdInlineBodyRebuildsCarrier(incore)) {
+      // Print the body as-is. Either inlining would drop the carrier — the parser
+      // re-synthesises an InCore only for a body that carries a split or reads the
+      // per-block index, so the carrier must be spelled out as a nested
+      // ``pl.at(level=pl.Level.CORE_GROUP)``, the same shape the plain with-form
+      // prints — or (defensively) there is no InCore wrapper at all, which an
+      // `as tid` Spmd scope should never be missing.
+      PrintStmtBlock(op->body_);
+    } else if (incore_seq && !incore_seq->stmts_.empty()) {
       for (size_t i = 0; i < incore_seq->stmts_.size(); ++i) {
         if (ShouldSuppressPlaceholder(incore_seq->stmts_, i)) continue;
         PrintStmtBlock(incore_seq->stmts_[i]);
         if (i + 1 < incore_seq->stmts_.size()) stream_ << "\n";
       }
-    } else if (incore) {
-      PrintStmtBlock(incore->body_);
     } else {
-      // Defensive: an `as tid` Spmd scope should always wrap its body in InCore.
-      PrintStmtBlock(op->body_);
+      // Non-null: SpmdInlineBodyRebuildsCarrier only returns true for a real InCore.
+      PrintStmtBlock(incore->body_);
     }
     DecreaseIndent();
     return;

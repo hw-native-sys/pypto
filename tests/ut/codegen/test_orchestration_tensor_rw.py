@@ -750,15 +750,11 @@ class TestTensorReadWriteOffsetCodegen:
                 final = self.consumer(out, final)
                 return final
 
-        # VerificationLevel.NONE: tuple destructuring inside `with pl.spmd(N):`
-        # desugars to a multi-statement body the printer emits verbatim but the
-        # parser rejects (same known roundtrip gap as test_spmd_multi_assemble).
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = passes.expand_mixed_kernel()(
-                passes.infer_tile_memory_space()(
-                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutReturnLast))
-                )
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutReturnLast))
             )
+        )
 
         code = _generate_orch_code(transformed)
 
@@ -822,18 +818,11 @@ class TestTensorReadWriteOffsetCodegen:
                     out0, out1 = self.kernel(a, b0, b1, out0, out1)
                 return out0, out1
 
-        # NOTE: bypass tracks a known print->parse round-trip limitation — a
-        # multi-output `out0, out1 = self.kernel(...)` inside `with pl.spmd(N):`
-        # desugars to a 3-statement body the printer emits verbatim, which the
-        # parser then rejects (spmd body must be a single statement). The IR is
-        # valid (passes BEFORE_AND_AFTER property verification); only roundtrip
-        # fails. Remove NONE once the printer/parser round-trips this shape.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = passes.expand_mixed_kernel()(
-                passes.infer_tile_memory_space()(
-                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiAssembleProgram))
-                )
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiAssembleProgram))
             )
+        )
         code = _generate_orch_code(transformed)
 
         assert "add_output(ext_out0)" in code and "add_output(ext_out1)" in code, (

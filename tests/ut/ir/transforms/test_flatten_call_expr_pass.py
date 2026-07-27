@@ -985,9 +985,8 @@ class TestFlattenCallInClusterScope:
     ``FlattenScopeBody`` helper (lines 364-382), which keeps extracted
     temporaries *inside* the scope body (mirroring the ``pl.at()`` behaviour)
     so execution-context boundaries are preserved. The sibling Spmd scope
-    visitor (lines 414-420) reuses the same helper; see the
-    spmd-2-statement-body note in the deferred report for why it is not
-    exercised here.
+    visitor (lines 414-420) reuses the same helper and is covered by
+    ``test_nested_call_inside_spmd_scope`` below.
     """
 
     def test_nested_call_inside_cluster_scope(self):
@@ -1014,6 +1013,63 @@ class TestFlattenCallInClusterScope:
                     t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                     result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
                 return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_nested_call_inside_spmd_scope(self):
+        """A nested call arg in a ``pl.spmd()`` dispatch body keeps its temp inside.
+
+        The hoisted temporary leaves the SPMD body with two statements. That is a
+        *dispatch* body — the per-block work is in the callee, which reads the block
+        index internally — so it stays unwrapped (no ``InCoreScopeStmt``) and remains
+        expressible in the ``with pl.spmd(...)`` surface syntax.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def worker(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(x, x)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.worker(pl.add(x, 1.0), out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def worker(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(x, x)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(4):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    out = self.worker(t__tmp_v0, out)
+                return out
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))

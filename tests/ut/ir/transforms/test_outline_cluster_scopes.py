@@ -998,8 +998,7 @@ class TestOutlinedReturnParamsExplicit:
                     pre, post, out = self.kernel(a, pre, post, out)
                 return out
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            after = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+        after = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
 
         spmd_fns = [f for f in after.functions.values() if f.func_type == ir.FunctionType.Spmd]
         assert len(spmd_fns) == 1

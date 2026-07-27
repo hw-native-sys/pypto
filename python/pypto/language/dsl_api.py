@@ -644,10 +644,10 @@ class SpmdContext:
     """Context manager / loop iterator for SPMD dispatch scope.
 
     The parser recognizes ``with pl.spmd(...):`` (builds a ``ScopeStmt(Spmd)``
-    whose body must be a single function call), ``with pl.spmd(...) as tid:``
-    (captures the grid dispatch's producer ``Scalar[TASK_ID]`` and accepts an
-    inline multi-statement body), and ``for i in pl.spmd(...):`` (auto-outlines
-    the loop body into an InCore function with ``i`` bound to
+    whose body either dispatches a kernel or is an inline block auto-outlined
+    into one), ``with pl.spmd(...) as tid:`` (same body shapes, and captures the
+    grid dispatch's producer ``Scalar[TASK_ID]``), and ``for i in pl.spmd(...):``
+    (auto-outlines the loop body into an InCore function with ``i`` bound to
     ``pl.tile.get_block_idx()``).
     """
 
@@ -714,13 +714,18 @@ def spmd(
 
     Usage forms:
 
-    1. ``with pl.spmd(n):`` — body is either a single call to a pre-defined
-       InCore kernel (direct dispatch), or an inline multi-statement block that
-       is auto-outlined into a synthetic InCore kernel (like the loop form, minus
-       the auto-bound index). An inline body must read the per-block index via
-       ``pl.tile.get_block_idx()`` — without it every block runs identical work.
-       Captures no producer TaskId (use form 3 for that). Can stand alone
-       (implicit cluster) or nest inside ``pl.cluster()``.
+    1. ``with pl.spmd(n):`` — body is either a *dispatch* body calling a
+       pre-defined InCore kernel, or an *inline* block auto-outlined into a
+       synthetic InCore kernel (like the loop form, minus the auto-bound index).
+       Which one is decided semantically, not by statement count: a body reading
+       the per-block index via ``pl.tile.get_block_idx()`` is inline; otherwise it
+       is a dispatch body, however many statements it holds. A body that neither
+       reads the index nor dispatches a kernel is rejected — every block would run
+       identical work. An explicit ``with pl.at(<CORE_GROUP level>, ...):`` as the
+       sole body statement *is* the InCore carrier and is not wrapped again;
+       specifying ``optimizations=`` on both scopes is rejected. Captures no
+       producer TaskId (use form 3 for that). Can stand alone (implicit cluster)
+       or nest inside ``pl.cluster()``.
 
     2. ``for i in pl.spmd(n):`` — loop-style. The iteration variable binds
        the per-block index (equivalent to ``pl.tile.get_block_idx()``); the
