@@ -14,13 +14,26 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace backend {
+
+/**
+ * @brief The (src, dst) dtype pairs an architecture converts in one `pto.tcvt`.
+ *
+ * Transcribed from the ISA Supported Conversions table in the pto-isa tcvt
+ * documentation. Order is irrelevant; duplicates and self-edges are ignored by
+ * consumers.
+ */
+struct TcvtAdjacency {
+  std::vector<std::pair<DataType, DataType>> edges;
+};
 
 /**
  * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
@@ -361,6 +374,21 @@ class BackendHandler {
    * placeholder until characterised — override here once measured.
    */
   [[nodiscard]] virtual L0CostModel GetL0CostModel() const { return L0CostModel{}; }
+
+  /**
+   * @brief Native single-instruction `pto.tcvt` conversions for this architecture.
+   *
+   * Each entry is one (src, dst) dtype pair the ISA can emit as a single
+   * `tcvt`; the set differs per architecture (a5 has FP8/HF8/FP4 sources and
+   * no INT32 -> FP16 deq, a2a3 is the reverse). LegalizeTileCast treats this as
+   * a directed graph and expands any cast whose pair is absent into the
+   * shortest chain of native hops, so the table is the single source of truth
+   * for what a backend can convert directly.
+   *
+   * Returned by reference from a handler-owned static — callers may hold the
+   * reference for the duration of a pass.
+   */
+  [[nodiscard]] virtual const TcvtAdjacency& GetTcvtAdjacency() const = 0;
 };
 
 }  // namespace backend

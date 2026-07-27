@@ -11,6 +11,10 @@
 
 #include "pypto/backend/950/backend_950_handler.h"
 
+#include <initializer_list>
+
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
@@ -46,6 +50,40 @@ ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_m
       INTERNAL_UNREACHABLE << "cross-core move destination must be Vec, Mat, Left, or Right, got "
                            << static_cast<int>(dest_ms);
   }
+}
+
+// ISA Supported Conversions (pto-isa tcvt docs, a5 column). a5 adds the FP8 /
+// HF8 / FP4 formats and the unsigned integer widths, but drops a2a3's
+// INT32 -> FP16 deq and every INT4 pair -- which is why pl.cast(x_i32, pl.FP16)
+// has to be legalized here. Grouped by source, mirroring the ISA table.
+const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
+  static const TcvtAdjacency kTable = [] {
+    TcvtAdjacency t;
+    auto add = [&t](DataType from, std::initializer_list<DataType> tos) {
+      for (DataType to : tos) {
+        t.edges.emplace_back(from, to);
+      }
+    };
+    add(DataType::FP32, {DataType::FP16, DataType::BF16, DataType::INT16, DataType::INT32, DataType::INT64});
+    add(DataType::FP32, {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::HF8});
+    add(DataType::FP16, {DataType::FP32, DataType::INT32, DataType::INT16, DataType::INT8, DataType::UINT8});
+    add(DataType::FP16, {DataType::HF8});
+    add(DataType::BF16, {DataType::FP32, DataType::INT32, DataType::FP16, DataType::FP4});
+    add(DataType::INT16, {DataType::FP16, DataType::FP32, DataType::UINT8, DataType::UINT32});
+    add(DataType::INT16, {DataType::INT32});
+    add(DataType::INT32, {DataType::FP32, DataType::INT16, DataType::INT64, DataType::UINT16});
+    add(DataType::INT32, {DataType::UINT8});
+    add(DataType::INT64, {DataType::FP32, DataType::INT32});
+    add(DataType::UINT8, {DataType::FP16, DataType::UINT16});
+    add(DataType::INT8, {DataType::FP16, DataType::INT16, DataType::INT32});
+    add(DataType::UINT32, {DataType::UINT8, DataType::UINT16, DataType::INT16});
+    add(DataType::FP8E4M3FN, {DataType::FP32});
+    add(DataType::FP8E5M2, {DataType::FP32});
+    add(DataType::HF8, {DataType::FP32});
+    add(DataType::FP4, {DataType::BF16});
+    return t;
+  }();
+  return kTable;
 }
 
 }  // namespace backend

@@ -167,6 +167,15 @@ c = pl.matmul(a, b)         # linear algebra
 c = pl.row_sum(a)            # reductions (also row_max)
 ```
 
+Not every `pl.cast` is one instruction. Whether a `(src, dst)` dtype pair maps to a
+single hardware `pto.tcvt` or is expanded into a multi-hop chain depends on the target
+architecture — for example `INT32 -> FP16` is one instruction on Ascend910B but lowers
+to `INT32 -> FP32 -> FP16` on Ascend950. The chain costs one `tcvt` per hop, and where
+an intermediate is narrower than the source it can differ from a directly rounded
+conversion by one ULP of the destination. See
+[LegalizeTileCast](../dev/passes/14-legalize_tile_cast.md) for the per-architecture
+tables of native pairs, expanded pairs and their hop counts.
+
 Tensor and Tile types also support Python subscript syntax as sugar for `slice`/`read`:
 
 ```python
@@ -477,7 +486,7 @@ too; entry `True` + inline `False` is legal and just nests hand scopes
 inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
 outline into separate kernels. It specializes into
 `@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/41-materialize_runtime_scopes.md)
+[MaterializeRuntimeScopes pass](../dev/passes/42-materialize_runtime_scopes.md)
 for the resulting scope-placement semantics.
 
 ### `@pl.inline`

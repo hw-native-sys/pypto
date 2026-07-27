@@ -429,6 +429,26 @@ Pass OptimizeOrchTensors();
 Pass FlattenTileNdTo2D();
 
 /**
+ * @brief Expand hardware-unsupported ``tile.cast`` pairs into native cast chains.
+ *
+ * ``pto.tcvt`` only supports a profile-dependent subset of (src, dst) dtype
+ * pairs. This pass rewrites each non-native ``tile.cast`` into the shortest
+ * sequence of native casts (BFS over the ISA adjacency table for A5 / A2A3).
+ * Among equal-length paths it prefers "same byte-width -> float, then adjust
+ * width" edges (e.g. A5 ``INT32->FP16`` becomes ``INT32->FP32->FP16``).
+ *
+ * Already-native casts (including FIXPIPE-foldable ``FP32->BF16/FP16`` with
+ * ``mode=rint``) are left untouched. Runs after ``FlattenTileNdTo2D`` (so
+ * newly inserted casts are also legalized) and before ``AutoTileMatmulL0``.
+ *
+ * Requirements:
+ * - Input IR must have 2D tile ops (run FlattenTileNdTo2D first)
+ * - A BackendHandler must be configured (PassContext) so the arch table
+ *   (``a5`` / ``a2a3``) can be selected via ``GetPtoTargetArch()``
+ */
+Pass LegalizeTileCast();
+
+/**
  * @brief Auto-tile static 2D matmul / matmul_acc calls for the backend's L0
  *
  * Queries ``utils::ChooseL0Tile`` for an ``(m, n, k, stationarity, dbC)``

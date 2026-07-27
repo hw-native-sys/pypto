@@ -71,6 +71,7 @@ struct PassProperties {
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
+| LegalizeTileCast | — | — | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
 | CanonicalizeTileSlice | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure | — |
@@ -399,42 +400,43 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 
 1. [`LowerCompositeOps`](12-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md)
-3. [`AutoTileMatmulL0`](14-auto_tile_matmul_l0.md)
-4. [`CanonicalizeTileSlice`](15-canonicalize_tile_slice.md)
-5. `InferTileMemorySpace`
-6. [`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
-7. [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) (live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form before ExpandMixedKernel)
-8. `ExpandMixedKernel`
-9. [`InjectGMPipeBuffer`](20-inject_gm_pipe_buffer.md)
-10. [`SplitVectorKernel`](21-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
-11. [`StampTfreeSplit`](22-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
-12. `NormalizeReturnOrder`
-13. [`SkewCrossCorePipeline`](24-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
-14. [`LowerPipelineLoops`](25-lower_pipeline_loops.md)
-15. [`CanonicalizeIOOrder`](26-canonicalize_io_order.md)
-16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
-17. `InitMemRef`
-18. [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
-19. `MemoryReuse`
-20. `AllocateMemoryAddr`
-21. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
-22. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
-23. [`DeriveCallDirections`](34-derive_call_directions.md)
-24. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
-25. [`ExpandManualPhaseFence`](36-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
-26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
-27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
-28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
-30. `Simplify`
-31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
-32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+3. [`LegalizeTileCast`](14-legalize_tile_cast.md) (expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt`)
+4. [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md)
+5. [`CanonicalizeTileSlice`](16-canonicalize_tile_slice.md)
+6. `InferTileMemorySpace`
+7. [`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
+8. [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md) (live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form before ExpandMixedKernel)
+9. `ExpandMixedKernel`
+10. [`InjectGMPipeBuffer`](21-inject_gm_pipe_buffer.md)
+11. [`SplitVectorKernel`](22-split_vector_kernel.md) (only stamps attrs for split_aiv functions + handles the no-split dual-AIV path)
+12. [`StampTfreeSplit`](23-stamp_tfree_split.md) (copies each cross-core tpop's split/pipe-id onto its matching tfree op)
+13. `NormalizeReturnOrder`
+14. [`SkewCrossCorePipeline`](25-skew_cross_core_pipeline.md) (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops)
+15. [`LowerPipelineLoops`](26-lower_pipeline_loops.md)
+16. [`CanonicalizeIOOrder`](27-canonicalize_io_order.md)
+17. [`MaterializeTensorStrides`](28-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
+18. `InitMemRef`
+19. [`MaterializeSemanticAliases`](30-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
+20. `MemoryReuse`
+21. `AllocateMemoryAddr`
+22. [`FoldNoOpReshape`](33-fold_no_op_reshape.md)
+23. [`FuseCreateAssembleToSlice`](34-fuse_create_assemble_to_slice.md)
+24. [`DeriveCallDirections`](35-derive_call_directions.md)
+25. [`AutoDeriveTaskDependencies`](36-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
+26. [`ExpandManualPhaseFence`](37-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
+27. [`SynthesizeAllReduceSignals`](38-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
+28. [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
+29. [`LowerHostTensorCollectives`](40-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
+30. [`MaterializeDistTensorCtx`](41-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
+31. `Simplify`
+32. [`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+33. [`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
 for non-strategy-specific tests so the maintained pipeline stays covered.
 
-[`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) repairs
+[`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.
 For the current PTO row-major elementwise ops, it rewrites `[N, 1]` vector
 operands into `[1, N] row_major` `tile.reshape` operations at the
@@ -442,7 +444,7 @@ constrained use site, where row-major is inferred from the target shape.
 It then reshapes the result back to the original vector shape when
 needed.
 
-[`NormalizeReturnOrder`](23-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
+[`NormalizeReturnOrder`](24-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
 and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
 orchestration codegen map tuple element indices to output parameters with a

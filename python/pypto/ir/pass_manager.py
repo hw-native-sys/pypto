@@ -174,6 +174,10 @@ class PassManager:
         tile_pto_passes: tuple[PassFactory, ...] = (
             passes.lower_composite_ops,
             passes.flatten_tile_nd_to_2d,
+            # Expand non-native tile.cast (src,dst) pairs into shortest native
+            # cast chains (e.g. A5 INT32→FP16 → INT32→FP32→FP16) before
+            # AutoTileMatmulL0 may FIXPIPE-fold already-native f32→bf16/f16.
+            passes.legalize_tile_cast,
             passes.auto_tile_matmul_l0,
             passes.canonicalize_tile_slice,
             passes.infer_tile_memory_space,

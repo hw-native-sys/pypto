@@ -55,6 +55,10 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 
+  /// Native single-instruction `pto.tcvt` pairs for this architecture
+  /// (ISA Supported Conversions, pto-isa tcvt docs).
+  [[nodiscard]] const TcvtAdjacency& GetTcvtAdjacency() const override;
+
   [[nodiscard]] uint32_t GetGmAccessGranularityBytes() const override { return 128; }
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 128; }

@@ -195,7 +195,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor，位于区域外
 ```
 
-本 pass 将两者**各自 1:1**下降为对应的 tile 算子（`tensor.aiv_shard` → `tile.aiv_shard`,`tensor.aic_gather` → `tile.aic_gather`）；此后 IR 与 AUTO `pl.split` 路径经 [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md)（pass 18）产出的结果逐字节一致。随后 `ExpandMixedKernel`（pass 19）将两者折叠进跨核 `tpush`/`tpop` 机制。
+本 pass 将两者**各自 1:1**下降为对应的 tile 算子（`tensor.aiv_shard` → `tile.aiv_shard`,`tensor.aic_gather` → `tile.aic_gather`）；此后 IR 与 AUTO `pl.split` 路径经 [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md)（pass 19）产出的结果逐字节一致。随后 `ExpandMixedKernel`（pass 20）将两者折叠进跨核 `tpush`/`tpop` 机制。
 
 **约束**（由张量级类型推导器与 DSL 解析器施加,而非本 pass）：
 

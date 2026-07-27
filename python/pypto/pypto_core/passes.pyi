@@ -461,6 +461,15 @@ def optimize_orch_tensors() -> Pass:
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
+def legalize_tile_cast() -> Pass:
+    """Create a pass that expands hardware-unsupported ``tile.cast`` pairs.
+
+    ``pto.tcvt`` supports only a profile-dependent subset of (src, dst) dtype
+    pairs. Each non-native cast is rewritten into the shortest chain of native
+    casts for the active backend's ISA (e.g. on A5 ``INT32 -> FP16`` becomes
+    ``INT32 -> FP32 -> FP16``). Already-native casts are left untouched.
+    """
+
 def auto_tile_matmul_l0() -> Pass:
     """Create a pass that auto-tiles static 2D ``tile.matmul`` / ``tile.matmul_acc`` for L0.
 
@@ -872,6 +881,7 @@ __all__ = [
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",
+    "legalize_tile_cast",
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",

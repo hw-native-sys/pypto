@@ -204,7 +204,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](18-lower_auto_vector_split.md) (pass 18). `ExpandMixedKernel` (pass 19) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md) (pass 19). `ExpandMixedKernel` (pass 20) then folds both into the cross-core `tpush`/`tpop` machinery.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 

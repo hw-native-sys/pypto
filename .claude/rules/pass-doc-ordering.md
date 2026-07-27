@@ -26,35 +26,36 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 11 | `11-optimize_orch_tensors.md` | 11th pass |
 | 12 | `12-lower_composite_ops.md` | 12th pass (first tile_pto pass) |
 | 13 | `13-flatten_tile_nd_to_2d.md` | 13th pass |
-| 14 | `14-auto_tile_matmul_l0.md` | 14th pass |
-| 15 | `15-canonicalize_tile_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat/Vec `tile.slice` → `tile.extract`) |
-| 16 | `16-infer_tile_memory_space.md` | 16th pass |
-| 17 | `17-resolve_backend_op_layouts.md` | 17th pass |
-| 18 | `18-lower_auto_vector_split.md` | Live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form (aiv_shard/aic_gather + halved vector sub-region). ALSO the sole consumer of the first-class `SplitAivScopeStmt` region node (`pl.split_aiv`, nestable/multi-mode): lowers each region in place (region-scoped halving; explicit-boundary bodies passed through unchanged) and erases the scope wrapper. Runs immediately before `ExpandMixedKernel` |
-| 19 | `19-expand_mixed_kernel.md` | 19th pass (no `SplitAivScopeStmt` survives to here; its single-func-mode transpose check is skipped for functions stamped `split_aiv_region_validated` by pass 18) |
-| 20 | `20-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 21 | `21-split_vector_kernel.md` | 21st pass (after the convergence refactor: only stamps attrs for split_aiv functions + handles the no-split dual-AIV path; the per-op halving driver was deleted — moved to LowerAutoVectorSplit + split_axis_utils. Single-func-mode assertion relaxed for multi-mode `split_aiv` functions: stamps the mode-agnostic `dual_aiv_dispatch` and trusts the per-op `split` ints from pass 18) |
-| 22 | `22-stamp_tfree_split.md` | 22nd pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |
-| 23 | `23-normalize_return_order.md` | 23rd pass |
-| 24 | `24-skew_cross_core_pipeline.md` | 24th pass (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops) |
-| 25 | `25-lower_pipeline_loops.md` | 25th pass |
-| 26 | `26-canonicalize_io_order.md` | 26th pass |
-| 27 | `27-materialize_tensor_strides.md` | 27th pass (RFC #1300 P3 — wired into Default starting from P6) |
-| 28 | `28-init_memref.md` | 28th pass |
-| 29 | `29-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
-| 30 | `30-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
-| 31 | `31-allocate_memory_addr.md` | 31st pass (skippable under `memory_planner=PTOAS`) |
-| 32 | `32-fold_no_op_reshape.md` | 32nd pass |
-| 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
-| 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
-| 35 | `35-auto_derive_task_dependencies.md` | 35th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 36 | `36-expand_manual_phase_fence.md` | 36th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 37 | `37-synthesize_allreduce_signals.md` | 37th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
-| 38 | `38-materialize_comm_domain_scopes.md` | 38th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 39 | `39-lower_host_tensor_collectives.md` | 39th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 40 | `40-materialize_dist_tensor_ctx.md` | 40th pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
-| 41 | `41-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
-| 42 | `42-classify_iter_arg_carry.md` | Last pass (classifies each Orchestration ForStmt iter_arg — trivial alias vs materialised rebind carry — and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes) |
+| 14 | `14-legalize_tile_cast.md` | Expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt` into the shortest chain of native casts (A5 `INT32->FP16` becomes `INT32->FP32->FP16`); runs between `FlattenTileNdTo2D` and `AutoTileMatmulL0` |
+| 15 | `15-auto_tile_matmul_l0.md` | 15th pass |
+| 16 | `16-canonicalize_tile_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat/Vec `tile.slice` → `tile.extract`) |
+| 17 | `17-infer_tile_memory_space.md` | 17th pass |
+| 18 | `18-resolve_backend_op_layouts.md` | 18th pass |
+| 19 | `19-lower_auto_vector_split.md` | Live auto-split lowering path; converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form (aiv_shard/aic_gather + halved vector sub-region). ALSO the sole consumer of the first-class `SplitAivScopeStmt` region node (`pl.split_aiv`, nestable/multi-mode): lowers each region in place (region-scoped halving; explicit-boundary bodies passed through unchanged) and erases the scope wrapper. Runs immediately before `ExpandMixedKernel` |
+| 20 | `20-expand_mixed_kernel.md` | 20th pass (no `SplitAivScopeStmt` survives to here; its single-func-mode transpose check is skipped for functions stamped `split_aiv_region_validated` by pass 19) |
+| 21 | `21-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 22 | `22-split_vector_kernel.md` | 22nd pass (after the convergence refactor: only stamps attrs for split_aiv functions + handles the no-split dual-AIV path; the per-op halving driver was deleted — moved to LowerAutoVectorSplit + split_axis_utils. Single-func-mode assertion relaxed for multi-mode `split_aiv` functions: stamps the mode-agnostic `dual_aiv_dispatch` and trusts the per-op `split` ints from pass 19) |
+| 23 | `23-stamp_tfree_split.md` | 23rd pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |
+| 24 | `24-normalize_return_order.md` | 24th pass |
+| 25 | `25-skew_cross_core_pipeline.md` | 25th pass (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops) |
+| 26 | `26-lower_pipeline_loops.md` | 26th pass |
+| 27 | `27-canonicalize_io_order.md` | 27th pass |
+| 28 | `28-materialize_tensor_strides.md` | 28th pass (RFC #1300 P3 — wired into Default starting from P6) |
+| 29 | `29-init_memref.md` | 29th pass |
+| 30 | `30-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
+| 31 | `31-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
+| 32 | `32-allocate_memory_addr.md` | 32nd pass (skippable under `memory_planner=PTOAS`) |
+| 33 | `33-fold_no_op_reshape.md` | 33rd pass |
+| 34 | `34-fuse_create_assemble_to_slice.md` | 34th pass |
+| 35 | `35-derive_call_directions.md` | 35th pass (two-phase: arg directions + manual-scope lowering) |
+| 36 | `36-auto_derive_task_dependencies.md` | 36th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 37 | `37-expand_manual_phase_fence.md` | 37th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 38 | `38-synthesize_allreduce_signals.md` | 38th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
+| 39 | `39-materialize_comm_domain_scopes.md` | 39th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 40 | `40-lower_host_tensor_collectives.md` | 40th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 41 | `41-materialize_dist_tensor_ctx.md` | 41st pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
+| 42 | `42-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
+| 43 | `43-classify_iter_arg_carry.md` | Last pass (classifies each Orchestration ForStmt iter_arg — trivial alias vs materialised rebind carry — and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
