@@ -152,16 +152,22 @@ def _is_self_method_call(node: object) -> TypeGuard[ast.Call]:
     return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "self"
 
 
-def _spmd_body_has_call(body: "list[ast.stmt]", predicate: "Callable[[ast.Call], bool]") -> bool:
-    """Return True when any call in ``body`` satisfies ``predicate``.
+def _spmd_body_calls(body: "list[ast.stmt]", predicate: "Callable[[ast.Call], bool]") -> "Iterator[ast.Call]":
+    """Yield each call in ``body`` satisfying ``predicate``.
 
     ``ast.walk`` recurses the whole body subtree, so a call nested inside a
     ``pl.range`` loop, an argument expression, or a nested ``with`` still counts.
-    Shared by the two SPMD body classifiers so they cannot drift apart.
+    Shared by the SPMD body classifiers so they cannot drift apart.
     """
-    return any(
-        isinstance(node, ast.Call) and predicate(node) for body_stmt in body for node in ast.walk(body_stmt)
-    )
+    for body_stmt in body:
+        for node in ast.walk(body_stmt):
+            if isinstance(node, ast.Call) and predicate(node):
+                yield node
+
+
+def _spmd_body_has_call(body: "list[ast.stmt]", predicate: "Callable[[ast.Call], bool]") -> bool:
+    """Return True when any call in ``body`` satisfies ``predicate``."""
+    return next(_spmd_body_calls(body, predicate), None) is not None
 
 
 def _is_const_int(value: object) -> bool:
@@ -3962,8 +3968,8 @@ class ASTParser:
             or (isinstance(node.func, ast.Name) and node.func.id == "get_block_idx"),
         )
 
-    def _is_explicit_incore_carrier(self, body: "list[ast.stmt]") -> bool:
-        """True if ``body`` is a lone ``with pl.at(<CORE_GROUP level>, ...):``.
+    def _explicit_incore_carrier(self, body: "list[ast.stmt]") -> "_AtKwargState | None":
+        """The parsed ``pl.at`` state if ``body`` is a lone ``with pl.at(<CORE_GROUP>, ...):``.
 
         That nested scope *is* the ``InCoreScopeStmt`` carrier, so
         :meth:`_emit_spmd_body` must parse it as an ordinary nested scope rather
@@ -3982,22 +3988,32 @@ class ASTParser:
         nested scope either way. Only ``CORE_GROUP`` qualifies: every other level
         builds a ``HierarchyScopeStmt``, which is not an InCore carrier (see
         :meth:`_parse_at_scope`).
+
+        Returns the parsed :class:`_AtKwargState` (never ``None`` for a match) so
+        the caller can see whether the carrier itself carries an ``optimizations=``
+        entry; ``None`` when ``body`` is not a carrier.
         """
         if len(body) != 1 or not isinstance(body[0], ast.With):
-            return False
+            return None
         items = body[0].items
         if len(items) != 1 or not _is_pl_call(items[0].context_expr, "at"):
-            return False
-        return self._parse_at_kwargs(items[0].context_expr).level == ir.Level.CORE_GROUP
+            return None
+        state = self._parse_at_kwargs(items[0].context_expr)
+        return state if state.level == ir.Level.CORE_GROUP else None
 
-    def _spmd_body_dispatches_kernel(self, body: "list[ast.stmt]") -> bool:
-        """True if any statement in an SPMD body calls another PyPTO function.
+    def _spmd_body_kernel_dispatch_count(self, body: "list[ast.stmt]") -> int:
+        """Number of cross-function kernel dispatches in an SPMD body.
 
-        Such a body is a *dispatch* body: the per-block work lives in the callee,
-        which reads the block index internally, so the body itself need not
-        mention ``get_block_idx``. Used only to scope the "every block runs
-        identical work" rejection in :meth:`_emit_spmd_body` to bodies that
-        genuinely do no per-block differentiation.
+        A body with at least one dispatch is a *dispatch* body: the per-block work
+        lives in the callee, which reads the block index internally, so the body
+        itself need not mention ``get_block_idx``.
+
+        The count matters because an unwrapped dispatch body is lowered by
+        ``FindFirstInnerCall`` (``wrapper_call_utils.cpp``), which stops at the
+        first call — orchestration codegen would emit a launch for that callee only
+        and silently drop the rest. Hoisted temporaries and tuple projections are
+        not dispatches, so the shapes ``FlattenCallExpr`` and the multi-output
+        desugar produce still count as exactly one.
 
         Both call spellings :meth:`parse_call` accepts count: the ``self.<kernel>``
         cross-function call, and a bare name resolving through ``closure_vars`` to
@@ -4013,7 +4029,7 @@ class ASTParser:
                 return isinstance(resolved, (ir.Function, InlineFunction))
             return False
 
-        return _spmd_body_has_call(body, is_dispatch)
+        return sum(1 for _ in _spmd_body_calls(body, is_dispatch))
 
     def _emit_spmd_body(  # noqa: PLR0913 — args map 1:1 to the SpmdScopeStmt fields
         self,
@@ -4070,21 +4086,30 @@ class ASTParser:
         # slot_num could only arrive via pl.split(mode, slot_num=N), which always
         # set a mode.
         has_optimization_entry = split_mode is not None or split_slot_num is not None
-        if self._is_explicit_incore_carrier(stmt.body):
-            # The nested ``pl.at(CORE_GROUP)`` already is the carrier; an
-            # ``optimizations=`` entry on the ``pl.spmd(...)`` line too would
-            # specify it in two places, so reject rather than silently pick one.
+        carrier = self._explicit_incore_carrier(stmt.body)
+        if carrier is not None:
+            # The nested ``pl.at(CORE_GROUP)`` already is the carrier, and an
+            # ``optimizations=`` entry has to land on it. One on the
+            # ``pl.spmd(...)`` line as well is either a duplicate or would have to
+            # be pushed into a scope the user wrote by hand — reject both rather
+            # than silently picking one or dropping it.
             if has_optimization_entry:
+                carrier_has_entry = carrier.split_mode is not None or carrier.split_slot_num is not None
+                where = (
+                    "is specified twice: on `pl.spmd(...)` and on the inner"
+                    if carrier_has_entry
+                    else "belongs on the InCore scope, but the body already provides one as the inner"
+                )
                 raise ParserSyntaxError(
-                    "`optimizations=` is specified twice: on `pl.spmd(...)` and on the inner "
-                    "`pl.at(level=pl.Level.CORE_GROUP, ...)`",
+                    f"`optimizations=` {where} `pl.at(level=pl.Level.CORE_GROUP, ...)`",
                     span=span,
-                    hint="Keep `optimizations=[...]` on one of the two scopes.",
+                    hint="Keep `optimizations=[...]` on the inner `pl.at(...)` carrier only.",
                 )
             needs_incore = False
         else:
             is_inline_body = self._spmd_body_reads_block_idx(stmt.body)
-            if not is_inline_body and not self._spmd_body_dispatches_kernel(stmt.body):
+            dispatch_count = 0 if is_inline_body else self._spmd_body_kernel_dispatch_count(stmt.body)
+            if not is_inline_body and dispatch_count == 0:
                 raise ParserSyntaxError(
                     "`with pl.spmd(...)` body neither reads the per-block index via "
                     "`pl.tile.get_block_idx()` nor dispatches a `self.<kernel>(...)` call, "
@@ -4093,6 +4118,18 @@ class ASTParser:
                     hint="Add `i = pl.tile.get_block_idx()` inside the scope, dispatch a kernel "
                     "that reads it, or use `for i in pl.spmd(n):` to bind the block index "
                     "automatically.",
+                )
+            # An unwrapped dispatch body is lowered via FindFirstInnerCall, which
+            # stops at the first call — a second dispatch would be silently
+            # dropped by orchestration codegen rather than launched.
+            if dispatch_count > 1:
+                raise ParserSyntaxError(
+                    f"`with pl.spmd(...)` dispatch body launches {dispatch_count} kernels; "
+                    "only one kernel dispatch per SPMD scope is supported.",
+                    span=span,
+                    hint="Use one `pl.spmd(...)` scope per kernel, or make the body inline by "
+                    "reading `pl.tile.get_block_idx()` so the whole body is outlined into a "
+                    "single per-block kernel.",
                 )
             needs_incore = is_inline_body or has_optimization_entry
         if not needs_incore:

@@ -719,13 +719,14 @@ def spmd(
        synthetic InCore kernel (like the loop form, minus the auto-bound index).
        Which one is decided semantically, not by statement count: a body reading
        the per-block index via ``pl.tile.get_block_idx()`` is inline; otherwise it
-       is a dispatch body, however many statements it holds. A body that neither
+       is a dispatch body, however many statements it holds — though it may launch
+       only one kernel (the lowering stops at the first call). A body that neither
        reads the index nor dispatches a kernel is rejected — every block would run
        identical work. An explicit ``with pl.at(<CORE_GROUP level>, ...):`` as the
-       sole body statement *is* the InCore carrier and is not wrapped again;
-       specifying ``optimizations=`` on both scopes is rejected. Captures no
-       producer TaskId (use form 3 for that). Can stand alone (implicit cluster)
-       or nest inside ``pl.cluster()``.
+       sole body statement *is* the InCore carrier and is not wrapped again; with
+       such a body ``optimizations=`` must go on that ``pl.at(...)`` rather than on
+       the ``pl.spmd(...)`` line. Captures no producer TaskId (use form 3 for
+       that). Can stand alone (implicit cluster) or nest inside ``pl.cluster()``.
 
     2. ``for i in pl.spmd(n):`` — loop-style. The iteration variable binds
        the per-block index (equivalent to ``pl.tile.get_block_idx()``); the

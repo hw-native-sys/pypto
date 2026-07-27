@@ -2263,6 +2263,68 @@ class Prog:
         with pytest.raises(ParserSyntaxError, match="`optimizations=` is specified twice"):
             parse_program(src)
 
+    def test_multiple_kernel_dispatches_rejected(self):
+        """An unwrapped dispatch body may launch only one kernel.
+
+        ``FindFirstInnerCall`` stops at the first call, so orchestration codegen
+        would emit a launch for that callee and silently drop the rest.
+        """
+        src = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[64], pl.FP32],
+               out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.add(a, a)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[64], pl.FP32],
+             b: pl.Out[pl.Tensor[[64], pl.FP32]],
+             out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.spmd(4):
+            b = self.kernel(a, b)
+            out = self.kernel(a, out)
+        return out
+"""
+        with pytest.raises(ParserSyntaxError, match="launches 2 kernels"):
+            parse_program(src)
+
+    def test_optimizations_on_outer_scope_only_with_carrier_rejected(self):
+        """``optimizations=`` on the spmd alone, with a bare carrier body, is rejected.
+
+        The entry has to land on the InCore scope, and the body already provides one
+        by hand — pushing the outer setting into it would be silent, and dropping it
+        would be worse. The message distinguishes this from the both-scopes case.
+        """
+        src = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[64], pl.FP32],
+               out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.add(a, a)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = self.kernel(a, out)
+        return out
+"""
+        with pytest.raises(ParserSyntaxError, match="belongs on the InCore scope"):
+            parse_program(src)
+
     def test_cross_core_slot_alone_forces_carrier_on_dispatch_body(self):
         """A bare ``cross_core_slot`` count still requires an InCore carrier.
 
