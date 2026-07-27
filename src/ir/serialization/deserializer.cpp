@@ -335,6 +335,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     msgpack::object tile_view_obj;
     msgpack::object tensor_view_obj;
     msgpack::object window_buffer_obj;
+    int count = 0;
     uint8_t memory_space_code = 0;
     bool has_memref = false;
     bool has_tile_view = false;
@@ -379,6 +380,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "memory_space") {
         p->val.convert(memory_space_code);
         has_memory_space = true;
+      } else if (key == "count") {
+        p->val.convert(count);
       }
     }
 
@@ -428,6 +431,17 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       }
 
       return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
+    } else if (type_kind == "TileBufferSetType") {
+      std::optional<MemRefPtr> memref;
+      std::optional<TileView> tile_view;
+      std::optional<MemorySpace> memory_space;
+
+      if (has_memref) memref = DeserializeMemRef(memref_obj, zone);
+      if (has_tile_view) tile_view = DeserializeTileView(tile_view_obj, zone);
+      if (has_memory_space) memory_space = static_cast<MemorySpace>(memory_space_code);
+
+      return std::make_shared<TileBufferSetType>(shape, DataType(dtype_code), count, memref, tile_view,
+                                                 memory_space);
     } else if (type_kind == "ArrayType") {
       CHECK(shape.size() == 1) << "ArrayType must have rank-1 shape, got " << shape.size();
       return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);

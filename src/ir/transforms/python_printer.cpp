@@ -655,6 +655,29 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
+  if (auto buffer_set_type = As<TileBufferSetType>(type)) {
+    std::ostringstream oss;
+    oss << prefix_ << ".TileBufferSet[[";
+    PrintShapeDims(oss, buffer_set_type->shape_);
+    oss << "], " << prefix_ << "." << DataTypeToString(buffer_set_type->dtype_);
+    oss << ", " << buffer_set_type->count_;
+    if (buffer_set_type->memref_.has_value()) {
+      oss << ", " << PrintMemRef(*buffer_set_type->memref_.value());
+    }
+    if (buffer_set_type->memory_space_.has_value()) {
+      oss << ", " << prefix_ << ".Mem." << MemorySpaceToString(buffer_set_type->memory_space_.value());
+    } else {
+      INTERNAL_UNREACHABLE << "TileBufferSetType must have memory_space before printing";
+    }
+    if (buffer_set_type->tile_view_.has_value()) {
+      auto view_str = PrintTileView(*buffer_set_type->tile_view_, buffer_set_type->shape_,
+                                    buffer_set_type->memory_space_);
+      oss << ", " << (view_str.empty() ? prefix_ + ".TileView()" : view_str);
+    }
+    oss << "]";
+    return oss.str();
+  }
+
   if (auto tuple_type = As<TupleType>(type)) {
     std::ostringstream oss;
     if (tuple_type->types_.empty()) {

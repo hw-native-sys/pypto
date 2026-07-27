@@ -455,6 +455,28 @@ class IRSerializer::Impl {
       if (tile_type->memory_space_.has_value()) {
         type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(*tile_type->memory_space_), zone);
       }
+    } else if (auto buffer_set_type = As<TileBufferSetType>(type)) {
+      type_map["dtype"] = msgpack::object(buffer_set_type->dtype_.Code(), zone);
+      type_map["count"] = msgpack::object(buffer_set_type->count_, zone);
+
+      std::vector<msgpack::object> shape_vec;
+      for (const auto& dim : buffer_set_type->shape_) {
+        shape_vec.push_back(SerializeNode(dim, zone));
+      }
+      type_map["shape"] = msgpack::object(shape_vec, zone);
+
+      if (buffer_set_type->memref_.has_value()) {
+        type_map["memref"] = SerializeMemRef(buffer_set_type->memref_, zone);
+      }
+      if (buffer_set_type->tile_view_.has_value()) {
+        type_map["tile_view"] = SerializeTileView(buffer_set_type->tile_view_, zone);
+      }
+      if (buffer_set_type->memory_space_.has_value()) {
+        type_map["memory_space"] =
+            msgpack::object(static_cast<uint8_t>(buffer_set_type->memory_space_.value()), zone);
+      } else {
+        INTERNAL_UNREACHABLE << "TileBufferSetType must have memory_space before serialization";
+      }
     } else if (auto array_type = As<ArrayType>(type)) {
       type_map["dtype"] = msgpack::object(array_type->dtype_.Code(), zone);
       std::vector<msgpack::object> shape_vec;

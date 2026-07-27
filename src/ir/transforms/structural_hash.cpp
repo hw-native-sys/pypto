@@ -528,6 +528,35 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
+  } else if (auto buffer_set_type = As<TileBufferSetType>(type)) {
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(buffer_set_type->dtype_.Code())));
+    h = hash_combine(h, static_cast<result_type>(buffer_set_type->count_));
+    h = hash_combine(h, static_cast<result_type>(buffer_set_type->shape_.size()));
+    for (const auto& dim : buffer_set_type->shape_) {
+      INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TileBufferSetType";
+      h = hash_combine(h, HashNode(dim));
+    }
+    const auto& tile_view = buffer_set_type->tile_view_;
+    if (tile_view.has_value()) {
+      const auto& tv = *tile_view;
+      h = hash_combine(h, static_cast<result_type>(1));
+      h = hash_combine(h, static_cast<result_type>(tv.valid_shape.size()));
+      for (const auto& dim : tv.valid_shape) h = hash_combine(h, HashNode(dim));
+      h = hash_combine(h, static_cast<result_type>(tv.stride.size()));
+      for (const auto& dim : tv.stride) h = hash_combine(h, HashNode(dim));
+      h = hash_combine(h, HashNode(tv.start_offset));
+      h = hash_combine(h, static_cast<result_type>(tv.blayout));
+      h = hash_combine(h, static_cast<result_type>(tv.slayout));
+      h = hash_combine(h, static_cast<result_type>(tv.fractal));
+      h = hash_combine(h, static_cast<result_type>(tv.pad));
+    } else {
+      h = hash_combine(h, static_cast<result_type>(0));
+    }
+    if (buffer_set_type->memory_space_.has_value()) {
+      h = hash_combine(h, static_cast<result_type>(buffer_set_type->memory_space_.value()));
+    } else {
+      INTERNAL_UNREACHABLE << "TileBufferSetType must have memory_space before hashing";
+    }
   } else if (auto tuple_type = As<TupleType>(type)) {
     h = hash_combine(h, static_cast<result_type>(tuple_type->types_.size()));
     for (const auto& t : tuple_type->types_) {

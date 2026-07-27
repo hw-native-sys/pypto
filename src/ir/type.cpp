@@ -81,6 +81,36 @@ void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::
   }
 }
 
+bool IsTileBufferMemorySpace(MemorySpace memory_space) {
+  switch (memory_space) {
+    case MemorySpace::Vec:
+    case MemorySpace::Mat:
+    case MemorySpace::Left:
+    case MemorySpace::Right:
+    case MemorySpace::Acc:
+    case MemorySpace::Bias:
+      return true;
+    case MemorySpace::DDR:
+    case MemorySpace::ScalarLocal:
+      return false;
+  }
+  return false;
+}
+
+void ValidateTileBufferSetFields(const std::vector<ExprPtr>& shape, int count,
+                                 const std::optional<MemorySpace>& memory_space) {
+  CHECK(count >= 2 && count <= 16) << "TileBufferSetType count must be in [2, 16], got " << count;
+  CHECK(!shape.empty()) << "TileBufferSetType shape must be non-empty and all dimensions positive";
+  for (const auto& dim : shape) {
+    auto const_dim = As<ConstInt>(dim);
+    CHECK(const_dim) << "TileBufferSetType shape must be static";
+    CHECK(const_dim->value_ > 0)
+        << "TileBufferSetType shape must be non-empty and all dimensions positive, got " << const_dim->value_;
+  }
+  CHECK(memory_space.has_value() && IsTileBufferMemorySpace(*memory_space))
+      << "TileBufferSetType memory_space must be an on-chip tile memory space";
+}
+
 }  // namespace
 
 bool operator==(const TileView& lhs, const TileView& rhs) {
@@ -266,6 +296,28 @@ std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_spac
 std::optional<MemorySpace> TileType::ValidateMemorySpace(const std::optional<MemRefPtr>& memref,
                                                          std::optional<MemorySpace> memory_space) {
   return ValidateTileMemorySpaceConsistency(memref, memory_space);
+}
+
+TileBufferSetType::TileBufferSetType(const std::vector<int64_t>& shape, DataType dtype, int count,
+                                     std::optional<MemRefPtr> memref, std::optional<TileView> tile_view,
+                                     std::optional<MemorySpace> memory_space)
+    : ShapedType(dtype, shape, std::move(memref)),
+      count_(count),
+      tile_view_(std::move(tile_view)),
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
+  ValidateTileBufferSetFields(shape_, count_, memory_space_);
+  CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
+}
+
+TileBufferSetType::TileBufferSetType(std::vector<ExprPtr> shape, DataType dtype, int count,
+                                     std::optional<MemRefPtr> memref, std::optional<TileView> tile_view,
+                                     std::optional<MemorySpace> memory_space)
+    : ShapedType(dtype, std::move(shape), std::move(memref)),
+      count_(count),
+      tile_view_(std::move(tile_view)),
+      memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
+  ValidateTileBufferSetFields(shape_, count_, memory_space_);
+  CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
 }
 
 namespace {

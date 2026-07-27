@@ -745,6 +745,39 @@ class TileType(ShapedType):
         the canonical sparse ``tile_view`` storage directly.
         """
 
+class TileBufferSetType(ShapedType):
+    """Homogeneous allocation group containing multiple physical tile slots."""
+
+    count: Final[int]
+    """Number of physical slots in the allocation group."""
+
+    tile_view: Final[TileView | None]
+    """Optional per-slot tile view information."""
+
+    memory_space: Final[MemorySpace | None]
+    """Per-slot on-chip memory space."""
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[Expr],
+        dtype: DataType,
+        count: int,
+        memref: MemRef | None = None,
+        tile_view: TileView | None = None,
+        memory_space: MemorySpace | None = None,
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        count: int,
+        memref: MemRef | None = None,
+        tile_view: TileView | None = None,
+        memory_space: MemorySpace | None = None,
+    ) -> None: ...
+
 class ArrayType(ShapedType):
     """On-core array type (lives on scalar register file / C stack).
 

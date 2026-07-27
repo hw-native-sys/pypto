@@ -1236,6 +1236,47 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
+  } else if (auto lhs_set = As<TileBufferSetType>(lhs)) {
+    auto rhs_set = As<TileBufferSetType>(rhs);
+    if (!rhs_set) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Type cast failed for TileBufferSetType", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_set->dtype_ != rhs_set->dtype_ || lhs_set->count_ != rhs_set->count_ ||
+        lhs_set->shape_.size() != rhs_set->shape_.size() ||
+        lhs_set->memory_space_ != rhs_set->memory_space_ ||
+        lhs_set->tile_view_.has_value() != rhs_set->tile_view_.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileBufferSetType field mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    for (size_t i = 0; i < lhs_set->shape_.size(); ++i) {
+      if (!Equal(lhs_set->shape_[i], rhs_set->shape_[i])) return false;
+    }
+    if (lhs_set->tile_view_.has_value()) {
+      const auto& lhs_view = *lhs_set->tile_view_;
+      const auto& rhs_view = *rhs_set->tile_view_;
+      if (lhs_view.valid_shape.size() != rhs_view.valid_shape.size() ||
+          lhs_view.stride.size() != rhs_view.stride.size() || lhs_view.blayout != rhs_view.blayout ||
+          lhs_view.slayout != rhs_view.slayout || lhs_view.fractal != rhs_view.fractal ||
+          lhs_view.pad != rhs_view.pad) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileBufferSetType tile_view mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
+      for (size_t i = 0; i < lhs_view.valid_shape.size(); ++i) {
+        if (!Equal(lhs_view.valid_shape[i], rhs_view.valid_shape[i])) return false;
+      }
+      for (size_t i = 0; i < lhs_view.stride.size(); ++i) {
+        if (!Equal(lhs_view.stride[i], rhs_view.stride[i])) return false;
+      }
+      if (!Equal(lhs_view.start_offset, rhs_view.start_offset)) return false;
+    }
+    return true;
   } else if (auto lhs_tuple = As<TupleType>(lhs)) {
     auto rhs_tuple = As<TupleType>(rhs);
     if (!rhs_tuple) {

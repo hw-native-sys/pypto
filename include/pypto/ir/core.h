@@ -113,6 +113,7 @@ enum class ObjectKind {
   TensorType,
   DistributedTensorType,
   TileType,
+  TileBufferSetType,
   ArrayType,
   TupleType,
   WindowBufferType,

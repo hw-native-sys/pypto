@@ -598,6 +598,43 @@ class TileType : public ShapedType {
 using TileTypePtr = std::shared_ptr<const TileType>;
 
 /**
+ * @brief Homogeneous allocation group containing multiple physical tile slots.
+ *
+ * Unlike TileType, this is storage metadata rather than a tile value. A
+ * tile.buffer_slot operation selects one slot and produces a TileType.
+ */
+class TileBufferSetType : public ShapedType {
+ public:
+  int count_;                                ///< Number of physical slots
+  std::optional<TileView> tile_view_;        ///< Per-slot tile view
+  std::optional<MemorySpace> memory_space_;  ///< Per-slot on-chip memory space
+
+  TileBufferSetType(const std::vector<int64_t>& shape, DataType dtype, int count,
+                    std::optional<MemRefPtr> memref = std::nullopt,
+                    std::optional<TileView> tile_view = std::nullopt,
+                    std::optional<MemorySpace> memory_space = std::nullopt);
+
+  TileBufferSetType(std::vector<ExprPtr> shape, DataType dtype, int count,
+                    std::optional<MemRefPtr> memref = std::nullopt,
+                    std::optional<TileView> tile_view = std::nullopt,
+                    std::optional<MemorySpace> memory_space = std::nullopt);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TileBufferSetType; }
+  [[nodiscard]] std::string TypeName() const override { return "TileBufferSetType"; }
+  [[nodiscard]] std::optional<MemorySpace> GetMemorySpace() const override { return memory_space_; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(
+        ShapedType::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&TileBufferSetType::count_, "count"),
+                        reflection::UsualField(&TileBufferSetType::tile_view_, "tile_view"),
+                        reflection::UsualField(&TileBufferSetType::memory_space_, "memory_space")));
+  }
+};
+
+using TileBufferSetTypePtr = std::shared_ptr<const TileBufferSetType>;
+
+/**
  * @brief Array type representation
  *
  * Represents a small fixed-size homogeneous 1-D array that lives on the

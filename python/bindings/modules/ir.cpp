@@ -502,6 +502,21 @@ void BindIR(nb::module_& m) {
       "(shape, memory_space). Callers needing semantic fields should use this method.");
   BindFields<TileType>(tile_type_class);
 
+  // TileBufferSetType - homogeneous physical tile-slot allocation group
+  auto tile_buffer_set_type_class = nb::class_<TileBufferSetType, ShapedType>(
+      ir, "TileBufferSetType", "Homogeneous allocation group containing multiple physical tile slots");
+  tile_buffer_set_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, int, std::optional<MemRefPtr>, std::optional<TileView>,
+               std::optional<MemorySpace>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("count"), nb::arg("memref") = nb::none(),
+      nb::arg("tile_view") = nb::none(), nb::arg("memory_space") = nb::none());
+  tile_buffer_set_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, int, std::optional<MemRefPtr>, std::optional<TileView>,
+               std::optional<MemorySpace>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("count"), nb::arg("memref") = nb::none(),
+      nb::arg("tile_view") = nb::none(), nb::arg("memory_space") = nb::none());
+  BindFields<TileBufferSetType>(tile_buffer_set_type_class);
+
   // ArrayType - on-core fixed-size 1-D homogeneous array (C-stack local)
   auto array_type_class = nb::class_<ArrayType, ShapedType>(
       ir, "ArrayType",
