@@ -177,11 +177,21 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   // A reshape is a zero-copy view, so it cannot invent data: the result's valid
   // region is the source's, mapped through the reshape. A region the target
   // shape cannot represent is rejected rather than rounded up to fully valid.
-  const TensorLayout source_layout =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  // Row-major flat order needs BOTH an ND layout and packed row-major strides:
+  // tensor.transpose of a non-trailing axis pair keeps the ND layout while
+  // permuting the strides, so ND alone does not imply the element order the
+  // flat-prefix mapping walks.
+  bool row_major_contiguous = true;
+  if (tensor_type->tensor_view_.has_value()) {
+    const TensorView& source_view = *tensor_type->tensor_view_;
+    row_major_contiguous =
+        source_view.layout == TensorLayout::ND &&
+        (source_view.stride.empty() || tile_view_semantics::ShapeExprListsEquivalent(
+                                           source_view.stride, BuildRowMajorStrides(tensor_type->shape_)));
+  }
   std::vector<ExprPtr> mapped_valid =
       ComputeReshapeValidShape(GetValidShape(tensor_type), tensor_type->shape_, new_shape,
-                               source_layout == TensorLayout::ND, args[0]->span_, "tensor.reshape");
+                               row_major_contiguous, args[0]->span_, "tensor.reshape");
 
   // The optional 3rd argument may narrow the mapped region but may never claim
   // data outside it. Unknown symbolic relations reject, because reshape emits
@@ -193,7 +203,14 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
     CHECK_SPAN(requested.size() == new_shape.size(), args[2]->span_)
         << "tensor.reshape: valid_shape rank (" << requested.size() << ") must match the target shape rank ("
         << new_shape.size() << ")";
+    const ExprPtr zero = std::make_shared<ConstInt>(0, DataType::INDEX, args[2]->span_);
     for (size_t i = 0; i < requested.size(); ++i) {
+      // An upper bound alone admits a negative extent: -1 <= 5 proves true, and
+      // a negative valid_shape is not a region at all. Zero stays legal -- it is
+      // how an empty region is spelled.
+      CHECK_SPAN(ProveValidExtentLessEqual(zero, requested[i]) == ProofResult::kTrue, args[2]->span_)
+          << "tensor.reshape: explicit valid_shape[" << i << "]=" << PythonPrint(requested[i])
+          << " must be provably >= 0; a valid extent counts real elements";
       const ProofResult within_source = ProveValidExtentLessEqual(requested[i], mapped_valid[i]);
       CHECK_SPAN(within_source == ProofResult::kTrue, args[2]->span_)
           << "tensor.reshape: explicit valid_shape[" << i << "]=" << PythonPrint(requested[i])

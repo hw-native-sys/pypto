@@ -2877,6 +2877,34 @@ def test_tensor_reshape_explicit_valid_shape_may_not_widen_the_mapped_region():
         ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8], valid_shape=[12, 8])
 
 
+def test_tensor_reshape_explicit_valid_shape_rejects_a_negative_extent():
+    """An upper bound alone would admit a negative extent: -1 <= 5 proves true."""
+    with pytest.raises(ValueError, match="must be provably >= 0"):
+        ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8], valid_shape=[-1, 8])
+
+
+def test_tensor_reshape_explicit_valid_shape_allows_a_zero_extent():
+    """Zero is how an empty region is spelled, so it must survive the bound check."""
+    call = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8], valid_shape=[0, 8])
+
+    assert _valid_of(call.type) == [0, 8]
+
+
+def test_tensor_reshape_rejects_a_partial_source_with_reordered_strides():
+    """An ND layout does not by itself mean the elements are stored row-major.
+
+    ``tensor.transpose`` of a non-trailing axis pair keeps the ND layout while
+    permuting the strides ([2, 4, 8] -> [4, 2, 8] with stride [8, 32, 1]), so the
+    flat-prefix mapping would walk the wrong offsets and could widen the region.
+    """
+    span = ir.Span.unknown()
+    view = ir.TensorView([8, 32, 1], ir.TensorLayout.ND, valid_shape=[2, 2, 8])
+    strided = ir.Var("t", ir.TensorType([4, 2, 8], DataType.FP32, None, view), span)
+
+    with pytest.raises(ValueError, match="not stored row-major"):
+        ir.op.tensor.reshape(strided, [8, 8])
+
+
 def test_tensor_transpose_with_valid_shape():
     """Test tensor.transpose with valid_shape parameter."""
     span = ir.Span.unknown()

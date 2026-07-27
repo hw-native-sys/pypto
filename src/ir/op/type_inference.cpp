@@ -713,12 +713,19 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
 
 namespace {
 
-// Whether axis `valid` covers all of `shape` -- the predicate the whole
-// no-widening rule turns on. Named so the three sites that only need the
-// yes/no answer read the same, leaving the tri-state to the one site that
-// reports *why* an axis is not full.
-bool IsProvablyFullExtent(const ExprPtr& valid, const ExprPtr& shape) {
-  return ProveValidExtentEqual(valid, shape) == ProofResult::kTrue;
+// Whether two extents are provably the same. Constants decide by value first:
+// ProveValidExtentEqual only compares extents of matching signedness, so a
+// UINT64 valid extent (what tile.set_validshape emits) against an INDEX
+// physical extent comes back kUnknown even when both are the same literal.
+// Reading a full axis as partial that way rejects reshapes that map exactly --
+// the same signedness caveat IsProvablyEmptyExtent documents above.
+bool ExtentsProvablyEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
+  const auto lhs_const = GetConstantDimension(lhs);
+  const auto rhs_const = GetConstantDimension(rhs);
+  if (lhs_const.has_value() && rhs_const.has_value()) {
+    return *lhs_const == *rhs_const;
+  }
+  return ProveValidExtentEqual(lhs, rhs) == ProofResult::kTrue;
 }
 
 // Align the input and target axes of a reshape that only inserts or erases
@@ -765,7 +772,7 @@ std::optional<std::vector<ExprPtr>> MapUnitAxisRankChange(const std::vector<Expr
   }
   // Erase an input unit axis -- lossless only when its sole coordinate is valid.
   if (input_dim < in_shape.size() && IsConstValue(in_shape[input_dim], 1) &&
-      IsProvablyFullExtent(src_valid[input_dim], in_shape[input_dim])) {
+      ExtentsProvablyEqual(src_valid[input_dim], in_shape[input_dim])) {
     if (auto tail =
             MapUnitAxisRankChange(src_valid, in_shape, new_shape, input_dim + 1, output_dim, failed)) {
       return tail;
@@ -803,7 +810,7 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
   // valid_shape away, so no view survives.
   bool fully_valid = true;
   for (size_t i = 0; i < src_valid.size(); ++i) {
-    if (!IsProvablyFullExtent(src_valid[i], in_shape[i])) {
+    if (!ExtentsProvablyEqual(src_valid[i], in_shape[i])) {
       fully_valid = false;
       break;
     }
@@ -851,13 +858,14 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
   }
 
   for (size_t i = free_dim + 1; i < input_rank; ++i) {
+    const bool full_axis = ExtentsProvablyEqual(src_valid[i], in_shape[i]);
     const ProofResult full = ProveValidExtentEqual(src_valid[i], in_shape[i]);
-    CHECK_SPAN(full == ProofResult::kTrue, span)
+    CHECK_SPAN(full_axis, span)
         << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
         << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
         << "). Dimension " << i << " is valid for " << PythonPrint(src_valid[i]) << " of "
         << PythonPrint(in_shape[i])
-        << (full == ProofResult::kUnknown ? " (a symbolic extent that cannot be proven equal)" : "")
+        << (full == ProofResult::kUnknown ? " (a runtime extent that cannot be proven equal)" : "")
         << ", so the real data is scattered across the buffer rather than filling it from the start, and "
            "no region of the new shape describes the same cells. Reshape the full extent and narrow "
            "afterwards, or copy the real data out first (pl.slice / pl.store).";

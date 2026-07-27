@@ -2091,6 +2091,24 @@ class TestTileSliceReshapeOps:
         with pytest.raises(ValueError, match="not stored row-major"):
             tile.reshape(self._col_major_tile([2, 3], [1, 3]), [1, 6])
 
+    def test_tile_reshape_maps_a_valid_region_of_a_different_int_dtype(self):
+        """A full axis must read as full even when its dtype differs from the shape's.
+
+        ``tile.set_validshape`` emits UINT64 extents while the physical shape is
+        INDEX, and the analyzer only compares extents of matching signedness — so
+        16 == 16 came back unknown, the axis read as partial, and this mappable
+        reshape was rejected outright.
+        """
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 16], DataType.FP32), span)
+        narrowed = tile.set_validshape(
+            src, ir.ConstInt(5, DataType.UINT64, span), ir.ConstInt(16, DataType.UINT64, span)
+        )
+
+        result_type = tile.reshape(narrowed, [16, 8]).type
+
+        assert _valid_of(result_type) == [10, 8]
+
     def test_tile_reshape_allows_fully_valid_col_major_source(self):
         """Only the flat-prefix case reads storage order; a full region never does."""
         result_type = tile.reshape(self._col_major_tile([2, 3], [2, 3]), [1, 6]).type
