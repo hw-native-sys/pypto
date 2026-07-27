@@ -106,13 +106,18 @@ TypePtr DeduceBuiltinTensorAllReduceType(const std::vector<ExprPtr>& args,
   CHECK(signal_type->dtype_ == DataType::INT32)
       << kOpName << " signal dtype must be INT32, got " << signal_type->dtype_.ToString();
   CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
-      << kOpName << " signal must be rank-1 [world_size] or rank-2 [world_size, 1], got rank "
+      << kOpName << " signal must be rank-1 [world_size] or rank-2 [world_size, signal_stride], got rank "
       << signal_type->shape_.size();
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", kOpName);
+  CHECK(core_num > 0) << kOpName << " core_num must be positive, got " << core_num;
+  CHECK(signal_type->shape_.size() == 2 || core_num == 1)
+      << kOpName << " rank-1 signal is valid only when core_num=1, got core_num=" << core_num;
   if (signal_type->shape_.size() == 2) {
     auto second_extent = As<ConstInt>(signal_type->shape_[1]);
-    CHECK(second_extent) << kOpName << " rank-2 signal shape[1] must be the constant 1";
-    CHECK(second_extent->value_ == 1)
-        << kOpName << " rank-2 signal shape[1] must be 1, got " << second_extent->value_;
+    CHECK(second_extent) << kOpName << " rank-2 signal shape[1] must be a compile-time constant";
+    CHECK(second_extent->value_ >= core_num)
+        << kOpName << " rank-2 signal shape[1] (" << second_extent->value_ << ") must be at least core_num ("
+        << core_num << ")";
   }
 
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", kOpName);
@@ -199,6 +204,7 @@ REGISTER_OP("builtin.tensor.allreduce")
     .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
     .set_attr<int>("op")
     .set_attr<DataType>("dtype")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     .set_internal_only(true)
     .set_template_dir(":pypto.runtime.builtins.collectives.allreduce")

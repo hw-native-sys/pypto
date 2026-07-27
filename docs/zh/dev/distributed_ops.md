@@ -331,8 +331,8 @@ variant 混入。不支持在 `host_orch` 的 `for`/`while` 循环内调用（�
 ### `pld.tensor.allreduce`
 
 ```text
-pld.tensor.allreduce(src, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh") -> DistributedTensorType(src)
-pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh") -> DistributedTensorType(src)
+pld.tensor.allreduce(src, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh", core_num: int = 1) -> DistributedTensorType(src)
+pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh", core_num: int = 1) -> DistributedTensorType(src)
 ```
 
 完全有效的 packed mesh 目标会被视为一个逻辑 `[1, N]` 线性流，并按最大
@@ -377,7 +377,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
 [`SynthesizeAllReduceSignals`](passes/40-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
-语义 shape 为 `[world_size, 1]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
+语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
 [屏障-信号协议](#屏障-信号协议)）使每次调用都是无状态循环，
@@ -390,9 +390,53 @@ host builtin 路径均支持 FP16、FP32，以及任意正元素数量下的
 分块，host builtin 使用 256 元素分块。InCore mesh 和 ring 只把 FP16 remote
 尾块的物理范围向上对齐到 32 字节；host builtin 会把 FP16 和 FP32 的 ragged load
 范围都对齐到 32 字节。两者都保留逻辑 valid shape。host builtin 接受 rank-1
-`[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。Ring 模式
+`[world_size]` 或 rank-2 `[world_size, signal_stride]` signal。Ring 模式
 （`mode="ring"`）在 host orchestrator 中降级为 `builtin.tensor.allreduce_ring`，
 要求显式 rank-2 `[2 * (NR - 1) + 1, NR]` INT32 signal（额外增加一行用于返回屏障）。
+
+#### HOST 多核 AllReduce（`core_num`）
+
+`core_num` 表示**每个 rank** 上一次 HOST `pld.tensor.allreduce` 分发使用多少个
+AIV block。它不改变任务层级：`device=r` 仍然选择卡，调用仍然为每个 rank 降级为
+一个 builtin orchestration task，只是该 task 现在启动一个包含 `core_num` 个
+block 的同步 SPMD grid。
+
+```python
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+```
+
+| 约束 | 规则 |
+| ---- | ---- |
+| 取值 | 编译期正整数，默认 `1`（与既有行为一致） |
+| 调度 | 仅 mesh —— `mode="ring"` 要求 `core_num == 1` |
+| 容量 | 不超过 backend 的 AIV 核数（经 `rt_submit_aiv_task` 提交，一个 block 对应一个 AIV 核） |
+| InCore | 必须保持 `1`，多核应使用外层 `pl.spmd(...)` |
+
+**Signal 布局。** signal 是 peer-major、lane 连续的
+`[world_size, signal_stride]` 矩阵，且 `signal_stride >= core_num`。block `b` 在
+`signal_base + peer * signal_stride + b` 上等待，并在
+`signal_base + my_rank * signal_stride + b` 上通知 peer `p`，因此每个
+`(peer, block)` 组合拥有一个独立计数器。rank-1 `[world_size]` signal（stride 为
+1）仅在 `core_num == 1` 时有效。自动合成的 signal 恰好是
+`[world_size, core_num]`；显式 signal 可以更宽。
+
+**Kernel 切分。** block 以 block-cyclic 方式拥有 256 元素 tile：block `b` 处理
+tile `b, b + C, b + 2C, ...`（`C` 为启动的 block 数），因此任意两个 block 不会
+触碰同一个 chunk。每个 block 执行一次 ready barrier，然后每个 chunk 执行一次
+read-done barrier。该 per-chunk barrier 必须保持在 store **之前**：否则某个 rank
+可能在另一个 rank 上对应的 block 完成 remote load 之前就覆盖了自己的源 chunk。
+没有数据的 block 仍会执行 ready barrier，从而保持跨 rank 对称，也允许
+`core_num` 超过 chunk 数量。索引达到或超过 `signal_stride` 的 block 没有可用
+lane，会直接退出而不参与 barrier；由于各 rank 的 `signal_stride` 一致，所有 rank
+退出的是同一批 block，协议依然对称。
+
+**为什么用一个 SPMD grid 而不是 `pl.parallel`。** `pl.parallel(N)` 会产生 `N`
+个独立 task，每个都有自己的 TaskId 和调度生命周期，对这种原地集合通信并不安全：
+不同 rank 可能以不同顺序调度 chunk task，因此等待另一 rank 对应 chunk 的 task
+可能死锁；而且共享 InOut window 上保守的依赖分析往往会把它们串行化。单个 SPMD
+grid 避免了这两个问题 —— `require_sync_start` 让所有 block 一起准入，
+`block_idx` 在每个 rank 上给出确定且互相匹配的划分。它是单卡准入保证而非跨 rank
+的全局同时启动；跨 rank 的启动偏差由 ready barrier 吸收。
 
 ### `pld.system.notify`（TNOTIFY）
 

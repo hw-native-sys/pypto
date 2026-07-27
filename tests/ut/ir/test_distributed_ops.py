@@ -230,6 +230,7 @@ def test_tensor_allreduce_returns_src_type():
     call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
     assert call.type is src.type
     assert call.kwargs["op"] == int(ir.ReduceOp.Sum)
+    assert call.kwargs["core_num"] == 1
 
 
 @pytest.mark.parametrize(
@@ -274,6 +275,31 @@ def test_tensor_allreduce_accepts_missing_signal_for_later_host_synthesis():
     assert call.type is src.type
     assert len(call.args) == 1
     assert call.kwargs["op"] == int(ir.ReduceOp.Sum)
+
+
+def test_tensor_allreduce_accepts_static_core_num():
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4, 8], DataType.INT32, span)
+    call = dist_tensor_ops.allreduce(src, signal, core_num=4, span=span)
+    assert call.kwargs["core_num"] == 4
+
+
+@pytest.mark.parametrize(
+    ("core_num", "error_type", "match"),
+    [
+        (True, TypeError, "compile-time int"),
+        (0, ValueError, "must be positive"),
+        (-1, ValueError, "must be positive"),
+        (1.5, TypeError, "compile-time int"),
+    ],
+)
+def test_tensor_allreduce_rejects_invalid_core_num(core_num, error_type, match):
+    span = ir.Span.unknown()
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    with pytest.raises(error_type, match=match):
+        dist_tensor_ops.allreduce(src, signal, core_num=core_num, span=span)
 
 
 def test_tensor_allreduce_rejects_explicit_none_signal():

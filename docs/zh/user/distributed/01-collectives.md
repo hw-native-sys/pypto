@@ -20,12 +20,15 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)  # mesh 模式，就地
 # InCore kernel——显式 signal。
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="mesh")
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+
+# Host 编排器——把一次调用分摊到每个 rank 的 4 个 AIV 核上。
+data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 ```
 
 ### Mesh 模式
 
 - 每步 O(N) 远程流量——每个 rank 读取所有对端
-- 每次调用一个全局屏障（AtomicAdd/Ge 在 `[NR, 1]` signal 上）
+- 每次调用一个全局屏障（AtomicAdd/Ge 在 `[NR, core_num]` signal 上）
 - 支持 `pl.dynamic("NR")`
 - 最适合小消息和低延迟
 
@@ -46,14 +49,33 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 | ---- | ---- | ---- |
 | 每步远程流量 | O(N) | O(N/P) |
 | 屏障轮次 | 1 | 2(P-1) |
-| Signal 形状 | `[NR, 1]` | `[2 × (NR − 1), NR]` |
+| Signal 形状 | `[NR, core_num]` | `[2 × (NR − 1), NR]` |
 | 最适合 | 小消息，低延迟 | 大消息，高带宽 |
 
 **经验法则：** 默认使用 `mode="mesh"`。当负载超过约 16 KiB 且 mesh 带宽达到平台期时
 切换到 `mode="ring"`。
 
-Host 编排器形式（省略 `signal`）是语法糖——编译器合成 `[world_size(), 1]` 的
+Host 编排器形式（省略 `signal`）是语法糖——编译器合成 `[world_size(), core_num]` 的
 signal（仅限 mesh）。
+
+### 多核（`core_num`）
+
+在 host 编排器上，`core_num` 把一次 AllReduce 调用分摊到**每个 rank** 的多个
+AIV 核上。它不改变任务层级：`device=r` 仍然选择卡；该 rank 的 builtin task 现在
+启动一个包含 `core_num` 个 block 的同步 grid，以 block-cyclic 方式把负载切成
+256 元素的 tile。
+
+```python
+data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
+```
+
+- 默认为 `1`（单 block，即原有行为）。
+- 仅 mesh：`mode="ring"` 要求 `core_num == 1`。
+- 不得超过目标平台的 AIV 核数（910B 为 48，950 为 36）——该 launch 要求所有
+  block 同时准入，因此超额请求会在编译期被拒绝。
+- 显式 `signal` 需要每个 block 一条 lane：`[world_size(), stride]` 且
+  `stride >= core_num`。rank-1 的 `[world_size()]` signal 只适用于 `core_num=1`。
+- InCore kernel 保持 `core_num=1`，改用外层 `pl.spmd(...)`。
 
 ### 变更
 

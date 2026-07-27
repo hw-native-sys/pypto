@@ -201,7 +201,14 @@ def get(
 
 
 @overload
-def allreduce(target: Expr, *, op: ReduceOp = ReduceOp.Sum, span: Span | None = None) -> Call: ...
+def allreduce(
+    target: Expr,
+    *,
+    op: ReduceOp = ReduceOp.Sum,
+    mode: str = "mesh",
+    core_num: int = 1,
+    span: Span | None = None,
+) -> Call: ...
 
 
 @overload
@@ -211,6 +218,7 @@ def allreduce(
     op: ReduceOp = ReduceOp.Sum,
     *,
     mode: str = "mesh",
+    core_num: int = 1,
     span: Span | None = None,
 ) -> Call: ...
 
@@ -221,6 +229,7 @@ def allreduce(
     op: ReduceOp = ReduceOp.Sum,
     *,
     mode: str = "mesh",
+    core_num: int = 1,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allreduce(target[, signal])`` Call.
@@ -249,6 +258,14 @@ def allreduce(
     type-metadata-only symbol is rejected during PTO codegen. A fully dynamic
     physical target dimension is bound from that tensor parameter.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.allreduce core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
+
     actual_span = _get_span_or_capture(span, frame_offset=1)
     if signal is _ALLREDUCE_SIGNAL_MISSING:
         args = [target]
@@ -260,7 +277,12 @@ def allreduce(
         args = [target, signal]
     else:
         raise TypeError(f"pld.tensor.allreduce signal must be an Expr, got {type(signal).__name__}")
-    return _ir_core.create_op_call("pld.tensor.allreduce", args, {"op": int(op), "mode": mode}, actual_span)
+    return _ir_core.create_op_call(
+        "pld.tensor.allreduce",
+        args,
+        {"op": int(op), "mode": mode, "core_num": core_num},
+        actual_span,
+    )
 
 
 def barrier(

@@ -105,6 +105,9 @@ TypePtr DeduceTensorAllReduceType(const std::vector<ExprPtr>& args,
   CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
       << "pld.tensor.allreduce op must be ReduceOp.Sum, Max, Min, or Prod (got int " << op_value << ")";
 
+  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", "pld.tensor.allreduce");
+  CHECK(core_num > 0) << "pld.tensor.allreduce core_num must be positive, got " << core_num;
+
   // Result type: same DistributedTensorType as the input target (in-place
   // reduce — the same view holds the reduced value on every rank). Preserve
   // the window_buffer_ back-reference so downstream passes still see the
@@ -133,6 +136,7 @@ REGISTER_OP("pld.tensor.allreduce")
                   "Optional window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .set_attr<int>("op")
     .set_attr<std::string>("mode")
+    .set_attr<int>("core_num")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllReduceType);
 

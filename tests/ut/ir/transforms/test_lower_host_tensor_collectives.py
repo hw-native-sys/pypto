@@ -26,6 +26,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.pypto_core import backend as _backend
 from pypto.pypto_core import ir, passes
 
 
@@ -235,8 +236,8 @@ def test_host_allreduce_lowers_to_builtin_world_size_loop():
         "builtin.tensor.allreduce",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
-        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
     )
 
 
@@ -266,8 +267,8 @@ def test_implicit_host_allreduce_synthesizes_signal_then_lowers():
         "builtin.tensor.allreduce",
         arg_names=["data", "__allreduce_signal_0"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
-        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
     )
 
 
@@ -303,8 +304,8 @@ def test_return_implicit_host_allreduce_synthesizes_signal_then_lowers():
         "builtin.tensor.allreduce",
         arg_names=["data", "__allreduce_signal_0"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
-        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
     )
     assert len(returns) == 1
     _assert_alias_keeps_window_buffer(returns[0])
@@ -348,8 +349,8 @@ def test_return_explicit_host_allreduce_lowers_with_user_signal():
         "builtin.tensor.allreduce",
         arg_names=["data", "signal"],
         arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
-        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
-        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 1},
     )
     assert len(returns) == 1
     _assert_alias_keeps_window_buffer(returns[0])
@@ -518,7 +519,153 @@ def test_host_allreduce_rejects_rank2_signal_with_dynamic_second_extent():
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(ValueError, match=r"rank-2 signal shape\[1\] must be the constant 1"):
+    with pytest.raises(ValueError, match=r"rank-2 signal shape\[1\] must be constant"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_allreduce_multicore_propagates_core_num_and_accepts_wider_signal():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * 8 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 8], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    host = _get_func(result, "host_orch")
+
+    # A stride of 8 is wider than the 4 requested lanes: the spare lanes are
+    # accepted and `core_num` reaches the builtin unchanged.
+    _assert_builtin_dispatch(
+        host.body,
+        "builtin.tensor.allreduce",
+        arg_names=["data", "signal"],
+        arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 4},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32, "core_num": 4},
+    )
+
+
+def test_host_allreduce_multicore_rejects_rank1_signal():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"rank-1 signal is valid only when one signal lane is required"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_allreduce_multicore_rejects_narrow_rank2_signal():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * 2 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 2], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"must be at least the required lane count"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_allreduce_rejects_core_num_above_backend_capacity(ascend_backend):
+    """The builtin is submitted with ``rt_submit_aiv_task``, so one block maps to
+    one AIV core and the bound is the vector-core count, not the cube-core count.
+
+    The launch also sets ``require_sync_start``, so an unsatisfiable request would
+    hang the device rather than fail — it has to be rejected at compile time.
+    """
+    backend = _backend.get_backend_instance(ascend_backend)
+    aiv_cores = backend.get_core_count(ir.CoreType.VECTOR)
+    aic_cores = backend.get_core_count(ir.CoreType.CUBE)
+    # Guards the regression this test exists for: a cube-derived bound would
+    # wrongly reject every core_num in (aic_cores, aiv_cores].
+    assert aiv_cores > aic_cores
+
+    def _build(core_num: int):
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+                signal_buf = pld.alloc_window_buffer(pld.world_size() * core_num * pl.INT32.get_byte())
+                data = pld.window(data_buf, [256], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [pld.world_size(), core_num], dtype=pl.INT32)
+                for r in pl.range(pld.world_size()):
+                    self.chip_orch(data, device=r)
+                pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=core_num)
+                return 0
+
+        return passes.materialize_comm_domain_scopes()(P)
+
+    # Exactly at capacity is accepted.
+    passes.lower_host_tensor_collectives()(_build(aiv_cores))
+
+    with pytest.raises(ValueError, match="exceeds the backend AIV core count"):
+        passes.lower_host_tensor_collectives()(_build(aiv_cores + 1))
+
+
+def test_host_allreduce_ring_rejects_multicore():
+    """Multicore is a mesh-only capability: the ring builtin runs one block per rank."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * 8 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 8], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring", core_num=4)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r'mode="ring" does not support core_num > 1'):
         passes.lower_host_tensor_collectives()(program)
 
 

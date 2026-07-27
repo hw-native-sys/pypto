@@ -28,6 +28,7 @@ builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](41-materialize_co
 
 ```python
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
@@ -63,10 +64,10 @@ comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生�
 
 每个生成的 builtin call 携带来源 `pld.tensor.*` 调用中 collective 特定的
 参数和 kwarg 属性。窗口绑定的 INOUT tensor 原样传递；标量 kwarg 值
-（`op`、`root`、`dtype`）转发给 builtin。`all_to_all_v` 的 `MAX_RECV` 不是
-lowering 时的属性：HOST 内核在入口把它推导为 `target.shape[0] / nranks`
-（运行时通信域大小），因此不再需要按 `MAX_RECV` 进行代码生成的 variant
-混入，块布局也始终与实际运行的设备数一致。
+（`op`、`root`、`dtype`，以及 mesh AllReduce 的 `core_num`）转发给 builtin。
+`all_to_all_v` 的 `MAX_RECV` 不是 lowering 时的属性：HOST 内核在入口把它推导为
+`target.shape[0] / nranks`（运行时通信域大小），因此不再需要按 `MAX_RECV`
+进行代码生成的 variant 混入，块布局也始终与实际运行的设备数一致。
 
 若用户代码使用赋值形式，pass 会在生成的 builtin 调用之后追加
 `<result> = <original expr>`，保留 public API 的 rebind 语义。
@@ -78,7 +79,19 @@ lowering 时的属性：HOST 内核在入口把它推导为 `target.shape[0] / n
 `ReduceOp.Sum`、`Max`、`Min` 和 `Prod`，并支持任意正元素数量。它按 256 个
 元素分块，并把 FP16 和 FP32 的 ragged load 范围都对齐到 32 字节，不改变逻辑 tensor shape。
 signal 必须是 INT32 tensor，形状可以是 rank-1 `[world_size]` 或 rank-2
-`[world_size, 1]`；当参与设备数静态可知时，signal 的静态容量必须足够。Ring allreduce（`mode="ring"`）
+`[world_size, signal_stride]`；当参与设备数静态可知时，signal 的静态容量必须足够。
+由于 signal 由 `pld.window` 产生，它天然是 packed 的，builtin 按扁平 row-major
+数组索引它。
+
+mesh allreduce 为每个启动的 AIV block 分配一条 signal lane：rank-1 signal 仅在
+`core_num == 1` 时有效；rank-2 signal 要求第二维是常量且
+`signal_stride >= core_num`（允许更宽的 stride，因此显式 signal 可以带有多余
+lane）。`core_num` 还必须不超过所配置 backend 的 AIV 核数——该 builtin 以
+standalone AIV kernel 提交并设置了 `require_sync_start`，超额的 launch 永远无法
+被准入，表现为挂死而非报错。未配置 backend 时（纯 IR 测试）跳过该检查。
+多核仅支持 mesh：`mode="ring"` 要求 `core_num == 1`。
+
+Ring allreduce（`mode="ring"`）
 的 signal 为 rank-2，形状为 `[2 * (NR - 1) + 1, NR]`，其
 `shape[0]` 在 signal 两个维度均为编译期常量时必须恰好等于 `2 * (NR - 1) + 1`；仅
 `shape[0]` 静态可知时则至少为 `2 * (NR - 1) + 1`（两个维度均为动态时无静态检查）。

@@ -827,6 +827,25 @@ def test_allreduce_eval_stmt_with_signal_is_decomposed():
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
 
+def test_incore_allreduce_rejects_local_multicore_request():
+    SIZE = _ALLREDUCE_SIZE
+    nr = _ALLREDUCE_NRANKS
+
+    @pl.program
+    class MultiCoreAllreduce:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 4], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+            data = pld.tensor.allreduce(data, signal, core_num=4)
+            return data
+
+    with pytest.raises(ValueError, match="supported only in a HOST orchestrator"):
+        passes.lower_composite_ops()(MultiCoreAllreduce)
+
+
 def test_allreduce_in_for_loop_now_succeeds():
     """A dynamic trip count used to have no compile-time generation to wait for,
     so this was rejected. The self-clearing epilogue (each call restarts at

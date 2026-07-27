@@ -22,12 +22,15 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -116,21 +119,43 @@ static constexpr size_t kMaxSupportedRanks = 16;
   return nullptr;
 }
 
-void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t required_slots) {
+/// Validate a collective signal's shape against the participating device count.
+///
+/// ``required_lanes`` is the number of per-peer signal lanes the collective
+/// needs — one for every collective except the mesh AllReduce, which needs one
+/// lane per launched SPMD block. ``allow_wider_lanes`` lets an explicitly
+/// supplied signal carry spare lanes beyond the required count.
+///
+/// The builtins index the signal as a flat row-major array. That is always
+/// sound here because HOST collective signals originate from
+/// ``pld.tensor.window``, whose type deducer builds a plain
+/// ``DistributedTensorType(shape, dtype)`` with no ``tensor_view_`` — a
+/// window-bound signal is packed by construction, so there is no strided or
+/// partial-view case to reject.
+void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t required_slots,
+                               int64_t required_lanes = 1, bool allow_wider_lanes = false) {
   auto signal_type = As<DistributedTensorType>(signal_expr->GetType());
   INTERNAL_CHECK_SPAN(signal_type, call->span_)
       << "LowerHostTensorCollectives: collective signal must be DistributedTensorType";
   CHECK_SPAN(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2, call->span_)
       << "LowerHostTensorCollectives: collective signal must be rank-1 [world_size] "
-         "or rank-2 [world_size, 1]";
+         "or rank-2 [world_size, signal_stride]";
   if (signal_type->shape_.empty()) return;
+  CHECK_SPAN(signal_type->shape_.size() == 2 || required_lanes == 1, call->span_)
+      << "LowerHostTensorCollectives: rank-1 signal is valid only when one signal lane is required";
   if (signal_type->shape_.size() == 2) {
     auto second_extent = As<ConstInt>(signal_type->shape_[1]);
     CHECK_SPAN(second_extent, call->span_)
-        << "LowerHostTensorCollectives: collective rank-2 signal shape[1] must be the constant 1";
-    CHECK_SPAN(second_extent->value_ == 1, call->span_)
-        << "LowerHostTensorCollectives: collective rank-2 signal shape[1] must be 1, got "
-        << second_extent->value_;
+        << "LowerHostTensorCollectives: collective rank-2 signal shape[1] must be constant";
+    if (allow_wider_lanes) {
+      CHECK_SPAN(second_extent->value_ >= required_lanes, call->span_)
+          << "LowerHostTensorCollectives: collective rank-2 signal shape[1] (" << second_extent->value_
+          << ") must be at least the required lane count (" << required_lanes << ")";
+    } else {
+      CHECK_SPAN(second_extent->value_ == required_lanes, call->span_)
+          << "LowerHostTensorCollectives: collective rank-2 signal shape[1] (" << second_extent->value_
+          << ") must equal the required lane count (" << required_lanes << ")";
+    }
   }
   auto extent = As<ConstInt>(signal_type->shape_[0]);
   if (!extent) return;
@@ -206,8 +231,44 @@ void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, si
   }
 }
 
-void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
+/// Reject a `core_num` that the configured backend could never admit.
+///
+/// The mesh AllReduce builtin is submitted through `rt_submit_aiv_task`, so it
+/// is a standalone AIV kernel: one logical block maps to one AIV core, and the
+/// bound is the vector-core count rather than the cube-core count (the same
+/// mapping VerifyHardSyncAllOccupancy applies to standalone AIV kernels).
+///
+/// This bound is a correctness requirement, not an optimisation. The generated
+/// launch sets `require_sync_start`, which admits all blocks atomically, so a
+/// request above the physical core count can never be admitted — the device
+/// would hang rather than report an error. Reject it at compile time instead.
+///
+/// Pure-IR unit tests run without a configured backend; there is nothing to
+/// bound in that case.
+void CheckAllReduceCoreCapacity(const CallPtr& call, int64_t core_num) {
+  if (!backend::BackendConfig::IsConfigured()) return;
+  const auto* be = backend::GetBackend();
+  const auto max_blocks = static_cast<int64_t>(be->GetCoreCount(CoreType::VECTOR));
+  CHECK_SPAN(core_num <= max_blocks, call->span_)
+      << "pld.tensor.allreduce core_num (" << core_num << ") exceeds the backend AIV core count ("
+      << max_blocks << ")";
+}
+
+/// Validate a HOST AllReduce call.
+///
+/// ``world_size_known`` is false when the collective lowers to a loop over a
+/// dynamic ``pld.system.world_size``. The schedule/``core_num`` compatibility and
+/// signal-lane checks are world-size independent and always run; only the ring
+/// layout and rank-count checks are skipped when the device set is dynamic.
+void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size,
+                                  bool world_size_known) {
+  const auto core_num = static_cast<int64_t>(call->GetKwarg<int>("core_num"));
   if (ShouldLowerAllReduceAsRing(call)) {
+    // The ring builtin runs a single block per rank; multicore is mesh-only.
+    CHECK_SPAN(core_num == 1, call->span_)
+        << R"(HOST pld.tensor.allreduce mode="ring" does not support core_num > 1, got core_num=)" << core_num
+        << R"(; use mode="mesh" for a multi-core AllReduce)";
+    if (!world_size_known) return;
     CheckRingSignalCapacity(call, signal_expr, world_size);
     CHECK_SPAN(world_size <= kMaxSupportedRanks, call->span_)
         << "LowerHostTensorCollectives: ring allreduce requires " << static_cast<int>(kMaxSupportedRanks)
@@ -217,7 +278,10 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
     CheckRingChunkConstraints(call, call->args_[0], world_size);
     return;
   }
-  CheckStaticSignalCapacity(call, signal_expr, world_size);
+  CheckAllReduceCoreCapacity(call, core_num);
+  // A ``world_size`` of 0 makes the shape[0] bound vacuous, which is exactly the
+  // right behaviour when the participating device count is only known at runtime.
+  CheckStaticSignalCapacity(call, signal_expr, world_size, core_num, /*allow_wider_lanes=*/true);
 }
 
 [[nodiscard]] CallPtr MakeBuiltinCallWithAttrs(const std::string& builtin_name, const CallPtr& call,
@@ -238,6 +302,7 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
   INTERNAL_CHECK_SPAN(src_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.allreduce src must be DistributedTensorType";
   auto op_value = call->GetKwarg<int>("op");
+  const bool as_ring = ShouldLowerAllReduceAsRing(call);
   std::vector<std::pair<std::string, std::any>> kwargs = {
       {"op", op_value},
       {"dtype", src_type->dtype_},
@@ -246,11 +311,17 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
       {"op", op_value},
       {"dtype", src_type->dtype_},
   };
+  // Only the mesh builtin launches an SPMD grid, so only it declares `core_num`.
+  // The ring builtin runs a single block per rank.
+  if (!as_ring) {
+    const auto core_num = call->GetKwarg<int>("core_num");
+    kwargs.emplace_back("core_num", core_num);
+    attrs.emplace_back("core_num", core_num);
+  }
   INTERNAL_CHECK_SPAN(call->args_.size() >= 2, call->span_)
       << "LowerHostTensorCollectives: expected pld.tensor.allreduce to have an explicit signal by the time "
          "this pass runs";
-  const char* builtin_name =
-      ShouldLowerAllReduceAsRing(call) ? "builtin.tensor.allreduce_ring" : "builtin.tensor.allreduce";
+  const char* builtin_name = as_ring ? "builtin.tensor.allreduce_ring" : "builtin.tensor.allreduce";
   return MakeBuiltinCallWithAttrs(builtin_name, call, call->args_, kwargs, device, std::move(attrs),
                                   {ArgDirection::InOut, ArgDirection::InOut});
 }
@@ -519,7 +590,8 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
                                   const std::vector<std::string>& leading_comments) {
   if (!scope->devices_.empty()) {
     if (IsOp(call, "pld.tensor.allreduce")) {
-      CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
+      CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
+                                   /*world_size_known=*/true);
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     }
@@ -540,6 +612,13 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   auto zero = std::make_shared<ConstInt>(0, DataType::INT64, call->span_);
   auto one = std::make_shared<ConstInt>(1, DataType::INT64, call->span_);
   auto stop = OpRegistry::GetInstance().Create("pld.system.world_size", {}, call->span_);
+  // The device set is dynamic here, so world-size-dependent capacity cannot be
+  // checked; pass 0 so only the world-size-independent constraints apply.
+  if (IsOp(call, "pld.tensor.allreduce")) {
+    CheckAllReduceSignalCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
+  } else {
+    CheckStaticSignalCapacity(call, rule.signal_expr(call), 0);
+  }
   auto body = std::make_shared<EvalStmt>(rule.make_builtin(call, loop_var), call->span_);
   return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
                                    std::vector<VarPtr>{}, span, ForKind::Sequential,

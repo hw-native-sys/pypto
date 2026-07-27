@@ -379,8 +379,8 @@ per-`MAX_RECV` variant mangling. Not supported inside a `for`/`while` loop in
 ### `pld.tensor.allreduce`
 
 ```text
-pld.tensor.allreduce(src, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh") -> DistributedTensorType(src)
-pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh") -> DistributedTensorType(src)
+pld.tensor.allreduce(src, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh", core_num: int = 1) -> DistributedTensorType(src)
+pld.tensor.allreduce(src, signal, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh", core_num: int = 1) -> DistributedTensorType(src)
 ```
 
 Reduces every participating rank's window-bound `src` slice in place and returns
@@ -436,7 +436,8 @@ dynamic physical target dimension is bound from that tensor parameter.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
 the [`SynthesizeAllReduceSignals`](passes/40-synthesize_allreduce_signals.md)
-pass inserts a private INT32 signal window with semantic shape `[world_size, 1]`
+pass inserts a private INT32 signal window with semantic shape
+`[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
 pass binds `world_size = pld.world_size()` as a standalone statement and uses
 that variable in the synthesized buffer size and window shape. The
@@ -451,11 +452,59 @@ with `ReduceOp.Sum`, `Max`, `Min`, and `Prod` for arbitrary positive element
 counts. InCore lowering uses UB-bounded chunks; the host builtin uses
 256-element chunks. InCore mesh and ring round only the physical FP16 remote
 tail span to 32 bytes. The host builtin rounds ragged FP16 and FP32 load spans
-to 32 bytes. Both preserve the logical valid shape. The host builtin accepts either a
-rank-1 `[world_size]` signal or the synthesized rank-2 `[world_size, 1]`
-signal. Ring mode (`mode="ring"`) for the host orchestrator lowers to
-`builtin.tensor.allreduce_ring` and requires an explicit rank-2
-`[2 * (NR - 1) + 1, NR]` INT32 signal (one extra row for the return barrier).
+to 32 bytes. Both preserve the logical valid shape. The host builtin accepts
+either a rank-1 `[world_size]` signal or a rank-2
+`[world_size, signal_stride]` signal. Ring mode (`mode="ring"`) for the host
+orchestrator lowers to `builtin.tensor.allreduce_ring` and requires an explicit
+rank-2 `[2 * (NR - 1) + 1, NR]` INT32 signal (one extra row for the return
+barrier).
+
+#### Host multi-core AllReduce (`core_num`)
+
+`core_num` selects how many AIV blocks one HOST `pld.tensor.allreduce` dispatch
+uses **on each rank**. It does not change the task hierarchy: `device=r` still
+selects the card and the call still lowers to one builtin orchestration task per
+rank; that task now launches a synchronized SPMD grid of `core_num` blocks.
+
+```python
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+```
+
+| Constraint | Rule |
+| ---------- | ---- |
+| Range | Positive compile-time integer, default `1` (pre-existing behavior) |
+| Schedule | Mesh only — `mode="ring"` requires `core_num == 1` |
+| Capacity | At most the backend's AIV core count (submitted via `rt_submit_aiv_task`, so one block = one AIV core) |
+| InCore | Must stay `1`; use an enclosing `pl.spmd(...)` for multi-core work |
+
+**Signal layout.** The signal is a peer-major, lane-contiguous
+`[world_size, signal_stride]` matrix with `signal_stride >= core_num`. Block `b`
+waits on `signal_base + peer * signal_stride + b` and notifies peer `p` at
+`signal_base + my_rank * signal_stride + b`, so every `(peer, block)` pair owns
+an independent counter. A rank-1 `[world_size]` signal (stride 1) is valid only
+for `core_num == 1`. A synthesized signal is exactly `[world_size, core_num]`;
+an explicit signal may be wider.
+
+**Kernel partitioning.** Blocks own 256-element tiles block-cyclically — block
+`b` processes tiles `b, b + C, b + 2C, ...` for `C` launched blocks — so no two
+blocks touch the same chunk. Each block runs the ready barrier once, then a
+read-done barrier per chunk. That per-chunk barrier must stay **before** the
+store: without it a rank could overwrite its source chunk before the matching
+block on another rank has remote-loaded it. Blocks with no data still run the
+ready barrier, keeping ranks symmetric and letting `core_num` exceed the chunk
+count. Blocks at or beyond `signal_stride` have no lane to own, so they retire
+immediately without joining the barrier; `signal_stride` is equal on every rank,
+so all ranks retire the same blocks and the protocol stays symmetric.
+
+**Why one SPMD grid rather than `pl.parallel`.** `pl.parallel(N)` emits `N`
+independent tasks, each with its own TaskId and scheduling lifetime — unsafe for
+an in-place collective. Ranks may schedule chunk tasks in different orders, so a
+task waiting on another rank's matching chunk can deadlock, and conservative
+dependency tracking on the shared InOut window tends to serialize them anyway.
+One SPMD grid avoids both: `require_sync_start` admits all blocks together and
+`block_idx` gives deterministic, matching partitioning on every rank. That is a
+per-card admission guarantee, not a global simultaneous start across ranks — the
+ready barrier absorbs cross-rank launch skew.
 
 ### `pld.system.notify` (TNOTIFY)
 

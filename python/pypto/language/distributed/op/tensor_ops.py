@@ -503,7 +503,11 @@ def get(
 
 @overload
 def allreduce(
-    target: DistributedTensor, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh"
+    target: DistributedTensor,
+    *,
+    op: ReduceOp = ReduceOp.Sum,
+    mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor: ...
 
 
@@ -514,6 +518,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor: ...
 
 
@@ -523,6 +528,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor:
     """In-place cross-rank allreduce of a window-bound DistributedTensor.
 
@@ -630,7 +636,8 @@ def allreduce(
         signal: Optional window-bound INT32 :class:`pld.DistributedTensor`.
             In InCore code this remains required. In host-orchestrator code
             outside ``for`` / ``while`` loops, omitting it lets the compiler
-            synthesize a private signal of shape ``[pld.world_size(), 1]``.
+            synthesize a private signal of shape
+            ``[pld.world_size(), core_num]``.
         op: :class:`pld.ReduceOp` selecting element-wise ``Sum``, ``Max``,
             ``Min``, or ``Prod`` (keyword-only). Defaults to
             :attr:`pld.ReduceOp.Sum`.
@@ -640,13 +647,27 @@ def allreduce(
             requires an explicit ``signal`` — host signal synthesis is
             mesh-only, so omitting the signal with ``mode="ring"`` is
             rejected.
+        core_num: Number of AIV blocks used by a HOST AllReduce builtin
+            (keyword-only). Must be a positive compile-time Python integer and
+            may not exceed the configured backend's AIV core count. Defaults to
+            1. Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
+            ``core_num=1``. InCore calls must keep this value at 1 and use an
+            enclosing :func:`pl.spmd` for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
         identical shape / dtype / window-buffer binding, post-reduce content.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.allreduce core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
+
     if signal is _ALLREDUCE_SIGNAL_MISSING:
-        # Host signal synthesis only produces a mesh-shaped [world_size, 1]
+        # Host signal synthesis produces a mesh-shaped [world_size, core_num]
         # signal. Ring mode needs a [2*(NR-1), NR] signal, so it must be
         # passed explicitly — reject the synthesized-signal path for it.
         if mode != "mesh":
@@ -656,7 +677,7 @@ def allreduce(
                 'signal, e.g. pld.tensor.allreduce(target, signal, mode="ring").'
             )
         (target_expr,) = _unwrap_distributed_tensors("pld.tensor.allreduce", target=target)
-        call = _ir_tensor.allreduce(target_expr, op=op)
+        call = _ir_tensor.allreduce(target_expr, op=op, core_num=core_num)
         return DistributedTensor(expr=call)
     if signal is None:
         raise TypeError(
@@ -666,7 +687,7 @@ def allreduce(
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allreduce", target=target, signal=signal
     )
-    call = _ir_tensor.allreduce(target_expr, signal_expr, op, mode=mode)
+    call = _ir_tensor.allreduce(target_expr, signal_expr, op, mode=mode, core_num=core_num)
     return DistributedTensor(expr=call)
 
 
