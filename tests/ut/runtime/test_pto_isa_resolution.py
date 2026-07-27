@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Regression tests for managed PTO-ISA revision resolution."""
+"""Regression tests for device-runner diagnostics and PTO-ISA resolution."""
 
 import importlib
 import logging
@@ -161,6 +161,84 @@ def test_unavailable_runtime_pin_falls_back_to_latest(
     checkout.assert_not_called()
     update_latest.assert_called_once_with(clone_path)
     assert "falling back to the latest remote HEAD" in caplog.text
+
+
+def _write_raw_pto(work_dir):
+    pto_path = work_dir / "kernels" / "aiv" / "tile_add.pto"
+    pto_path.parent.mkdir(parents=True)
+    pto_path.write_text("module {}", encoding="utf-8")
+
+
+def _missing_config_message(device_runner, work_dir):
+    with pytest.raises(FileNotFoundError) as exc_info:
+        device_runner.compile_and_assemble(work_dir, "a2a3")
+    return str(exc_info.value)
+
+
+def test_missing_kernel_config_explains_unavailable_ptoas(device_runner, monkeypatch, tmp_path):
+    _write_raw_pto(tmp_path)
+    monkeypatch.delenv("PTOAS_ROOT", raising=False)
+    monkeypatch.setattr(device_runner.shutil, "which", lambda _name: None)
+
+    message = _missing_config_message(device_runner, tmp_path)
+    assert str(tmp_path / "kernel_config.py") in message
+    assert "compile-only artifact produced with skip_ptoas=True" in message
+    assert "PTOAS_ROOT is not set" in message
+    assert "'ptoas' was not found on PATH" in message
+    assert "export PTOAS_ROOT=/path/to/ptoas-bin" in message
+    assert "Restart the Python process and rerun" in message
+
+
+def test_missing_kernel_config_reports_invalid_ptoas_root(device_runner, monkeypatch, tmp_path):
+    _write_raw_pto(tmp_path)
+    ptoas_root = tmp_path / "invalid-ptoas"
+    monkeypatch.setenv("PTOAS_ROOT", str(ptoas_root))
+
+    message = _missing_config_message(device_runner, tmp_path)
+    assert f"PTOAS_ROOT is set to '{ptoas_root}'" in message
+    assert str(ptoas_root / "ptoas") in message
+    assert "does not exist or is not executable" in message
+    assert "Correct or remove the invalid PTOAS_ROOT setting" in message
+    assert "unset PTOAS_ROOT" in message
+    assert 'unset PTOAS_ROOT\n       eval "$(pypto-setup --export)"' in message
+
+
+def test_missing_kernel_config_requires_recompile_when_ptoas_is_now_available(
+    device_runner, monkeypatch, tmp_path
+):
+    _write_raw_pto(tmp_path)
+    ptoas_root = tmp_path / "ptoas-bin"
+    ptoas_root.mkdir()
+    ptoas_path = ptoas_root / "ptoas"
+    ptoas_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    ptoas_path.chmod(0o755)
+    monkeypatch.setenv("PTOAS_ROOT", str(ptoas_root))
+
+    message = _missing_config_message(device_runner, tmp_path)
+    assert f"ptoas is now available at '{ptoas_path}'" in message
+    assert "artifact was generated without it and must be recompiled" in message
+    assert "export PTOAS_ROOT" not in message
+
+
+def test_missing_kernel_config_requires_recompile_when_ptoas_is_now_on_path(
+    device_runner, monkeypatch, tmp_path
+):
+    _write_raw_pto(tmp_path)
+    monkeypatch.delenv("PTOAS_ROOT", raising=False)
+    ptoas_path = tmp_path / "bin" / "ptoas"
+    monkeypatch.setattr(device_runner.shutil, "which", lambda _name: str(ptoas_path))
+
+    message = _missing_config_message(device_runner, tmp_path)
+    assert f"ptoas is now available on PATH at '{ptoas_path}'" in message
+    assert "artifact was generated without it and must be recompiled" in message
+    assert "export PTOAS_ROOT" not in message
+
+
+def test_missing_kernel_config_reports_incomplete_artifact(device_runner, tmp_path):
+    message = _missing_config_message(device_runner, tmp_path)
+    assert str(tmp_path / "kernel_config.py") in message
+    assert "may be incomplete or use a different build layout" in message
+    assert "skip_ptoas=True" not in message
 
 
 if __name__ == "__main__":
