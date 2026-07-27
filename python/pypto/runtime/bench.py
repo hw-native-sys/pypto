@@ -846,6 +846,8 @@ def benchmark(
     platform: str | None = None,
     device_id: int | None = None,
     config: RunConfig | None = None,
+    persistent: bool = False,
+    reset_persistent_windows: bool | None = None,
 ) -> BenchmarkStats:
     """Register *compiled* once and dispatch *rounds* timed launches.
 
@@ -898,6 +900,13 @@ def benchmark(
             *or* *platform*/*device_id*, not both. L3: forwarded per dispatch for
             ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
             ``ring_dep_pool``); ``None`` reuses the prepared baseline.
+        persistent: L3 only. Reuse retained CommDomains across all warmup and
+            measured dispatches while fencing each launch with ``Worker.run``.
+        reset_persistent_windows: L3 persistent mode only. Restore retained
+            windows to zero before reuse. ``None`` (the default) enables reset
+            in persistent mode. Set to ``False`` only when the benchmarked
+            program manually clears or otherwise manages all reused
+            communication-buffer state.
 
     Returns:
         A :class:`BenchmarkStats` with the per-round ``device_wall_us`` /
@@ -963,6 +972,10 @@ def benchmark(
                 "time via distributed_config. Pass config=RunConfig(...) for "
                 "per-dispatch ring overrides instead."
             )
+    elif persistent or reset_persistent_windows is not None:
+        raise ValueError(
+            "benchmark(): persistent/reset_persistent_windows apply only to an L3 DistributedCompiledProgram"
+        )
     elif config is not None and (platform is not None or device_id is not None):
         raise ValueError("benchmark(): pass either config=... or platform=/device_id=, not both")
 
@@ -984,7 +997,11 @@ def benchmark(
                     with _capture_fd_stderr(log_path):
                         # Pass the dispatch config so prepare() prewarms the ring
                         # sizing the loop below actually dispatches with.
-                        with compiled.prepare(config) as rt:
+                        with compiled.prepare(
+                            config,
+                            persistent=persistent,
+                            reset_persistent_windows=reset_persistent_windows,
+                        ) as rt:
                             handle = rt.register(compiled)  # register once (cid=0)
                             _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=config)
                 except Exception:

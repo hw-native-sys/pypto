@@ -12,14 +12,14 @@
 Runs without a device or the ``simpler`` package by patching the module-level
 setup helpers in :mod:`pypto.runtime.distributed_runner`, so construction does
 no real compile/fork. The tests cover both ordinary prepared dispatch and the
-persistent contract: one outer ``Worker.run``, retained per-program domains,
-and a complete synchronous cleanup boundary for every caller-visible request.
+persistent contract: one ``Worker.run`` fence per request, retained per-program
+domains, and a complete synchronous cleanup boundary for every caller-visible
+request.
 """
 
 import sys
 import threading
 import weakref
-from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -65,6 +65,7 @@ def patched_setup():
     """
     worker = MagicMock(name="Worker(level=3)")
     worker.chip_contexts = []
+    worker._live_domains = {}
     # Device-memory ops route through the Orchestrator facade (worker._orch).
     worker._orch.malloc.return_value = 0xDEAD0000
 
@@ -1068,6 +1069,7 @@ class TestMultiProgram:
         with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
             DistributedCompiledProgram.prepare(primary, persistent=True)
         assert fake_worker.call_args.kwargs["persistent"] is True
+        assert fake_worker.call_args.kwargs["reset_persistent_windows"] is None
 
     def test_empty_sequence_raises(self, patched_setup):
         with pytest.raises(ValueError, match="at least one compiled program"):
@@ -1472,6 +1474,7 @@ class _PersistentDomainHandle:
             for worker in workers
         }
         self.release_count = 0
+        self.freed = False
 
     def __getitem__(self, worker_id: int):
         return self.contexts[worker_id]
@@ -1481,14 +1484,12 @@ class _PersistentDomainHandle:
 
 
 class _PersistentOrch:
-    def __init__(self) -> None:
+    def __init__(self, worker: Any) -> None:
+        self.worker = worker
         self.allocate_calls: list[dict[str, Any]] = []
         self.copy_calls: list[tuple[int, int, int, int]] = []
         self.handles: list[_PersistentDomainHandle] = []
-        self.scope_end_count = 0
-        self.drain_count = 0
-        self.scope_begin_count = 0
-        self.drain_hook: Callable[[], None] | None = None
+        self.worker._execute_pending_domain_releases.side_effect = self._mark_released_domains_freed
 
     def allocate_domain(self, **kwargs):
         self.allocate_calls.append(kwargs)
@@ -1499,21 +1500,16 @@ class _PersistentOrch:
             len(self.handles),
         )
         self.handles.append(handle)
+        self.worker._live_domains[handle.name] = handle
         return handle
 
     def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
         self.copy_calls.append((worker_id, dst, src, size))
 
-    def scope_end(self) -> None:
-        self.scope_end_count += 1
-
-    def _drain(self) -> None:
-        self.drain_count += 1
-        if self.drain_hook is not None:
-            self.drain_hook()
-
-    def scope_begin(self) -> None:
-        self.scope_begin_count += 1
+    def _mark_released_domains_freed(self) -> None:
+        for handle in self.handles:
+            if handle.release_count:
+                handle.freed = True
 
 
 def _persistent_entry(window_size: int, seen_handles: list[Any]):
@@ -1543,14 +1539,39 @@ def _persistent_entry(window_size: int, seen_handles: list[Any]):
 
 
 class TestPersistentDistributedWorker:
+    def test_window_reset_requires_persistent_mode(self):
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        with pytest.raises(ValueError, match="requires persistent=True"):
+            DistributedWorker(compiled, reset_persistent_windows=True)
+
     def test_rejects_artifact_without_domain_provider_hook(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         with pytest.raises(ValueError, match="requires regenerated host orchestration"):
             DistributedWorker(compiled, persistent=True)
 
-    def test_one_worker_run_reuses_and_zeros_domain(self, patched_setup):
+    @pytest.mark.parametrize(
+        ("attribute", "value"),
+        [
+            ("_live_domains", None),
+            ("_execute_pending_domain_releases", None),
+        ],
+    )
+    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup, attribute, value):
         m = patched_setup
-        orch = _PersistentOrch()
+        setattr(m["worker"], attribute, value)
+        m["load_entry"].return_value = (_persistent_entry(64, []), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        with pytest.raises(RuntimeError, match=attribute):
+            DistributedWorker(compiled, persistent=True)
+
+        m["worker"].init.assert_not_called()
+        m["worker"].close.assert_called_once_with()
+
+    def test_request_run_fences_reuse_and_zero_domain_by_default(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
         m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
         seen_handles: list[Any] = []
         window_size = (1 << 20) + 17
@@ -1564,7 +1585,7 @@ class TestPersistentDistributedWorker:
         rt(arg)
         rt.close()
 
-        assert m["worker"].run.call_count == 1
+        assert m["worker"].run.call_count == 2
         assert [call["name"] for call in orch.allocate_calls] == ["p0:comm_d0"]
         assert len(seen_handles) == 2
         assert seen_handles[0] is seen_handles[1]
@@ -1576,24 +1597,37 @@ class TestPersistentDistributedWorker:
             (1, 1 << 20),
             (1, 17),
         ]
-        assert orch.scope_end_count == 2
-        assert orch.drain_count == 2
-        assert orch.scope_begin_count == 2
-        # A retained domain survives both request boundaries and is released
-        # once, when the long-running outer Worker.run exits during close().
+        # A retained domain survives both request run-fences and is released
+        # once when the persistent dispatcher closes.
         assert orch.handles[0].release_count == 1
-        # Persistent dispatch reproduces Worker.run's per-request cleanup, but
-        # deliberately omits _release_all_live_domains so the domain is reusable.
-        assert m["worker"]._release_active_remote_slot_refs.call_count == 2
-        assert m["worker"]._flush_pending_remote_frees.call_count == 2
-        assert m["worker"]._cleanup_l3_l2_regions.call_count == 2
-        assert m["worker"]._l3_l2_orch_comm_host_buffers.clear.call_count == 2
-        assert m["worker"]._execute_pending_domain_releases.call_count == 2
+        assert m["worker"]._live_domains == {}
+        m["worker"]._execute_pending_domain_releases.assert_called_once_with()
+
+    def test_reused_domain_skips_window_reset_when_disabled(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        seen_handles: list[Any] = []
+        m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+
+        rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=False)
+        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        rt(arg)
+        rt(arg)
+        rt.close()
+
+        assert len(orch.allocate_calls) == 1
+        assert seen_handles[0] is seen_handles[1]
+        assert orch.copy_calls == []
+        assert m["worker"].run.call_count == 2
 
     def test_task_args_stay_alive_through_request_drain(self, patched_setup):
         m = patched_setup
-        orch = _PersistentOrch()
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
         task_args_ref = None
 
         class TaskArgsSentinel:
@@ -1621,9 +1655,13 @@ class TestPersistentDistributedWorker:
             assert task_args_ref is not None
             assert task_args_ref() is not None
 
-        # Generated TaskArgs may still be dereferenced by in-flight tasks, so
-        # the request-owned keepalive must remain populated throughout drain.
-        orch.drain_hook = assert_task_args_alive
+        def worker_run(fn):
+            fn(orch, None, None)
+            # The request-owned keepalive stays populated until Worker.run's
+            # completion fence and cleanup return.
+            assert_task_args_alive()
+
+        m["worker"].run.side_effect = worker_run
         m["load_entry"].return_value = (entry, None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
@@ -1638,7 +1676,8 @@ class TestPersistentDistributedWorker:
 
     def test_multi_program_domains_are_isolated_and_reused(self, patched_setup):
         m = patched_setup
-        orch = _PersistentOrch()
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
         m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
         seen_a: list[Any] = []
         seen_b: list[Any] = []
@@ -1652,13 +1691,17 @@ class TestPersistentDistributedWorker:
         compiled_b._distributed_config = DistributedConfig(device_ids=[0, 1])
         arg = DeviceTensor(0x1000, (16, 16), torch.float32)
 
-        rt = DistributedWorker([compiled_a, compiled_b], persistent=True)
+        rt = DistributedWorker(
+            [compiled_a, compiled_b],
+            persistent=True,
+            reset_persistent_windows=True,
+        )
         rt.run(compiled_a, arg)
         rt.run(compiled_b, arg)
         rt.run(compiled_a, arg)
         rt.close()
 
-        assert m["worker"].run.call_count == 1
+        assert m["worker"].run.call_count == 3
         assert [call["name"] for call in orch.allocate_calls] == ["p0:comm_d0", "p1:comm_d0"]
         assert seen_a[0] is seen_a[1]
         assert seen_a[0] is not seen_b[0]
@@ -1671,9 +1714,45 @@ class TestPersistentDistributedWorker:
         # released exactly once when the shared persistent worker closes.
         assert [handle.release_count for handle in orch.handles] == [1, 1]
 
+    def test_domain_release_error_reaches_close(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["load_entry"].return_value = (_persistent_entry(64, []), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True)
+        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        m["worker"]._execute_pending_domain_releases.side_effect = RuntimeError(
+            "persistent domain release failed"
+        )
+
+        with pytest.raises(RuntimeError, match="persistent domain release failed"):
+            rt.close()
+
+        assert orch.handles[0].release_count == 1
+        m["worker"].close.assert_called_once_with()
+
+    def test_unfreed_domain_release_reaches_close(self, patched_setup):
+        m = patched_setup
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["load_entry"].return_value = (_persistent_entry(64, []), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True)
+        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        m["worker"]._execute_pending_domain_releases.side_effect = None
+
+        with pytest.raises(RuntimeError, match="did not free.*p0:comm_d0"):
+            rt.close()
+
+        assert not orch.handles[0].freed
+        m["worker"].close.assert_called_once_with()
+
     def test_dispatch_error_reaches_caller_and_releases_domain(self, patched_setup):
         m = patched_setup
-        orch = _PersistentOrch()
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
         m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
 
         def failing_entry(
@@ -1707,23 +1786,59 @@ class TestPersistentDistributedWorker:
             rt(arg)
         rt.close()
 
-        # The terminal request unwinds the outer Worker.run, whose final cleanup
-        # releases the retained domain before the error reaches the caller.
+        # The failing request's Worker.run completes before the error reaches
+        # the caller, then dispatcher teardown releases the retained domain.
         assert orch.handles[0].release_count == 1
         assert m["worker"].run.call_count == 1
 
-    def test_dispatch_error_waits_for_outer_worker_cleanup(self, patched_setup):
+    def test_dispatch_error_keeps_teardown_error_as_context(self, patched_setup):
         m = patched_setup
-        orch = _PersistentOrch()
-        outer_finalizer_started = threading.Event()
-        allow_outer_finalizer_to_finish = threading.Event()
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+
+        def failing_entry(
+            orch,
+            _args,
+            config,
+            *,
+            tensors,
+            callables,
+            sub_ids,
+            _keep,
+            world_size,
+            _domain_provider=None,
+        ):
+            del orch, _args, config, tensors, callables, sub_ids, _keep, world_size, _domain_provider
+            raise RuntimeError("persistent dispatch failed")
+
+        m["load_entry"].return_value = (failing_entry, None)
+        m["worker"]._execute_pending_domain_releases.side_effect = RuntimeError("persistent teardown failed")
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True)
+
+        with pytest.raises(RuntimeError, match="persistent dispatch failed") as exc_info:
+            rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        assert isinstance(exc_info.value.__context__, RuntimeError)
+        assert str(exc_info.value.__context__) == "persistent teardown failed"
+        rt.close()
+
+    def test_dispatch_error_waits_for_request_worker_cleanup(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        request_finalizer_started = threading.Event()
+        allow_request_finalizer_to_finish = threading.Event()
 
         def worker_run(fn):
-            fn(orch, None, None)
-            # Model the interval in real Worker.run between the orchestration
-            # callable returning and its outer drain/cleanup finally completing.
-            outer_finalizer_started.set()
-            assert allow_outer_finalizer_to_finish.wait(timeout=2)
+            try:
+                fn(orch, None, None)
+            except BaseException:
+                # Model the interval between orchestration failing and this
+                # request's Worker.run fence/cleanup finally completing.
+                request_finalizer_started.set()
+                assert allow_request_finalizer_to_finish.wait(timeout=2)
+                raise
 
         m["worker"].run.side_effect = worker_run
 
@@ -1758,12 +1873,12 @@ class TestPersistentDistributedWorker:
 
         caller = threading.Thread(target=call_worker)
         caller.start()
-        assert outer_finalizer_started.wait(timeout=2)
+        assert request_finalizer_started.wait(timeout=2)
         # A failing entry may already have submitted device work. Its caller
         # must not observe completion while Worker.run is still finalizing it.
         assert not caller_done.is_set()
 
-        allow_outer_finalizer_to_finish.set()
+        allow_request_finalizer_to_finish.set()
         caller.join(timeout=2)
         assert not caller.is_alive()
         assert caller_done.is_set()

@@ -13,21 +13,24 @@ End-to-end exercise of the N6 cross-rank signalling primitives, isolated
 from the data path (``remote_load`` is used only to read a signal cell
 back for the golden — there is no data shuffle here):
 
-* Each rank ``r`` writes a distinct ``tag = r + 1`` into its **peer**'s
-  signal cell via ``pld.system.notify(..., op=pld.NotifyOp.Set)`` with
+* Each rank ``r`` adds a distinct ``tag = r + 1`` into its **peer**'s
+  signal cell via ``pld.system.notify(..., op=pld.NotifyOp.AtomicAdd)`` with
   ``peer = (r + 1) % nranks``.
 * Each rank then ``pld.system.wait(..., cmp=pld.WaitCmp.Ge, expected=1)``
   on its **own** signal cell — blocking until the rank that targets it
   (``r' = (r - 1) % nranks``) has run its notify. This is the barrier the
   test is really validating.
-* After the barrier, rank ``r`` reads its own cell with a local
-  ``pl.load(signal, ...)`` (``tile.load`` accepts a ``DistributedTensor``
-  source) and writes the received tag to ``outputs[r]``.
+* After the barrier, rank ``r`` reads its own cell with
+  ``pl.read(signal, ...)`` and writes the received tag to ``outputs[r]``.
 
 Golden: ``outputs[r] == ((r - 1) % nranks) + 1``. For 2 ranks rank 0 reads
 rank 1's tag (2) and rank 1 reads rank 0's tag (1), so ``outputs == [2, 1]``.
 A missing/incorrect wait would let the read race ahead of the peer's notify
 and observe the zero-initialised cell.
+
+The persistent test dispatches the same prepared program three times. Since the
+notifications accumulate, a retained window that is not reset would produce
+``[4, 2]`` on the second dispatch instead of ``[2, 1]``.
 
 Runs on 2 devices via ``DistributedConfig(device_ids=device_ids[:2], ...)``.
 Pytest skips only when fewer than 2 devices are available.
@@ -60,13 +63,13 @@ def _build_signal_handshake_program():
             peer: pl.Scalar[pl.INT32],
             tag: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, 1], pl.INT32]:
-            # Phase 1: write our tag into the peer's signal cell (Set).
+            # Phase 1: add our tag into the peer's signal cell.
             pld.system.notify(
                 target=signal,
                 peer=peer,
                 offsets=[0, 0],
                 value=tag,
-                op=pld.NotifyOp.Set,
+                op=pld.NotifyOp.AtomicAdd,
             )
 
             # Phase 2: barrier — block until our own cell has been written by
@@ -115,12 +118,13 @@ def _build_signal_handshake_program():
 class TestL3NotifyWait:
     """L3 distributed runtime: cross-rank notify/wait handshake."""
 
-    def test_signal_exchange(self, test_config, device_ids):
+    @staticmethod
+    def _compile(test_config, device_ids):
         if len(device_ids) < 2:
             pytest.skip(f"notify/wait handshake needs 2 devices, got {device_ids}")
 
         program = _build_signal_handshake_program()
-        compiled = ir.compile(
+        return ir.compile(
             program,
             platform=test_config.platform,
             distributed_config=DistributedConfig(
@@ -129,14 +133,34 @@ class TestL3NotifyWait:
             ),
         )
 
-        outputs = torch.zeros((2, 1, 1), dtype=torch.int32)
-        compiled(outputs)
-
-        # rank r reads the tag written by rank (r-1) % nranks (= r-1+1 = r),
+    @staticmethod
+    def _assert_signal_exchange(outputs):
+        # Rank r reads the tag written by rank (r-1) % nranks (= r-1+1 = r),
         # i.e. for nranks=2: rank 0 sees 2, rank 1 sees 1.
         expected = torch.tensor([[[2]], [[1]]], dtype=torch.int32)
         got = outputs.flatten().tolist()
         assert torch.equal(outputs, expected), f"notify/wait handshake mismatch: got {got}"
+
+    def test_signal_exchange(self, test_config, device_ids):
+        compiled = self._compile(test_config, device_ids)
+        outputs = torch.zeros((2, 1, 1), dtype=torch.int32)
+        compiled(outputs)
+        self._assert_signal_exchange(outputs)
+
+    def test_persistent_signal_exchange_resets_retained_window(self, test_config, device_ids):
+        """Repeated persistent dispatches reuse a CommDomain with fresh window contents."""
+        compiled = self._compile(test_config, device_ids)
+        outputs = torch.zeros((2, 1, 1), dtype=torch.int32).share_memory_()
+
+        with compiled.prepare(persistent=True) as worker:
+            allocation_count_before = worker._w._next_alloc_id
+            for _ in range(3):
+                outputs.zero_()
+                worker(outputs)
+                self._assert_signal_exchange(outputs)
+            assert worker._w._next_alloc_id == allocation_count_before + 1, (
+                "persistent dispatches must allocate the generated CommDomain exactly once"
+            )
 
 
 if __name__ == "__main__":

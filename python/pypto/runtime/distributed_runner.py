@@ -59,9 +59,30 @@ _PERSISTENT_ZERO_CHUNK_BYTES = 1 << 20
 _PERSISTENT_STOP = object()
 
 
+def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
+    """Resolve the retained-window reset policy.
+
+    Args:
+        persistent: Whether CommDomains are retained across dispatches.
+        reset_persistent_windows: Explicit reset override. ``None`` enables
+            reset only when persistent execution is enabled.
+
+    Returns:
+        Whether retained windows should be reset before reuse.
+
+    Raises:
+        ValueError: If reset is explicitly enabled without persistent execution.
+    """
+    if reset_persistent_windows is None:
+        return persistent
+    if reset_persistent_windows and not persistent:
+        raise ValueError("DistributedWorker reset_persistent_windows=True requires persistent=True")
+    return reset_persistent_windows
+
+
 @dataclass
 class _PersistentRequest:
-    """One caller-visible dispatch handled by the long-running L3 orch."""
+    """One caller-visible dispatch handled by the persistent L3 dispatcher."""
 
     state: dict[str, Any]
     tensors: dict[str, Any]
@@ -1009,12 +1030,14 @@ class DistributedWorker(Worker):
         config: RunConfig | None = None,
         *,
         persistent: bool = False,
+        reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
+        reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
         inherited = tuple(inherited_host_tensors) if inherited_host_tensors is not None else ()
         for tensor in inherited:
             if not isinstance(tensor, torch.Tensor):
@@ -1030,13 +1053,14 @@ class DistributedWorker(Worker):
         self._inherited_host_tensors = inherited
         self._inherited_host_storage_ptrs = {tensor.untyped_storage().data_ptr() for tensor in inherited}
         self._persistent = bool(persistent)
+        self._reset_persistent_windows = reset_persistent_windows
         # ``orch.copy_to`` runs in each forked chip child and dereferences the
         # source host pointer there. Keep a read-only zero chunk allocated
         # before ``Worker.init()`` forks, then reuse it to restore retained
         # CommDomain windows in bounded-size copies between requests.
         self._persistent_zero = (
             torch.zeros(_PERSISTENT_ZERO_CHUNK_BYTES, dtype=torch.uint8).share_memory_()
-            if self._persistent
+            if self._persistent and self._reset_persistent_windows
             else None
         )
         self._persistent_requests: queue.Queue[_PersistentRequest | object] | None = None
@@ -1125,6 +1149,7 @@ class DistributedWorker(Worker):
             # callables before ``init()`` so the L3 fork inherits the whole
             # registry via COW; each program keeps its own cids in its state.
             self._w = _construct_worker(self.dc, primary.platform, runtime_name, num_sub)
+            self._validate_persistent_runtime_hooks()
             for prog, chip_callables, sub_worker_fns in loaded:
                 sub_ids, chip_cids = _register_callables(self._w, sub_worker_fns, chip_callables)
                 self._states[prog]["sub_ids"] = sub_ids
@@ -1200,6 +1225,23 @@ class DistributedWorker(Worker):
             buffers,
         )
 
+    def _validate_persistent_runtime_hooks(self) -> None:
+        """Fail before worker initialization when Simpler cannot retain domains."""
+        if not self._persistent:
+            return
+        live_domains = getattr(self._w, "_live_domains", None)
+        execute_pending = getattr(self._w, "_execute_pending_domain_releases", None)
+        missing = []
+        if not isinstance(live_domains, dict):
+            missing.append("_live_domains")
+        if not callable(execute_pending):
+            missing.append("_execute_pending_domain_releases")
+        if missing:
+            raise RuntimeError(
+                "persistent distributed execution requires Simpler's private retention hooks: "
+                + ", ".join(missing)
+            )
+
     def _reset_persistent_domains(self, orch: Any, domains: dict[str, tuple[tuple[Any, ...], Any]]) -> None:
         """Restore retained windows to the zero-filled fresh-allocation state."""
         assert self._persistent_zero is not None
@@ -1218,58 +1260,43 @@ class DistributedWorker(Worker):
                         nbytes,
                     )
 
-    def _finish_persistent_request(self, orch: Any) -> None:
-        """Drain one request and run the non-domain ``Worker.run`` cleanup."""
-        orch.scope_end()
-        try:
-            try:
-                try:
-                    orch._drain()
-                except Exception as exc:
-                    self._w._poison_l3_l2_region_from_endpoint_error(exc)
-                    raise
-            finally:
-                self._w._release_active_remote_slot_refs()
-                self._w._flush_pending_remote_frees()
-                try:
-                    self._w._cleanup_l3_l2_regions()
-                finally:
-                    self._w._l3_l2_orch_comm_host_buffers.clear()
-                self._w._execute_pending_domain_releases()
-        finally:
-            # Balance the outer ``Worker.run`` scope even when drain or cleanup
-            # fails; its finalizer consumes this newly opened scope.
-            orch.scope_begin()
+    def _detach_persistent_domain(self, handle: Any) -> None:
+        """Exclude a retained CommDomain from simpler's per-run release sweep."""
+        live_domains = getattr(self._w, "_live_domains", None)
+        if not isinstance(live_domains, dict) or live_domains.get(handle.name) is not handle:
+            raise RuntimeError(
+                "persistent distributed execution requires Simpler's live-domain retention hook"
+            )
+        del live_domains[handle.name]
 
-    def _persistent_orch(self, orch: Any, _args: Any, _config: Any) -> None:
-        """Serve all prepared programs from one outer simpler ``Worker.run``."""
+    def _release_persistent_domains(
+        self,
+        domains_by_program: dict[str, dict[str, tuple[tuple[Any, ...], Any]]],
+    ) -> None:
+        """Release retained domains after the last request run-fence."""
+        execute_pending = getattr(self._w, "_execute_pending_domain_releases", None)
+        if not callable(execute_pending):
+            raise RuntimeError(
+                "persistent distributed execution requires Simpler's deferred domain-release hook"
+            )
+        handles = [
+            handle
+            for program_domains in reversed(tuple(domains_by_program.values()))
+            for _spec, handle in reversed(tuple(program_domains.values()))
+        ]
+        for handle in handles:
+            handle.release()
+        execute_pending()
+        not_freed = [handle for handle in handles if not bool(getattr(handle, "freed", False))]
+        if not_freed:
+            names = ", ".join(repr(handle.name) for handle in not_freed)
+            raise RuntimeError(f"persistent CommDomain release did not free: {names}")
+
+    def _persistent_worker_main(self) -> None:
+        """Fence each request with ``Worker.run`` while retaining CommDomains."""
         assert self._persistent_requests is not None
         assert self._persistent_ready is not None
         domains_by_program: dict[str, dict[str, tuple[tuple[Any, ...], Any]]] = {}
-        active_program_id: str | None = None
-
-        def domain_provider(**kwargs: Any) -> _RetainedDomainLease:
-            """Allocate once per program/domain pair and return a retained lease."""
-            if active_program_id is None:
-                raise RuntimeError("persistent domain allocation has no active compiled program")
-            generated_name = str(kwargs["name"])
-            program_domains = domains_by_program.setdefault(active_program_id, {})
-            spec = self._persistent_domain_spec(kwargs)
-            existing = program_domains.get(generated_name)
-            if existing is None:
-                runtime_kwargs = dict(kwargs)
-                runtime_kwargs["name"] = f"{active_program_id}:{generated_name}"
-                handle = orch.allocate_domain(**runtime_kwargs)
-                program_domains[generated_name] = (spec, handle)
-            else:
-                prior_spec, handle = existing
-                if spec != prior_spec:
-                    raise ValueError(
-                        f"persistent CommDomain {generated_name!r} changed specification "
-                        f"for program {active_program_id}"
-                    )
-            return _RetainedDomainLease(handle)
-
         self._persistent_ready.set()
         try:
             while True:
@@ -1278,10 +1305,31 @@ class DistributedWorker(Worker):
                     break
                 assert isinstance(item, _PersistentRequest)
                 request = item
-                active_program_id = str(request.state["persistent_id"])
-                try:
-                    program_domains = domains_by_program.get(active_program_id)
-                    if program_domains:
+                program_id = str(request.state["persistent_id"])
+
+                def run_request(orch: Any, _args: Any, _config: Any) -> None:
+                    def domain_provider(**kwargs: Any) -> _RetainedDomainLease:
+                        generated_name = str(kwargs["name"])
+                        program_domains = domains_by_program.setdefault(program_id, {})
+                        spec = self._persistent_domain_spec(kwargs)
+                        existing = program_domains.get(generated_name)
+                        if existing is None:
+                            runtime_kwargs = dict(kwargs)
+                            runtime_kwargs["name"] = f"{program_id}:{generated_name}"
+                            handle = orch.allocate_domain(**runtime_kwargs)
+                            self._detach_persistent_domain(handle)
+                            program_domains[generated_name] = (spec, handle)
+                        else:
+                            prior_spec, handle = existing
+                            if spec != prior_spec:
+                                raise ValueError(
+                                    f"persistent CommDomain {generated_name!r} changed specification "
+                                    f"for program {program_id}"
+                                )
+                        return _RetainedDomainLease(handle)
+
+                    program_domains = domains_by_program.get(program_id)
+                    if program_domains and self._reset_persistent_windows:
                         self._reset_persistent_domains(orch, program_domains)
                     orch._dfx_dispatch_idx = {}
                     request.state["entry_fn"](
@@ -1295,7 +1343,9 @@ class DistributedWorker(Worker):
                         world_size=request.state["device_nums"],
                         _domain_provider=domain_provider,
                     )
-                    self._finish_persistent_request(orch)
+
+                try:
+                    self._w.run(run_request)
                 except BaseException as exc:  # noqa: BLE001 - rethrown on caller thread
                     request.error = exc
                     self._persistent_error = exc
@@ -1306,27 +1356,26 @@ class DistributedWorker(Worker):
                     request.done.set()
                 if request.error is not None:
                     break
-        finally:
-            for program_domains in reversed(tuple(domains_by_program.values())):
-                for _spec, handle in reversed(tuple(program_domains.values())):
-                    handle.release()
-
-    def _persistent_worker_main(self) -> None:
-        """Run the persistent orchestration and publish its terminal status."""
-        try:
-            self._w.run(self._persistent_orch)
         except BaseException as exc:  # noqa: BLE001 - observed by start/run/close
             self._persistent_error = exc
             self._persistent_error_reported = False
             terminal = self._persistent_terminal_request
             if terminal is not None and terminal.error is None:
                 terminal.error = exc
-            if self._persistent_ready is not None:
-                self._persistent_ready.set()
         finally:
-            # A failed request may still have submitted device work. Publish
-            # completion only after the outer Worker.run has performed its final
-            # drain and cleanup, preserving the synchronous dispatch contract.
+            try:
+                self._release_persistent_domains(domains_by_program)
+            except BaseException as exc:  # noqa: BLE001 - surfaced by run/close
+                if self._persistent_error is None:
+                    self._persistent_error = exc
+                    self._persistent_error_reported = False
+                elif self._persistent_error.__context__ is None:
+                    self._persistent_error.__context__ = exc
+                else:
+                    print(
+                        f"persistent CommDomain teardown also failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
             terminal = self._persistent_terminal_request
             if terminal is not None:
                 terminal.keepalive.clear()
@@ -1339,7 +1388,7 @@ class DistributedWorker(Worker):
             raise self._persistent_error
 
     def _start_persistent_dispatcher(self) -> None:
-        """Start one background ``Worker.run`` and wait until it can accept work."""
+        """Start the background request dispatcher and wait until it is ready."""
         self._persistent_requests = queue.Queue(maxsize=1)
         self._persistent_ready = threading.Event()
         self._persistent_thread = threading.Thread(

@@ -564,9 +564,11 @@ class _FakeDistributedCompiled:
         self._rt = rt
         self.platform = "a2a3sim"
         self.prepare_config: Any = "unset"
+        self.prepare_kwargs: dict[str, Any] = {}
 
-    def prepare(self, config: Any = None) -> _FakeDistributedWorker:
+    def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
         self.prepare_config = config
+        self.prepare_kwargs = kwargs
         return self._rt
 
 
@@ -582,7 +584,12 @@ def test_benchmark_l3_dispatches_via_distributed_worker():
         patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
     ):
         compiled = _FakeDistributedCompiled(rt)
-        stats = benchmark(compiled, [MagicMock(name="arg")], rounds=2, warmup=1)
+        stats = benchmark(
+            compiled,
+            [MagicMock(name="arg")],
+            rounds=2,
+            warmup=1,
+        )
 
     assert rt.register_calls == 1  # registered exactly once
     assert rt.handle.call_count == 3  # warmup + rounds launches
@@ -590,9 +597,43 @@ def test_benchmark_l3_dispatches_via_distributed_worker():
     # prepare() gets the dispatch config, so it prewarms the runtime arena with
     # the ring sizing the loop dispatches with (here: None -> baseline sizing).
     assert compiled.prepare_config is None
+    assert compiled.prepare_kwargs == {
+        "persistent": False,
+        "reset_persistent_windows": None,
+    }
     # The parser is told this is a distributed run.
     assert parse.call_args.kwargs == {"rounds": 2, "warmup": 1, "distributed": True}
     assert stats.rounds == 2
+
+
+def test_benchmark_l3_forwards_persistent_options():
+    """Persistent L3 benchmark controls are forwarded to ``prepare()``."""
+    rt = _FakeDistributedWorker()
+    sentinel = BenchmarkStats(device_wall_us=[1.0], host_wall_us=[2.0], rounds=1, warmup=0)
+    with (
+        patch.object(dcp_mod, "DistributedCompiledProgram", _FakeDistributedCompiled),
+        patch("pypto.runtime.bench.ChipWorker") as chip_ctor,
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel),
+    ):
+        compiled = _FakeDistributedCompiled(rt)
+        benchmark(
+            compiled,
+            [MagicMock(name="arg")],
+            rounds=1,
+            warmup=0,
+            persistent=True,
+            reset_persistent_windows=False,
+        )
+
+    assert rt.register_calls == 1
+    assert rt.handle.call_count == 1
+    assert chip_ctor.call_count == 0
+    assert compiled.prepare_kwargs == {
+        "persistent": True,
+        "reset_persistent_windows": False,
+    }
 
 
 def test_benchmark_l3_rejects_platform_device_id():
@@ -609,6 +650,20 @@ def test_benchmark_l3_rejects_platform_device_id():
             benchmark(_FakeDistributedCompiled(rt), [MagicMock()], rounds=1, warmup=0, device_id=2)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"persistent": True},
+        {"reset_persistent_windows": True},
+        {"reset_persistent_windows": False},
+    ],
+)
+def test_benchmark_l2_rejects_persistent_options(kwargs):
+    """Persistent controls, including explicit ``False``, do not apply to L2."""
+    with pytest.raises(ValueError, match="apply only to an L3"):
+        benchmark(_compiled_mock(), [MagicMock()], rounds=1, warmup=0, **kwargs)
+
+
 def test_benchmark_l3_capture_wraps_prepare(span_root):
     """Markers emitted during ``prepare()`` are captured — the stderr redirect
     must wrap ``prepare()`` (where chip workers fork), not just the loop.
@@ -621,7 +676,8 @@ def test_benchmark_l3_capture_wraps_prepare(span_root):
     """
 
     class _CompiledEmittingAtPrepare(_FakeDistributedCompiled):
-        def prepare(self, config: Any = None) -> _FakeDistributedWorker:
+        def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
+            del config, kwargs
             # Two ranks each emit one dispatch's markers at fork/prepare time,
             # before the measured loop runs.
             for pid, dev_us in ((100, 10.0), (101, 20.0)):
