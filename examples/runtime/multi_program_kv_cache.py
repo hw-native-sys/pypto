@@ -106,7 +106,7 @@ def decode(token: pl.Tensor, kv: pl.Tensor, logits: pl.Out[pl.Tensor]):
 
 
 def serve(platform: str = "a2a3", device_ids: list[int] | None = None) -> None:
-    dc = DistributedConfig(device_ids=device_ids or [0], num_sub_workers=0, block_dim=3)
+    dc = DistributedConfig(device_ids=device_ids or [0], num_sub_workers=0)
     cfg = RunConfig(platform=platform, distributed_config=dc)
 
     # Per-call IO buffers must be shared-memory host tensors allocated BEFORE the

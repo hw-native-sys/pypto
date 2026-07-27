@@ -68,7 +68,6 @@ def compile(  # noqa: PLR0913
     profiling: bool = False,
     platform: str | None = None,
     distributed_config: Any = None,
-    block_dim: int | None = None,
     analyze_auto_scopes_for_deps: bool = False,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
@@ -128,15 +127,6 @@ def compile(  # noqa: PLR0913
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
             ``DistributedConfig()`` is used.
-        block_dim: Optional logical SPMD block count to bake into the
-            generated ``kernel_config.py``'s ``RUNTIME_CONFIG``. ``None``
-            (default) omits the key so the runtime's own default applies
-            at dispatch time; simpler validates the value against device
-            capacity. Set this when targeting devices whose usable core
-            count is below simpler's default of 24, or when the kernel
-            needs a specific block count. Ignored for L3+ distributed
-            programs — set ``DistributedConfig.block_dim`` instead.
-
         analyze_auto_scopes_for_deps: If True, let
             ``AutoDeriveTaskDependencies`` analyze AUTO runtime scopes. The
             default is False to preserve the existing TensorMap-fallback
@@ -260,7 +250,6 @@ def compile(  # noqa: PLR0913
                     transformed_program,
                     output_dir,
                     skip_ptoas=skip_ptoas,
-                    block_dim=block_dim,
                     memory_planner=mplan,
                 )
         except PartialCodegenError as exc:

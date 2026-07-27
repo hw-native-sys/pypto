@@ -405,7 +405,7 @@ def _make_call_config(
 ) -> Any:
     """Build a simpler ``CallConfig`` from the distributed config.
 
-    The ``block_dim`` / ``aicpu_thread_num`` baseline always comes from the
+    The ``aicpu_thread_num`` baseline always comes from the
     program's :class:`DistributedConfig`. When *run_config* is given, its
     per-task ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
     ``ring_dep_pool``, each a scalar or a per-ring list of 4 ints) are overlaid
@@ -441,8 +441,6 @@ def _make_call_config(
     )
 
     call_config = CallConfig()
-    if dc.block_dim is not None:
-        call_config.block_dim = dc.block_dim
     call_config.aicpu_thread_num = dc.aicpu_thread_num
     if run_config is not None:
         from .runner import _apply_ring_overrides, _DfxOpts  # noqa: PLC0415
@@ -1664,7 +1662,7 @@ class DistributedWorker(Worker):
         ``config`` is an optional per-dispatch :class:`RunConfig` whose per-task
         ring-sizing overrides size this dispatch's runtime ring buffers. When
         given, a fresh ``CallConfig`` is built for this dispatch only (from the
-        program's ``block_dim`` / ``aicpu_thread_num`` baseline plus the ring
+        program's ``aicpu_thread_num`` baseline plus the ring
         overrides), leaving the prepared, shared ``call_config`` untouched. When
         ``None``, the prepared baseline is reused with zero extra allocation.
         """

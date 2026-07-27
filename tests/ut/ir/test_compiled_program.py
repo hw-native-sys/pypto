@@ -560,7 +560,7 @@ class TestCompiledProgramExtraction:
         statements bind to the patched name at import time.
         """
         cc = MagicMock(name=chip_callable_name)
-        runtime_config = {"block_dim": 8, "aicpu_thread_num": 2}
+        runtime_config = {"aicpu_thread_num": 2}
         return (
             cc,
             runtime_config,
@@ -684,8 +684,7 @@ class TestCompiledProgramExtraction:
             cfg = cp.build_call_config(RunConfig())
 
         assert cfg is fake_call_config
-        assert fake_call_config.block_dim == 8  # from runtime_config
-        assert fake_call_config.aicpu_thread_num == 2
+        assert fake_call_config.aicpu_thread_num == 2  # from runtime_config
 
     def test_build_call_config_explicit_overrides_runtime_config(self, tmp_path):
         prog = _make_program_with_orchestration()
@@ -699,10 +698,9 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(RunConfig(), block_dim=32, aicpu_thread_num=4)
+            cp.build_call_config(RunConfig(aicpu_thread_num=8), aicpu_thread_num=4)
 
-        assert fake_call_config.block_dim == 32
-        assert fake_call_config.aicpu_thread_num == 4
+        assert fake_call_config.aicpu_thread_num == 4  # kwarg > RunConfig field > runtime_config
 
     def test_build_call_config_run_config_beats_runtime_config(self, tmp_path):
         prog = _make_program_with_orchestration()
@@ -716,9 +714,9 @@ class TestCompiledProgramExtraction:
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
-            cp.build_call_config(RunConfig(block_dim=16))
+            cp.build_call_config(RunConfig(aicpu_thread_num=16))
 
-        assert fake_call_config.block_dim == 16  # RunConfig wins over runtime_config.block_dim=8
+        assert fake_call_config.aicpu_thread_num == 16  # RunConfig wins over runtime_config's 2
 
     def test_build_call_config_copies_dfx_flags(self, tmp_path):
         prog = _make_program_with_orchestration()
@@ -756,7 +754,6 @@ class TestCompiledProgramExtraction:
         _, _, patcher = self._patch_assemble()
         fake_call_config = MagicMock(
             spec=[
-                "block_dim",
                 "aicpu_thread_num",
                 "enable_l2_swimlane",
                 "enable_dump_args",

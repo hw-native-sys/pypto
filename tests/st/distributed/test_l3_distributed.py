@@ -113,7 +113,6 @@ class TestL3Dependency:
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )
@@ -140,7 +139,6 @@ class TestL3Dependency:
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=1,
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )
@@ -183,7 +181,6 @@ class TestL3SubWorkerOverride:
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )
@@ -224,7 +221,6 @@ class TestL3SubWorkerOverride:
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )

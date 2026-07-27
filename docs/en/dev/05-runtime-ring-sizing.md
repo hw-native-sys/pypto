@@ -12,7 +12,7 @@ maps 1:1 to a field on Simpler's `CallConfig.runtime_env` and is sized **per
 task submission** — per `run()` / `rt.run()` call — so different submissions of
 the same kernel can use different ring sizes. On the L3 path the override is
 applied per dispatch on top of the program's `DistributedConfig` baseline
-(`block_dim` / `aicpu_thread_num`) and reaches every chip in that dispatch.
+(`aicpu_thread_num`) and reaches every chip in that dispatch.
 
 ## Field matrix
 

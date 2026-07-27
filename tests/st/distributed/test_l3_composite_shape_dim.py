@@ -108,7 +108,6 @@ class TestL3CompositeShapeDim:
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:NRANKS],
                 num_sub_workers=0,
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )

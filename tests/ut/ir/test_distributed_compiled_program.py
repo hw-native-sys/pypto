@@ -229,11 +229,11 @@ def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
 
 def test_from_dir_overrides_platform_and_config(compiled, tmp_path):
     """Explicit platform / distributed_config override the persisted defaults."""
-    dc = DistributedConfig(device_ids=[0, 1], block_dim=8)
+    dc = DistributedConfig(device_ids=[0, 1], aicpu_thread_num=3)
     reloaded = DistributedCompiledProgram.from_dir(tmp_path, platform="a2a3", distributed_config=dc)
     assert reloaded.platform == "a2a3"
     assert reloaded._distributed_config.device_ids == [0, 1]
-    assert reloaded._distributed_config.block_dim == 8
+    assert reloaded._distributed_config.aicpu_thread_num == 3
 
 
 def test_from_dir_output_indices_match_out_params(compiled, tmp_path):

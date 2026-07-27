@@ -247,7 +247,6 @@ class TestCrossCoreGroupedTpopTfree:
                     platform,
                     runtime_name,
                     device_id,
-                    block_dim=runtime_cfg.get("block_dim", 24),
                     aicpu_thread_num=runtime_cfg.get("aicpu_thread_num", 4),
                     output_prefix=output_prefix,
                     enable_l2_swimlane=test_config.enable_l2_swimlane,

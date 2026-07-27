@@ -388,7 +388,7 @@ def _make_dist_call_config_with_fake(dc, run_config, monkeypatch, *, dfx_base=No
 class TestMakeCallConfigRing:
     """Verify L3 ``_make_call_config`` overlays per-dispatch ring sizing.
 
-    The ``block_dim`` / ``aicpu_thread_num`` baseline always comes from the
+    The ``aicpu_thread_num`` baseline always comes from the
     program's :class:`DistributedConfig`; a per-dispatch :class:`RunConfig`
     overlays the ``ring_*`` overrides on top. ``None`` leaves every ring field
     at the runtime's ``0`` default.
@@ -419,11 +419,10 @@ class TestMakeCallConfigRing:
     def test_baseline_preserved_and_partial_ring_overlay(self, monkeypatch):
         from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
 
-        dc = DistributedConfig(block_dim=8, aicpu_thread_num=3)
+        dc = DistributedConfig(aicpu_thread_num=3)
         run_config = RunConfig(platform="a2a3sim", ring_heap=1024 * 1024)
         cfg = _make_dist_call_config_with_fake(dc, run_config, monkeypatch)
         # DistributedConfig baseline is preserved.
-        assert cfg.block_dim == 8
         assert cfg.aicpu_thread_num == 3
         # Only the provided ring field is written; the rest stay at 0.
         assert cfg.runtime_env.ring_heap == 1024 * 1024
@@ -577,7 +576,6 @@ class TestRunConfigCompileForwarding:
 
         assert captured["compile"]["platform"] == "a2a3sim"
         assert captured["execute"]["args"][3] == "fake_runtime"
-        assert captured["execute"]["kwargs"]["block_dim"] is None
         assert captured["execute"]["kwargs"]["aicpu_thread_num"] is None
 
     def test_compile_program_forwards_auto_scope_deps_switch(self, tmp_path, monkeypatch):

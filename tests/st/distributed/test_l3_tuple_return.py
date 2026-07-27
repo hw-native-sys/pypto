@@ -92,7 +92,6 @@ class TestL3TupleReturn:
             platform=test_config.platform,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
-                block_dim=3,
                 aicpu_thread_num=4,
             ),
         )

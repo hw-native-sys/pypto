@@ -163,7 +163,6 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
   codegen.Emit(cfg_var + " = CallConfig()");
-  codegen.Emit(cfg_var + ".block_dim = 1");
   codegen.Emit(cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");
   codegen.Emit("_keep.append(" + ta_var + ")");
   codegen.Emit("orch.submit_next_level(callables[\"" + variant + "\"], " + ta_var + ", " + cfg_var +

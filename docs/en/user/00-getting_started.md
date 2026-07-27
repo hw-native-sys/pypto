@@ -353,7 +353,7 @@ print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 ```
 
 Pass `platform=` / `device_id=` for the common case, or a full `RunConfig` via
-`config=` for `block_dim` / `aicpu_thread_num` control (not both). Aggregates are
+`config=` for `aicpu_thread_num` control (not both). Aggregates are
 exposed under both `device_wall_us_*` and shorter `device_us_*` names, with
 `samples` aliasing the raw `device_wall_us` list.
 

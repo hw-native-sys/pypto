@@ -96,16 +96,6 @@ class TestKernelConfigSignature:
         assert '"signature": [_D.IN, _D.OUT]' in text
         assert _is_valid_python(text)
 
-    def test_block_dim_still_works_with_signatures(self) -> None:
-        text = _generate_config_file(
-            **_base_inputs(),
-            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT"]},
-            block_dim=8,
-        )
-        assert '"block_dim": 8,' in text
-        assert '"signature": [_D.IN, _D.IN, _D.INOUT]' in text
-        assert _is_valid_python(text)
-
 
 class TestOrchestrationConfigSignature:
     """Regression tests for the ``ORCHESTRATION`` ``signature`` emission.

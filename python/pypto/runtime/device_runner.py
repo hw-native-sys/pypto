@@ -497,9 +497,8 @@ def compile_and_assemble(
         callable, the runtime name (e.g. ``"tensormap_and_ringbuffer"``),
         and the full ``RUNTIME_CONFIG`` dict loaded from
         ``kernel_config.py``. Callers can read defaults such as
-        ``block_dim`` / ``aicpu_thread_num`` from ``runtime_config`` —
-        keys are only present when the producer of the artifact opted
-        to bake them in.
+        ``aicpu_thread_num`` from ``runtime_config`` — keys are only
+        present when the producer of the artifact opted to bake them in.
     """
     # Load kernel_config.py
     config_path = work_dir / "kernel_config.py"
@@ -610,7 +609,6 @@ def execute_on_device(  # noqa: PLR0913
     device_id: int,
     *,
     level: int = 2,
-    block_dim: int | None = None,
     aicpu_thread_num: int | None = None,
     output_prefix: str | None = None,
     enable_l2_swimlane: bool = False,
@@ -639,19 +637,6 @@ def execute_on_device(  # noqa: PLR0913
             supported; passing any other value raises ``ValueError``. The
             parameter exists so callers can plumb level through ahead of L3
             user-API support.
-        block_dim: Number of logical SPMD blocks to dispatch. ``None``
-            (default) leaves the field unset on the underlying
-            ``ChipCallConfig``, so the simpler runtime's own default
-            (``ChipCallConfig::block_dim = 0``, the "auto" sentinel)
-            applies — DeviceRunner resolves it at ``run()`` time to the
-            max the AICore stream allows (``aclrtGetStreamResLimit`` on
-            onboard, ``PLATFORM_MAX_BLOCKDIM`` on sim). Any positive
-            value is taken as an explicit cap and validated against the
-            same stream-resource limits; over-capacity requests are
-            rejected with a clear error
-            (``max_block_dim=... cube=... vector=...``). Callers that
-            know the kernel's required block count should pass it
-            explicitly rather than relying on auto-resolution.
         aicpu_thread_num: Number of AICPU threads. ``None`` leaves the
             field unset and uses the simpler runtime default.
         output_prefix: Directory under which the runtime writes diagnostic
@@ -712,8 +697,6 @@ def execute_on_device(  # noqa: PLR0913
     from .worker import ChipWorker as _PyptoWorker  # noqa: PLC0415
 
     cfg = CallConfig()
-    if block_dim is not None:
-        cfg.block_dim = block_dim
     if aicpu_thread_num is not None:
         cfg.aicpu_thread_num = aicpu_thread_num
     # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen``

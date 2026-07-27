@@ -10,7 +10,7 @@ L2 单 chip 路径（`run()` / `ChipWorker.run()`）和 L3 分布式路径
 Simpler 的 `CallConfig.runtime_env` 上的同名字段一一对应，并且按 **每次任务提交**
 生效 —— 即每次 `run()` / `rt.run()` 调用，因此同一 kernel 的不同提交可以使用不同
 的 ring 尺寸。在 L3 路径上，覆盖项按每次派发生效，叠加在程序的 `DistributedConfig`
-基线（`block_dim` / `aicpu_thread_num`）之上，并作用于该次派发的所有 chip。
+基线（`aicpu_thread_num`）之上，并作用于该次派发的所有 chip。
 
 ## 字段对照表
 

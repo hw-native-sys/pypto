@@ -417,7 +417,6 @@ def _invoke_compiled(
         platform=platform,
         device_id=config.device_id,
         dfx=_DfxOpts.from_run_config(config),
-        block_dim=config.block_dim,
         aicpu_thread_num=config.aicpu_thread_num,
     )
 
@@ -530,7 +529,7 @@ class _RuntimeFacade:
 
     @property
     def runtime_config(self) -> dict[str, Any]:
-        """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``block_dim``, ``aicpu_thread_num``)."""
+        """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``aicpu_thread_num``)."""
         self._ensure_runtime_loaded()
         assert self._runtime_config is not None
         return self._runtime_config
@@ -746,16 +745,14 @@ class CompiledProgram(_RuntimeFacade):
         self,
         config: Any = None,
         *,
-        block_dim: int | None = None,
         aicpu_thread_num: int | None = None,
         dfx_dir: "Path | None" = None,
     ) -> Any:
         """Translate a pypto :class:`RunConfig` into a simpler ``CallConfig``.
 
-        Precedence for ``block_dim`` / ``aicpu_thread_num``: explicit kwarg
-        > ``config`` field > ``runtime_config`` baked into
-        ``kernel_config.py``. When all three are unset, the simpler
-        runtime's own default applies.
+        Precedence for ``aicpu_thread_num``: explicit kwarg > ``config``
+        field > ``runtime_config`` baked into ``kernel_config.py``. When
+        all three are unset, the simpler runtime's own default applies.
 
         DFX flags are copied straight from ``config``; ``dfx_dir`` (when
         given) becomes ``output_prefix``. Callers that enable DFX flags
@@ -773,7 +770,6 @@ class CompiledProgram(_RuntimeFacade):
         return _build_call_config(
             run_config,
             runtime_config=self.runtime_config,
-            block_dim_override=block_dim,
             aicpu_thread_num_override=aicpu_thread_num,
             dfx_dir=dfx_dir,
         )
@@ -973,7 +969,6 @@ class _SubChipCallable(_RuntimeFacade):
         self,
         config: Any = None,
         *,
-        block_dim: int | None = None,
         aicpu_thread_num: int | None = None,
         dfx_dir: "Path | None" = None,
     ) -> Any:
@@ -983,7 +978,6 @@ class _SubChipCallable(_RuntimeFacade):
         return _build_call_config(
             run_config,
             runtime_config=self.runtime_config,
-            block_dim_override=block_dim,
             aicpu_thread_num_override=aicpu_thread_num,
             dfx_dir=dfx_dir,
         )

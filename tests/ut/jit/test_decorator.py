@@ -2252,7 +2252,6 @@ class TestCompileKwargForwarding:
             dump_passes=True,
             compile_profiling=True,
             save_kernels_dir=str(artifacts_dir),
-            block_dim=8,
             analyze_auto_scopes_for_deps=True,
         )
         kwargs = _run_config_compile_kwargs(cfg)
@@ -2265,10 +2264,6 @@ class TestCompileKwargForwarding:
         assert "disabled_diagnostics" in kwargs
         # backend_type is derived from `platform` by ir.compile(); not forwarded.
         assert "backend_type" not in kwargs
-        # block_dim is a runtime dispatch param — execute_compiled re-supplies
-        # RunConfig.block_dim and overrides the baked value, so it is not a
-        # compile input and must not be forwarded (would split the cache key).
-        assert "block_dim" not in kwargs
 
     def test_run_config_compile_kwargs_omits_unset_output_dir(self):
         """save_kernels_dir left unset omits output_dir so ir.compile()'s default applies."""

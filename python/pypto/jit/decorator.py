@@ -1235,13 +1235,6 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     codegen backend from ``platform``, which the JIT path already forwards;
     passing ``backend_type`` as well would be redundant and could conflict.
 
-    ``block_dim`` is intentionally omitted too: although ``ir.compile()``
-    accepts it (baking it into ``kernel_config.py``), the JIT runtime path
-    always re-supplies ``RunConfig.block_dim`` at dispatch time
-    (``execute_compiled``), which overrides the baked value. Forwarding it
-    here would be redundant and would split the cache key on a value that
-    never reaches the executed artifact.
-
     ``output_dir`` is forwarded only when set, so an unset value defers to
     ``ir.compile()``'s own default.
 

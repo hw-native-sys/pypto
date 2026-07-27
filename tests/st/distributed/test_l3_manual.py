@@ -150,11 +150,10 @@ class TestL3Manual:
         # 5) CallConfig for chip dispatch. ``submit_next_level`` takes a
         # ``CallConfig`` as its third argument (see DistributedCodegen at
         # ``src/codegen/distributed/distributed_codegen.cpp:566``); the chip
-        # binary reads ``block_dim`` / ``aicpu_thread_num`` from it. The
+        # binary reads ``aicpu_thread_num`` from it. The
         # values mirror ``test_l3_distributed.py`` so the same kernel runs
         # identically under both paths.
         call_config = CallConfig()
-        call_config.block_dim = 3
         call_config.aicpu_thread_num = 4
 
         # 6) Hand-written L3 orchestrator. ``submit_next_level`` queues chip

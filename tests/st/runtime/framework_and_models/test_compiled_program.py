@@ -215,15 +215,17 @@ class TestManualWorkerExtraction:
         assert isinstance(compiled.runtime_name, str) and compiled.runtime_name
         assert isinstance(compiled.runtime_config, dict)
 
-    def test_block_dim_override_runs(self, test_config):
-        """build_call_config block_dim override is accepted and runs correctly."""
+    def test_call_config_override_runs(self, test_config):
+        """build_call_config aicpu_thread_num override is accepted and runs correctly."""
         tile_add_128._cache.clear()
         a = torch.full((128, 128), 2.0, dtype=torch.float32)
         b = torch.full((128, 128), 3.0, dtype=torch.float32)
         tile_add_128(a, b, torch.zeros_like(a), config=test_config)
         compiled = _get_cached_compiled(tile_add_128)
-        cfg = compiled.build_call_config(test_config, block_dim=1)
-        assert cfg.block_dim == 1
+        # 3, not the 4 baked into RUNTIME_CONFIG — otherwise the assert cannot
+        # tell an applied override from the default.
+        cfg = compiled.build_call_config(test_config, aicpu_thread_num=3)
+        assert cfg.aicpu_thread_num == 3
         coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id, call_config=cfg)
         assert torch.allclose(coerced[compiled.output_indices[0]], torch.full((128, 128), 5.0))
 

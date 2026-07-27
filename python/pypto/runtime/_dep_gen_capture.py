@@ -125,12 +125,9 @@ def main(argv: list[str]) -> int:
     # ``orch_args`` stores raw host pointers; ``_keepalive`` (the backing
     # tensors) must stay referenced until execute_on_device's H2D copy completes.
 
-    # Caller-supplied block_dim / aicpu_thread_num take precedence; fall back to
-    # the values baked into kernel_config.py so the captured graph matches the
+    # A caller-supplied aicpu_thread_num takes precedence; fall back to the
+    # value baked into kernel_config.py so the captured graph matches the
     # in-process run's scheduling.
-    block_dim = spec.get("block_dim")
-    if block_dim is None:
-        block_dim = runtime_config.get("block_dim")
     aicpu_thread_num = spec.get("aicpu_thread_num")
     if aicpu_thread_num is None:
         aicpu_thread_num = runtime_config.get("aicpu_thread_num")
@@ -143,7 +140,6 @@ def main(argv: list[str]) -> int:
         runtime_name,
         device_id,
         level=level,
-        block_dim=block_dim,
         aicpu_thread_num=aicpu_thread_num,
         output_prefix=str(dfx_dir),
         enable_dep_gen=True,

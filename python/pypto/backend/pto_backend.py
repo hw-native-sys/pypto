@@ -724,16 +724,8 @@ def _generate_config_file(
     orchestration_signature: list[str] | None = None,
     func_name_to_external_source: dict[str, str] | None = None,
     func_name_to_external_include_dirs: dict[str, tuple[str, ...]] | None = None,
-    *,
-    block_dim: int | None = None,
 ) -> str:
     """Generate kernel_config.py content.
-
-    ``block_dim`` is only embedded into ``RUNTIME_CONFIG`` when the user
-    supplies it via ``compile(block_dim=...)``. When omitted, the
-    simpler runtime's own default applies at dispatch time; simpler
-    validates the value against device capacity and rejects
-    over-capacity requests with a clear error rather than hanging.
 
     ``func_name_to_signature`` maps each kernel name to its runtime
     ``ArgDirection`` names ("IN"/"OUT"/"INOUT") for its tensor args, in
@@ -768,10 +760,8 @@ def _generate_config_file(
         "RUNTIME_CONFIG = {",
         '\t"runtime": "tensormap_and_ringbuffer",',
         '\t"aicpu_thread_num": 4,',
+        "}\n",
     ]
-    if block_dim is not None:
-        runtime_lines.append(f'\t"block_dim": {block_dim},')
-    runtime_lines.append("}\n")
 
     header = [
         "# Kernel and Orchestration Configuration\n",
@@ -787,8 +777,6 @@ def _generate_config_file(
         *header,
         "# Runtime configuration for tensormap_and_ringbuffer.",
         "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3).",
-        "# block_dim is only emitted when the user passes compile(block_dim=...);",
-        "# otherwise the runtime default applies (simpler validates against device capacity).",
         *runtime_lines,
         "ORCHESTRATION = {",
         f'\t"source": str(_ROOT_DIR / "orchestration" / "{orch_func_name}.cpp"),',
@@ -1177,7 +1165,6 @@ def generate(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    block_dim: int | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
@@ -1196,11 +1183,6 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
-        block_dim: Optional logical SPMD block count to bake into the
-            generated ``kernel_config.py``'s ``RUNTIME_CONFIG``. ``None``
-            (default) omits the key — the simpler runtime's own default
-            applies at dispatch time. Ignored for distributed (L3+)
-            programs, which carry ``block_dim`` via ``DistributedConfig``.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -1230,12 +1212,10 @@ def generate(
     )
     if orch_count > 1:
         return _generate_multi_chip(
-            transformed_program, output_dir, skip_ptoas, block_dim=block_dim, memory_planner=memory_planner
+            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
         )
 
-    return _generate_single_chip(
-        transformed_program, output_dir, skip_ptoas, block_dim=block_dim, memory_planner=memory_planner
-    )
+    return _generate_single_chip(transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner)
 
 
 def _generate_with_distributed(
@@ -1462,7 +1442,6 @@ def _generate_multi_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    block_dim: int | None = None,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
@@ -1482,7 +1461,7 @@ def _generate_multi_chip(
         chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
         chip_subdir = os.path.join(output_dir, "next_levels", func.name)
         chip_files = _generate_single_chip(
-            chip_program, chip_subdir, skip_ptoas, block_dim=block_dim, memory_planner=memory_planner
+            chip_program, chip_subdir, skip_ptoas, memory_planner=memory_planner
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1494,7 +1473,6 @@ def _generate_single_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    block_dim: int | None = None,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
@@ -1624,7 +1602,6 @@ def _generate_single_chip(
                     orch_result.orchestration_signature,
                     func_name_to_external_source,
                     func_name_to_external_include_dirs,
-                    block_dim=block_dim,
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

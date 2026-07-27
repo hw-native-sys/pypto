@@ -338,7 +338,7 @@ stats = benchmark(compiled, [a, b, c], rounds=100, warmup=3,
 print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 ```
 
-常见情况传 `platform=` / `device_id=`；需要 `block_dim` / `aicpu_thread_num` 等
+常见情况传 `platform=` / `device_id=`；需要 `aicpu_thread_num` 等
 精细控制时传完整的 `RunConfig`（通过 `config=`）——两者不能同时给。聚合指标同时
 以 `device_wall_us_*` 和更短的 `device_us_*` 两套命名暴露，`samples` 是原始
 `device_wall_us` 列表的别名。
