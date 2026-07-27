@@ -159,12 +159,13 @@ struct ReusePenaltyRecognition {
  * Candidate recognition records mechanism evidence. This separate policy
  * constructs one edge per qualifying cross-resource buffer pair when the
  * recognizer has a complete, full-allocation handoff, a verified minimal-write
- * antichain, no same-operation alias question, and no pre-existing completion
- * relation. Each abstract resource is modeled as one completion-ordered issue
- * chain; SSA def-use is also a completion dependency, but bare lexical
- * statement order is not. Distance-zero handoffs in structured control are
- * included; loop-carried, same-resource, partial-view, and uncertain
- * candidates remain report-only.
+ * antichain, no same-operation alias question, and no ordering proxy. Each
+ * abstract resource is modeled as one completion-ordered issue chain. The
+ * current v4 policy also uses SSA def-use reachability as an experimental
+ * suppression proxy, although it does not prove asynchronous completion; bare
+ * lexical statement order is not used. Distance-zero handoffs in structured
+ * control are included; loop-carried, same-resource, partial-view, and
+ * uncertain candidates remain report-only.
  */
 void ConstructExperimentalPairEdges(ReusePenaltyRecognition* recognition);
 

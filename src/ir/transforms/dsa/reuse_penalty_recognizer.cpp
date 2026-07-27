@@ -811,10 +811,11 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
     if (earlier.route.resource == later.route.resource) {
       return earlier.resource_issue_index < later.resource_issue_index;
     }
-    // SSA def-use is a required completion dependency: a consumer cannot
-    // execute before the value-producing operation completes.  Unlike
-    // lexical statement order, this relation is preserved by lower-level
-    // scheduling and synchronization.
+    // The v4 baseline uses SSA def-use reachability as an ordering proxy.
+    // Exact-placement experiments show that this does not necessarily carry
+    // asynchronous physical-access completion across resources, so callers
+    // must retain the witness as provenance rather than treat it as a
+    // production-safe suppression proof. Bare lexical order is not used.
     return earlier.statement != later.statement && collector.TransitivelyOrdered(earlier, later);
   };
   for (const AllocationAccessSummary& summary : summaries) {

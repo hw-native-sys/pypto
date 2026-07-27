@@ -1746,7 +1746,7 @@ def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp
 
 @requires_dsa
 def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promoting_it(tmp_path):
-    """Real SSA def-use is an existing completion dependency."""
+    """The current v4 policy records and suppresses its SSA-ordering proxy."""
     export_dir = tmp_path / "quadratic"
     _allocate_with_dsa(
         _dsa_directly_ordered_handoff_program(),
@@ -1773,7 +1773,7 @@ def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promotin
 
 @requires_dsa
 def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path):
-    """Transitive SSA def-use suppresses redundant reuse penalties."""
+    """The current v4 policy records transitive SSA ordering as suppression evidence."""
     _allocate_with_dsa(
         _dsa_transitively_ordered_handoff_program(),
         str(tmp_path),
