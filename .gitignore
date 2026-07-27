@@ -136,6 +136,10 @@ dmypy.json
 .agent/
 .copilot/
 
+# Local Superpowers design, plan, and execution artifacts
+.superpowers/
+docs/*/superpowers/
+
 # Claude settings (contains auth tokens)
 .claude/settings.local.json
 
