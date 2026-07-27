@@ -66,6 +66,38 @@ jobs:
           fi
           exit $status
 
+  # ---------------------------------------------------------------------------
+  # LINT GATE — `pre-commit` + `clang-tidy` run first, on their own. Every other
+  # test job lists both of them in its `needs` (the five jobs that also consume
+  # `needs.toolchain.outputs.*` list `toolchain` alongside), so a formatting or
+  # static-analysis failure short-circuits the run before any downstream job
+  # claims a macOS runner, a GitHub-hosted ubuntu slot, or one of the in-house
+  # arm64 CPU / NPU slots (a scarce shared pool).
+  #
+  # This cannot weaken the merge rule: `pre-commit` and `clang-tidy` are
+  # themselves required status checks (repo ruleset "default" → Require status
+  # checks), so when lint is red the merge is blocked by those two contexts
+  # regardless of how the skipped downstream jobs report — a job skipped via a
+  # failed `needs` reports `skipped`, which rulesets count as satisfied. Keep
+  # both in that required list; the whole gate rests on it.
+  #
+  # Accepted trade-offs:
+  #  - `clang-tidy` runs on the in-house arm64 *cpu* pool, so that pool is now a
+  #    serialization point for the whole workflow: if it is saturated or offline,
+  #    no test job starts. Its setup is not cheap either (per-job venv, pip
+  #    install of cmake/ninja/nanobind + pinned clang-tidy, a full CMake
+  #    configure), and that wall time is prepended to every test job on the green
+  #    path. Accepted to keep a non-linting tree off the scarce device runners.
+  #  - `codegen-tests` used to run concurrently with `clang-tidy` on that same
+  #    arm64 cpu pool (hence their separate checkout trees, so neither one's
+  #    `git clean` wipes the other). They are serialized within a run now, which
+  #    frees a slot for other PRs at the cost of arm64-cpu wall time.
+  #
+  # `toolchain` is deliberately NOT gated: it is a seconds-long metadata read on
+  # a free GitHub-hosted runner, so gating it would protect no scarce capacity
+  # while pushing every device job's start back by its runtime. It runs
+  # concurrently with the gate instead.
+  # ---------------------------------------------------------------------------
   pre-commit:
     runs-on: ubuntu-latest
 
@@ -162,6 +194,9 @@ jobs:
         fi
 
   unit-tests:
+    # Lint gate (see the pre-commit job) — don't spend a macOS runner on a tree
+    # that doesn't lint.
+    needs: [pre-commit, clang-tidy]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -219,6 +254,10 @@ jobs:
     # ptoas / pto-isa / simpler — codegen-only needs none). Checkout / install
     # land under ./codegen-checkout so they don't collide with other jobs' trees
     # on the shared self-hosted host.
+    #
+    # Lint gate (see the pre-commit job) — shares the arm64 cpu pool with
+    # clang-tidy, so it must not start until that pool's lint job is green.
+    needs: [pre-commit, clang-tidy]
     runs-on: [self-hosted, linux, arm64, cpu]
     defaults:
       run:
@@ -295,7 +334,10 @@ jobs:
     #
     # Checkout / install happen under ./st-checkout so they don't collide with
     # other jobs' workspaces.
-    needs: toolchain
+    #
+    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
+    needs: [toolchain, pre-commit, clang-tidy]
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -406,7 +448,10 @@ jobs:
     # --ignore's). This job checks out under ./st-direct-checkout so it never
     # collides with system-tests' ./st-checkout on the shared self-hosted host,
     # and cleans up its own orphaned task-submit tasks.
-    needs: toolchain
+    #
+    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
+    needs: [toolchain, pre-commit, clang-tidy]
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -546,7 +591,10 @@ jobs:
     # Checkout / install happen under ./dist-checkout so they don't collide
     # with system-tests' workspace (which is owned by container root and
     # would EACCES our ci-runner cleanup).
-    needs: toolchain
+    #
+    # Lint gate (see the pre-commit job) — never claim NPU slots for a tree that
+    # doesn't lint. `toolchain` is ungated and runs alongside the gate.
+    needs: [toolchain, pre-commit, clang-tidy]
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -620,7 +668,10 @@ jobs:
     # the job holds no card and runs on a CPU runner. task-submit preserves the
     # caller's environment (per daily_ci.yml `a5-system-tests`), so sourcing
     # activate.sh before the wrap is enough — the child inherits the venv + env.
-    needs: toolchain
+    #
+    # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
+    # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
+    needs: [toolchain, pre-commit, clang-tidy]
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -757,7 +808,9 @@ jobs:
           checkout-path: lib-checkout
 
   system-tests-a5sim:
-    needs: toolchain
+    # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
+    # alongside it.
+    needs: [toolchain, pre-commit, clang-tidy]
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
