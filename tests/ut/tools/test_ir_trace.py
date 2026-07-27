@@ -12,6 +12,8 @@
 import json
 import shutil
 import subprocess
+import sysconfig
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -160,6 +162,100 @@ def test_cli_cleans_up_temporary_file_when_replacement_fails(
     assert "pypto-ir-trace: error: failed to write" in capsys.readouterr().err
     assert output.read_text(encoding="utf-8") == "existing report"
     assert list(tmp_path.glob(".trace.html.*.tmp")) == []
+
+
+def test_cli_cleans_up_owned_temporary_file_when_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "trace.html"
+    output.write_text("existing report", encoding="utf-8")
+
+    with tempfile.NamedTemporaryFile() as probe:
+        handle_type = type(probe)
+
+    def fail_write(_handle: object, _content: str) -> int:
+        raise OSError("write failed")
+
+    monkeypatch.setattr(handle_type, "write", fail_write, raising=False)
+
+    assert main([str(dump), "--output", str(output)]) == 1
+    assert "pypto-ir-trace: error: failed to write" in capsys.readouterr().err
+    assert output.read_text(encoding="utf-8") == "existing report"
+    assert list(tmp_path.glob(".trace.html.*.tmp")) == []
+
+
+def test_cli_cleanup_failure_does_not_mask_primary_write_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "trace.html"
+    output.write_text("existing report", encoding="utf-8")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("replacement failed")
+
+    def fail_unlink(_path: Path, *, missing_ok: bool = False) -> None:
+        raise OSError(f"cleanup failed (missing_ok={missing_ok})")
+
+    with monkeypatch.context() as cleanup_failure:
+        cleanup_failure.setattr(Path, "replace", fail_replace)
+        cleanup_failure.setattr(Path, "unlink", fail_unlink)
+        assert main([str(dump), "--output", str(output)]) == 1
+
+    error = capsys.readouterr().err
+    assert "pypto-ir-trace: error: failed to write" in error
+    assert "replacement failed" in error
+    assert "cleanup failed" not in error
+    assert output.read_text(encoding="utf-8") == "existing report"
+    for temporary in tmp_path.glob(".trace.html.*.tmp"):
+        temporary.unlink()
+
+
+def test_installed_console_script_preserves_main_exit_codes(tmp_path: Path):
+    script = Path(sysconfig.get_path("scripts")) / "pypto-ir-trace"
+    assert script.is_file(), "install PyPTO before running the console-script smoke test"
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "trace.html"
+
+    success = subprocess.run(
+        [str(script), str(dump), "--output", str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    domain_error = subprocess.run(
+        [str(script), str(tmp_path / "missing")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    argument_error = subprocess.run(
+        [str(script), str(dump), "--context", "-1"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert success.returncode == 0
+    assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert domain_error.returncode == 1
+    assert "pypto-ir-trace: error: input directory does not exist" in domain_error.stderr
+    assert argument_error.returncode == 2
+    assert "argument --context: must be non-negative, got -1" in argument_error.stderr
 
 
 def test_build_trace_counts_and_aligns_replace(tmp_path: Path):

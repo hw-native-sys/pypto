@@ -38,20 +38,24 @@ def _write_atomic(output: Path, content: str) -> None:
 
     temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
+        handle = tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
             dir=output_parent,
             prefix=f".{output.name}.",
             suffix=".tmp",
             delete=False,
-        ) as handle:
+        )
+        temporary = Path(handle.name)
+        with handle:
             handle.write(content)
-            temporary = Path(handle.name)
         temporary.replace(output)
     except OSError as error:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise IRTraceError(f"failed to write {output}: {error}") from error
 
 
