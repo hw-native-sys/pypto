@@ -26,6 +26,25 @@ _TOKEN_CLASSES = {
 }
 
 
+def _escape_html(text: str, *, quote: bool = False) -> str:
+    """Escape HTML-sensitive text and JavaScript line separators."""
+    return html.escape(text, quote=quote).replace("\u2028", "&#x2028;").replace("\u2029", "&#x2029;")
+
+
+def _source_lines(text: str) -> tuple[str, ...]:
+    """Split physical source lines without discarding Unicode separators."""
+    markers = [chr(codepoint) for codepoint in range(0xFDD0, 0xFDF0) if chr(codepoint) not in text]
+    if len(markers) < 2:
+        return tuple(text.split("\n")) if text else ()
+
+    line_separator, paragraph_separator = markers[:2]
+    protected = text.replace("\u2028", line_separator).replace("\u2029", paragraph_separator)
+    return tuple(
+        line.replace(line_separator, "\u2028").replace(paragraph_separator, "\u2029")
+        for line in protected.splitlines()
+    )
+
+
 def highlight_python(text: str) -> tuple[str, ...]:
     """Return one safely escaped HTML fragment for each Python source line.
 
@@ -36,8 +55,8 @@ def highlight_python(text: str) -> tuple[str, ...]:
         Escaped per-line HTML fragments. Invalid source falls back to escaped
         plain text so rendering remains safe.
     """
-    lines = text.splitlines()
-    escaped_lines = tuple(html.escape(line) for line in lines)
+    lines = _source_lines(text)
+    escaped_lines = tuple(_escape_html(line, quote=True) for line in lines)
     spans: list[list[tuple[int, int, str]]] = [[] for _ in lines]
 
     try:
@@ -70,12 +89,10 @@ def highlight_python(text: str) -> tuple[str, ...]:
         for span_start, span_end, css_class in line_spans:
             if span_start < current_column:
                 return escaped_lines
-            fragments.append(html.escape(line[current_column:span_start], quote=False))
-            fragments.append(
-                f'<span class="{css_class}">{html.escape(line[span_start:span_end], quote=False)}</span>'
-            )
+            fragments.append(_escape_html(line[current_column:span_start]))
+            fragments.append(f'<span class="{css_class}">{_escape_html(line[span_start:span_end])}</span>')
             current_column = span_end
-        fragments.append(html.escape(line[current_column:], quote=False))
+        fragments.append(_escape_html(line[current_column:]))
         highlighted.append("".join(fragments))
     return tuple(highlighted)
 

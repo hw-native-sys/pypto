@@ -175,6 +175,15 @@ def test_highlight_python_escapes_script_text_and_marks_tokens():
     assert 'class="tok-comment"' in highlighted[0]
 
 
+def test_highlight_python_escapes_unicode_line_separators():
+    highlighted = highlight_python("value = '\u2028\u2029'\n")
+
+    assert highlighted[0].count("&#x2028;") == 1
+    assert highlighted[0].count("&#x2029;") == 1
+    assert "\u2028" not in highlighted[0]
+    assert "\u2029" not in highlighted[0]
+
+
 def test_highlight_python_escapes_every_line_after_tokenization_error():
     text = "if True:\n  value = (<script>\n"
 
@@ -182,6 +191,12 @@ def test_highlight_python_escapes_every_line_after_tokenization_error():
 
     assert highlighted == ("if True:", "  value = (&lt;script&gt;")
     assert all("<script>" not in line for line in highlighted)
+
+
+def test_highlight_python_escapes_unicode_line_separators_after_tokenization_error():
+    highlighted = highlight_python("value = (<script>\u2028\u2029")
+
+    assert highlighted == ("value = (&lt;script&gt;&#x2028;&#x2029;",)
 
 
 def test_discover_orders_snapshots_and_attaches_warning(tmp_path: Path):
