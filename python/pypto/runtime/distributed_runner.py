@@ -946,8 +946,8 @@ class DistributedWorker(Worker):
     construction + registration + ``init()`` (fork) — happens exactly once.
 
     Mirrors the L2 ``with ChipWorker(...)`` reuse block: it exposes device-memory
-    helpers (:meth:`malloc`, :meth:`copy_to`, :meth:`copy_from`, :meth:`free`,
-    :meth:`alloc_tensor`) so callers can build worker-resident
+    helpers (:meth:`malloc`, :meth:`copy_to`, :meth:`copy_to_offset`,
+    :meth:`copy_from`, :meth:`free`, :meth:`alloc_tensor`) so callers can build worker-resident
     :class:`~pypto.runtime.DeviceTensor` buffers that survive across dispatches,
     then call ``rt(*device_args)`` or ``rt.run(compiled, *device_args)``
     repeatedly.
@@ -1435,6 +1435,25 @@ class DistributedWorker(Worker):
         """H2D copy: ``nbytes`` from host *src_host_ptr* to device *dst_dev_ptr*."""
         self._require_open("copy_to")
         self._orch().copy_to(worker_id, dst_dev_ptr, src_host_ptr, nbytes)
+
+    def copy_to_offset(
+        self,
+        dst_base_ptr: int,
+        dst_offset: int,
+        src_host_ptr: int,
+        nbytes: int,
+        *,
+        worker_id: int = 0,
+    ) -> None:
+        """H2D copy to ``dst_base_ptr + dst_offset`` within a live device allocation."""
+        self._require_open("copy_to_offset")
+        self._orch().copy_to_offset(
+            worker_id,
+            dst_base_ptr,
+            dst_offset,
+            src_host_ptr,
+            nbytes,
+        )
 
     def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """D2H copy: ``nbytes`` from device *src_dev_ptr* back to host *dst_host_ptr*."""
