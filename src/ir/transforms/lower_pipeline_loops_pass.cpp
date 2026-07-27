@@ -179,7 +179,11 @@ class PipelineMembershipTagger : public IRMutator {
     // PyPTO capacity-gate (#1475) allocates exactly the two co-live L0C buffers
     // rather than the per-loop cross-product it would shed back to one.
     const bool is_cube_matmul = call->op_ && call->op_->name_.rfind("tile.matmul", 0) == 0;
-    const bool is_cube_accumulator = is_cube_matmul && tile_type->GetMemorySpace() == MemorySpace::Acc;
+    const bool has_explicit_destination =
+        call->op_ && call->op_->name_.size() >= 5 &&
+        call->op_->name_.compare(call->op_->name_.size() - 5, 5, "_into") == 0;
+    const bool is_cube_accumulator =
+        is_cube_matmul && !has_explicit_destination && tile_type->GetMemorySpace() == MemorySpace::Acc;
     if (is_cube_accumulator && !loop_double_buffers_c_) return visited;
 
     auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());

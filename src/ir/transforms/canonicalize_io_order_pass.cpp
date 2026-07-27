@@ -17,6 +17,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -75,22 +76,30 @@ enum class IOCategory : int {
 /// of name strings avoids string comparisons in the hot path and makes the set
 /// of recognized ops explicit at pass construction.
 struct IOCategoryOps {
-  OpPtr tile_load;      ///< Read: tensor → tile data movement
-  OpPtr tile_read;      ///< Read: extract scalar from a tile
-  OpPtr tile_store;     ///< Write: tile → tensor data movement
-  OpPtr tile_write;     ///< Write: put scalar into a tile
-  OpPtr tile_extract;   ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
-  OpPtr tile_assemble;  ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
+  OpPtr tile_load;          ///< Read: tensor → tile data movement
+  OpPtr tile_load_into;     ///< Read directly into an explicit tile slot
+  OpPtr tile_read;          ///< Read: extract scalar from a tile
+  OpPtr tile_store;         ///< Write: tile → tensor data movement
+  OpPtr tile_write;         ///< Write: put scalar into a tile
+  OpPtr tile_extract;       ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
+  OpPtr tile_extract_into;  ///< L1→L0 extract directly into an explicit tile slot
+  OpPtr tile_assemble;      ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
+  OpPtr tile_buffer_slot;   ///< Runtime handle selection; no hardware work
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
-        registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
-        registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.assemble"),
+        registry.GetOp("tile.load"),         registry.GetOp("tile.load_into"),
+        registry.GetOp("tile.read"),         registry.GetOp("tile.store"),
+        registry.GetOp("tile.write"),        registry.GetOp("tile.extract"),
+        registry.GetOp("tile.extract_into"), registry.GetOp("tile.assemble"),
+        registry.GetOp("tile.buffer_slot"),
     };
   }
 
-  [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
+  [[nodiscard]] bool IsLoadLike(const OpPtr& op) const {
+    return op == tile_load || op == tile_load_into || op == tile_read;
+  }
   [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
   [[nodiscard]] bool IsAssemble(const OpPtr& op) const { return op == tile_assemble; }
 
@@ -106,7 +115,7 @@ struct IOCategoryOps {
   /// or unknown memory space — keep the default TileCompute tier so we don't
   /// disturb compute orderings the dependency graph already constrains.
   [[nodiscard]] bool IsL1ToL0ExtractCall(const Call& call) const {
-    if (call.op_ != tile_extract) return false;
+    if (call.op_ != tile_extract && call.op_ != tile_extract_into) return false;
     if (call.args_.empty()) return false;
     auto src_tile = std::dynamic_pointer_cast<const TileType>(call.args_[0]->GetType());
     if (!src_tile) return false;
@@ -136,6 +145,10 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops, bool ov
       (overlap_stores || double_buffer_c) ? IOCategory::Store : IOCategory::TileCompute;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+      // Slot selection only computes a handle. Lift it with scalar address
+      // arithmetic so every cloned stage can make its destination ready before
+      // the load tier is scheduled.
+      if (call->op_ == ops.tile_buffer_slot) return IOCategory::ScalarCompute;
       // tile.read keeps Load even though its LHS is scalar — it's I/O against
       // a tile and belongs in the load tier alongside tile.load.
       if (ops.IsLoadLike(call->op_)) return IOCategory::Load;
@@ -302,11 +315,41 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     if (sort_count < 2) return seq;  // nothing to reorder among non-terminators
 
     std::vector<IOCategory> cats(sort_count);
+    std::vector<bool> drains_explicit_acc(sort_count, false);
     std::unordered_map<const Stmt*, size_t> idx_of;
     idx_of.reserve(sort_count);
+    std::unordered_set<const Var*> explicit_acc_aliases;
     for (size_t i = 0; i < sort_count; ++i) {
       cats[i] = CategorizeStmt(stmts[i], io_ops_, overlap_stores_, double_buffer_c_);
       idx_of.emplace(stmts[i].get(), i);
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmts[i])) {
+        if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+          auto result_type = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType());
+          if (call->op_ == io_ops_.tile_buffer_slot && result_type &&
+              result_type->GetMemorySpace() == MemorySpace::Acc) {
+            explicit_acc_aliases.insert(assign->var_.get());
+          } else if (call->op_ && call->op_->name_.size() >= 5 &&
+                     call->op_->name_.compare(call->op_->name_.size() - 5, 5, "_into") == 0 &&
+                     !call->args_.empty()) {
+            if (auto destination = AsVarLike(call->args_.back());
+                destination && explicit_acc_aliases.count(destination.get()) != 0) {
+              explicit_acc_aliases.insert(assign->var_.get());
+            }
+          }
+        }
+      }
+      auto mark_explicit_drain = [&](const CallPtr& call) {
+        if (!call || call->op_ != io_ops_.tile_store || call->args_.empty()) return;
+        if (auto source = AsVarLike(call->args_[0]);
+            source && explicit_acc_aliases.count(source.get()) != 0) {
+          drains_explicit_acc[i] = true;
+        }
+      };
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmts[i])) {
+        mark_explicit_drain(std::dynamic_pointer_cast<const Call>(assign->value_));
+      } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmts[i])) {
+        mark_explicit_drain(std::dynamic_pointer_cast<const Call>(eval->expr_));
+      }
     }
 
     // Build successors adjacency lists + in-degree counts in one pass over
@@ -386,10 +429,10 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     std::vector<int> sub(sort_count);
     std::vector<std::string> stage(sort_count);
     for (size_t i = 0; i < sort_count; ++i) {
-      tier[i] = (cats[i] == IOCategory::ScalarCompute)               ? 0
-                : (cats[i] == IOCategory::Load)                      ? 1
-                : (cats[i] == IOCategory::Store && double_buffer_c_) ? 3
-                                                                     : 2;
+      tier[i] = (cats[i] == IOCategory::ScalarCompute)                                           ? 0
+                : (cats[i] == IOCategory::Load)                                                  ? 1
+                : (cats[i] == IOCategory::Store && (double_buffer_c_ || drains_explicit_acc[i])) ? 3
+                                                                                                 : 2;
       sub[i] = (cats[i] == IOCategory::Store) ? 1 : 0;
       if (tier[i] == 2) stage[i] = stage_key(stmts[i]);
     }

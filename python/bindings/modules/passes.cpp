@@ -29,6 +29,7 @@
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace nb = nanobind;
 
@@ -115,7 +116,9 @@ void BindPass(nb::module_& m) {
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
-             "for TaskId array carries), so orchestration codegen reads the carry lowering");
+             "for TaskId array carries), so orchestration codegen reads the carry lowering")
+      .value("TileBufferLifetimeValid", IRProperty::TileBufferLifetimeValid,
+             "Explicit tile slot leases are not used after release or released invalidly");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -225,6 +228,8 @@ void BindPass(nb::module_& m) {
              "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
   passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
              nb::arg("pass_name"), "Verify properties on a program and throw on errors");
+  passes.def("verify_tile_buffer_lifetime", &VerifyTileBufferLifetime, nb::arg("program"),
+             "Verify explicit tile buffer-slot release and use lifetime rules");
 
   // Pass class - expose call operators and property accessors
   nb::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")

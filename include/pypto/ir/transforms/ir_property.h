@@ -90,7 +90,9 @@ enum class IRProperty : uint64_t {
                                     ///< ``iter_arg_array_size_<i>`` for TaskId array carries), so
                                     ///< orchestration codegen reads the carry lowering instead of
                                     ///< re-deriving it
-  kCount                            ///< Sentinel (must be last)
+  TileBufferLifetimeValid,  ///< Explicit tile slot leases are not used after release, double-released,
+                            ///< or released through values unrelated to tile.buffer_slot
+  kCount                    ///< Sentinel (must be last)
 };
 
 static_assert(
@@ -232,7 +234,8 @@ const IRPropertySet& GetVerifiedProperties();
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
  * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
- * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly}.
+ * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
+ * TileBufferLifetimeValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 

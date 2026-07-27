@@ -84,6 +84,38 @@ class TestCanonicalizeIOOrder:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_explicit_l0_slots_cluster_extracts_matmuls_and_stores(self):
+        """Modulo-selected Right/Acc slots expose the intended two-stage cadence."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def kernel(self, out: pl.Tensor[[16, 256], pl.FP32]):
+                right_buffers = pl.create_tile_buffers(2, [32, 128], pl.BF16, pl.Mem.Right)
+                acc_buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+                source = pl.create_tile([32, 256], pl.BF16, pl.Mem.Mat)
+                lhs = pl.create_tile([16, 32], pl.BF16, pl.Mem.Left)
+                for col in pl.pipeline(0, 256, 128, stage=2):
+                    index: pl.Scalar[pl.INDEX] = (col // 128) % 2
+                    right_slot = right_buffers[index]
+                    acc_slot = acc_buffers[index]
+                    right = pl.tile.extract(
+                        source, 0, col, [32, 128], target_memory=pl.Mem.Right, out=right_slot
+                    )
+                    acc = pl.tile.matmul(lhs, right, out=acc_slot)
+                    pl.tile.store(acc, [0, col], out)
+
+        after = passes.canonicalize_io_order()(passes.lower_pipeline_loops()(Before))
+        order = []
+        for line in ir.python_print(after).splitlines():
+            if "tile.extract_into" in line:
+                order.append("extract")
+            elif "tile.matmul_into" in line:
+                order.append("matmul")
+            elif "tile.store" in line:
+                order.append("store")
+        assert order == ["extract", "extract", "matmul", "matmul", "store", "store"]
+
     def test_lowered_pipeline_orders_compute_store_per_stage(self):
         """Once LowerPipelineLoops tags each clone with ``pipeline_membership``,
         the compute/store tier emits *per stage* — ``load load compute store

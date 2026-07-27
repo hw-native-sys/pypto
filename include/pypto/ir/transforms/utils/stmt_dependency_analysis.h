@@ -37,7 +37,9 @@ namespace stmt_dep {
  *
  * The graph is sound under the InOut-use discipline (RFC #1026): physical
  * memory mutation is mirrored by SSA version changes, so SSA def-use captures
- * all real dependencies. `BuildStmtDependencyGraph` enforces this
+ * all real dependencies. Explicit tile buffer slots additionally contribute
+ * RAW/WAR/WAW edges by physical `(buffer set, slot index)` identity; a dynamic
+ * index conservatively aliases every slot in the same set. `BuildStmtDependencyGraph` enforces this
  * precondition when a program is supplied; callers that bypass that path
  * must ensure the discipline holds before relying on the graph for soundness.
  */
@@ -98,12 +100,13 @@ std::vector<Diagnostic> CollectInOutUseDisciplineDiagnostics(const StmtPtr& regi
 /**
  * @brief Build the statement dependency graph for a region.
  *
- * Dataflow analysis over SSA def-use. Runs `CheckInOutUseDiscipline` first
+ * Dataflow analysis over SSA def-use plus explicit tile-slot memory hazards.
+ * Runs `CheckInOutUseDiscipline` first
  * (when a program is supplied) so callers always receive a sound graph.
  *
- * Complexity: O(N * avg_fanout) where N is the number of statements in the
- * region — a single pass with per-stmt use/def collection, in addition to
- * the linear discipline walk.
+ * Complexity is O(N²) in the worst case because every explicit slot access is
+ * compared with prior accesses; ordinary SSA-only regions retain the linear
+ * use/def collection cost.
  *
  * @param region The region (typically a SeqStmts) to analyze. If `region` is
  *               not a SeqStmts, the graph has a single node and no edges.

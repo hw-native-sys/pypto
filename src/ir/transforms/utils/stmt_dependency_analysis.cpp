@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,15 +24,121 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
 namespace pypto {
 namespace ir {
 namespace stmt_dep {
+
+namespace {
+
+struct TileSlotIdentity {
+  const Var* buffer_set{nullptr};
+  struct Index {
+    bool normalized{false};
+    ExprPtr base;
+    int64_t modulus{0};
+    int64_t residue{0};
+  } index;
+};
+
+struct TileSlotAccess {
+  TileSlotIdentity identity;
+  const Stmt* stmt{nullptr};
+  bool writes{false};
+};
+
+bool MayAlias(const TileSlotIdentity& lhs, const TileSlotIdentity& rhs) {
+  if (lhs.buffer_set != rhs.buffer_set) return false;
+  const auto& li = lhs.index;
+  const auto& ri = rhs.index;
+  if (!li.normalized || !ri.normalized) return true;
+  if (!li.base && !ri.base) return li.residue == ri.residue;
+  if (!li.base || !ri.base || li.modulus != ri.modulus) return true;
+  return !structural_equal(li.base, ri.base) || li.residue == ri.residue;
+}
+
+CallPtr GetTopLevelCall(const StmtPtr& stmt) {
+  if (auto assign = As<AssignStmt>(stmt)) return As<Call>(assign->value_);
+  if (auto eval = As<EvalStmt>(stmt)) return As<Call>(eval->expr_);
+  return nullptr;
+}
+
+std::optional<size_t> DestinationOperand(const CallPtr& call) {
+  if (!call) return std::nullopt;
+  if (IsOp(call, "tile.load_into") || IsOp(call, "tile.extract_into")) return 4;
+  if (IsOp(call, "tile.move_into")) return 1;
+  if (IsOp(call, "tile.matmul_into")) return 2;
+  if (IsOp(call, "tile.matmul_acc_into")) return 3;
+  return std::nullopt;
+}
+
+ExprPtr ResolveScalarAlias(const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& scalar_defs) {
+  ExprPtr current = expr;
+  std::unordered_set<const Var*> visited;
+  while (auto var = AsVarLike(current)) {
+    if (!visited.insert(var.get()).second) break;
+    auto it = scalar_defs.find(var.get());
+    if (it == scalar_defs.end()) break;
+    current = it->second;
+  }
+  return current;
+}
+
+std::pair<ExprPtr, int64_t> SplitConstantOffset(const ExprPtr& expr) {
+  if (auto add = As<Add>(expr)) {
+    if (auto c = As<ConstInt>(add->right_)) return {add->left_, c->value_};
+    if (auto c = As<ConstInt>(add->left_)) return {add->right_, c->value_};
+  }
+  if (auto sub = As<Sub>(expr)) {
+    if (auto c = As<ConstInt>(sub->right_)) return {sub->left_, -c->value_};
+  }
+  return {expr, 0};
+}
+
+TileSlotIdentity::Index NormalizeSlotIndex(const ExprPtr& original,
+                                           const std::unordered_map<const Var*, ExprPtr>& scalar_defs) {
+  auto expr = ResolveScalarAlias(original, scalar_defs);
+  if (auto constant = As<ConstInt>(expr)) return {true, nullptr, 0, constant->value_};
+
+  auto mod = As<FloorMod>(expr);
+  auto modulus = mod ? As<ConstInt>(mod->right_) : nullptr;
+  if (!mod || !modulus || modulus->value_ <= 0) return {};
+
+  ExprPtr base = mod->left_;
+  int64_t offset = 0;
+  if (auto div = As<FloorDiv>(base)) {
+    auto divisor = As<ConstInt>(div->right_);
+    auto [div_base, div_offset] = SplitConstantOffset(div->left_);
+    if (divisor && divisor->value_ > 0 && div_offset % divisor->value_ == 0) {
+      base = MakeFloorDiv(div_base, div->right_, div->span_);
+      offset = div_offset / divisor->value_;
+    }
+  } else {
+    auto split = SplitConstantOffset(base);
+    base = split.first;
+    offset = split.second;
+  }
+  const int64_t residue = ((offset % modulus->value_) + modulus->value_) % modulus->value_;
+  return {true, base, modulus->value_, residue};
+}
+
+std::optional<TileSlotIdentity> SelectedSlot(const CallPtr& call,
+                                             const std::unordered_map<const Var*, ExprPtr>& scalar_defs) {
+  if (!IsOp(call, "tile.buffer_slot") || call->args_.size() != 2) return std::nullopt;
+  auto buffer_set = AsVarLike(call->args_[0]);
+  if (!buffer_set) return std::nullopt;
+  return TileSlotIdentity{buffer_set.get(), NormalizeSlotIndex(call->args_[1], scalar_defs)};
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // BuildStmtDependencyGraph
@@ -59,6 +166,11 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
 
   // Last stmt in the region that defined each Var (tracked by raw pointer).
   std::unordered_map<const Var*, const Stmt*> last_def;
+  // Physical slot identity carried by selection vars and destination-form
+  // results. Unlike SSA dependencies, this state represents memory aliases.
+  std::unordered_map<const Var*, TileSlotIdentity> slot_by_var;
+  std::unordered_map<const Var*, ExprPtr> scalar_defs;
+  std::vector<TileSlotAccess> prior_slot_accesses;
 
   for (const auto& stmt : graph.stmts) {
     var_collectors::VarDefUseCollector collector;
@@ -79,6 +191,53 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const Progra
     // prevents self-loops.
     for (const Var* v : collector.var_defs) {
       last_def[v] = raw_stmt;
+    }
+
+    std::vector<TileSlotAccess> current_slot_accesses;
+    for (const Var* v : collector.var_uses) {
+      auto it = slot_by_var.find(v);
+      if (it != slot_by_var.end()) current_slot_accesses.push_back({it->second, raw_stmt, false});
+    }
+
+    auto call = GetTopLevelCall(stmt);
+    auto destination_operand = DestinationOperand(call);
+    if (destination_operand.has_value() && *destination_operand < call->args_.size()) {
+      if (auto destination = AsVarLike(call->args_[*destination_operand])) {
+        auto it = slot_by_var.find(destination.get());
+        if (it != slot_by_var.end()) current_slot_accesses.push_back({it->second, raw_stmt, true});
+      }
+    }
+    if (IsOp(call, "tile.release") && !call->args_.empty()) {
+      if (auto released = AsVarLike(call->args_[0])) {
+        auto it = slot_by_var.find(released.get());
+        if (it != slot_by_var.end()) current_slot_accesses.push_back({it->second, raw_stmt, true});
+      }
+    }
+
+    for (const auto& current : current_slot_accesses) {
+      for (const auto& prior : prior_slot_accesses) {
+        if (prior.stmt != raw_stmt && (prior.writes || current.writes) &&
+            MayAlias(prior.identity, current.identity)) {
+          graph.predecessors[raw_stmt].insert(prior.stmt);
+        }
+      }
+    }
+    prior_slot_accesses.insert(prior_slot_accesses.end(), current_slot_accesses.begin(),
+                               current_slot_accesses.end());
+
+    if (auto assign = As<AssignStmt>(stmt); assign && assign->var_) {
+      if (auto selected = SelectedSlot(call, scalar_defs)) {
+        slot_by_var[assign->var_.get()] = *selected;
+      } else if (destination_operand.has_value() && *destination_operand < call->args_.size()) {
+        if (auto destination = AsVarLike(call->args_[*destination_operand])) {
+          auto it = slot_by_var.find(destination.get());
+          if (it != slot_by_var.end()) slot_by_var[assign->var_.get()] = it->second;
+        }
+      } else if (auto alias = AsVarLike(assign->value_)) {
+        auto it = slot_by_var.find(alias.get());
+        if (it != slot_by_var.end()) slot_by_var[assign->var_.get()] = it->second;
+      }
+      if (As<ScalarType>(assign->var_->GetType())) scalar_defs[assign->var_.get()] = assign->value_;
     }
   }
 

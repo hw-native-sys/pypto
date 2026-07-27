@@ -259,6 +259,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_assign_type_symmetry.cpp
     src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/verify_tensor_view_canonical.cpp
+    src/ir/verifier/verify_tile_buffer_lifetime.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/perf_hint_tile_innermost_dim.cpp

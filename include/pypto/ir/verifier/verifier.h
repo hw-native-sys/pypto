@@ -73,6 +73,12 @@ class PropertyVerifier {
 /// Shared pointer to a property verifier
 using PropertyVerifierPtr = std::shared_ptr<PropertyVerifier>;
 
+/** Verify explicit tile buffer-slot release/use lifetime rules and throw on errors. */
+void VerifyTileBufferLifetime(const ProgramPtr& program);
+
+/** Create the structural verifier for explicit tile buffer-slot lease lifetimes. */
+PropertyVerifierPtr CreateTileBufferLifetimePropertyVerifier();
+
 /**
  * @brief Factory function for creating SSA property verifier
  * @return Shared pointer to SSA PropertyVerifier

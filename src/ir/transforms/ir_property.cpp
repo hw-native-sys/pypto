@@ -99,6 +99,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HardSyncallOccupancyValid";
     case IRProperty::IterArgCarryClassified:
       return "IterArgCarryClassified";
+    case IRProperty::TileBufferLifetimeValid:
+      return "TileBufferLifetimeValid";
     default:
       return "Unknown";
   }
@@ -170,11 +172,17 @@ VerificationLevel GetDefaultVerificationLevel() {
 }
 
 const IRPropertySet& GetStructuralProperties() {
-  static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid,
-                                   IRProperty::ArrayNotEscaped,     IRProperty::ManualDepsOnSubmitOnly};
+  static const IRPropertySet props{IRProperty::TypeChecked,
+                                   IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks,
+                                   IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed,
+                                   IRProperty::NoNestedInCore,
+                                   IRProperty::InOutUseValid,
+                                   IRProperty::PipelineLoopValid,
+                                   IRProperty::ArrayNotEscaped,
+                                   IRProperty::ManualDepsOnSubmitOnly,
+                                   IRProperty::TileBufferLifetimeValid};
   return props;
 }
 

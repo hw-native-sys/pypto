@@ -164,6 +164,68 @@ class TestStmtDependencyGraph:
         assert graph.get_predecessors(stmts[0]) == []
         assert graph.get_predecessors(stmts[1]) == []
 
+    def test_destination_writes_to_same_physical_slot_are_ordered(self):
+        """Two distinct SSA selections of slot 0 still have a WAW edge."""
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main(self):
+                buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+                slot_a = buffers[0]
+                slot_b = buffers[0]
+                lhs = pl.create_tile([16, 32], pl.BF16, pl.Mem.Left)
+                rhs = pl.create_tile([32, 128], pl.BF16, pl.Mem.Right)
+                _first = pl.tile.matmul(lhs, rhs, out=slot_a)
+                _second = pl.tile.matmul(lhs, rhs, out=slot_b)
+
+        body = _seq_body(P, "main")
+        stmts = body.stmts
+        graph = dep_analysis.build_stmt_dependency_graph(body)
+        assert stmts[5] in graph.get_predecessors(stmts[6])
+
+    def test_destination_writes_to_distinct_constant_slots_are_independent(self):
+        """Proven-distinct constant slots do not gain a false WAW edge."""
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main(self):
+                buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+                slot_a = buffers[0]
+                slot_b = buffers[1]
+                lhs = pl.create_tile([16, 32], pl.BF16, pl.Mem.Left)
+                rhs = pl.create_tile([32, 128], pl.BF16, pl.Mem.Right)
+                _first = pl.tile.matmul(lhs, rhs, out=slot_a)
+                _second = pl.tile.matmul(lhs, rhs, out=slot_b)
+
+        body = _seq_body(P, "main")
+        stmts = body.stmts
+        graph = dep_analysis.build_stmt_dependency_graph(body)
+        assert stmts[5] not in graph.get_predecessors(stmts[6])
+
+    def test_cloned_modulo_residues_are_proven_distinct(self):
+        """``i % 2`` and ``(i + 1) % 2`` select different slots for every i."""
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main(self, i: pl.Scalar[pl.INDEX]):
+                buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+                index_a: pl.Scalar[pl.INDEX] = i % 2
+                index_b: pl.Scalar[pl.INDEX] = (i + 1) % 2
+                slot_a = buffers[index_a]
+                slot_b = buffers[index_b]
+                lhs = pl.create_tile([16, 32], pl.BF16, pl.Mem.Left)
+                rhs = pl.create_tile([32, 128], pl.BF16, pl.Mem.Right)
+                _first = pl.tile.matmul(lhs, rhs, out=slot_a)
+                _second = pl.tile.matmul(lhs, rhs, out=slot_b)
+
+        body = _seq_body(P, "main")
+        stmts = body.stmts
+        graph = dep_analysis.build_stmt_dependency_graph(body)
+        assert stmts[7] not in graph.get_predecessors(stmts[8])
+
 
 # =============================================================================
 # InOut-use discipline
