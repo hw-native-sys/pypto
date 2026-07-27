@@ -16,6 +16,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from pypto.tools.ir_trace.cli import main
 from pypto.tools.ir_trace.diff import build_trace, highlight_python
 from pypto.tools.ir_trace.discovery import discover_snapshots
 from pypto.tools.ir_trace.html import render_html
@@ -88,6 +89,77 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
         """
     )
     return subprocess.run([node, "-e", harness], check=False, capture_output=True, text=True)
+
+
+def test_cli_writes_default_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main([str(dump)]) == 0
+    assert (tmp_path / "ir_trace.html").read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_cli_reports_domain_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    assert main([str(tmp_path / "missing")]) == 1
+    assert "pypto-ir-trace: error: input directory does not exist" in capsys.readouterr().err
+
+
+def test_cli_writes_explicit_report(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "custom.html"
+
+    assert main([str(dump), "--output", str(output), "--context", "0"]) == 0
+    assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+
+def test_cli_rejects_negative_context(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    assert main([str(tmp_path / "passes_dump"), "--context", "-1"]) == 2
+    assert (
+        "pypto-ir-trace: error: argument --context: must be non-negative, got -1" in capsys.readouterr().err
+    )
+
+
+def test_cli_reports_missing_output_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "missing" / "trace.html"
+
+    assert main([str(dump), "--output", str(output)]) == 1
+    assert (
+        f"pypto-ir-trace: error: output directory does not exist: {output.parent}" in capsys.readouterr().err
+    )
+    assert not output.exists()
+
+
+def test_cli_cleans_up_temporary_file_when_replacement_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    output = tmp_path / "trace.html"
+    output.write_text("existing report", encoding="utf-8")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    assert main([str(dump), "--output", str(output)]) == 1
+    assert "pypto-ir-trace: error: failed to write" in capsys.readouterr().err
+    assert output.read_text(encoding="utf-8") == "existing report"
+    assert list(tmp_path.glob(".trace.html.*.tmp")) == []
 
 
 def test_build_trace_counts_and_aligns_replace(tmp_path: Path):

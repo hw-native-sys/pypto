@@ -36,6 +36,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13"
 ]
 
+[project.scripts]
+pypto-ir-trace = "pypto.tools.ir_trace.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
