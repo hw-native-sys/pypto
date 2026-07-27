@@ -4884,6 +4884,35 @@ class TestWriteValidRegionUnion:
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is None
 
+    def test_assemble_padded_source_does_not_disturb_the_target_beyond_it(self):
+        """An ISA-padded source moves its valid region, not its allocation.
+
+        Codegen emits ``pto.subview %dst[...] sizes [R, C] valid [Vr, Vc]`` and
+        moves into that view, so the band between the source's valid extent and
+        its allocation is addressed but not transferred. The target keeps what it
+        had there, which is why a fully valid target stays fully valid and the
+        ISA-padding idiom of PR #1528 is accepted.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
+        # 8 of 16 rows real -- the classic fixed-width staging tile.
+        source = self._partial_tile([16, 128], [8, 128], name="src")
+
+        result_type = tile.assemble(target, source, [0, 0]).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None
+
+    def test_assemble_padded_source_appends_only_its_valid_region(self):
+        """The append grows by the source's real extent, not its allocation."""
+        target = self._partial_tile([64, 128], [20, 128], name="dst")
+        source = self._partial_tile([16, 128], [8, 128], name="src")
+
+        result_type = tile.assemble(target, source, [20, 0]).type
+
+        # 8 real rows land at 20-27; the allocation's remaining 8 rows move nothing.
+        assert self._tile_valid_of(result_type) == [28, 128]
+
     def test_assemble_contiguous_growth_extends_one_dimension(self):
         """An append that abuts the target grows exactly that axis."""
         target = self._partial_tile([64, 128], [20, 128], name="dst")
