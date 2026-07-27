@@ -129,6 +129,11 @@ class Backtrace {
 
   /**
    * @brief Error callback for libbacktrace
+   *
+   * Writes the failure to stderr, but only the first time a given (msg, errnum) pair is seen.
+   * A platform that cannot symbolize at all reports the same failure on every captured trace,
+   * which would otherwise emit the same lines on every exception PyPTO throws.
+   *
    * @param data User data pointer
    * @param msg Error message from libbacktrace
    * @param errnum Error number

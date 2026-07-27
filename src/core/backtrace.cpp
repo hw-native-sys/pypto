@@ -17,8 +17,11 @@
 #include <cstdio>
 #include <fstream>
 #include <ios>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -74,10 +77,27 @@ Backtrace::Backtrace() {
 }
 
 void Backtrace::ErrorCallback(void* data, const char* msg, int errnum) {
-  // Always report libbacktrace errors to stderr so failures in backtrace generation are not silent
-  if (msg) {
-    fprintf(stderr, "libbacktrace error: %s (errno: %d)\n", msg, errnum);
+  // Report libbacktrace errors to stderr so failures in backtrace generation are not silent, but
+  // report each distinct message only once. When a platform cannot supply symbol information at
+  // all, the same failure repeats without bound. macOS is the case in practice: upstream
+  // libbacktrace accepts only MH_EXECUTE / MH_DYLIB / MH_DSYM Mach-O files, and a CPython
+  // extension module is an MH_BUNDLE. Its dyld initialization path still succeeds overall, so it
+  // installs macho_nodebug as the fileline handler — and that fires once per *frame* of every
+  // captured trace, on top of one rejection message per loaded bundle.
+  if (msg == nullptr) {
+    return;
   }
+
+  // The state is created with threaded=1, so the dedupe set needs its own lock. Holding it across
+  // the write also keeps concurrent reports from interleaving.
+  static std::mutex reported_mutex;
+  static std::set<std::pair<std::string, int>> reported;
+  std::scoped_lock lock(reported_mutex);
+  if (!reported.emplace(msg, errnum).second) {
+    return;
+  }
+
+  fprintf(stderr, "libbacktrace error: %s (errno: %d)\n", msg, errnum);
 }
 
 /// Clean up file paths from debug info that may contain temp build directory prefixes.

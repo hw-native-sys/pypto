@@ -57,7 +57,11 @@ set_target_properties(libbacktrace PROPERTIES
 )
 add_dependencies(libbacktrace project_libbacktrace)
 
-# Function to run dsymutil on macOS for libbacktrace debug symbols
+# Function to run dsymutil on macOS to emit a .dSYM bundle.
+#
+# Note: libbacktrace no longer consults this. Upstream's Mach-O reader rejects the MH_BUNDLE
+# filetype of a CPython extension module before it ever looks for a companion .dSYM, so macOS
+# gets no C++ stack traces regardless. Kept because the .dSYM is still what lldb reads.
 function(pypto_add_apple_dsymutil target_name)
     if(APPLE)
         find_program(DSYMUTIL dsymutil)
