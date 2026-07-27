@@ -9,12 +9,14 @@
 
 """Tests for IR pass snapshot discovery."""
 
+import errno
 import json
 import shutil
 import subprocess
 import sysconfig
 import tempfile
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -107,6 +109,66 @@ def test_cli_writes_default_report(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_cli_reports_domain_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     assert main([str(tmp_path / "missing")]) == 1
     assert "pypto-ir-trace: error: input directory does not exist" in capsys.readouterr().err
+
+
+def test_cli_reports_directory_enumeration_error_without_path_or_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    dump = _write_dump(
+        tmp_path,
+        {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
+    )
+    original_iterdir = Path.iterdir
+
+    def fail_dump_enumeration(path: Path) -> Iterator[Path]:
+        if path == dump:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_dump_enumeration)
+
+    assert main([str(dump)]) == 1
+    error = capsys.readouterr().err
+    assert "pypto-ir-trace: error: failed to enumerate passes_dump: Permission denied" in error
+    assert str(tmp_path) not in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize("path_name", ["01_after_TestPass.py", "01_after_TestPass.log"])
+def test_cli_reports_snapshot_read_error_without_path_or_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    path_name: str,
+):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "a\n",
+            "01_after_TestPass.py": "b\n",
+            "01_after_TestPass.log": "warning\n",
+        },
+    )
+    original_read_text = Path.read_text
+
+    def fail_snapshot_read(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        if path.name == path_name:
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", fail_snapshot_read)
+
+    assert main([str(dump)]) == 1
+    error = capsys.readouterr().err
+    assert f"pypto-ir-trace: error: failed to read {path_name}: Input/output error" in error
+    assert str(tmp_path) not in error
+    assert "Traceback" not in error
 
 
 def test_cli_writes_explicit_report(tmp_path: Path):
@@ -598,6 +660,40 @@ def test_viewer_clears_details_when_filters_hide_every_pass(tmp_path: Path):
         if (!elements["copy-before"].disabled || !elements["expand-all"].disabled) {
           throw new Error("snapshot controls remained enabled");
         }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_selects_closest_visible_pass_when_filter_hides_selection(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "a\n",
+            "01_after_NoopBefore.py": "a\n",
+            "02_after_ChangedTwo.py": "b\n",
+            "03_after_ChangedThree.py": "c\n",
+            "04_after_ChangedFour.py": "d\n",
+            "05_after_NoopAfter.py": "d\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        selectPass(4);
+        elements["changed-filter"].checked = false;
+        elements["changed-filter"].listeners.change();
+        if (selectedIndex !== 5) throw new Error("closest visible pass was not selected");
+
+        elements["changed-filter"].checked = true;
+        elements["changed-filter"].listeners.change();
+        selectPass(3);
+        elements["changed-filter"].checked = false;
+        elements["changed-filter"].listeners.change();
+        if (selectedIndex !== 1) throw new Error("lower-index pass did not win an equal-distance tie");
         """,
     )
 

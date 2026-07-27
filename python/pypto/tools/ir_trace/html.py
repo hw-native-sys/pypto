@@ -321,6 +321,16 @@ function visiblePasses() {
   );
 }
 
+function closestVisiblePass(passes, index) {
+  if (index === null) return passes[0];
+  return passes.reduce((closest, trace) => {
+    const distance = Math.abs(trace.index - index);
+    const closestDistance = Math.abs(closest.index - index);
+    // Passes are index-ordered; keeping the first pass makes lower indexes win ties.
+    return distance < closestDistance ? trace : closest;
+  });
+}
+
 function currentTrace() {
   return data.passes.find((trace) => trace.index === selectedIndex);
 }
@@ -498,7 +508,7 @@ function toggleTheme() {
 function applyFilters() {
   const passes = visiblePasses();
   if (!passes.some((trace) => trace.index === selectedIndex)) {
-    if (passes[0]) selectPass(passes[0].index);
+    if (passes[0]) selectPass(closestVisiblePass(passes, selectedIndex).index);
     else {
       clearDetail("No passes match the filters.");
       renderSidebar();

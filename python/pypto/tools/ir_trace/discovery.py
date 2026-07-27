@@ -18,13 +18,28 @@ _PASS_RE = re.compile(r"^(?P<index>\d+)_after_(?P<name>.+)\.py$")
 _NUMERIC_PY_RE = re.compile(r"^\d+_.*\.py$")
 
 
+def _input_io_error(action: str, path: Path, error: OSError) -> IRTraceError:
+    reason = error.strerror or "I/O error"
+    return IRTraceError(f"failed to {action} {path.name}: {reason}")
+
+
 def _read_utf8(path: Path) -> str:
-    if not path.is_file():
-        raise IRTraceError(f"{path.name} is not a file")
     try:
+        if not path.is_file():
+            raise IRTraceError(f"{path.name} is not a file")
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise IRTraceError(f"{path.name} is not valid UTF-8") from exc
+    except OSError as exc:
+        raise _input_io_error("read", path, exc) from exc
+
+
+def _read_optional_utf8(path: Path) -> str | None:
+    try:
+        exists = path.exists()
+    except OSError as exc:
+        raise _input_io_error("read", path, exc) from exc
+    return _read_utf8(path) if exists else None
 
 
 def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
@@ -48,8 +63,13 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
     if not frontend.is_file():
         raise IRTraceError(f"missing 00_frontend.py in {directory}")
 
+    try:
+        paths = sorted(directory.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise _input_io_error("enumerate", directory, exc) from exc
+
     indexed: dict[int, tuple[str, Path]] = {}
-    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+    for path in paths:
         match = _PASS_RE.fullmatch(path.name)
         if match:
             index = int(match.group("index"))
@@ -82,7 +102,7 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
     for index, (name, path) in sorted(indexed.items()):
         text = _read_utf8(path)
         warning_path = path.with_suffix(".log")
-        warning_text = _read_utf8(warning_path) if warning_path.exists() else None
+        warning_text = _read_optional_utf8(warning_path)
         snapshots.append(
             Snapshot(
                 index=index,
