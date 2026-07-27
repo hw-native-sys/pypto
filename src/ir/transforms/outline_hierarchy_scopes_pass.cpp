@@ -12,12 +12,16 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -28,6 +32,46 @@ namespace pypto {
 namespace ir {
 
 namespace pass {
+
+namespace {
+
+/// Assert no ``HierarchyScopeStmt`` in @p func carries a dispatch predicate.
+///
+/// A Hierarchy scope is outlined into an Opaque level/role function that
+/// orchestration codegen never dispatches as a task, so a ``kAttrPredicate`` on
+/// one has no runtime carrier and would be silently dropped. The parser rejects
+/// ``pl.at(level != CORE_GROUP, predicate=...)``; ``ScopeOutliner::OutlineScope``
+/// re-asserts it for the scopes it outlines.
+///
+/// Run before the ``Opaque``-only skip below, because that skip is exactly what
+/// the OutlineScope backstop cannot see: a hand-built or deserialized program
+/// whose predicated Hierarchy scope sits in an Orchestration body is never
+/// handed to a ``ScopeOutliner`` at all, and would otherwise survive the whole
+/// pipeline with its attr intact.
+void AssertNoHierarchyDispatchPredicate(const FunctionPtr& func) {
+  class HierarchyPredicateFinder : public IRVisitor {
+   public:
+    explicit HierarchyPredicateFinder(std::string func_name) : func_name_(std::move(func_name)) {}
+
+   protected:
+    void VisitStmt_(const HierarchyScopeStmtPtr& op) override {
+      INTERNAL_CHECK_SPAN(!op->GetAttr<ExprPtr>(kAttrPredicate, nullptr), op->span_)
+          << "Internal error: a Hierarchy scope in function '" << func_name_
+          << "' carries a dispatch predicate (kAttrPredicate). It is outlined into an Opaque "
+             "level/role function that orchestration codegen never dispatches as a task, so the "
+             "predicate would be silently dropped. The parser must reject this at parse time.";
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    std::string func_name_;
+  };
+
+  HierarchyPredicateFinder finder(func->name_);
+  finder.VisitStmt(func->body_);
+}
+
+}  // namespace
 
 /**
  * @brief Pass to outline Hierarchy scopes into separate functions with level/role
@@ -66,6 +110,10 @@ Pass OutlineHierarchyScopes() {
     }
 
     for (const auto& [gvar, func] : program->functions_) {
+      // Before the function-type skip: a predicated Hierarchy scope is invalid
+      // in *any* body, and the skip below would hide it from every ScopeOutliner.
+      if (func && func->body_) AssertNoHierarchyDispatchPredicate(func);
+
       // Only process Opaque functions (hierarchy scopes appear in user-written programs)
       if (func->func_type_ != FunctionType::Opaque) {
         new_functions.push_back(func);

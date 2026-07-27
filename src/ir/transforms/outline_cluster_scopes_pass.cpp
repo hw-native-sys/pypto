@@ -27,6 +27,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -217,6 +218,50 @@ class LaunchSpecStamper : public IRMutator {
   const std::unordered_map<std::string, SpmdLaunchSpec>& specs_;
 };
 
+/// Assert no ``Submit`` inside a Group / Spmd wrapper body carries a dispatch
+/// predicate. Applied to every wrapper in the resulting program — freshly
+/// outlined here, or already declared by the input program.
+///
+/// A ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...):`` nested inside
+/// ``pl.cluster()`` / ``pl.spmd()`` is outlined into a ``Submit`` by
+/// ``OutlineIncoreScopes`` (pass 8) and then swept into the wrapper function
+/// here. Orchestration codegen builds the task from the *outer* wrapper call
+/// (``BuildSpmdCallDispatchPlan`` / ``BuildAivOnlyGroupDispatchPlan`` /
+/// ``BuildMixedGroupDispatchPlan``), so the inner predicate has no runtime
+/// carrier and would be silently dropped.
+///
+/// ``ASTParser._parse_at_predicate`` rejects the nesting where it can see it. It
+/// cannot see through an ``@pl.function(type=Inline)`` helper: the helper body
+/// parses on its own, and only ``InlineFunctions`` (pass 1) reveals which call
+/// site it lands in. So this fires on user input as readily as on hand-built or
+/// deserialized IR, and reports as ``CHECK`` rather than ``INTERNAL_CHECK``.
+void AssertNoInnerDispatchPredicate(const FunctionPtr& wrapper_func) {
+  class PredicateFinder : public IRVisitor {
+   public:
+    explicit PredicateFinder(std::string func_name) : func_name_(std::move(func_name)) {}
+
+   protected:
+    void VisitExpr_(const SubmitPtr& op) override {
+      CHECK_SPAN(!op->predicate_.has_value(), op->span_)
+          << "pl.at(..., predicate=(...)) is not supported inside pl.cluster() / pl.spmd(). It "
+             "ended up in the wrapper function '"
+          << func_name_
+          << "', which is dispatched as one task, so the predicate has no runtime carrier and "
+             "would be silently dropped. Move the predicate to the enclosing dispatch, or write "
+             "the predicated pl.at at orchestration top level. Written directly this is rejected "
+             "at parse time; it reaches here through an @pl.function(type=Inline) helper, whose "
+             "call site the parser cannot see.";
+      IRVisitor::VisitExpr_(op);
+    }
+
+   private:
+    std::string func_name_;
+  };
+
+  PredicateFinder finder(wrapper_func->name_);
+  finder.VisitStmt(wrapper_func->body_);
+}
+
 }  // namespace
 
 /**
@@ -342,6 +387,20 @@ Pass OutlineClusterScopes() {
 
     // Add all outlined functions before the originals
     all_outlined_functions.insert(all_outlined_functions.end(), new_functions.begin(), new_functions.end());
+
+    // A Group / Spmd wrapper is dispatched as a single task, so a dispatch
+    // predicate on a ``Submit`` *inside* it has no runtime carrier and would be
+    // silently dropped. The parser rejects the nesting; this is the backstop for
+    // hand-built / deserialized IR. Swept over the final function list rather
+    // than over the freshly outlined wrappers alone: a wrapper the input program
+    // already declared skips the outlining loop above and reaches the program
+    // only through ``new_functions``.
+    for (const auto& wrapper : all_outlined_functions) {
+      if (wrapper && wrapper->body_ &&
+          (wrapper->func_type_ == FunctionType::Group || wrapper->func_type_ == FunctionType::Spmd)) {
+        AssertNoInnerDispatchPredicate(wrapper);
+      }
+    }
 
     return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);
   };

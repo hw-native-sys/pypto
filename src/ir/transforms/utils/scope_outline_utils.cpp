@@ -2006,12 +2006,26 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       << "pl.at(...) containing pld.system.defer_wait cannot use "
          "allow_early_resolve=True; the waiter's TaskId must remain unresolved until its "
          "registered signal condition is satisfied";
-  // Dispatch predicate (``with pl.spmd(..., predicate=(t[i] > 0)):``). Rides
-  // on the scope from parse through SSA (which versions the Vars inside it);
-  // moved onto ``Submit::predicate_`` below, after which the attr is gone —
-  // the field is the single source of truth, so it is deliberately NOT copied
+  // Dispatch predicate (``with pl.spmd(..., predicate=(t[i] > 0)):`` or
+  // ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...):``). Rides on the
+  // scope from parse through SSA (which versions the Vars inside it); moved
+  // onto ``Submit::predicate_`` below, after which the attr is gone — the
+  // field is the single source of truth, so it is deliberately NOT copied
   // into ``submit_attrs``.
   ExprPtr scope_predicate = op->GetAttr<ExprPtr>(kAttrPredicate, nullptr);
+  if (scope_predicate) {
+    // Resolve the operand tensor to the value current *as of this scope*,
+    // exactly as ``call_args`` are resolved above. A target-kind scope skips
+    // the base ``MutateScopeAttrs`` walk (VisitScopeKind goes straight to
+    // OutlineScope), so the attr still names the pre-outline SSA version. When
+    // an earlier sibling scope wrote that tensor, the version it names is a
+    // scope-local post-store alias that no longer exists in the parent
+    // function — leaving it would emit a Submit referencing a dangling Var
+    // (UseAfterDefCheck). ``VisitExpr_(const VarPtr&)`` applies
+    // ``store_target_renames_``, whose entries for such aliases were
+    // registered when the earlier scope was outlined.
+    scope_predicate = VisitExpr(scope_predicate);
+  }
 
   // Dependency edges (or an early-resolve flag, or a dispatch predicate)
   // force the Submit shape: deps live in the typed ``Submit::deps_`` field,

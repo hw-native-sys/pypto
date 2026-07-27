@@ -615,18 +615,27 @@ class _AtKwargState:
     # ``dump_vars`` transfer), and the outliner translates it into the
     # synthesised dispatch's ``kAttrDumpVars``.
     dumps_kw: "ast.keyword | None" = field(default=None)
+    # ``predicate=(t[i] > 0)`` AST kept verbatim; resolved by
+    # ``_parse_at_predicate`` only after the level / nesting gates have run, so a
+    # misplaced predicate reports *that* rather than a shape error. The parsed
+    # comparison Expr lands on ScopeStmt.attrs[predicate] and is moved onto
+    # ``Submit::predicate_`` by the outliner.
+    predicate_kw: "ast.keyword | None" = field(default=None)
     windowize: bool = False
 
 
 _SPMD_SCOPE_NAME_SUFFIX = "_spmd"
 
 # ``pl.at()`` kwargs whose AST node is stashed verbatim on ``_AtKwargState`` for
-# later resolution (duplicate-checked, then resolved by ``_parse_at_meta``).
+# later resolution: ``deps`` / ``no_dep_args`` / ``dumps`` are duplicate-checked
+# then resolved by ``_parse_at_meta``, and ``predicate`` by
+# ``_parse_at_predicate``.
 # Maps the kwarg name to its ``_AtKwargState`` field.
 _AT_STASH_KWARGS = {
     "deps": "deps_kw",
     "no_dep_args": "no_dep_args_kw",
     "dumps": "dumps_kw",
+    "predicate": "predicate_kw",
 }
 
 # Call attrs that never appear inside a printed ``attrs={...}`` dict. On
@@ -3910,7 +3919,7 @@ class ASTParser:
                 span=self.span_tracker.get_span(kw),
                 hint=(
                     "Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, "
-                    "allow_early_resolve, name_hint, windowize"
+                    "allow_early_resolve, predicate, name_hint, windowize"
                 ),
             )
 
@@ -5568,8 +5577,9 @@ class ASTParser:
         # an ``Array[N, TASK_ID]`` carry. ``with pl.at(...) as tid:`` binds a
         # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
         # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
+        predicate = self._parse_at_predicate(state.predicate_kw, is_core_group, span)
         scope_attrs = self._parse_at_meta(
-            deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, span
+            deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, predicate, span
         )
         scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
         if state.windowize:
@@ -5592,9 +5602,11 @@ class ASTParser:
         # on the placeholder — they belong on the surviving scope. We pop the
         # pending-comment stack here and re-push it so the scope, emitted
         # next, absorbs them.
+        tid_var: ir.Var | None = None
         if scope_attrs is not None:
             for k, v in scope_attrs:
                 if k == "task_id_var":
+                    tid_var = v
                     leading = self.builder.pop_pending_leading_comments()
                     placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
                     self.builder.assign(v, placeholder_rhs, span=span)
@@ -5630,6 +5642,102 @@ class ASTParser:
                 attrs=scope_attrs,
             )
 
+        # Record the tensors this scope writes as produced by its ``tid``, so a
+        # later ``predicate=`` over one of them is checked against ``deps=``.
+        # Same helper (and same best-effort limits) as the ``pl.spmd`` scope
+        # form; ``_parse_scope_body`` leaks body-bound names into the enclosing
+        # scope, so the lookups below resolve.
+        if tid_var is not None:
+            self._record_scope_producer(stmt.body, tid_var)
+
+    def _parse_at_predicate(
+        self, kw: "ast.keyword | None", is_core_group: bool, span: "ir.Span"
+    ) -> "ir.Expr | None":
+        """Parse ``pl.at(..., predicate=(t[i] > 0))`` — the placements that dispatch.
+
+        A dispatch predicate only has a runtime carrier where the scope becomes
+        an independently submitted L0 task, i.e. an InCore scope that
+        ``OutlineIncoreScopes`` turns into a ``Submit`` orchestration codegen
+        dispatches. Three placements never get there and would drop it silently:
+
+        * a non-CORE_GROUP ``pl.at`` builds a Hierarchy scope, which is outlined
+          into an Opaque level/role function orchestration codegen never
+          dispatches as a task;
+        * a ``pl.at`` nested inside ``pl.cluster()`` / ``pl.spmd()`` / another
+          CORE_GROUP ``pl.at`` is folded into the enclosing Group / Spmd wrapper
+          dispatch (or into the enclosing kernel body), and codegen emits
+          ``set_predicate`` from the *outer* call only;
+        * a ``pl.at`` written directly in a function body ``OutlineIncoreScopes``
+          skips — ``Group`` / ``Spmd`` / an InCore-family kernel — is never
+          outlined into a dispatch at all, so the scope reaches codegen still
+          carrying the attr and nothing reads it.
+
+        These gates read the function being parsed, so they cannot see through an
+        ``@pl.function(type=Inline)`` helper: its body parses on its own, and only
+        ``InlineFunctions`` (pass 1) reveals which call site it lands in. A helper
+        called at orchestration top level is a legal placement, so ``Inline`` is
+        accepted here and the outlining passes re-check the placement they can
+        actually see (``AssertDispatchPredicatesHaveACarrier`` in
+        ``OutlineIncoreScopes``, ``AssertNoInnerDispatchPredicate`` in
+        ``OutlineClusterScopes``), reporting a user-facing error there.
+
+        Nesting inside a *non*-CORE_GROUP ``pl.at`` is **not** rejected: the
+        inner InCore scope is still outlined into its own ``Submit`` (whether the
+        enclosing Hierarchy scope is itself outlined or survives in place), and
+        the emitted orchestration C++ carries the same ``set_predicate`` as the
+        un-nested form.
+
+        Each rejection is raised here rather than miscompiled, mirroring
+        :meth:`_reject_spmd_submit_only_kwargs_in_cluster`. The shape checks are
+        shared with the call form via
+        :meth:`_parse_submit_predicate_kwarg`; the operand's producer must also
+        be in ``deps=`` (checked in :meth:`_parse_at_meta`, which owns the
+        resolved dep list).
+        """
+        if kw is None:
+            return None
+        if not is_core_group:
+            raise ParserSyntaxError(
+                "pl.at(predicate=...) is only supported with level=pl.Level.CORE_GROUP",
+                span=span,
+                hint="A non-CORE_GROUP pl.at builds a Hierarchy scope, which is never outlined into a "
+                "task dispatch, so the dispatch predicate would be lost. Use "
+                "pl.at(level=pl.Level.CORE_GROUP, predicate=...) or pl.spmd_submit(..., predicate=...).",
+            )
+        for kind, owner in (
+            (ir.ScopeKind.Cluster, "pl.cluster()"),
+            (ir.ScopeKind.Spmd, "pl.spmd()"),
+            (ir.ScopeKind.InCore, "another pl.at(level=pl.Level.CORE_GROUP)"),
+        ):
+            if self._is_inside_scope(kind):
+                raise ParserSyntaxError(
+                    f"`pl.at(..., predicate=(...))` cannot be nested inside `{owner}` — the inner "
+                    "dispatch is folded into the enclosing task, so the dispatch predicate would be lost.",
+                    span=span,
+                    hint="Move the predicate to the enclosing dispatch, or use a top-level "
+                    "`with pl.at(level=pl.Level.CORE_GROUP, predicate=...):`.",
+                )
+        # ``OutlineIncoreScopes`` (pass 8) only rewrites ``Opaque`` and
+        # orchestration-like bodies; a Group / Spmd / InCore-family function is
+        # left untouched, so a scope written there never becomes a dispatch and
+        # the attr rides straight through to codegen. ``Inline`` is accepted:
+        # ``InlineFunctions`` (pass 1) substitutes the body into its caller, and
+        # a caller at orchestration top level is a legal placement. Which caller
+        # it is cannot be known here, so the outlining passes re-check it.
+        if self._func_type not in (
+            ir.FunctionType.Opaque,
+            ir.FunctionType.Inline,
+        ) and not ir.is_orchestration_like(self._func_type):
+            raise ParserSyntaxError(
+                "`pl.at(..., predicate=(...))` is not supported inside a "
+                f"{self._func_type.name} function — the scope is never outlined into its own task "
+                "dispatch there, so the dispatch predicate would be lost.",
+                span=span,
+                hint="Write the predicated `with pl.at(level=pl.Level.CORE_GROUP, predicate=...):` "
+                "in the orchestration function that launches this kernel.",
+            )
+        return self._parse_submit_predicate_kwarg("pl.at()", [kw])
+
     @staticmethod
     def _append_split_slot_num_attr(
         attrs: "list[tuple[str, Any]] | None", slot_num: "int | None"
@@ -5654,15 +5762,16 @@ class ASTParser:
         dumps_kw: "ast.keyword | None",
         optional_vars: "ast.expr | None",
         allow_early_resolve: bool,
+        predicate: "ir.Expr | None",
         span: "ir.Span",
     ) -> "list[tuple[str, Any]] | None":
         """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` /
-        ``no_dep_args=`` / ``dumps=`` kwarg set and a ``with ... as <tid>:``
-        capture target.
+        ``no_dep_args=`` / ``dumps=`` / ``predicate=`` kwarg set and a
+        ``with ... as <tid>:`` capture target.
 
         Returns ``None`` when none are present, leaving the scope's ``attrs_``
         empty (the typical plain ``pl.at(...)`` case). Otherwise returns a list
-        with up to four reserved keys, always in this canonical order (so a
+        with up to six reserved keys, always in this canonical order (so a
         print -> reparse cycle reproduces it byte-for-byte; structural_equal
         compares scope attrs positionally):
 
@@ -5681,6 +5790,12 @@ class ASTParser:
             outliner translates this into the synthesised dispatch's ``kAttrDumpVars``.
           * ``task_id_var``: ``VarPtr`` — the outer-scope ``Scalar[TASK_ID]``
             Var the outliner binds to the producer TaskId tuple element.
+          * ``allow_early_resolve``: ``bool`` — speculative early-dispatch hint.
+          * ``predicate``: ``ExprPtr`` — the dispatch-predicate comparison,
+            already shape- and placement-validated by
+            :meth:`_parse_at_predicate`. Unlike the keys above this is a whole
+            Expr carrying live SSA Vars (the operand tensor and its indices);
+            the outliner moves it onto ``Submit::predicate_``.
 
         The ``tid`` Var is defined in the outer scope so subsequent statements
         (e.g. another ``pl.at(..., deps=[tid])``) can reference it.
@@ -5699,19 +5814,19 @@ class ASTParser:
             and not dump_vars
             and optional_vars is None
             and not allow_early_resolve
+            and predicate is None
         ):
             return None
 
         attrs: list[tuple[str, Any]] = []
 
-        if deps_kw is not None:
-            dep_vars = self._parse_submit_deps_kwarg("pl.at()", [deps_kw], span)
-            if dep_vars:
-                # Attr keys mirror the C++ ``kAttrManualDepEdges`` /
-                # ``kAttrTaskIdVar`` / ``kAttrArgDirOverrideVars`` /
-                # ``kAttrDumpVars`` constants (include/pypto/ir/expr.h); passed
-                # as raw strings since they are not exposed to Python.
-                attrs.append(("manual_dep_edges", dep_vars))
+        dep_vars = self._parse_submit_deps_kwarg("pl.at()", [deps_kw], span) if deps_kw is not None else []
+        if dep_vars:
+            # Attr keys mirror the C++ ``kAttrManualDepEdges`` /
+            # ``kAttrTaskIdVar`` / ``kAttrArgDirOverrideVars`` /
+            # ``kAttrDumpVars`` constants (include/pypto/ir/expr.h); passed
+            # as raw strings since they are not exposed to Python.
+            attrs.append(("manual_dep_edges", dep_vars))
 
         if no_dep_args_kw is not None:
             no_dep_vars = self._parse_at_no_dep_args_kwarg(no_dep_args_kw)
@@ -5732,10 +5847,19 @@ class ASTParser:
             self.scope_manager.define_var(optional_vars.id, tid_var, span=span)
             attrs.append(("task_id_var", tid_var))
 
-        # ``allow_early_resolve`` last (canonical order) — a plain bool the
-        # outliner reads off the scope and threads onto the synthesised Submit.
+        # ``allow_early_resolve`` — a plain bool the outliner reads off the scope
+        # and threads onto the synthesised Submit.
         if allow_early_resolve:
             attrs.append(("allow_early_resolve", True))
+
+        # ``predicate`` last (canonical order, matching the pl.spmd scope form) —
+        # an Expr, not a flag, moved onto ``Submit::predicate_`` by the outliner.
+        # The producer-in-deps contract is checked here because this is where the
+        # resolved dep list lives; ``pl.at`` accepts ``deps=`` on every form, so
+        # the default ``deps_accepted=True`` hint is always the right advice.
+        if predicate is not None:
+            self._validate_predicate_deps("pl.at()", predicate, dep_vars, span)
+            attrs.append(("predicate", predicate))
 
         return attrs if attrs else None
 

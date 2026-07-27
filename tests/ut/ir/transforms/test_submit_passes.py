@@ -264,8 +264,16 @@ def _spmd_scopes(program: ir.Program) -> list:
 
 def _predicate_operand(scope) -> ir.Var:
     """The tensor Var a scope's ``predicate`` attr reads."""
-    predicate = dict(scope.attrs.items())["predicate"]
-    operand = predicate.left
+    return _operand_of(dict(scope.attrs.items())["predicate"])
+
+
+def _operand_of(predicate) -> ir.Var:
+    """The tensor Var a predicate comparison reads, in either operand order.
+
+    Shared by the scope-attr form (before outlining) and the ``Submit.predicate``
+    field form (after), so both assert against the same extraction.
+    """
+    operand = predicate.right if isinstance(predicate.left, ir.ConstInt) else predicate.left
     while isinstance(operand, ir.Cast):
         operand = operand.operand
     assert isinstance(operand, ir.Call)  # tensor.read
@@ -406,6 +414,311 @@ def test_dce_keeps_the_predicate_operands_producer():
     assert "__FREE_VAR" not in printed, f"predicate references a dangling Var:\n{printed}"
     # The assignment itself survived, not just the name inside the predicate.
     assert "idx: pl.Scalar" in printed, printed
+
+
+# ---------------------------------------------------------------------------
+# Scope-form dispatch predicate — ``with pl.at(level=CORE_GROUP, predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# The pl.at form rides the same scope-attr rail as pl.spmd, one pass earlier
+# (OutlineIncoreScopes rather than OutlineClusterScopes). What is genuinely
+# different is *who produces the operand*: a pl.at body typically writes the
+# tensor with ``pl.store``, which the outliner exports under a fresh call-site
+# Var. The attr still names the scope-local post-store alias, so the outliner
+# must resolve it through ``store_target_renames_`` exactly as it does for the
+# synthesised call's args — otherwise the emitted Submit reads a Var that no
+# longer exists in the parent function.
+
+_AT_PREDICATE_PROGRAM = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Out[pl.Tensor[[512, 128], pl.INT32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP) as g_tid:
+            g = pl.load(rc, [0, 0], [128, 128])
+            rc = pl.store(g, [0, 0], rc)
+        with pl.at(level=pl.Level.CORE_GROUP, deps=[g_tid], predicate=(rc[0, 0] > 0)) as t:
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+
+
+def _incore_scopes(program: ir.Program) -> list:
+    """Every InCoreScopeStmt in ``main``, in source order."""
+    found: list = []
+
+    def walk(stmt) -> None:
+        if isinstance(stmt, ir.InCoreScopeStmt):
+            found.append(stmt)
+        for field in ("stmts", "body"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif value is not None:
+                walk(value)
+
+    main = program.get_function("main")
+    assert main is not None
+    walk(main.body)
+    return found
+
+
+def test_ssa_renames_at_scope_predicate_operand():
+    """The operand Var inside a pl.at scope attr is versioned like any other use."""
+    program = pl.parse_program(_AT_PREDICATE_PROGRAM)
+    before = _predicate_operand(_incore_scopes(program)[1])
+    assert before.name_hint == "rc"
+
+    after_program = passes.convert_to_ssa()(program)
+    after = _predicate_operand(_incore_scopes(after_program)[1])
+
+    assert after.unique_id != before.unique_id, "predicate operand was not SSA-versioned"
+    assert after.name_hint.startswith("rc"), after.name_hint
+
+
+def test_outlining_rebinds_a_store_produced_predicate_operand():
+    """The outliner must resolve the operand to the value current at this scope.
+
+    The gate scope writes ``rc`` via ``pl.store``, so after SSA the predicate
+    names the scope-*local* post-store alias. ``OutlineIncoreScopes`` exports
+    that store target under a fresh call-site Var and drops the alias, so an
+    unresolved predicate would leave the emitted ``Submit`` reading a Var with
+    no definition in ``main`` (printed with a ``__FREE_VAR`` suffix, and caught
+    by UseAfterDefCheck once verification runs).
+    """
+    program = pl.parse_program(_AT_PREDICATE_PROGRAM)
+    for factory in (
+        passes.inline_functions,
+        passes.unroll_loops,
+        passes.ctrl_flow_transform,
+        passes.convert_to_ssa,
+        passes.simplify,
+        passes.normalize_stmt_structure,
+        passes.flatten_call_expr,
+        passes.outline_hierarchy_scopes,
+        passes.outline_incore_scopes,
+    ):
+        program = factory()(program)
+
+    main = program.get_function("main")
+    assert main is not None
+    printed = ir.python_print(main)
+    assert "predicate=(" in printed, printed
+    assert "__FREE_VAR" not in printed, f"predicate references a dangling Var:\n{printed}"
+
+    # A dangling operand is only half the failure mode: rebinding to the *input*
+    # ``rc`` would also be defined and also print without ``__FREE_VAR``, while
+    # making the dispatch read the pre-gate value. Pin the operand to the result
+    # the gate Submit actually exports.
+    gate, expert = _submits(main.body)
+    assert expert.predicate is not None, ir.python_print(main)
+    operand = _submit_predicate_operand(expert)
+
+    # SSA has versioned the parameter by now (``rc`` -> ``rc__ssa_v0``).
+    rc_param = next(param for param in main.params if param.name_hint.startswith("rc"))
+    assert operand.unique_id != rc_param.unique_id, (
+        f"predicate operand is the pre-gate input rc, so the dispatch would read a stale value:\n{printed}"
+    )
+    exported = _tuple_result_vars(main.body, gate)
+    assert operand.unique_id in exported, (
+        "predicate operand should be the rc result exported by the gate submit, "
+        f"got {operand.name_hint} (#{operand.unique_id}); gate exports {exported}\n{printed}"
+    )
+
+
+def _submits(body) -> list:
+    """Every ``Submit`` bound by an AssignStmt under ``body``, in source order."""
+    found: list = []
+    for stmt in _flatten_stmts(body):
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Submit):
+            found.append(stmt.value)
+    return found
+
+
+def _submit_predicate_operand(submit: ir.Submit) -> ir.Var:
+    """The tensor Var a ``Submit``'s first-class ``predicate`` field reads."""
+    predicate = submit.predicate
+    assert predicate is not None
+    return _operand_of(predicate)
+
+
+def _tuple_result_vars(body, submit: ir.Submit) -> list:
+    """Unique ids of the Vars bound from ``submit``'s result tuple.
+
+    The outliner emits ``t = pl.submit(...)`` followed by one
+    ``TupleGetItemExpr`` binding per exported output, so the store target the
+    gate scope wrote reaches later statements only through one of these.
+    """
+    stmts = _flatten_stmts(body)
+    tuple_vars = {
+        stmt.var.unique_id
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.value is submit and isinstance(stmt.var, ir.Var)
+    }
+    return [
+        stmt.var.unique_id
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.var, ir.Var)
+        and isinstance(stmt.value, ir.TupleGetItemExpr)
+        and isinstance(stmt.value.tuple, ir.Var)
+        and stmt.value.tuple.unique_id in tuple_vars
+    ]
+
+
+# ``idx`` feeds nothing but the pl.at predicate's index — dead unless DCE counts
+# the scope attr as a use. The pl.spmd sibling is
+# _SCOPE_PREDICATE_LIVE_INDEX_PROGRAM above.
+_AT_PREDICATE_LIVE_INDEX_PROGRAM = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Tensor[[512, 128], pl.INT32],
+        i: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        idx = i + 1
+        with pl.at(level=pl.Level.CORE_GROUP, predicate=(rc[idx, 0] > 0)):
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+
+
+def test_dce_keeps_an_at_predicate_operands_producer():
+    """A Var used only inside a pl.at scope predicate is a live use, not dead code."""
+    program = passes.simplify()(pl.parse_program(_AT_PREDICATE_LIVE_INDEX_PROGRAM))
+    main = program.get_function("main")
+    assert main is not None
+    printed = ir.python_print(main)
+
+    assert "__FREE_VAR" not in printed, f"predicate references a dangling Var:\n{printed}"
+    assert "idx: pl.Scalar" in printed, printed
+
+
+# ---------------------------------------------------------------------------
+# The one placement the parser cannot gate: a predicated ``pl.at`` inside an
+# ``@pl.function(type=Inline)`` helper. The helper body parses on its own, so
+# ``_parse_at_predicate`` sees neither the enclosing scopes nor the caller's
+# function type; only ``InlineFunctions`` (pass 1) reveals which call site it
+# lands in. The outlining passes re-check it there and report a user-facing
+# error, which is why these are ``CHECK`` rather than ``INTERNAL_CHECK``.
+# ---------------------------------------------------------------------------
+
+_INLINE_PREDICATE_PROGRAM = """
+import pypto.language as pl
+
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Inline)
+    def helper(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Tensor[[512, 128], pl.INT32],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, predicate=(rc[0, 0] > 0)):
+            out = pl.store(pl.load(x, [0, 0], [128, 128]), [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        rc: pl.Tensor[[512, 128], pl.INT32],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+{call_site}
+        return out
+"""
+
+_OUTLINING_PIPELINE = (
+    passes.inline_functions,
+    passes.unroll_loops,
+    passes.ctrl_flow_transform,
+    passes.convert_to_ssa,
+    passes.simplify,
+    passes.normalize_stmt_structure,
+    passes.flatten_call_expr,
+    passes.outline_hierarchy_scopes,
+    passes.outline_incore_scopes,
+    passes.outline_cluster_scopes,
+)
+
+
+def _run_outlining(call_site: str):
+    """Parse the inline-helper program with ``call_site`` and outline it.
+
+    Scoped to ``BASIC`` verification on purpose. Under the default ``ROUNDTRIP``
+    level the reparse of the printed IR trips the parser's own placement gate
+    first — a correct user-facing error too, but a different one, and it would
+    hide whether the pass-level check under test fires at all.
+    """
+    program = pl.parse_program(_INLINE_PREDICATE_PROGRAM.format(call_site=call_site))
+    with passes.PassContext([], passes.VerificationLevel.BASIC):
+        for factory in _OUTLINING_PIPELINE:
+            program = factory()(program)
+    return program
+
+
+@pytest.mark.parametrize(
+    "call_site,match",
+    [
+        (
+            "        with pl.cluster():\n            out = self.helper(x, out, rc)",
+            r"not supported inside pl\.cluster\(\) / pl\.spmd\(\)",
+        ),
+        (
+            "        for i in pl.spmd(4):\n            out = self.helper(x, out, rc)",
+            r"not supported nested inside pl\.spmd\(\)",
+        ),
+        (
+            "        with pl.at(level=pl.Level.CORE_GROUP):\n            out = self.helper(x, out, rc)",
+            r"not supported nested inside pl\.spmd\(\)",
+        ),
+    ],
+    ids=["cluster", "spmd", "at"],
+)
+def test_inline_helper_predicate_in_a_bad_placement_is_rejected(call_site, match):
+    """A bad placement smuggled in through an Inline helper fails as a user error.
+
+    ``ValueError`` (from ``CHECK``), not ``InternalError`` — the input is
+    ordinary DSL the parser had no way to reject, so blaming the compiler would
+    be the wrong classification.
+    """
+    with pytest.raises(ValueError, match=match):
+        _run_outlining(call_site)
+
+
+def test_inline_helper_predicate_at_top_level_still_lowers():
+    """The legal placement must keep working — the gate above is about the caller.
+
+    Pins that the fix is not "reject predicate= in Inline bodies", which would
+    drop a surface that lowers correctly.
+    """
+    program = _run_outlining("        out = self.helper(x, out, rc)")
+    main = program.get_function("main")
+    assert main is not None
+    submits = _submits(main.body)
+    assert len(submits) == 1, ir.python_print(main)
+    assert submits[0].predicate is not None, ir.python_print(main)
 
 
 if __name__ == "__main__":
