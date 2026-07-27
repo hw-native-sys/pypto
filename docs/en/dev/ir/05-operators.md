@@ -321,9 +321,9 @@ with ib.function("tile_computation") as f:
 
 ## SyncOp: Synchronization Operations
 
-**Purpose**: Hardware synchronization and barriers
-**Type**: `UnknownType` (no return), use in `EvalStmt`
-**Location**: `src/ir/op/sync_ops/sync.cpp`
+**Purpose**: Hardware synchronization and barriers, plus the TaskId and SPMD launch-shape queries sharing the `system.` namespace
+**Type**: `UnknownType` (no return, used in `EvalStmt`) for barriers; `ScalarType` for the value-binding query ops (`task_invalid`, `task_is_valid`, `available_cluster_count`, `available_aiv_count`)
+**Location**: `src/ir/op/sync_ops/` — `sync.cpp` (barriers), `task.cpp` (TaskId), `launch.cpp` (launch-shape queries)
 **Python API**: `from pypto.ir.op import system`
 
 | Operation | Description | Kwargs |
@@ -444,6 +444,8 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
+| `sync_ops/task.cpp` | SyncOp: TaskId sentinel and predicate |
+| `sync_ops/launch.cpp` | SyncOp: SPMD launch-shape queries |
 | `sync_ops/cross_core.cpp` | CrossCoreOp: tpush, tpop, pipe init, buffers |
 
 **Benefits**:

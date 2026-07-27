@@ -40,8 +40,10 @@
 //     `pl.system.available_aiv_count()`, directly or through the Var it binds.
 //     These resolve on device to the run's own geometry, so they fill their
 //     core type by construction and need no count comparison. They are the
-//     portable spelling: a literal that matches this SoC's static counts still
-//     under-fills a run that lands on a device with fewer usable cores;
+//     portable spelling: a literal matching this SoC's static counts is wrong
+//     on any run whose device reports a different usable count — too few blocks
+//     when more cores are available, too many when fewer are (which the runtime
+//     rejects outright);
 //   - anything else (a host scalar, arithmetic) — not classifiable, not checked.
 //
 // Given a launch site's width and its direct callee kernel K:

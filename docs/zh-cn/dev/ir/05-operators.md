@@ -315,9 +315,9 @@ with ib.function("tile_computation") as f:
 
 ## SyncOp：同步操作
 
-**用途**：硬件同步与屏障
-**类型**：`UnknownType`（无返回值），在 `EvalStmt` 中使用
-**位置**：`src/ir/op/sync_ops/sync.cpp`
+**用途**：硬件同步与屏障，以及共用 `system.` 命名空间的 TaskId 与 SPMD 启动形状查询
+**类型**：屏障类为 `UnknownType`（无返回值，在 `EvalStmt` 中使用）；查询类为 `ScalarType`，会绑定一个值（`task_invalid`、`task_is_valid`、`available_cluster_count`、`available_aiv_count`）
+**位置**：`src/ir/op/sync_ops/` —— `sync.cpp`（屏障）、`task.cpp`（TaskId）、`launch.cpp`（启动形状查询）
 **Python API**：`from pypto.ir.op import system`
 
 | 操作 | 描述 | Kwargs |
@@ -438,6 +438,8 @@ class CrossCoreExample:
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
 | `sync_ops/sync.cpp` | SyncOp: sync_src, sync_dst, barriers |
+| `sync_ops/task.cpp` | SyncOp：TaskId 哨兵与判定 |
+| `sync_ops/launch.cpp` | SyncOp：SPMD 启动形状查询 |
 | `sync_ops/cross_core.cpp` | CrossCoreOp: tpush, tpop, pipe init, buffers |
 
 **优势**：
