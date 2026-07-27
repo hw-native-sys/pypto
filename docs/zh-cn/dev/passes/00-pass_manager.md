@@ -79,6 +79,7 @@ struct PassProperties {
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
+| MaterializeInplaceAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -415,20 +416,21 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
 17. `InitMemRef`
 18. [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
-19. `MemoryReuse`
-20. `AllocateMemoryAddr`
-21. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
-22. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
-23. [`DeriveCallDirections`](34-derive_call_directions.md)
-24. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
-25. [`ExpandManualPhaseFence`](36-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
-26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
-27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
-28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
-29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
-30. `Simplify`
-31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
-32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
+19. [`MaterializeInplaceAliases`](30-materialize_inplace_aliases.md)（仅 PTOAS 启用的安全操作边界别名；PYPTO 下为空操作）
+20. [`MemoryReuse`](31-memory_reuse.md)
+21. [`AllocateMemoryAddr`](32-allocate_memory_addr.md)
+22. [`FoldNoOpReshape`](33-fold_no_op_reshape.md)
+23. [`FuseCreateAssembleToSlice`](34-fuse_create_assemble_to_slice.md)
+24. [`DeriveCallDirections`](35-derive_call_directions.md)
+25. [`AutoDeriveTaskDependencies`](36-auto_derive_task_dependencies.md)（runtime scope 编译器依赖；AUTO-scope 分析需要显式开启）
+26. [`ExpandManualPhaseFence`](37-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
+27. [`SynthesizeAllReduceSignals`](38-synthesize_allreduce_signals.md)（分布式：host allreduce optional signal -> explicit internal signal IR）
+28. [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md)（分布式：构造 WindowBuffer 并写 CommDomainScopeStmt wrappers in each host_orch body；无通信程序为 no-op）
+29. [`LowerHostTensorCollectives`](40-lower_host_tensor_collectives.md)（host-level tensor collectives -> internal builtin chip dispatches）
+30. [`MaterializeDistTensorCtx`](41-materialize_dist_tensor_ctx.md)（为 DistributedTensor 参数显式物化 CommCtx 参数/实参）
+31. `Simplify`
+32. [`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
+33. [`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

@@ -344,6 +344,9 @@ def init_mem_ref() -> Pass:
 def materialize_semantic_aliases() -> Pass:
     """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
 
+def materialize_inplace_aliases() -> Pass:
+    """Create the PTOAS-only operation-boundary in-place alias materialization pass."""
+
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""
 

@@ -278,6 +278,11 @@ inline const PassProperties kMaterializeSemanticAliasesProperties{
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::NormalizedStmtStructure}};
 
+inline const PassProperties kMaterializeInplaceAliasesProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::NormalizedStmtStructure}};
+
 inline const PassProperties kMemoryReuseProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},

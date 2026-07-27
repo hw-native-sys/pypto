@@ -651,6 +651,257 @@ class TestAutoTileMatmulL0MNTiling:
     per-sub-tile stores in SSA form.
     """
 
+    @staticmethod
+    def _vec_left_pv_full_store_program(n_dim: int = 512):
+        @pl.program
+        class VecLeftPVFullStoreProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 128], pl.BF16],
+                rhs: pl.Tensor[[128, n_dim], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, n_dim], pl.FP32]],
+            ) -> pl.Tensor[[32, n_dim], pl.FP32]:
+                lhs_vec: pl.Tile[[32, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+                    lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec
+                )
+                rhs_mat: pl.Tile[[128, n_dim], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [128, n_dim], target_memory=pl.Mem.Mat
+                )
+                result: pl.Tile[[32, n_dim], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_vec, rhs_mat)
+                out_result = pl.tile.store(result, [0, 0], out)
+                return out_result
+
+        return VecLeftPVFullStoreProg
+
+    @staticmethod
+    def _vec_left_pv_slice_store_program(n_dim: int = 512):
+        @pl.program
+        class VecLeftPVSliceStoreProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 128], pl.BF16],
+                rhs: pl.Tensor[[128, n_dim], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, n_dim], pl.FP32]],
+            ) -> pl.Tensor[[32, n_dim], pl.FP32]:
+                lhs_vec: pl.Tile[[32, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+                    lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec
+                )
+                rhs_mat: pl.Tile[[128, n_dim], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [128, n_dim], target_memory=pl.Mem.Mat
+                )
+                result: pl.Tile[[32, n_dim], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_vec, rhs_mat)
+                top: pl.Tile[[16, n_dim], pl.FP32, pl.Mem.Acc] = pl.tile.slice(result, [16, n_dim], [0, 0])
+                out_top = pl.tile.store(top, [0, 0], out)
+                bottom: pl.Tile[[16, n_dim], pl.FP32, pl.Mem.Acc] = pl.tile.slice(
+                    result, [16, n_dim], [16, 0]
+                )
+                out_bottom = pl.tile.store(bottom, [16, 0], out_top)
+                return out_bottom
+
+        return VecLeftPVSliceStoreProg
+
+    @staticmethod
+    def _vec_left_pv_full_store_expected():
+        @pl.program
+        class VecLeftPVFullStoreExpected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 512], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+            ) -> pl.Tensor[[32, 512], pl.FP32]:
+                lhs_vec: pl.Tile[[32, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+                    lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec
+                )
+                rhs_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+                )
+                lhs_mat: pl.Tile[[32, 128], pl.BF16, pl.Mem.Mat] = pl.tile.move(
+                    lhs_vec, target_memory=pl.Mem.Mat
+                )
+                for row, (out_outer,) in pl.pipeline(
+                    0,
+                    32,
+                    32,
+                    init_values=(out,),
+                    stage=2,
+                    attrs={"pipeline_overlap_stores": False},
+                ):
+                    left: pl.Tile[[32, 128], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, row, 0, [32, 128], target_memory=pl.Mem.Left
+                    )
+                    for col, (out_inner,) in pl.pipeline(
+                        0,
+                        512,
+                        128,
+                        init_values=(out_outer,),
+                        stage=2,
+                        attrs={"pipeline_overlap_stores": False},
+                    ):
+                        right: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                            rhs_mat, 0, col, [128, 128], target_memory=pl.Mem.Right
+                        )
+                        acc: pl.Tile[[32, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(left, right)
+                        out_next = pl.tile.store(acc, [row, col], out_inner)
+                        out_inner_result = pl.yield_(out_next)
+                    out_outer_result = pl.yield_(out_inner_result)
+                return out_outer_result  # pyright: ignore[reportReturnType]
+
+        return VecLeftPVFullStoreExpected
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_vec_left_pv_full_store_tiles_n_and_stages_lhs_once(self, planner):
+        """The DeepSeek PV shape stages Vec A once and N-tiles the oversized B."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        before = self._vec_left_pv_full_store_program()
+        with passes.PassContext([], memory_planner=planner):
+            after = passes.auto_tile_matmul_l0()(before)
+
+        printed = ir.python_print(after)
+        assert printed.count("pl.tile.move(") == 1
+        assert "target_memory=pl.Mem.Mat" in printed
+        assert "[128, 128], target_memory=pl.Mem.Right" in printed
+        assert "[128, 512], target_memory=pl.Mem.Right" not in printed
+        ir.assert_structural_equal(after, self._vec_left_pv_full_store_expected())
+        _assert_ssa_valid(after, f"vec_left_pv_full_store_{planner}")
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_vec_left_pv_disjoint_row_slice_stores_are_distributed(self, planner):
+        """Two full-N row slices are folded into every generated N subtile."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        before = self._vec_left_pv_slice_store_program()
+        with passes.PassContext([], memory_planner=planner):
+            after = passes.auto_tile_matmul_l0()(before)
+
+        printed = ir.python_print(after)
+        assert printed.count("pl.tile.move(") == 1
+        assert "[128, 128], target_memory=pl.Mem.Right" in printed
+        assert "pl.tile.slice(result," not in printed
+        assert printed.count("pl.tile.slice(") >= 2
+        assert printed.count("pl.tile.store(") >= 2
+        _assert_ssa_valid(after, f"vec_left_pv_slice_stores_{planner}")
+
+    def test_vec_left_pv_accepts_unrolled_constant_ssa_slice_offsets(self):
+        """Unrolled model code spells row offsets as `row = 0/16` SSA defs."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ConstantSsaOffsets:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 512], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+            ) -> pl.Tensor[[32, 512], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                row0: pl.Scalar[pl.INDEX] = 0
+                top = pl.tile.slice(result, [16, 512], [row0, 0])
+                out_top = pl.tile.store(top, [0, 0], out)
+                row1: pl.Scalar[pl.INDEX] = 16
+                bottom = pl.tile.slice(result, [16, 512], [row1, 0])
+                out_bottom = pl.tile.store(bottom, [16, 0], out_top)
+                return out_bottom
+
+        after = passes.auto_tile_matmul_l0()(ConstantSsaOffsets)
+        printed = ir.python_print(after)
+        assert "[128, 512], target_memory=pl.Mem.Right" not in printed
+        assert "[128, 128], target_memory=pl.Mem.Right" in printed
+        assert "pl.tile.slice(result," not in printed
+        _assert_ssa_valid(after, "vec_left_pv_constant_ssa_offsets")
+
+    def test_vec_left_pv_partial_n_tail_is_peeled(self):
+        """N=528 emits four 128-wide blocks plus one static 16-wide tail."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        before = self._vec_left_pv_full_store_program(n_dim=528)
+        after = passes.auto_tile_matmul_l0()(before)
+        printed = ir.python_print(after)
+        assert "[128, 128], target_memory=pl.Mem.Right" in printed
+        assert "[128, 16], target_memory=pl.Mem.Right" in printed
+        _assert_ssa_valid(after, "vec_left_pv_partial_n")
+
+    def test_vec_left_pv_overlapping_row_slices_are_deferred(self, capfd):
+        """Overlapping consumer windows remain explicit and report PH-AT-006."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class OverlappingSlices:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 128], pl.BF16],
+                rhs: pl.Tensor[[128, 512], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, 512], pl.FP32]],
+            ) -> pl.Tensor[[32, 512], pl.FP32]:
+                lhs_vec: pl.Tile[[32, 128], pl.BF16, pl.Mem.Vec] = pl.tile.load(
+                    lhs, [0, 0], [32, 128], target_memory=pl.Mem.Vec
+                )
+                rhs_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat
+                )
+                result: pl.Tile[[32, 512], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_vec, rhs_mat)
+                upper = pl.tile.slice(result, [24, 512], [0, 0])
+                out_upper = pl.tile.store(upper, [0, 0], out)
+                lower = pl.tile.slice(result, [16, 512], [16, 0])
+                out_lower = pl.tile.store(lower, [16, 0], out_upper)
+                return out_lower
+
+        after = passes.auto_tile_matmul_l0()(OverlappingSlices)
+        captured = capfd.readouterr()
+        assert "PH-AT-006" in captured.err
+        assert "overlapping/dynamic slices" in captured.err
+        ir.assert_structural_equal(after, OverlappingSlices)
+
+    def test_vec_left_pv_torch_codegen_matches_matmul(self):
+        """Distributed row stores retain the complete PV numerical result."""
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        after = passes.auto_tile_matmul_l0()(self._vec_left_pv_slice_store_program())
+        namespace: dict = {}
+        exec(torch_codegen(after), namespace)  # noqa: S102
+
+        torch.manual_seed(0)
+        lhs = torch.randn(32, 128, dtype=torch.bfloat16)
+        rhs = torch.randn(128, 512, dtype=torch.bfloat16)
+        out = torch.zeros(32, 512, dtype=torch.float32)
+        namespace["kernel"](lhs, rhs, out)
+        expected = lhs.float() @ rhs.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-3, f"Vec-left PV torch-codegen relative error {rel_err:.3e}"
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+    def test_vec_left_pv_full_default_pipeline_fits_l0b(self, planner):
+        """The complete default pipeline allocates only 32 KiB Right stages."""
+        import re  # noqa: PLC0415
+
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        before = self._vec_left_pv_slice_store_program()
+        with passes.PassContext([], memory_planner=planner):
+            manager = PassManager.get_strategy(OptimizationStrategy.Default)
+            after = manager.run_passes(before)
+
+        printed = ir.python_print(after)
+        right_sizes = [int(size) for size in re.findall(r"pl\.tile\.alloc\(pl\.Mem\.Right, (\d+)\)", printed)]
+        assert right_sizes == [32768, 32768]
+        assert max(right_sizes) * 2 == 64 * 1024
+        _assert_ssa_valid(after, f"vec_left_pv_default_{planner}")
+
     def test_mn_tiling_rewrites_to_subtile_grid(self):
         """512×512 @ 512 FP32 on Ascend950 (L0c = 256 KB): the [512, 512] FP32
         output is 1 MB > L0c, so ChooseL0Tile picks m = n = 256, k = 32.  The

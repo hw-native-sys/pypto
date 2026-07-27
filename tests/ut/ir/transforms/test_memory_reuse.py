@@ -35,6 +35,14 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
+def _run_inplace_alias_materialization(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
+    """Run the shared pre-memory passes plus the PTOAS-only local alias pass."""
+    with passes.PassContext([], memory_planner=planner):
+        initialized = passes.init_mem_ref()(program)
+        semantic = passes.materialize_semantic_aliases()(initialized)
+        return passes.materialize_inplace_aliases()(semantic)
+
+
 class TestBasic:
     """Core reuse logic: chain reuse, producer-consumer, size/shape, transitive conflicts."""
 
@@ -3695,6 +3703,213 @@ class TestStorageLayoutReuseGate:
         )
 
 
+class TestMaterializeInplaceAliases:
+    """PTOAS receives only legal dst == dead-src aliases, not global packing."""
+
+    @staticmethod
+    def _safe_add_program():
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                ta: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                tb: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(b, [0, 0], [32, 32])
+                tc: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(ta, tb)
+                return pl.store(tc, [0, 0], out)
+
+        return Prog
+
+    def test_safe_last_use_add_aliases_under_ptoas(self):
+        after = _run_inplace_alias_materialization(self._safe_add_program(), passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["tc"] == bases["ta"]
+        assert bases["tc"] != bases["tb"]
+
+    def test_transitive_inplace_chain_aliases_the_root_buffer(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                ta: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                tb: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(b, [0, 0], [32, 32])
+                tc: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(ta, tb)
+                td: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.mul(tc, tb)
+                return pl.store(td, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["tc"] == bases["ta"]
+        assert bases["td"] == bases["ta"]
+
+    def test_last_use_loop_result_can_start_an_inplace_chain(self):
+        """A completed assembly carry is ordinary dead input after its loop."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                score_in: pl.Tensor[[8, 128], pl.FP32],
+                kv_in: pl.Tensor[[8, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                score_init = pl.tile.create([128, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                kv_init = pl.tile.create([128, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                score_chunk = pl.tile.load(score_in, [0, 0], [8, 128], target_memory=pl.Mem.Vec)
+                kv_chunk = pl.tile.load(kv_in, [0, 0], [8, 128], target_memory=pl.Mem.Vec)
+                for i, (score_state, kv_state) in pl.range(16, init_values=(score_init, kv_init)):
+                    row = i * 8
+                    score_next = pl.tile.assemble(score_state, score_chunk, [row, 0])
+                    kv_next = pl.tile.assemble(kv_state, kv_chunk, [row, 0])
+                    score_done, kv_done = pl.yield_(score_next, kv_next)
+                score_max = pl.tile.col_max(score_done)
+                score_exp = pl.tile.col_expand_expdif(score_done, score_max)
+                weighted = pl.tile.mul(kv_done, score_exp)
+                pooled = pl.tile.col_sum(weighted)
+                return pl.tile.store(pooled, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["score_exp"] == bases["score_init"]
+
+    def test_loop_carry_buffer_is_not_opportunistically_remapped(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[128, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                initial: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(inp, [0, 0], [32, 32])
+                for i, (acc,) in pl.range(1, 4, init_values=(initial,)):
+                    offset = i * 32
+                    chunk: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(inp, [offset, 0], [32, 32])
+                    updated: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(acc, chunk)
+                    result = pl.yield_(updated)
+                return pl.store(result, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["updated"] == bases["initial"]
+        assert bases["updated"] != bases["chunk"]
+
+    def test_pass_is_noop_under_pypto(self):
+        after = _run_inplace_alias_materialization(self._safe_add_program(), passes.MemoryPlanner.PYPTO)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["tc"] != bases["ta"]
+        assert bases["tc"] != bases["tb"]
+
+    def test_non_inplace_safe_recip_stays_separate(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                src: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(inp, [0, 0], [32, 32])
+                result: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.recip(src)
+                return pl.store(result, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["result"] != bases["src"]
+
+    def test_pad_changing_fillpad_stays_separate(self):
+        """One PTOAS SSA handle cannot change its pad metadata."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                src: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(
+                    inp, [0, 0], [32, 32], valid_shapes=[16, 32]
+                )
+                padded: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.fillpad(src, pad_value=pl.PadValue.max)
+                return pl.store(padded, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["padded"] != bases["src"]
+
+    def test_transpose_and_reduction_stay_separate(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[16, 16], pl.FP32],
+                tmp_in: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                src: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.load(inp, [0, 0], [16, 16])
+                transposed: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.transpose(src, axis1=0, axis2=1)
+                tmp: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.load(tmp_in, [0, 0], [16, 16])
+                reduced: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.row_sum(transposed, tmp)
+                return pl.store(reduced, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["transposed"] != bases["src"]
+        assert bases["reduced"] != bases["transposed"]
+        assert bases["reduced"] != bases["tmp"]
+
+    def test_explicit_move_forbid_alias_stays_separate(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                src: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(inp, [0, 0], [32, 32])
+                moved: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.move(src, target_memory=pl.Mem.Vec)
+                return pl.store(moved, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["moved"] != bases["src"]
+
+    def test_inputs_live_past_definition_are_not_aliased(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                ta: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                tb: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.load(b, [0, 0], [32, 32])
+                tc: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(ta, tb)
+                td: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(ta, tc)
+                result: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.add(tb, td)
+                return pl.store(result, [0, 0], out)
+
+        after = _run_inplace_alias_materialization(Prog, passes.MemoryPlanner.PTOAS)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["tc"] != bases["ta"]
+        assert bases["tc"] != bases["tb"]
+
+
 class TestAscend910BLoadTpopHazard:
     """MemoryReuse must not coalesce a writer that consumes a tile.load result
     and a tile.tpop_from_aic value into the load's buffer on Ascend910B split-AIV
@@ -4174,7 +4389,7 @@ class TestCapacityGatedReuse:
     afford it; when it cannot, the shed / force_legacy floor merges them (the
     fa_fused 8->1 collapse in miniature). The success metric is WAR distance /
     overlap, *never* sync-flag count (see the pipeline-stage guard in
-    docs/en/dev/passes/29-memory_reuse.md). The operands are ``tile.move``
+    docs/en/dev/passes/31-memory_reuse.md). The operands are ``tile.move``
     results (not loads), so the legacy load-only guard never protected them either.
     """
 
@@ -4584,7 +4799,7 @@ class TestCapacityGatedReuse:
 
     def test_composes_with_matmul_acc_carry(self):
         """Carry composition (#1352; see the loop-carry re-alignment in
-        docs/en/dev/passes/29-memory_reuse.md): the gate only ever *adds* separation and
+        docs/en/dev/passes/31-memory_reuse.md): the gate only ever *adds* separation and
         excludes loop carries from the packer, so capacity-gated reuse must not disturb a
         matmul_acc accumulator chain. These operands carry no pipeline_membership tags,
         so they never trip the gated residue constraint and behave like legacy. The pass

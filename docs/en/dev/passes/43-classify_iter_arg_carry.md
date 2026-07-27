@@ -26,7 +26,7 @@ array through an inner `pl.parallel` inherits the inner extent.
 
 **When to use**: last pass in the `Default` and `DebugTileOptimization`
 strategies, immediately after
-[`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md). Running last
+[`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md). Running last
 means the classified IR is exactly the IR codegen lowers.
 
 ## Alias classes
@@ -128,6 +128,6 @@ collection when that trip count is dynamic.
 
 ## See also
 
-- [MaterializeRuntimeScopes](41-materialize_runtime_scopes.md) — the pass that runs immediately before
+- [MaterializeRuntimeScopes](42-materialize_runtime_scopes.md) — the pass that runs immediately before
 - [Orchestration codegen](../codegen/01-orchestration_codegen.md) — the consumer of the stamped plan
 - [Pass manager](00-pass_manager.md)

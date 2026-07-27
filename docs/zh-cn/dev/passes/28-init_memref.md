@@ -4,11 +4,12 @@
 
 ## 概述
 
-此 Pass 执行三项任务：
+此 Pass 执行四项任务：
 
 1. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
-2. **为 TileType 和 TensorType 变量初始化 MemRef**
-3. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
+2. **在 `tile.set_validshape` 前合法化静态 view 句柄**
+3. **为 TileType 和 TensorType 变量初始化 MemRef**
+4. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
 
 内存空间从 `TileType::memory_space_` 读取（由 InferTileMemorySpace 设置）。无 `memory_space` 的变量默认为 DDR。
 
@@ -44,14 +45,15 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+2. **合法化静态 view 句柄**：当 `tile.set_validshape` 的输入是具有静态 valid shape PTO 句柄的零拷贝 view（例如 `tile.reshape`）时，先插入一个同内存空间的新 `tile.move`。该 move 产生 PTO 原地修改 `set_validshape` 所要求的动态句柄。`tile.move` 禁止输出与输入缓冲区别名，因此两种内存规划器都会保留这次物化。
+3. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
-3. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-4. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
-5. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
+5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
+6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
 
 ## 示例
 
@@ -119,6 +121,7 @@ Pass InitMemRef();
 **实现文件**：`src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
+- `MaterializeStaticViewValidShape` 在静态零拷贝 view 输入 `tile.set_validshape` 时插入同内存空间的新 move
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
   - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）、tile 别名（`a = b`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef

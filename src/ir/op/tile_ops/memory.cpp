@@ -925,6 +925,9 @@ REGISTER_OP("tile.move")
     .set_attr<TileLayout>("blayout")
     .set_attr<TileLayout>("slayout")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
+    // A move is an explicit copy. Coalescing its destination back onto the
+    // source would erase the copy and is unsafe for same-space materialization.
+    .forbid_output_alias(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMoveType(args, kwargs, "tile.move");

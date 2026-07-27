@@ -79,6 +79,7 @@ struct PassProperties {
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MaterializeSemanticAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
+| MaterializeInplaceAliases | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -415,20 +416,21 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 16. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
 17. `InitMemRef`
 18. [`MaterializeSemanticAliases`](29-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
-19. `MemoryReuse`
-20. `AllocateMemoryAddr`
-21. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
-22. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
-23. [`DeriveCallDirections`](34-derive_call_directions.md)
-24. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
-25. [`ExpandManualPhaseFence`](36-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
-26. [`SynthesizeAllReduceSignals`](37-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
-27. [`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
-28. [`LowerHostTensorCollectives`](39-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
-29. [`MaterializeDistTensorCtx`](40-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
-30. `Simplify`
-31. [`MaterializeRuntimeScopes`](41-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
-32. [`ClassifyIterArgCarry`](42-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
+19. [`MaterializeInplaceAliases`](30-materialize_inplace_aliases.md) (PTOAS-only safe operation-boundary aliases; no-op under PYPTO)
+20. [`MemoryReuse`](31-memory_reuse.md)
+21. [`AllocateMemoryAddr`](32-allocate_memory_addr.md)
+22. [`FoldNoOpReshape`](33-fold_no_op_reshape.md)
+23. [`FuseCreateAssembleToSlice`](34-fuse_create_assemble_to_slice.md)
+24. [`DeriveCallDirections`](35-derive_call_directions.md)
+25. [`AutoDeriveTaskDependencies`](36-auto_derive_task_dependencies.md) (compiler deps for runtime scopes; AUTO-scope analysis is opt-in)
+26. [`ExpandManualPhaseFence`](37-expand_manual_phase_fence.md) (manual-scope phase-fence TaskId dep compression)
+27. [`SynthesizeAllReduceSignals`](38-synthesize_allreduce_signals.md) (distributed: host allreduce optional signal -> explicit internal signal IR)
+28. [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md) (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; no-op for comm-less programs)
+29. [`LowerHostTensorCollectives`](40-lower_host_tensor_collectives.md) (host-level tensor collectives -> internal builtin chip dispatches)
+30. [`MaterializeDistTensorCtx`](41-materialize_dist_tensor_ctx.md) (explicit CommCtx params/args for DistributedTensor params)
+31. `Simplify`
+32. [`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
+33. [`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
