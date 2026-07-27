@@ -563,6 +563,30 @@ class TestFlattenTileNdTo2DDynamicValid:
         )
         assert isinstance(valid[1], ir.ConstInt) and valid[1].value == 512
 
+    def test_static_partial_valid_flattens_without_widening(self):
+        """A statically *partial* 3D tile keeps its narrower region through the flatten.
+
+        The pass synthesizes its own ``tile.reshape``, so it now runs the same
+        no-widening mapping user code does. Dropping the leading unit axis is a
+        coordinate-only rank change, so ``[1, 16, 512]`` valid ``[1, 10, 512]``
+        must land on ``[16, 512]`` valid ``[10, 512]`` — not be rounded back up
+        to the full 16 rows, which would hand codegen 6 rows of padding as if
+        they were real data.
+        """
+        before = _incore_cast_chain(shapes=[1, 16, 512], valid=[1, 10, 512], tensor_shape=[1, 16, 512])
+
+        after = passes.flatten_tile_nd_to_2d()(before)
+
+        after_func = after.get_function("cast_incore")
+        assert after_func is not None
+        loads = [c for c in _tile_calls(after_func.body) if c.op.name == ir.get_op("tile.load").name]
+        assert loads, "expected a tile.load in the flattened body"
+        load_type = cast(ir.TileType, loads[0].type)
+        assert [cast(ir.ConstInt, d).value for d in load_type.shape] == [16, 512]
+        assert load_type.tile_view is not None
+        valid = load_type.tile_view.valid_shape
+        assert [cast(ir.ConstInt, d).value for d in valid] == [10, 512]
+
     def test_static_3d_flattens(self):
         """A fully static 3D chain flattens to 2D normally."""
         before = _incore_cast_chain(shapes=[1, 8, 512], valid=[1, 8, 512], tensor_shape=[1, 8, 512])

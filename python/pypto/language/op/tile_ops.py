@@ -1818,12 +1818,22 @@ def slice(
 def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
     """Reshape tile to new shape.
 
+    The valid region is carried through, never widened: the result holds real
+    data in exactly the cells the input did. See ``pl.reshape`` for the cases
+    that always map.
+
     Args:
         tile: Input tile
-        shape: New shape dimensions (at most 2 for TileType)
+        shape: New shape dimensions. A tile is physically 2D, so a higher-rank
+            result is an intermediate that ``FlattenTileNdTo2D`` later collapses.
 
     Returns:
         Tile wrapping the reshape operation
+
+    Raises:
+        ValueError: If the element count changes, or if the input holds real
+            data in only part of its buffer and no origin-anchored region of
+            ``shape`` describes those same cells.
     """
     tile_expr = tile.unwrap()
     call_expr = _ir_ops.reshape(tile_expr, _normalize_intlike(shape))

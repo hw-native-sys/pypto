@@ -1974,11 +1974,12 @@ class ASTParser:
         reshape product check passes whether or not the source carries a
         narrower ``valid_shape`` (issue #1509).
 
-        When the source carries an explicit narrower ``valid_shape``, that
-        narrowing is carried forward via ``tensor.reshape``'s optional 3rd
-        argument; ``tile.reshape`` has no such parameter, so a narrowed tile
-        + rank-lift combo is rejected here (the user should switch to
-        ``pl.store``).
+        A narrower ``valid_shape`` survives the lift on both paths. Reshape maps
+        the source's valid region through to the result, and a lift that only
+        inserts unit axes is a coordinate-only rank change it reproduces exactly.
+        The tensor path additionally restates the lifted region through
+        ``tensor.reshape``'s optional 3rd argument (issue #1509); ``tile.reshape``
+        has no such parameter and does not need one.
         """
         # "Narrowed" means valid_shape is actually smaller than shape; a view
         # with valid_shape == shape (e.g. a tile's canonical implicit view) is
@@ -1988,20 +1989,6 @@ class ASTParser:
         is_narrowed = source_valid_shape is not None and not _shape_exprs_match(
             source_type.shape, source_valid_shape
         )
-
-        # tile.reshape has no valid_shape parameter, so a narrowed tile +
-        # rank-lift would silently drop the narrowing. Reject upfront and point
-        # users to pl.store.
-        if is_narrowed and kind_name != "tensor":
-            raise UnsupportedFeatureError(
-                "Subscript-write with rank reduction is not supported when "
-                "the source tile carries an explicit valid_shape — "
-                "tile.reshape cannot carry valid_shape across the rank lift.",
-                span=span,
-                hint="Write the tile via pl.store directly, or use slice "
-                "indices on every axis instead of scalar indices to avoid "
-                "rank reduction.",
-            )
 
         drop_set = set(drop_dims)
         unit: ir.Expr = ir.ConstInt(1, DataType.INDEX, span)
@@ -2013,12 +2000,14 @@ class ASTParser:
             it = iter(list(seq)[lead_units:])
             return [unit if d in drop_set else next(it) for d in range(len(extents))]
 
-        reshape_op = ir_op.tensor.reshape if kind_name == "tensor" else ir_op.tile.reshape
+        is_tensor = kind_name == "tensor"
+        reshape_op = ir_op.tensor.reshape if is_tensor else ir_op.tile.reshape
         reshape_args: list[list[int | ir.Expr]] = [_lift_shape(source_type.shape)]
-        if is_narrowed:
-            # Tensor path with a genuinely narrower valid_shape — carry it via
-            # reshape's optional 3rd arg so the narrowing survives the rank
-            # lift (issue #1509). Asserted non-None by the is_narrowed guard.
+        if is_narrowed and is_tensor:
+            # Tensor path with a genuinely narrower valid_shape — restate it via
+            # reshape's optional 3rd arg (issue #1509). Reshape derives the same
+            # region from the source anyway, so this only pins it explicitly.
+            # Asserted non-None by the is_narrowed guard.
             assert source_valid_shape is not None
             reshape_args.append(_lift_shape(source_valid_shape))
         return reshape_op(source_expr, *reshape_args, span=span)

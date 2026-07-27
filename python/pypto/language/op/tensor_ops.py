@@ -1611,12 +1611,21 @@ def concat(src0: Tensor, src1: Tensor) -> Tensor:
 def reshape(tensor: Tensor, shape: Sequence[IntLike]) -> Tensor:
     """Reshape tensor to new shape.
 
+    The valid region is carried through, never widened: the result holds real
+    data in exactly the cells the input did. See ``pl.reshape`` for the cases
+    that always map.
+
     Args:
         tensor: Input tensor
         shape: New shape dimensions
 
     Returns:
         Tensor wrapping the reshape operation
+
+    Raises:
+        ValueError: If the element count changes, or if the input holds real
+            data in only part of its buffer and no origin-anchored region of
+            ``shape`` describes those same cells.
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.reshape(tensor_expr, _normalize_intlike(shape))

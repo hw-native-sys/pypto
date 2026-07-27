@@ -30,6 +30,22 @@ def _tile_result_dtype(call: ir.Call) -> DataType:
     return result_type.dtype
 
 
+def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src"):
+    """A tile Var whose tile_view narrows it to `valid_shape`."""
+    span = ir.Span.unknown()
+    view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad)
+    return ir.Var(name, ir.TileType(shape, DataType.FP32, tile_view=view), span)
+
+
+def _valid_of(result_type):
+    """Effective valid extents. GetEffectiveTileView always resolves them, so
+    an absent view needs no fallback here."""
+    return [
+        d.value if isinstance(d, ir.ConstInt) else d
+        for d in result_type.get_effective_tile_view().valid_shape
+    ]
+
+
 class TestTileElementwiseOps:
     """Test suite for tile-level element-wise operators (tile-tile and tile-scalar)."""
 
@@ -2009,6 +2025,55 @@ class TestTileSliceReshapeOps:
         assert isinstance(result_type3, ir.TileType)
         assert result_type3.get_effective_tile_view().blayout == ir.TileLayout.row_major
         assert call3.kwargs == {}
+
+    # ------------------------------------------------------------------
+    # valid_shape mapping through reshape. A reshape is a zero-copy view, so it
+    # cannot invent data: the result's valid region is the source's, expressed in
+    # the target shape, and a region the target shape cannot spell as an
+    # origin-anchored box is rejected rather than rounded up to fully valid.
+    # tile.reshape and tensor.reshape share one rule, so ConvertTensorToTileOps
+    # cannot rewrite a tensor.reshape into a tile.reshape that widens it back —
+    # see the mirrored cases in test_tensor_ops.py.
+    # ------------------------------------------------------------------
+
+    def test_tile_reshape_fully_valid_input_yields_no_explicit_valid_shape(self):
+        """A fully valid source stays fully valid, canonicalized to nothing to print."""
+        span = ir.Span.unknown()
+        dims = [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)]
+        tile_var = ir.Var("src", ir.TileType(dims, DataType.FP32), span)
+
+        result_type = tile.reshape(tile_var, [16, 8]).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None or len(result_type.tile_view.valid_shape) == 0
+
+    def test_tile_reshape_maps_row_prefix_to_target_rectangle(self):
+        """Valid rows are a contiguous flat prefix: 5*16 = 80 cells = 10 rows of 8."""
+        result_type = tile.reshape(_partial_tile([8, 16], [5, 16]), [16, 8]).type
+
+        assert _valid_of(result_type) == [10, 8]
+
+    def test_tile_reshape_drops_full_unit_axis_exactly(self):
+        """Erasing a provably full unit axis preserves an arbitrary rectangle."""
+        result_type = tile.reshape(_partial_tile([1, 8, 16], [1, 8, 5]), [8, 16]).type
+
+        assert _valid_of(result_type) == [8, 5]
+
+    def test_tile_reshape_empty_region_stays_empty(self):
+        """The empty set has an exact representation in every target shape."""
+        result_type = tile.reshape(_partial_tile([8, 16], [0, 16]), [16, 8]).type
+
+        assert _valid_of(result_type) == [0, 0]
+
+    def test_tile_reshape_rejects_region_that_is_not_a_flat_prefix(self):
+        """Valid columns leave gaps between real rows, so no target rectangle spans them."""
+        with pytest.raises(ValueError, match="real data is scattered across the buffer"):
+            tile.reshape(_partial_tile([8, 16], [8, 5]), [16, 8])
+
+    def test_tile_reshape_rejects_prefix_without_a_target_rectangle(self):
+        """80 cells is not a whole number of 32-wide rows, so [4, 32] cannot spell it."""
+        with pytest.raises(ValueError, match="do not fill a whole number of rows"):
+            tile.reshape(_partial_tile([8, 16], [5, 16]), [4, 32])
 
     def test_tile_fillpad_expand(self):
         """Test tile.fillpad_expand grows the tile and fills with pad_value."""
@@ -4566,25 +4631,10 @@ class TestWindowReadValidRegion:
     """
 
     @staticmethod
-    def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src"):
-        """A tile Var whose tile_view narrows it to `valid_shape`."""
-        span = ir.Span.unknown()
-        view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad)
-        return ir.Var(name, ir.TileType(shape, DataType.FP32, tile_view=view), span)
-
-    @staticmethod
     def _partial_tensor(shape, valid_shape, name="a"):
         span = ir.Span.unknown()
         view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape)
         return ir.Var(name, ir.TensorType(shape, DataType.FP32, tensor_view=view), span)
-
-    @staticmethod
-    def _valid_of(result_type):
-        """Effective valid extents: the explicit view when set, else the shape."""
-        view = result_type.tile_view
-        if view is None or not view.valid_shape:
-            return [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
-        return [d.value if isinstance(d, ir.ConstInt) else d for d in view.valid_shape]
 
     # --- tile.slice ---------------------------------------------------------
 
@@ -4601,26 +4651,26 @@ class TestWindowReadValidRegion:
 
     def test_slice_partial_source_narrows_result(self):
         """A window over padding inherits the source tile's narrower validity."""
-        src = self._partial_tile([64, 64], [40, 50])
+        src = _partial_tile([64, 64], [40, 50])
 
         call = tile.slice(src, [32, 32], [24, 32])
 
         # rows: clamp(40 - 24, 0, 32) = 16;  cols: clamp(50 - 32, 0, 32) = 18
-        assert self._valid_of(call.type) == [16, 18]
+        assert _valid_of(call.type) == [16, 18]
 
     def test_slice_intersects_rather_than_replaces_explicit_valid_shape(self):
         """An explicit valid_shape narrows the result but cannot widen it."""
-        src = self._partial_tile([64, 64], [20, 64])
+        src = _partial_tile([64, 64], [20, 64])
 
         widening = tile.slice(src, [32, 32], [0, 0], valid_shape=[32, 32])
-        assert self._valid_of(widening.type) == [20, 32]
+        assert _valid_of(widening.type) == [20, 32]
 
         narrowing = tile.slice(src, [32, 32], [0, 0], valid_shape=[8, 4])
-        assert self._valid_of(narrowing.type) == [8, 4]
+        assert _valid_of(narrowing.type) == [8, 4]
 
     def test_slice_folds_constants_without_min_max_nesting(self):
         """Static intersections fold to a plain ConstInt, not a min/max tree."""
-        src = self._partial_tile([64, 64], [40, 64])
+        src = _partial_tile([64, 64], [40, 64])
 
         call = tile.slice(src, [32, 64], [16, 0], valid_shape=[32, 64])
 
@@ -4670,14 +4720,14 @@ class TestWindowReadValidRegion:
 
     def test_slice_drop_dims_rejected_when_axis_is_not_provably_valid(self):
         """Rank reduction erases an axis, so the axis must have nothing left to say."""
-        src = self._partial_tile([64, 64], [8, 64])
+        src = _partial_tile([64, 64], [8, 64])
 
         with pytest.raises(ValueError, match="not provably 1"):
             tile.slice(src, [1, 64], [16, 0], drop_dims=[0])
 
     def test_slice_inherits_source_pad_mode(self):
         """A read view over padded bytes keeps saying they are padded."""
-        src = self._partial_tile([64, 64], [40, 64], pad=ir.PadValue.zero)
+        src = _partial_tile([64, 64], [40, 64], pad=ir.PadValue.zero)
 
         call = tile.slice(src, [32, 64], [0, 0])
 
@@ -4695,7 +4745,7 @@ class TestWindowReadValidRegion:
         call = tile.load(src, [0, 0], [64, 128], valid_shapes=[64, 128])
 
         # The request asked for all 64 rows; only 40 exist.
-        assert self._valid_of(call.type) == [40, 128]
+        assert _valid_of(call.type) == [40, 128]
 
     def test_load_rejects_a_request_that_reads_past_the_source(self):
         """valid_shapes is what the DMA actually reads, so it must exist."""
@@ -4717,7 +4767,7 @@ class TestWindowReadValidRegion:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 128]
-        assert self._valid_of(result_type) == [36, 128]
+        assert _valid_of(result_type) == [36, 128]
 
     def test_load_clamp_narrows_an_over_reaching_request(self):
         """clamp=True cuts an over-reaching read back to the source edge."""
@@ -4727,7 +4777,7 @@ class TestWindowReadValidRegion:
         call = tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[64, 128], clamp=True)
 
         # clamp(100 - 64, 0, 64) = 36, intersected with the 64-row request -> 36.
-        assert self._valid_of(call.type) == [36, 128]
+        assert _valid_of(call.type) == [36, 128]
 
     def test_load_clamp_print_parse_roundtrip(self):
         """A clamped ragged load survives python_print -> pl.parse -> python_print."""
@@ -4828,12 +4878,12 @@ class TestWindowReadValidRegion:
 
     def test_extract_partial_source_narrows_result(self):
         """TEXTRACT repacks a window, so it can only be valid where src is."""
-        src = self._partial_tile([64, 256], [40, 100])
+        src = _partial_tile([64, 256], [40, 100])
 
         call = tile.extract(src, 16, 64, shape=[32, 32], target_memory=ir.MemorySpace.Vec)
 
         # rows: clamp(40 - 16, 0, 32) = 24;  cols: clamp(100 - 64, 0, 32) = 32
-        assert self._valid_of(call.type) == [24, 32]
+        assert _valid_of(call.type) == [24, 32]
 
 
 if __name__ == "__main__":

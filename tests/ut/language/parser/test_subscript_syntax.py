@@ -860,23 +860,44 @@ class TestTileSubscriptWrite:
         # not src.shape[0] (= the floor's lead unit).
         assert "pl.tile.reshape(row, [1, 1, 128])" in printed
 
-    def test_tile_subscript_write_rank_reduce_narrow_valid_rejected(self):
-        """Tile rank-reduce + narrow valid_shape is rejected: tile.reshape
-        cannot carry valid_shape, so the rank lift would silently lose the
-        narrowing. Force users to take the pl.store path instead."""
+    def test_tile_subscript_write_rank_reduce_carries_narrow_valid(self):
+        """Tile rank-reduce + narrow valid_shape keeps the narrowing.
 
-        with pytest.raises(UnsupportedFeatureError, match=r"tile\.reshape cannot carry valid_shape"):
+        The lift only inserts a unit axis, which tile.reshape reproduces as a
+        coordinate-only rank change, so a [8, 8] region of a 16x16 source
+        survives as [1, 8, 8]. This region is not a contiguous flat prefix --
+        only the unit-axis rule can map it -- and before reshape mapped validity
+        at all the lift silently widened it back to the full 16x16.
+        """
 
-            @pl.function
-            def bad_tile(
-                x: pl.Tensor[[32, 16, 16], pl.FP32],
-                src: pl.Tile[[16, 16], pl.FP32],
-                i: pl.Scalar[pl.INDEX],
-            ) -> pl.Tensor[[32, 16, 16], pl.FP32]:
-                t: pl.Tile[[8, 16, 16], pl.FP32] = pl.tile.load(x, [0, 0, 0], [8, 16, 16])
-                narrowed = pl.set_validshape(src, 8, 8)
-                t[i, :, :] = narrowed
-                return pl.tile.store(t, [0, 0, 0], x)
+        @pl.function
+        def narrow_tile_lift(
+            x: pl.Tensor[[32, 16, 16], pl.FP32],
+            src: pl.Tile[[16, 16], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[32, 16, 16], pl.FP32]:
+            t: pl.Tile[[8, 16, 16], pl.FP32] = pl.tile.load(x, [0, 0, 0], [8, 16, 16])
+            narrowed = pl.set_validshape(src, 8, 8)
+            t[i, :, :] = narrowed
+            return pl.tile.store(t, [0, 0, 0], x)
+
+        printed = narrow_tile_lift.as_python()
+        assert "tile.assemble" in printed
+        assert "pl.tile.reshape(narrowed, [1, 16, 16])" in printed
+
+        assert isinstance(narrow_tile_lift, ir.Function)
+        assert isinstance(narrow_tile_lift.body, ir.SeqStmts)
+        assemble_stmt = narrow_tile_lift.body.stmts[2]
+        assert isinstance(assemble_stmt, ir.AssignStmt)
+        assert isinstance(assemble_stmt.value, ir.Call)
+        reshaped = assemble_stmt.value.args[1]
+        assert isinstance(reshaped, ir.Call)
+        assert reshaped.op.name == ir.get_op("tile.reshape").name
+
+        reshaped_type = reshaped.type
+        assert isinstance(reshaped_type, ir.TileType)
+        valid = reshaped_type.get_effective_tile_view().valid_shape
+        assert [cast(ir.ConstInt, dim).value for dim in valid] == [1, 8, 8]
 
 
 if __name__ == "__main__":

@@ -711,6 +711,238 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
   }
 }
 
+namespace {
+
+// Whether axis `valid` covers all of `shape` -- the predicate the whole
+// no-widening rule turns on. Named so the three sites that only need the
+// yes/no answer read the same, leaving the tri-state to the one site that
+// reports *why* an axis is not full.
+bool IsProvablyFullExtent(const ExprPtr& valid, const ExprPtr& shape) {
+  return ProveValidExtentEqual(valid, shape) == ProofResult::kTrue;
+}
+
+// Align the input and target axes of a reshape that only inserts or erases
+// provably-full physical unit axes, returning the mapped valid shape.
+//
+// Such a reshape is a coordinate-only rank change -- rows stay rows, columns
+// stay columns -- so it preserves an arbitrary origin-anchored rectangle
+// exactly, which the flat-prefix rule below could not. Ambiguous runs of unit
+// axes are resolved by a small sequence alignment: matching equal axes is tried
+// first so a partial or empty unit axis is preserved rather than erased and
+// recreated as fully valid. An input unit axis may be erased only when its sole
+// coordinate is provably valid; an output unit axis is inserted fully valid.
+//
+// `failed` memoizes the states already proven unmappable, indexed
+// `input_dim * (out_rank + 1) + output_dim`. Without it the three moves make
+// this a backtracking search over monotone lattice paths -- Delannoy-many,
+// ~5.83^rank -- and the miss path is not rare: it is the ordinary fall-through
+// to the flat-prefix rule. Since the answer at a state depends only on that
+// state, caching failures bounds the walk at one visit per state.
+std::optional<std::vector<ExprPtr>> MapUnitAxisRankChange(const std::vector<ExprPtr>& src_valid,
+                                                          const std::vector<ExprPtr>& in_shape,
+                                                          const std::vector<ExprPtr>& new_shape,
+                                                          size_t input_dim, size_t output_dim,
+                                                          std::vector<char>* failed) {
+  const size_t state = input_dim * (new_shape.size() + 1) + output_dim;
+  INTERNAL_CHECK(state < failed->size())
+      << "Internal error: reshape unit-axis memo table is sized " << failed->size() << ", need > " << state;
+  if ((*failed)[state]) return std::nullopt;
+
+  if (input_dim == in_shape.size() && output_dim == new_shape.size()) {
+    return std::vector<ExprPtr>{};
+  }
+
+  // Match two axes carrying the same extent. Tried first so an axis that is
+  // only partially valid keeps its own extent instead of being erased and
+  // recreated as fully valid.
+  if (input_dim < in_shape.size() && output_dim < new_shape.size() &&
+      ProveValidExtentEqual(in_shape[input_dim], new_shape[output_dim]) == ProofResult::kTrue) {
+    if (auto tail =
+            MapUnitAxisRankChange(src_valid, in_shape, new_shape, input_dim + 1, output_dim + 1, failed)) {
+      tail->insert(tail->begin(), src_valid[input_dim]);
+      return tail;
+    }
+  }
+  // Erase an input unit axis -- lossless only when its sole coordinate is valid.
+  if (input_dim < in_shape.size() && IsConstValue(in_shape[input_dim], 1) &&
+      IsProvablyFullExtent(src_valid[input_dim], in_shape[input_dim])) {
+    if (auto tail =
+            MapUnitAxisRankChange(src_valid, in_shape, new_shape, input_dim + 1, output_dim, failed)) {
+      return tail;
+    }
+  }
+  // Insert a target unit axis -- one coordinate, and it holds real data.
+  if (output_dim < new_shape.size() && IsConstValue(new_shape[output_dim], 1)) {
+    if (auto tail =
+            MapUnitAxisRankChange(src_valid, in_shape, new_shape, input_dim, output_dim + 1, failed)) {
+      tail->insert(tail->begin(), new_shape[output_dim]);
+      return tail;
+    }
+  }
+  (*failed)[state] = 1;
+  return std::nullopt;
+}
+
+}  // namespace
+
+std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
+                                              const std::vector<ExprPtr>& in_shape,
+                                              const std::vector<ExprPtr>& new_shape, const Span& span,
+                                              const std::string& op_name) {
+  INTERNAL_CHECK_SPAN(src_valid.size() == in_shape.size(), span)
+      << "Internal error: " << op_name << " source valid_shape rank (" << src_valid.size()
+      << ") must match the source shape rank (" << in_shape.size()
+      << "); callers resolve the valid shape through GetValidShape";
+  CHECK_SPAN(!src_valid.empty() && !new_shape.empty(), span)
+      << op_name << ": reshape validity mapping requires non-empty input and output ranks";
+
+  // (1) A fully valid source stays fully valid. Returning the target shape
+  // verbatim keeps an unpadded program byte-identical to what it deduced before
+  // this rule existed -- the type constructor canonicalizes the redundant full
+  // valid_shape away, so no view survives.
+  bool fully_valid = true;
+  for (size_t i = 0; i < src_valid.size(); ++i) {
+    if (!IsProvablyFullExtent(src_valid[i], in_shape[i])) {
+      fully_valid = false;
+      break;
+    }
+  }
+  if (fully_valid) {
+    return new_shape;
+  }
+
+  // (2) The empty set stays empty under every reshape. This is settled before
+  // the prefix proof below because a box such as [1, 0, N] is not a flat prefix
+  // by that syntactic form, yet it denotes no cells and so has an exact
+  // representation in every target shape.
+  if (std::any_of(src_valid.begin(), src_valid.end(), IsProvablyEmptyExtent)) {
+    return std::vector<ExprPtr>(new_shape.size(), IndexZero());
+  }
+
+  // (3) A pure rank change over provably-full unit axes preserves an arbitrary
+  // rectangle, which the flat-prefix rule cannot see.
+  std::vector<char> unit_axis_failed((in_shape.size() + 1) * (new_shape.size() + 1), 0);
+  if (auto unit_mapped = MapUnitAxisRankChange(src_valid, in_shape, new_shape, 0, 0, &unit_axis_failed)) {
+    return *unit_mapped;
+  }
+
+  // (4) Otherwise the region has to occupy a contiguous flat prefix of the
+  // buffer, so that some rectangle of the target shape spans exactly the same
+  // cells. Leading axes pinned to a single valid coordinate contribute nothing
+  // to the extent; the first remaining axis carries the prefix's one free
+  // extent, and every axis below it must be full.
+  const size_t input_rank = src_valid.size();
+  size_t free_dim = 0;
+  while (free_dim + 1 < input_rank && IsConstValue(src_valid[free_dim], 1)) {
+    ++free_dim;
+  }
+
+  for (size_t i = free_dim + 1; i < input_rank; ++i) {
+    const ProofResult full = ProveValidExtentEqual(src_valid[i], in_shape[i]);
+    CHECK_SPAN(full == ProofResult::kTrue, span)
+        << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+        << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
+        << "). Dimension " << i << " is valid for " << PythonPrint(src_valid[i]) << " of "
+        << PythonPrint(in_shape[i])
+        << (full == ProofResult::kUnknown ? " (a symbolic extent that cannot be proven equal)" : "")
+        << ", so the real data is scattered across the buffer rather than filling it from the start, and "
+           "no region of the new shape describes the same cells. Reshape the full extent and narrow "
+           "afterwards, or copy the real data out first (pl.slice / pl.store).";
+  }
+
+  // The prefix is measured in elements, so every extent it spans has to be a
+  // compile-time constant.
+  int64_t trailing_volume = 1;
+  for (size_t i = free_dim + 1; i < input_rank; ++i) {
+    const auto extent = GetConstantDimension(in_shape[i]);
+    CHECK_SPAN(extent.has_value(), span)
+        << op_name << ": cannot reshape a partially-valid " << FormatShape(in_shape) << " because dimension "
+        << i << " has the runtime extent " << PythonPrint(in_shape[i]) << ". Mapping the real data into "
+        << FormatShape(new_shape)
+        << " needs its size at compile time; use a static shape, or reshape before narrowing.";
+    trailing_volume *= *extent;
+  }
+  std::vector<int64_t> target(new_shape.size());
+  for (size_t i = 0; i < new_shape.size(); ++i) {
+    const auto extent = GetConstantDimension(new_shape[i]);
+    CHECK_SPAN(extent.has_value(), span)
+        << op_name << ": cannot reshape a partially-valid " << FormatShape(in_shape) << " into "
+        << FormatShape(new_shape) << " because target dimension " << i << " has the runtime extent "
+        << PythonPrint(new_shape[i])
+        << ". Mapping the real data needs the target size at compile time; use a static shape, or "
+           "reshape before narrowing.";
+    target[i] = *extent;
+  }
+
+  // Row-major volume below each target axis: the number of elements one step
+  // along that axis advances by.
+  std::vector<int64_t> suffix(target.size(), 1);
+  for (size_t i = target.size(); i-- > 0;) {
+    suffix[i] = i + 1 < target.size() ? suffix[i + 1] * target[i + 1] : 1;
+  }
+
+  // The result box is full below its own free axis and pinned to one coordinate
+  // above it -- the target-shape spelling of "a flat prefix".
+  const ExprPtr pinned = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto build_box = [&](size_t output_free_dim, const ExprPtr& free_extent) {
+    std::vector<ExprPtr> output(new_shape.size());
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+      if (i < output_free_dim) {
+        output[i] = pinned;
+      } else if (i == output_free_dim) {
+        output[i] = free_extent;
+      } else {
+        output[i] = new_shape[i];
+      }
+    }
+    return output;
+  };
+
+  const ExprPtr& free_valid = src_valid[free_dim];
+  if (const auto extent = GetConstantDimension(free_valid)) {
+    // A static prefix maps onto the outermost target axis whose suffix volume
+    // divides it -- the prefix is then a whole number of that axis's steps.
+    const int64_t prefix_elements = *extent * trailing_volume;
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+      if (suffix[i] == 0 || prefix_elements % suffix[i] != 0) continue;
+      const int64_t output_extent = prefix_elements / suffix[i];
+      if (output_extent <= target[i]) {
+        return build_box(i, std::make_shared<ConstInt>(output_extent, DataType::INDEX, span));
+      }
+    }
+    CHECK_SPAN(false, span)
+        << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+        << " because only " << prefix_elements << " of its "
+        << (prefix_elements == 1 ? "element" : "elements") << " hold real data (valid_shape "
+        << FormatShape(src_valid) << "), and no region of " << FormatShape(new_shape)
+        << " covers exactly those " << prefix_elements
+        << " elements -- they do not fill a whole number of rows there. Pick a target shape whose "
+           "trailing dimensions divide it, or copy the real data out first (pl.slice / pl.store).";
+  }
+
+  // A dynamic prefix cannot be divided, so it survives only on a target axis
+  // whose step is exactly the input's trailing volume: the free extent then
+  // carries over unchanged. That axis has to have room for the whole free
+  // dimension, which is knowable only if the free dimension is itself static --
+  // a requirement of this branch alone, not of the static one above.
+  const auto free_physical = GetConstantDimension(in_shape[free_dim]);
+  if (free_physical.has_value()) {
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+      if (suffix[i] == trailing_volume && *free_physical <= target[i]) {
+        return build_box(i, free_valid);
+      }
+    }
+  }
+  CHECK_SPAN(false, span)
+      << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+      << " because its real data extends a runtime number of rows (" << PythonPrint(free_valid)
+      << ") and no dimension of " << FormatShape(new_shape) << " has the matching row size of "
+      << trailing_volume
+      << " elements. Keep that dimension intact in the target shape, or copy the real data out first "
+         "(pl.slice / pl.store).";
+  return {};
+}
+
 // ============================================================================
 // Slice rank-reduction (drop_dims) helpers
 // ============================================================================

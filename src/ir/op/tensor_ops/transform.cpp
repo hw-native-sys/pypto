@@ -37,9 +37,11 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -172,16 +174,38 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
                                       << " into shape with size " << new_product;
   }
 
-  // Return new TensorType with reshaped dimensions and same dtype
-  // If valid_shape is provided as 3rd argument, store it in TensorView
+  // A reshape is a zero-copy view, so it cannot invent data: the result's valid
+  // region is the source's, mapped through the reshape. A region the target
+  // shape cannot represent is rejected rather than rounded up to fully valid.
+  std::vector<ExprPtr> mapped_valid = ComputeReshapeValidShape(
+      GetValidShape(tensor_type), tensor_type->shape_, new_shape, args[0]->span_, "tensor.reshape");
+
+  // The optional 3rd argument may narrow the mapped region but may never claim
+  // data outside it. Unknown symbolic relations reject, because reshape emits
+  // no runtime guard that could cut the request back.
   if (args.size() == 3) {
     auto valid_shape_tuple = As<MakeTuple>(args[2]);
     CHECK(valid_shape_tuple) << "tensor.reshape valid_shape (3rd argument) must be a MakeTuple";
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
-    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
-                                        std::make_optional(std::move(tensor_view)));
+    const std::vector<ExprPtr>& requested = valid_shape_tuple->elements_;
+    CHECK_SPAN(requested.size() == new_shape.size(), args[2]->span_)
+        << "tensor.reshape: valid_shape rank (" << requested.size() << ") must match the target shape rank ("
+        << new_shape.size() << ")";
+    for (size_t i = 0; i < requested.size(); ++i) {
+      const ProofResult within_source = ProveValidExtentLessEqual(requested[i], mapped_valid[i]);
+      CHECK_SPAN(within_source == ProofResult::kTrue, args[2]->span_)
+          << "tensor.reshape: explicit valid_shape[" << i << "]=" << PythonPrint(requested[i])
+          << " is not provably within the source-derived extent " << PythonPrint(mapped_valid[i]);
+    }
+    mapped_valid = requested;
   }
-  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
+
+  // Return new TensorType with reshaped dimensions and same dtype. A fully valid
+  // region is canonicalized away by the constructor, leaving no view at all.
+  const PadValue pad =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->pad : PadValue::null;
+  TensorView tensor_view({}, TensorLayout::ND, std::move(mapped_valid), pad);
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                      std::make_optional(std::move(tensor_view)));
 }
 
 TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,

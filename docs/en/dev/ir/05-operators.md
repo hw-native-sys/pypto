@@ -271,7 +271,7 @@ with ib.function("tensor_example") as f:
 | **Unary** | `tile.sqrt` | Element-wise square root |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |
-| - | `tile.reshape` | Reshape tile to new dimensions (element count must match) |
+| - | `tile.reshape` | Reshape tile to new dimensions (element count must match). Carries the source's `valid_shape` through without widening it — see [Reshape and the valid region](#reshape-and-the-valid-region) |
 | - | `tile.reinterpret_view` | Zero-copy view with a different dtype and the same exact bytes; optional shape uses layout-aware inference (packed flat tiles only) |
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
@@ -280,7 +280,29 @@ with ib.function("tensor_example") as f:
 | **Scatter** | `tile.scatter` | Row-scatter `src` into `dst` at per-row indices (`pto.tscatter` index form; DPS — `dst` is in/out, the result aliases `dst`). `src`/`dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}; `indexes` dtype ∈ {I16, I32}; element-size matching rule: 4-byte dst ↔ INT32, 2-byte dst ↔ INT16, 1-byte dst ↔ INT16. |
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (DPS — `dst` is in/out). A PyPTO codegen form lowered to a `pto.tscatter` mask emission — **not** a distinct pto-isa instruction (unlike `tile.gather_mask`). See [Mask patterns](#mask-patterns). |
 
-`tile.reshape` preserves dtype and element count; `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views.
+`tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views.
+
+### Reshape and the valid region
+
+A reshape is a zero-copy view, so it cannot invent data: `tensor.reshape` and
+`tile.reshape` share one rule that carries the source's `valid_shape` into the
+target shape and never widens it. A valid region is an origin-anchored box, so
+not every source region survives a repartition — the rule maps what it can:
+
+| Source region | Result |
+| ------------- | ------ |
+| Fully valid | `new_shape` — canonicalized away, so no view survives and no existing program changes |
+| Provably empty | An all-zero box |
+| Only full unit axes added / removed | Surviving axes map 1:1; an arbitrary rectangle is preserved exactly |
+| A contiguous flat prefix | The rectangle of `new_shape` spanning those same cells, if one exists |
+| Anything else | **Rejected** — `valid_shape` cannot describe the reshaped region |
+
+So `[8, 16]` valid `[5, 16]` (a flat prefix of 80 cells) maps to `[16, 8]` valid
+`[10, 8]` and to `[128]` valid `[80]`, while `[4, 32]` is rejected — 80 cells is
+not a whole number of 32-wide rows. `[1, 8, 16]` valid `[1, 8, 5]` is not a flat
+prefix at all, yet `[8, 16]` valid `[8, 5]` is exact, because dropping a full
+unit axis keeps rows as rows. `tensor.reshape`'s optional third `valid_shape`
+operand may only *narrow* the derived region, never claim data outside it.
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

@@ -391,6 +391,43 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
                                   const Span& span);
 
 /**
+ * @brief Map an origin-anchored valid box through a reshape without widening
+ *
+ * A reshape is a zero-copy view, so it cannot invent data: the result's valid
+ * region is the source's, expressed in the target shape. ``valid_shape`` can
+ * only describe an origin-anchored box, so not every source region survives the
+ * repartition, and the ones that do not are rejected rather than rounded up.
+ *
+ * ```text
+ * 1. source fully valid                  -> new_shape
+ * 2. source provably empty               -> all-zero box
+ * 3. only full unit axes added / removed -> surviving axes map 1:1
+ * 4. contiguous flat prefix              -> rectangular box under new_shape
+ * 5. otherwise                           -> reject
+ * ```
+ *
+ * Cases 2 and 3 are exact because neither repartitions data: the empty set stays
+ * empty under every reshape, and inserting or removing a provably-full physical
+ * unit axis is a coordinate-only rank change that preserves an arbitrary
+ * rectangle. Case 4 is the general rule: a region that occupies a contiguous
+ * flat prefix of the buffer maps to whatever rectangle spans that same prefix in
+ * the target shape, provided one exists. Tensor and tile reshape share this rule.
+ *
+ * @param src_valid Effective valid shape of the source, resolved by ``GetValidShape``
+ * @param in_shape Physical shape of the source, same rank as @p src_valid
+ * @param new_shape Physical shape of the result
+ * @param span IR source location, reported when the region is rejected
+ * @param op_name Operator name, used in diagnostics
+ * @return The result valid shape, one extent per target dimension
+ * @throws pypto::ValueError when ``valid_shape`` cannot represent the reshaped
+ *         region, or when a partial region meets a dynamic extent it cannot map
+ */
+std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
+                                              const std::vector<ExprPtr>& in_shape,
+                                              const std::vector<ExprPtr>& new_shape, const Span& span,
+                                              const std::string& op_name);
+
+/**
  * @brief Reject a reduction whose input is empty on some axis
  *
  * A reduction consumes its input's *valid* region: the backend kernels bound their loops by the

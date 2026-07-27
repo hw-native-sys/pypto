@@ -2740,6 +2740,143 @@ def test_tensor_reshape_with_valid_shape():
     assert len(result_type.tensor_view.valid_shape) == 1
 
 
+# ---- valid_shape mapping through reshape ---------------------------------------------------
+#
+# A reshape is a zero-copy view, so it cannot invent data: the result's valid region is the
+# source's, expressed in the target shape. `valid_shape` can only describe an origin-anchored
+# box, so a region the target shape cannot spell is rejected rather than rounded up to fully
+# valid. `tile.reshape` is held to the same rule — see test_tile_ops.py.
+
+
+def test_tensor_reshape_fully_valid_input_yields_no_explicit_view():
+    """A fully valid source stays fully valid, canonicalized to no view at all."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([8, 16], DataType.FP32), span)
+
+    result_type = ir.op.tensor.reshape(tensor_var, [16, 8]).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
+def test_tensor_reshape_maps_row_prefix_to_target_rectangle():
+    """Valid rows are a contiguous flat prefix: 5*16 = 80 cells = 10 rows of 8."""
+    result_type = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8]).type
+
+    assert _valid_of(result_type) == [10, 8]
+
+
+def test_tensor_reshape_maps_prefix_through_flatten():
+    """Flattening keeps the prefix as a single extent."""
+    result_type = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [128]).type
+
+    assert _valid_of(result_type) == [80]
+
+
+def test_tensor_reshape_drops_full_unit_axis_exactly():
+    """Erasing a provably full unit axis is a coordinate-only rank change.
+
+    Rows stay rows and columns stay columns, so an arbitrary rectangle survives —
+    including a column-partial region, which is not a contiguous flat prefix.
+    """
+
+    def dropped(valid):
+        return _valid_of(ir.op.tensor.reshape(_partial_tensor_var([1, 8, 16], valid), [8, 16]).type)
+
+    assert dropped([1, 5, 16]) == [5, 16]  # also reachable as a flat prefix
+    assert dropped([1, 8, 5]) == [8, 5]  # column-partial — unit-axis rule only
+    assert dropped([1, 5, 5]) == [5, 5]  # partial on both axes — unit-axis rule only
+
+
+def test_tensor_reshape_lifts_unit_axis_exactly():
+    """The inverse rank change — inserting a unit axis — is equally exact."""
+    result_type = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [8, 5]), [1, 8, 16]).type
+
+    assert _valid_of(result_type) == [1, 8, 5]
+
+
+def test_tensor_reshape_empty_region_stays_empty():
+    """The empty set has an exact representation in every target shape."""
+    result_type = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [0, 16]), [16, 8]).type
+
+    assert _valid_of(result_type) == [0, 0]
+
+
+def test_tensor_reshape_preserves_symbolic_row_prefix():
+    """A dynamic row count survives onto a target axis whose step is the trailing volume.
+
+    The target is repartitioned ([8, 16] -> [8, 4, 4]) so the unit-axis rule cannot
+    apply — 16 != 4 and neither axis is a unit — which pins the dynamic-prefix
+    branch specifically. An identity reshape would be answered by the unit-axis
+    rule first and prove nothing about this one.
+    """
+    span = ir.Span.unknown()
+    vrow = ir.Var("vrow", ir.ScalarType(DataType.INDEX), span)
+    view = ir.TensorView([], ir.TensorLayout.ND, valid_shape=[vrow, ir.ConstInt(16, DataType.INDEX, span)])
+    tensor_var = ir.Var("t", ir.TensorType([8, 16], DataType.FP32, None, view), span)
+
+    result_type = ir.op.tensor.reshape(tensor_var, [8, 4, 4]).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    valid = result_type.tensor_view.valid_shape
+    assert valid[0] == vrow  # the dynamic prefix carries over unchanged
+    assert _const_int_values(valid[1:]) == [4, 4]
+
+
+def test_tensor_reshape_rejects_symbolic_prefix_without_a_target_axis():
+    """No target axis preserves the trailing volume, so the dynamic prefix is rejected."""
+    span = ir.Span.unknown()
+    vrow = ir.Var("vrow", ir.ScalarType(DataType.INDEX), span)
+    view = ir.TensorView([], ir.TensorLayout.ND, valid_shape=[vrow, ir.ConstInt(16, DataType.INDEX, span)])
+    tensor_var = ir.Var("t", ir.TensorType([8, 16], DataType.FP32, None, view), span)
+
+    with pytest.raises(ValueError, match="has the matching row size"):
+        ir.op.tensor.reshape(tensor_var, [32, 4])
+
+
+def test_tensor_reshape_carries_pad_alongside_the_mapped_region():
+    """Padding describes the invalid cells, so it travels with the region it describes.
+
+    A view of the same buffer keeps its fill convention; dropping it would leave
+    downstream unable to tell zero-filled padding from unknown bytes.
+    """
+    src = _partial_tensor_var([8, 16], [5, 16], pad=ir.PadValue.zero)
+
+    result_type = ir.op.tensor.reshape(src, [16, 8]).type
+
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.pad == ir.PadValue.zero
+    assert _valid_of(result_type) == [10, 8]
+
+
+def test_tensor_reshape_rejects_region_that_is_not_a_flat_prefix():
+    """Valid columns leave gaps between real rows, so no target rectangle spans them."""
+    with pytest.raises(ValueError, match="real data is scattered across the buffer"):
+        ir.op.tensor.reshape(_partial_tensor_var([8, 16], [8, 5]), [16, 8])
+
+
+def test_tensor_reshape_rejects_prefix_without_a_target_rectangle():
+    """80 cells is not a whole number of 32-wide rows, so [4, 32] cannot spell it."""
+    with pytest.raises(ValueError, match="do not fill a whole number of rows"):
+        ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [4, 32])
+
+
+def test_tensor_reshape_explicit_valid_shape_may_narrow_the_mapped_region():
+    """The 3rd argument narrows what the source supplies."""
+    call = ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8], valid_shape=[4, 8])
+
+    assert len(call.args) == 3
+    assert _valid_of(call.type) == [4, 8]
+
+
+def test_tensor_reshape_explicit_valid_shape_may_not_widen_the_mapped_region():
+    """The 3rd argument cannot claim data the source does not have."""
+    with pytest.raises(ValueError, match="not provably within the source-derived extent"):
+        ir.op.tensor.reshape(_partial_tensor_var([8, 16], [5, 16]), [16, 8], valid_shape=[12, 8])
+
+
 def test_tensor_transpose_with_valid_shape():
     """Test tensor.transpose with valid_shape parameter."""
     span = ir.Span.unknown()

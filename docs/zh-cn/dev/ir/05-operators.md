@@ -265,7 +265,7 @@ with ib.function("tensor_example") as f:
 | **一元** | `tile.sqrt` | 逐元素平方根 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat） |
-| - | `tile.reshape` | 重塑 tile 维度（元素总数须一致） |
+| - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
 | - | `tile.reinterpret_view` | 以不同 dtype 对完全相同的字节做零拷贝视图；可选 shape 默认按 layout 推导（仅支持紧密、非分形 tile） |
 | - | `tile.transpose` | 交换 tile 的两个轴 |
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
@@ -274,7 +274,28 @@ with ib.function("tensor_example") as f:
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（DPS：`dst` 为 in/out）。这是 PyPTO codegen 层形式，下降为 `pto.tscatter` 掩码发射 —— **并非**独立的 pto-isa 指令（与 `tile.gather_mask` 不同）。掩码语义见[掩码模式](#掩码模式)。 |
 
-`tile.reshape` 保持 dtype 和元素总数；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
+`tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
+
+### reshape 与有效区域（valid region）
+
+reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `tile.reshape` 共用
+同一条规则，把源的 `valid_shape` 映射到目标 shape，且绝不扩大。有效区域只能表示为
+以原点为锚的矩形框，因此并非所有源区域都能在重新切分后保留：
+
+| 源区域 | 结果 |
+| ------ | ---- |
+| 完全有效 | `new_shape` —— 会被规范化掉，不产生 view，已有程序不受影响 |
+| 可证明为空 | 全零矩形框 |
+| 仅增删完全有效的单位轴 | 保留的轴按 1:1 映射，可精确保留任意矩形 |
+| 连续的扁平前缀 | `new_shape` 中覆盖同一批元素的矩形（若存在） |
+| 其他情况 | **拒绝** —— `valid_shape` 无法描述 reshape 后的区域 |
+
+因此 `[8, 16]` valid `[5, 16]`（80 个元素的扁平前缀）可映射为 `[16, 8]` valid
+`[10, 8]` 或 `[128]` valid `[80]`，而 `[4, 32]` 会被拒绝 —— 80 个元素不是整数行
+（每行 32）。`[1, 8, 16]` valid `[1, 8, 5]` 根本不是扁平前缀，但映射到 `[8, 16]`
+valid `[8, 5]` 是精确的，因为丢弃完全有效的单位轴不改变行列关系。
+`tensor.reshape` 可选的第三个 `valid_shape` 操作数只能*收窄*推导出的区域，
+不能声称拥有该区域之外的数据。
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`
 

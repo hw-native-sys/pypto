@@ -602,7 +602,16 @@ def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Til
 
 
 def reshape(input: T, shape: Sequence[IntLike]) -> T:
-    """Reshape operation, dispatched by input type."""
+    """Reshape operation, dispatched by input type.
+
+    A reshape is a zero-copy view, so it never widens the valid region: the
+    result holds real data in exactly the cells the input did, re-expressed in
+    ``shape``. Because a valid region is an origin-anchored box, not every input
+    region survives a repartition — reshaping a region that no box of ``shape``
+    can describe is rejected rather than silently rounded up to fully valid.
+    Reshapes that only add or drop fully-valid unit axes always work, as does a
+    region occupying a contiguous prefix of the buffer.
+    """
     if isinstance(input, Tensor):
         return _tensor.reshape(input, shape)
     if isinstance(input, Tile):
