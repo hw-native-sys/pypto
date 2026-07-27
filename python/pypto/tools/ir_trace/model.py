@@ -14,6 +14,23 @@ from pathlib import Path
 from typing import Literal
 
 
+def split_source_lines(text: str) -> tuple[str, ...]:
+    """Split physical source lines without discarding Unicode separators.
+
+    Args:
+        text: Source text using LF or CRLF physical line endings.
+
+    Returns:
+        Source lines without physical newline characters.
+    """
+    if not text:
+        return ()
+    lines = text.split("\n")
+    if not lines[-1]:
+        lines.pop()
+    return tuple(line.removesuffix("\r") for line in lines)
+
+
 class IRTraceError(ValueError):
     """Report an actionable IR trace input or output error."""
 

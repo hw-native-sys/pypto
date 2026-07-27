@@ -12,7 +12,7 @@
 import re
 from pathlib import Path
 
-from .model import IRTraceError, Snapshot
+from .model import IRTraceError, Snapshot, split_source_lines
 
 _PASS_RE = re.compile(r"^(?P<index>\d+)_after_(?P<name>.+)\.py$")
 _NUMERIC_PY_RE = re.compile(r"^\d+_.*\.py$")
@@ -76,7 +76,7 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
             pass_name=None,
             path=frontend,
             text=frontend_text,
-            lines=tuple(frontend_text.splitlines()),
+            lines=split_source_lines(frontend_text),
         )
     ]
     for index, (name, path) in sorted(indexed.items()):
@@ -89,7 +89,7 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
                 pass_name=name,
                 path=path,
                 text=text,
-                lines=tuple(text.splitlines()),
+                lines=split_source_lines(text),
                 warning_text=warning_text,
             )
         )

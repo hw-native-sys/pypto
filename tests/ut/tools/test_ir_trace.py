@@ -249,6 +249,26 @@ def test_highlight_python_escapes_unicode_line_separators():
     assert "\u2029" not in highlighted[0]
 
 
+def test_build_trace_preserves_unicode_line_separators_from_discovery(tmp_path: Path):
+    source = "value = '\u2028\u2029'\n"
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": source,
+            "01_after_TestPass.py": source,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    assert not trace.changed
+    assert len(trace.hunks) == 1
+    assert len(trace.hunks[0].rows) == 1
+    row = trace.hunks[0].rows[0]
+    assert "&#x2028;" in row.before_html and "&#x2029;" in row.before_html
+    assert "&#x2028;" in row.after_html and "&#x2029;" in row.after_html
+
+
 def test_highlight_python_escapes_every_line_after_tokenization_error():
     text = "if True:\n  value = (<script>\n"
 
