@@ -11,6 +11,8 @@
 
 import importlib.util
 import json
+import shutil
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -25,7 +27,11 @@ def _load_script(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(f"_test_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(_SKILL_DIR))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(_SKILL_DIR))
     return module
 
 
@@ -37,6 +43,11 @@ def generator() -> ModuleType:
 @pytest.fixture(scope="module")
 def comparison() -> ModuleType:
     return _load_script("standalone_compare")
+
+
+@pytest.fixture(scope="module")
+def preflight() -> ModuleType:
+    return _load_script("preflight_standalone_comparison")
 
 
 def _write_kernel(root: Path, *, mixed: bool = False) -> Path:
@@ -233,6 +244,94 @@ def test_generate_npu_case_with_synthetic_inputs(generator: ModuleType, tmp_path
     assert manifest["input_source"] == {"kind": "synthetic", "seed": 19}
 
 
+def test_generate_npu_case_from_invocation_profile(generator: ModuleType, tmp_path: Path):
+    kernel = tmp_path / "integer_kernel.cpp"
+    kernel.write_text(
+        'extern "C" __global__ AICORE void sample(__gm__ int32_t* v0, int32_t n) {}\n',
+        encoding="utf-8",
+    )
+    kernel.with_suffix(".pto").write_text(
+        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        encoding="utf-8",
+    )
+    profile = tmp_path / "invocation.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "block_dim": 4,
+                "input": {"kind": "synthetic", "seed": 23},
+                "scalars": {"n": 8},
+                "pointer_fills": {"v0": 7},
+                "outputs": ["v0"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        generator.main(
+            [
+                "--input",
+                str(kernel),
+                "--testcase",
+                "profiled",
+                "--output-root",
+                str(tmp_path / "output"),
+                "--run-mode",
+                "npu",
+                "--invocation-profile",
+                str(profile),
+            ]
+        )
+        == 0
+    )
+    case = tmp_path / "output" / "ptoas" / "profiled"
+    assert np.array_equal(np.fromfile(case / "v0.bin", dtype=np.int32), np.full(8, 7, dtype=np.int32))
+    manifest = json.loads((case / "standalone_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["block_dim"] == 4
+    assert manifest["recommended_outputs"] == ["v0"]
+    assert manifest["input_source"] == {
+        "kind": "synthetic",
+        "pointer_fills": {"v0": 7},
+        "seed": 23,
+    }
+    assert manifest["invocation_profile"]["path"] == "invocation.json"
+    assert len(manifest["invocation_profile"]["sha256"]) == 64
+
+
+def test_invocation_profile_rejects_invalid_controls(generator: ModuleType, tmp_path: Path):
+    profile = tmp_path / "invalid.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "input": {"kind": "files"},
+                "pointer_fills": {"indices": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="pointer_fills require synthetic input"):
+        generator.load_invocation_profile(profile)
+
+
+def test_preflight_sync_summary_requires_one_target(preflight: ModuleType, tmp_path: Path):
+    summary = tmp_path / "summary.jsonl"
+    summary.write_text(
+        "\n".join(
+            [
+                '{"function":"sample","active_sync_groups":2}',
+                '{"function":"sibling","active_sync_groups":3}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert preflight._load_target_sync_summary(summary, "sample")["active_sync_groups"] == 2
+    with pytest.raises(ValueError, match="exactly one synchronization summary"):
+        preflight._load_target_sync_summary(summary, "missing")
+
+
 def test_generate_npu_requires_explicit_scalars(generator: ModuleType, tmp_path: Path):
     kernel = _write_kernel(tmp_path)
     with pytest.raises(ValueError, match="require every scalar ABI argument explicitly"):
@@ -421,6 +520,82 @@ def test_generate_sim_case_remains_single_core(generator: ModuleType, tmp_path: 
     assert 'option(ENABLE_SIM_GOLDEN "Build Ascend simulator (camodel) executable" ON)' in cmake
     assert 'option(ENABLE_NPU_BENCHMARK "Build real-device standalone benchmark executable" OFF)' in cmake
     assert "stream, 1);" in (case / "main.cpp").read_text(encoding="utf-8")
+
+
+def test_preflight_resolves_compiles_and_validates_endpoints(
+    generator: ModuleType,
+    preflight: ModuleType,
+    tmp_path: Path,
+    monkeypatch,
+):
+    del generator
+    builds = {}
+    for label in ("baseline", "candidate"):
+        build = tmp_path / label
+        ptoas = build / "ptoas"
+        ptoas.mkdir(parents=True)
+        (ptoas / "group.pto").write_text(
+            """\
+func.func @sample(%arg0: !pto.ptr<i32>, %arg1: i32) {
+  %tile = pto.alloc_tile : !pto.tile<8xi32>, addr = 0
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+""",
+            encoding="utf-8",
+        )
+        builds[label] = build
+
+    profile = tmp_path / "invocation.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "block_dim": 2,
+                "input": {"kind": "synthetic", "seed": 19},
+                "scalars": {"v1": 8},
+                "pointer_fills": {"v0": 3},
+                "outputs": ["v0"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_compile(unit, output_dir, ptoas_bin, *, timeout):
+        del ptoas_bin, timeout
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pto = output_dir / unit.path.name
+        shutil.copy2(unit.path, pto)
+        cpp = output_dir / "group.cpp"
+        cpp.write_text(
+            'extern "C" __global__ AICORE void sample(__gm__ int32_t* v0, int32_t v1) {}\n',
+            encoding="utf-8",
+        )
+        summary = output_dir / "group.sync.jsonl"
+        summary.write_text('{"function":"sample","active_sync_groups":0}\n', encoding="utf-8")
+        return pto, cpp, summary
+
+    monkeypatch.setattr(preflight, "compile_pto_unit", fake_compile)
+    (tmp_path / "fake-ptoas").write_bytes(b"fake")
+    output = preflight.prepare(
+        builds["baseline"],
+        builds["candidate"],
+        "sample",
+        profile,
+        tmp_path / "prepared",
+        tmp_path / "fake-ptoas",
+    )
+
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["post_insert_sync_compiled"] is True
+    assert document["npu_cases_built"] is False
+    assert document["ptoas"]["path"].endswith("fake-ptoas")
+    assert document["recommended_outputs"] == ["v0"]
+    assert document["endpoints"]["baseline"]["target_sync_summary"]["active_sync_groups"] == 0
+    assert document["endpoints"]["baseline"]["functions"] == ["sample"]
+    assert document["endpoints"]["candidate"]["functions"] == ["sample"]
+    baseline_case = Path(document["endpoints"]["baseline"]["case_dir"])
+    candidate_case = Path(document["endpoints"]["candidate"]["case_dir"])
+    assert (baseline_case / "v0.bin").read_bytes() == (candidate_case / "v0.bin").read_bytes()
 
 
 def test_validate_cases_and_summarize(generator: ModuleType, comparison: ModuleType, tmp_path: Path):

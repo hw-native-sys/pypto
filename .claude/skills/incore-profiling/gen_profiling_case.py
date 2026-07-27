@@ -45,12 +45,14 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import re
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import numpy as np
 
@@ -145,6 +147,120 @@ class DumpSelection:
     func_id: int
     task_id: str | None = None
     task_occurrence: int | None = None
+
+
+@dataclass(frozen=True)
+class InvocationProfile:
+    """Portable inputs and launch metadata for one standalone kernel."""
+
+    block_dim: int
+    input_dir: Path | None
+    synthetic_seed: int | None
+    scalar_values: dict[str, str]
+    pointer_fills: dict[str, int | float]
+    outputs: list[str]
+    source_path: Path
+
+
+def _profile_number(value: Any, *, context: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{context} must be a finite JSON number, got {value!r}")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{context} must be finite, got {value!r}")
+    return value
+
+
+def _load_profile_input(path: Path, input_spec: Any) -> tuple[Path | None, int | None]:
+    if not isinstance(input_spec, dict):
+        raise ValueError(f"{path}: input must describe either synthetic or files input")
+    input_kind = input_spec.get("kind")
+    if input_kind == "synthetic":
+        if set(input_spec) - {"kind", "seed"}:
+            raise ValueError(f"{path}: synthetic input accepts only kind and seed")
+        seed = input_spec.get("seed", _SYNTHETIC_SEED)
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError(f"{path}: synthetic seed must be a nonnegative integer")
+        return None, seed
+    if input_kind == "files":
+        if set(input_spec) - {"kind", "directory"}:
+            raise ValueError(f"{path}: files input accepts only kind and directory")
+        directory = input_spec.get("directory", ".")
+        if not isinstance(directory, str) or not directory:
+            raise ValueError(f"{path}: files input directory must be a nonempty string")
+        return (path.parent / directory).resolve(), None
+    raise ValueError(f"{path}: input kind must be 'synthetic' or 'files', got {input_kind!r}")
+
+
+def _load_profile_values(path: Path, raw_values: Any, *, field: str) -> dict[str, int | float]:
+    if not isinstance(raw_values, dict):
+        raise ValueError(f"{path}: {field} must be an object")
+    values: dict[str, int | float] = {}
+    for name, value in raw_values.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*", name):
+            raise ValueError(f"{path}: invalid {field} parameter name {name!r}")
+        values[name] = _profile_number(value, context=f"{path}: {field} {name}")
+    return values
+
+
+def _load_profile_outputs(path: Path, raw_outputs: Any) -> list[str]:
+    if not isinstance(raw_outputs, list) or not all(
+        isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name) for name in raw_outputs
+    ):
+        raise ValueError(f"{path}: outputs must be a list of ABI parameter names")
+    if len(raw_outputs) != len(set(raw_outputs)):
+        raise ValueError(f"{path}: outputs contains duplicate ABI parameter names")
+    return raw_outputs
+
+
+def load_invocation_profile(path: Path) -> InvocationProfile:
+    """Load a schema-v1 portable standalone invocation profile.
+
+    Args:
+        path: JSON profile to load.
+
+    Returns:
+        Validated launch metadata and input configuration.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError(f"{path} is not a schema-v1 standalone invocation profile")
+    allowed = {
+        "schema_version",
+        "block_dim",
+        "input",
+        "scalars",
+        "pointer_fills",
+        "outputs",
+    }
+    unknown = sorted(set(document) - allowed)
+    if unknown:
+        raise ValueError(f"{path} contains unknown invocation-profile fields: {unknown}")
+
+    block_dim = document.get("block_dim", 1)
+    if isinstance(block_dim, bool) or not isinstance(block_dim, int) or block_dim <= 0:
+        raise ValueError(f"{path}: block_dim must be a positive integer, got {block_dim!r}")
+
+    input_dir, synthetic_seed = _load_profile_input(path, document.get("input"))
+    scalar_numbers = _load_profile_values(path, document.get("scalars", {}), field="scalar")
+    scalar_values = {name: repr(value) for name, value in scalar_numbers.items()}
+    pointer_fills = _load_profile_values(
+        path,
+        document.get("pointer_fills", {}),
+        field="pointer fill",
+    )
+    if pointer_fills and synthetic_seed is None:
+        raise ValueError(f"{path}: pointer_fills require synthetic input")
+    outputs = _load_profile_outputs(path, document.get("outputs", []))
+
+    return InvocationProfile(
+        block_dim=block_dim,
+        input_dir=input_dir,
+        synthetic_seed=synthetic_seed,
+        scalar_values=scalar_values,
+        pointer_fills=pointer_fills,
+        outputs=outputs,
+        source_path=path.resolve(),
+    )
 
 
 def _split_params(blob: str) -> list[str]:
@@ -977,14 +1093,40 @@ def _synthetic_chunk(cpp_type: str, count: int, rng: np.random.Generator) -> np.
     raise ValueError(f"unsupported synthetic-input ABI type {cpp_type!r}")
 
 
+def _constant_chunk(cpp_type: str, count: int, value: int | float) -> np.ndarray:
+    """Create one constant chunk represented in the kernel ABI type."""
+    if cpp_type in {"bfloat16_t", "__bf16"}:
+        fp32 = np.full(count, value, dtype=np.float32)
+        return (fp32.view(np.uint32) >> 16).astype(np.uint16)
+    if cpp_type in {"half", "aclFloat16"}:
+        return np.full(count, value, dtype=np.float16)
+    if cpp_type == "float":
+        return np.full(count, value, dtype=np.float32)
+    dtype = _SYNTHETIC_INTEGER_DTYPES.get(cpp_type)
+    if dtype is None:
+        raise ValueError(f"unsupported constant-fill ABI type {cpp_type!r}")
+    if not isinstance(value, int):
+        raise ValueError(f"integer pointer type {cpp_type} requires an integer fill, got {value!r}")
+    info = np.iinfo(dtype)
+    if value < info.min or value > info.max:
+        raise ValueError(f"fill {value} is outside {cpp_type} range [{info.min}, {info.max}]")
+    return np.full(count, value, dtype=dtype)
+
+
 def _write_synthetic_inputs(
     output_dir: Path,
     params: list[Param],
     counts: dict[str, int],
     *,
     seed: int,
+    pointer_fills: dict[str, int | float] | None = None,
 ) -> None:
     """Write deterministic finite ABI inputs without retaining large tensors in RAM."""
+    pointer_fills = pointer_fills or {}
+    pointer_names = {param.name for param in params if param.is_ptr}
+    unknown = sorted(set(pointer_fills) - pointer_names)
+    if unknown:
+        raise ValueError(f"pointer fills name parameters absent from the kernel ABI: {unknown}")
     rng = np.random.default_rng(seed)
     for param in params:
         if not param.is_ptr:
@@ -994,7 +1136,12 @@ def _write_synthetic_inputs(
         with path.open("wb") as stream:
             while remaining:
                 count = min(remaining, _SYNTHETIC_CHUNK_ELEMENTS)
-                stream.write(_synthetic_chunk(param.cpp_type, count, rng).tobytes())
+                chunk = (
+                    _constant_chunk(param.cpp_type, count, pointer_fills[param.name])
+                    if param.name in pointer_fills
+                    else _synthetic_chunk(param.cpp_type, count, rng)
+                )
+                stream.write(chunk.tobytes())
                 remaining -= count
 
 
@@ -1243,6 +1390,9 @@ def generate(  # noqa: PLR0913
     scalar_values: dict[str, str] | None = None,
     dump_selection: DumpSelection | None = None,
     synthetic_seed: int | None = None,
+    pointer_fills: dict[str, int | float] | None = None,
+    recommended_outputs: list[str] | None = None,
+    invocation_profile: Path | None = None,
     ptoas_root: Path | None = None,
 ) -> Path:
     if run_mode not in {"sim", "npu"}:
@@ -1316,7 +1466,20 @@ def generate(  # noqa: PLR0913
             f"missing: {missing_scalars}"
         )
     if synthetic_seed is not None:
-        _write_synthetic_inputs(out_dir, params, counts, seed=synthetic_seed)
+        _write_synthetic_inputs(
+            out_dir,
+            params,
+            counts,
+            seed=synthetic_seed,
+            pointer_fills=pointer_fills,
+        )
+    elif pointer_fills:
+        raise ValueError("pointer fills require synthetic inputs")
+    recommended_outputs = recommended_outputs or []
+    pointer_names = {param.name for param in params if param.is_ptr}
+    unknown_outputs = sorted(set(recommended_outputs) - pointer_names)
+    if unknown_outputs:
+        raise ValueError(f"recommended outputs name non-pointer ABI parameters: {unknown_outputs}")
     (out_dir / f"{testcase}_kernel.cpp").write_text(
         emit_kernel_cpp(
             cpp_text,
@@ -1354,8 +1517,25 @@ def generate(  # noqa: PLR0913
         "mixed": is_mixed,
         **({"mixed_runner": mixed_wrapper} if mixed_wrapper is not None else {}),
         **(
-            {"input_source": {"kind": "synthetic", "seed": synthetic_seed}}
+            {
+                "input_source": {
+                    "kind": "synthetic",
+                    "seed": synthetic_seed,
+                    **({"pointer_fills": pointer_fills} if pointer_fills else {}),
+                }
+            }
             if synthetic_seed is not None
+            else {}
+        ),
+        **({"recommended_outputs": recommended_outputs} if recommended_outputs else {}),
+        **(
+            {
+                "invocation_profile": {
+                    "path": invocation_profile.name,
+                    "sha256": hashlib.sha256(invocation_profile.read_bytes()).hexdigest(),
+                }
+            }
+            if invocation_profile is not None
             else {}
         ),
         **({"capture": capture} if capture is not None else {}),
@@ -1393,6 +1573,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--soc-version", default="Ascend910B1", help="CLI compat (cmake -DSOC_VERSION)")
     ap.add_argument("--aicore-arch", default="dav-c220", help="--cce-aicore-arch (a2a3 / a5)")
     ap.add_argument("--block-dim", type=int, default=1, help="exact launch block dimension")
+    ap.add_argument(
+        "--invocation-profile",
+        type=Path,
+        help="schema-v1 portable inputs, exact scalars, launch dimension, and output names",
+    )
     ap.add_argument(
         "--ptoas-root",
         type=Path,
@@ -1436,7 +1621,36 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     arch = args.aicore_arch or "dav-c220"
-    scalar_values = _parse_scalar_assignments(args.scalar)
+    profile = (
+        load_invocation_profile(args.invocation_profile) if args.invocation_profile is not None else None
+    )
+    if profile is not None:
+        conflicting = []
+        if args.input_dir is not None:
+            conflicting.append("--input-dir")
+        if args.synthetic_inputs:
+            conflicting.append("--synthetic-inputs")
+        if args.scalar:
+            conflicting.append("--scalar")
+        if args.args_dump is not None:
+            conflicting.append("--args-dump")
+        if args.block_dim != 1:
+            conflicting.append("--block-dim")
+        if conflicting:
+            ap.error(f"--invocation-profile cannot be combined with {', '.join(conflicting)}")
+        scalar_values = profile.scalar_values
+        block_dim = profile.block_dim
+        input_dir = profile.input_dir
+        synthetic_seed = profile.synthetic_seed
+        pointer_fills = profile.pointer_fills
+        recommended_outputs = profile.outputs
+    else:
+        scalar_values = _parse_scalar_assignments(args.scalar)
+        block_dim = args.block_dim
+        input_dir = args.input_dir
+        synthetic_seed = args.synthetic_seed if args.synthetic_inputs else None
+        pointer_fills = {}
+        recommended_outputs = []
     dump_selection = None
     if args.args_dump is not None:
         if args.func_id is None:
@@ -1453,11 +1667,14 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.output_root),
         arch,
         run_mode=args.run_mode,
-        block_dim=args.block_dim,
-        input_dir=args.input_dir,
+        block_dim=block_dim,
+        input_dir=input_dir,
         scalar_values=scalar_values,
         dump_selection=dump_selection,
-        synthetic_seed=args.synthetic_seed if args.synthetic_inputs else None,
+        synthetic_seed=synthetic_seed,
+        pointer_fills=pointer_fills,
+        recommended_outputs=recommended_outputs,
+        invocation_profile=args.invocation_profile,
         ptoas_root=args.ptoas_root,
     )
     print(f"[gen_profiling_case] wrote testcase -> {out_dir}")
