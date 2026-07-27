@@ -26,6 +26,25 @@ class TestMatmulMxRegistry:
         assert constraints[2] == [ir.MemorySpace.Right]
         assert constraints[3] == [ir.MemorySpace.RightScale]
 
+    def test_matmul_mx_acc_spec(self):
+        spec = ir.get_op_memory_spec("tile.matmul_mx_acc")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert constraints[0] == [ir.MemorySpace.Acc]
+        assert constraints[1] == [ir.MemorySpace.Left]
+        assert constraints[2] == [ir.MemorySpace.LeftScale]
+        assert constraints[3] == [ir.MemorySpace.Right]
+        assert constraints[4] == [ir.MemorySpace.RightScale]
+
+    def test_matmul_mx_bias_spec(self):
+        spec = ir.get_op_memory_spec("tile.matmul_mx_bias")
+        assert spec is not None
+        assert spec["output_memory"] == ir.MemorySpace.Acc
+        constraints = spec["input_constraints"]
+        assert constraints[4] == [ir.MemorySpace.Bias]
+
+
 
 class TestMatmulMxTypes:
     def test_matmul_mx_type_deduction(self):
@@ -39,6 +58,7 @@ class TestMatmulMxTypes:
         assert call.type.dtype == DataType.FP32
         assert isinstance(call.type.shape[0], ir.ConstInt) and call.type.shape[0].value == 16
         assert isinstance(call.type.shape[1], ir.ConstInt) and call.type.shape[1].value == 32
+
 
     def test_matmul_mx_rejects_fp8e5m2_data(self):
         span = ir.Span.unknown()

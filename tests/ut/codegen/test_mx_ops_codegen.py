@@ -7,7 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Codegen / IR smoke tests for minimal MXFP8 matmul path."""
+"""Codegen / IR smoke tests for MX DSL ops."""
+
+import re
 
 import pypto.language as pl
 from pypto import ir
@@ -108,3 +110,106 @@ class TestMxDslProgram:
         assert "make_tensor_view" in mlir and "#pto.layout<mx_a_zz>" in mlir
         assert "#pto.layout<mx_b_nn>" in mlir
         assert "pto.tload" in mlir
+
+    def test_matmul_mx_acc_accumulates_in_place(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[128, 2], pl.FP8E8M0],
+                b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 64], pl.FP8E8M0],
+                out: pl.Tensor[[128, 64], pl.FP32],
+            ):
+                ta = pl.load(a, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                tas = pl.load(a_s, [0, 0], [128, 2], target_memory=pl.Mem.Mat, mx_layout="mx_a_zz")
+                tb = pl.load(b, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                tbs = pl.load(b_s, [0, 0], [2, 64], target_memory=pl.Mem.Mat, mx_layout="mx_b_nn")
+                la = pl.move(ta, target_memory=pl.Mem.Left)
+                las = pl.move(tas, target_memory=pl.Mem.LeftScale)
+                rb = pl.move(tb, target_memory=pl.Mem.Right)
+                rbs = pl.move(tbs, target_memory=pl.Mem.RightScale)
+                las = pl.tget_scale_addr(las, la)
+                rbs = pl.tget_scale_addr(rbs, rb)
+                acc = pl.matmul_mx(la, las, rb, rbs)
+                acc = pl.matmul_mx_acc(acc, la, las, rb, rbs)
+                pl.store(acc, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tmatmul.mx.acc" in mlir
+        line = next((ln for ln in mlir.splitlines() if "pto.tmatmul.mx.acc" in ln), None)
+        assert line is not None, f"pto.tmatmul.mx.acc line not found in MLIR:\n{mlir}"
+        ins_first = re.search(r"ins\((%[^,)\s]+)", line)
+        outs_val = re.search(r"outs\((%[^,)\s]+)", line)
+        assert ins_first and outs_val, f"could not parse ins/outs from: {line!r}"
+        assert ins_first.group(1) == outs_val.group(1), (
+            f"matmul_mx_acc must accumulate in place (ins(acc) == outs); "
+            f"got ins acc={ins_first.group(1)!r}, outs={outs_val.group(1)!r} in {line!r}"
+        )
+
+
+class TestTQuantProgram:
+    def test_tquant_program_builds(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                out_q: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                out_s: pl.Tensor[[16, 2], pl.FP8E8M0],
+            ):
+                t = pl.load(src, [0, 0], [16, 64])
+                q, s = pl.tquant(t, mode="mxfp8_e4m3")
+                pl.store(q, [0, 0], out_q)
+                pl.store(s, [0, 0], out_s)
+
+        assert "tile.tquant" in str(Program)
+
+    def test_mx_quant_chain_emits_pto_ops(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                b_t: pl.Tensor[[32, 64], pl.FP32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                ta = pl.load(a, [0, 0], [16, 64])
+                tb_t = pl.load(b_t, [0, 0], [32, 64])
+                qa, sa = pl.mx_quant(ta, mode="mxfp8_e4m3")
+                qb_t, sb_t = pl.mx_quant(tb_t, mode="mxfp8_e4m3")
+                qb = pl.tile.transpose_view(qb_t)
+                qa_m = pl.move(
+                    pl.tile.reinterpret_view(qa, pl.FP8E4M3FN), target_memory=pl.Mem.Mat
+                )
+                qb_m = pl.move(
+                    pl.tile.reinterpret_view(qb, pl.FP8E4M3FN), target_memory=pl.Mem.Mat
+                )
+                sa_m = pl.move(sa, target_memory=pl.Mem.Mat)
+                sb_m = pl.move(sb_t, target_memory=pl.Mem.Mat)
+                la = pl.move(qa_m, target_memory=pl.Mem.Left)
+                las = pl.move(sa_m, target_memory=pl.Mem.LeftScale, target_shape=[16, 2])
+                rb = pl.move(qb_m, target_memory=pl.Mem.Right)
+                rbs = pl.move(sb_m, target_memory=pl.Mem.RightScale, target_shape=[2, 32])
+                las = pl.tget_scale_addr(las, la)
+                rbs = pl.tget_scale_addr(rbs, rb)
+                c = pl.matmul_mx(la, las, rb, rbs)
+                pl.store(c, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tquant.mx" in mlir
+        assert "pto.tmatmul.mx" in mlir
+        assert "pto.tget_scale_addr" in mlir
+        tquant_line = next(line for line in mlir.splitlines() if "pto.tquant.mx" in line)
+        assert "quant_type" in tquant_line
+        assert "pto.treshape" in mlir
+        reshape_lines = [ln for ln in mlir.splitlines() if "pto.treshape" in ln and "dtype=ui8" in ln]
+        assert reshape_lines, f"expected ui8 treshape for LeftScale target_shape, got:\n{mlir}"
+        assert any("loc=mat" in ln and "dtype=ui8" in ln for ln in mlir.splitlines())
+        assert any(
+            "pto.tmov" in ln and "loc=scaling" in ln for ln in mlir.splitlines()
+        ), f"expected tmov into scaling, got:\n{mlir}"

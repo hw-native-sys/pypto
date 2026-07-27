@@ -430,7 +430,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
-    // tile.matmul_acc and tile.gemv_acc have custom codegen (in-place accumulation)
+    {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
+    // tile.matmul_acc, tile.gemv_acc, and tile.matmul_mx_acc have custom codegen
+    // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     {"tile.gemv",            "pto.tgemv",            2},
     // tile.gemv_acc has custom codegen (in-place accumulation)
@@ -864,28 +866,38 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
   });
 
-  // In-place accumulation ops (matmul_acc, gemv_acc): ptoas expects the
-  // accumulator in ins() to be the same SSA value as outs().  InitMemRef
-  // guarantees that the output shares the MemRef of the accumulator input
-  // (via set_output_reuses_input), so we use the result buffer (dst) as the
-  // accumulator operand instead of the IR-level input arg.
+  // In-place accumulation ops (matmul_acc, gemv_acc, matmul_mx_acc): ptoas /
+  // pto-isa expect `c_in == dst` (same Acc SSA). Prefer the IR accumulator
+  // arg's SSA; ShouldAliasScatterResultToInput already binds the AssignStmt
+  // result to args_[0] when MemRefs match. Fall back to GetCurrentResultTarget
+  // only if args_[0] has no SSA yet. Never invent a fresh Acc sibling.
   auto make_acc_codegen = [](const std::string& pto_op) {
     return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = AsPto(codegen_base);
-      CHECK(op->args_.size() == 3) << pto_op << " requires 3 arguments: acc, lhs, rhs";
+      CHECK(op->args_.size() >= 2)
+          << pto_op << " requires an accumulator plus at least one operand";
 
+      std::string acc_ssa = codegen.GetExprAsCode(op->args_[0]);
       std::string dst = codegen.GetCurrentResultTarget();
-      std::string lhs = codegen.GetExprAsCode(op->args_[1]);
-      std::string rhs = codegen.GetExprAsCode(op->args_[2]);
-      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
-      std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
-      std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+      if (!acc_ssa.empty()) {
+        dst = acc_ssa;
+        codegen.SetCurrentResultBuf(dst);
+      }
+      std::string dst_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+      if (dst_type.empty()) {
+        dst_type = codegen.GetCurrentResultTileBufTypeString();
+      }
+      INTERNAL_CHECK(!dst.empty())
+          << "Internal error: " << pto_op << " Acc SSA must resolve (in-place c_in==dst)";
 
       std::ostringstream acc_inst;
-      acc_inst << pto_op << " ins(" << dst << ", " << lhs << ", " << rhs;
+      acc_inst << pto_op << " ins(" << dst;
       std::vector<std::string> ins_type_parts;
-      for (const auto& t : {dst_type, lhs_type, rhs_type}) {
-        if (!t.empty()) ins_type_parts.push_back(t);
+      if (!dst_type.empty()) ins_type_parts.push_back(dst_type);
+      for (size_t i = 1; i < op->args_.size(); ++i) {
+        acc_inst << ", " << codegen.GetExprAsCode(op->args_[i]);
+        std::string operand_type = codegen.GetExprTypeAnnotation(op->args_[i]);
+        if (!operand_type.empty()) ins_type_parts.push_back(operand_type);
       }
       if (!ins_type_parts.empty()) {
         acc_inst << " : ";
@@ -904,6 +916,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
 
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
+  reg("tile.matmul_mx_acc", make_acc_codegen("pto.tmatmul.mx.acc"));
 }
 }  // namespace backend
 }  // namespace pypto

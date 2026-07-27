@@ -20,6 +20,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -207,7 +208,78 @@ bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
   if (auto scope = AsScope(body)) return IsDefinedInBranch(var, scope->body_);
   return false;
 }
+
+/// Find the AssignStmt Call that defines `var` inside `body` (lexically).
+ir::CallPtr FindDefiningCall(const ir::Var* var, const StmtPtr& body) {
+  if (!body || !var) return nullptr;
+  if (auto assign = As<ir::AssignStmt>(body)) {
+    if (assign->var_.get() == var) {
+      return As<ir::Call>(assign->value_);
+    }
+    return nullptr;
+  }
+  if (auto seq = As<ir::SeqStmts>(body)) {
+    for (const auto& s : seq->stmts_) {
+      if (auto c = FindDefiningCall(var, s)) return c;
+    }
+    return nullptr;
+  }
+  if (auto for_stmt = As<ir::ForStmt>(body)) return FindDefiningCall(var, for_stmt->body_);
+  if (auto while_stmt = As<ir::WhileStmt>(body)) return FindDefiningCall(var, while_stmt->body_);
+  if (auto if_stmt = As<ir::IfStmt>(body)) {
+    if (auto c = FindDefiningCall(var, if_stmt->then_body_)) return c;
+    if (if_stmt->else_body_.has_value()) return FindDefiningCall(var, *if_stmt->else_body_);
+    return nullptr;
+  }
+  if (auto scope = AsScope(body)) return FindDefiningCall(var, scope->body_);
+  return nullptr;
+}
+
+/// True when `call` is an in-place Acc accumulate op (`matmul_acc` / `gemv_acc` /
+/// `matmul_mx_acc`) whose result reuses input 0 — ISA requires c_in == dst.
+bool IsAccInplaceAccumulateCall(const ir::CallPtr& call) {
+  if (!call || !call->op_ || call->args_.empty()) return false;
+  if (!(ir::IsOp(call->op_, "tile.matmul_acc") || ir::IsOp(call->op_, "tile.gemv_acc") ||
+        ir::IsOp(call->op_, "tile.matmul_mx_acc"))) {
+    return false;
+  }
+  const auto& reg = ir::OpRegistry::GetInstance();
+  if (!reg.IsRegistered(call->op_->name_)) return false;
+  auto reuse = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+  return reuse.has_value() && *reuse == 0;
+}
+
 }  // namespace
+
+/// Resolve the single Acc buffer SSA an Acc if-phi must write: the in-place
+/// `matmul_acc` branch's accumulator input. Both the seed (`matmul`) and the
+/// accumulate leg, plus every post-if consumer, must share that handle so
+/// ptoas sees in-place Acc (`c_in == dst`) and one dominating `alloc_tile`.
+std::string PTOCodegen::ResolveAccIfPhiCanonicalSSA(const IfStmtPtr& op, size_t slot) {
+  if (!op->else_body_.has_value() || slot >= op->return_vars_.size()) return "";
+  auto return_tile = As<TileType>(op->return_vars_[slot]->GetType());
+  if (!return_tile || return_tile->GetMemorySpace() != ir::MemorySpace::Acc) return "";
+
+  const YieldStmtPtr then_yield = FindBranchYield(op->then_body_);
+  const YieldStmtPtr else_yield = FindBranchYield(*op->else_body_);
+  if (!then_yield || !else_yield) return "";
+
+  auto try_branch = [&](const StmtPtr& body, const YieldStmtPtr& yield) -> std::string {
+    if (slot >= yield->value_.size()) return "";
+    auto yv = ir::AsVarLike(yield->value_[slot]);
+    if (!yv) return "";
+    ir::CallPtr call = FindDefiningCall(yv.get(), body);
+    if (!IsAccInplaceAccumulateCall(call)) return "";
+    auto in = ir::AsVarLike(call->args_[0]);
+    if (!in) return "";
+    auto it = fs_.var_to_mlir.find(GetVarKey(in));
+    return it != fs_.var_to_mlir.end() ? it->second : std::string{};
+  };
+
+  std::string ssa = try_branch(op->then_body_, then_yield);
+  if (!ssa.empty()) return ssa;
+  return try_branch(*op->else_body_, else_yield);
+}
 
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null IfStmt";
@@ -255,32 +327,36 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
-        // Reuse the same alloc_tile rules as EmitAllocTileForVar so this
-        // deferred alloc emits a dynamic-validShape `pto.alloc_tile` with
-        // explicit valid_row / valid_col operands.
-        AllocTileFields fields = ComputeAllocTileFields(tile_type);
-        // Under PTOAS no `addr` is baked, so variables denoting the same buffer
-        // must share ONE tile_buf handle — two addr-less allocs are two
-        // independent buffers to ptoas PlanMemory. When the phi's MemRef is
-        // already bound to a handle (a loop-carried accumulator: the `pl.range`
-        // init, the iter_arg and the loop result all share the phi's MemRef),
-        // reuse it. Minting a second handle here would strand that buffer: the
-        // branch producers write the phi handle (they are re-bound to it below,
-        // fix #1956) while the loop result and every post-if read still resolve
-        // to the shared one, which no branch ever wrote.
-        std::string ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type));
+        // Head-declared tiles: physical-shape constants only (prologue-safe).
+        // Dynamic valid_shape is applied later via set_validshape at use sites.
+        AllocTileFields fields = ComputeAllocTileFields(tile_type, /*prologue_safe=*/true);
+        // Prefer (in order):
+        //   1. Acc if-phi canonical buffer — the in-place matmul_acc input SSA
+        //      so seed + accumulate + post-if consumers share one dominating
+        //      handle (ISA c_in == dst; avoids a fresh AllocNewTileBuf that
+        //      orphans the branch writes under level3).
+        //   2. MemRef-identity shared handle (PTOAS any tile; level3 Acc only).
+        //   3. Prior per-var Acc-identity binding already in var_to_mlir.
+        //   4. Fresh head-declared handle (fallback).
+        std::string ret_name = ResolveAccIfPhiCanonicalSSA(op, i);
+        if (ret_name.empty()) {
+          ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type));
+        }
+        if (ret_name.empty()) {
+          auto existing = fs_.var_to_mlir.find(GetVarKey(return_var));
+          if (existing != fs_.var_to_mlir.end()) {
+            ret_name = existing->second;
+          }
+        }
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
-          // Hoist its declaration to the function head unless the body already
-          // emitted it before this region.
           DeclareTileBufAtHead(ret_name, fields);
         } else {
           ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
                                      fields.valid_row_ssa, fields.valid_col_ssa);
-          // This head-declared handle is the phi buffer. Under PTOAS the branch
-          // producers are re-bound to it (see emit_branch, fix #1956); mark it
-          // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
-          if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
+          // Mark emitted so branch producers' EmitAllocTileForVar dedups instead
+          // of re-declaring a nested alloc that would not dominate post-if uses.
+          fs_.emitted_tile_alloc_names.insert(ret_name);
         }
         BindVarToMlir(return_var, ret_name);
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
@@ -319,18 +395,22 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
       const YieldStmtPtr yield = FindBranchYield(body);
-      // Fix #1956: under memory_planner=PTOAS, MemoryReuse (which would alias the
-      // branch yields onto the phi return_var's canonical MemRef via
-      // YieldFixupMutator) is skipped. Without it, each branch's tile producer
-      // writes its own handle and the post-if read of the phi handle reads a
-      // buffer no branch wrote. Re-bind each tile yield-source var to the phi
+      // Fix #1956 / Acc peel: re-bind each tile yield-source var to the phi
       // return_var's (head-declared) handle so this branch's producer writes it.
-      // Under PYPTO (emit_tile_addr_) the IR-level aliasing already holds, so
-      // leave the bindings untouched.
-      if (!emit_tile_addr_ && yield) {
+      //
+      // Under PTOAS MemoryReuse is skipped, so every tile phi needs this rebind.
+      // Under PYPTO (emit_tile_addr_) MemoryReuse aliases most tiles at IR level,
+      // but Acc peel if-phis still need an explicit rebind: a fresh AllocNewTileBuf
+      // for the phi (or a distinct seed SSA) would leave post-if Acc consumers
+      // reading a buffer no branch wrote, and bury seed `alloc_tile` inside the
+      // then-block (undeclared SSA in sibling regions). Acc always rebinds.
+      if (yield) {
         for (size_t i = 0; i < op->return_vars_.size(); ++i) {
           if (i >= yield->value_.size()) continue;
-          if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+          auto ret_tile = As<TileType>(op->return_vars_[i]->GetType());
+          if (!ret_tile) continue;
+          const bool is_acc = ret_tile->GetMemorySpace() == ir::MemorySpace::Acc;
+          if (emit_tile_addr_ && !is_acc) continue;
           auto src = ir::AsVarLike(yield->value_[i]);
           if (!src) continue;
           // Only re-point a branch-local producer; an outer var yielded through

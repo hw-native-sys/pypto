@@ -148,8 +148,8 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW frontend+codegen+ST; a2a3 hardware CI pending (watch ISA defects in irregular family) |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **Quantization** |  |  |  |  |  |  |  |  |
-| pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (issue #1975); PTOAS outs arity/attr follow-up |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (issue #1975); ST follow-up |
 | **Fixed pipeline** |  |  |  |  |  |  |  |  |
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.textract_fp | TEXTRACT_FP | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (FP variant) |

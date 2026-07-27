@@ -411,6 +411,21 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
   return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
+/// MX activation scales (tquant ui8 / f8E8M0) stage through Mat as ND fractal=32
+/// row_major. Forcing NZ adapt on V2C would rewrite their bytes into NZ while the
+/// AIC Mat type (and later LeftScale reshape) still expects contiguous ND — skip
+/// the fractal adapt for these tiles and keep the ND V2C path.
+bool IsMxNdScaleTile(const TileType& tt) {
+  if (tt.dtype_ != DataType::UINT8 && tt.dtype_ != DataType::FP8E8M0) {
+    return false;
+  }
+  const TileView v = tile_view_semantics::GetEffectiveTileView(tt);
+  if (v.slayout == TileLayout::none_box) {
+    return true;
+  }
+  return v.fractal == 32 && v.blayout == TileLayout::row_major && v.slayout == TileLayout::row_major;
+}
+
 // ============================================================================
 // GM-Mediated Cross-Lane Dependency Detection (issue #1433)
 // ============================================================================
@@ -439,20 +454,67 @@ struct GmSyncPop {
 };
 
 /// Resolve a tensor SSA Var to its origin (the parameter / create result it
-/// derives from) by following tile.store result -> store destination chains.
-/// A tile.store's result is a fresh SSA version of the destination tensor, so
-/// the loaded version and the stored version may differ; resolving to a common
-/// origin lets us match them.
+/// derives from) by following:
+///   * tile.store result → store destination
+///   * tensor.reshape / tile.reshape result → reshape source
+/// A tile.store's result is a fresh SSA version of the destination tensor, and
+/// a reshape is a zero-copy view of the same buffer — resolving both to a
+/// common origin lets flat-store / 2D-mx_a_nd-load pairs still share a GM fence.
 const Var* ResolveTensorOrigin(const Var* var,
-                               const std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
+                               const std::unordered_map<const Var*, const Var*>& tensor_alias_to_base) {
   std::unordered_set<const Var*> seen;
   while (var) {
-    auto it = store_result_to_dest.find(var);
-    if (it == store_result_to_dest.end()) break;
+    auto it = tensor_alias_to_base.find(var);
+    if (it == tensor_alias_to_base.end()) break;
     if (!seen.insert(var).second) break;  // guard against cycles
     var = it->second;
   }
   return var;
+}
+
+/// OutlineIncoreScopes often captures both ``ws`` and ``ws_flat = reshape(ws)``
+/// as separate InCore params and drops the reshape stmt from the mixed body.
+/// Orchestration still allocates one buffer (``ws.reshape(...)``), but CollectGm
+/// would see two origins and skip the V2C MX-scale fence — AIC then races ahead
+/// of the AIV flat store and LeftScale stays ~0. Re-link UINT8/FP8E8M0 params
+/// whose shapes are exact flat↔2D reshape pairs ([1, R*C] ↔ [R, C]).
+void SeedOutlinedMxScaleReshapeAliases(const std::vector<VarPtr>& params,
+                                       std::unordered_map<const Var*, const Var*>& tensor_alias_to_base) {
+  struct Cand {
+    const Var* var;
+    int64_t rows;
+    int64_t cols;
+    DataType dtype;
+  };
+  std::vector<Cand> cands;
+  for (const auto& p : params) {
+    auto tt = As<TensorType>(p->GetType());
+    if (!tt || tt->shape_.size() != 2) continue;
+    if (tt->dtype_ != DataType::UINT8 && tt->dtype_ != DataType::FP8E8M0) continue;
+    auto r = As<ConstInt>(tt->shape_[0]);
+    auto c = As<ConstInt>(tt->shape_[1]);
+    if (!r || !c || r->value_ <= 0 || c->value_ <= 0) continue;
+    cands.push_back({p.get(), r->value_, c->value_, tt->dtype_});
+  }
+  for (size_t i = 0; i < cands.size(); ++i) {
+    for (size_t j = i + 1; j < cands.size(); ++j) {
+      if (cands[i].dtype != cands[j].dtype) continue;
+      const Cand* flat = nullptr;
+      const Cand* shaped = nullptr;
+      if (cands[i].rows == 1 && cands[i].cols == cands[j].rows * cands[j].cols &&
+          cands[j].rows > 1) {
+        flat = &cands[i];
+        shaped = &cands[j];
+      } else if (cands[j].rows == 1 && cands[j].cols == cands[i].rows * cands[i].cols &&
+                 cands[i].rows > 1) {
+        flat = &cands[j];
+        shaped = &cands[i];
+      }
+      if (!flat || !shaped) continue;
+      // Prefer shaped as the canonical origin (matches create([M,K/32]) root).
+      tensor_alias_to_base[flat->var] = shaped->var;
+    }
+  }
 }
 
 /// Detect GM-mediated cross-lane store/load pairs and populate the sync maps.
@@ -467,18 +529,25 @@ const Var* ResolveTensorOrigin(const Var* var,
 /// same number of times (the store body's trip count), so the ring buffer cannot
 /// deadlock. Pairs split across sibling/disjoint bodies are left untouched.
 void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
+                             const std::vector<VarPtr>& params,
                              const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                              std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
                              std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
-  // Pass 1: build tensor origin chains from tile.store results.
-  std::unordered_map<const Var*, const Var*> store_result_to_dest;
+  // Pass 1: build tensor alias chains (store SSA versions + reshape views).
+  std::unordered_map<const Var*, const Var*> tensor_alias_to_base;
+  SeedOutlinedMxScaleReshapeAliases(params, tensor_alias_to_base);
   std::function<void(const std::vector<StmtPtr>&)> build_origins = [&](const std::vector<StmtPtr>& ss) {
     for (const auto& stmt : ss) {
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
         if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
-            store_result_to_dest[assign->var_.get()] = dest.get();
+            tensor_alias_to_base[assign->var_.get()] = dest.get();
+          }
+        } else if ((IsOp(call, "tensor.reshape") || IsOp(call, "tile.reshape")) &&
+                   !call->args_.empty()) {
+          if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+            tensor_alias_to_base[assign->var_.get()] = src.get();
           }
         }
       }
@@ -523,13 +592,13 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
         if (single_lane && IsOp(call, "tile.store") && call->args_.size() >= 3) {
           if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
-            stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
+            stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), tensor_alias_to_base), side, call,
                               body_id, order_counter++});
           }
         } else if (single_lane && IsOp(call, "tile.load") && !call->args_.empty()) {
           if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
             const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
-            loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest), side, call,
+            loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), tensor_alias_to_base), side, call,
                              body_id, order_counter++});
           }
         }
@@ -602,61 +671,76 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     }
   };
 
+  auto is_v2c_mx_scale_store = [](const AccessRec& store) -> bool {
+    if (store.side != CoreSide::AIV) return false;
+    auto src_tt = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
+    return src_tt && IsMxNdScaleTile(*src_tt);
+  };
+
   for (const Var* origin : ordered_origins) {
     const auto& origin_stores = stores_by_origin.at(origin);
-    if (origin_stores.size() != 1) continue;  // require a unique producer store
-    const AccessRec& store = *origin_stores.front();
-
-    // Restrict to the cube-store -> vector-load (C2V) direction. The producer
-    // store is on AIC, the consumer load on AIV: the AIC tpush sends the source
-    // tile raw, exactly as the normal boundary C2V push does on both backends
-    // (no fractal adaptation), and the AIV tpop lands in Vec where the transfer
-    // view is "preserve original". The reverse V2C direction would need the V->C
-    // fractal adaptation (tile.move to NZ/ZN before tpush_to_aic, fractal-typed
-    // tpop_from_aiv) that the boundary path applies; emitting a raw-tile sync
-    // there would violate the cross-core transport contract, so we leave V2C
-    // GM exchanges unfenced rather than emit unadapted transport.
-    if (store.side != CoreSide::AIC) continue;
-
-    const AccessRec* chosen = nullptr;
     auto loads_it = loads_by_origin.find(origin);
     if (loads_it == loads_by_origin.end()) continue;
-    for (const AccessRec* load : loads_it->second) {
-      if (load->side != CoreSide::AIV) continue;  // C2V only: consumer on the vector lane
-      // The consumer load must share the store's body (a 1:1 fence) or be nested
-      // in a loop/branch under it. In the nested case the tpop is hoisted to the
-      // store-body-level compound below, so tpush and the hoisted tpop still run
-      // the same number of times. Loads in a sibling/disjoint body are left
-      // unfenced — their trip count vs. the store's is unproven (deadlock risk).
-      if (!is_ancestor_body(store.body_id, load->body_id)) continue;
-      if (load->order <= store.order) continue;  // load must follow the store
-      if (chosen == nullptr || load->order < chosen->order) chosen = load;
-    }
-    if (chosen == nullptr) continue;
 
-    // Where the consumer fence tpop is emitted: at the load itself when it
-    // shares the store's body, otherwise hoisted before the store-body-level
-    // compound that encloses it (so it runs once per producer store, not once
-    // per loop iteration).
-    const Stmt* pop_stmt = chosen->stmt;
-    if (chosen->body_id != store.body_id) {
-      pop_stmt = enclosing_stmt_in_body(store.body_id, chosen->body_id);
-      if (pop_stmt == nullptr) continue;  // defensive: not actually nested under the store
+    // C2V (AIC store → AIV load): still require a unique producer store.
+    // V2C MX ND scale (AIV store → AIC load): allow N stores paired 1:1 with N
+    // subsequent AIC loads in program order. K-chunk peels/unrolls write the
+    // same scale workspace many times; the unique-store rule would skip all
+    // fences and leave AIC TLOAD racing the AIV TSTORE (qkv LeftScale path).
+    std::vector<const AccessRec*> c2v_stores;
+    std::vector<const AccessRec*> v2c_mx_stores;
+    for (const AccessRec* sp : origin_stores) {
+      if (sp->side == CoreSide::AIC) c2v_stores.push_back(sp);
+      else if (is_v2c_mx_scale_store(*sp)) v2c_mx_stores.push_back(sp);
     }
 
-    auto src_tile_type = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
-    if (!src_tile_type) continue;  // need a TileType for cross-core slot sizing
+    std::unordered_set<const AccessRec*> used_loads;
+    auto emit_pair = [&](const AccessRec& store, bool is_c2v, int pair_idx) {
+      const CoreSide expected_consumer = is_c2v ? CoreSide::AIV : CoreSide::AIC;
+      const AccessRec* chosen = nullptr;
+      for (const AccessRec* load : loads_it->second) {
+        if (used_loads.count(load)) continue;
+        if (load->side != expected_consumer) continue;
+        // The consumer load must share the store's body (a 1:1 fence) or be nested
+        // in a loop/branch under it. In the nested case the tpop is hoisted to the
+        // store-body-level compound below, so tpush and the hoisted tpop still run
+        // the same number of times. Loads in a sibling/disjoint body are left
+        // unfenced — their trip count vs. the store's is unproven (deadlock risk).
+        if (!is_ancestor_body(store.body_id, load->body_id)) continue;
+        if (load->order <= store.order) continue;  // load must follow the store
+        if (chosen == nullptr || load->order < chosen->order) chosen = load;
+      }
+      if (chosen == nullptr) return;
 
-    const CoreSide consumer_side = chosen->side;
-    const MemorySpace consumer_mem = GetBoundaryTpopMemory(consumer_side);
-    auto pop_tile_type = std::make_shared<TileType>(src_tile_type->shape_, src_tile_type->dtype_,
-                                                    std::nullopt, std::nullopt, consumer_mem);
-    std::string token_name = origin->name_hint_ + "_gm_sync";
+      const Stmt* pop_stmt = chosen->stmt;
+      if (chosen->body_id != store.body_id) {
+        pop_stmt = enclosing_stmt_in_body(store.body_id, chosen->body_id);
+        if (pop_stmt == nullptr) return;
+      }
 
-    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
-    // A vector per stmt: several GM dependencies can hoist to the same enclosing
-    // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
-    gm_sync_pops[pop_stmt].push_back(GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
+      auto src_tile_type = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
+      if (!src_tile_type) return;
+
+      used_loads.insert(chosen);
+      const CoreSide consumer_side = chosen->side;
+      const MemorySpace consumer_mem = GetBoundaryTpopMemory(consumer_side);
+      auto pop_tile_type = std::make_shared<TileType>(src_tile_type->shape_, src_tile_type->dtype_,
+                                                      std::nullopt, std::nullopt, consumer_mem);
+      std::string token_name = origin->name_hint_ + "_gm_sync";
+      if (pair_idx > 0) token_name += "_" + std::to_string(pair_idx);
+
+      gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
+      // A vector per stmt: several GM dependencies can hoist to the same enclosing
+      // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
+      gm_sync_pops[pop_stmt].push_back(GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
+    };
+
+    if (c2v_stores.size() == 1) {
+      emit_pair(*c2v_stores.front(), /*is_c2v=*/true, /*pair_idx=*/0);
+    }
+    for (size_t i = 0; i < v2c_mx_stores.size(); ++i) {
+      emit_pair(*v2c_mx_stores[i], /*is_c2v=*/false, static_cast<int>(i));
+    }
   }
 }
 
@@ -722,31 +806,40 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             // off the half source's own view. For tile.move boundaries the
             // destination is the cube tile itself (Mat/Left/Right), so key off
             // its memory and view as before.
-            TileView fractal_view;
-            if (bm.op_driven) {
-              fractal_view = BuildCrossCoreTransferView(
-                  GetBoundaryTpopMemory(CoreSide::AIC),  // cube-side transfer memory (Mat)
-                  tile_view_semantics::GetEffectiveTileView(*src_type));
-            } else {
+            bool skip_fractal_adapt = IsMxNdScaleTile(*src_type);
+            if (!bm.op_driven) {
               auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
               INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value(), stmt->span_)
                   << "Boundary move destination must have TileType and MemSpace";
-              fractal_view = BuildCrossCoreTransferView(
-                  push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-                  tile_view_semantics::GetEffectiveTileView(*push_dest_type));
+              skip_fractal_adapt = skip_fractal_adapt || IsMxNdScaleTile(*push_dest_type);
             }
+            if (!skip_fractal_adapt) {
+              TileView fractal_view;
+              if (bm.op_driven) {
+                fractal_view = BuildCrossCoreTransferView(
+                    GetBoundaryTpopMemory(CoreSide::AIC),  // cube-side transfer memory (Mat)
+                    tile_view_semantics::GetEffectiveTileView(*src_type));
+              } else {
+                auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
+                INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value(), stmt->span_)
+                    << "Boundary move destination must have TileType and MemSpace";
+                fractal_view = BuildCrossCoreTransferView(
+                    push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+                    tile_view_semantics::GetEffectiveTileView(*push_dest_type));
+              }
 
-            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
-                                                        fractal_view, MemorySpace::Vec);
-            std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-              src_name = sv->name_hint_;
+              auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
+                                                          fractal_view, MemorySpace::Vec);
+              std::string src_name = "tile";
+              if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+                src_name = sv->name_hint_;
+              }
+              bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+              auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+              auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
+              result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+              push_source = tmov_var;
             }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split), stmt->span_));
@@ -786,7 +879,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           } else {
             boundary_view = tile_view_semantics::GetEffectiveTileView(*shape_tt);
           }
-          auto fractal_view = BuildCrossCoreTransferView(view_ms, boundary_view);
+          // Preserve ND MX scale layout across V2C (see IsMxNdScaleTile).
+          TileView fractal_view =
+              IsMxNdScaleTile(*shape_tt) ? boundary_view : BuildCrossCoreTransferView(view_ms, boundary_view);
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
                                                   : bm.dest_var->name_hint_;
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
@@ -970,6 +1065,10 @@ std::unordered_map<const Var*, const Var*> BuildGmOriginMap(const std::vector<St
             propagate_from_expr(lhs, call->args_[2]);
             continue;
           }
+          if ((IsOp(call, "tensor.reshape") || IsOp(call, "tile.reshape")) && !call->args_.empty()) {
+            propagate_from_expr(lhs, call->args_[0]);
+            continue;
+          }
         }
         propagate_from_expr(lhs, assign->value_);
       } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
@@ -1133,7 +1232,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
   std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
-  CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+  CollectGmCrossLaneSyncs(stmts, func->params_, stmt_map, gm_sync_pushes, gm_sync_pops);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;

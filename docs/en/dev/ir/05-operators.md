@@ -134,16 +134,18 @@ later unrolls the batched form into per-batch 2D ops.
 
 MX uses dedicated `LeftScale` / `RightScale` memory spaces and `FP8E8M0` scale dtype.
 This PR extends #2147 (minimal host-prequant MXFP8 matmul) with on-chip `tquant` /
-`tdequant`; `matmul_mx_acc` / `_bias` / MXFP4 / ND A-scale rewrite land in later #2117 commits.
+`tdequant` and `matmul_mx_acc` / `matmul_mx_bias`; MXFP4 / ND A-scale rewrite land in later #2117 commits.
 
 | IR / DSL | Notes |
 | -------- | ----- |
 | `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; **data `FP8E4M3FN` only** (FP8E5M2 / FP4 rejected here); scale `FP8E8M0`; `K % 32 == 0` |
+| `tile.matmul_mx_acc` / `_bias` | Acc / bias variants (same data dtype rules as `matmul_mx`) |
 | `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 dynamic quant → `TupleType{quant, scale}`; codegen `pto.tquant.mx` |
 | `tile.tdequant` / `pl.tdequant` | Integer per-row dequant: `dst = (src - offset) * scale` |
 | `tile.tget_scale_addr` / `pl.tget_scale_addr` | Bind scale address from Left/Right (A5); flushes deferred Mat→Scale fills |
 | `tile.load(..., mx_layout=...)` | MX scale GM layouts `mx_a_*` / `mx_b_*` (dtype FP8E8M0 or UINT8) |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move; may register a pending fill until `tget_scale_addr` |
+
 
 Canonical sample: `M=128,K=64,N=64`, A/B=`FP8E4M3FN`, scale=`FP8E8M0` (`[128,2]` / `[2,64]`),
 GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); align M↑16, K↑64, N↑32 (fp8).
@@ -169,7 +171,8 @@ GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); align M↑16, K↑64, 
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first |
 | Order | `tget_scale_addr` **before** Mat→scaling fill; PyPTO uses `PendingScaleFill`, flushed at tget |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage ST uses **host ZZ/NN** (AZZ2ZZ) and does **not** rely on EmitC ND rewrite (rewrite / AIC `PIPE_ALL` → #2117) |
-| Coverage here | `pto.tmatmul.mx` + `pto.tquant.mx` + `pto.tget_scale_addr`; acc·bias → #2117 |
+| Coverage here | `pto.tmatmul.mx` + `pto.tmatmul.mx.acc` + `pto.tmatmul.mx.bias` + `pto.tquant.mx` + `pto.tget_scale_addr`; MXFP4 / ND rewrite → #2117 |
+
 
 ## Python Usage
 

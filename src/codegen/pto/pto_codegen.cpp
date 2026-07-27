@@ -225,12 +225,19 @@ int GetGMPipeSlotCount(int dir_mask) {
 //     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
 //     not an unsupported Mat->Mat preservation copy);
 //   * `tile.tget_scale_addr` (`set_output_reuses_input(0)`): rebinds the scale
-//     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale.
+//     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale;
+//   * Acc accumulate ops (`matmul_acc` / `gemv_acc` / `matmul_mx_acc`): pto-isa
+//     and ptoas require in-place Acc (`c_in == dst`). Binding the result Var to
+//     args_[0]'s SSA prevents a fresh `alloc_tile` sibling at the same addr
+//     (uninitialized Acc → NaN on `tmatmul.mx.acc`). Matches ISA K-chunk reuse
+//     (`TMATMUL_MX` then `TMATMUL_MX(c,c,…)`); Acc must NOT go through scf.for
+//     iter_args under level3 materialize.
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
   return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
-         ir::IsOp(op, "tile.tget_scale_addr");
+         ir::IsOp(op, "tile.tget_scale_addr") || ir::IsOp(op, "tile.matmul_acc") ||
+         ir::IsOp(op, "tile.gemv_acc") || ir::IsOp(op, "tile.matmul_mx_acc");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
@@ -613,21 +620,25 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Still collect fs_.memref_to_tile_type for GetTileBufTypeString fallback paths
   fs_.memref_to_tile_type = collector.GetMemRefTileTypes();
 
-  // Per-var SSA binding: each tile variable gets its own SSA name — except in
-  // PTOAS memory-planner mode (no addr baked), where variables denoting the
-  // *same* buffer (same MemRef base+offset+size, e.g. a loop-carried
-  // accumulator coalesced by MemoryReuse) must share one tile_buf handle. In
-  // level3 that aliasing was carried by an identical `addr`; without addr, ptoas
-  // PlanMemory would otherwise allocate them separately, so we instead emit a
-  // single alloc_tile and let the op write in place (`outs(%acc)`).
+  // Per-var SSA binding: each tile variable gets its own SSA name — except when
+  // variables denote the *same* buffer (same MemRef base+offset+size).
+  //
+  // PTOAS memory-planner mode (no addr baked): always share one handle; mixed
+  // types become `pto.treshape` views. Without sharing PlanMemory would allocate
+  // them separately.
+  //
+  // Level3 baked-addr mode: share only when tile_buf types match (e.g. Acc
+  // chain for matmul_mx → matmul_mx_acc). Fresh SSAs at the same addr for Acc
+  // caused mx_acc to accumulate into an uninitialized sibling → NaNs. Mixed-type
+  // MemRef reuse (fp32 Vec later used as i8) must keep separate SSAs here.
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     auto memref = ir::GetDefinedMemRef(tile_type);
 
     std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
 
     std::string ssa_name;
+    const std::string ident = MemRefIdentityKey(memref);
     if (!emit_tile_addr_) {
-      const std::string ident = MemRefIdentityKey(memref);
       auto it = fs_.memref_identity_to_mlir.find(ident);
       if (it != fs_.memref_identity_to_mlir.end()) {
         ssa_name = it->second;  // reuse the shared handle (in-place aliasing)
@@ -646,7 +657,21 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         fs_.memref_identity_mixed_types.insert(ident);
       }
     } else {
-      ssa_name = NewNamedTemp(tile_var->name_hint_);
+      // Level3: only coalesce Acc tiles that share MemRef+type. Other spaces keep
+      // per-var SSAs (pipeline Vec reuse breaks if we share broadly).
+      const bool is_acc = type_str.find("loc=acc") != std::string::npos;
+      auto it = fs_.memref_identity_to_mlir.find(ident);
+      auto type_it = fs_.memref_identity_type.find(ident);
+      if (is_acc && it != fs_.memref_identity_to_mlir.end() &&
+          type_it != fs_.memref_identity_type.end() && type_it->second == type_str) {
+        ssa_name = it->second;
+      } else {
+        ssa_name = NewNamedTemp(tile_var->name_hint_);
+        if (is_acc && it == fs_.memref_identity_to_mlir.end()) {
+          fs_.memref_identity_to_mlir[ident] = ssa_name;
+          fs_.memref_identity_type.emplace(ident, type_str);
+        }
+      }
     }
     BindVarToMlir(tile_var, ssa_name);
 
@@ -1097,13 +1122,50 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
+// Compute the minimum column count that satisfies a5's 32-byte row alignment
+// constraint for the given dtype.  Tiles whose physical row byte size
+// (cols * sizeof(dtype)) is < 32 must be padded up.
+static int64_t PaddedColsFor32BAlign(int64_t cols, const DataType& dtype) {
+  size_t elem_size;
+  if (dtype == DataType::FP32 || dtype == DataType::INT32 || dtype == DataType::UINT32) {
+    elem_size = 4;
+  } else if (dtype == DataType::INT64 || dtype == DataType::UINT64) {
+    elem_size = 8;
+  } else if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::INT16 ||
+             dtype == DataType::UINT16) {
+    elem_size = 2;
+  } else {
+    elem_size = 1;  // FP8 / INT8 / UINT8 / BOOL / FP4
+  }
+  size_t row_bytes = static_cast<size_t>(cols) * elem_size;
+  if (row_bytes >= 32) return cols;
+  return static_cast<int64_t>((32 + elem_size - 1) / elem_size);
+}
+
 PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
-    const std::shared_ptr<const ir::TileType>& tile_type) {
+    const std::shared_ptr<const ir::TileType>& tile_type, bool prologue_safe) {
   AllocTileFields fields;
 
   // Type string always uses dynamic valid dims (v_row=?, v_col=?); the actual
   // extent is conveyed via valid_row / valid_col operands below.
   fields.type_str = GetTileBufTypeStringFromTileType(tile_type);
+
+  auto memref = ir::GetDefinedMemRef(tile_type);
+  if (memref && emit_tile_addr_) {
+    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
+      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+    }
+  }
+
+  // Prologue `alloc_tile` (EmitExtraAllocTiles) may only reference constants /
+  // other prologue SSA. Dynamic valid_shape dims (e.g. loop-local minsi) do
+  // not dominate → ptoas "operand does not dominate this use".
+  if (prologue_safe) {
+    auto c = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
+    fields.valid_row_ssa = GetOrEmitConstant(c.rows, DataType::INDEX);
+    fields.valid_col_ssa = GetOrEmitConstant(c.cols, DataType::INDEX);
+    return fields;
+  }
 
   // Cast a non-index integer SSA to `index` (PTOAS expects index typed
   // valid_row / valid_col operands). Floating-point operands are rejected.
@@ -1150,12 +1212,6 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     }
   }
 
-  auto memref = ir::GetDefinedMemRef(tile_type);
-  if (memref && emit_tile_addr_) {
-    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
-    }
-  }
   return fields;
 }
 
@@ -1173,11 +1229,29 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.
-  if (!fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
+  if (fs_.emitted_tile_alloc_names.count(tile_buf) != 0) {
+    return;
+  }
+
+  // Acc tiles are reused across scf.for / scf.if regions (K-peel if-phi, Acc
+  // MemRef identity across sequential matmuls, remainder-tail after a loop).
+  // Emitting `alloc_tile` at the first use site can bury the def inside a
+  // nested region that does not dominate later sibling uses → undeclared SSA.
+  // Hoist every Acc handle to the function prologue so one def dominates all
+  // regions (ISA in-place Acc: c_in == dst on a single alloc_tile SSA).
+  // valid_row/col must be prologue-safe constants (not loop-local valid_shape);
+  // compute fields only after this branch so dynamic valid_shape is not lowered
+  // into the body stream as a discarded side effect.
+  if (tile_type->GetMemorySpace() == ir::MemorySpace::Acc) {
+    DeclareTileBufAtHead(tile_buf, ComputeAllocTileFields(tile_type, /*prologue_safe=*/true));
     return;
   }
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
+
+  if (!fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
+    return;
+  }
 
   std::ostringstream line;
   line << tile_buf << " = pto.alloc_tile";
@@ -1289,7 +1363,7 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
 }
 
 std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const {
-  if (emit_tile_addr_ || !memref) {
+  if (!memref) {
     return "";
   }
   const std::string ident = MemRefIdentityKey(memref);
@@ -1299,7 +1373,21 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) c
     return "";
   }
   auto it = fs_.memref_identity_to_mlir.find(ident);
-  return it != fs_.memref_identity_to_mlir.end() ? it->second : std::string{};
+  if (it == fs_.memref_identity_to_mlir.end()) {
+    return "";
+  }
+  // PTOAS: always share one handle for the same MemRef identity.
+  // Level3 (emit_tile_addr_): only Acc identities are registered in the map
+  // (see GenerateFunction per-var binding), so a hit here is Acc in-place reuse.
+  if (!emit_tile_addr_) {
+    return it->second;
+  }
+  auto type_it = fs_.memref_identity_type.find(ident);
+  if (type_it != fs_.memref_identity_type.end() &&
+      type_it->second.find("loc=acc") != std::string::npos) {
+    return it->second;
+  }
+  return "";
 }
 
 bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {

@@ -758,19 +758,37 @@ class PTOCodegen : public CodegenBase {
    * `valid_row` / `valid_col` operands lowered from `tile_type->tile_view_.valid_shape`
    * when present, falling back to `tile_type->shape_` otherwise.
    *
+   * When `prologue_safe` is true (Acc / IfStmt head-declared tiles), extents
+   * come from physical `shape_` constants only. Dynamic `valid_shape` SSA from
+   * nested regions must not appear on prologue `alloc_tile` (dominate error);
+   * runtime extent is applied later via `pto.set_validshape`.
+   *
    * @param tile_type Tile type carrying shape/tile_view/memref metadata.
+   * @param prologue_safe Restrict valid_row/col to constants that dominate the
+   *                      function prologue (`EmitExtraAllocTiles`).
    */
-  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type);
+  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type,
+                                         bool prologue_safe = false);
 
   /**
    * @brief The tile_buf handle already bound to the buffer `memref` denotes.
    *
-   * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
-   * where variables denoting the same buffer must share one handle because
-   * there is no baked `addr` to alias through. Returns "" when addresses are
-   * baked, when `memref` is null, or when no handle is bound yet.
+   * Under PTOAS (`emit_tile_addr_ == false`) any MemRef identity may share one
+   * handle. Under level3, only Acc identities are registered — a hit means the
+   * Acc in-place chain already bound a dominating SSA. Returns "" when no
+   * handle is bound yet / mixed-type identity / non-Acc under level3.
    */
   [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+
+  /**
+   * @brief Acc if-phi canonical buffer: SSA of the in-place `matmul_acc` input.
+   *
+   * Peeled K-loops yield a seed `matmul` on one leg and `matmul_acc(init,…)` on
+   * the other. Both legs (and every post-if Acc consumer) must write the same
+   * `alloc_tile` handle so ptoas sees in-place Acc (`c_in == dst`). Returns ""
+   * when the slot is not an Acc if-phi with a resolvable accumulate input.
+   */
+  [[nodiscard]] std::string ResolveAccIfPhiCanonicalSSA(const ir::IfStmtPtr& op, size_t slot);
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.

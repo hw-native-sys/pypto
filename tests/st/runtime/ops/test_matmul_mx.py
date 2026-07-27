@@ -152,10 +152,18 @@ def matmul_mx_prequant(
 
 @pytest.mark.platforms("a5", "a5sim")
 class TestMatmulMx:
-    """MX matmul system tests (Ascend950 / a5sim), host-prequant MXFP8 sample."""
+    """MX matmul system tests (Ascend950 / a5sim), host-prequant MXFP8 E4M3 sample."""
 
     def test_matmul_mx_compiles_ptoas(self, test_config):
-        """Frontend → PTOAS EmitC succeeds for the MX GEMM chain."""
+        """Frontend → PTOAS EmitC succeeds for the MX GEMM chain.
+
+        Uses signature-mode ``compile(config=test_config)`` so CI (torch 2.6,
+        no float8_e8m0fnu) still exercises the full codegen/PTOAS path without
+        host FP8 tensors. ``config=test_config`` forwards the session platform
+        (a5sim → Ascend950); compiling without it would default the backend to
+        Ascend910B and pollute the global backend type for the rest of the
+        a5sim session (every sibling test needs 950).
+        """
         matmul_mx_prequant._cache.clear()
         compiled = matmul_mx_prequant.compile(config=test_config)
         assert compiled is not None
@@ -163,7 +171,11 @@ class TestMatmulMx:
 
     @pytest.mark.platforms("a5")
     def test_matmul_mx_prequant_on_device(self, test_config):
-        """End-to-end on real a5 (host-prequant FP8E4M3FN+E8M0)."""
+        """End-to-end on real a5 (host-prequant FP8E4M3FN+E8M0).
+
+        a5sim is excluded: CPU TLoad stubs only accept ND/DN/NZ, not MX_A_ZZ/MX_B_NN.
+        Requires torch.float8_e8m0fnu (PyTorch 2.7+) for host scale tensors.
+        """
         matmul_mx_prequant._cache.clear()
         a, a_s, b, b_s, c, expected = _make_case1_inputs()
         matmul_mx_prequant(a, a_s, b, b_s, c, config=test_config)

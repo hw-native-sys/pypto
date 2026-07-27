@@ -71,6 +71,8 @@ __all__ = [
     "batch_matmul_acc",
     "matmul_bias",
     "matmul_mx",
+    "matmul_mx_acc",
+    "matmul_mx_bias",
     "tquant",
     "mx_quant",
     "tdequant",
@@ -1216,6 +1218,22 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication."""
     call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+    """MX block-scale matmul with accumulation."""
+    call_expr = _ir_ops.matmul_mx_acc(
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+    )
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
+    """MX block-scale matmul with bias."""
+    call_expr = _ir_ops.matmul_mx_bias(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap()
+    )
     return Tile(expr=call_expr)
 
 

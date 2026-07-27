@@ -170,18 +170,22 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
     codegen.Emit(mov.str());
   }
 
-  // An Acc(L0C, f32) -> Mat(L1, bf16/f16) write at an (row, col) offset is the
-  // cube's FIXPIPE writeback (pto-isa `mte_l0c_l1`): the only offset Acc->Mat
-  // path on A2/A3, and it intrinsically downcasts the f32 accumulator to the Mat
-  // tile's low-precision dtype. Lower it to `pto.tinsert` (the documented offset
-  // Acc->Mat op) rather than `pto.subview` + a converting `pto.tmov`: ptoas
-  // rejects the latter for a partial window (its tmov shape check reads the
-  // subview's *base* [M, N], not the [m, n] window — verified against ptoas
-  // v0.45), and the f32->bf16 cast has no MTE1 `tmov` form. A same-dtype (f32)
-  // full-window cross-space assemble keeps the subview/tmov path below.
-  const bool fixpipe_insert = cross_space_acc_to_mat && (result_tile_type->dtype_ == DataType::BF16 ||
-                                                         result_tile_type->dtype_ == DataType::FP16);
-  if (fixpipe_insert) {
+  // Acc(L0C) → Mat(L1) writeback — align with pto-isa:
+  //   * full window → direct `pto.tmov` (TMovCcToCb / CheckTMovAccValid)
+  //   * partial window → `pto.tinsert` (TInsertAccToMat); subview+tmov is
+  //     rejected by ptoas for partial Acc→Mat (shape check reads the base).
+  // bf16/fp16 FIXPIPE downcast also uses tinsert.
+  if (cross_space_acc_to_mat) {
+    if (full_window_acc_to_mat) {
+      std::ostringstream tmov;
+      tmov << "pto.tmov ins(" << src;
+      if (!src_type.empty()) tmov << " : " << src_type;
+      tmov << ") outs(" << dst;
+      if (!dst_type.empty()) tmov << " : " << dst_type;
+      tmov << ")";
+      codegen.Emit(tmov.str());
+      return "";
+    }
     std::ostringstream tins;
     tins << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
     if (!src_type.empty()) tins << " : " << src_type << ", index, index";
