@@ -36,9 +36,11 @@ std::runtime_error
 上游的 Mach-O 读取器只接受 `MH_EXECUTE`、`MH_DYLIB` 和 `MH_DSYM`，而 CPython 扩展模块是
 `MH_BUNDLE`——因此在 **macOS** 上符号化会失败，`GetFullMessage()` 退化为
 `No stack trace available`。任何构建模式都无法改变这一点：这是文件类型（filetype）的限制，
-而非缺少调试信息。Linux（ELF）不受影响，可生成完整回溯。
+而非缺少调试信息。Linux（ELF）不受影响，但仍然需要调试信息：`Debug` 和 `RelWithDebInfo`
+（默认值）会传入 `-g`，可生成完整回溯；而纯 `Release` 构建为 `-O2 -DNDEBUG`、不含 `-g`，
+栈帧因此没有源码位置，同样会退化为上述提示。
 
-`Backtrace::ErrorCallback` 对每条不同的 libbacktrace *消息*只上报一次。否则在 macOS 上，每次
+`Backtrace::ErrorCallback` 对每个不同的 `(消息, errno)` 组合只上报一次。否则在 macOS 上，每次
 捕获回溯都会为**每个栈帧**打印一行 `no debug info in Mach-O executable`——因为 dyld 初始化
 路径整体上是成功的，并会把 `macho_nodebug` 装为 fileline 处理函数。
 

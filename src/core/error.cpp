@@ -32,7 +32,8 @@ std::string Error::GetFullMessage() const {
     // Upstream libbacktrace accepts only MH_EXECUTE / MH_DYLIB / MH_DSYM Mach-O files, and a
     // CPython extension module is an MH_BUNDLE — so no build mode enables traces on macOS.
     oss << "\n\nNo stack trace available. \n"
-           "(C++ stack traces are not supported on macOS; build on Linux to get them.)";
+           "(C++ stack traces are not supported on macOS; use a Linux Debug or RelWithDebInfo "
+           "build to get them.)";
 #else
     oss << "\n\nNo stack trace available. \n"
            "(Tip: Build with CMake in Debug or RelWithDebInfo mode to enable stack trace support.)";
