@@ -468,18 +468,19 @@ Pass LegalizeTileCast();
  * opt-in.  Chained Mat-scratch producers remain output-stationary to avoid the
  * allocator offset-packing limitation tracked by issue #1908.
  *
- * The pass also recognizes a user-authored, static pipeline (stage >= 2, trip
- * count divisible by the stage count) containing exactly one already-L0
- * ``tile.matmul`` whose Acc result is directly drained
- * by ``tile.store`` or ``tile.assemble``, with one loop-invariant operand and
- * one operand produced by a per-iteration Mat-to-L0 transfer.  When the
- * conservative whole-function Acc footprint (including the physical stage
- * multiplicity of other pipelined Acc producers) plus one slot per eligible
- * loop fits in L0C, it
- * enables the existing two-accumulator drain-overlap schedule automatically
- * under the PyPTO memory planner.  Deeper operand pipelines are scheduled in
- * depth-two compute/drain chunks and still rotate only two L0C slots.  Explicit
- * loop policies, nested control flow, multiple cube matmuls or Acc values,
+ * The pass also recognizes a user-authored, static pipeline (stage >= 2, at
+ * least four iterations, trip count divisible by the stage count) containing
+ * exactly one already-L0 ``tile.matmul`` whose Acc result is drained directly
+ * to GM by ``tile.store``, with one loop-invariant operand and one operand
+ * produced by a per-iteration Mat-to-L0 transfer.  Acc-to-Mat
+ * ``tile.assemble`` pipelines remain unchanged until their distinct drain path
+ * has a profitability model.  When the conservative whole-function Acc
+ * footprint (including the physical stage multiplicity of other pipelined Acc
+ * producers) plus one slot per eligible loop fits in L0C, it enables the
+ * existing two-accumulator drain-overlap schedule automatically under the
+ * PyPTO memory planner.  Deeper operand pipelines are scheduled in depth-two
+ * compute/drain chunks and still rotate only two L0C slots.  Explicit loop
+ * policies, nested control flow, multiple cube matmuls or Acc values,
  * non-canonical drain/yield chains, additional stores, and insufficient L0C
  * capacity stay unchanged.
  *

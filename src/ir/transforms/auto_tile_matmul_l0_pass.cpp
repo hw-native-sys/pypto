@@ -1491,6 +1491,12 @@ struct PipelineAccumulatorCandidate {
   uint64_t aligned_acc_bytes = 0;
 };
 
+/// Two L0C slots need at least two complete compute/drain pairs before their
+/// fill/drain bubble is reliably amortized.  The device sweep for #2131 found
+/// the two-iteration (one-pair) form tied, while every direct-store case with
+/// four or more iterations won across M/N/K, operand side, and Acc size.
+constexpr int64_t kMinAutoPipelineDbCTripCount = 4;
+
 /// Recognize an already-L0, directly-drained matmul in a software pipeline and
 /// return the extra accumulator slot it would need.
 ///
@@ -1510,15 +1516,19 @@ struct PipelineAccumulatorCandidate {
 /// ping-pong rather than growing to one accumulator per stage.
 ///
 /// Keep the recognition deliberately conservative:
-///   * static pipeline with stage >= 2 and a trip count divisible by the stage
-///     count (no separately lowered tail group);
+///   * static pipeline with stage >= 2 and at least four iterations, with a
+///     trip count divisible by the stage count (no separately lowered tail
+///     group and enough work to amortize the two-slot fill/drain bubble);
 ///   * no nested control flow in the candidate body;
 ///   * exactly one cube MAD, and it is plain ``tile.matmul`` over Left/Right;
 ///   * exactly one operand is a recognized per-iteration Mat->L0 transfer; the
 ///     stationary operand is defined outside the loop and is not an IterArg;
 ///   * no other Acc definition/read or store-like operation in the body;
-///   * one canonical loop-carried ``tile.store`` or ``tile.assemble`` chain:
-///     the drain targets IterArg i and its result is yielded at index i.
+///   * one canonical loop-carried direct-to-GM ``tile.store`` chain: the drain
+///     targets IterArg i and its result is yielded at index i.  Acc-to-Mat
+///     ``tile.assemble`` remains structurally supported by the lowering but is
+///     not auto-enabled until its distinct profitability has a path-aware
+///     model.
 ///
 /// The direct-body scans are disjoint across nested loops, so this remains
 /// linear in program size.
@@ -1528,7 +1538,7 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(const For
   const int64_t trip_count = loop ? transform_utils::EvalConstTripCount(loop) : -1;
   if (!loop || loop->kind_ != ForKind::Pipeline || loop->HasAttr(kPipelineOverlapStoresAttr) ||
       loop->HasAttr(kPipelineDoubleBufferCAttr) || stages < 2 || trip_count < stages ||
-      trip_count % stages != 0) {
+      trip_count < kMinAutoPipelineDbCTripCount || trip_count % stages != 0) {
     return std::nullopt;
   }
 
@@ -1638,9 +1648,12 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(const For
     const bool is_assemble = IsOp(call, "tile.assemble");
     if (!is_store && !is_assemble && !IsOp(call, "tile.write")) continue;
     ++store_like_calls;
-    if (!assign || call->args_.size() != 3) return std::nullopt;
-    const size_t source_index = is_assemble ? 1 : 0;
-    auto source = AsVarLike(call->args_[source_index]);
+    // The same two-slot schedule has path-dependent profitability.  Direct GM
+    // stores won throughout the device sweep, whereas a small BF16 Mat
+    // assemble regressed.  Be conservative until the Acc->Mat drain has its
+    // own calibrated admission rule.
+    if (!is_store || !assign || call->args_.size() != 3) return std::nullopt;
+    auto source = AsVarLike(call->args_[0]);
     if (!source || source.get() != candidate->var_.get()) return std::nullopt;
     if (drain_assign) return std::nullopt;
     drain_assign = assign;
@@ -1660,19 +1673,10 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(const For
     }
   }
   if (!yield_index || *yield_index >= loop->iter_args_.size()) return std::nullopt;
-  const size_t target_index = IsOp(drain_call, "tile.assemble") ? 0 : 2;
-  auto target = AsVarLike(drain_call->args_[target_index]);
+  auto target = AsVarLike(drain_call->args_[2]);
   if (!target || target.get() != loop->iter_args_[*yield_index].get()) return std::nullopt;
   if (uses.counts[drain_assign->var_.get()] != 1 || uses.counts[target.get()] != 1) {
     return std::nullopt;
-  }
-  if (IsOp(drain_call, "tile.assemble")) {
-    auto target_ty = As<TileType>(target->GetType());
-    auto result_ty = As<TileType>(drain_assign->var_->GetType());
-    if (!target_ty || target_ty->GetMemorySpace() != MemorySpace::Mat || !result_ty ||
-        result_ty->GetMemorySpace() != MemorySpace::Mat) {
-      return std::nullopt;
-    }
   }
   return PipelineAccumulatorCandidate{*acc_bytes};
 }

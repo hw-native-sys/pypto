@@ -2001,6 +2001,17 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         After = passes.auto_tile_matmul_l0()(Before)
         assert "pipeline_double_buffer_c" not in ir.python_print(After)
 
+    def test_defers_single_compute_drain_pair(self):
+        """Two iterations do not amortize the two-slot fill/drain bubble."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        Before = self._single_matmul_pipeline(tile_n=128, inner_stage=2, width=256)
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        assert "pipeline_double_buffer_c" not in ir.python_print(After)
+        _assert_ssa_valid(After, "test_existing_pipeline_dbc_single_pair")
+
     def test_marks_exact_half_l0c_accumulator(self):
         """Two 128x128 f32 accumulators exactly fill A2/A3's 128 KiB L0C."""
         _backend.reset_for_testing()
@@ -2086,8 +2097,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert "pipeline_double_buffer_c" in ir.python_print(After)
         _assert_ssa_valid(After, "test_existing_pipeline_dbc_moving_left")
 
-    def test_marks_canonical_mat_scratch_assemble_chain(self):
-        """A direct Acc->Mat assemble is eligible when it threads one scratch IterArg."""
+    def test_defers_mat_scratch_assemble_without_path_profitability_model(self):
+        """Acc->Mat needs a drain-path-specific profitability decision."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -2123,8 +2134,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 return scratch_r
 
         After = passes.auto_tile_matmul_l0()(Before)
-        assert "pipeline_double_buffer_c" in ir.python_print(After)
-        _assert_ssa_valid(After, "test_existing_pipeline_dbc_assemble")
+        assert "pipeline_double_buffer_c" not in ir.python_print(After)
+        _assert_ssa_valid(After, "test_existing_pipeline_dbc_assemble_deferred")
 
     def test_rejects_loop_carried_matmul_operand(self):
         """An operand IterArg changes by loop semantics and is not invariant."""
