@@ -258,9 +258,9 @@ void DistributedCodegen::EmitImports() {
       "from simpler.task_interface import "
       "CallConfig, CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType");
   emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
-  // ``_submit_chip`` wraps ``orch.submit_next_level`` to namespace per-dispatch
-  // DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``, or ``rank_local/d{k}``
-  // for a comm-less dispatch); a no-op when DFX is off.
+  // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
+  // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
+  // namespacing half is a no-op when DFX is off.
   emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
 }
 
@@ -1079,12 +1079,15 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   } else {
     // CHIP Worker: dispatch via ``_submit_chip`` (wraps orch.submit_next_level).
     // N7: thread the dispatch ``device=`` attr (N3 parser) into the simpler
-    // runtime's ``worker=`` kwarg — a rank-pinned dispatch passes its rank; a
-    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``-1``
-    // (unconstrained; see simpler/python/simpler/orchestrator.py). ``_submit_chip``
-    // owns the per-dispatch DFX ``output_prefix`` namespacing — see its docstring.
+    // runtime's ``worker=`` kwarg. A rank-pinned dispatch passes its rank; a
+    // comm-less dispatch (empty rank_expr, no ``device=``) passes ``None``,
+    // which ``_submit_chip`` resolves to a concrete chip at dispatch time —
+    // simpler no longer accepts an unconstrained target (simpler #1436). The
+    // chip count is only known at run time, so the choice cannot be baked here.
+    // ``_submit_chip`` also owns the per-dispatch DFX ``output_prefix``
+    // namespacing — see its docstring.
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
-    const std::string worker_arg = rank_expr.empty() ? "-1" : rank_expr;
+    const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
     emitter_.EmitLine("_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var + ", config, " +
                       worker_arg + ")");
   }

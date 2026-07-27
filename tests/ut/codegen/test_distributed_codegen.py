@@ -53,8 +53,8 @@ class TestDistributedCodegen:
         assert "orch, _args, config" in code
 
         # Verify call-site lowering: CHIP orchestrator → _submit_chip (the
-        # comm-less dispatch passes worker=-1; _submit_chip forwards to
-        # submit_next_level when DFX is off).
+        # comm-less dispatch passes None and _submit_chip resolves the chip;
+        # it forwards to submit_next_level when DFX is off).
         assert "_submit_chip" in code
         assert 'callables["chip_orch"]' in code
         assert "TaskArgs()" in code
@@ -634,7 +634,7 @@ class TestDistributedCodegen:
 
         # Each tuple element should get its own tensors[...] alias
         assert code.count('tensors["') >= 2
-        # _submit_chip dispatch emitted for chip_orch (comm-less, worker=-1)
+        # _submit_chip dispatch emitted for chip_orch (comm-less, chip resolved at dispatch)
         assert "_submit_chip" in code
         # Two OUTPUT_EXISTING args for the two Out params
         assert code.count("TensorArgType.OUTPUT_EXISTING") == 2

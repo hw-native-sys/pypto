@@ -44,15 +44,16 @@ namespaces the prefix per dispatch:
 <work_dir>/dfx_outputs/
 ├── rank0/d0/          # rank 0, its 0th dispatch
 ├── rank0/d1/          # rank 0, its 1st dispatch
-├── rank1/d0/
-└── rank_local/d0/     # comm-less dispatch — no real rank
+└── rank1/d0/
 ```
 
 `d{k}` counts that card's dispatches within the run, restarting at `d0`
-each run. A dispatch that is not pinned to a rank (a comm-less program,
-which has no `device=` attribute) lands under `rank_local` instead of
-`rank{r}`. Each leaf holds the flat artefacts from the table above, so
-the L2 contract applies unchanged within one dispatch directory.
+each run. Every dispatch is filed under the chip that ran it: a `device=`
+pinned dispatch under its own rank, and a comm-less one (no `device=`)
+under the chip it was placed on — those are handed out round-robin over
+the program's chips in submit order. Each leaf holds the flat artefacts
+from the table above, so the L2 contract applies unchanged within one
+dispatch directory.
 
 ## L2 swimlane runs the kernel twice (onboard)
 

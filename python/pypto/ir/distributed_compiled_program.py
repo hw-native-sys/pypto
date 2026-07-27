@@ -307,8 +307,7 @@ class DistributedCompiledProgram:
         runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu`` /
         ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
         written per dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``
-        (``rank_local/d{k}`` for a comm-less dispatch, which has no real rank;
-        ``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card
+        (``d{k}`` is the card's k-th dispatch, so multiple dispatches to one card
         keep separate artifacts; swimlane co-enables dep_gen and emits
         ``merged_swimlane_*.json`` per dispatch, onboard only). Other compile-side
         fields are not consumed on the dispatch path.

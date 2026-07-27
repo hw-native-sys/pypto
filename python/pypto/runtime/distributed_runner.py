@@ -470,10 +470,9 @@ def _make_call_config(
             call_config.enable_scope_stats = dfx.enable_scope_stats
             call_config.enable_l2_swimlane = dfx.enable_l2_swimlane
             # Base dir shared by every chip; ``_submit_chip`` namespaces it per
-            # dispatch (``<dfx_base>/rank{worker}/d{k}``, or ``rank_local/d{k}``
-            # for a comm-less dispatch) so per-dispatch artifacts (pmu.csv,
-            # deps.json, l2_swimlane_records.json, ...) don't overwrite each
-            # other — even when one card runs multiple dispatches.
+            # dispatch (``<dfx_base>/rank{worker}/d{k}``) so per-dispatch
+            # artifacts (pmu.csv, deps.json, l2_swimlane_records.json, ...) don't
+            # overwrite each other — even when one card runs multiple dispatches.
             call_config.output_prefix = str(dfx_base)
     return call_config
 
@@ -491,16 +490,40 @@ _DISPATCH_DIR_GLOB = "d[0-9]*"
 def _dfx_rank_label(worker: int) -> str:
     """Directory name namespacing one card's DFX artifacts.
 
-    A rank-pinned dispatch (``worker >= 0``) is labelled by its rank; every
-    unconstrained / comm-less worker (``worker < 0``) collapses to a single
-    ``rank_local``, which has no real rank but still needs a namespace of its
-    own. Both forms match :data:`_RANK_DIR_GLOB`, so the consumers pick up
-    rank-pinned and comm-less dispatches uniformly.
+    Every dispatch names a concrete chip by the time it reaches here (see
+    :func:`_resolve_chip_worker`), so the label is always the chip's own rank
+    and matches :data:`_RANK_DIR_GLOB`.
     """
-    return f"rank{worker}" if worker >= 0 else "rank_local"
+    return f"rank{worker}"
 
 
-def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int) -> Any:
+def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
+    """Pick the chip a dispatch runs on.
+
+    A ``device=``-pinned dispatch arrives with its rank and is returned as is.
+    A comm-less dispatch arrives as ``None``: it expresses no affinity, but the
+    runtime requires an exact target — simpler #1436 made ``worker`` a required,
+    non-negative NEXT_LEVEL id and removed the "unconstrained" mode where the
+    scheduler picked an idle worker itself. Those dispatches are handed out
+    round-robin over the program's chips in submit order, so a host_orch with
+    one comm-less dispatch per chip still spreads across them (and does so
+    deterministically, unlike the old idle-pool pick).
+
+    The chip count is stamped on ``orch`` by ``_dispatch.orch_fn``; without it
+    (a caller that bypassed ``orch_fn``) every comm-less dispatch falls back to
+    chip 0, which always exists.
+    """
+    if worker is not None:
+        return worker
+    chip_count = max(1, int(getattr(orch, "_pypto_chip_count", 1)))
+    seq = getattr(orch, "_pypto_commless_seq", None)
+    if seq is None:
+        seq = 0
+    orch._pypto_commless_seq = seq + 1
+    return seq % chip_count
+
+
+def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None) -> Any:
     """``orch.submit_next_level`` with per-dispatch DFX ``output_prefix`` isolation.
 
     The runtime path helpers root every diagnostic artifact at a fixed filename
@@ -520,18 +543,15 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     run (see ``_dispatch.orch_fn``), so the numbering is deterministic and
     matches across the swimlane two-pass.
 
-    A rank-pinned dispatch (``worker >= 0``) is namespaced ``rank{worker}/d{k}``;
-    a comm-less / unconstrained dispatch (``worker < 0``, no ``device=`` attr) is
-    namespaced ``rank_local/d{k}``. The comm-less case has no real rank but still
-    needs a per-dispatch namespace: without it, several comm-less dispatches in
-    one run would share the base ``output_prefix`` and clobber each other's
-    fixed-name artifacts, and ``_collect_l3_swimlane`` (globs ``rank*``) would
-    never find records left at the base root. When DFX is off (``output_prefix``
-    unset) the call is forwarded unchanged.
+    Every dispatch is namespaced ``rank{worker}/d{k}`` by the chip it runs on.
+    When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
 
-    The codegen routes every chip dispatch through this wrapper — rank-pinned
-    dispatches pass their rank, comm-less dispatches pass ``-1``.
+    The codegen routes every chip dispatch through this wrapper — a rank-pinned
+    dispatch passes its rank, a comm-less one passes ``None`` and is resolved by
+    :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
+    so the artifacts land under the chip that actually ran the dispatch.
     """
+    worker = _resolve_chip_worker(orch, worker)
     base = config.output_prefix
     if not base:
         return orch.submit_next_level(callable_id, task_args, config, worker=worker)
@@ -540,9 +560,6 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
         # Defensive: a caller that bypassed ``orch_fn`` (no reset) still gets
         # per-card isolation, just without a guaranteed two-pass match.
         idx_map = orch._dfx_dispatch_idx = {}
-    # Key the counter by the *label*, not the raw worker: unconstrained workers
-    # all collapse to one ``rank_local`` dir, so keying by ``worker`` would let
-    # two distinct negative values both claim ``rank_local/d0``.
     rank_label = _dfx_rank_label(worker)
     k = idx_map.get(rank_label, 0)
     idx_map[rank_label] = k + 1
@@ -580,12 +597,11 @@ def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
 def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
-    The runtime writes ``<rank>/d{k}/l2_swimlane_records.json`` +
-    ``<rank>/d{k}/deps.json`` per dispatch, where ``<rank>`` is ``rank{r}`` for a
-    rank-pinned dispatch and ``rank_local`` for a comm-less one (``_submit_chip``
-    namespaced the dir by card *and* the card's k-th dispatch; dep_gen is
-    co-enabled with swimlane). Globbing ``rank*`` — rather than iterating a rank
-    count — picks up both, so a comm-less / single-card L3 program (which never
+    The runtime writes ``rank{r}/d{k}/l2_swimlane_records.json`` +
+    ``rank{r}/d{k}/deps.json`` per dispatch (``_submit_chip`` namespaced the dir
+    by card *and* the card's k-th dispatch; dep_gen is co-enabled with
+    swimlane). Globbing ``rank*`` — rather than iterating a rank count — picks up
+    whichever cards actually ran, so a comm-less / single-card L3 program (which never
     creates ``rank{0..n}``) still has its records converted. This best-effort
     post-pass runs the offline ``swimlane_converter`` once per dispatch dir,
     resolving kernel names from a merged map of every chip callable's
@@ -625,9 +641,8 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
         print(f"Skipping L3 swimlane name_map ({type(e).__name__}: {e}); labels fall back to defaults")
 
     dfx_base = output_dir / "dfx_outputs"
-    # Both ``rank{r}`` and the comm-less ``rank_local`` match ``rank*`` (see the
-    # docstring for why we glob rather than iterate a rank count). 3.10-safe dir
-    # filter (``glob`` directory filtering is only reliable on 3.11+).
+    # See the docstring for why we glob rather than iterate a rank count.
+    # 3.10-safe dir filter (``glob`` directory filtering is only reliable on 3.11+).
     rank_dirs = sorted(d for d in dfx_base.glob(_RANK_DIR_GLOB) if d.is_dir())
     for rank_dir in rank_dirs:
         # One card may have run several dispatches: ``<rank>/d0``, ``d1``, ...
@@ -704,9 +719,15 @@ def _dispatch(
         # ``_submit_chip`` numbers a card's dispatches ``d0, d1, ...`` fresh each
         # pass. Two-pass swimlane reissues the same dispatch order, so pass 1
         # (deps.json) and pass 2 (records) land the same dispatch in the same
-        # ``rank{w}/d{k}`` (or ``rank_local/d{k}``) dir — letting the converter
-        # join them.
+        # ``rank{w}/d{k}`` dir — letting the converter join them.
         orch._dfx_dispatch_idx = {}
+        # Comm-less dispatches carry no rank, so ``_resolve_chip_worker`` hands
+        # them out round-robin over the program's chips; both the count and the
+        # sequence live on ``orch`` so the wrapper stays a pure function of the
+        # dispatch. Resetting the sequence per run keeps placement identical
+        # across the swimlane two-pass, exactly like the DFX counter above.
+        orch._pypto_chip_count = device_nums
+        orch._pypto_commless_seq = 0
         entry_fn(
             orch,
             _unused_args,
@@ -744,10 +765,9 @@ def execute_distributed(
             runtime-diagnostic DFX flags (``enable_dump_args`` / ``enable_pmu``
             / ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``)
             are written per dispatch under
-            ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` — or ``rank_local/d{k}/``
-            for a comm-less dispatch (``d{k}`` is the card's k-th dispatch, so
-            multiple — even different — chip programs on one card keep separate
-            artifacts). Onboard, ``enable_l2_swimlane`` runs a
+            ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` (``d{k}`` is the card's
+            k-th dispatch, so multiple — even different — chip programs on one
+            card keep separate artifacts). Onboard, ``enable_l2_swimlane`` runs a
             clean two-pass dispatch (pass 1 dep_gen → ``deps.json``, pass 2
             swimlane → records with unperturbed timing) and additionally produces
             ``merged_swimlane_*.json`` per dispatch. The remaining compile-side
@@ -899,9 +919,8 @@ def execute_distributed_compiled(
             runtime ring buffers, and its runtime-diagnostic DFX flags
             (``enable_dump_args`` / ``enable_pmu`` / ``enable_dep_gen`` /
             ``enable_scope_stats`` / ``enable_l2_swimlane``) are written per
-            dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/`` (or
-            ``rank_local/d{k}/`` for a comm-less dispatch). Other compile-side
-            fields are not consumed on the dispatch path.
+            dispatch under ``<output_dir>/dfx_outputs/rank{r}/d{k}/``. Other
+            compile-side fields are not consumed on the dispatch path.
         platform: Override the persisted platform (e.g. ``a2a3sim`` → ``a2a3``).
         distributed_config: Override the persisted run config (e.g. a different
             set of ``device_ids``).

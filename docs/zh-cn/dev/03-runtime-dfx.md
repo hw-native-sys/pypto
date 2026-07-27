@@ -40,13 +40,13 @@ dispatch——若共用同一 prefix，各次 dispatch 会互相覆盖同名产�
 <work_dir>/dfx_outputs/
 ├── rank0/d0/          # rank 0 的第 0 次 dispatch
 ├── rank0/d1/          # rank 0 的第 1 次 dispatch
-├── rank1/d0/
-└── rank_local/d0/     # 无通信（comm-less）dispatch——没有真实 rank
+└── rank1/d0/
 ```
 
 `d{k}` 是该卡在本次 run 内的第 k 次 dispatch，每次 run 从 `d0` 重新计数。
-未绑定 rank 的 dispatch（comm-less 程序，没有 `device=` 属性）落在
-`rank_local` 而非 `rank{r}` 下。每个叶子目录内是上表所述的扁平产物，
+每次 dispatch 都归档在实际运行它的芯片下：带 `device=` 的按自身 rank，
+comm-less 的（没有 `device=`）则按被分配到的芯片——这类 dispatch 按提交
+顺序在程序的各芯片间轮询分配。每个叶子目录内是上表所述的扁平产物，
 因此在单个 dispatch 目录内 L2 契约完全适用。
 
 ## L2 泳道会把 kernel 跑两遍（onboard）

@@ -159,13 +159,16 @@ class TestL3Manual:
         # 6) Hand-written L3 orchestrator. ``submit_next_level`` queues chip
         # work; ``submit_sub`` queues the Python SubWorker. Both calls are
         # non-blocking; the implicit scope around ``orch_fn`` waits at return.
+        # ``worker=`` names the exact chip: simpler #1436 removed the
+        # unconstrained mode, so a NEXT_LEVEL submit must target a chip itself.
+        # This program has one chip, so that is chip 0.
         def orch_fn(orch, _unused_args, _unused_cfg) -> None:
             del _unused_args, _unused_cfg  # required by simpler's orch_fn signature
             chip_ta = TaskArgs()
             chip_ta.add_tensor(make_tensor_arg(a), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(b), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(f), TensorArgType.OUTPUT_EXISTING)
-            orch.submit_next_level(chip_cid, chip_ta, call_config)
+            orch.submit_next_level(chip_cid, chip_ta, call_config, worker=0)
 
             verify_ta = TaskArgs()
             verify_ta.add_tensor(make_tensor_arg(f), TensorArgType.INPUT)
