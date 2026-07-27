@@ -729,9 +729,17 @@ AxisView ClassifyAxis(const ElementwiseValidOperand& operand, size_t dim, size_t
     return {AxisRole::kAbsent, nullptr};
   }
   const size_t axis = dim - lead;
+  // A literal one is what `IsBroadcastable` widens, so that is what can widen here.
   const auto physical = GetConstantDimension(operand.physical[axis]);
-  const auto result = GetConstantDimension(result_extent);
-  const bool widens = physical && *physical == 1 && !(result && *result == 1);
+  const bool physical_is_one = physical && *physical == 1;
+  // ... but only if the result is actually wider. `BroadcastShapes` keeps the *first*
+  // operand's expression for equal dimensions, so a unit result axis can arrive here
+  // in symbolic form (`n - n + 1` against a literal 1) — prove it rather than
+  // pattern-matching a literal, or the same commutative operation would classify its
+  // operands differently depending on which one came first.
+  const bool result_is_one =
+      physical_is_one && ProveValidExtentEqual(result_extent, OneExtent()) == ProofResult::kTrue;
+  const bool widens = physical_is_one && !result_is_one;
   return {widens ? AxisRole::kBroadcast : AxisRole::kContributor, operand.valid[axis]};
 }
 
@@ -748,12 +756,25 @@ std::string FormatOperandRegions(const ElementwiseValidShapeParams& params) {
 }
 
 /// Whether @p candidate should replace @p current as a dimension's representative
-/// extent. Both are already known to denote the same extent; preferring a constant
-/// makes the choice independent of operand order, so a commutative operation yields
-/// structurally equal types whichever way round its operands are given. Used by both
-/// combine modes so the guarantee cannot drift between them.
+/// extent. Both are already known to denote the same extent, so this only has to be
+/// *deterministic*: a commutative operation must yield structurally equal types
+/// whichever way round its operands are given. Used by both combine modes so the
+/// guarantee cannot drift between them.
 bool PrefersAsRepresentative(const ExprPtr& current, const ExprPtr& candidate) {
-  return !As<ConstInt>(current) && As<ConstInt>(candidate) != nullptr;
+  const bool current_is_const = As<ConstInt>(current) != nullptr;
+  const bool candidate_is_const = As<ConstInt>(candidate) != nullptr;
+  if (current_is_const != candidate_is_const) {
+    return candidate_is_const;  // a literal is the clearest representative
+  }
+  if (current_is_const || AreExprsEqual(current, candidate)) {
+    return false;  // already the same expression, literal or not
+  }
+  // Two symbolic extents the analyzer proved equal but that are *not* structurally
+  // equal (`n` against `n + 0`). Type equality and hashing compare structurally, so
+  // keeping whichever was seen first would still let operand order change the result
+  // type. Break the tie on a stable printed key. Reached only when a dimension has
+  // two differing symbolic contributors, so the formatting cost is rare.
+  return PythonPrint(candidate) < PythonPrint(current);
 }
 
 /// Whether @p shape is the result shape, dimension for dimension.

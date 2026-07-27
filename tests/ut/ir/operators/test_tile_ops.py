@@ -5688,6 +5688,26 @@ class TestTileElementwiseValidRegion:
         with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
             tile.add(self._tile([8, 16], [rows, n]), self._tile([8, 16], [rows, m]))
 
+    def test_provably_equal_symbolic_extents_pick_one_representative(self):
+        """`n` and `n + 0` are proven equal but differ structurally.
+
+        Type equality and hashing compare expressions structurally, so keeping
+        whichever operand came first would let a commutative operation produce
+        unequal types and trip a reassignment/join type check downstream.
+        """
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        n_plus_zero = ir.Add(n, ir.ConstInt(0, DataType.INDEX, span), DataType.INDEX, span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+
+        plain = self._tile([8, 16], [rows, n], name="a")
+        padded = self._tile([8, 16], [rows, n_plus_zero], name="b")
+
+        forward = tile.add(plain, padded).type
+        reverse = tile.add(padded, plain).type
+        assert isinstance(forward, ir.TileType) and isinstance(reverse, ir.TileType)
+        assert ir.structural_equal(forward, reverse)
+
     def test_constant_representative_makes_order_irrelevant(self):
         """A constant extent is preferred, so either operand order prints the same."""
         span = ir.Span.unknown()
@@ -5716,6 +5736,31 @@ class TestTileElementwiseValidRegion:
         rows = ir.ConstInt(8, DataType.INDEX, span)
         with pytest.raises(ValueError, match=r"broadcasts dimension .* not provably 1"):
             tile.row_expand_sub(self._tile([8, 16], [8, 4]), self._tile([8, 1], [rows, n]))
+
+    def test_symbolically_unit_result_axis_is_not_widening(self):
+        """A unit axis that reaches the rule in symbolic form must not read as broadcasting.
+
+        BroadcastShapes keeps the *first* operand's expression for provably equal
+        dims, so pairing a symbolic-but-unit extent with a literal 1 yields a result
+        axis that is one without being a ConstInt. Classifying the literal operand as
+        a broadcast singleton there would demand its valid extent be 1 -- rejecting an
+        empty axis that widens nothing, and only in one operand order.
+        """
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        # n - n + 1: provably 1, but not a ConstInt.
+        symbolic_one = ir.Add(
+            ir.Sub(n, n, DataType.INDEX, span), ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span
+        )
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        zero = ir.ConstInt(0, DataType.INDEX, span)
+
+        symbolic = self._tile([rows, symbolic_one], [rows, zero], name="sym")
+        literal = self._tile([8, 1], [8, 0], name="lit")
+
+        # Neither axis widens, so an empty unit axis is legal in either order.
+        assert self._valid_of(tile.add(symbolic, literal).type)[1] == 0
+        assert self._valid_of(tile.add(literal, symbolic).type)[1] == 0
 
     def test_broadcast_operand_still_agrees_on_its_non_broadcast_axis(self):
         """A [1, 16] column tile broadcasts rows, but its 16 columns still must agree."""
