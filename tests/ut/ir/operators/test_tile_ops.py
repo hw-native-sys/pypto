@@ -4970,6 +4970,15 @@ class TestWriteValidRegionUnion:
         with pytest.raises(ValueError, match="writes past the end of dimension 0"):
             tile.assemble(target, source, [56, 0])
 
+    def test_assemble_bounds_rejection_names_the_subview_rule(self):
+        """tile.assemble's overhang error explains why the allocation must fit."""
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
+        source = self._partial_tile([48, 128], [8, 128], name="src")
+
+        with pytest.raises(ValueError, match="copies the whole source subview"):
+            tile.assemble(target, source, [56, 0])
+
     def test_assemble_keeps_the_target_layout_while_narrowing(self):
         """A partial union must not cost the target its layout metadata."""
         target = self._partial_tile([64, 128], [20, 128], name="dst", blayout=ir.TileLayout.col_major)
@@ -5050,15 +5059,6 @@ class TestWriteValidRegionUnion:
 
         with pytest.raises(ValueError, match="performs no layout conversion"):
             tile.store(src, [0, 0], out)
-
-    def test_assemble_bounds_rejection_names_the_subview_rule(self):
-        """tile.assemble's overhang error explains why the allocation must fit."""
-        span = ir.Span.unknown()
-        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
-        source = self._partial_tile([48, 128], [8, 128], name="src")
-
-        with pytest.raises(ValueError, match="copies the whole source subview"):
-            tile.assemble(target, source, [56, 0])
 
     def test_store_gap_rejects(self):
         """A store that does not abut the destination's valid region rejects."""
