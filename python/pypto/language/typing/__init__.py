@@ -26,6 +26,7 @@ from pypto.language.typing.ptr import Ptr
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
 from pypto.language.typing.tile import Tile
+from pypto.language.typing.tile_buffer_set import TileBufferSet
 from pypto.language.typing.tuple import Tuple
 from pypto.pypto_core.ir import Expr
 
@@ -43,6 +44,7 @@ __all__ = [
     "Scalar",
     "Tensor",
     "Tile",
+    "TileBufferSet",
     "Tuple",
     "dynamic",
 ]

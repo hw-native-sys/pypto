@@ -24,6 +24,9 @@ __all__ = [
     "alloc",
     "create_tile",
     "create",
+    "create_buffer_set",
+    "buffer_slot",
+    "release",
     "read",
     "write",
     "load",
@@ -172,7 +175,7 @@ from pypto.pypto_core.ir import (
     TileLayout,
 )
 
-from ..typing import IntLike, Scalar, Tensor, Tile
+from ..typing import IntLike, Scalar, Tensor, Tile, TileBufferSet
 from .system_ops import (  # noqa: F401
     tpop_from_aic,
     tpop_from_aiv,
@@ -316,6 +319,29 @@ def create(
 
 
 create_tile = create
+
+
+def create_buffer_set(
+    shape: Sequence[IntLike],
+    dtype: DataType,
+    target_memory: MemorySpace,
+    count: int,
+) -> TileBufferSet:
+    """Create a homogeneous set of physical tile buffers."""
+    call_expr = _ir_ops.create_buffer_set(_normalize_intlike(shape), dtype, target_memory, count)
+    return TileBufferSet(expr=call_expr, count=count)
+
+
+def buffer_slot(buffer_set: TileBufferSet, index: IntLike) -> Tile:
+    """Select a static or dynamic slot as an ordinary Tile."""
+    index_expr = index.unwrap() if isinstance(index, Scalar) else index
+    call_expr = _ir_ops.buffer_slot(buffer_set.unwrap(), index_expr)
+    return Tile(expr=call_expr)
+
+
+def release(slot: Tile) -> Expr:
+    """End the current lease of a selected buffer slot."""
+    return _ir_ops.release(slot.unwrap())
 
 
 def read(tile: Tile, indices: IntLike | Sequence[IntLike]) -> Scalar:

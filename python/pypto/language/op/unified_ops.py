@@ -81,6 +81,7 @@ __all__ = [
     "cmp",
     "set_validshape",
     "create_tile",
+    "create_tile_buffers",
     "read",
     "write",
 ]
@@ -90,7 +91,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import MemorySpace, PadValue
 
-from ..typing import IntLike, Scalar, Tensor, Tile
+from ..typing import IntLike, Scalar, Tensor, Tile, TileBufferSet
 from . import tensor_ops as _tensor
 from . import tile_ops as _tile
 
@@ -1106,6 +1107,17 @@ def create_tile(
     ``pl.create_tile(shape, dtype)`` (omitting target_memory) keep working.
     """
     return _tile.create(shape, dtype, target_memory)
+
+
+def create_tile_buffers(
+    count: int | _ir_core.ConstInt,
+    shape: Sequence[IntLike],
+    dtype: DataType,
+    memory_space: MemorySpace,
+) -> TileBufferSet:
+    """Create ``count`` homogeneous, runtime-selectable physical tile slots."""
+    static_count = count.value if isinstance(count, _ir_core.ConstInt) else count
+    return _tile.create_buffer_set(shape, dtype, memory_space, static_count)
 
 
 # ---------------------------------------------------------------------------

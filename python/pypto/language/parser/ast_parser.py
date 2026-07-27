@@ -7550,6 +7550,12 @@ class ASTParser:
                 return self.type_resolver.resolve_dtype(arg)
             except ParserError:
                 pass
+            try:
+                resolved = self.expr_evaluator.eval_expr(arg)
+                if isinstance(resolved, ir.MemorySpace):
+                    return resolved
+            except ParserError:
+                pass
         return self.parse_expression(arg)
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
@@ -8235,6 +8241,8 @@ class ASTParser:
 
         if isinstance(value_type, ir.TupleType):
             return self._parse_tuple_subscript(subscript, value_expr, span)
+        if isinstance(value_type, ir.TileBufferSetType):
+            return self._parse_tile_buffer_set_subscript(subscript, value_expr, span)
         if isinstance(value_type, ir.TensorType):
             return self._parse_tensor_subscript(subscript, value_expr, value_type, span)
         if isinstance(value_type, ir.TileType):
@@ -8243,10 +8251,24 @@ class ASTParser:
             return self._parse_array_subscript(subscript, value_expr, span)
 
         raise ParserTypeError(
-            f"Subscript requires Tuple, Tensor, Tile, or Array type, got {type(value_type).__name__}",
+            f"Subscript requires Tuple, TileBufferSet, Tensor, Tile, or Array type, "
+            f"got {type(value_type).__name__}",
             span=span,
-            hint="Subscript syntax is supported for Tuple, Tensor, Tile, and Array types",
+            hint="Subscript syntax is supported for Tuple, TileBufferSet, Tensor, Tile, and Array types",
         )
+
+    def _parse_tile_buffer_set_subscript(
+        self, subscript: ast.Subscript, value_expr: ir.Expr, span: ir.Span
+    ) -> ir.Expr:
+        """Parse ``buffers[index]`` as a runtime-capable tile.buffer_slot call."""
+        if isinstance(subscript.slice, ast.Tuple):
+            raise ParserTypeError(
+                "TileBufferSet subscript requires a single index",
+                span=span,
+                hint="Use buffers[index], not buffers[i, j]",
+            )
+        index_expr = self.parse_expression(subscript.slice)
+        return ir.create_op_call("tile.buffer_slot", [value_expr, index_expr], {}, span)
 
     def _parse_array_subscript(self, subscript: ast.Subscript, value_expr: ir.Expr, span: ir.Span) -> ir.Expr:
         """Parse array subscript: ``arr[i]`` -> array.get_element."""

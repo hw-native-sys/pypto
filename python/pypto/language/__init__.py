@@ -179,6 +179,7 @@ from .op.unified_ops import (
     col_prod,
     col_sum,
     concat,
+    create_tile_buffers,
     div,
     exp,
     expands,
@@ -226,7 +227,20 @@ from .optimizations import cross_core_slot, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
-from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import (
+    Array,
+    DynVar,
+    InOut,
+    IntLike,
+    MemRef,
+    Out,
+    Scalar,
+    Tensor,
+    Tile,
+    TileBufferSet,
+    Tuple,
+    dynamic,
+)
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
@@ -281,6 +295,7 @@ __all__ = [
     "loads_program",
     "Tensor",
     "Tile",
+    "TileBufferSet",
     "Scalar",
     "Array",
     "Tuple",
@@ -367,6 +382,7 @@ __all__ = [
     "write",
     # Promoted tile-only
     "create_tile",
+    "create_tile_buffers",
     "fillpad",
     "fillpad_expand",
     "load",

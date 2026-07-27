@@ -105,6 +105,7 @@ def _is_pl_yield_call(node: ast.expr) -> bool:
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
+    ir.TileBufferSetType: "TileBufferSet",
     ir.ScalarType: "Scalar",
     ir.ArrayType: "Array",
 }
@@ -278,7 +279,7 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        valid = ("Tensor", "Tile", "Scalar", "Array", "Tuple", "DistributedTensor")
+        valid = ("Tensor", "Tile", "TileBufferSet", "Scalar", "Array", "Tuple", "DistributedTensor")
         if isinstance(node, ast.Attribute) and node.attr in valid:
             return node.attr
         if isinstance(node, ast.Name) and node.id in valid:
@@ -394,6 +395,26 @@ class TypeResolver:
 
         if type_name == "Tuple":
             return self._resolve_tuple_subscript_type(subscript_node)
+
+        if type_name == "TileBufferSet":
+            if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 4:
+                raise ParserTypeError(
+                    f"TileBufferSet subscript requires [shape, dtype, count, memory_space], "
+                    f"got: {ast.unparse(slice_value)}",
+                    span=self._get_span(slice_value),
+                    hint="Use pl.TileBufferSet[[shape], dtype, count, pl.Mem.Acc]",
+                )
+            shape = self._to_ir_shape(self._parse_shape(slice_value.elts[0]))
+            dtype = self.resolve_dtype(slice_value.elts[1])
+            success, count = self.expr_evaluator.try_eval_expr(slice_value.elts[2])
+            if not success or not isinstance(count, int) or isinstance(count, bool):
+                raise ParserTypeError(
+                    "TileBufferSet count must be a compile-time integer",
+                    span=self._get_span(slice_value.elts[2]),
+                    hint="Use a count in the range [2, 16]",
+                )
+            memory_space = self._resolve_memory_space(slice_value.elts[3])
+            return ir.TileBufferSetType(shape, dtype, count, None, None, memory_space)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref].
         # DistributedTensor: same forms as Tensor — only the IR ObjectKind differs.

@@ -134,6 +134,7 @@ from .unified_ops import (
     col_sum,
     concat,
     create_tile,
+    create_tile_buffers,
     div,
     exp,
     expands,
@@ -245,6 +246,7 @@ __all__ = [
     "batch_matmul",
     # Promoted tile-only
     "create_tile",
+    "create_tile_buffers",
     "fillpad",
     "fillpad_expand",
     "load",
