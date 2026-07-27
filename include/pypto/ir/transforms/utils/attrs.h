@@ -84,11 +84,11 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
 /// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
 /// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
-/// recognizes a user-authored pipeline containing one canonical direct-to-GM
-/// L0 matmul with enough iterations to amortize the pair and whose conservative
-/// whole-function Acc footprint still fits after adding the extra slot. The
-/// existing-pipeline admission deliberately excludes Acc-to-Mat drains until
-/// that path has a separate profitability model. Consumed (stripped) by
+/// recognizes a user-authored pipeline containing one canonical directly drained
+/// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
+/// conservative whole-function Acc footprint still fits after adding the extra
+/// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
+/// separate conservative admission thresholds. Consumed (stripped) by
 /// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
 /// ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";

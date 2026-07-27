@@ -1894,6 +1894,44 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
         return Before
 
+    @staticmethod
+    def _mat_scratch_pipeline(tile_m: int, trips: int):
+        tile_n = 128
+        width = trips * tile_n
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                q: pl.Tensor[[tile_m, 128], pl.BF16],
+                b: pl.Tensor[[128, width], pl.BF16],
+            ) -> pl.Tile[[tile_m, width], pl.BF16, pl.Mem.Mat]:
+                q_mat: pl.Tile[[tile_m, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    q, [0, 0], [tile_m, 128], target_memory=pl.Mem.Mat
+                )
+                q_l0: pl.Tile[[tile_m, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    q_mat, target_memory=pl.Mem.Left
+                )
+                b_mat: pl.Tile[[128, width], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, width], target_memory=pl.Mem.Mat
+                )
+                scratch: pl.Tile[[tile_m, width], pl.BF16, pl.Mem.Mat] = pl.tile.create(
+                    [tile_m, width], dtype=pl.BF16, target_memory=pl.Mem.Mat
+                )
+                for ni, (scratch_i,) in pl.pipeline(0, width, tile_n, stage=2, init_values=(scratch,)):
+                    b_l0: pl.Tile[[128, tile_n], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, ni, [128, tile_n], target_memory=pl.Mem.Right
+                    )
+                    c: pl.Tile[[tile_m, tile_n], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
+                    scratch_s: pl.Tile[[tile_m, width], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(
+                        scratch_i, c, [0, ni]
+                    )
+                    scratch_r = pl.yield_(scratch_s)
+                return scratch_r
+
+        return Before
+
     def test_marks_only_direct_inner_pipeline_when_two_accumulators_fit(self):
         """#2131 shape: shared L0A, moving L0B, and two 8 KiB L0C slots."""
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
@@ -2097,45 +2135,41 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert "pipeline_double_buffer_c" in ir.python_print(After)
         _assert_ssa_valid(After, "test_existing_pipeline_dbc_moving_left")
 
-    def test_defers_mat_scratch_assemble_without_path_profitability_model(self):
-        """Acc->Mat needs a drain-path-specific profitability decision."""
+    @pytest.mark.parametrize(
+        ("tile_m", "trips", "expected"),
+        [
+            (16, 8, False),  # 8 KiB Acc: measured regression
+            (32, 8, False),  # 16 KiB Acc: measured tie
+            (64, 4, False),  # 32 KiB Acc but too little work for the Mat path
+            (64, 8, True),  # 32 KiB Acc and four complete compute/drain pairs
+        ],
+    )
+    def test_applies_path_specific_mat_scratch_profitability(self, tile_m, trips, expected):
+        """Acc->Mat uses its own trip-count and L0C-share admission gate."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                q: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 512], pl.BF16],
-            ) -> pl.Tile[[16, 512], pl.BF16, pl.Mem.Mat]:
-                q_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    q, [0, 0], [16, 128], target_memory=pl.Mem.Mat
-                )
-                q_l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
-                    q_mat, target_memory=pl.Mem.Left
-                )
-                b_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    b, [0, 0], [128, 512], target_memory=pl.Mem.Mat
-                )
-                scratch: pl.Tile[[16, 512], pl.BF16, pl.Mem.Mat] = pl.tile.create(
-                    [16, 512], dtype=pl.BF16, target_memory=pl.Mem.Mat
-                )
-                for ni, (scratch_i,) in pl.pipeline(0, 512, 128, stage=2, init_values=(scratch,)):
-                    b_l0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
-                        b_mat, 0, ni, [128, 128], target_memory=pl.Mem.Right
-                    )
-                    c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
-                    scratch_s: pl.Tile[[16, 512], pl.BF16, pl.Mem.Mat] = pl.tile.assemble(
-                        scratch_i, c, [0, ni]
-                    )
-                    scratch_r = pl.yield_(scratch_s)
-                return scratch_r
-
+        Before = self._mat_scratch_pipeline(tile_m, trips)
         After = passes.auto_tile_matmul_l0()(Before)
-        assert "pipeline_double_buffer_c" not in ir.python_print(After)
-        _assert_ssa_valid(After, "test_existing_pipeline_dbc_assemble_deferred")
+        assert ("pipeline_double_buffer_c" in ir.python_print(After)) is expected
+        _assert_ssa_valid(After, "test_existing_pipeline_dbc_assemble_profitability")
+
+        if expected:
+            allocated = passes.infer_tile_memory_space()(After)
+            allocated = passes.lower_pipeline_loops()(allocated)
+            allocated = passes.canonicalize_io_order()(allocated)
+            allocated = passes.materialize_tensor_strides()(allocated)
+            allocated = passes.init_mem_ref()(allocated)
+            allocated = passes.materialize_semantic_aliases()(allocated)
+            allocated = passes.memory_reuse()(allocated)
+            acc_allocs = {
+                line.strip().split(":")[0]
+                for line in ir.python_print(allocated).splitlines()
+                if "tile.alloc(pl.Mem.Acc" in line
+            }
+            assert len(acc_allocs) == 2, (
+                f"admitted Mat-scratch dbC must allocate exactly two Acc slots: {acc_allocs}"
+            )
 
     def test_rejects_loop_carried_matmul_operand(self):
         """An operand IterArg changes by loop semantics and is not invariant."""
