@@ -44,6 +44,36 @@ def test_discover_orders_snapshots_and_attaches_warning(tmp_path: Path):
     assert snapshots[2].warning_text is None
 
 
+def test_discover_rejects_zero_index_pass_snapshot(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "frontend\n",
+            "00_after_InlineFunctions.py": "after zero\n",
+        },
+    )
+
+    with pytest.raises(IRTraceError, match="00_after_InlineFunctions.py"):
+        discover_snapshots(dump)
+
+
+@pytest.mark.parametrize("path_name", ["01_after_InlineFunctions.py", "01_after_InlineFunctions.log"])
+def test_discover_rejects_non_file_snapshot_paths(tmp_path: Path, path_name: str):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "frontend\n",
+            "01_after_InlineFunctions.py": "after one\n",
+        },
+    )
+    if path_name.endswith(".py"):
+        (dump / path_name).unlink()
+    (dump / path_name).mkdir()
+
+    with pytest.raises(IRTraceError, match=path_name):
+        discover_snapshots(dump)
+
+
 @pytest.mark.parametrize(
     ("case", "expected_message"),
     [

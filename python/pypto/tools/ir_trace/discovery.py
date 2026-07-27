@@ -19,6 +19,8 @@ _NUMERIC_PY_RE = re.compile(r"^\d+_.*\.py$")
 
 
 def _read_utf8(path: Path) -> str:
+    if not path.is_file():
+        raise IRTraceError(f"{path.name} is not a file")
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -51,6 +53,8 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
         match = _PASS_RE.fullmatch(path.name)
         if match:
             index = int(match.group("index"))
+            if index == 0:
+                raise IRTraceError(f"pass snapshot index must be at least 01: {path.name}")
             if index in indexed:
                 previous = indexed[index][1].name
                 raise IRTraceError(f"duplicate snapshot index {index:02d}: {previous} and {path.name}")
@@ -78,7 +82,7 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
     for index, (name, path) in sorted(indexed.items()):
         text = _read_utf8(path)
         warning_path = path.with_suffix(".log")
-        warning_text = _read_utf8(warning_path) if warning_path.is_file() else None
+        warning_text = _read_utf8(warning_path) if warning_path.exists() else None
         snapshots.append(
             Snapshot(
                 index=index,
