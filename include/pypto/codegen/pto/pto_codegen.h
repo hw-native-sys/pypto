@@ -768,8 +768,11 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
         view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
-    std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
-    std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
+    std::map<const ir::Var*, std::string> memref_to_mlir;      ///< keyed by base_ Ptr
+    std::map<const ir::Var*, const ir::Var*> var_to_memref;    ///< maps tile var → base_ Ptr
+    std::set<const ir::Var*> explicit_buffer_bases;            ///< bases owned by TileBufferSetType
+    std::map<const ir::Var*, std::string> buffer_set_to_mlir;  ///< buffer-set var → multi-tile SSA
+    std::map<const ir::Var*, std::string> buffer_set_types;    ///< buffer-set var → multi-tile type
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 
@@ -856,6 +859,9 @@ class PTOCodegen : public CodegenBase {
       view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
       var_to_memref.clear();
+      explicit_buffer_bases.clear();
+      buffer_set_to_mlir.clear();
+      buffer_set_types.clear();
       memref_to_tile_type.clear();
 
       emitted_numeric_constants.clear();

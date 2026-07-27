@@ -931,6 +931,26 @@ REGISTER_OP("tile.load")
       return DeduceTileLoadType(args, kwargs, "tile.load");
     });
 
+REGISTER_OP("tile.load_into")
+    .set_op_category("TileOp")
+    .set_description("Copy data from tensor directly into a selected tile slot")
+    .add_argument("tensor", "Source tensor")
+    .add_argument("offsets", "Source offsets")
+    .add_argument("shapes", "Destination shape")
+    .add_argument("valid_shapes", "Destination valid shape")
+    .add_argument("destination", "Selected destination tile slot")
+    .set_attr<MemorySpace>("target_memory")
+    .set_attr<bool>("clamp")
+    .set_output_reuses_input(4)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 5) << "The operator tile.load_into requires 5 arguments";
+      std::vector<ExprPtr> producer_args(args.begin(), args.begin() + 4);
+      auto inferred = DeduceTileLoadType(producer_args, kwargs, "tile.load_into");
+      return ValidateTileDestination(inferred, args[4], GetKwarg<MemorySpace>(kwargs, "target_memory"),
+                                     "tile.load_into");
+    });
+
 REGISTER_OP("tile.store")
     .set_op_category("TileOp")
     .set_description("Copy data from unified buffer (tile) to tensor")
@@ -1035,6 +1055,23 @@ REGISTER_OP("tile.move")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMoveType(args, kwargs, "tile.move");
+    });
+
+REGISTER_OP("tile.move_into")
+    .set_op_category("TileOp")
+    .set_description("Move a tile directly into a selected destination slot")
+    .add_argument("tile", "Input tile")
+    .add_argument("destination", "Selected destination tile slot")
+    .set_attr<MemorySpace>("target_memory")
+    .set_attr<TileLayout>("blayout")
+    .set_attr<TileLayout>("slayout")
+    .set_output_reuses_input(1)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "The operator tile.move_into requires 2 arguments";
+      auto inferred = DeduceTileMoveType({args[0]}, kwargs, "tile.move_into");
+      return ValidateTileDestination(inferred, args[1], GetKwarg<MemorySpace>(kwargs, "target_memory"),
+                                     "tile.move_into");
     });
 
 // tile.alloc is emitted by InitMemRef, which runs after ExpandMixedKernel —

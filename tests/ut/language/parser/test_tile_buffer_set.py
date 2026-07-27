@@ -49,3 +49,14 @@ def test_runtime_wrapper_supports_len_and_dynamic_getitem():
     slot_expr = slot.unwrap()
     assert isinstance(slot_expr, ir.Call)
     assert slot_expr.op.name == "tile.buffer_slot"
+
+
+def test_destination_form_parses_selected_slot_as_out_operand():
+    @pl.function
+    def load_into_slot(x: pl.Tensor[[16, 128], pl.FP32], index: pl.Scalar[pl.INDEX]):
+        buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Vec)
+        slot = buffers[index % 2]
+        _value = pl.load(x, [0, 0], [16, 128], out=slot)
+
+    printed = load_into_slot.as_python()
+    assert "pl.tile.load_into" in printed

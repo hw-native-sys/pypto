@@ -762,6 +762,29 @@ REGISTER_OP("tile.extract")
       return DeduceTileExtractType(args, kwargs);
     });
 
+REGISTER_OP("tile.extract_into")
+    .set_op_category("TileOp")
+    .set_description("Extract a sub-tile directly into a selected destination slot")
+    .add_argument("src", "Source tile")
+    .add_argument("index_row", "Starting row offset")
+    .add_argument("index_col", "Starting column offset")
+    .add_argument("shape", "Static destination shape")
+    .add_argument("destination", "Selected destination tile slot")
+    .set_attr<MemorySpace>("target_memory")
+    .set_output_reuses_input(4)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 5) << "The operator tile.extract_into requires 5 arguments";
+      std::vector<ExprPtr> producer_args(args.begin(), args.begin() + 4);
+      auto inferred = DeduceTileExtractType(producer_args, kwargs);
+      MemorySpace target = MemorySpace::Vec;
+      for (const auto& [key, value] : kwargs) {
+        if (key == "target_memory") target = AnyCast<MemorySpace>(value, "target_memory");
+      }
+      return ValidateTileDestination(inferred, args[4], target, "tile.extract_into");
+    });
+
 TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tile.scatter_update(input, index, src) -> TileType same as input

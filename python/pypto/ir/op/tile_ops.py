@@ -198,6 +198,8 @@ def load(
     target_memory: MemorySpace = MemorySpace.Vec,
     clamp: bool = False,
     span: Span | None = None,
+    *,
+    out: Expr | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -257,9 +259,36 @@ def load(
                 f"got {len(valid_shapes_tuple.elements)} valid_shapes and {len(shapes_tuple.elements)} shapes"
             )
 
-    return _ir_core.create_op_call(
-        "tile.load", [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple], kwargs, actual_span
-    )
+    args = [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple]
+    if out is not None:
+        return load_into(*args, out, target_memory=target_memory, clamp=clamp, span=actual_span)
+    return _ir_core.create_op_call("tile.load", args, kwargs, actual_span)
+
+
+def load_into(
+    tensor: Expr,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    destination: Expr,
+    *,
+    target_memory: MemorySpace = MemorySpace.Vec,
+    clamp: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Internal destination-form variant of :func:`load`."""
+    actual_span = _get_span_or_capture(span)
+    args = [
+        tensor,
+        _to_make_tuple(offsets, actual_span),
+        _to_make_tuple(shapes, actual_span),
+        _to_make_tuple(valid_shapes, actual_span),
+        destination,
+    ]
+    kwargs: dict[str, Any] = {"target_memory": target_memory}
+    if clamp:
+        kwargs["clamp"] = True
+    return _ir_core.create_op_call("tile.load_into", args, kwargs, actual_span)
 
 
 def store(
@@ -498,6 +527,8 @@ def move(
     blayout: TileLayout | None = None,
     slayout: TileLayout | None = None,
     span: Span | None = None,
+    *,
+    out: Expr | None = None,
 ) -> Call:
     """Move tile between memory levels.
 
@@ -522,7 +553,27 @@ def move(
     if slayout is not None:
         kwargs["slayout"] = slayout
 
+    if out is not None:
+        return move_into(tile, out, target_memory, blayout, slayout, actual_span)
     return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
+
+
+def move_into(
+    tile: Expr,
+    destination: Expr,
+    target_memory: MemorySpace,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Internal destination-form variant of :func:`move`."""
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"target_memory": target_memory}
+    if blayout is not None:
+        kwargs["blayout"] = blayout
+    if slayout is not None:
+        kwargs["slayout"] = slayout
+    return _ir_core.create_op_call("tile.move_into", [tile, destination], kwargs, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:
@@ -1644,7 +1695,7 @@ def not_(tile: Expr, span: Span | None = None) -> Call:
 # ============================================================================
 
 
-def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def matmul(lhs: Expr, rhs: Expr, span: Span | None = None, *, out: Expr | None = None) -> Call:
     """Matrix multiplication of two tiles.
 
     Args:
@@ -1656,10 +1707,18 @@ def matmul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         Call expression for matrix multiplication
     """
     actual_span = _get_span_or_capture(span)
+    if out is not None:
+        return matmul_into(lhs, rhs, out, actual_span)
     return _ir_core.create_op_call("tile.matmul", [lhs, rhs], {}, actual_span)
 
 
-def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def matmul_into(lhs: Expr, rhs: Expr, destination: Expr, span: Span | None = None) -> Call:
+    """Internal destination-form variant of :func:`matmul`."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.matmul_into", [lhs, rhs, destination], {}, actual_span)
+
+
+def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None, *, out: Expr | None = None) -> Call:
     """Matrix multiplication with accumulation.
 
     Performs matrix multiplication and accumulates the result: acc = acc + lhs @ rhs.
@@ -1676,7 +1735,15 @@ def matmul_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Cal
         Call expression for matrix multiplication with accumulation
     """
     actual_span = _get_span_or_capture(span)
+    if out is not None:
+        return matmul_acc_into(acc, lhs, rhs, out, actual_span)
     return _ir_core.create_op_call("tile.matmul_acc", [acc, lhs, rhs], {}, actual_span)
+
+
+def matmul_acc_into(acc: Expr, lhs: Expr, rhs: Expr, destination: Expr, span: Span | None = None) -> Call:
+    """Internal destination-form variant of :func:`matmul_acc`."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.matmul_acc_into", [acc, lhs, rhs, destination], {}, actual_span)
 
 
 def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
@@ -2533,6 +2600,7 @@ def extract(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     *,
     target_memory: MemorySpace,
+    out: Expr | None = None,
     span: Span | None = None,
 ) -> Call:
     """Extract a sub-tile from src at (index_row, index_col).
@@ -2555,9 +2623,41 @@ def extract(
     shape_tuple = _to_make_tuple(shape, actual_span)
     row_expr = _normalize_expr(index_row, actual_span, int_dtype=DataType.INDEX)
     col_expr = _normalize_expr(index_col, actual_span, int_dtype=DataType.INDEX)
+    args = [src, row_expr, col_expr, shape_tuple]
+    op_name = "tile.extract"
+    if out is not None:
+        return extract_into(
+            src, row_expr, col_expr, shape_tuple, out, target_memory=target_memory, span=actual_span
+        )
     return _ir_core.create_op_call(
-        "tile.extract",
-        [src, row_expr, col_expr, shape_tuple],
+        op_name,
+        args,
+        {"target_memory": target_memory},
+        actual_span,
+    )
+
+
+def extract_into(
+    src: Expr,
+    index_row: int | Expr,
+    index_col: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    destination: Expr,
+    *,
+    target_memory: MemorySpace,
+    span: Span | None = None,
+) -> Call:
+    """Internal destination-form variant of :func:`extract`."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.extract_into",
+        [
+            src,
+            _normalize_expr(index_row, actual_span, int_dtype=DataType.INDEX),
+            _normalize_expr(index_col, actual_span, int_dtype=DataType.INDEX),
+            _to_make_tuple(shape, actual_span),
+            destination,
+        ],
         {"target_memory": target_memory},
         actual_span,
     )

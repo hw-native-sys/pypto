@@ -738,7 +738,7 @@ def matmul(
     c_matrix_nz: bool = ...,
 ) -> Tensor: ...
 @overload
-def matmul(lhs: Tile, rhs: Tile) -> Tile: ...
+def matmul(lhs: Tile, rhs: Tile, *, out: Tile | None = ...) -> Tile: ...
 
 
 def matmul(
@@ -748,6 +748,8 @@ def matmul(
     a_trans: bool = False,
     b_trans: bool = False,
     c_matrix_nz: bool = False,
+    *,
+    out: Tile | None = None,
 ) -> T:
     """Matrix multiplication, dispatched by input type.
 
@@ -761,9 +763,11 @@ def matmul(
     matmul.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        if out is not None:
+            raise TypeError("pl.matmul: out= is supported only for Tile operands")
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
-        return _tile.matmul(lhs, rhs)
+        return _tile.matmul(lhs, rhs, out=out)
     _raise_type_dispatch_error("matmul", lhs, rhs)
 
 
@@ -794,7 +798,7 @@ def matmul_acc(
     b_trans: bool = ...,
 ) -> Tensor: ...
 @overload
-def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile: ...
+def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, *, out: Tile | None = ...) -> Tile: ...
 
 
 def matmul_acc(
@@ -803,6 +807,8 @@ def matmul_acc(
     rhs: T,
     a_trans: bool = False,
     b_trans: bool = False,
+    *,
+    out: Tile | None = None,
 ) -> T:
     """Matrix multiplication with accumulation, dispatched by input type.
 
@@ -815,9 +821,11 @@ def matmul_acc(
     per-batch ``tile.matmul_acc`` by ``FlattenTileNdTo2D``.
     """
     if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        if out is not None:
+            raise TypeError("pl.matmul_acc: out= is supported only for Tile operands")
         return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans)
     if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
-        return _tile.matmul_acc(acc, lhs, rhs)
+        return _tile.matmul_acc(acc, lhs, rhs, out=out)
     _raise_type_dispatch_error("matmul_acc", acc, lhs, rhs)
 
 

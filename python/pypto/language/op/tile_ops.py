@@ -387,6 +387,8 @@ def load(
     valid_shapes: Sequence[IntLike] | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
     clamp: bool = False,
+    *,
+    out: Tile | None = None,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -427,6 +429,7 @@ def load(
         _normalize_intlike(valid_shapes),
         target_memory,
         clamp=clamp,
+        out=out.unwrap() if out is not None else None,
     )
     return Tile(expr=call_expr)
 
@@ -550,6 +553,7 @@ def extract(
     shape: Sequence[IntLike],
     *,
     target_memory: MemorySpace,
+    out: Tile | None = None,
 ) -> Tile:
     """Extract a sub-tile from ``src`` at ``(index_row, index_col)`` — ISA TEXTRACT.
 
@@ -571,6 +575,7 @@ def extract(
         col,
         shape=_normalize_intlike(shape),
         target_memory=target_memory,
+        out=out.unwrap() if out is not None else None,
     )
     return Tile(expr=call_expr)
 
@@ -616,6 +621,8 @@ def move(
     target_memory: MemorySpace,
     blayout: TileLayout | None = None,
     slayout: TileLayout | None = None,
+    *,
+    out: Tile | None = None,
 ) -> Tile:
     """Move tile between memory levels.
 
@@ -628,7 +635,13 @@ def move(
     Returns:
         Tile wrapping the move operation
     """
-    call_expr = _ir_ops.move(tile.unwrap(), target_memory, blayout=blayout, slayout=slayout)
+    call_expr = _ir_ops.move(
+        tile.unwrap(),
+        target_memory,
+        blayout=blayout,
+        slayout=slayout,
+        out=out.unwrap() if out is not None else None,
+    )
     return Tile(expr=call_expr)
 
 
@@ -1143,7 +1156,7 @@ def cast(
     return Tile(expr=call_expr)
 
 
-def matmul(lhs: Tile, rhs: Tile) -> Tile:
+def matmul(lhs: Tile, rhs: Tile, *, out: Tile | None = None) -> Tile:
     """Matrix multiplication of two tiles.
 
     Args:
@@ -1153,7 +1166,7 @@ def matmul(lhs: Tile, rhs: Tile) -> Tile:
     Returns:
         Tile wrapping the matmul operation
     """
-    call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap(), out=out.unwrap() if out is not None else None)
     return Tile(expr=call_expr)
 
 
@@ -1171,7 +1184,7 @@ def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile, *, out: Tile | None = None) -> Tile:
     """Matrix multiplication with accumulation: acc += lhs @ rhs.
 
     Args:
@@ -1182,7 +1195,9 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
     Returns:
         Tile wrapping the matmul_acc operation
     """
-    call_expr = _ir_ops.matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.matmul_acc(
+        acc.unwrap(), lhs.unwrap(), rhs.unwrap(), out=out.unwrap() if out is not None else None
+    )
     return Tile(expr=call_expr)
 
 

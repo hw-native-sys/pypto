@@ -104,6 +104,44 @@ bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
 }
 
+std::optional<std::string> GetDestinationBaseOpName(const CallPtr& call) {
+  if (!call || !call->op_) return std::nullopt;
+  static const std::map<std::string, std::string> kDestinationOps = {
+      {"tile.load_into", "tile.load"},
+      {"tile.extract_into", "tile.extract"},
+      {"tile.move_into", "tile.move"},
+      {"tile.matmul_into", "tile.matmul"},
+      {"tile.matmul_acc_into", "tile.matmul_acc"},
+  };
+  auto it = kDestinationOps.find(call->op_->name_);
+  return it == kDestinationOps.end() ? std::nullopt : std::optional<std::string>(it->second);
+}
+
+CallPtr StripDestinationOperand(const CallPtr& call, const std::string& base_op_name) {
+  INTERNAL_CHECK_SPAN(call && !call->args_.empty(), call ? call->span_ : ir::Span::unknown())
+      << "Destination-form tile op must carry a destination operand";
+  std::vector<ExprPtr> args(call->args_.begin(), call->args_.end() - 1);
+  return std::make_shared<ir::Call>(std::make_shared<ir::Op>(base_op_name), std::move(args), call->kwargs_,
+                                    call->GetType(), call->span_);
+}
+
+std::string GetMultiTileBufTypeString(const ir::TileBufferSetType& set_type) {
+  auto slot_type = std::make_shared<ir::TileType>(set_type.shape_, set_type.dtype_, std::nullopt,
+                                                  set_type.tile_view_, set_type.memory_space_);
+  const auto components = ExtractTileTypeInfo(*slot_type);
+  INTERNAL_CHECK(set_type.memory_space_.has_value()) << "TileBufferSetType memory space is unresolved";
+  const std::string tile_type = FormatTileBufTypeString(
+      MemorySpaceToMLIR(*set_type.memory_space_), components.dtype_str, components.rows, components.cols,
+      components.blayout, components.slayout, components.fractal, components.pad, components.v_row,
+      components.v_col, components.v_row_dynamic, components.v_col_dynamic);
+  constexpr const char* kPrefix = "!pto.tile_buf<";
+  INTERNAL_CHECK(tile_type.rfind(kPrefix, 0) == 0 && tile_type.back() == '>')
+      << "Unexpected tile buffer type spelling: " << tile_type;
+  const std::string fields =
+      tile_type.substr(std::strlen(kPrefix), tile_type.size() - std::strlen(kPrefix) - 1);
+  return "!pto.multi_tile_buf<count=" + std::to_string(set_type.count_) + ", " + fields + ">";
+}
+
 // Extract the (row, col) valid_shape expressions from a TileType's tile_view.
 // Returns nullptr for a dimension when it is missing or is a ConstInt (static).
 // Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
@@ -874,21 +912,47 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
+  class ExplicitBufferBaseCollector : public ir::IRVisitor {
+   public:
+    explicit ExplicitBufferBaseCollector(std::set<const ir::Var*>& bases) : bases_(bases) {}
+
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (auto set_type = As<ir::TileBufferSetType>(op->var_->GetType());
+          set_type && set_type->memref_.has_value()) {
+        bases_.insert(set_type->memref_.value()->base_.get());
+      }
+      ir::IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    std::set<const ir::Var*>& bases_;
+  } explicit_collector(fs_.explicit_buffer_bases);
+  if (func->body_) explicit_collector.VisitStmt(func->body_);
+
   class VarMemRefMapper : public ir::IRVisitor {
    public:
     std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
     std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
+    const std::set<const ir::Var*>& explicit_buffer_bases;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
                     std::map<const ir::Var*, std::string>& reverse_mapping,
-                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs)
-        : var_to_memref(mapping), memref_to_var_name(reverse_mapping), tile_var_allocs(allocs) {}
+                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
+                    const std::set<const ir::Var*>& explicit_bases)
+        : var_to_memref(mapping),
+          memref_to_var_name(reverse_mapping),
+          tile_var_allocs(allocs),
+          explicit_buffer_bases(explicit_bases) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         const auto memref = ir::GetDefinedMemRef(tile_type);
         const ir::Var* base_ptr = memref->base_.get();
+        if (explicit_buffer_bases.count(base_ptr) != 0) {
+          ir::IRVisitor::VisitStmt_(op);
+          return;
+        }
         var_to_memref[op->var_.get()] = base_ptr;
         if (memref_to_var_name.find(base_ptr) == memref_to_var_name.end()) {
           memref_to_var_name[base_ptr] = op->var_->name_hint_;
@@ -899,7 +963,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     }
   };
 
-  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs);
+  VarMemRefMapper mapper(fs_.var_to_memref, fs_.memref_to_var_name, fs_.tile_var_allocs,
+                         fs_.explicit_buffer_bases);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -1435,6 +1500,73 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
+
+  if (ir::IsOp(call, "tile.create_buffer_set")) {
+    auto set_type = As<ir::TileBufferSetType>(op->var_->GetType());
+    auto set_memref = set_type ? set_type->memref_.value_or(nullptr) : nullptr;
+    INTERNAL_CHECK_SPAN(set_type && set_memref, op->span_)
+        << "tile.create_buffer_set must have a TileBufferSetType with MemRef before PTO codegen";
+    const std::string result = NewNamedTemp(op->var_->name_hint_);
+    const std::string multi_type = GetMultiTileBufTypeString(*set_type);
+    std::ostringstream line;
+    line << result << " = pto.alloc_multi_tile";
+    if (emit_tile_addr_) {
+      auto offset = As<ir::ConstInt>(set_memref->byte_offset_);
+      INTERNAL_CHECK_SPAN(offset, op->span_)
+          << "PyPTO planner requires a constant TileBufferSetType base address";
+      line << " addr = " << GetOrEmitConstant(offset->value_, offset->dtype());
+    }
+    line << " : " << multi_type;
+    Emit(line.str());
+    BindVarToMlir(op->var_, result);
+    fs_.buffer_set_to_mlir[op->var_.get()] = result;
+    fs_.buffer_set_types[op->var_.get()] = multi_type;
+    return;
+  }
+
+  if (ir::IsOp(call, "tile.buffer_slot")) {
+    INTERNAL_CHECK_SPAN(call->args_.size() == 2, op->span_)
+        << "tile.buffer_slot requires buffer set and index operands";
+    auto set_var = ir::AsVarLike(call->args_[0]);
+    INTERNAL_CHECK_SPAN(set_var, op->span_)
+        << "tile.buffer_slot buffer set must be an SSA variable before PTO codegen";
+    auto set_it = fs_.buffer_set_to_mlir.find(set_var.get());
+    auto type_it = fs_.buffer_set_types.find(set_var.get());
+    INTERNAL_CHECK_SPAN(set_it != fs_.buffer_set_to_mlir.end() && type_it != fs_.buffer_set_types.end(),
+                        op->span_)
+        << "tile.buffer_slot references an unbound buffer set";
+    auto slot_type = As<ir::TileType>(op->var_->GetType());
+    INTERNAL_CHECK_SPAN(slot_type, op->span_) << "tile.buffer_slot result must be TileType";
+    const std::string result = NewNamedTemp(op->var_->name_hint_);
+    const std::string slot_type_string = GetTileBufTypeStringFromTileType(slot_type);
+    Emit(result + " = pto.multi_tile_get " + set_it->second + "[" + GetExprAsCode(call->args_[1]) +
+         "] : " + type_it->second + " -> " + slot_type_string);
+    BindVarToMlir(op->var_, result);
+    fs_.ssa_to_tile_buf_type[result] = slot_type_string;
+    return;
+  }
+
+  if (auto base_op_name = GetDestinationBaseOpName(call)) {
+    INTERNAL_CHECK_SPAN(!call->args_.empty(), op->span_)
+        << "Destination-form tile op requires a destination operand";
+    const std::string destination = GetExprAsCode(call->args_.back());
+    INTERNAL_CHECK_SPAN(!destination.empty(), op->span_)
+        << "Destination-form tile op has an unbound destination";
+    auto result_tile_type = As<ir::TileType>(op->var_->GetType());
+    INTERNAL_CHECK_SPAN(result_tile_type, op->span_) << "Destination-form tile op result must be TileType";
+    BindVarToMlir(op->var_, destination);
+    fs_.ssa_to_tile_buf_type[destination] = GetTileBufTypeStringFromTileType(result_tile_type);
+    fs_.current_result_var = op->var_;
+    fs_.current_result_buf = destination;
+    fs_.current_result_tile_type = result_tile_type;
+    VisitExpr(StripDestinationOperand(call, *base_op_name));
+    BindVarToMlir(op->var_, fs_.current_result_buf.empty() ? destination : fs_.current_result_buf);
+    fs_.current_result_var.reset();
+    fs_.current_result_buf.clear();
+    fs_.current_result_tile_type = nullptr;
+    return;
+  }
+
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);

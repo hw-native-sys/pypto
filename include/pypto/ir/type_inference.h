@@ -36,6 +36,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"  // NOLINT(misc-include-cleaner) -- needed for operator<< on ExprPtr
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -498,6 +499,44 @@ inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>&
     return tile_type->shape_;
   }
   return detail::ResolveValidShape(tile_type->tile_view_->valid_shape, tile_type->shape_, "TileType");
+}
+
+inline bool StructurallyEqualExprVectors(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!structural_equal(lhs[i], rhs[i])) return false;
+  }
+  return true;
+}
+
+/** Validate and return a destination tile type for an explicit ``*_into`` op. */
+inline TileTypePtr ValidateTileDestination(const TypePtr& inferred_type, const ExprPtr& destination,
+                                           MemorySpace expected_space, const std::string& op_name) {
+  auto inferred = As<TileType>(inferred_type);
+  auto dest = destination ? As<TileType>(destination->GetType()) : nullptr;
+  CHECK(dest) << "The operator " << op_name << " destination must be a TileType";
+  CHECK(inferred) << "Internal error: " << op_name << " inferred a non-TileType result";
+  CHECK(StructurallyEqualExprVectors(inferred->shape_, dest->shape_))
+      << "The operator " << op_name << " destination shape " << FormatShape(dest->shape_)
+      << " does not match inferred shape " << FormatShape(inferred->shape_);
+  CHECK(inferred->dtype_ == dest->dtype_)
+      << "The operator " << op_name << " destination dtype " << dest->dtype_.ToString()
+      << " does not match inferred dtype " << inferred->dtype_.ToString();
+  auto dest_space = dest->GetMemorySpace();
+  CHECK(dest_space.has_value() && *dest_space == expected_space)
+      << "The operator " << op_name << " destination memory space must be "
+      << MemorySpaceToString(expected_space) << ", but got "
+      << (dest_space.has_value() ? MemorySpaceToString(*dest_space) : "unresolved");
+
+  const auto inferred_view = tile_view_semantics::GetEffectiveTileView(*inferred);
+  const auto dest_view = tile_view_semantics::GetEffectiveTileView(*dest);
+  CHECK(StructurallyEqualExprVectors(inferred_view.valid_shape, dest_view.valid_shape))
+      << "The operator " << op_name << " destination valid_shape does not match the inferred result";
+  CHECK(inferred_view.blayout == dest_view.blayout && inferred_view.slayout == dest_view.slayout &&
+        inferred_view.fractal == dest_view.fractal && inferred_view.pad == dest_view.pad &&
+        StructurallyEqualExprVectors(inferred_view.stride, dest_view.stride))
+      << "The operator " << op_name << " destination layout does not match the inferred result layout";
+  return dest;
 }
 
 /**

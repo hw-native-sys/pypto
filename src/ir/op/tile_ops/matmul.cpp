@@ -274,6 +274,22 @@ REGISTER_OP("tile.matmul")
       return DeduceTileMatMulType(args, kwargs, "tile.matmul");
     });
 
+REGISTER_OP("tile.matmul_into")
+    .set_op_category("TileOp")
+    .set_description("Matrix multiplication into a selected accumulator slot")
+    .add_argument("lhs", "Left-hand side tile")
+    .add_argument("rhs", "Right-hand side tile")
+    .add_argument("destination", "Selected accumulator destination")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::Right)
+    .set_output_reuses_input(2)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 3) << "The operator tile.matmul_into requires 3 arguments";
+      auto inferred = DeduceTileMatMulType({args[0], args[1]}, kwargs, "tile.matmul_into");
+      return ValidateTileDestination(inferred, args[2], MemorySpace::Acc, "tile.matmul_into");
+    });
+
 REGISTER_OP("tile.matmul_acc")
     .set_op_category("TileOp")
     .set_description("Matrix multiplication with accumulation: acc = acc + lhs @ rhs")
@@ -288,6 +304,24 @@ REGISTER_OP("tile.matmul_acc")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
+    });
+
+REGISTER_OP("tile.matmul_acc_into")
+    .set_op_category("TileOp")
+    .set_description("Matrix multiplication with accumulation into a selected accumulator slot")
+    .add_argument("acc", "Accumulator tile")
+    .add_argument("lhs", "Left-hand side tile")
+    .add_argument("rhs", "Right-hand side tile")
+    .add_argument("destination", "Selected accumulator destination")
+    .set_input_memory(0, MemorySpace::Acc)
+    .set_input_memory(1, MemorySpace::Left)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_output_reuses_input(3)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 4) << "The operator tile.matmul_acc_into requires 4 arguments";
+      auto inferred = DeduceTileMatMulAccType({args[0], args[1], args[2]}, kwargs, "tile.matmul_acc_into");
+      return ValidateTileDestination(inferred, args[3], MemorySpace::Acc, "tile.matmul_acc_into");
     });
 
 REGISTER_OP("tile.matmul_bias")

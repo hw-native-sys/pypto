@@ -68,6 +68,7 @@ static std::string JoinPairs(const std::vector<std::string>& lhs, const std::str
 void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null EvalStmt";
   INTERNAL_CHECK_SPAN(op->expr_ != nullptr, op->span_) << "Internal error: EvalStmt has null expression";
+  if (ir::IsOp(ir::As<ir::Call>(op->expr_), "tile.release")) return;
   VisitExpr(op->expr_);
 }
 
