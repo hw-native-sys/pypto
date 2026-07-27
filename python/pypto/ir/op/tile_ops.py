@@ -159,6 +159,37 @@ def create(
 create_tile = create
 
 
+def create_buffer_set(
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    target_memory: MemorySpace,
+    count: int,
+    span: Span | None = None,
+) -> Call:
+    """Create a homogeneous allocation group containing physical tile slots."""
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    kwargs: dict[str, Any] = {
+        "dtype": dtype,
+        "target_memory": target_memory,
+        "count": count,
+    }
+    return _ir_core.create_op_call("tile.create_buffer_set", [shape_tuple], kwargs, actual_span)
+
+
+def buffer_slot(buffer_set: Expr, index: int | Expr, span: Span | None = None) -> Call:
+    """Select one static or dynamic slot from a tile buffer set."""
+    actual_span = _get_span_or_capture(span)
+    index_expr = _normalize_expr(index, actual_span, int_dtype=DataType.INDEX)
+    return _ir_core.create_op_call("tile.buffer_slot", [buffer_set, index_expr], {}, actual_span)
+
+
+def release(slot: Expr, span: Span | None = None) -> Call:
+    """Mark the selected slot's current lease as ended."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.release", [slot], {}, actual_span)
+
+
 def load(
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,

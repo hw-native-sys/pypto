@@ -445,6 +445,78 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);
 }
 
+TypePtr DeduceTileCreateBufferSetType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                      const std::string& op_name) {
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
+                          << args.size();
+
+  auto shape_tuple = As<MakeTuple>(args[0]);
+  CHECK(shape_tuple)
+      << "The operator " << op_name
+      << " requires first argument to be a MakeTuple expression with static shape values, but got "
+      << args[0]->TypeName();
+
+  std::vector<ExprPtr> slot_shape;
+  slot_shape.reserve(shape_tuple->elements_.size());
+  for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+    auto dim = As<ConstInt>(shape_tuple->elements_[i]);
+    CHECK(dim) << "The operator " << op_name << " shape element " << i
+               << " must be a compile-time constant (ConstInt), but got "
+               << shape_tuple->elements_[i]->TypeName();
+    slot_shape.push_back(shape_tuple->elements_[i]);
+  }
+
+  const auto dtype = GetKwarg<DataType>(kwargs, "dtype");
+  const auto target_memory = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  const auto count = GetKwarg<int>(kwargs, "count");
+  auto tile_view = tile_view_semantics::GetImplicitTileView(slot_shape, target_memory);
+  return std::make_shared<TileBufferSetType>(slot_shape, dtype, count, std::nullopt, tile_view,
+                                             target_memory);
+}
+
+TypePtr DeduceTileBufferSlotType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name
+                          << " requires exactly 2 arguments (buffer_set, index), but got " << args.size();
+
+  auto buffer_set_type = As<TileBufferSetType>(args[0]->GetType());
+  CHECK(buffer_set_type) << "The operator " << op_name
+                         << " requires first argument to be a TileBufferSetType, but got "
+                         << args[0]->GetType()->TypeName();
+
+  auto index_type = As<ScalarType>(args[1]->GetType());
+  CHECK(index_type && (index_type->dtype_.IsInt() || index_type->dtype_.IsIndexLike()))
+      << "The operator " << op_name << " index must have integer dtype";
+  if (auto constant_index = As<ConstInt>(args[1])) {
+    CHECK(constant_index->value_ >= 0 && constant_index->value_ < buffer_set_type->count_)
+        << "The operator " << op_name << " index " << constant_index->value_ << " is out of range [0, "
+        << buffer_set_type->count_ << ")";
+  }
+
+  (void)kwargs;
+  return std::make_shared<TileType>(buffer_set_type->shape_, buffer_set_type->dtype_, std::nullopt,
+                                    buffer_set_type->tile_view_, buffer_set_type->memory_space_);
+}
+
+TypePtr DeduceTileReleaseType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
+                          << args.size();
+  auto slot_type = As<TileType>(args[0]->GetType());
+  CHECK(slot_type) << "The operator " << op_name << " requires a TileType slot, but got "
+                   << args[0]->GetType()->TypeName();
+  if (auto slot_call = As<Call>(args[0])) {
+    CHECK(IsOp(slot_call, "tile.buffer_slot"))
+        << "The operator " << op_name << " requires a slot selected by tile.buffer_slot";
+  }
+
+  (void)kwargs;
+  return std::make_shared<ScalarType>(DataType::BOOL);
+}
+
 TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -800,6 +872,41 @@ REGISTER_OP("tile.create")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCreateTileType(args, kwargs, "tile.create");
+    });
+
+REGISTER_OP("tile.create_buffer_set")
+    .set_op_category("TileOp")
+    .set_description("Create a homogeneous allocation group of physical tile slots")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
+    .add_argument("shape", "Per-slot shape (TupleType of static positive dimensions)")
+    .set_attr<DataType>("dtype")
+    .set_attr<MemorySpace>("target_memory")
+    .set_attr<int>("count")
+    .set_output_memory_from_kwarg("target_memory")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileCreateBufferSetType(args, kwargs, "tile.create_buffer_set");
+    });
+
+REGISTER_OP("tile.buffer_slot")
+    .set_op_category("TileOp")
+    .set_description("Select one physical slot from a tile buffer set")
+    .add_argument("buffer_set", "Source allocation group (TileBufferSetType)")
+    .add_argument("index", "Static or dynamic integer slot index")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileBufferSlotType(args, kwargs, "tile.buffer_slot");
+    });
+
+REGISTER_OP("tile.release")
+    .set_op_category("TileOp")
+    .set_description("End the lifetime of a selected tile buffer slot")
+    .add_argument("slot", "Slot selected by tile.buffer_slot")
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileReleaseType(args, kwargs, "tile.release");
     });
 
 REGISTER_OP("tile.load")
