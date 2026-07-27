@@ -4836,5 +4836,249 @@ class TestWindowReadValidRegion:
         assert self._valid_of(call.type) == [24, 32]
 
 
+class TestWriteValidRegionUnion:
+    """The valid-region union rule shared by tile.assemble and tile.store.
+
+    out_valid[i] = min(shape[i], max(target_valid[i], offset[i] + source_valid[i]))
+
+    accepted only where that candidate provably *is* the union of the target
+    rectangle and the written one.
+    """
+
+    @staticmethod
+    def _partial_tile(shape, valid_shape, name="t", **view_kwargs):
+        span = ir.Span.unknown()
+        view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, **view_kwargs)
+        return ir.Var(name, ir.TileType(shape, DataType.FP32, tile_view=view), span)
+
+    @staticmethod
+    def _partial_tensor(shape, valid_shape, name="out"):
+        span = ir.Span.unknown()
+        view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+        return ir.Var(name, ir.TensorType(shape, DataType.FP32, tensor_view=view), span)
+
+    @staticmethod
+    def _tile_valid_of(result_type):
+        view = result_type.tile_view
+        if view is None or not view.valid_shape:
+            return [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+        return [d.value if isinstance(d, ir.ConstInt) else d for d in view.valid_shape]
+
+    @staticmethod
+    def _tensor_valid_of(result_type):
+        view = result_type.tensor_view
+        if view is None or not view.valid_shape:
+            return [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+        return [d.value if isinstance(d, ir.ConstInt) else d for d in view.valid_shape]
+
+    # --- tile.assemble ------------------------------------------------------
+
+    def test_assemble_fully_valid_target_stays_implicit(self):
+        """A full target keeps the implicit view its layout depends on."""
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
+        source = self._partial_tile([16, 128], [12, 128], name="src")
+
+        result_type = tile.assemble(target, source, [8, 0]).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None
+
+    def test_assemble_contiguous_growth_extends_one_dimension(self):
+        """An append that abuts the target grows exactly that axis."""
+        target = self._partial_tile([64, 128], [20, 128], name="dst")
+        source = self._partial_tile([12, 128], [12, 128], name="src")
+
+        result_type = tile.assemble(target, source, [20, 0]).type
+
+        assert self._tile_valid_of(result_type) == [32, 128]
+
+    def test_assemble_empty_source_is_a_no_op(self):
+        """Writing an empty region leaves the target exactly as it was."""
+        target = self._partial_tile([64, 128], [20, 128], name="dst")
+        source = self._partial_tile([16, 128], [0, 128], name="src")
+
+        result_type = tile.assemble(target, source, [20, 0]).type
+
+        assert self._tile_valid_of(result_type) == [20, 128]
+
+    def test_assemble_empty_target_is_initialized_from_the_origin(self):
+        """An empty accumulator takes the written region as its valid region."""
+        target = self._partial_tile([64, 128], [0, 128], name="dst")
+        source = self._partial_tile([16, 128], [12, 128], name="src")
+
+        result_type = tile.assemble(target, source, [0, 0]).type
+
+        assert self._tile_valid_of(result_type) == [12, 128]
+
+    def test_assemble_gap_rejects(self):
+        """A write starting past the target's edge leaves an unrepresentable hole."""
+        target = self._partial_tile([64, 128], [20, 128], name="dst")
+        source = self._partial_tile([12, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match="leaves a gap in dimension 0"):
+            tile.assemble(target, source, [24, 0])
+
+    def test_assemble_l_shape_rejects(self):
+        """Growing two axes at once is not one origin-anchored rectangle."""
+        target = self._partial_tile([64, 256], [20, 64], name="dst")
+        source = self._partial_tile([32, 128], [12, 80], name="src")
+
+        with pytest.raises(ValueError, match="dimensions 0 and 1 at once"):
+            tile.assemble(target, source, [20, 0])
+
+    def test_assemble_validates_the_physical_source_subview(self):
+        """``pto.tinsert`` copies the whole subview, so all of it must fit.
+
+        The tensor.assemble counterpart accepts this same write, because a tensor
+        transfer moves only the source's valid region.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
+        # 48 rows allocated, only 8 real; the allocation overhangs the target.
+        source = self._partial_tile([48, 128], [8, 128], name="src")
+
+        with pytest.raises(ValueError, match="writes past the end of dimension 0"):
+            tile.assemble(target, source, [56, 0])
+
+    def test_assemble_keeps_the_target_layout_while_narrowing(self):
+        """A partial union must not cost the target its layout metadata."""
+        target = self._partial_tile([64, 128], [20, 128], name="dst", blayout=ir.TileLayout.col_major)
+        source = self._partial_tile([12, 128], [12, 128], name="src")
+
+        result_type = tile.assemble(target, source, [20, 0]).type
+
+        assert isinstance(result_type, ir.TileType)
+        view = result_type.tile_view
+        assert view is not None
+        assert view.blayout == ir.TileLayout.col_major
+        assert self._tile_valid_of(result_type) == [32, 128]
+
+    def test_assemble_negative_offset_rejects(self):
+        """A write must start inside its target."""
+        span = ir.Span.unknown()
+        target = self._partial_tile([64, 128], [20, 128], name="dst")
+        source = self._partial_tile([12, 128], [12, 128], name="src")
+        neg = ir.ConstInt(-4, DataType.INDEX, span)
+
+        with pytest.raises(ValueError, match="provably negative"):
+            tile.assemble(target, source, [neg, 0])
+
+    # --- tile.store ---------------------------------------------------------
+
+    def test_store_into_fully_valid_destination_is_unchanged(self):
+        """The overwhelmingly common store keeps the destination type it had."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        result_type = tile.store(src, [8, 0], out).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+    def test_store_unions_into_a_partially_valid_destination(self):
+        """A store appends to the destination's valid region."""
+        out = self._partial_tensor([64, 128], [20, 128])
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        result_type = tile.store(src, [20, 0], out).type
+
+        assert self._tensor_valid_of(result_type) == [32, 128]
+
+    def test_store_transfers_only_the_tile_valid_region(self):
+        """The DMA moves the real extent, so a padded tile is bounded by it."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        # 64 rows allocated, 8 real, landing on the destination's last 8 rows.
+        src = self._partial_tile([64, 128], [8, 128], name="src")
+
+        result_type = tile.store(src, [56, 0], out).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+    def test_store_validates_destination_bounds(self):
+        """A transfer that runs off the destination rejects."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([64, 128], DataType.FP32), span)
+        src = self._partial_tile([32, 128], [32, 128], name="src")
+
+        with pytest.raises(ValueError, match="writes past the end of dimension 0"):
+            tile.store(src, [56, 0], out)
+
+    def test_store_bounds_rejection_names_the_layout_remedy(self):
+        """An overhang is usually a coordinate mismatch, so the error says so.
+
+        A tile read through a DN view is transposed; storing it into the
+        destination's untransposed shape overflows one axis while under-filling
+        the other. ``tile.store`` converts no layouts (RFC #1300 P7), so the
+        diagnostic points at taking the matching view of the destination.
+        """
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([8, 16], DataType.FP32), span)
+        src = self._partial_tile([16, 8], [16, 8], name="src")
+
+        with pytest.raises(ValueError, match="performs no layout conversion"):
+            tile.store(src, [0, 0], out)
+
+    def test_assemble_bounds_rejection_names_the_subview_rule(self):
+        """tile.assemble's overhang error explains why the allocation must fit."""
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TileType([64, 128], DataType.FP32), span)
+        source = self._partial_tile([48, 128], [8, 128], name="src")
+
+        with pytest.raises(ValueError, match="copies the whole source subview"):
+            tile.assemble(target, source, [56, 0])
+
+    def test_store_gap_rejects(self):
+        """A store that does not abut the destination's valid region rejects."""
+        out = self._partial_tensor([64, 128], [20, 128])
+        src = self._partial_tile([16, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match="leaves a gap in dimension 0"):
+            tile.store(src, [24, 0], out)
+
+    def test_store_uses_the_authoritative_original_rank_partition(self):
+        """The ND ``shapes`` operand names the written region, not the 2D tile.
+
+        FlattenTileNdTo2D records it precisely because a flattened tile no longer
+        carries the ND extent.
+        """
+        out = self._partial_tensor([2, 3, 16, 64], [1, 3, 16, 64])
+        src = self._partial_tile([16, 64], [16, 64], name="src")
+
+        result_type = tile.store(src, [1, 0, 0, 0], out, [1, 3, 16, 64]).type
+
+        assert self._tensor_valid_of(result_type) == [2, 3, 16, 64]
+
+    def test_store_partial_tile_does_not_claim_the_whole_nd_partition(self):
+        """A partially valid tile must not promote its padding to real data.
+
+        ``shapes`` is authoritative for the partition's physical extent, but the
+        region actually written is the flattened tile's valid one. Recovering that
+        on ND axes is the ND-to-2D mapping problem, so the destination is left
+        alone rather than reported as fully written.
+        """
+        out = self._partial_tensor([2, 3, 16, 64], [1, 3, 16, 64])
+        # Only 8 of the tile's 16 rows are real.
+        src = self._partial_tile([16, 64], [8, 64], name="src")
+
+        result_type = tile.store(src, [1, 0, 0, 0], out, [1, 3, 16, 64]).type
+
+        assert self._tensor_valid_of(result_type) == [1, 3, 16, 64]
+
+    def test_store_rank_mismatch_keeps_its_previous_result(self):
+        """A reinterpreting store is not a rectangle on the destination axes."""
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([1, 16, 64], DataType.FP32), span)
+        src = self._partial_tile([16, 64], [8, 64], name="src")
+
+        result_type = tile.store(src, [0, 0], out).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

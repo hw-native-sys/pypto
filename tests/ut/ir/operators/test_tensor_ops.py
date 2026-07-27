@@ -4176,5 +4176,217 @@ class TestTensorRandomOp:
         assert pl.random is pl.tensor.random
 
 
+class TestTensorAssembleValidRegionUnion:
+    """The valid region left behind by ``tensor.assemble``.
+
+    A valid shape names one origin-anchored rectangle, so the union of what the
+    target already held with what was just written is representable only in the
+    cases proven below; everything else rejects rather than widening padding into
+    real data or narrowing real data away.
+    """
+
+    @staticmethod
+    def _symbol(name):
+        return ir.Var(name, ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+
+    def test_fully_valid_target_stays_fully_valid(self):
+        """A write inside a fully valid target leaves nothing to narrow."""
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TensorType([64, 128], DataType.FP32), span)
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [8, 0]).type
+
+        # Full validity is the redundant encoding, so the view collapses away.
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+    def test_empty_source_is_a_no_op(self):
+        """Writing an empty region leaves the target exactly as it was."""
+        target = _partial_tensor_var([64, 128], [20, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [0, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [20, 0]).type
+
+        assert _valid_of(result_type) == [20, 128]
+
+    def test_empty_target_is_initialized_by_an_origin_anchored_source(self):
+        """An empty accumulator takes the written region as its whole valid region."""
+        target = _partial_tensor_var([64, 128], [0, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [0, 0]).type
+
+        assert _valid_of(result_type) == [12, 128]
+
+    def test_empty_target_written_off_origin_rejects(self):
+        """A region that does not start at the origin is not a valid shape."""
+        target = _partial_tensor_var([64, 128], [0, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match="does not start at the origin"):
+            ir.op.tensor.assemble(target, source, [8, 0])
+
+    def test_source_contained_in_target_preserves_target_validity(self):
+        """Overwriting real data that is already there adds nothing."""
+        target = _partial_tensor_var([64, 128], [40, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [8, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [0, 0]).type
+
+        assert _valid_of(result_type) == [40, 128]
+
+    def test_contiguous_growth_extends_one_dimension(self):
+        """An append that abuts the target grows exactly that axis."""
+        target = _partial_tensor_var([64, 128], [20, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [20, 0]).type
+
+        assert _valid_of(result_type) == [32, 128]
+
+    def test_overlapping_growth_is_still_contiguous(self):
+        """A write that starts inside the target and runs past it leaves no gap."""
+        target = _partial_tensor_var([64, 128], [20, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [16, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [12, 0]).type
+
+        assert _valid_of(result_type) == [28, 128]
+
+    def test_gap_between_target_and_write_rejects(self):
+        """A write starting past the target's edge leaves an unrepresentable hole."""
+        target = _partial_tensor_var([64, 128], [20, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+
+        with pytest.raises(ValueError, match="leaves a gap in dimension 0"):
+            ir.op.tensor.assemble(target, source, [24, 0])
+
+    def test_growth_in_two_dimensions_rejects(self):
+        """Growing two axes at once makes the union an L-shape."""
+        target = _partial_tensor_var([64, 256], [20, 64], name="dst")
+        source = _partial_tensor_var([32, 128], [12, 80], name="src")
+
+        with pytest.raises(ValueError, match="dimensions 0 and 1 at once"):
+            ir.op.tensor.assemble(target, source, [20, 0])
+
+    def test_passenger_dimension_must_match_the_target_exactly(self):
+        """A narrower slab than the region it extends is an L-shape."""
+        target = _partial_tensor_var([64, 256], [20, 128], name="dst")
+        source = _partial_tensor_var([32, 128], [12, 64], name="src")
+
+        with pytest.raises(ValueError, match="must provably equal the target valid extent"):
+            ir.op.tensor.assemble(target, source, [20, 0])
+
+    def test_passenger_dimension_must_start_at_the_origin(self):
+        """An offset slab does not line up with the region it extends.
+
+        Dimension 1 stays inside the target (8 + 64 <= 128), so this reaches the
+        passenger rule rather than the two-dimensional growth rule above.
+        """
+        target = _partial_tensor_var([64, 256], [20, 128], name="dst")
+        source = _partial_tensor_var([32, 128], [12, 64], name="src")
+
+        with pytest.raises(ValueError, match="must span dimension 1 from the origin"):
+            ir.op.tensor.assemble(target, source, [20, 8])
+
+    def test_target_swallowed_by_an_origin_anchored_write(self):
+        """A write covering the target on every axis stands alone."""
+        target = _partial_tensor_var([64, 128], [4, 8], name="dst")
+        source = _partial_tensor_var([32, 128], [32, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [0, 0]).type
+
+        assert _valid_of(result_type) == [32, 128]
+
+    def test_negative_offset_rejects(self):
+        """A write must start inside its target."""
+        span = ir.Span.unknown()
+        target = _partial_tensor_var([64, 128], [20, 128], name="dst")
+        source = _partial_tensor_var([16, 128], [12, 128], name="src")
+        neg = ir.ConstInt(-4, DataType.INDEX, span)
+
+        with pytest.raises(ValueError, match="provably negative"):
+            ir.op.tensor.assemble(target, source, [neg, 0])
+
+    def test_write_past_the_target_end_rejects(self):
+        """The written region must fit inside the target allocation."""
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TensorType([64, 128], DataType.FP32), span)
+        source = _partial_tensor_var([32, 128], [32, 128], name="src")
+
+        with pytest.raises(ValueError, match="writes past the end of dimension 0"):
+            ir.op.tensor.assemble(target, source, [56, 0])
+
+    def test_only_the_source_valid_region_has_to_fit(self):
+        """A padded source transfers its real extent, not its whole allocation.
+
+        The counterpart tile.assemble rejects this same write, because
+        ``pto.tinsert`` copies the physical subview rather than the valid one.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TensorType([64, 128], DataType.FP32), span)
+        # 48 rows allocated, only 8 of them real, landing on the last 8 target rows.
+        source = _partial_tensor_var([48, 128], [8, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [56, 0]).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+    def test_symbolic_contiguous_append_is_proven_by_structural_equality(self):
+        """``t = [k, 128]`` appended at ``[k, 0]`` grows to ``k + m``."""
+        k = self._symbol("k")
+        m = self._symbol("m")
+        target = _partial_tensor_var([64, 128], [k, 128], name="dst")
+        source = _partial_tensor_var([32, 128], [m, 128], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [k, 0]).type
+
+        # Capped at the physical extent, which no proof settles for symbolic k + m.
+        assert isinstance(result_type, ir.TensorType)
+        view = result_type.tensor_view
+        assert view is not None
+        assert ir.python_print(view.valid_shape[0]) == "pl.min(k + m, 64)"
+        assert _valid_of(result_type)[1] == 128
+
+    def test_unprovable_symbolic_offset_rejects(self):
+        """An offset unrelated to the target's extent cannot be shown to abut it."""
+        k = self._symbol("k")
+        m = self._symbol("m")
+        j = self._symbol("j")
+        target = _partial_tensor_var([64, 128], [k, 128], name="dst")
+        source = _partial_tensor_var([32, 128], [m, 128], name="src")
+
+        with pytest.raises(ValueError, match="leaves a gap in dimension 0"):
+            ir.op.tensor.assemble(target, source, [j, 0])
+
+    def test_monotonic_multi_step_accumulation(self):
+        """Repeated appends stay one rectangle and never narrow."""
+        span = ir.Span.unknown()
+        target = _partial_tensor_var([64, 128], [0, 128], name="acc")
+        source = _partial_tensor_var([8, 128], [8, 128], name="src")
+
+        for step, expected in enumerate([8, 16, 24]):
+            result_type = ir.op.tensor.assemble(target, source, [step * 8, 0]).type
+            assert _valid_of(result_type) == [expected, 128]
+            target = ir.Var(f"acc{step}", result_type, span)
+
+    def test_rank_mismatched_write_keeps_its_previous_result(self):
+        """A reinterpreting write is not a rectangle on these axes, so it is left alone.
+
+        ``OptimizeOrchTensors`` materializes the dimension correspondence of a
+        lower-rank source as strides, exactly as for a lower-rank window read.
+        """
+        span = ir.Span.unknown()
+        target = ir.Var("dst", ir.TensorType([2, 4, 8], DataType.FP32), span)
+        source = _partial_tensor_var([2, 4], [1, 4], name="src")
+
+        result_type = ir.op.tensor.assemble(target, source, [0, 0, 0]).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

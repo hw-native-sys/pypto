@@ -410,6 +410,103 @@ void CheckReductionInputNonEmpty(const std::vector<ExprPtr>& valid, const std::s
                                  const Span& span);
 
 /**
+ * @brief What a write is allowed to move, and therefore what has to fit in the target
+ *
+ * The dual of ``WindowReadKind``: a read asks which extent must lie inside the
+ * source, a write asks which extent must lie inside the target. As there, this is
+ * a property of the substrate beneath the operator, not of aliasing.
+ */
+enum class WriteBoundsKind {
+  /// The whole physical source is written, so all of it must fit.
+  ///
+  /// ``tile.assemble`` lowers to ``pto.tinsert``, which copies the source subview
+  /// wholesale; nothing consults a valid extent, so a source allocation that
+  /// overhangs the target corrupts memory past the target.
+  kExactSubview,
+  /// Only the source's effective valid region is transferred, so only that has to
+  /// fit and a larger physical source allocation is harmless.
+  ///
+  /// ``tensor.assemble`` and ``tile.store`` move data by DMA over the valid
+  /// extent, which is the standard idiom for a padded fixed-width staging buffer
+  /// holding a short tail.
+  kValidRegionTransfer,
+};
+
+/**
+ * @brief Inputs to the shared write valid-region union rule
+ *
+ * All shape-like vectors are in target coordinates and must share one rank.
+ */
+struct WriteValidShapeUnionParams {
+  std::vector<ExprPtr> target_physical;  ///< Physical shape of the target
+  /// Target valid shape, already resolved by ``GetValidShape`` /
+  /// ``GetEffectiveTensorValidShape`` — never empty.
+  std::vector<ExprPtr> target_valid;
+  std::vector<ExprPtr> source_physical;  ///< Physical shape of the source
+  /// Source valid shape, already resolved — never empty. This is the extent
+  /// actually written, and the rectangle whose union with the target is proven.
+  std::vector<ExprPtr> source_valid;
+  std::vector<ExprPtr> offsets;  ///< Write origin, in target coordinates
+  WriteBoundsKind kind = WriteBoundsKind::kExactSubview;
+  std::string op_name;  ///< Operator name, used in diagnostics
+  /// Way out, appended to a physical-bounds rejection. An overhang is most often
+  /// a coordinate-system mismatch rather than an arithmetic slip — a tile read
+  /// through a transposing view and written back to an untransposed destination
+  /// overflows on one axis while under-filling the other — so each write says how
+  /// its own substrate wants to be addressed instead of only reporting the sum.
+  std::string bounds_remedy;
+  Span span = Span::unknown();
+};
+
+/**
+ * @brief Derive the valid region left behind by a write, when it is representable
+ *
+ * A valid shape names one origin-anchored rectangle, so the region after a write
+ * is expressible only when the union of the target's rectangle and the written
+ * one is itself an origin-anchored rectangle. The bounding candidate is
+ *
+ * ```text
+ * out_valid[i] = min(shape[i], max(target_valid[i], offset[i] + source_valid[i]))
+ * ```
+ *
+ * and this returns it only where that union is *provably* exactly that rectangle.
+ *
+ * **Why the proof is needed.** Returning the target's full shape after a partial
+ * write lets a later store push padding out as real data; returning only the
+ * source discards real data the target already held. Both are silent. Writing
+ * `W = ∏[o[i], o[i]+s[i])` into `T = ∏[0, t[i])`, the candidate rectangle covers
+ * `T ∪ W` exactly in these cases, which are what this accepts:
+ *
+ * - the written region is empty — the write is a no-op and the target stands;
+ * - the target is empty — the result is the source, provided it sits at the origin;
+ * - the written region lies inside the target — the target stands (a fully valid
+ *   target is this case, so it stays fully valid);
+ * - the target lies inside an origin-anchored written region — the source stands;
+ * - the write grows exactly one dimension `d` and abuts what is already there
+ *   (`offset[d] <= target_valid[d]`, so no gap opens), while every other dimension
+ *   spans the target exactly (`offset[i] == 0` and `source_valid[i] == target_valid[i]`).
+ *   Anything less on a passenger dimension leaves the new slab narrower than the
+ *   region it extends — an L-shape, which no valid shape can name.
+ *
+ * Growth in two or more dimensions at once, a gap, a mismatched passenger
+ * dimension, and any of these relations left unproven all reject rather than
+ * widen. Extents are compared with the tri-state proof vocabulary, so symbolic
+ * appends stated by structural equality (`t = [k, 128]`, `s = [m, 128]` at
+ * `[k, 0]` yields `[k + m, 128]`) are accepted while unrelated symbols are not.
+ *
+ * Expressions are built through the same proof-first helpers the window-read rule
+ * uses, so constant arithmetic folds and no redundant ``min`` / ``max`` nesting
+ * reaches a type.
+ *
+ * @param params Write description; see WriteValidShapeUnionParams
+ * @return The target's valid shape after the write, one extent per dimension
+ * @throws pypto::ValueError on rank mismatch, a provably negative offset, a
+ *         provable physical-bounds violation, or a union that is not provably an
+ *         origin-anchored rectangle
+ */
+std::vector<ExprPtr> InferWriteValidShapeUnion(const WriteValidShapeUnionParams& params);
+
+/**
  * @brief Check if a dimension is broadcastable to another
  *
  * A dimension is broadcastable if:

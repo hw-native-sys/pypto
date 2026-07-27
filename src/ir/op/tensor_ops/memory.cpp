@@ -433,15 +433,50 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
-  // Assemble returns a new tensor type with the same shape and dtype as target.
+  // The assembled result holds what the target already held plus what was just
+  // written. Only the source's valid region is transferred — a padded staging
+  // tensor whose physical allocation is larger than its real contents moves only
+  // the real part — so kValidRegionTransfer is the bound the write must respect.
+  // The rule needs the written region to be a rectangle in target coordinates,
+  // which holds whenever the source, the offsets, and the target share one rank.
+  // A rank-mismatched source is instead a reinterpreting write whose dimension
+  // correspondence OptimizeOrchTensors materializes as strides (e.g. a 2D source
+  // into a 3D parent), so it is not a rectangle on these axes and unioning it
+  // would target the wrong ones. Such a write keeps the result it had before this
+  // rule existed — the same exclusion lower-rank window reads carry.
+  std::vector<ExprPtr> offsets = ExtractTupleElements(args[2], offset_tuple_type->types_.size());
+  const size_t target_rank = target_type->shape_.size();
+  std::vector<ExprPtr> result_valid = target_type->shape_;
+  if (source_type->shape_.size() == target_rank && offsets.size() == target_rank) {
+    result_valid = InferWriteValidShapeUnion({
+        /*target_physical=*/target_type->shape_,
+        /*target_valid=*/GetValidShape(target_type),
+        /*source_physical=*/source_type->shape_,
+        /*source_valid=*/GetValidShape(source_type),
+        /*offsets=*/std::move(offsets),
+        /*kind=*/WriteBoundsKind::kValidRegionTransfer,
+        /*op_name=*/"tensor.assemble",
+        /*bounds_remedy=*/
+        "tensor.assemble transfers only the source's effective valid region, so it is that extent -- "
+        "not the whole source allocation -- that has to fit at this offset",
+        /*span=*/args[0]->span_,
+    });
+  }
+
+  // Assemble returns a new tensor type with the same shape and dtype as target,
+  // carrying that union. A result equal to the physical shape is canonicalized
+  // back to an absent view by the constructor, so a fully valid target still
+  // produces exactly the type it produced before this rule existed.
   // When the target is a DistributedTensorType, the result preserves that kind
   // along with its window_buffer_ — the assembled result is still a view into
   // the same comm-group allocation. A fresh shared_ptr avoids type aliasing.
+  TensorView result_view;
+  result_view.valid_shape = result_valid;
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
     return std::make_shared<DistributedTensorType>(target_type->shape_, target_type->dtype_, std::nullopt,
-                                                   std::nullopt, dt->window_buffer_);
+                                                   std::make_optional(result_view), dt->window_buffer_);
   }
-  return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
+  return MakeFreshTensorType(target_type->shape_, target_type->dtype_, std::move(result_valid));
 }
 
 TypePtr DeduceTensorFullType(const std::vector<ExprPtr>& args,

@@ -614,17 +614,44 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
          "Acc->Mat FIXPIPE downcast to bf16/f16), but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
-  // Inherit the target's TileView *and its optionality*.  When the target carries
-  // an implicit view (``tile_view_ == nullopt`` — e.g. a tile.create'd Mat scratch,
-  // whose effective layout is the Mat NZ implicit col_major/row_major), the result
-  // must stay implicit too, so its effective layout matches the target's rather than
-  // collapsing to the raw struct default (row_major/none_box — the VEC layout, not a
-  // Mat operand's).  An in-place Acc->Mat assemble chain then shares one consistent
-  // layout (see GetEffectiveTileView, which only honors an *explicit* view).
-  std::optional<TileView> tile_view = target_type->tile_view_;
-  if (tile_view.has_value()) {
-    tile_view->valid_shape = target_type->shape_;
+  // The result holds what the target already held plus what was just written.
+  // ``pto.tinsert`` copies the whole source subview rather than consulting its
+  // valid extent, so the *physical* source is what has to fit inside the target.
+  // As for tensor.assemble, the union is derivable only when the source, the
+  // offsets, and the target share one rank; a rank-mismatched write is a
+  // reinterpreting one whose axes do not correspond, and keeps its previous result.
+  std::vector<ExprPtr> offsets = ExtractTupleElements(args[2], offset_tuple_type->types_.size());
+  const size_t target_rank = target_type->shape_.size();
+  std::vector<ExprPtr> result_valid = target_type->shape_;
+  if (source_type->shape_.size() == target_rank && offsets.size() == target_rank) {
+    result_valid = InferWriteValidShapeUnion({
+        /*target_physical=*/target_type->shape_,
+        /*target_valid=*/GetValidShape(target_type),
+        /*source_physical=*/source_type->shape_,
+        /*source_valid=*/GetValidShape(source_type),
+        /*offsets=*/std::move(offsets),
+        /*kind=*/WriteBoundsKind::kExactSubview,
+        /*op_name=*/"tile.assemble",
+        /*bounds_remedy=*/
+        "tile.assemble lowers to pto.tinsert, which copies the whole source subview rather than only "
+        "its valid region, so the source allocation itself has to fit -- unlike tensor.assemble, "
+        "which transfers only the valid extent",
+        /*span=*/args[0]->span_,
+    });
   }
+
+  // Seed from the target's EFFECTIVE view so the result keeps the layout the
+  // target's shape and memory space imply.  When the target carries an implicit
+  // view (``tile_view_ == nullopt`` — e.g. a tile.create'd Mat scratch, whose
+  // effective layout is the Mat NZ implicit col_major/row_major), that layout must
+  // survive rather than collapsing to the raw struct default (row_major/none_box —
+  // the VEC layout, not a Mat operand's).  An in-place Acc->Mat assemble chain then
+  // shares one consistent layout (see GetEffectiveTileView, which only honors an
+  // *explicit* view).  A fully valid union canonicalizes straight back to an
+  // implicit view in the TileType constructor, so a target that was implicit before
+  // stays implicit unless the write genuinely leaves the result partially valid.
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*target_type);
+  tile_view.valid_shape = std::move(result_valid);
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
                                     target_type->memory_space_);
 }

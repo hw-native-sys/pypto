@@ -2665,13 +2665,19 @@ def test_pto_codegen_tensor_view_aliases_input_base_ptr():
     view_var = ir.Var("src_dn", view_call.type, span)
     tile_call = ir.op.tile.load(view_var, [0, 0], [16, 8])
     tile_var = ir.Var("tile", tile_call.type, span)
-    store_call = ir.op.tile.store(tile_var, [0, 0], out)
+    # The DN view transposes [8, 16] to [16, 8], so the tile is in DN coordinates.
+    # tile.store does no layout conversion (RFC #1300 P7), so the destination is
+    # addressed through the matching view rather than in its untransposed shape.
+    out_view_call = ir.op.tensor.view(out, layout=ir.TensorLayout.DN)
+    out_view_var = ir.Var("out_dn", out_view_call.type, span)
+    store_call = ir.op.tile.store(tile_var, [0, 0], out_view_var)
     result_var = ir.Var("result", store_call.type, span)
 
     body = ir.SeqStmts(
         [
             ir.AssignStmt(view_var, view_call, span),
             ir.AssignStmt(tile_var, tile_call, span),
+            ir.AssignStmt(out_view_var, out_view_call, span),
             ir.AssignStmt(result_var, store_call, span),
             ir.ReturnStmt([result_var], span),
         ],

@@ -712,6 +712,234 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
 }
 
 // ============================================================================
+// Write valid-region unions (assemble / store)
+// ============================================================================
+
+namespace {
+
+/// Dual of `MinExtent`: the provably larger operand when the ordering is settled,
+/// and a folded `max` only when it is not.
+ExprPtr MaxExtent(const ExprPtr& lhs, const ExprPtr& rhs, const Span& span) {
+  if (ProveValidExtentLessEqual(lhs, rhs) == ProofResult::kTrue) {
+    return rhs;
+  }
+  if (ProveValidExtentLessEqual(rhs, lhs) == ProofResult::kTrue) {
+    return lhs;
+  }
+  return FoldExtent(MakeMax(lhs, rhs, span));
+}
+
+/// Whether `valid` names the whole of `physical`, dimension by dimension.
+///
+/// Canonicalization stores redundant full validity as an absent view, so this is
+/// usually the identity `GetValidShape` returned; an explicit spelling that the
+/// analyzer can still settle is accepted too.
+bool IsFullyValid(const std::vector<ExprPtr>& valid, const std::vector<ExprPtr>& physical) {
+  for (size_t i = 0; i < valid.size(); ++i) {
+    if (!AreExprsEqual(valid[i], physical[i]) &&
+        ProveValidExtentEqual(valid[i], physical[i]) != ProofResult::kTrue) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// Whether every offset is provably zero, i.e. the written region is itself
+/// origin-anchored and can stand alone as a valid shape.
+bool IsOriginAnchored(const std::vector<ExprPtr>& offsets) {
+  for (const auto& offset : offsets) {
+    if (!IsProvablyEmptyExtent(offset)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string FormatDimensionList(const std::vector<size_t>& dims) {
+  std::string out;
+  for (size_t i = 0; i < dims.size(); ++i) {
+    if (i != 0) {
+      out += i + 1 == dims.size() ? " and " : ", ";
+    }
+    out += std::to_string(dims[i]);
+  }
+  return out;
+}
+
+void CheckWriteUnionRanks(const WriteValidShapeUnionParams& p) {
+  const size_t rank = p.target_physical.size();
+  CHECK_SPAN(p.source_physical.size() == rank, p.span)
+      << p.op_name << " requires the source and the target to have the same rank, but got source rank "
+      << p.source_physical.size() << " " << FormatShape(p.source_physical) << " and target rank " << rank
+      << " " << FormatShape(p.target_physical);
+  CHECK_SPAN(p.offsets.size() == rank, p.span)
+      << p.op_name << " requires one offset per target dimension, but got " << p.offsets.size()
+      << " offsets for target rank " << rank;
+  CHECK_SPAN(p.target_valid.size() == rank, p.span)
+      << p.op_name << " target valid_shape rank " << p.target_valid.size()
+      << " does not match its shape rank " << rank;
+  CHECK_SPAN(p.source_valid.size() == rank, p.span)
+      << p.op_name << " source valid_shape rank " << p.source_valid.size()
+      << " does not match its shape rank " << rank;
+}
+
+/// The extent of dimension `i` the write must keep inside the target.
+///
+/// Under `kExactSubview` the whole physical source lands, so all of it has to fit,
+/// however small its valid region. Under `kValidRegionTransfer` only the valid
+/// region moves, so a larger physical source allocation is free.
+const ExprPtr& WriteReach(const WriteValidShapeUnionParams& p, size_t i) {
+  return p.kind == WriteBoundsKind::kExactSubview ? p.source_physical[i] : p.source_valid[i];
+}
+
+/// Enforce what a write promises about dimension `i` before its union is derived:
+/// it starts inside the target, and the extent it touches also ends inside it.
+///
+/// Provable violations reject; relations that stay symbolic are taken on trust,
+/// exactly as for a non-clamping window read, because that inequality is the
+/// operator's precondition rather than a guess.
+void CheckWriteDimBounds(const WriteValidShapeUnionParams& p, size_t i) {
+  const ExprPtr& offset = p.offsets[i];
+  const ExprPtr& target = p.target_physical[i];
+
+  CHECK_SPAN(ProveValidExtentLessEqual(IndexZero(), offset) != ProofResult::kFalse, p.span)
+      << p.op_name << " offset " << i << " is provably negative (" << PythonPrint(offset)
+      << "); a write must start inside its target";
+
+  const ExprPtr& reach = WriteReach(p, i);
+  if (IsIntegerScalarExpr(offset) && IsIntegerScalarExpr(reach) && IsIntegerScalarExpr(target)) {
+    const ExprPtr end = FoldExtent(MakeAdd(offset, reach, p.span));
+    CHECK_SPAN(ProveValidExtentLessEqual(end, target) != ProofResult::kFalse, p.span)
+        << p.op_name << " writes past the end of dimension " << i << ": offset " << PythonPrint(offset)
+        << " + extent " << PythonPrint(reach) << " exceeds the target extent " << PythonPrint(target)
+        << (p.bounds_remedy.empty() ? "" : ". ") << p.bounds_remedy;
+  }
+}
+
+/// The far edge `offset[i] + source_valid[i]` of the written region.
+ExprPtr WriteFarEdge(const WriteValidShapeUnionParams& p, size_t i) {
+  const ExprPtr& offset = p.offsets[i];
+  const ExprPtr& extent = p.source_valid[i];
+  if (IsProvablyEmptyExtent(offset)) {
+    return extent;
+  }
+  CHECK_SPAN(IsIntegerScalarExpr(offset) && IsIntegerScalarExpr(extent), p.span)
+      << p.op_name << " needs an integer scalar offset and valid extent to place dimension " << i
+      << " against a partially valid target, but got offset " << offset->GetType()->TypeName()
+      << " and extent " << extent->GetType()->TypeName();
+  return FoldExtent(MakeAdd(offset, extent, p.span));
+}
+
+}  // namespace
+
+std::vector<ExprPtr> InferWriteValidShapeUnion(const WriteValidShapeUnionParams& params) {
+  CheckWriteUnionRanks(params);
+  const size_t rank = params.target_physical.size();
+  for (size_t i = 0; i < rank; ++i) {
+    CheckWriteDimBounds(params, i);
+  }
+
+  const std::vector<ExprPtr>& target_valid = params.target_valid;
+  const std::vector<ExprPtr>& source_valid = params.source_valid;
+
+  // An empty written region leaves the target exactly as it was.
+  for (size_t i = 0; i < rank; ++i) {
+    if (IsProvablyEmptyExtent(source_valid[i])) {
+      return target_valid;
+    }
+  }
+
+  // An empty target holds nothing to union with, so the result is the written
+  // region alone — which is a valid shape only if it starts at the origin.
+  for (size_t i = 0; i < rank; ++i) {
+    if (IsProvablyEmptyExtent(target_valid[i])) {
+      CHECK_SPAN(IsOriginAnchored(params.offsets), params.span)
+          << params.op_name << " writes at offset " << FormatShape(params.offsets)
+          << " into a target whose valid region is empty (dimension " << i
+          << " has extent 0), which would leave a region that does not start at the origin. A valid "
+             "shape names one origin-anchored rectangle, so initialize an empty target at offset 0";
+      return source_valid;
+    }
+  }
+
+  // A fully valid target stays fully valid: the physical bounds asserted above
+  // are exactly the containment proof, including for the symbolic offsets that
+  // dominate real code, so this must not be re-derived from the weaker
+  // per-dimension proofs below.
+  if (IsFullyValid(target_valid, params.target_physical)) {
+    return target_valid;
+  }
+
+  // Dimensions the write may push past the target's valid region. Everything it
+  // cannot reach is already covered, so an empty set means the write lands inside.
+  std::vector<ExprPtr> far_edge;
+  std::vector<size_t> growing;
+  far_edge.reserve(rank);
+  for (size_t i = 0; i < rank; ++i) {
+    far_edge.push_back(WriteFarEdge(params, i));
+    if (ProveValidExtentLessEqual(far_edge[i], target_valid[i]) != ProofResult::kTrue) {
+      growing.push_back(i);
+    }
+  }
+  if (growing.empty()) {
+    return target_valid;
+  }
+
+  // The written region swallows the target whole, and starts at the origin, so it
+  // stands alone. This is the multi-dimensional overwrite the single-axis rule
+  // below cannot express.
+  if (IsOriginAnchored(params.offsets)) {
+    bool covers_target = true;
+    for (size_t i = 0; i < rank && covers_target; ++i) {
+      covers_target = ProveValidExtentLessEqual(target_valid[i], source_valid[i]) == ProofResult::kTrue;
+    }
+    if (covers_target) {
+      return source_valid;
+    }
+  }
+
+  // Otherwise the only representable growth is along a single axis: the new slab
+  // must abut what is already there, and must span every other axis exactly, or
+  // the union is an L-shape that no valid shape can name.
+  CHECK_SPAN(growing.size() == 1, params.span)
+      << params.op_name << " grows the valid region along dimensions " << FormatDimensionList(growing)
+      << " at once, whose union with the target is an L-shape rather than one origin-anchored "
+         "rectangle. Target valid "
+      << FormatShape(target_valid) << ", writing " << FormatShape(source_valid) << " at offset "
+      << FormatShape(params.offsets);
+
+  const size_t axis = growing.front();
+  CHECK_SPAN(ProveValidExtentLessEqual(params.offsets[axis], target_valid[axis]) == ProofResult::kTrue,
+             params.span)
+      << params.op_name << " leaves a gap in dimension " << axis << ": the write starts at "
+      << PythonPrint(params.offsets[axis]) << ", which is not provably at or before the target valid extent "
+      << PythonPrint(target_valid[axis])
+      << ". A valid shape names one contiguous origin-anchored rectangle, so a write that grows it must "
+         "abut the region already there";
+
+  for (size_t i = 0; i < rank; ++i) {
+    if (i == axis) {
+      continue;
+    }
+    CHECK_SPAN(IsProvablyEmptyExtent(params.offsets[i]), params.span)
+        << params.op_name << " grows dimension " << axis << ", so it must span dimension " << i
+        << " from the origin, but it starts at " << PythonPrint(params.offsets[i])
+        << ". The added region would be narrower than the region it extends, making the union an L-shape";
+    CHECK_SPAN(ProveValidExtentEqual(source_valid[i], target_valid[i]) == ProofResult::kTrue, params.span)
+        << params.op_name << " grows dimension " << axis << ", so its extent in dimension " << i << " ("
+        << PythonPrint(source_valid[i]) << ") must provably equal the target valid extent ("
+        << PythonPrint(target_valid[i])
+        << "). The added region would otherwise not line up with the region it extends, making the union "
+           "an L-shape";
+  }
+
+  std::vector<ExprPtr> result = target_valid;
+  result[axis] = MinExtent(MaxExtent(target_valid[axis], far_edge[axis], params.span),
+                           params.target_physical[axis], params.span);
+  return result;
+}
+
+// ============================================================================
 // Slice rank-reduction (drop_dims) helpers
 // ============================================================================
 
