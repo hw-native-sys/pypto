@@ -12,6 +12,7 @@
 from pathlib import Path
 
 import pytest
+from pypto.tools.ir_trace.diff import build_trace, highlight_python
 from pypto.tools.ir_trace.discovery import discover_snapshots
 from pypto.tools.ir_trace.model import IRTraceError
 
@@ -22,6 +23,165 @@ def _write_dump(root: Path, files: dict[str, str]) -> Path:
     for name, text in files.items():
         (dump / name).write_text(text, encoding="utf-8")
     return dump
+
+
+def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "a\nb\nc\n",
+            "01_after_TestPass.py": "a\nx\ny\nc\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    assert (trace.inserted, trace.deleted, trace.changed) == (2, 1, True)
+    assert trace.changed
+    assert len(trace.hunks) == 1
+    assert not trace.hunks[0].collapsed
+    changed_rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind == "replace"]
+    assert [(row.before_number, row.after_number) for row in changed_rows] == [(2, 2), (None, 3)]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "kind", "before_number", "after_number"),
+    [
+        ("a\nc\n", "a\nb\nc\n", "insert", None, 2),
+        ("a\nb\nc\n", "a\nc\n", "delete", 2, None),
+    ],
+)
+def test_build_trace_aligns_insert_and_delete(
+    tmp_path: Path,
+    before: str,
+    after: str,
+    kind: str,
+    before_number: int | None,
+    after_number: int | None,
+):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind == kind]
+    assert [(row.before_number, row.after_number) for row in rows] == [(before_number, after_number)]
+    assert (trace.inserted, trace.deleted) == (int(kind == "insert"), int(kind == "delete"))
+
+
+def test_build_trace_keeps_noop_and_normalizes_line_endings(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "a\r\nb\r\n",
+            "01_after_TestPass.py": "a\nb",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    assert not trace.changed
+    assert (trace.inserted, trace.deleted) == (0, 0)
+    assert [row.kind for hunk in trace.hunks for row in hunk.rows] == ["equal", "equal"]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "changed_number"),
+    [
+        ("old\na\nb\nc\nd\n", "new\na\nb\nc\nd\n", 1),
+        ("a\nb\nc\nd\nold\n", "a\nb\nc\nd\nnew\n", 5),
+    ],
+)
+def test_build_trace_folds_file_edge_equal_rows(tmp_path: Path, before: str, after: str, changed_number: int):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=1)[0]
+
+    visible_rows = [row for hunk in trace.hunks if not hunk.collapsed for row in hunk.rows]
+    assert any(
+        row.kind == "replace" and row.before_number == changed_number and row.after_number == changed_number
+        for row in visible_rows
+    )
+    assert any(hunk.collapsed for hunk in trace.hunks)
+
+
+def test_build_trace_collapses_middle_equal_rows_with_zero_context(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "old\na\nb\nold\n",
+            "01_after_TestPass.py": "new\na\nb\nnew\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=0)[0]
+
+    collapsed = [hunk for hunk in trace.hunks if hunk.collapsed]
+    assert [[row.before_number for row in hunk.rows] for hunk in collapsed] == [[2, 3]]
+
+
+@pytest.mark.parametrize(
+    ("middle", "collapsed_count"),
+    [
+        ("a\nb\nc\nd", 0),
+        ("a\nb\nc\nd\ne", 1),
+    ],
+)
+def test_build_trace_only_folds_long_middle_equal_runs(tmp_path: Path, middle: str, collapsed_count: int):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": f"old\n{middle}\nold\n",
+            "01_after_TestPass.py": f"new\n{middle}\nnew\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=2)[0]
+
+    assert sum(hunk.collapsed for hunk in trace.hunks) == collapsed_count
+
+
+def test_build_trace_rejects_negative_context(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "before\n",
+            "01_after_TestPass.py": "after\n",
+        },
+    )
+
+    with pytest.raises(IRTraceError, match="context must be non-negative, got -1"):
+        build_trace(discover_snapshots(dump), context=-1)
+
+
+def test_highlight_python_escapes_script_text_and_marks_tokens():
+    highlighted = highlight_python('value = "<script>"  # <script>\n')
+
+    assert len(highlighted) == 1
+    assert "<script>" not in highlighted[0]
+    assert "&lt;script&gt;" in highlighted[0]
+    assert 'class="tok-string"' in highlighted[0]
+    assert 'class="tok-comment"' in highlighted[0]
+
+
+def test_highlight_python_escapes_every_line_after_tokenization_error():
+    text = "if True:\n  value = (<script>\n"
+
+    highlighted = highlight_python(text)
+
+    assert highlighted == ("if True:", "  value = (&lt;script&gt;")
+    assert all("<script>" not in line for line in highlighted)
 
 
 def test_discover_orders_snapshots_and_attaches_warning(tmp_path: Path):
