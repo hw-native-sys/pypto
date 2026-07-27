@@ -286,28 +286,22 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   const std::vector<ExprPtr>& dest_shape = output_tensor_type->shape_;
   const size_t dest_rank = dest_shape.size();
 
-  // The rectangle written, in destination coordinates. The optional ``shapes``
-  // operand is the authoritative original-rank partition — FlattenTileNdTo2D
-  // records it precisely because the flattened 2D tile no longer carries the ND
-  // extent — so it wins whenever it is present.
-  std::vector<ExprPtr> transfer_physical;
-  std::vector<ExprPtr> transfer_valid;
+  // The optional ``shapes`` operand carries FlattenTileNdTo2D's ND partition,
+  // which is a *collapsed-dims* descriptor rather than a rectangle in
+  // destination coordinates: it is built as leading 1s followed by the
+  // pre-flatten tile shape, whose leading extent may be the product of several
+  // destination axes. A [2, 3, 8] gather, for one, stores its collapsed [6, 8]
+  // tile as partition [1, 6, 8], where 6 spans two axes of a destination whose
+  // own axis 1 is only 3. Codegen consumes that through pto.partition_view,
+  // which understands the collapse; reading it as an origin-anchored rectangle
+  // here would both mis-bound the write and place the union on the wrong axes.
+  // So the ND form keeps the destination type it had — recovering the written
+  // region on ND axes is the ND-to-2D mapping problem, not this rule's.
   if (shapes_tuple) {
-    // ``shapes`` is authoritative for the partition's *physical* extent, but the
-    // region actually written is the flattened tile's valid one, and recovering
-    // that on ND axes is the ND-to-2D mapping problem rather than this rule's.
-    // So a partially valid tile leaves the destination type alone: claiming the
-    // whole partition was written would promote the tile's padding to real data,
-    // which is exactly what this rule exists to prevent.
-    if (!AreExprVectorsEqual(GetValidShape(tile_type), tile_type->shape_)) {
-      return output_tensor_type;
-    }
-    transfer_physical = shapes_tuple->elements_;
-    transfer_valid = transfer_physical;
-  } else {
-    transfer_physical = tile_type->shape_;
-    transfer_valid = GetValidShape(tile_type);
+    return output_tensor_type;
   }
+  std::vector<ExprPtr> transfer_physical = tile_type->shape_;
+  std::vector<ExprPtr> transfer_valid = GetValidShape(tile_type);
 
   // As for assemble, the union is derivable only when the transfer, the offsets,
   // and the destination share one rank. A store whose tile addresses the

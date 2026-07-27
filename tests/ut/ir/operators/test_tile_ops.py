@@ -5068,34 +5068,37 @@ class TestWriteValidRegionUnion:
         with pytest.raises(ValueError, match="leaves a gap in dimension 0"):
             tile.store(src, [24, 0], out)
 
-    def test_store_uses_the_authoritative_original_rank_partition(self):
-        """The ND ``shapes`` operand names the written region, not the 2D tile.
+    def test_store_leaves_the_nd_partition_form_alone(self):
+        """The ND ``shapes`` operand is a collapsed-dims descriptor, not a rectangle.
 
-        FlattenTileNdTo2D records it precisely because a flattened tile no longer
-        carries the ND extent.
+        FlattenTileNdTo2D builds it as leading 1s followed by the pre-flatten tile
+        shape, so its leading extent can be a product of several destination axes
+        and need not fit the matching one. Reading it as an origin-anchored
+        rectangle would mis-bound the write and place the union on the wrong axes,
+        so the destination type is passed through untouched.
         """
         out = self._partial_tensor([2, 3, 16, 64], [1, 3, 16, 64])
         src = self._partial_tile([16, 64], [16, 64], name="src")
 
         result_type = tile.store(src, [1, 0, 0, 0], out, [1, 3, 16, 64]).type
 
-        assert self._tensor_valid_of(result_type) == [2, 3, 16, 64]
-
-    def test_store_partial_tile_does_not_claim_the_whole_nd_partition(self):
-        """A partially valid tile must not promote its padding to real data.
-
-        ``shapes`` is authoritative for the partition's physical extent, but the
-        region actually written is the flattened tile's valid one. Recovering that
-        on ND axes is the ND-to-2D mapping problem, so the destination is left
-        alone rather than reported as fully written.
-        """
-        out = self._partial_tensor([2, 3, 16, 64], [1, 3, 16, 64])
-        # Only 8 of the tile's 16 rows are real.
-        src = self._partial_tile([16, 64], [8, 64], name="src")
-
-        result_type = tile.store(src, [1, 0, 0, 0], out, [1, 3, 16, 64]).type
-
         assert self._tensor_valid_of(result_type) == [1, 3, 16, 64]
+
+    def test_store_accepts_a_collapsed_nd_partition(self):
+        """A partition extent may exceed the destination axis it nominally sits on.
+
+        This is the shape ``tests/st/runtime/ops/test_gather.py`` produces: a
+        ``[2, 3, 8]`` gather whose lowering collapses the leading dims to a
+        ``[6, 8]`` tile, stored as partition ``[1, 6, 8]`` where 6 > 3.
+        """
+        span = ir.Span.unknown()
+        out = ir.Var("out", ir.TensorType([2, 3, 8], DataType.FP32), span)
+        src = self._partial_tile([6, 8], [6, 8], name="src")
+
+        result_type = tile.store(src, [0, 0, 0], out, [1, 6, 8]).type
+
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
 
     def test_store_rank_mismatch_keeps_its_previous_result(self):
         """A reinterpreting store is not a rectangle on the destination axes."""
