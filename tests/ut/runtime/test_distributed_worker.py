@@ -1169,11 +1169,17 @@ class _RecordingOrch:
     ``_submit_chip`` applied the per-dispatch suffix before the task was queued.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, chip_count: int | None = None) -> None:
         self.calls: list[tuple[Any, int, str]] = []
         # ``_submit_chip`` reads/writes this per-card dispatch counter on the
         # orch; declare it so the attribute is known to the type checker.
         self._dfx_dispatch_idx: dict[str, int] = {}
+        # ``_dispatch.orch_fn`` stamps the placement state on the real
+        # Orchestrator; mirror it here. Leaving ``chip_count`` unset models a
+        # caller that bypassed ``orch_fn``.
+        if chip_count is not None:
+            self._pypto_chip_count: int = chip_count
+        self._pypto_commless_seq: int = 0
 
     def submit_next_level(self, callable_id: Any, task_args: Any, config: Any, *, worker: int) -> str:
         self.calls.append((callable_id, worker, config.output_prefix))
@@ -1248,8 +1254,7 @@ class TestSubmitChip:
         # #1436 requires an exact target, so consecutive ones are handed out
         # round-robin over the program's chips — a host_orch with one comm-less
         # dispatch per chip still spreads across them.
-        orch = _RecordingOrch()
-        orch._pypto_chip_count = 2
+        orch = _RecordingOrch(chip_count=2)
         cfg = _SpyDfxConfig(output_prefix="/work/dfx_outputs")
         for _ in range(3):
             _submit_chip(orch, "chip", "ta", cfg, None)
@@ -1274,8 +1279,7 @@ class TestSubmitChip:
     def test_pinned_dispatch_keeps_its_rank(self):
         # A ``device=``-pinned dispatch is never re-placed, even when comm-less
         # dispatches are round-robining alongside it.
-        orch = _RecordingOrch()
-        orch._pypto_chip_count = 2
+        orch = _RecordingOrch(chip_count=2)
         cfg = _SpyDfxConfig(output_prefix="")
         _submit_chip(orch, "chip", "ta", cfg, 1)
         _submit_chip(orch, "chip", "ta", cfg, None)
