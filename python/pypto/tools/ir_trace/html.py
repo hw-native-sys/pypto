@@ -309,6 +309,9 @@ const afterPane = document.getElementById("after-pane");
 const beforeTitle = document.getElementById("before-title");
 const afterTitle = document.getElementById("after-title");
 const warningsPanel = document.getElementById("warnings-panel");
+const snapshotControls = ["copy-before", "copy-after", "expand-all", "collapse-all"].map((id) =>
+  document.getElementById(id)
+);
 const expandedHunks = new Set();
 let selectedIndex = null;
 
@@ -322,10 +325,27 @@ function currentTrace() {
   return data.passes.find((trace) => trace.index === selectedIndex);
 }
 
+function setSnapshotControlsEnabled(enabled) {
+  for (const control of snapshotControls) control.disabled = !enabled;
+}
+
+function clearDetail(message) {
+  selectedIndex = null;
+  passTitle.textContent = message;
+  beforeTitle.textContent = "";
+  afterTitle.textContent = "";
+  warningsPanel.hidden = true;
+  warningsPanel.textContent = "";
+  beforePane.replaceChildren();
+  afterPane.replaceChildren();
+  setSnapshotControlsEnabled(false);
+}
+
 function selectPass(index) {
   const trace = data.passes.find((candidate) => candidate.index === index);
   if (!trace) return;
   selectedIndex = index;
+  setSnapshotControlsEnabled(true);
   renderSidebar();
   renderDiff(trace);
 }
@@ -448,7 +468,9 @@ function fallbackCopy(text) {
 }
 
 function copySnapshot(side) {
-  const text = currentTrace()[side + "Text"];
+  const trace = currentTrace();
+  if (!trace) return;
+  const text = trace[side + "Text"];
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
   } else {
@@ -477,7 +499,10 @@ function applyFilters() {
   const passes = visiblePasses();
   if (!passes.some((trace) => trace.index === selectedIndex)) {
     if (passes[0]) selectPass(passes[0].index);
-    else renderSidebar();
+    else {
+      clearDetail("No passes match the filters.");
+      renderSidebar();
+    }
   } else {
     renderSidebar();
   }
@@ -510,7 +535,10 @@ document.documentElement.dataset.theme = window.matchMedia("(prefers-color-schem
   : "light";
 const initialTrace = data.passes.find((trace) => trace.changed) || data.passes[0];
 if (initialTrace) selectPass(initialTrace.index);
-else renderSidebar();
+else {
+  clearDetail("No passes in this report.");
+  renderSidebar();
+}
 """
 
 _BODY = """

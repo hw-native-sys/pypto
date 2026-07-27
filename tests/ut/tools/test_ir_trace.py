@@ -10,6 +10,9 @@
 """Tests for IR pass snapshot discovery."""
 
 import json
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,66 @@ def _write_dump(root: Path, files: dict[str, str]) -> Path:
     for name, text in files.items():
         (dump / name).write_text(text, encoding="utf-8")
     return dump
+
+
+def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedProcess[str]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the embedded viewer behavior")
+
+    payload = report.split('<script id="trace-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    viewer_script = report.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    harness = textwrap.dedent(
+        f"""
+        class Element {{
+          constructor(tagName = "div") {{
+            this.tagName = tagName.toUpperCase();
+            this.checked = true;
+            this.children = [];
+            this.className = "";
+            this.dataset = {{}};
+            this.disabled = false;
+            this.hidden = false;
+            this.listeners = {{}};
+            this.style = {{}};
+            this.textContent = "";
+          }}
+          addEventListener(name, callback) {{ this.listeners[name] = callback; }}
+          appendChild(child) {{ this.children.push(child); return child; }}
+          remove() {{}}
+          replaceChildren(...children) {{ this.children = children; }}
+          select() {{}}
+          setAttribute(name, value) {{ this[name] = value; }}
+        }}
+
+        const ids = [
+          "trace-data", "source-name", "changed-filter", "noop-filter", "pass-list", "summary",
+          "pass-title", "before-pane", "after-pane", "before-title", "after-title", "warnings-panel",
+          "copy-before", "copy-after", "expand-all", "collapse-all", "theme-toggle"
+        ];
+        const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
+        elements["trace-data"].textContent = {json.dumps(payload)};
+        const documentListeners = {{}};
+        const document = {{
+          body: new Element("body"),
+          documentElement: new Element("html"),
+          addEventListener(name, callback) {{ documentListeners[name] = callback; }},
+          createElement(tagName) {{ return new Element(tagName); }},
+          execCommand() {{ throw new Error("copy fallback must not run without a selected trace"); }},
+          getElementById(id) {{ return elements[id]; }}
+        }};
+        const window = {{ matchMedia() {{ return {{ matches: false }}; }} }};
+        Object.defineProperty(
+          globalThis,
+          "navigator",
+          {{ value: {{ clipboard: null }}, configurable: true }}
+        );
+
+        {viewer_script}
+        {assertions}
+        """
+    )
+    return subprocess.run([node, "-e", harness], check=False, capture_output=True, text=True)
 
 
 def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
@@ -320,8 +383,64 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
     assert "data.passes.find((trace) => trace.changed) || data.passes[0]" in report
     assert "navigator.clipboard.writeText(text)" in report
     assert 'document.createElement("textarea")' in report
-    assert 'currentTrace()[side + "Text"]' in report
+    assert 'trace[side + "Text"]' in report
     assert "trace.warning" in report
+
+
+def test_viewer_clears_details_when_filters_hide_every_pass(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "before\n",
+            "01_after_ChangedPass.py": "after\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        if (selectedIndex !== 1) throw new Error("changed pass was not initially selected");
+        elements["changed-filter"].checked = false;
+        elements["changed-filter"].listeners.change();
+        if (selectedIndex !== null) throw new Error("hidden pass remained selected");
+        if (elements["pass-title"].textContent !== "No passes match the filters.") {
+          throw new Error("empty filter detail message was not rendered");
+        }
+        if (!elements["copy-before"].disabled || !elements["expand-all"].disabled) {
+          throw new Error("snapshot controls remained enabled");
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_empty_viewer_disables_snapshot_controls():
+    result = _run_viewer_behavior(
+        render_html((), source_name="passes_dump"),
+        """
+        for (const id of ["copy-before", "copy-after", "expand-all", "collapse-all"]) {
+          if (!elements[id].disabled) throw new Error(`${id} remained enabled`);
+        }
+        if (elements["pass-title"].textContent !== "No passes in this report.") {
+          throw new Error("empty report detail message was not rendered");
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_empty_viewer_copy_is_a_safe_noop():
+    result = _run_viewer_behavior(
+        render_html((), source_name="passes_dump"),
+        """
+        copySnapshot("before");
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_discover_orders_snapshots_and_attaches_warning(tmp_path: Path):
