@@ -81,6 +81,42 @@ class TestBasic:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_tile_buffer_set_uses_one_group_allocation_with_slot_offsets(self):
+        """A buffer set owns one group MemRef; selected slots are views into it."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+                _slot0 = buffers[0]
+                _slot1 = buffers[1]
+
+        after = passes.init_mem_ref()(Before)
+        func = next(iter(after.functions.values()))
+        assigns = {
+            stmt.var.name_hint: stmt
+            for stmt in cast(ir.SeqStmts, func.body).stmts
+            if isinstance(stmt, ir.AssignStmt)
+        }
+
+        group_type = assigns["buffers"].var.type
+        slot0_type = assigns["_slot0"].var.type
+        slot1_type = assigns["_slot1"].var.type
+        assert isinstance(group_type, ir.TileBufferSetType)
+        assert isinstance(slot0_type, ir.TileType)
+        assert isinstance(slot1_type, ir.TileType)
+        assert group_type.memref is not None
+        assert slot0_type.memref is not None
+        assert slot1_type.memref is not None
+        assert group_type.memref.size_ == 16384
+        assert slot0_type.memref.base_ is group_type.memref.base_
+        assert slot1_type.memref.base_ is group_type.memref.base_
+        assert isinstance(slot0_type.memref.byte_offset_, ir.ConstInt)
+        assert isinstance(slot1_type.memref.byte_offset_, ir.ConstInt)
+        assert slot0_type.memref.byte_offset_.value == 0
+        assert slot1_type.memref.byte_offset_.value == 8192
+
     def test_matmul_pipeline(self):
         """load→move→matmul→store: Vec/Mat/Left/Right/Acc memory spaces each get their own MemRef."""
 

@@ -111,6 +111,11 @@ class InitMemRefMutator : public IRMutator {
         return tile_type->memory_space_;
       }
     }
+    if (auto buffer_set_type = std::dynamic_pointer_cast<const TileBufferSetType>(type)) {
+      if (buffer_set_type->memory_space_.has_value()) {
+        return buffer_set_type->memory_space_;
+      }
+    }
 
     if (default_to_ddr) {
       return MemorySpace::DDR;
@@ -123,7 +128,7 @@ class InitMemRefMutator : public IRMutator {
                                         std::optional<MemorySpace> memory_space) {
     const std::string var_name = var ? var->name_hint_ : "<anonymous>";
     uint64_t size_bytes = 0;
-    if (As<TileType>(type)) {
+    if (As<TileType>(type) || As<TileBufferSetType>(type)) {
       uint64_t num_elements = 1;
       for (size_t i = 0; i < type->shape_.size(); ++i) {
         auto const_dim = As<ConstInt>(type->shape_[i]);
@@ -138,6 +143,10 @@ class InitMemRefMutator : public IRMutator {
       }
 
       size_bytes = num_elements * ((type->dtype_.GetBit() + 7) / 8);
+      if (auto buffer_set_type = As<TileBufferSetType>(type)) {
+        const uint64_t aligned_slot_size = (size_bytes + 31) / 32 * 32;
+        size_bytes = aligned_slot_size * static_cast<uint64_t>(buffer_set_type->count_);
+      }
     } else {
       uint64_t num_elements = 1;
       bool is_static = true;
@@ -605,14 +614,24 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   const auto& memrefs = collector.memrefs;
   if (memrefs.empty()) return result_func;
 
-  // Deduplicate by base_ Ptr — one alloc per unique base
-  std::set<const Var*> seen_bases;
-  std::vector<StmtPtr> alloc_stmts;
-  alloc_stmts.reserve(memrefs.size());
+  // Deduplicate by base_ Ptr — one alloc per unique base. A base may be seen
+  // through a smaller view before its owning group, so retain the largest
+  // extent associated with that base.
+  std::map<const Var*, size_t> base_to_index;
+  std::vector<std::pair<MemRefPtr, MemorySpace>> unique_memrefs;
+  unique_memrefs.reserve(memrefs.size());
   for (const auto& [memref, memory_space] : memrefs) {
-    if (seen_bases.insert(memref->base_.get()).second) {
-      alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
+    auto [it, inserted] = base_to_index.emplace(memref->base_.get(), unique_memrefs.size());
+    if (inserted) {
+      unique_memrefs.emplace_back(memref, memory_space);
+    } else if (memref->size_ > unique_memrefs[it->second].first->size_) {
+      unique_memrefs[it->second] = {memref, memory_space};
     }
+  }
+  std::vector<StmtPtr> alloc_stmts;
+  alloc_stmts.reserve(unique_memrefs.size());
+  for (const auto& [memref, memory_space] : unique_memrefs) {
+    alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
   }
 
   // Step 4: Insert alloc statements at the beginning of the function body

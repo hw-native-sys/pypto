@@ -308,7 +308,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 1: Resolve reserve_buffer bases before assigning tile addresses.
   auto reserve_resolution = ResolveReserveBufferBases(func, *policy);
 
-  // Step 2: Collect all unique MemRef objects from TileType variables
+  // Step 2: Collect all unique MemRef objects from tile and explicit buffer-set variables.
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
   // Step 3: Allocate memory addresses using the policy
@@ -365,12 +365,13 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
 
   void VisitVarLike_(const VarPtr& op) override {
     if (!op || !op->GetType()) return;
-    auto tile_type = As<TileType>(op->GetType());
-    if (tile_type && tile_type->memref_.has_value()) {
-      auto memory_space = tile_type->GetMemorySpace();
+    auto shaped_type = As<ShapedType>(op->GetType());
+    const bool is_tile_like = As<TileType>(op->GetType()) || As<TileBufferSetType>(op->GetType());
+    if (is_tile_like && shaped_type && shaped_type->memref_.has_value()) {
+      auto memory_space = shaped_type->GetMemorySpace();
       INTERNAL_CHECK_SPAN(memory_space.has_value(), op->span_)
-          << "TileType with MemRef must have memory_space for address verification";
-      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_hint_, op->span_);
+          << "Tile-like type with MemRef must have memory_space for address verification";
+      CheckMemRefAddr(shaped_type->memref_.value(), *memory_space, op->name_hint_, op->span_);
     }
   }
 

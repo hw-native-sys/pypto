@@ -5091,5 +5091,33 @@ class TestCapacityGatedReuse:
         )
 
 
+def test_explicit_tile_buffer_group_is_not_coalesced_with_automatic_tile():
+    """MemoryReuse preserves the allocation identity of explicit groups."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self):
+            buffers = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+            _slot = buffers[0]
+            automatic = pl.create_tile([16, 128], pl.FP32, pl.Mem.Acc)
+            _ = automatic
+
+    after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+    func = after.get_function("kernel")
+    assert func is not None
+    assert isinstance(func.body, ir.SeqStmts)
+    bases: dict[str, ir.Var] = {}
+    for stmt in func.body.stmts:
+        if not isinstance(stmt, ir.AssignStmt):
+            continue
+        memref = getattr(stmt.var.type, "memref", None)
+        if memref is not None:
+            bases[stmt.var.name_hint] = memref.base_
+
+    assert bases["buffers"] is bases["_slot"]
+    assert bases["buffers"] is not bases["automatic"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -36,9 +36,10 @@ namespace memref_collectors {
 // Visitor-based collector
 // ============================================================================
 
-/// Collects unique (MemRefPtr, MemorySpace) pairs from TileType variables.
+/// Collects unique (MemRefPtr, MemorySpace) pairs from tile-like variables.
 ///
-/// Requires that each TileType carries both memref_ and memory_space_.
+/// Supports TileType and TileBufferSetType. Requires that each collected type
+/// carries both memref_ and memory_space_.
 /// Deduplicates by canonical (MemRef*, MemorySpace) — each MemRef appears at
 /// most once; conflicting memory spaces for the same MemRef trigger a CHECK.
 ///
@@ -50,15 +51,16 @@ class MemRefWithSpaceCollector : public IRVisitor {
   std::vector<std::pair<MemRefPtr, MemorySpace>> memrefs;
 
   void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
-      auto memory_space = tile_type->GetMemorySpace();
+    auto shaped_type = GetTileLikeTypeWithMemRef(op->GetType());
+    if (shaped_type) {
+      auto memory_space = shaped_type->GetMemorySpace();
       CHECK(memory_space.has_value())
-          << "TileType with MemRef must have memory_space before MemRef collection";
-      CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef before MemRef collection";
+          << "Tile-like type with MemRef must have memory_space before MemRef collection";
+      CHECK(shaped_type->memref_.has_value()) << "Tile-like type must carry MemRef before MemRef collection";
       const MemorySpace canonical_space = memory_space.value();
       if (skip_ddr_ && canonical_space == MemorySpace::DDR) return;
 
-      const auto& memref = tile_type->memref_.value();
+      const auto& memref = shaped_type->memref_.value();
       if (TryRegisterUniqueMemRef(memref, canonical_space, seen_ptrs_)) {
         memrefs.emplace_back(memref, canonical_space);
       }
@@ -66,6 +68,16 @@ class MemRefWithSpaceCollector : public IRVisitor {
   }
 
  private:
+  static std::shared_ptr<const ShapedType> GetTileLikeTypeWithMemRef(const TypePtr& type) {
+    auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(type);
+    if ((!std::dynamic_pointer_cast<const TileType>(type) &&
+         !std::dynamic_pointer_cast<const TileBufferSetType>(type)) ||
+        !shaped_type || !shaped_type->memref_.has_value()) {
+      return nullptr;
+    }
+    return shaped_type;
+  }
+
   bool skip_ddr_;
   std::map<const MemRef*, MemorySpace> seen_ptrs_;
 };
@@ -74,16 +86,16 @@ class MemRefWithSpaceCollector : public IRVisitor {
 // Free-function collectors
 // ============================================================================
 
-/// Collect all unique (MemRef, MemorySpace) pairs from TileType variables
-/// in a statement subtree.
+/// Collect all unique (MemRef, MemorySpace) pairs from TileType and
+/// TileBufferSetType variables in a statement subtree.
 inline std::vector<std::pair<MemRefPtr, MemorySpace>> CollectMemRefsWithSpace(const StmtPtr& stmt) {
   MemRefWithSpaceCollector collector;
   collector.VisitStmt(stmt);
   return std::move(collector.memrefs);
 }
 
-/// Collect non-DDR (MemRef, MemorySpace) pairs from TileType variables
-/// in a statement subtree.
+/// Collect non-DDR (MemRef, MemorySpace) pairs from TileType and
+/// TileBufferSetType variables in a statement subtree.
 inline std::vector<std::pair<MemRefPtr, MemorySpace>> CollectNonDDRMemRefsWithSpace(const StmtPtr& stmt) {
   MemRefWithSpaceCollector collector(/*skip_ddr=*/true);
   collector.VisitStmt(stmt);
@@ -111,7 +123,7 @@ inline std::set<MemRefPtr> CollectShapedTypeMemRefs(const ExprPtr& expr) {
 }
 
 /// Collect raw pointers of base_ Var objects referenced by MemRefs in
-/// TileType and TensorType variables.
+/// TileType, TileBufferSetType, and TensorType variables.
 /// Used to identify unused tile.alloc/tensor.alloc Ptr variables.
 inline std::set<const Var*> CollectUsedBasePtrs(const StmtPtr& stmt) {
   class Collector : public IRVisitor {
@@ -120,6 +132,9 @@ inline std::set<const Var*> CollectUsedBasePtrs(const StmtPtr& stmt) {
     void VisitVarLike_(const VarPtr& op) override {
       if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
         used_bases.insert(GetDefinedMemRef(tile_type)->base_.get());
+      } else if (auto buffer_set_type = As<TileBufferSetType>(op->GetType());
+                 buffer_set_type && buffer_set_type->memref_.has_value()) {
+        used_bases.insert(buffer_set_type->memref_.value()->base_.get());
       } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
         if (tensor_type->memref_.has_value()) {
           used_bases.insert(tensor_type->memref_.value()->base_.get());

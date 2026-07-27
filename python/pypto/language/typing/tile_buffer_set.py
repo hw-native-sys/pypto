@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, MemorySpace
+from pypto.pypto_core.ir import Expr, MemorySpace, MemRef
 
 if TYPE_CHECKING:
     from pypto.language.typing.scalar import Scalar
@@ -24,10 +24,15 @@ class TileBufferSetMeta(type):
     """Enable ``pl.TileBufferSet[[shape], dtype, count, memory_space]`` syntax."""
 
     def __getitem__(cls, item: tuple[Any, ...]) -> "TileBufferSet":
-        if not isinstance(item, tuple) or len(item) != 4:
-            raise TypeError("TileBufferSet requires [shape, dtype, count, memory_space] notation")
-        shape, dtype, count, memory_space = item
-        return cls(shape, dtype, count, memory_space, _annotation_only=True)
+        if not isinstance(item, tuple) or len(item) not in (4, 5):
+            raise TypeError(
+                "TileBufferSet requires [shape, dtype, count, memory_space] or "
+                "[shape, dtype, count, memref, memory_space] notation"
+            )
+        shape, dtype, count, *storage = item
+        memref = storage[0] if len(storage) == 2 else None
+        memory_space = storage[-1]
+        return cls(shape, dtype, count, memory_space, memref=memref, _annotation_only=True)
 
 
 class TileBufferSet(metaclass=TileBufferSetMeta):
@@ -40,6 +45,7 @@ class TileBufferSet(metaclass=TileBufferSetMeta):
         count: int | None = None,
         memory_space: MemorySpace | None = None,
         expr: Expr | None = None,
+        memref: MemRef | None = None,
         _annotation_only: bool = False,
     ) -> None:
         if _annotation_only:
@@ -47,6 +53,7 @@ class TileBufferSet(metaclass=TileBufferSetMeta):
             self.dtype = dtype
             self.count = count
             self.memory_space = memory_space
+            self.memref = memref
             self._expr: Expr | None = None
         elif expr is not None and count is not None:
             self._expr = expr
@@ -54,6 +61,7 @@ class TileBufferSet(metaclass=TileBufferSetMeta):
             self.dtype = None
             self.count = count
             self.memory_space = None
+            self.memref = None
         else:
             raise ValueError("TileBufferSet runtime wrappers require expr and count")
 

@@ -67,6 +67,14 @@ inline TypePtr CloneTypeWithMemRef(const TypePtr& type, const std::optional<MemR
                                         tensor_type->tensor_view_);
   }
 
+  if (auto buffer_set_type = std::dynamic_pointer_cast<const TileBufferSetType>(type)) {
+    auto memory_space =
+        tile_memory_space_override.has_value() ? tile_memory_space_override : buffer_set_type->memory_space_;
+    return std::make_shared<TileBufferSetType>(buffer_set_type->shape_, buffer_set_type->dtype_,
+                                               buffer_set_type->count_, memref, buffer_set_type->tile_view_,
+                                               memory_space);
+  }
+
   if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
     auto memory_space =
         tile_memory_space_override.has_value() ? tile_memory_space_override : tile_type->memory_space_;
@@ -161,6 +169,19 @@ inline TypePtr CloneTypeWithMemRefAndRemapExprs(
     }
     return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, memref,
                                         std::move(new_tensor_view));
+  }
+
+  if (auto buffer_set_type = std::dynamic_pointer_cast<const TileBufferSetType>(type)) {
+    auto memory_space =
+        tile_memory_space_override.has_value() ? tile_memory_space_override : buffer_set_type->memory_space_;
+    auto new_shape = RemapTypeExprVector(buffer_set_type->shape_, remap_expr, changed);
+    auto new_tile_view = RemapTileViewExprs(buffer_set_type->tile_view_, remap_expr, changed);
+    if (!changed) {
+      return type;
+    }
+    return std::make_shared<TileBufferSetType>(std::move(new_shape), buffer_set_type->dtype_,
+                                               buffer_set_type->count_, memref, std::move(new_tile_view),
+                                               memory_space);
   }
 
   if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
@@ -315,6 +336,27 @@ inline ExprPtr ComputeSliceByteOffset(const std::vector<ExprPtr>& offsets,
 /// Dispatches: slice ops → stride-based offset, others → zero offset.
 inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
   const std::string& op_name = call->op_->name_;
+
+  if (IsOp(call, "tile.buffer_slot")) {
+    auto buffer_set_type = As<TileBufferSetType>(parent_type);
+    INTERNAL_CHECK_SPAN(buffer_set_type, call->span_)
+        << "Internal error: tile.buffer_slot parent must be TileBufferSetType";
+    INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_)
+        << "Internal error: tile.buffer_slot requires set and index operands";
+
+    uint64_t slot_elements = 1;
+    for (const auto& dim : buffer_set_type->shape_) {
+      auto static_dim = As<ConstInt>(dim);
+      INTERNAL_CHECK_SPAN(static_dim && static_dim->value_ > 0, call->span_)
+          << "Internal error: tile.buffer_slot requires a static positive slot shape";
+      slot_elements *= static_cast<uint64_t>(static_dim->value_);
+    }
+    const uint64_t raw_slot_bytes = slot_elements * ((buffer_set_type->dtype_.GetBit() + 7) / 8);
+    const uint64_t aligned_slot_bytes = (raw_slot_bytes + 31) / 32 * 32;
+    auto slot_size = std::make_shared<ConstInt>(static_cast<int64_t>(aligned_slot_bytes), DataType::INDEX,
+                                                Span::unknown());
+    return MulByteOffsets(call->args_[1], slot_size);
+  }
 
   if (IsOp(call, "tensor.slice") || IsOp(call, "tile.slice")) {
     auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);

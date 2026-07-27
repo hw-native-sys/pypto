@@ -63,6 +63,35 @@ def test_allocate_memory_addr_simple():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_allocate_memory_addr_places_explicit_buffer_groups_as_full_ranges():
+    """Each explicit group occupies one aligned range sized for all slots."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(self):
+            first = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+            second = pl.create_tile_buffers(2, [16, 128], pl.FP32, pl.Mem.Acc)
+            _first_slot = first[1]
+            _second_slot = second[0]
+
+    after = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
+    func = after.get_function("main")
+    assert func is not None
+    assert isinstance(func.body, ir.SeqStmts)
+    groups: dict[str, ir.TileBufferSetType] = {}
+    for stmt in func.body.stmts:
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileBufferSetType):
+            groups[stmt.var.name_hint] = stmt.var.type
+
+    assert groups["first"].memref is not None
+    assert groups["second"].memref is not None
+    assert isinstance(groups["first"].memref.byte_offset_, ir.ConstInt)
+    assert isinstance(groups["second"].memref.byte_offset_, ir.ConstInt)
+    assert groups["first"].memref.byte_offset_.value == 0
+    assert groups["second"].memref.byte_offset_.value == 16384
+
+
 def test_allocate_memory_addr_multiple_tiles():
     """Three tiles each get their own MemRef at 32-byte aligned offsets 0, 16384, 32768."""
 

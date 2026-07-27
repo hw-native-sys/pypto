@@ -1684,7 +1684,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
-    const std::set<const Var*>& pipeline_load_tiles,
+    const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& protected_bases,
     const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const FunctionPtr& func,
     std::vector<Diagnostic>* out_hints) {
   std::map<VarPtr, VarPtr> reuse_map;
@@ -1943,6 +1943,12 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // largest-first ordering guarantees the buffer is sized to its representative.
   // On Vec only, ND and NZ must not share — see AreVecNdNzCompatible.
   auto can_share = [&](const LifetimeInterval& cand, const LifetimeInterval& member) {
+    const Var* cand_base = TileMemRefBase(cand.variable);
+    const Var* member_base = TileMemRefBase(member.variable);
+    if ((cand_base && protected_bases.count(cand_base) != 0) ||
+        (member_base && protected_bases.count(member_base) != 0)) {
+      return false;
+    }
     // Group-interval overlap is a fast reject; when it fires, fall back to the
     // precise per-var check so mutually-exclusive / same-value phi-family tiles
     // may still share while a genuine conflict (incl. one hidden behind a
@@ -2897,6 +2903,30 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 1: Compute lifetimes by walking full IR tree
   auto analysis_result = ComputeLifetimes(new_body);
 
+  // Explicit tile-buffer groups are fixed allocation roots: selected slots
+  // participate in liveness but their shared base must never be coalesced with
+  // an automatic tile. Charge the group's full extent to capacity accounting.
+  class ExplicitBufferGroupCollector : public IRVisitor {
+   public:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (auto type = As<TileBufferSetType>(op->var_->GetType()); type && type->memref_.has_value()) {
+        const auto& memref = type->memref_.value();
+        protected_sizes[memref->base_.get()] = memref->size_;
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+
+    std::map<const Var*, uint64_t> protected_sizes;
+  } explicit_groups;
+  explicit_groups.VisitStmt(new_body);
+  std::set<const Var*> protected_bases;
+  for (const auto& [base, size] : explicit_groups.protected_sizes) {
+    protected_bases.insert(base);
+    for (auto& lifetime : analysis_result.lifetimes) {
+      if (TileMemRefBase(lifetime.variable) == base) lifetime.size = size;
+    }
+  }
+
   if (analysis_result.lifetimes.empty()) {
     LOG_DEBUG << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
     return func;
@@ -2935,7 +2965,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto reuse_map = IdentifyReuseOpportunities(
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
-      analysis_result.pipeline_load_tiles, reserved_end_by_space, func, &hints);
+      analysis_result.pipeline_load_tiles, protected_bases, reserved_end_by_space, func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");

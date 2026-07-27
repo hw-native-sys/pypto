@@ -397,7 +397,7 @@ class TypeResolver:
             return self._resolve_tuple_subscript_type(subscript_node)
 
         if type_name == "TileBufferSet":
-            if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 4:
+            if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in (4, 5):
                 raise ParserTypeError(
                     f"TileBufferSet subscript requires [shape, dtype, count, memory_space], "
                     f"got: {ast.unparse(slice_value)}",
@@ -413,8 +413,13 @@ class TypeResolver:
                     span=self._get_span(slice_value.elts[2]),
                     hint="Use a count in the range [2, 16]",
                 )
-            memory_space = self._resolve_memory_space(slice_value.elts[3])
-            return ir.TileBufferSetType(shape, dtype, count, None, None, memory_space)
+            memref = None
+            memory_space_node = slice_value.elts[3]
+            if len(slice_value.elts) == 5:
+                memref = self.resolve_memref(slice_value.elts[3])
+                memory_space_node = slice_value.elts[4]
+            memory_space = self._resolve_memory_space(memory_space_node)
+            return ir.TileBufferSetType(shape, dtype, count, memref, None, memory_space)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref].
         # DistributedTensor: same forms as Tensor — only the IR ObjectKind differs.
