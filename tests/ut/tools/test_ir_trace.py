@@ -9,11 +9,13 @@
 
 """Tests for IR pass snapshot discovery."""
 
+import json
 from pathlib import Path
 
 import pytest
 from pypto.tools.ir_trace.diff import build_trace, highlight_python
 from pypto.tools.ir_trace.discovery import discover_snapshots
+from pypto.tools.ir_trace.html import render_html
 from pypto.tools.ir_trace.model import IRTraceError
 
 
@@ -197,6 +199,129 @@ def test_highlight_python_escapes_unicode_line_separators_after_tokenization_err
     highlighted = highlight_python("value = (<script>\u2028\u2029")
 
     assert highlighted == ("value = (&lt;script&gt;&#x2028;&#x2029;",)
+
+
+def test_render_html_is_deterministic_self_contained_and_safe(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "value = '</script><b>&'\n",
+            "01_after_TestPass.py": "value = '<script>'\n",
+            "01_after_TestPass.log": "warning </script>\u2028\u2029\n",
+        },
+    )
+    traces = build_trace(discover_snapshots(dump), context=3)
+
+    first = render_html(traces, source_name="passes_dump")
+
+    assert first == render_html(traces, source_name="passes_dump")
+    assert first.startswith("<!doctype html>")
+    assert "http://" not in first and "https://" not in first
+    assert "</script><b>" not in first
+    assert "\\u003c/script\\u003e" in first
+    assert "\\u003e" in first
+    assert "\\u0026" in first
+    assert "\\u2028" in first and "\\u2029" in first
+
+
+def test_render_html_payload_has_only_portable_trace_data(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "header\nold\ntail\n",
+            "01_after_ChangedPass.py": "header\nnew\ntail\n",
+            "01_after_ChangedPass.log": "lowering warning\n",
+            "02_after_NoopPass.py": "header\nnew\ntail\n",
+        },
+    )
+    traces = build_trace(discover_snapshots(dump), context=0)
+
+    report = render_html(traces, source_name=str(dump))
+    encoded = report.split('<script id="trace-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    payload = json.loads(encoded)
+
+    assert str(tmp_path) not in report
+    assert payload["sourceName"] == "passes_dump"
+    assert (payload["changedCount"], payload["noopCount"]) == (1, 1)
+    assert [(item["index"], item["name"], item["changed"]) for item in payload["passes"]] == [
+        (1, "ChangedPass", True),
+        (2, "NoopPass", False),
+    ]
+    assert payload["passes"][0]["warning"] == "lowering warning\n"
+    assert payload["passes"][1]["warning"] is None
+    assert payload["passes"][0]["beforeName"] == "00_frontend.py"
+    assert payload["passes"][0]["afterName"] == "01_after_ChangedPass.py"
+    assert payload["passes"][0]["beforeText"] == "header\nold\ntail\n"
+    assert payload["passes"][0]["afterText"] == "header\nnew\ntail\n"
+    assert any(hunk["collapsed"] for hunk in payload["passes"][0]["hunks"])
+    assert {row["kind"] for hunk in payload["passes"][0]["hunks"] for row in hunk["rows"]} == {
+        "equal",
+        "replace",
+    }
+    assert "timestamp" not in encoded.lower()
+    assert '"path"' not in encoded.lower()
+
+
+def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "before\n",
+            "01_after_ChangedPass.py": "after\n",
+            "01_after_ChangedPass.log": "warning\n",
+            "02_after_NoopPass.py": "after\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    for element_id in (
+        "pass-list",
+        "changed-filter",
+        "noop-filter",
+        "summary",
+        "pass-title",
+        "before-pane",
+        "after-pane",
+        "warnings-panel",
+        "copy-before",
+        "copy-after",
+        "expand-all",
+        "collapse-all",
+        "theme-toggle",
+    ):
+        assert f'id="{element_id}"' in report
+
+    assert "grid-template-columns: 18rem minmax(0, 1fr)" in report
+    assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in report
+    assert "@media (max-width: 800px)" in report
+    assert ':root[data-theme="light"]' in report
+    assert ':root[data-theme="dark"]' in report
+    assert "var(--" in report
+    assert 'matchMedia("(prefers-color-scheme: dark)")' in report
+    assert 'document.getElementById("source-name").textContent = data.sourceName' in report
+
+    for function_name in (
+        "visiblePasses",
+        "selectPass",
+        "renderSidebar",
+        "renderDiff",
+        "copySnapshot",
+        "setAllHunks",
+        "toggleTheme",
+    ):
+        assert f"function {function_name}(" in report
+
+    assert 'document.getElementById("changed-filter")' in report
+    assert 'document.getElementById("noop-filter")' in report
+    assert 'document.addEventListener("keydown"' in report
+    assert 'event.key === "j"' in report and 'event.key === "ArrowDown"' in report
+    assert 'event.key === "k"' in report and 'event.key === "ArrowUp"' in report
+    assert 'target.tagName === "INPUT"' in report and 'target.tagName === "BUTTON"' in report
+    assert "data.passes.find((trace) => trace.changed) || data.passes[0]" in report
+    assert "navigator.clipboard.writeText(text)" in report
+    assert 'document.createElement("textarea")' in report
+    assert 'currentTrace()[side + "Text"]' in report
+    assert "trace.warning" in report
 
 
 def test_discover_orders_snapshots_and_attaches_warning(tmp_path: Path):
