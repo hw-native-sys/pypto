@@ -582,6 +582,61 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 }
 
 // ============================================================================
+// ``tile.tquant`` lowering — materialize FP32 scratch, keep pto.tquant.mx.
+//
+// Rewrites the 1-arg DSL form ``tile.tquant(src)`` into the 3-arg internal form
+// ``tile.tquant_dps(src, max, scaling)``, creating the two write-only FP32
+// scratch tiles (max, scaling) as IR-level ``tile.create`` results. Because they
+// are real IR tiles, the AllocateMemoryAddr pass assigns them on-chip addresses
+// — which codegen-internal scratch (AllocNewTileBuf) cannot obtain at
+// --pto-level=level3. The scratch are flat [1, groups] (groups = M*K/32): the
+// ptoas TQuantMxOp verifier only requires their valid element count to equal
+// src-elements/32, and a flat row is already 32-byte aligned. Codegen lowers
+// tile.tquant_dps to the ptoas pto.tquant.mx instruction.
+ExprPtr LowerTileTQuantRule(const CallPtr& call, const std::vector<ExprPtr>& args,
+                            LoweringBuilder& b) {
+  const auto& span = call->span_;
+  auto& reg = OpRegistry::GetInstance();
+  auto src = args[0];
+
+  // --- extract M, K from the source tile (must be 2D, K divisible by 32) ---
+  auto src_tile = As<TileType>(src->GetType());
+  INTERNAL_CHECK_SPAN(src_tile && src_tile->shape_.size() == 2, span)
+      << "Internal error: tile.tquant lowering requires 2D source tile";
+  auto m_const = As<ConstInt>(src_tile->shape_[0]);
+  auto k_const = As<ConstInt>(src_tile->shape_[1]);
+  INTERNAL_CHECK_SPAN(m_const && k_const, span)
+      << "Internal error: tile.tquant lowering requires static M, K shapes";
+  INTERNAL_CHECK_SPAN(k_const->value_ % 32 == 0, span)
+      << "Internal error: tile.tquant lowering requires K divisible by 32, got " << k_const->value_;
+  int groups = m_const->value_ * (k_const->value_ / 32);
+
+  // Flat [1, groups] write-only scratch (pto-isa flattens per-group max /
+  // scaling to 1D). The ptoas TQuantMxOp verifier requires max/scaling element
+  // type to MATCH src, so the scratch carries src's dtype (fp32 for MXFP8,
+  // fp16/bf16 for MXFP4). The valid element count must equal src-elements/32,
+  // and a flat row is already 32-byte aligned. As IR-level tile.create results
+  // the AllocateMemoryAddr pass gives them real on-chip addresses
+  // (codegen-internal scratch cannot get one at --pto-level=level3).
+  DataType scratch_dtype = src_tile->dtype_;
+  auto flat_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{
+          std::make_shared<ConstInt>(1, DataType::INDEX, span),
+          std::make_shared<ConstInt>(groups, DataType::INDEX, span),
+      },
+      span);
+  auto max_tile = b.Bind(
+      "tq_max", reg.Create("tile.create", {flat_shape}, {{"dtype", scratch_dtype}}, span), span);
+  auto scaling_tile = b.Bind(
+      "tq_scaling", reg.Create("tile.create", {flat_shape}, {{"dtype", scratch_dtype}}, span), span);
+
+  // Emit the internal DPS form (no composite-lowering rule → pass is idempotent);
+  // codegen lowers tile.tquant_dps to the ptoas pto.tquant.mx instruction.
+  std::string mode = call->GetKwarg<std::string>("mode", "mxfp8_e4m3");
+  return reg.Create("tile.tquant_dps", {src, max_tile, scaling_tile}, {{"mode", mode}}, span);
+}
+
+// ============================================================================
 // ``pld.tensor.allreduce`` lowering rule
 //
 // In-place all-reduce of a window-bound DistributedTensor across every rank
@@ -1504,6 +1559,9 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
   static const std::unordered_map<std::string, CompositeLoweringFn> kRules = {
       {"tile.sin", &LowerSinRule},
       {"tile.cos", &LowerCosRule},
+      // tile.tquant → tile.tquant_dps: materialize FP32 scratch as IR-level tiles
+      // so the memory planner addresses them; codegen emits pto.tquant.mx.
+      {"tile.tquant", &LowerTileTQuantRule},
       {"pld.tensor.allreduce", &LowerTensorAllReduceRule},
       {"pld.tensor.allgather", &LowerTensorAllGatherRule},
       {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},

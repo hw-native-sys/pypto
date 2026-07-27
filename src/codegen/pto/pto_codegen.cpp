@@ -1485,6 +1485,26 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
 }
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
+  // Handle MakeTuple: store for lazy resolution by downstream TupleGetItemExpr.
+  if (auto mt = As<ir::MakeTuple>(op->value_)) {
+    fs_.tuple_makeexprs[op->var_.get()] = mt;
+    return;
+  }
+  // Inline TupleGetItemExpr from a stored MakeTuple: replace the tuple-get
+  // with the actual element Call so the normal Call handler processes it.
+  if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
+    if (auto base_var = As<ir::Var>(tge->tuple_)) {
+      auto it = fs_.tuple_makeexprs.find(base_var.get());
+      if (it != fs_.tuple_makeexprs.end() && tge->index_ >= 0 &&
+          static_cast<size_t>(tge->index_) < it->second->elements_.size()) {
+        auto modified = std::make_shared<ir::AssignStmt>(op->var_,
+                                                          it->second->elements_[tge->index_],
+                                                          op->span_);
+        return VisitStmt_(modified);
+      }
+    }
+  }
+
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);

@@ -1709,6 +1709,22 @@ def matmul_mx(
     return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
 
 
+def tquant(src: Expr, *, mode: str = "mxfp8_e4m3", span: Span | None = None) -> Call:
+    """MX block-32 dynamic quantization.
+
+    Returns TupleType{quantized, e8m0_scale, max, scaling} (max/scaling are
+    per-group FP32 scratch outputs required by pto-isa TQuant; codegen-internal).
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tquant", [src], {"mode": mode}, actual_span)
+
+
+def tdequant(src: Expr, scale: Expr, offset: Expr, span: Span | None = None) -> Call:
+    """Dequantize integer tile with per-row scale/offset."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tdequant", [src, scale, offset], {}, actual_span)
+
+
 def tget_scale_addr(dst_scale: Expr, src: Expr, span: Span | None = None) -> Call:
     """Bind MX scale-tile address from a Left/Right data tile (A5)."""
     actual_span = _get_span_or_capture(span)

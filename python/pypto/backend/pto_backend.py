@@ -236,6 +236,19 @@ _KERNEL_HEADER = """\
 
 using namespace pto;
 
+// PTOAS EmitC for pto.tget_scale_addr may emit bare GetScaleAddr(ptr). On the
+// a5sim CPU stub that helper is not declared; provide a minimal fallback
+// matching a5 SHIFT_MX_ADDR (see pto/npu/a5/utils.hpp).
+#if defined(__CPU_SIM)
+namespace pto {{
+template <typename T>
+inline uint64_t GetScaleAddr(T* dst) {{
+  constexpr unsigned kShiftMxAddr = 4;
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst) >> kShiftMxAddr);
+}}
+}}  // namespace pto
+#endif
+
 """
 
 

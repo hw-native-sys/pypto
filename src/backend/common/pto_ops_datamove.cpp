@@ -621,6 +621,71 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+// Helper for tile.tquant (MX block-32 quant) → pto.tquant.mx:
+//   pto.tquant.mx ins(src : src_ty)
+//                 outs(dst, scale, max, scaling : dst_ty, scale_ty, max_ty, scaling_ty)
+//                 {quant_type = #pto<quant_type MXFP8|MXFP4_E2M1>}
+// dst + scale (e8m0 exp) are the real DSL results (tuple indices 0,1). max + scaling
+// are write-only per-group scratch required by pto-isa TQuant(dst, src, exp, max,
+// scaling); pto-isa reuses their buffers right after TQUANT, so no caller consumes
+// them. They are allocated here as codegen-internal tile bufs (AllocNewTileBuf, the
+// tile.extract "extract_buf" pattern) — not DSL results, hence invisible to IR DCE.
+// ptoas requires pto.tquant.mx to carry 4 (or 5) outs + a quant_type attribute; the
+// scratch types (with static valid dims baked in via GetViewTileBufTypeStringFromTileType,
+// since these allocs carry no valid_row/valid_col operands) are recovered from the
+// op's static TupleType (indices 2,3).
+static std::string MakeTQuantCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 3)
+      << "tile.tquant_dps requires 3 arguments (src, max, scaling), but got " << op->args_.size();
+
+  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+      << "Internal error: tile.tquant_dps codegen requires current_result_var";
+
+  // Real DSL results: dst (idx 0, raw bytes), scale/e8m0 exp (idx 1, raw uint8).
+  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
+  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+      << "Internal error: tile.tquant_dps expects two TupleGetItemExpr consumers (dst, scale)";
+
+  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
+  for (size_t i = 0; i < 2; ++i) {
+    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
+        << "Internal error: tile.tquant_dps element var " << i << " must have TileType with MemRef";
+    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
+  }
+
+  // Map mode → pto-isa QuantType enum (MLIR attr value).
+  std::string mode = op->GetKwarg<std::string>("mode", "mxfp8_e4m3");
+  std::string quant_type = (mode == "mxfp4" || mode == "mxfp4_e2m1") ? "MXFP4_E2M1" : "MXFP8";
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetVarName(element_vars[0]);
+  std::string scale = codegen.GetVarName(element_vars[1]);
+  std::string dst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[0]);
+  std::string scale_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[1]);
+  // FP32 scratch (max, scaling) — IR-level operands materialized by the tile.tquant
+  // lowering rule, so the memory planner has already assigned them on-chip addresses
+  // (codegen-internal scratch cannot obtain one at --pto-level=level3).
+  std::string max_v = codegen.GetExprAsCode(op->args_[1]);
+  std::string scaling = codegen.GetExprAsCode(op->args_[2]);
+  std::string max_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string scaling_ty = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  std::ostringstream oss;
+  oss << "pto.tquant.mx ins(" << src;
+  if (!src_ty.empty()) {
+    oss << " : " << src_ty;
+  }
+  oss << ") outs(" << dst << ", " << scale << ", " << max_v << ", " << scaling
+      << " : " << dst_ty << ", " << scale_ty << ", " << max_ty << ", " << scaling_ty
+      << ") {quant_type = #pto<quant_type " << quant_type << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper for tile.tget_scale_addr (DPS, A5):
 //   pto.tget_scale_addr ins(%src : src_ty) outs(%dst_scale : dst_ty)
 //
@@ -967,6 +1032,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
   reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherCompareCodegenPTO(op, codegen);
   });
+  reg("tile.tquant_dps",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeTQuantCodegenPTO(op, codegen); });
   reg("tile.tget_scale_addr", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTGetScaleAddrCodegenPTO(op, codegen);
   });

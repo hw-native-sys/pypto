@@ -71,6 +71,9 @@ __all__ = [
     "batch_matmul_acc",
     "matmul_bias",
     "matmul_mx",
+    "tquant",
+    "mx_quant",
+    "tdequant",
     "tget_scale_addr",
     "gemv",
     "gemv_acc",
@@ -1213,6 +1216,35 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication."""
     call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    return Tile(expr=call_expr)
+
+
+def tquant(src: Tile, *, mode: str = "mxfp8_e4m3") -> tuple[Tile, Tile]:
+    """MX block-32 dynamic quantization.
+
+    Args:
+        src: source tile (FP16/FP32/BF16, 2D).
+        mode: quantization mode (mxfp8_e4m3 / mxfp8_e5m2 / mxfp4).
+
+    Returns:
+        (quantized, e8m0_scale).
+    """
+    call_expr = _ir_ops.tquant(src.unwrap(), mode=mode)
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def mx_quant(src: Tile, *, mode: str = "mxfp8_e4m3") -> tuple[Tile, Tile]:
+    """Convenience alias for :func:`tquant` with MX block-32 presets."""
+    return tquant(src, mode=mode)
+
+
+def tdequant(src: Tile, scale: Tile, offset: Tile) -> Tile:
+    """Dequantize integer tile with per-row scale/offset."""
+    call_expr = _ir_ops.tdequant(src.unwrap(), scale.unwrap(), offset.unwrap())
     return Tile(expr=call_expr)
 
 

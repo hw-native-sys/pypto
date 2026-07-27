@@ -804,6 +804,7 @@ class PTOCodegen : public CodegenBase {
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
 
     std::map<const ir::Var*, std::string> var_to_mlir;
+    std::map<const ir::Var*, ir::MakeTuplePtr> tuple_makeexprs;
     std::map<const ir::Var*, std::string> tensor_to_view;
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
