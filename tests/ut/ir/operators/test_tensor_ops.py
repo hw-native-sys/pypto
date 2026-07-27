@@ -4669,6 +4669,98 @@ class TestTensorAssembleValidRegionUnion:
         assert isinstance(result_type, ir.TensorType)
         assert result_type.tensor_view is None
 
+class TestTensorElementwiseValidRegion:
+    """Tensor elementwise ops follow the same valid-region rule as tile ops.
+
+    A tensor elementwise op lowers 1:1 to its tile counterpart, so the region
+    contract has to match: non-broadcast operands must provably agree, and only
+    the ``part_*`` family unites regions.
+    """
+
+    @staticmethod
+    def _tensor(shape, valid_shape=None, dtype=DataType.FP32, name="a"):
+        span = ir.Span.unknown()
+        view = (
+            None
+            if valid_shape is None
+            else ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+        )
+        return ir.Var(name, ir.TensorType(shape, dtype, tensor_view=view), span)
+
+    @staticmethod
+    def _valid_of(result_type):
+        view = result_type.tensor_view
+        shape = result_type.shape if view is None or not view.valid_shape else view.valid_shape
+        return [d.value if isinstance(d, ir.ConstInt) else d for d in shape]
+
+    def test_matching_partial_operands_propagate(self):
+        call = tensor.add(self._tensor([8, 16], [8, 4]), self._tensor([8, 16], [8, 4]))
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_fully_valid_operands_canonicalize_to_no_valid_shape(self):
+        result_type = tensor.add(self._tensor([8, 16]), self._tensor([8, 16])).type
+        assert isinstance(result_type, ir.TensorType)
+        view = result_type.tensor_view
+        assert view is None or not view.valid_shape
+
+    def test_static_disagreement_rejects(self):
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tensor.add(self._tensor([8, 16], [8, 4]), self._tensor([8, 16], [8, 16]))
+
+    def test_lower_rank_operand_right_aligns(self):
+        call = tensor.add(self._tensor([4, 8], [4, 6]), self._tensor([8], [6]))
+        assert self._valid_of(call.type) == [4, 6]
+
+    def test_broadcast_singleton_is_exempt(self):
+        call = tensor.add(self._tensor([4, 8], [4, 6]), self._tensor([4, 1], [4, 1]))
+        assert self._valid_of(call.type) == [4, 6]
+
+    def test_empty_broadcast_singleton_rejects(self):
+        with pytest.raises(ValueError, match=r"broadcasts dimension .* not provably 1"):
+            tensor.add(self._tensor([4, 8], [4, 6]), self._tensor([4, 1], [4, 0]))
+
+    def test_operand_order_is_irrelevant(self):
+        lhs = self._tensor([8, 16], [8, 4], name="a")
+        rhs = self._tensor([8, 16], [8, 4], name="b")
+        assert self._valid_of(tensor.add(lhs, rhs).type) == self._valid_of(tensor.add(rhs, lhs).type)
+
+    def test_part_takes_the_containing_region(self):
+        call = tensor.part_add(self._tensor([8, 16], [8, 4]), self._tensor([8, 16], [8, 10]))
+        assert self._valid_of(call.type) == [8, 10]
+
+    def test_part_rejects_a_non_rectangular_union(self):
+        with pytest.raises(ValueError, match=r"not ordered by containment"):
+            tensor.part_add(self._tensor([8, 16], [4, 10]), self._tensor([8, 16], [8, 4]))
+
+    @pytest.mark.parametrize(
+        "scalar_op",
+        [tensor.adds, tensor.subs, tensor.muls, tensor.divs, tensor.fmods],
+        ids=["adds", "subs", "muls", "divs", "fmods"],
+    )
+    def test_scalar_binary_preserves_validity(self, scalar_op):
+        """A scalar has no region, so the tensor's must survive (it used to be dropped)."""
+        call = scalar_op(self._tensor([8, 16], [8, 4]), 2.0)
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_result_carries_no_source_alias_metadata(self):
+        """A computed tensor is a new allocation, not a view of either operand."""
+        span = ir.Span.unknown()
+        strided = ir.TensorView(
+            stride=[ir.ConstInt(32, DataType.INDEX, span), ir.ConstInt(1, DataType.INDEX, span)],
+            layout=ir.TensorLayout.ND,
+            valid_shape=[8, 4],
+            pad=ir.PadValue.zero,
+        )
+        src = ir.Var("src", ir.TensorType([8, 16], DataType.FP32, tensor_view=strided), span)
+
+        for call in (tensor.add(src, src), tensor.adds(src, 1.0)):
+            result_type = call.type
+            assert isinstance(result_type, ir.TensorType)
+            view = result_type.tensor_view
+            assert view is not None and not view.stride
+            assert view.pad == ir.PadValue.null
+            assert view.layout == ir.TensorLayout.ND
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

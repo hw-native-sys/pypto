@@ -372,6 +372,117 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
 const std::vector<ExprPtr>& GetEffectiveTensorValidShape(const TensorType& type);
 
 /**
+ * @brief How an elementwise family combines its operands' valid regions
+ */
+enum class ElementwiseValidCombine {
+  /// True elementwise. Every non-broadcast contributor to an output dimension
+  /// must have a provably equal valid extent, because the operation reads all of
+  /// them at each cell and writes one region.
+  kAgree,
+  /// Partial combine (``part_add`` / ``part_mul`` / ``part_max`` / ``part_min``).
+  /// Where only one source is valid the result copies that source, so the result
+  /// covers the *union* of the operand regions — admitted only when that union is
+  /// representable as an origin-anchored rectangle.
+  kUnion,
+};
+
+/**
+ * @brief One *value* operand's contribution to an elementwise result's valid region
+ *
+ * Scratch (``tmp``) and predicate (``mask``) operands are not value operands:
+ * their contract differs, so callers leave them out rather than passing them here.
+ */
+struct ElementwiseValidOperand {
+  std::vector<ExprPtr> physical;  ///< Operand physical shape
+  /// Operand effective valid shape, already resolved by ``GetValidShape`` — always
+  /// the same rank as ``physical`` (both are empty for a rank-0 operand).
+  std::vector<ExprPtr> valid;
+  std::string label;  ///< Operand name used in diagnostics ("lhs", "src0", ...)
+};
+
+/**
+ * @brief Inputs to the shared elementwise valid-region rule
+ */
+struct ElementwiseValidShapeParams {
+  std::vector<ElementwiseValidOperand> operands;  ///< Value operands, in signature order
+  std::vector<ExprPtr> result_shape;              ///< Broadcast result physical shape
+  ElementwiseValidCombine combine = ElementwiseValidCombine::kAgree;
+  std::string op_name;  ///< Operator name, used in diagnostics
+  Span span = Span::unknown();
+};
+
+/**
+ * @brief Derive the valid region of an elementwise result
+ *
+ * Operand shapes and valid shapes are right-aligned to the result rank, and each
+ * operand is classified per output dimension:
+ *
+ * ```text
+ * missing leading axis      -> implicit, fully valid singleton; exempt
+ * ConstInt 1 widening to >1 -> explicit physical singleton; exempt *only if* its
+ *                              sole cell is provably valid (valid == 1)
+ * otherwise                 -> non-broadcast contributor
+ * ```
+ *
+ * Singleton detection matches ``BroadcastShapes`` / ``IsBroadcastable`` (a constant
+ * one), so classification never disagrees with the broadcast that produced
+ * ``result_shape``.
+ *
+ * ``kAgree`` requires every non-broadcast contributor on a dimension to have a
+ * provably equal valid extent. Both a proven inequality and an *undecided*
+ * symbolic relation reject: no runtime guard is emitted, so an unproved relation
+ * would silently widen or narrow the result.
+ *
+ * ``kUnion`` first lifts each operand into output coordinates — a missing axis or
+ * an exempt singleton lifts to the full output extent, since broadcasting
+ * replicates that operand's valid cell across the axis — then admits the union
+ * only when one lifted rectangle provably contains all the others. That is
+ * exactly when the union is an origin-anchored rectangle; otherwise the
+ * componentwise maximum would claim cells valid in no operand at all.
+ *
+ * The result is independent of operand order: extents are chosen per dimension,
+ * preferring a constant representative, so a commutative operation yields
+ * structurally equal types either way round.
+ *
+ * @param params Elementwise description; see ElementwiseValidShapeParams
+ * @return The result valid shape, one extent per result dimension
+ * @throws pypto::ValueError on disagreement, an invalid broadcast singleton, or a
+ *         union that is not representable
+ */
+std::vector<ExprPtr> InferElementwiseValidShape(const ElementwiseValidShapeParams& params);
+
+/**
+ * @brief A tile operand paired with the name it is reported under
+ */
+struct ElementwiseTileOperand {
+  std::shared_ptr<const TileType> type;
+  std::string label;
+};
+
+/**
+ * @brief Build the ``TileView`` of a freshly computed elementwise tile result
+ *
+ * Combines the two halves of the rule: the valid region from
+ * ``InferElementwiseValidShape``, and the production layout from an operand whose
+ * physical shape equals the output shape — falling back to the layout implied by
+ * the output shape when no operand owns it, so a broadcast singleton can never
+ * dictate the result's layout.
+ *
+ * The result is fresh, not a view: no alias, stride, or start offset is carried
+ * over (and ``InheritTileViewLayout`` carries no padding either).
+ *
+ * @param operands Value operands, in signature order; scratch/mask excluded
+ * @param result_shape Broadcast result physical shape
+ * @param op_name Operator name, used in diagnostics
+ * @param span IR source location, reported on rejection
+ * @param combine Agreement (the default, for a true elementwise op) or representable union
+ */
+TileView MakeElementwiseTileView(const std::vector<ElementwiseTileOperand>& operands,
+                                 const std::vector<ExprPtr>& result_shape, const std::string& op_name,
+                                 const Span& span,
+                                 ElementwiseValidCombine combine = ElementwiseValidCombine::kAgree);
+
+/**
  * @brief Reject ``drop_dims`` axes that do not carry provably unit validity
  *
  * Rank reduction erases an axis, so the axis must have nothing left to say: its
@@ -584,13 +695,25 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim);
 std::string FormatShape(const std::vector<ExprPtr>& shape);
 
 /**
- * @brief Propagate blayout and pad from a source TileType's tile_view into a new TileView
+ * @brief Propagate a source TileType's production layout into a fresh result's TileView
  *
- * Many tile ops preserve the layout properties of their primary input. This helper copies
- * blayout and pad when the source has a tile_view, avoiding repeated inline checks.
+ * Many tile ops produce a result laid out the same way as their primary input, so
+ * this copies ``blayout`` and ``slayout`` from the source's effective view.
+ *
+ * **Padding is deliberately not inherited.** A fresh result is a new allocation
+ * that the operation writes only across its valid region, so whatever the source
+ * promised about the cells *outside* that region does not survive: ``exp`` of a
+ * zero-padded tile is not zero-padded, it is padded with whatever the destination
+ * buffer already held. Claiming otherwise lets a consumer read padding as data.
+ * The result therefore carries ``PadValue::null`` — "nothing is promised out
+ * there" — and an operation that really does establish a pad (``tile.fillpad`` and
+ * the rest of that family) sets ``dst.pad`` itself after calling this.
+ *
+ * ``fractal`` is likewise not inherited: it stays at the ``TileView`` default,
+ * which matches the implicit layout of the Vec-space tiles these results live in.
  *
  * @param dst Destination TileView (valid_shape should already be set)
- * @param src Source TileType whose tile_view properties are inherited
+ * @param src Source TileType whose layout is inherited
  */
 inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const TileType>& src) {
   // Use the effective view: under canonicalization an implicit view is stored
@@ -598,7 +721,6 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
   const TileView eff = tile_view_semantics::GetEffectiveTileView(*src);
   dst.blayout = eff.blayout;
   dst.slayout = eff.slayout;
-  dst.pad = eff.pad;
 }
 
 namespace detail {

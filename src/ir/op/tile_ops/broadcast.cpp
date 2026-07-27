@@ -94,11 +94,11 @@ TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tile_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
-  // Output has the same shape as the main tile, inheriting pad and blayout from src0.
-  // Broadcast ops preserve the main tile's valid_shape (issue #1450; same class as #1370 for unary ops).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  // Output has the same shape as the main tile. The row vector is a physical
+  // singleton on the column axis, so the shared elementwise rule exempts it there
+  // (given its one cell is valid) while still requiring the two to agree on rows.
+  TileView tile_view = MakeElementwiseTileView({{tile_type, "tile"}, {row_type, "row_vec"}}, tile_shape,
+                                               op_name, args[0]->span_);
   return std::make_shared<TileType>(tile_shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -186,10 +186,11 @@ TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(target_type->dtype_, col_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
 
-  // Broadcast ops preserve the target tile's valid_shape (issue #1450; same class as #1370 for unary ops).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(target_type);
-  InheritTileViewLayout(tile_view, target_type);
+  // The column tile is a physical singleton on the row axis, so the shared rule
+  // exempts it there (given its one cell is valid) while requiring the two to
+  // agree on columns.
+  TileView tile_view = MakeElementwiseTileView({{target_type, "target"}, {col_type, "col_tile"}},
+                                               target_type->shape_, op_name, args[0]->span_);
   return std::make_shared<TileType>(target_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -214,10 +215,9 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
   auto result_dtype = PromoteDataTypes(tile_type->dtype_, scalar_type->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types";
 
-  // Broadcast ops preserve the target tile's valid_shape (issue #1450; same class as #1370 for unary ops).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
-  InheritTileViewLayout(tile_view, tile_type);
+  // The scalar has no region, so the target tile is the sole value operand.
+  TileView tile_view =
+      MakeElementwiseTileView({{tile_type, "target"}}, tile_type->shape_, op_name, args[0]->span_);
   return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 

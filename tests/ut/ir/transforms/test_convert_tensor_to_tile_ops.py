@@ -2436,17 +2436,28 @@ class TestGmLocalTensorConversion:
             # confuses pyright's overload matching of ``slice``'s ``span`` param).
             return [8, extras[0]] if with_valid_shape else None
 
+        # The gm input is narrowed to the same region as the local slice: an
+        # elementwise add requires its operands to agree on a valid region (TADD
+        # asserts src.valid == dst.valid), so adding a full-valid tile to a
+        # narrowed one is not a legal program. The pass folds that slice of a gm
+        # param into the pre-load, hence the load_* overrides below; the subject
+        # of this test is still the *local* slice becoming a tile.slice.
         def before_body(ib, ins, extras=()):
             t = ib.let("t", tensor_ops.create([16, 64], DataType.FP32))
             s = ib.let("s", tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=_valid_shape(extras)))
-            return ib.let("y", tensor_ops.add(s, ins[0]))
+            xs = ib.let("xs", tensor_ops.slice(ins[0], [8, 32], [0, 0], valid_shape=_valid_shape(extras)))
+            return ib.let("y", tensor_ops.add(s, xs))
 
-        def expected_body(ib, tiles, extras=()):
+        # ``preload=False`` because the pass folds the gm slice into its load, and
+        # the load carries the (possibly symbolic) valid_shape, which is only in
+        # scope here — so the expected body issues the load itself.
+        def expected_body(ib, tensors, extras=()):
             t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
             s_tile = ib.let(
                 "s_tile", tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=_valid_shape(extras))
             )
-            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+            xs_tile = ib.let("xs_tile", tile_ops.load(tensors[0], [0, 0], [8, 32], _valid_shape(extras)))
+            return ib.let("y_tile", tile_ops.add(s_tile, xs_tile))
 
         before = _make_before(
             in_specs=in_specs,
@@ -2460,6 +2471,7 @@ class TestGmLocalTensorConversion:
             out_shape=[8, 32],
             out_dtype=DataType.FP32,
             body=expected_body,
+            preload=False,
             extra_specs=extra_specs,
         )
         _assert_convert_equal(before, expected)
@@ -2468,25 +2480,33 @@ class TestGmLocalTensorConversion:
         """tensor.slice(..., pad_value=X) on a local tensor lowers to tile.slice(..., pad_value=X)."""
         in_specs: list[InSpec] = [("x", [8, 32], DataType.FP32)]
 
+        # As above: the addends must agree on a valid region, so the gm input is
+        # narrowed to the slice's region and its load carries that valid_shape.
         def before_body(ib, ins):
             t = ib.let("t", tensor_ops.create([16, 64], DataType.FP32))
             s = ib.let(
                 "s",
                 tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y", tensor_ops.add(s, ins[0]))
+            xs = ib.let("xs", tensor_ops.slice(ins[0], [8, 32], [0, 0], valid_shape=[8, 8]))
+            return ib.let("y", tensor_ops.add(s, xs))
 
-        def expected_body(ib, tiles):
+        def expected_body(ib, tensors):
             t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
             s_tile = ib.let(
                 "s_tile",
                 tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
             )
-            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+            xs_tile = ib.let("xs_tile", tile_ops.load(tensors[0], [0, 0], [8, 32], [8, 8]))
+            return ib.let("y_tile", tile_ops.add(s_tile, xs_tile))
 
         before = _make_before(in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=before_body)
         expected = _make_expected(
-            in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=expected_body
+            in_specs=in_specs,
+            out_shape=[8, 32],
+            out_dtype=DataType.FP32,
+            body=expected_body,
+            preload=False,
         )
         _assert_convert_equal(before, expected)
 

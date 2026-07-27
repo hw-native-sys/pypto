@@ -31,6 +31,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -694,17 +695,268 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
   return result;
 }
 
+// ============================================================================
+// Elementwise valid-region agreement
+// ============================================================================
+
+namespace {
+
+/// One, in the dtype the analyzer compares extents in.
+const ExprPtr& OneExtent() {
+  static const ExprPtr one = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
+  return one;
+}
+
+/// How a single operand meets a single output dimension.
+enum class AxisRole {
+  kAbsent,       ///< Missing leading axis: an implicit, fully valid singleton
+  kBroadcast,    ///< Explicit constant-1 physical extent widening to a larger output dim
+  kContributor,  ///< Carries the output extent, so its valid extent participates
+};
+
+struct AxisView {
+  AxisRole role;
+  ExprPtr valid;  ///< The operand's valid extent on this axis; null when kAbsent
+};
+
+/// Right-align @p operand to the result rank and classify how it meets dimension
+/// @p dim. Singleton detection is a *constant* one, matching `IsBroadcastable`, so
+/// this never disagrees with the broadcast that produced the result shape.
+AxisView ClassifyAxis(const ElementwiseValidOperand& operand, size_t dim, size_t result_rank,
+                      const ExprPtr& result_extent) {
+  const size_t lead = result_rank - operand.physical.size();
+  if (dim < lead) {
+    return {AxisRole::kAbsent, nullptr};
+  }
+  const size_t axis = dim - lead;
+  const auto physical = GetConstantDimension(operand.physical[axis]);
+  const auto result = GetConstantDimension(result_extent);
+  const bool widens = physical && *physical == 1 && !(result && *result == 1);
+  return {widens ? AxisRole::kBroadcast : AxisRole::kContributor, operand.valid[axis]};
+}
+
+/// "lhs [4, 8], rhs [4, 6]" — every operand's region, for a diagnostic.
+std::string FormatOperandRegions(const ElementwiseValidShapeParams& params) {
+  std::ostringstream oss;
+  for (size_t k = 0; k < params.operands.size(); ++k) {
+    if (k > 0) {
+      oss << ", ";
+    }
+    oss << params.operands[k].label << " " << FormatShape(params.operands[k].valid);
+  }
+  return oss.str();
+}
+
+/// Whether @p candidate should replace @p current as a dimension's representative
+/// extent. Both are already known to denote the same extent; preferring a constant
+/// makes the choice independent of operand order, so a commutative operation yields
+/// structurally equal types whichever way round its operands are given. Used by both
+/// combine modes so the guarantee cannot drift between them.
+bool PrefersAsRepresentative(const ExprPtr& current, const ExprPtr& candidate) {
+  return !As<ConstInt>(current) && As<ConstInt>(candidate) != nullptr;
+}
+
+/// Whether @p shape is the result shape, dimension for dimension.
+bool OwnsResultShape(const std::vector<ExprPtr>& shape, const std::vector<ExprPtr>& result_shape) {
+  return shape.size() == result_shape.size() &&
+         std::equal(shape.begin(), shape.end(), result_shape.begin(), DimensionsEqual);
+}
+
+/// Each operand's contribution to each output dimension: its valid extent where it
+/// is a non-broadcast contributor, and null where it is exempt (a missing leading
+/// axis or a physical singleton widening to the dimension).
+using ContributionGrid = std::vector<std::vector<ExprPtr>>;
+
+/// Classify every operand against every output dimension, rejecting a broadcast
+/// singleton whose sole cell is not provably valid.
+ContributionGrid ClassifyContributions(const ElementwiseValidShapeParams& params) {
+  const size_t rank = params.result_shape.size();
+  ContributionGrid grid(params.operands.size(), std::vector<ExprPtr>(rank));
+
+  for (size_t k = 0; k < params.operands.size(); ++k) {
+    const ElementwiseValidOperand& operand = params.operands[k];
+    for (size_t dim = 0; dim < rank; ++dim) {
+      const AxisView axis = ClassifyAxis(operand, dim, rank, params.result_shape[dim]);
+      if (axis.role == AxisRole::kBroadcast) {
+        CHECK_SPAN(ProveValidExtentEqual(axis.valid, OneExtent()) == ProofResult::kTrue, params.span)
+            << params.op_name << ": operand " << operand.label << " broadcasts dimension " << dim
+            << " from a physical extent of 1, but its valid extent there is " << PythonPrint(axis.valid)
+            << ", which is not provably 1. A broadcast singleton replicates its one cell across "
+               "the whole output dimension, so that cell must be valid";
+      }
+      if (axis.role == AxisRole::kContributor) {
+        grid[k][dim] = axis.valid;
+      }
+    }
+  }
+  return grid;
+}
+
+/// Require every non-broadcast contributor to a dimension to hold the same valid
+/// extent, and answer with that extent.
+std::vector<ExprPtr> ResolveAgreement(const ContributionGrid& grid,
+                                      const ElementwiseValidShapeParams& params) {
+  const size_t rank = params.result_shape.size();
+  std::vector<ExprPtr> agreed_shape;
+  agreed_shape.reserve(rank);
+
+  for (size_t dim = 0; dim < rank; ++dim) {
+    ExprPtr agreed;
+    const ElementwiseValidOperand* agreed_by = nullptr;
+    for (size_t k = 0; k < grid.size(); ++k) {
+      const ExprPtr& extent = grid[k][dim];
+      if (!extent) {
+        continue;  // exempt on this axis
+      }
+      const ElementwiseValidOperand& operand = params.operands[k];
+      if (!agreed) {
+        agreed = extent;
+        agreed_by = &operand;
+        continue;
+      }
+      // Both a proven inequality and an undecided symbolic relation reject: no
+      // runtime guard is emitted, so an unproved relation would silently widen
+      // or narrow the result region.
+      CHECK_SPAN(ProveValidExtentEqual(agreed, extent) == ProofResult::kTrue, params.span)
+          << params.op_name << ": operands " << agreed_by->label << " and " << operand.label
+          << " do not provably agree on the valid extent of dimension " << dim << " (" << agreed_by->label
+          << ": " << PythonPrint(agreed) << ", " << operand.label << ": " << PythonPrint(extent)
+          << "). An elementwise operation reads every operand at each cell and writes one region, "
+             "so every non-broadcast operand must have a provably equal valid extent. Narrow the "
+             "wider operand, or fill its padding with a fillpad before combining";
+      if (PrefersAsRepresentative(agreed, extent)) {
+        agreed = extent;
+        agreed_by = &operand;
+      }
+    }
+    // Every operand can be exempt here — a lower-rank sole value operand leaves the
+    // leading axes of a result broadcast against an excluded scratch operand with no
+    // contributor at all. Nothing constrains the dimension, so it is fully valid.
+    agreed_shape.push_back(agreed ? agreed : params.result_shape[dim]);
+  }
+  return agreed_shape;
+}
+
+/// The union of origin-anchored rectangles is itself an origin-anchored rectangle
+/// exactly when one of them contains all the others. Otherwise the componentwise
+/// maximum covers cells that lie in no operand at all, which is the silent
+/// widening this rule exists to prevent.
+std::vector<ExprPtr> ResolveRepresentableUnion(const ContributionGrid& grid,
+                                               const ElementwiseValidShapeParams& params) {
+  const size_t rank = params.result_shape.size();
+  std::vector<ExprPtr> widest;
+  widest.reserve(rank);
+  // Whether each operand's region still matches the widest extent on every
+  // dimension so far. Accumulated alongside the scan, so the "is the union some
+  // single operand's rectangle" test costs no second pass over the grid.
+  std::vector<bool> spans_every_dim(grid.size(), true);
+
+  for (size_t dim = 0; dim < rank; ++dim) {
+    // An exempt operand is fully valid on this axis: broadcasting replicates its
+    // one (valid) cell across the whole dimension.
+    auto extent_of = [&](size_t k) -> const ExprPtr& {
+      return grid[k][dim] ? grid[k][dim] : params.result_shape[dim];
+    };
+
+    // The extent that provably covers every other on this dimension. Picked per
+    // dimension, preferring a constant, so operand order cannot change the type.
+    const ExprPtr* best = nullptr;
+    for (size_t k = 0; k < grid.size(); ++k) {
+      const ExprPtr& candidate = extent_of(k);
+      bool covers = true;
+      for (size_t other = 0; other < grid.size() && covers; ++other) {
+        covers = ProveValidExtentLessEqual(extent_of(other), candidate) == ProofResult::kTrue;
+      }
+      if (covers && (best == nullptr || PrefersAsRepresentative(*best, candidate))) {
+        best = &candidate;
+      }
+    }
+    CHECK_SPAN(best != nullptr, params.span)
+        << params.op_name << ": the operand valid regions (" << FormatOperandRegions(params)
+        << ") have no provably widest extent on dimension " << dim
+        << ", so their union cannot be expressed as a valid_shape. A partial combine copies "
+           "whichever source is valid at a cell, so one operand's region must provably contain "
+           "the others";
+    widest.push_back(*best);
+
+    for (size_t k = 0; k < grid.size(); ++k) {
+      spans_every_dim[k] =
+          spans_every_dim[k] && ProveValidExtentEqual(extent_of(k), *best) == ProofResult::kTrue;
+    }
+  }
+
+  CHECK_SPAN(std::find(spans_every_dim.begin(), spans_every_dim.end(), true) != spans_every_dim.end(),
+             params.span)
+      << params.op_name << ": the operand valid regions (" << FormatOperandRegions(params)
+      << ") are not ordered by containment, so their union " << FormatShape(widest)
+      << " is not an origin-anchored rectangle and would claim cells that are valid in no "
+         "operand. Narrow one operand so that one region contains the other";
+  return widest;
+}
+
+}  // namespace
+
+std::vector<ExprPtr> InferElementwiseValidShape(const ElementwiseValidShapeParams& params) {
+  const size_t rank = params.result_shape.size();
+  for (const auto& operand : params.operands) {
+    INTERNAL_CHECK_SPAN(operand.physical.size() <= rank, params.span)
+        << "Internal error: " << params.op_name << " operand " << operand.label << " has rank "
+        << operand.physical.size() << ", which exceeds the broadcast result rank " << rank;
+    INTERNAL_CHECK_SPAN(operand.valid.size() == operand.physical.size(), params.span)
+        << "Internal error: " << params.op_name << " operand " << operand.label << " valid_shape rank ("
+        << operand.valid.size() << ") must match its physical rank (" << operand.physical.size() << ")";
+  }
+
+  const ContributionGrid grid = ClassifyContributions(params);
+  return params.combine == ElementwiseValidCombine::kAgree ? ResolveAgreement(grid, params)
+                                                           : ResolveRepresentableUnion(grid, params);
+}
+
+TileView MakeElementwiseTileView(const std::vector<ElementwiseTileOperand>& operands,
+                                 const std::vector<ExprPtr>& result_shape, const std::string& op_name,
+                                 const Span& span, ElementwiseValidCombine combine) {
+  std::vector<ElementwiseValidOperand> value_operands;
+  value_operands.reserve(operands.size());
+  for (const auto& operand : operands) {
+    INTERNAL_CHECK_SPAN(operand.type, span) << "Internal error: " << op_name << " operand " << operand.label
+                                            << " must be a TileType to derive an elementwise valid region";
+    value_operands.push_back({operand.type->shape_, GetValidShape(operand.type), operand.label});
+  }
+
+  TileView view;
+  view.valid_shape = InferElementwiseValidShape({
+      /*operands=*/std::move(value_operands),
+      /*result_shape=*/result_shape,
+      /*combine=*/combine,
+      /*op_name=*/op_name,
+      /*span=*/span,
+  });
+
+  // Production layout comes from an operand that owns the whole output shape. A
+  // broadcast singleton describes a differently shaped physical object, so letting
+  // it decide the layout is what made commutative operations order-dependent.
+  for (const auto& operand : operands) {
+    if (OwnsResultShape(operand.type->shape_, result_shape)) {
+      InheritTileViewLayout(view, operand.type);
+      return view;
+    }
+  }
+  const TileView implicit = tile_view_semantics::GetImplicitTileView(result_shape);
+  view.blayout = implicit.blayout;
+  view.slayout = implicit.slayout;
+  return view;
+}
+
 void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
                                   const std::vector<ExprPtr>& valid_shape, const std::string& op_name,
                                   const Span& span) {
-  static const auto one = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
   for (int64_t axis : drop_dims) {
     const auto index = static_cast<size_t>(axis);
     INTERNAL_CHECK_SPAN(index < valid_shape.size(), span)
         << "Internal error: " << op_name << " drop_dims axis " << axis
         << " is out of range for valid_shape rank " << valid_shape.size();
     const ExprPtr& extent = valid_shape[index];
-    CHECK_SPAN(ProveValidExtentEqual(extent, one) == ProofResult::kTrue, span)
+    CHECK_SPAN(ProveValidExtentEqual(extent, OneExtent()) == ProofResult::kTrue, span)
         << op_name << " cannot drop dimension " << axis << ": its valid extent is " << PythonPrint(extent)
         << ", which is not provably 1. Rank reduction erases an axis, so the axis must be fully valid; "
            "keep the dimension instead of dropping it";

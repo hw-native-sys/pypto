@@ -18,7 +18,6 @@
  */
 
 #include <any>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,9 +42,9 @@ static bool IsTSubsDataType(DataType dtype) {
          dtype == DataType::FP16 || dtype == DataType::FP32 || dtype == DataType::BF16;
 }
 
-TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
-                                            const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                            const std::string& op_name) {
+TypePtr DeduceTensorOpElementwiseBinaryType(
+    const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+    const std::string& op_name, ElementwiseValidCombine combine = ElementwiseValidCombine::kAgree) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -72,7 +71,19 @@ TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tensor_type1->shape_) << " and "
                                   << FormatShape(tensor_type2->shape_);
 
-  return std::make_shared<TensorType>(broadcast_result.shape, *result_dtype);
+  // Same rule as the tile level: the operands must agree on the region they are
+  // combined over (or, for the partial-combine family, admit a representable
+  // union). The sum is new data, so the result is a fresh tensor.
+  std::vector<ExprPtr> valid_shape = InferElementwiseValidShape({
+      /*operands=*/
+      {{tensor_type1->shape_, GetValidShape(tensor_type1), "lhs"},
+       {tensor_type2->shape_, GetValidShape(tensor_type2), "rhs"}},
+      /*result_shape=*/broadcast_result.shape,
+      /*combine=*/combine,
+      /*op_name=*/op_name,
+      /*span=*/args[0]->span_,
+  });
+  return MakeFreshTensorType(broadcast_result.shape, *result_dtype, std::move(valid_shape));
 }
 
 TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
@@ -91,8 +102,9 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
                       << " requires second argument to be a ScalarType, but got "
                       << args[1]->GetType()->TypeName();
 
+  // Same fresh-result rule as the promoting path below; only the dtype differs.
   if (preserve_lhs_dtype) {
-    return std::make_shared<TensorType>(tensor_type1->shape_, tensor_type1->dtype_);
+    return MakeFreshTensorType(tensor_type1->shape_, tensor_type1->dtype_, GetValidShape(tensor_type1));
   }
 
   // TensorType + ScalarType - result is TensorType with same shape as first argument
@@ -100,7 +112,11 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
 
-  return std::make_shared<TensorType>(tensor_type1->shape_, *result_dtype);
+  // The scalar has no region of its own, so the result keeps the tensor's: a
+  // partial input must not widen back to the full allocation, which would make
+  // padding indistinguishable from real data. Tile's equivalents (tile.adds and
+  // friends) already do this; this is the tensor-level dual.
+  return MakeFreshTensorType(tensor_type1->shape_, *result_dtype, GetValidShape(tensor_type1));
 }
 
 // ============================================================================
@@ -218,7 +234,8 @@ REGISTER_OP("tensor.part_add")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_add");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_add",
+                                                 ElementwiseValidCombine::kUnion);
     });
 
 REGISTER_OP("tensor.part_mul")
@@ -228,7 +245,8 @@ REGISTER_OP("tensor.part_mul")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_mul");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_mul",
+                                                 ElementwiseValidCombine::kUnion);
     });
 
 REGISTER_OP("tensor.part_max")
@@ -238,7 +256,8 @@ REGISTER_OP("tensor.part_max")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_max");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_max",
+                                                 ElementwiseValidCombine::kUnion);
     });
 
 REGISTER_OP("tensor.part_min")
@@ -248,7 +267,8 @@ REGISTER_OP("tensor.part_min")
     .add_argument("src1", "Second source tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_min");
+      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.part_min",
+                                                 ElementwiseValidCombine::kUnion);
     });
 
 REGISTER_OP("tensor.fmod")

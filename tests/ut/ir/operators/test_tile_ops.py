@@ -5625,5 +5625,281 @@ class TestWriteValidRegionUnion:
         assert result_type.tensor_view is None
 
 
+class TestTileElementwiseValidRegion:
+    """The valid-region rule shared by every elementwise / broadcast tile family.
+
+    Every non-broadcast operand must provably agree on each dimension's valid
+    extent -- that is the hardware contract (``TADD_IMPL`` asserts
+    ``src.GetValidRow() == dst.GetValidRow()`` for both sources), and no choice of
+    result region can satisfy it when the operands disagree. The partial-combine
+    family (``part_*``) instead takes the union, which ``TPartInstr`` realises by
+    testing each source's extent per cell -- admitted only when that union is an
+    origin-anchored rectangle.
+    """
+
+    @staticmethod
+    def _tile(shape, valid_shape=None, dtype=DataType.FP32, name="t"):
+        """A tile Var, optionally narrowed to ``valid_shape``."""
+        span = ir.Span.unknown()
+        view = None if valid_shape is None else ir.TileView(valid_shape=valid_shape)
+        return ir.Var(name, ir.TileType(shape, dtype, tile_view=view), span)
+
+    @staticmethod
+    def _valid_of(result_type):
+        """Effective valid extents, with ConstInt unwrapped to int."""
+        view = result_type.tile_view
+        shape = result_type.shape if view is None or not view.valid_shape else view.valid_shape
+        return [d.value if isinstance(d, ir.ConstInt) else d for d in shape]
+
+    # --- agreement ----------------------------------------------------------
+
+    def test_matching_partial_operands_propagate(self):
+        """Operands that agree hand their common region to the result."""
+        call = tile.add(self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 4]))
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_fully_valid_operands_canonicalize_to_no_valid_shape(self):
+        """A fully valid result carries no explicit valid_shape at all."""
+        result_type = tile.add(self._tile([8, 16]), self._tile([8, 16])).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is None or not result_type.tile_view.valid_shape
+
+    def test_static_disagreement_rejects(self):
+        """4 != 10 is provable, so the operands cannot be combined."""
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.add(self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 10]))
+
+    def test_symbolic_agreement_accepted(self):
+        """The same symbol on both sides is provably equal, and survives onto the result."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        call = tile.add(self._tile([8, 16], [rows, n]), self._tile([8, 16], [rows, n]))
+        valid = self._valid_of(call.type)
+        assert valid[0] == 8
+        assert isinstance(valid[1], ir.Var) and valid[1].name_hint == "n"
+
+    def test_symbolic_disagreement_rejects_as_unknown(self):
+        """An undecidable relation rejects: no runtime guard is emitted."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.add(self._tile([8, 16], [rows, n]), self._tile([8, 16], [rows, m]))
+
+    def test_constant_representative_makes_order_irrelevant(self):
+        """A constant extent is preferred, so either operand order prints the same."""
+        span = ir.Span.unknown()
+        four = ir.ConstInt(4, DataType.INDEX, span)
+        eight = ir.ConstInt(8, DataType.INDEX, span)
+        lhs = self._tile([8, 16], [eight, four], name="a")
+        rhs = self._tile([8, 16], [eight, four], name="b")
+        assert self._valid_of(tile.add(lhs, rhs).type) == self._valid_of(tile.add(rhs, lhs).type)
+
+    # --- broadcasting -------------------------------------------------------
+
+    def test_broadcast_singleton_is_exempt_from_agreement(self):
+        """A [8, 1] row vector widens to [8, 16] and does not have to match cols."""
+        call = tile.row_expand_sub(self._tile([8, 16], [8, 4]), self._tile([8, 1], [8, 1]))
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_empty_broadcast_singleton_rejects(self):
+        """A singleton replicates its one cell, so that cell must be valid."""
+        with pytest.raises(ValueError, match=r"broadcasts dimension .* not provably 1"):
+            tile.row_expand_sub(self._tile([8, 16], [8, 4]), self._tile([8, 1], [8, 0]))
+
+    def test_unknown_broadcast_singleton_rejects(self):
+        """An unproved singleton extent rejects for the same reason."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        with pytest.raises(ValueError, match=r"broadcasts dimension .* not provably 1"):
+            tile.row_expand_sub(self._tile([8, 16], [8, 4]), self._tile([8, 1], [rows, n]))
+
+    def test_broadcast_operand_still_agrees_on_its_non_broadcast_axis(self):
+        """A [1, 16] column tile broadcasts rows, but its 16 columns still must agree."""
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.col_expand_mul(self._tile([8, 16], [4, 16]), self._tile([1, 16], [1, 8]))
+
+    def test_lower_rank_operand_right_aligns(self):
+        """A rank-1 operand's missing leading axis is an implicit valid singleton."""
+        call = tile.add(self._tile([4, 8], [4, 6]), self._tile([8], [6]))
+        assert self._valid_of(call.type) == [4, 6]
+
+    def test_mutually_broadcasting_shapes(self):
+        """[4, 1] x [1, 8]: each operand is a singleton on the other's axis."""
+        call = tile.add(self._tile([4, 1], [4, 1]), self._tile([1, 8], [1, 8]))
+        assert self._valid_of(call.type) == [4, 8]
+
+    def test_layout_derives_from_the_output_when_no_operand_owns_it(self):
+        """[4, 1] x [1, 8] -> [4, 8]: neither operand owns the result shape.
+
+        A bare [4, 1] tile is implicitly col_major. Taking layout from operand 0 --
+        what the deducers used to do unconditionally -- would stamp col_major onto a
+        [4, 8] result, and make a commutative op's layout depend on operand order.
+        Deriving from the output shape gives row_major, which for a fully valid
+        result is the implicit layout, so the view canonicalizes away entirely.
+        """
+        col_vec = self._tile([4, 1], name="col")
+        row_vec = self._tile([1, 8], name="row")
+        for lhs, rhs in ((col_vec, row_vec), (row_vec, col_vec)):
+            result_type = tile.add(lhs, rhs).type
+            assert isinstance(result_type, ir.TileType)
+            assert self._valid_of(result_type) == [4, 8]
+            # A retained view here would mean a non-default (inherited) blayout.
+            assert result_type.tile_view is None
+
+    # --- every multi-operand family -----------------------------------------
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            pytest.param(lambda a, b: tile.add(a, b), id="binary"),
+            pytest.param(lambda a, b: tile.maximum(a, b), id="maximum"),
+            pytest.param(lambda a, b: tile.sels(a, b, 1), id="sels"),
+        ],
+    )
+    def test_family_rejects_disagreement(self, make):
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            make(self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 10]))
+
+    def test_shift_amount_is_a_value_operand(self):
+        """tile.shl reads the shift tile per element, so it must agree."""
+
+        def int_tile(valid):
+            return self._tile([8, 16], valid, dtype=DataType.INT32)
+
+        assert self._valid_of(tile.shl(int_tile([8, 4]), int_tile([8, 4])).type) == [8, 4]
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.shl(int_tile([8, 4]), int_tile([8, 10]))
+
+    def test_ternary_tmp_is_excluded(self):
+        """tile.rem's tmp is scratch: it is written before it is read."""
+        call = tile.rem(
+            self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 16])
+        )
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_tri_tile_all_three_agree(self):
+        """tile.addc reads all three operands, so all three must agree."""
+        assert self._valid_of(
+            tile.addc(
+                self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 4])
+            ).type
+        ) == [8, 4]
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.addc(self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 4]), self._tile([8, 16], [8, 10]))
+
+    def test_tile_scalar_tile_distinguishes_addend_from_scratch(self):
+        """tile.addsc's third tile is a real addend; tile.rems' is scratch."""
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.addsc(self._tile([8, 16], [8, 4]), 1.0, self._tile([8, 16], [8, 10]))
+        # Same shapes through tile.rems: the tmp is excluded, so this is fine.
+        call = tile.rems(self._tile([8, 16], [8, 4]), 1.0, self._tile([8, 16], [8, 10]))
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_sel_excludes_mask_and_tmp(self):
+        """tile.sel's mask is a packed predicate and its tmp is scratch."""
+        call = tile.sel(
+            self._tile([8, 4], [8, 4], dtype=DataType.UINT8),
+            self._tile([8, 16], [8, 4]),
+            self._tile([8, 16], [8, 4]),
+            self._tile([1, 32], None, dtype=DataType.UINT8),
+        )
+        assert self._valid_of(call.type) == [8, 4]
+
+    def test_cmp_packs_the_agreed_region(self):
+        """The mask's valid columns are the agreed columns, 8 predicates per byte."""
+        call = tile.cmp(self._tile([8, 64], [8, 40]), self._tile([8, 64], [8, 40]), cmp_type=0)
+        assert self._valid_of(call.type) == [8, 5]  # ceil(40 / 8)
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            tile.cmp(self._tile([8, 64], [8, 40]), self._tile([8, 64], [8, 48]), cmp_type=0)
+
+    # --- part_* union -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "part_op",
+        [tile.part_add, tile.part_mul, tile.part_max, tile.part_min],
+        ids=["add", "mul", "max", "min"],
+    )
+    def test_part_takes_the_containing_region(self, part_op):
+        """Where only one source is valid the result copies it, so regions unite."""
+        narrow = self._tile([8, 16], [8, 4])
+        wide = self._tile([8, 16], [8, 10])
+        assert self._valid_of(part_op(narrow, wide).type) == [8, 10]
+
+    def test_part_union_is_operand_order_independent(self):
+        narrow = self._tile([8, 16], [8, 4])
+        wide = self._tile([8, 16], [8, 10])
+        assert (
+            self._valid_of(tile.part_add(narrow, wide).type)
+            == self._valid_of(tile.part_add(wide, narrow).type)
+            == [8, 10]
+        )
+
+    def test_part_rejects_a_non_rectangular_union(self):
+        """[4, 10] u [8, 4] is an L-shape; [8, 10] would claim cells valid in neither."""
+        with pytest.raises(ValueError, match=r"not ordered by containment"):
+            tile.part_add(self._tile([8, 16], [4, 10]), self._tile([8, 16], [8, 4]))
+
+    def test_part_union_of_symbolically_equal_regions(self):
+        """Two regions carrying the same symbol are provably ordered, so the union is that symbol."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        call = tile.part_add(self._tile([8, 16], [rows, n]), self._tile([8, 16], [rows, n]))
+        valid = self._valid_of(call.type)
+        assert valid[0] == 8
+        assert isinstance(valid[1], ir.Var) and valid[1].name_hint == "n"
+
+    def test_part_rejects_an_unorderable_symbolic_union(self):
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(8, DataType.INDEX, span)
+        with pytest.raises(ValueError, match=r"no provably widest extent"):
+            tile.part_add(self._tile([8, 16], [rows, n]), self._tile([8, 16], [rows, m]))
+
+    # --- fresh result metadata ----------------------------------------------
+
+    def test_result_carries_no_source_alias_metadata(self):
+        """A computed tile is a new allocation, not a view of either operand."""
+        span = ir.Span.unknown()
+        aliased = ir.TileView(
+            valid_shape=[8, 4], stride=[32, 1], start_offset=ir.ConstInt(64, DataType.INDEX, span)
+        )
+        src = ir.Var("src", ir.TileType([8, 16], DataType.FP32, tile_view=aliased), span)
+
+        result_type = tile.add(src, src).type
+        assert isinstance(result_type, ir.TileType)
+        view = result_type.tile_view
+        assert view is not None and not view.stride
+        assert view.start_offset is None
+
+    def test_fresh_result_does_not_inherit_pad(self):
+        """exp() of a zero-padded tile is not zero-padded: only the valid region is written."""
+        padded = tile.fillpad(self._tile([8, 16], [8, 4]), pad_value=ir.PadValue.zero)
+        padded_type = padded.type
+        assert isinstance(padded_type, ir.TileType)
+        assert padded_type.tile_view is not None
+        assert padded_type.tile_view.pad == ir.PadValue.zero
+
+        for call in (tile.exp(padded), tile.add(padded, padded), tile.muls(padded, 2.0)):
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType)
+            view = result_type.tile_view
+            assert view is None or view.pad == ir.PadValue.null
+
+    def test_fillpad_family_still_establishes_its_pad(self):
+        """The ops that really do write the padding still say so."""
+        expanded_type = tile.fillpad_expand(
+            self._tile([8, 16], [8, 4]), [8, 32], pad_value=ir.PadValue.max
+        ).type
+        assert isinstance(expanded_type, ir.TileType)
+        assert expanded_type.tile_view is not None
+        assert expanded_type.tile_view.pad == ir.PadValue.max
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
