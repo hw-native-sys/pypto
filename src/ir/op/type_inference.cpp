@@ -787,7 +787,8 @@ std::optional<std::vector<ExprPtr>> MapUnitAxisRankChange(const std::vector<Expr
 
 std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
                                               const std::vector<ExprPtr>& in_shape,
-                                              const std::vector<ExprPtr>& new_shape, const Span& span,
+                                              const std::vector<ExprPtr>& new_shape,
+                                              bool row_major_contiguous, const Span& span,
                                               const std::string& op_name) {
   INTERNAL_CHECK_SPAN(src_valid.size() == in_shape.size(), span)
       << "Internal error: " << op_name << " source valid_shape rank (" << src_valid.size()
@@ -828,9 +829,21 @@ std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_va
 
   // (4) Otherwise the region has to occupy a contiguous flat prefix of the
   // buffer, so that some rectangle of the target shape spans exactly the same
-  // cells. Leading axes pinned to a single valid coordinate contribute nothing
-  // to the extent; the first remaining axis carries the prefix's one free
-  // extent, and every axis below it must be full.
+  // cells. Everything below walks flat positions in row-major order, so a
+  // source stored any other way would be measured against the wrong offsets:
+  // a col_major [2, 3] valid [1, 3] really occupies flat {0, 2, 4}, and the
+  // row-major reading would hand back a box covering {0, 1, 2} -- marking two
+  // padding elements as real. Reject instead of guessing.
+  CHECK_SPAN(row_major_contiguous, span)
+      << op_name << ": cannot reshape " << FormatShape(in_shape) << " to " << FormatShape(new_shape)
+      << " because only part of it holds real data (valid_shape " << FormatShape(src_valid)
+      << ") and its elements are not stored row-major, so the real data does not occupy a contiguous "
+         "run that the new shape can describe. Reshape the full extent and narrow afterwards, or copy "
+         "the real data out first (pl.slice / pl.store).";
+
+  // Leading axes pinned to a single valid coordinate contribute nothing to the
+  // extent; the first remaining axis carries the prefix's one free extent, and
+  // every axis below it must be full.
   const size_t input_rank = src_valid.size();
   size_t free_dim = 0;
   while (free_dim + 1 < input_rank && IsConstValue(src_valid[free_dim], 1)) {

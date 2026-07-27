@@ -413,9 +413,17 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
  * flat prefix of the buffer maps to whatever rectangle spans that same prefix in
  * the target shape, provided one exists. Tensor and tile reshape share this rule.
  *
+ * Case 4 is the only one that reasons about flat positions, so it is the only
+ * one that depends on storage order. Pass @p row_major_contiguous false for a
+ * source whose elements are not laid out row-major (a ``col_major`` tile, a
+ * ``DN`` / ``NZ`` tensor) and a partial region that needs case 4 is rejected
+ * rather than mapped against the wrong flat order. Cases 1-3 relabel axes
+ * without consulting flat positions and hold under any layout.
+ *
  * @param src_valid Effective valid shape of the source, resolved by ``GetValidShape``
  * @param in_shape Physical shape of the source, same rank as @p src_valid
  * @param new_shape Physical shape of the result
+ * @param row_major_contiguous Whether the source's elements are stored row-major
  * @param span IR source location, reported when the region is rejected
  * @param op_name Operator name, used in diagnostics
  * @return The result valid shape, one extent per target dimension
@@ -424,7 +432,8 @@ void ValidateDropDimsValidExtents(const std::vector<int64_t>& drop_dims,
  */
 std::vector<ExprPtr> ComputeReshapeValidShape(const std::vector<ExprPtr>& src_valid,
                                               const std::vector<ExprPtr>& in_shape,
-                                              const std::vector<ExprPtr>& new_shape, const Span& span,
+                                              const std::vector<ExprPtr>& new_shape,
+                                              bool row_major_contiguous, const Span& span,
                                               const std::string& op_name);
 
 /**

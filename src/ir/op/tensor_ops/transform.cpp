@@ -177,8 +177,11 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   // A reshape is a zero-copy view, so it cannot invent data: the result's valid
   // region is the source's, mapped through the reshape. A region the target
   // shape cannot represent is rejected rather than rounded up to fully valid.
-  std::vector<ExprPtr> mapped_valid = ComputeReshapeValidShape(
-      GetValidShape(tensor_type), tensor_type->shape_, new_shape, args[0]->span_, "tensor.reshape");
+  const TensorLayout source_layout =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  std::vector<ExprPtr> mapped_valid =
+      ComputeReshapeValidShape(GetValidShape(tensor_type), tensor_type->shape_, new_shape,
+                               source_layout == TensorLayout::ND, args[0]->span_, "tensor.reshape");
 
   // The optional 3rd argument may narrow the mapped region but may never claim
   // data outside it. Unknown symbolic relations reject, because reshape emits

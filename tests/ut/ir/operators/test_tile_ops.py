@@ -2075,6 +2075,28 @@ class TestTileSliceReshapeOps:
         with pytest.raises(ValueError, match="do not fill a whole number of rows"):
             tile.reshape(_partial_tile([8, 16], [5, 16]), [4, 32])
 
+    @staticmethod
+    def _col_major_tile(shape, valid_shape):
+        span = ir.Span.unknown()
+        view = ir.TileView(valid_shape=valid_shape, blayout=ir.TileLayout.col_major)
+        return ir.Var("src", ir.TileType(shape, DataType.FP32, tile_view=view), span)
+
+    def test_tile_reshape_rejects_partial_col_major_source(self):
+        """Flat-prefix mapping reads row-major offsets, so a col_major source is rejected.
+
+        A col_major [2, 3] valid [1, 3] really occupies flat cells {0, 2, 4};
+        reading it row-major would return a box covering {0, 1, 2} and mark two
+        padding elements as real — the widening this rule exists to prevent.
+        """
+        with pytest.raises(ValueError, match="not stored row-major"):
+            tile.reshape(self._col_major_tile([2, 3], [1, 3]), [1, 6])
+
+    def test_tile_reshape_allows_fully_valid_col_major_source(self):
+        """Only the flat-prefix case reads storage order; a full region never does."""
+        result_type = tile.reshape(self._col_major_tile([2, 3], [2, 3]), [1, 6]).type
+
+        assert _valid_of(result_type) == [1, 6]
+
     def test_tile_fillpad_expand(self):
         """Test tile.fillpad_expand grows the tile and fills with pad_value."""
         span = ir.Span.unknown()
