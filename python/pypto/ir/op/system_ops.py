@@ -572,3 +572,38 @@ def task_invalid(*, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("system.task_invalid", [], {}, actual_span)
+
+
+# ============================================================================
+# SPMD launch-shape queries
+# ============================================================================
+
+
+def available_cluster_count(*, span: Span | None = None) -> Call:
+    """Query this run's MIX cluster (= AIC) count.
+
+    Returns a ``Call`` of result type ``Scalar[INT32]`` that orchestration
+    codegen lowers to ``rt_available_cluster_count()``. The count belongs to
+    the device the run lands on, so it is the only launch width that keeps a
+    mixed (AIC+AIV) or cube-only SPMD launch at full occupancy — which a hard
+    ``system.syncall`` requires.
+
+    Args:
+        span: Optional source span (auto-captured if not provided).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.available_cluster_count", [], {}, actual_span)
+
+
+def available_aiv_count(*, span: Span | None = None) -> Call:
+    """Query this run's standalone AIV core count.
+
+    The AIV counterpart of :func:`available_cluster_count`; orchestration
+    codegen lowers it to ``rt_available_aiv_count()``. Sizes a vector-only
+    SPMD launch — a mixed launch uses :func:`available_cluster_count`.
+
+    Args:
+        span: Optional source span (auto-captured if not provided).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.available_aiv_count", [], {}, actual_span)

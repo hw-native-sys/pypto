@@ -461,6 +461,36 @@ def _resolve_external_source(external_source: str | Path, caller_frame: Any) -> 
     return str(path)
 
 
+# ``pl.system.available_*_count()`` used as an SPMD launch width lands in the
+# Spmd wrapper's ``attrs["core_num"]``, which the printer emits as the call
+# itself (it binds no variable, so there is no name to reference). Recovering it
+# needs no scope, unlike a Var-valued core_num.
+_LAUNCH_QUERY_ATTR_OPS = ("available_cluster_count", "available_aiv_count")
+
+
+def _parse_launch_query_call(node: ast.expr) -> Any | None:
+    """Rebuild the IR Call for a ``pl.system.available_*_count()`` attr value.
+
+    Returns ``None`` for any other expression, leaving the caller's existing
+    handling in place.
+    """
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return None
+    func = node.func
+    if not (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "system"
+        and isinstance(func.value.value, ast.Name)
+        and func.value.value.id == "pl"
+        and func.attr in _LAUNCH_QUERY_ATTR_OPS
+    ):
+        return None
+    from pypto.ir.op import system_ops  # noqa: PLC0415  (avoids an import cycle at module load)
+
+    return getattr(system_ops, func.attr)()
+
+
 def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, Any]:
     """Extract function attrs from @pl.function(attrs={...}) decorator.
 
@@ -500,6 +530,8 @@ def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, A
                     attrs["split"] = split_mode.value
             elif isinstance(v, ast.Constant):
                 attrs[attr_key] = v.value
+            elif (launch_query := _parse_launch_query_call(v)) is not None:
+                attrs[attr_key] = launch_query
         return attrs
     return {}
 

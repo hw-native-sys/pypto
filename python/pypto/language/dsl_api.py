@@ -744,7 +744,15 @@ def spmd(
             Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
             integer constants and closure arithmetic are folded to ``ConstInt``
             by the parser and ``Simplify``; non-foldable expressions flow
-            through to codegen unchanged.
+            through to codegen unchanged. Pass
+            ``pl.system.available_cluster_count()`` (mixed / cube-only kernel)
+            or ``pl.system.available_aiv_count()`` (vector-only kernel) to size
+            the launch on the run's own device geometry — the only spelling that
+            stays at full occupancy across devices, which a hard
+            ``pl.system.syncall`` requires. Pass such a query inline as shown;
+            binding it to a name first compiles and lowers correctly, but the
+            printed IR of the outlined ``Spmd`` wrapper then references a
+            variable defined in the caller and cannot be re-parsed.
         sync_start: If True, all blocks start execution simultaneously (default: False).
         name_hint: Optional name hint for the outlined function.
         optimizations: Optional list literal containing only ``pl.split(mode)``
@@ -824,6 +832,10 @@ def spmd(
         >>> with pl.cluster():
         ...     with pl.spmd(4, sync_start=True):
         ...         out = self.kernel(a, b, out)
+        >>>
+        >>> # Device-sized launch — required for a hard pl.system.syncall
+        >>> with pl.spmd(pl.system.available_cluster_count(), sync_start=True):
+        ...     out = self.mixed_kernel(a, b, out)
         >>>
         >>> # Dispatch predicate — skip the expert entirely when its row count is 0
         >>> with pl.spmd(1) as gate_tid:

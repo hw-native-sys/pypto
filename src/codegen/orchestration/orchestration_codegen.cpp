@@ -1187,6 +1187,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         return;
       }
+      // Launch-shape queries: the run's device geometry, latched by the runtime
+      // at bring-up. Emitted as a plain int32 binding so a downstream
+      // ``launch_spec.set_block_num(<var>)`` reads it back (see
+      // ``RenderLaunchCoreNum``).
+      if (IsOp(call, "system.available_cluster_count") || IsOp(call, "system.available_aiv_count")) {
+        EmitIndentedLine("int32_t " + var_name + " = " + RenderAvailableCoreCount(call) + ";");
+        return;
+      }
       if (IsOp(call, "pld.system.get_comm_ctx")) {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
             << "Internal error: pld.system.get_comm_ctx expects exactly 1 argument";
@@ -2202,9 +2210,25 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // ``b_dim // 8``). ``GenerateExprString`` resolves leaf Vars via TryGetVarName
   // (so SSA/emit-name mapping is respected) and recurses through arithmetic
   // operators — the same path used to render ForStmt bounds.
+  // The orchestration helper behind a launch-shape query op. Both helpers are
+  // pure reads of state the runtime latched at bring-up, so the call is safe to
+  // render either as a standalone binding or inline in a launch spec.
+  [[nodiscard]] static std::string RenderAvailableCoreCount(const CallPtr& call) {
+    return IsOp(call, "system.available_aiv_count") ? "rt_available_aiv_count()"
+                                                    : "rt_available_cluster_count()";
+  }
+
   [[nodiscard]] std::string RenderLaunchCoreNum(const ExprPtr& expr) const {
     if (auto ci = As<ConstInt>(expr)) {
       return std::to_string(ci->value_);
+    }
+    // A launch-shape query used directly as core_num (`pl.spmd(
+    // pl.system.available_cluster_count())`) — no binding statement exists, so
+    // render the helper inline.
+    if (auto call = As<Call>(expr)) {
+      if (IsOp(call, "system.available_cluster_count") || IsOp(call, "system.available_aiv_count")) {
+        return RenderAvailableCoreCount(call);
+      }
     }
     // Var/IterArg or composite index arithmetic (BinaryExpr/UnaryExpr). Keep a
     // core_num-specific diagnostic here rather than falling through to
@@ -2214,7 +2238,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                             std::dynamic_pointer_cast<const UnaryExpr>(expr) != nullptr;
     INTERNAL_CHECK_SPAN(renderable, expr->span_)
         << "Unsupported core_num expression kind for orchestration codegen: "
-        << "expected ConstInt, Var, or composite index arithmetic, got kind="
+        << "expected ConstInt, Var, a launch-shape query, or composite index arithmetic, got kind="
         << static_cast<int>(expr->GetKind());
     return GenerateExprString(expr);
   }

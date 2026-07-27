@@ -628,5 +628,93 @@ class test_program:
         ir.assert_structural_equal(Before, reparsed)
 
 
+class TestLaunchShapeQueryParsing:
+    """Parsing / round-trip for the SPMD launch-shape queries.
+
+    ``pl.system.available_cluster_count()`` / ``available_aiv_count()`` read the
+    run's own device geometry, so an SPMD launch can size itself on the device
+    rather than on a literal baked at compile time.
+    """
+
+    def test_available_cluster_count_round_trip(self):
+        """pl.system.available_cluster_count() binds a Scalar[INT32] and round-trips."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                n = pl.system.available_cluster_count()  # noqa: F841 — the DSL parser binds it
+                pl.system.fence()
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.available_cluster_count()" in printed
+        assert "n: pl.Scalar[pl.INT32]" in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_available_aiv_count_round_trip(self):
+        """pl.system.available_aiv_count() binds a Scalar[INT32] and round-trips."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                n = pl.system.available_aiv_count()  # noqa: F841 — the DSL parser binds it
+                pl.system.fence()
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.available_aiv_count()" in printed
+        assert "n: pl.Scalar[pl.INT32]" in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_spmd_launch_width_attr_round_trips(self):
+        """As an SPMD width the query lands in the Spmd wrapper's ``attrs["core_num"]``.
+
+        The outliner moves the launch width onto a synthesized ``Spmd`` function,
+        where the printer emits the call itself. Recovering it needs the
+        decorator-level ``attrs={...}`` parser, not the statement parser the
+        tests above cover.
+        """
+        from pypto import passes  # noqa: PLC0415
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t = pl.load(x, [0, 0], [64, 64])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(pl.system.available_cluster_count(), sync_start=True):
+                    out = self.kernel(x, out)
+                return out
+
+        outlined = passes.outline_cluster_scopes()(passes.convert_to_ssa()(Before))
+        printed = outlined.as_python()
+        assert 'attrs={"core_num": pl.system.available_cluster_count()' in printed, printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(outlined, reparsed)
+
+    def test_ir_level_result_type(self):
+        """The IR wrappers deduce Scalar[INT32] — the type pl.spmd's core_num accepts."""
+        for call in (system_ops.available_cluster_count(), system_ops.available_aiv_count()):
+            assert isinstance(call, ir.Call)
+            assert isinstance(call.type, ir.ScalarType)
+            assert call.type.dtype == DataType.INT32
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

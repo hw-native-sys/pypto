@@ -8,7 +8,7 @@
 | ---- | ---- | ---- | -------- |
 | **TensorOp** | TensorType | 支持广播的 N 维张量 (Tensor) 操作 | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | 硬件优化的 Tile 操作 | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType | 流水线屏障和同步 | `src/ir/op/sync_ops/sync.cpp` |
+| **SyncOp** | UnknownType（屏障）；ScalarType（task / 启动形状查询） | 流水线屏障、同步、TaskId 与 SPMD 启动形状查询 | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV 跨核通信 | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **主要特性**：流式 API、自动类型推导、kwargs 元数据、NumPy 风格广播、类型提升、动态维度（`kDynamicDim`）
@@ -16,12 +16,6 @@
 ## 类型系统
 
 ```cpp
-// TensorType: N-dimensional tensors
-TensorType(DataType::FP32, {dim1, dim2, dim3, ...})
-
-// TileType: Hardware-optimized tiles
-TileType(DataType::FP16, {dim1, dim2})
-
 // Dynamic dimensions (pypto/core/common.h)
 constexpr int64_t kDynamicDim = -1;
 auto dynamic_dim = make_int(kDynamicDim);
@@ -338,6 +332,8 @@ with ib.function("tile_computation") as f:
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
 | `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
+| `system.available_cluster_count` | 本次运行的 MIX cluster（= AIC）数，由设备读回。结果为 `Scalar[INT32]` | 无 |
+| `system.available_aiv_count` | 本次运行的独立 AIV 核数，由设备读回。结果为 `Scalar[INT32]` | 无 |
 
 `system.syncall` 有两种 mode。**hard** 形态（`mode="hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block）**且带 `sync_start=True`**（使所有 block 同时驻留——非 sync_start 启动可能分波次派发 block 而使屏障死锁），否则屏障死锁（AICore 错误 507018）。**soft** 形态（`mode="soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。`gm_workspace` 是共享、清零的 GM `INT32` tensor，含 `used_cores * 8` 个 slot（请作为 kernel 参数传入，使所有 block 共享同一缓冲）；暂存 tile 由编译器合成；`used_cores` 是参与核数。soft 形态对每种 `core_type` 都支持，operand 随参与核集合而不同：
 
@@ -348,6 +344,8 @@ with ib.function("tile_computation") as f:
 扁平 L1 暂存 tile 通过 `pl.tile.create(..., target_memory=pl.Mem.Mat, flat_layout=True)` 创建，保持连续的 `slayout=none_box` 布局（普通的 boxed NZ Mat tile 会错位 8 个 int32 计数槽）。
 
 统一的 `mode=` 关键字 API（`mode="hard"` / `mode="soft"`）是 **DSL** 层接口（`pl.system.syncall`）。`pypto.ir.op.system` 下的 Python IR 辅助函数则是拆开的：`syncall(core_type=...)` 构造 hard 形态，`syncall_soft(core_type, args)` 构造 soft 形态。
+
+`system.available_cluster_count` / `system.available_aiv_count` 是 SPMD **启动形状查询**：把它作为 `pl.spmd(...)` 的 `core_num` 传入，启动宽度即按本次运行落到的设备自适应。Orchestration codegen 分别下沉为 `rt_available_cluster_count()` / `rt_available_aiv_count()`。混合（AIC+AIV）或纯 cube kernel 用 cluster 数（每个 core-group 一个 block），纯 vector kernel 用 AIV 数。这是唯一能跨设备保持满占用的启动宽度，而 hard `system.syncall` 正需要满占用；`HardSyncallOccupancy` verifier 对这类宽度不再做数量比较，并会拒绝用错核类型的查询。请把调用内联传入（`pl.spmd(pl.system.available_cluster_count())`），不要先绑定到变量名——变量名会以「定义在调用方的变量」形式落到外提出的 `Spmd` 包装函数上，IR printer 无法重新解析。源码：`src/ir/op/sync_ops/launch.cpp`。
 
 `system.task_invalid` 返回类型为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。当 Python 字面量 `None` 出现在 TaskId 位置（`deps=[None]` 条目或 TaskId 循环 iter_arg 种子）时，它就是 `None` 在 `with pl.manual_scope():` 区域内的下沉目标。不存在 `system.task_id_of` op —— producer task id 由 `pl.submit(...)` parser construct 返回的二元组第二个元素获得，而非来自 builtin。源码：`src/ir/op/sync_ops/task.cpp`。
 

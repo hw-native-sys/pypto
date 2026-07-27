@@ -62,6 +62,8 @@ __all__ = [
     "tfree_to_aiv",
     "task_invalid",
     "task_dummy",
+    "available_cluster_count",
+    "available_aiv_count",
 ]
 
 
@@ -370,3 +372,57 @@ def task_dummy(*, deps: Sequence[Scalar | Array | None]) -> Scalar:
         "pl.system.task_dummy is a DSL parser construct and cannot be called directly; "
         "use it as `barrier = pl.system.task_dummy(deps=[task_id])` inside a @pl.function body."
     )
+
+
+def available_cluster_count(*, span: Span | None = None) -> Scalar:
+    """This run's MIX cluster (= AIC) count, as reported by the runtime.
+
+    Use it as the ``core_num`` of a mixed (AIC+AIV) or cube-only
+    ``pl.spmd`` launch instead of a literal: the count belongs to the device
+    the run lands on, so a baked-in literal under- or over-fills the launch on
+    any device with a different usable cluster count. A hard
+    ``pl.system.syncall`` needs full occupancy to complete, so this is the only
+    launch width that keeps it deadlock-free across devices.
+
+    Codegen lowers it to the orchestration helper ``rt_available_cluster_count()``.
+
+    Args:
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.INT32]`` wrapping the ``system.available_cluster_count`` IR call.
+
+    Example:
+        >>> with pl.spmd(pl.system.available_cluster_count(), sync_start=True):
+        ...     out = self.mixed_kernel(a, b, out)
+
+    Pass the call directly as ``core_num`` as shown. Binding it to a name first
+    (``n = pl.system.available_cluster_count()``) also compiles, but the launch
+    width then reaches the outlined Spmd wrapper as a reference to a variable in
+    the caller, which the IR printer cannot re-parse.
+    """
+    call = _ir_ops.available_cluster_count(span=span)
+    return Scalar(DataType.INT32, call)
+
+
+def available_aiv_count(*, span: Span | None = None) -> Scalar:
+    """This run's standalone AIV core count, as reported by the runtime.
+
+    The AIV counterpart of :func:`available_cluster_count` — the ``core_num``
+    of a vector-only ``pl.spmd`` launch. A mixed launch sizes itself on
+    :func:`available_cluster_count` (one block per cluster), not on this.
+
+    Codegen lowers it to the orchestration helper ``rt_available_aiv_count()``.
+
+    Args:
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.INT32]`` wrapping the ``system.available_aiv_count`` IR call.
+
+    Example:
+        >>> with pl.spmd(pl.system.available_aiv_count(), sync_start=True):
+        ...     out = self.aiv_kernel(a, b, out)
+    """
+    call = _ir_ops.available_aiv_count(span=span)
+    return Scalar(DataType.INT32, call)

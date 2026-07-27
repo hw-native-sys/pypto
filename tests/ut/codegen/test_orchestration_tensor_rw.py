@@ -586,6 +586,57 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t0.launch_spec.set_block_num(4);" in code
         assert "params_t0.launch_spec.set_require_sync_start(true);" in code
 
+    def test_spmd_launch_width_from_runtime_query(self):
+        """``pl.spmd(pl.system.available_cluster_count())`` sizes the launch on device.
+
+        The width is a property of the run, not of the program, so it lowers to
+        the orchestration helper rather than a baked literal.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdQueryProgram:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(pl.system.available_cluster_count(), sync_start=True):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdQueryProgram))
+            )
+        )
+        code = _generate_orch_code(transformed)
+
+        assert "params_t0.launch_spec.set_block_num(rt_available_cluster_count());" in code, code
+        assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code
+
     def test_spmd_mixed_multi_out_single_return_alias_targets_actual_return(self):
         """SPMD mixed kernel with multiple Out params + single return must alias the
         call-site result SSA to the Out parameter that the kernel actually returns,

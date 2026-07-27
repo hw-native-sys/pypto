@@ -8,7 +8,7 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 | -------- | ----- | -------- | ------------- |
 | **TensorOp** | TensorType | N-D tensor operations with broadcasting | `src/ir/op/tensor_ops/` |
 | **TileOp** | TileType | Hardware-optimized tile operations | `src/ir/op/tile_ops/` |
-| **SyncOp** | UnknownType | Pipeline barriers and synchronization | `src/ir/op/sync_ops/sync.cpp` |
+| **SyncOp** | UnknownType (barriers); ScalarType (task / launch queries) | Pipeline barriers, synchronization, TaskId and SPMD launch-shape queries | `src/ir/op/sync_ops/` |
 | **CrossCoreOp** | UnknownType/TileType | AIC↔AIV cross-core communication | `src/ir/op/sync_ops/cross_core.cpp` |
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
@@ -16,12 +16,6 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 ## Type System
 
 ```cpp
-// TensorType: N-dimensional tensors
-TensorType(DataType::FP32, {dim1, dim2, dim3, ...})
-
-// TileType: Hardware-optimized tiles
-TileType(DataType::FP16, {dim1, dim2})
-
 // Dynamic dimensions (pypto/core/common.h)
 constexpr int64_t kDynamicDim = -1;
 auto dynamic_dim = make_int(kDynamicDim);
@@ -344,6 +338,8 @@ with ib.function("tile_computation") as f:
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
+| `system.available_cluster_count` | This run's MIX cluster (= AIC) count, read from the device. Result `Scalar[INT32]` | None |
+| `system.available_aiv_count` | This run's standalone AIV core count, read from the device. Result `Scalar[INT32]` | None |
 
 `system.syncall` has two modes. The **hard** form (`mode="hard"`, default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (`mode="soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor with `used_cores * 8` slots (pass it as a kernel parameter so all blocks share one buffer); the scratch tile(s) are compiler-synthesized local staging buffers; `used_cores` is the participant count. Soft mode is supported for every `core_type`, with operands that vary by participant set:
 
@@ -354,6 +350,8 @@ with ib.function("tile_computation") as f:
 The flat L1 staging tile is created via `pl.tile.create(..., target_memory=pl.Mem.Mat, flat_layout=True)`, which keeps the contiguous `slayout=none_box` layout (a normal boxed NZ Mat tile would mis-place the 8-int32 counter slots).
 
 The unified `mode=` keyword API (`mode="hard"` / `mode="soft"`) is the **DSL** surface (`pl.system.syncall`). The Python IR helpers under `pypto.ir.op.system` are split instead: `syncall(core_type=...)` builds the hard form and `syncall_soft(core_type, args)` builds the soft form.
+
+`system.available_cluster_count` / `system.available_aiv_count` are the SPMD **launch-shape queries**: pass one as `pl.spmd(...)`'s `core_num` so the launch sizes itself on the device the run lands on. Orchestration codegen lowers them to `rt_available_cluster_count()` / `rt_available_aiv_count()`. Use the cluster count for a mixed (AIC+AIV) or cube-only kernel — one block per core-group — and the AIV count for a vector-only kernel. This is the only launch width that stays at full occupancy across devices, which the hard `system.syncall` requires; the `HardSyncallOccupancy` verifier accepts these widths without a count comparison and rejects the query for the *other* core type. Pass the call inline (`pl.spmd(pl.system.available_cluster_count())`) rather than binding it to a name first — a name reaches the outlined `Spmd` wrapper as a variable defined in the caller, which the IR printer cannot re-parse. Source: `src/ir/op/sync_ops/launch.cpp`.
 
 `system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
 
