@@ -223,11 +223,14 @@ int GetGMPipeSlotCount(int dir_mask) {
 //   * `tile.assemble` (`set_output_memory_inherit_input()`): the result is the
 //     target with one window overwritten — written in place so the out-of-window
 //     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
-//     not an unsupported Mat->Mat preservation copy).
+//     not an unsupported Mat->Mat preservation copy);
+//   * `tile.tget_scale_addr` (`set_output_reuses_input(0)`): rebinds the scale
+//     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale.
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
-  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble");
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
+         ir::IsOp(op, "tile.tget_scale_addr");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
@@ -871,6 +874,13 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   indent_level_--;
   stream_ << "  }\n";
+
+  // Deferred Mat→LeftScale/RightScale fills must be flushed by the bind-then-fill
+  // sequence before the function ends; an unflushed fill would leave the scale
+  // tile allocated but unwritten.
+  INTERNAL_CHECK(!HasPendingScaleFills())
+      << "Internal error: unflushed deferred scale fill at end of function — a "
+         "tile.move to LeftScale/RightScale requires a matching tget_scale_addr";
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
@@ -1329,6 +1339,47 @@ const PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterializat
   auto it = fs_.subview_materializations.find(subview_ssa);
   return it != fs_.subview_materializations.end() ? &it->second : nullptr;
 }
+
+void PTOCodegen::RegisterPendingScaleFill(const std::string& dst_ssa, PendingScaleFill fill) {
+  fs_.pending_scale_fills[dst_ssa] = std::move(fill);
+}
+
+bool PTOCodegen::HasPendingScaleFill(const std::string& dst_ssa) const {
+  return fs_.pending_scale_fills.find(dst_ssa) != fs_.pending_scale_fills.end();
+}
+
+void PTOCodegen::RegisterPendingSetValidShape(const std::string& dst_ssa, PendingSetValidShape pending) {
+  fs_.pending_set_validshapes[dst_ssa] = std::move(pending);
+}
+
+std::optional<PTOCodegen::PendingScaleFill> PTOCodegen::TakePendingScaleFill(const std::string& dst_ssa) {
+  auto it = fs_.pending_scale_fills.find(dst_ssa);
+  if (it == fs_.pending_scale_fills.end()) return std::nullopt;
+  PendingScaleFill fill = std::move(it->second);
+  fs_.pending_scale_fills.erase(it);
+  return fill;
+}
+
+std::optional<PTOCodegen::PendingSetValidShape> PTOCodegen::TakePendingSetValidShape(
+    const std::string& dst_ssa) {
+  auto it = fs_.pending_set_validshapes.find(dst_ssa);
+  if (it == fs_.pending_set_validshapes.end()) return std::nullopt;
+  PendingSetValidShape pending = std::move(it->second);
+  fs_.pending_set_validshapes.erase(it);
+  return pending;
+}
+
+void PTOCodegen::DeferTFree(const std::string& core, int split) {
+  fs_.deferred_tfrees.push_back({core, split});
+}
+
+std::vector<PTOCodegen::DeferredTFree> PTOCodegen::TakeDeferredTFrees() {
+  std::vector<DeferredTFree> out = std::move(fs_.deferred_tfrees);
+  fs_.deferred_tfrees.clear();
+  return out;
+}
+
+bool PTOCodegen::HasPendingScaleFills() const { return !fs_.pending_scale_fills.empty(); }
 
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype) {
   CHECK(dtype == DataType::FP32) << "__gm_pipe_buffer must use FP32 elements, got " << dtype.ToString();

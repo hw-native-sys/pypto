@@ -330,11 +330,32 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
                                       << " into shape with size " << new_product;
   }
 
-  // Return new TileType with reshaped dimensions and same dtype
+  // Return new TileType with reshaped dimensions and same dtype.
+  // Default: re-infer blayout from the *new* shape (e.g. [N,1] col → [1,N] row).
+  // Unconditionally inheriting source layout breaks rmsnorm / mixed matmul
+  // (boxed↔none_box treshape, col-major none_box 32B alignment).
+  // Exception: MX scale Mat (fractal=32 row/row or col/col) must keep layout so
+  // a subsequent ui8→FP8E8M0 reinterpret_view stays legal.
   TileView tile_view;
+  if (tile_type->tile_view_.has_value()) {
+    const auto& src_v = *tile_type->tile_view_;
+    const bool is_mx_scale_box =
+        src_v.fractal == 32 &&
+        ((src_v.blayout == TileLayout::row_major && src_v.slayout == TileLayout::row_major) ||
+         (src_v.blayout == TileLayout::col_major && src_v.slayout == TileLayout::col_major));
+    if (is_mx_scale_box) {
+      tile_view.blayout = src_v.blayout;
+      tile_view.slayout = src_v.slayout;
+      tile_view.fractal = src_v.fractal;
+      tile_view.pad = src_v.pad;
+    } else {
+      tile_view.blayout = InferTileLayoutFromShape(new_shape);
+      tile_view.pad = src_v.pad;
+    }
+  } else {
+    tile_view.blayout = InferTileLayoutFromShape(new_shape);
+  }
   tile_view.valid_shape = new_shape;
-
-  tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -352,9 +373,32 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
       << kOpName << " requires a tile rank >= 1, but got " << tile_type->shape_.size();
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  // FP8E5M2 is not executable on the Ascend950 backend; reject reinterpret
+  // early so MX paths cannot pick E5M2 by accident and hit a hardware error at
+  // run time. MX data uses FP8E4M3FN; MX scale uses FP8E8M0.
+  CHECK_SPAN(target_dtype != DataType::FP8E5M2 && tile_type->dtype_ != DataType::FP8E5M2, args[0]->span_)
+      << kOpName
+      << ": FP8E5M2 is not supported by the Ascend950 backend; use FP8E4M3FN "
+         "for MX data or FP8E8M0 for MX scale";
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box, args[0]->span_)
-      << kOpName << " only supports flat tiles with slayout=none_box; boxed/fractal tiles are unsupported";
+  const bool is_flat_none_box = source_view.slayout == TileLayout::none_box;
+  // MX scale Mat tiles use fractal=32 boxed layout; allow same-byte-width
+  // reinterpret (ui8↔FP8E8M0) there because pto.treshape rejects !pto.f8E8M0 and
+  // [M,K/32] cannot be none_box (row bytes < 32).
+  const bool is_mx_scale_box =
+      source_view.fractal == 32 &&
+      ((source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::row_major) ||
+       (source_view.blayout == TileLayout::col_major && source_view.slayout == TileLayout::col_major));
+  CHECK_SPAN(is_flat_none_box || is_mx_scale_box, args[0]->span_)
+      << kOpName
+      << " only supports flat tiles with slayout=none_box, or MX scale fractal=32 "
+         "boxed tiles; got slayout="
+      << static_cast<int>(source_view.slayout) << " fractal=" << source_view.fractal;
+  if (is_mx_scale_box) {
+    CHECK_SPAN(tile_type->dtype_.GetByte() == target_dtype.GetByte(), args[0]->span_)
+        << kOpName << " on MX scale boxed tiles requires equal source/target byte widths, got "
+        << tile_type->dtype_.ToString() << " -> " << target_dtype.ToString();
+  }
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
              args[0]->span_)
       << kOpName << " requires row_major or col_major blayout";

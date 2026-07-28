@@ -278,6 +278,13 @@ static std::string MakeTfreeCodegenPTO(const char* target, const CallPtr& op,
          "run before codegen to copy it from the originating tpop";
   const int split = op->GetKwarg<int>("split", 0);
 
+  // Deferred Mat→Scale fills still alias the V2C tpop FIFO (A5 cannot Mat→Mat
+  // copy). Hold the slot until tget_scale_addr flushes the pending tmov.
+  if (codegen.HasPendingScaleFills()) {
+    codegen.DeferTFree(target, split);
+    return "";
+  }
+
   std::ostringstream oss;
   oss << "pto.tfree_from_" << target << " " << FormatFrontendPipeAttrs(op, split);
   codegen.Emit(oss.str());

@@ -30,6 +30,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -257,6 +258,116 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
 }
 
+static void CheckMxScaleTile(const TileTypePtr& scale_type, const ExprPtr& expected_rows,
+                             const ExprPtr& expected_cols, const std::string& op_name,
+                             const char* scale_name) {
+  CHECK(scale_type) << "The operator " << op_name << " requires " << scale_name << " to be a TileType";
+  CHECK(scale_type->dtype_ == DataType::FP8E8M0)
+      << "The operator " << op_name << " requires " << scale_name << " dtype FP8E8M0, but got "
+      << scale_type->dtype_.ToString();
+  CHECK(scale_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires " << scale_name << " to be 2D, but got "
+      << scale_type->shape_.size() << " dimensions";
+
+  auto er = As<ConstInt>(expected_rows);
+  auto ec = As<ConstInt>(expected_cols);
+  auto sr = As<ConstInt>(scale_type->shape_[0]);
+  auto sc = As<ConstInt>(scale_type->shape_[1]);
+  if (scale_type->tile_view_.has_value() && scale_type->tile_view_->valid_shape.size() >= 2) {
+    auto vsr = As<ConstInt>(scale_type->tile_view_->valid_shape[0]);
+    auto vsc = As<ConstInt>(scale_type->tile_view_->valid_shape[1]);
+    if (vsr) sr = vsr;
+    if (vsc) sc = vsc;
+  }
+  if (er && sr) {
+    CHECK(er->value_ == sr->value_) << "The operator " << op_name << " requires " << scale_name
+                                    << " rows=" << er->value_ << ", but got " << sr->value_;
+  }
+  if (ec && sc) {
+    CHECK(ec->value_ == sc->value_) << "The operator " << op_name << " requires " << scale_name
+                                    << " cols=" << ec->value_ << ", but got " << sc->value_;
+  }
+}
+
+static ExprPtr MxScaleKFromK(const ExprPtr& k_dim, const std::string& op_name) {
+  auto k_const = As<ConstInt>(k_dim);
+  if (k_const) {
+    CHECK(k_const->value_ > 0 && k_const->value_ % 32 == 0)
+        << "The operator " << op_name
+        << " requires K divisible by 32 for MX block-scale, but got K=" << k_const->value_;
+    return std::make_shared<ConstInt>(k_const->value_ / 32, DataType::INDEX, Span::unknown());
+  }
+  return nullptr;
+}
+
+TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  CHECK(args.size() == 4) << "The operator " << op_name
+                          << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
+                          << args.size();
+
+  auto lhs_type = As<TileType>(args[0]->GetType());
+  auto lhs_scale_type = As<TileType>(args[1]->GetType());
+  auto rhs_type = As<TileType>(args[2]->GetType());
+  auto rhs_scale_type = As<TileType>(args[3]->GetType());
+
+  CHECK(lhs_type) << "The operator " << op_name << " requires lhs to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(rhs_type) << "The operator " << op_name << " requires rhs to be a TileType, but got "
+                  << args[2]->GetType()->TypeName();
+  CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires 2D lhs/rhs tiles";
+  CHECK(lhs_type->dtype_ == DataType::FP8E4M3FN)
+      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
+      << lhs_type->dtype_.ToString();
+  CHECK(rhs_type->dtype_ == DataType::FP8E4M3FN)
+      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
+      << rhs_type->dtype_.ToString();
+
+  ExprPtr m_dim = lhs_type->shape_[0];
+  ExprPtr k_dim_lhs = lhs_type->shape_[1];
+  ExprPtr k_dim_rhs = rhs_type->shape_[0];
+  ExprPtr n_dim = rhs_type->shape_[1];
+
+  ExprPtr m_valid = m_dim;
+  ExprPtr k_valid_lhs = k_dim_lhs;
+  ExprPtr n_valid = n_dim;
+  if (lhs_type->tile_view_.has_value()) {
+    const auto& vs = lhs_type->tile_view_->valid_shape;
+    if (vs.size() >= 1 && vs[0]) m_valid = vs[0];
+    if (vs.size() >= 2 && vs[1]) k_valid_lhs = vs[1];
+  }
+  if (rhs_type->tile_view_.has_value()) {
+    const auto& vs = rhs_type->tile_view_->valid_shape;
+    if (vs.size() >= 2 && vs[1]) n_valid = vs[1];
+  }
+
+  auto k_lhs_const = As<ConstInt>(k_dim_lhs);
+  auto k_rhs_const = As<ConstInt>(k_dim_rhs);
+  if (k_lhs_const && k_rhs_const) {
+    CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+        << "The operator " << op_name << " requires matching K, but got lhs K=" << k_lhs_const->value_
+        << " and rhs K=" << k_rhs_const->value_;
+  }
+
+  ExprPtr scale_k = MxScaleKFromK(k_valid_lhs, op_name);
+  if (!scale_k) {
+    CHECK(lhs_scale_type && lhs_scale_type->shape_.size() == 2);
+    scale_k = lhs_scale_type->shape_[1];
+  }
+  CheckMxScaleTile(lhs_scale_type, m_valid, scale_k, op_name, "lhs_scale");
+  CheckMxScaleTile(rhs_scale_type, scale_k, n_valid, op_name, "rhs_scale");
+
+  std::vector<ExprPtr> output_shape = {m_dim, n_dim};
+  TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
+  tile_view.valid_shape = {m_valid, n_valid};
+  return std::make_shared<TileType>(output_shape, DataType::FP32, std::nullopt, tile_view);
+}
+
 // ============================================================================
 // Registration Function for Block Matrix Multiplication Operations
 // ============================================================================
@@ -303,6 +414,23 @@ REGISTER_OP("tile.matmul_bias")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulBiasType(args, kwargs, "tile.matmul_bias");
+    });
+
+REGISTER_OP("tile.matmul_mx")
+    .set_op_category("TileOp")
+    .set_description("MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0, [M, K/32])")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0, [K/32, N])")
+    .set_input_memory(0, MemorySpace::Left)
+    .set_input_memory(1, MemorySpace::LeftScale)
+    .set_input_memory(2, MemorySpace::Right)
+    .set_input_memory(3, MemorySpace::RightScale)
+    .set_output_memory(MemorySpace::Acc)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMatMulMxType(args, kwargs, "tile.matmul_mx");
     });
 
 REGISTER_OP("tile.gemv")

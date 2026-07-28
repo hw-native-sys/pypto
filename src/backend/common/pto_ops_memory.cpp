@@ -106,13 +106,41 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_) << "tile.load requires assignment target (tile_buf)";
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
+
+  // MX scale loads: default EmitMakeTensorViews uses layout=nd, but PTOAS
+  // InferPTOLayout prefers mx_a_zz/mx_b_nn for !pto.f8E8M0 Mat+fractal=32 and
+  // rejects the ND/user conflict. Rebind a make_tensor_view with the MX layout
+  // (same physical ND strides) so EmitC yields Layout::MX_* for TLoadMxCube*.
+  const std::string mx_layout = op->GetKwarg<std::string>("mx_layout", "none");
+  const bool is_mx_load = (mx_layout == "mx_a_zz" || mx_layout == "mx_a_nd" || mx_layout == "mx_a_dn" ||
+                           mx_layout == "mx_b_nn" || mx_layout == "mx_b_nd" || mx_layout == "mx_b_dn");
+  INTERNAL_CHECK_SPAN(mx_layout == "none" || mx_layout.empty() || is_mx_load, op->span_)
+      << "tile.load mx_layout must be none or one of "
+         "{mx_a_zz,mx_a_nd,mx_a_dn,mx_b_nn,mx_b_nd,mx_b_dn}, got "
+      << mx_layout;
+  std::string tensor_view;
+  if (is_mx_load) {
+    INTERNAL_CHECK_SPAN(tensor_type->shape_.size() == 2, op->span_)
+        << "tile.load mx_layout requires a 2D tensor, got rank " << tensor_type->shape_.size();
+    std::string src_ptr = codegen.GetTensorBasePtr(tensor);
+    std::string rows_code = codegen.GetExprAsCode(tensor_type->shape_[0]);
+    std::string cols_code = codegen.GetExprAsCode(tensor_type->shape_[1]);
+    std::string one_code = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+    tensor_view = codegen.NewNamedTemp(tensor->name_hint_ + "_mx_view");
+    std::ostringstream mv;
+    mv << tensor_view << " = pto.make_tensor_view " << src_ptr << ", shape = [" << rows_code << ", "
+       << cols_code << "], strides = [" << cols_code << ", " << one_code << "] {layout = #pto.layout<"
+       << mx_layout << ">}: " << tensor_view_type;
+    codegen.Emit(mv.str());
+  } else {
+    tensor_view = codegen.GetOrCreateTensorView(tensor);
+  }
 
   // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
   // canonical coordinates (matching the source TensorType's shape). There is
@@ -129,6 +157,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
+  if (is_mx_load) {
+    tload_line << " {layout = #pto.layout<" << mx_layout << ">}";
+  }
   codegen.Emit(tload_line.str());
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
@@ -193,14 +224,50 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
                                           partition_type, GetIndexOffsetCodes(offset_elems, codegen),
                                           GetSizeCodes(shape_elems, codegen), codegen);
   } else {
-    // Standard 1D/2D path
-    std::string height_dim = "?", width_dim = "?";
-    if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
-    if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
-    partition_type = MakePartitionTensorViewType({height_dim, width_dim}, dtype_str);
-    partition_view = EmitPartitionViewPTO(
-        output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
-        GetIndexOffsetCodes(offsets_tuple->elements_, codegen), {height_code, width_code}, codegen);
+    // Flat MX scale store: tile [1, G] into tensor [M, K/32] with G == M*(K/32).
+    // Using the tensor's 2D strides with a [1, G] partition mis-strides each
+    // row (cols=K/32) and corrupts GM. Rebind a contiguous [1, G] view so the
+    // tstore writes the same row-major bytes mx_a_zz later reloads as [M, K/32].
+    bool flat_into_2d = false;
+    if (tensor_rank == 2 && offsets_tuple->elements_.size() == 2) {
+      auto th = As<ir::ConstInt>(valid_shape[0]);
+      auto tw = As<ir::ConstInt>(valid_shape[1]);
+      auto tr = As<ir::ConstInt>(tensor_type->shape_[0]);
+      auto tc = As<ir::ConstInt>(tensor_type->shape_[1]);
+      if (th && tw && tr && tc && th->value_ == 1 && tw->value_ == tr->value_ * tc->value_ &&
+          tw->value_ > tc->value_) {
+        auto off0 = As<ir::ConstInt>(offsets_tuple->elements_[0]);
+        auto off1 = As<ir::ConstInt>(offsets_tuple->elements_[1]);
+        INTERNAL_CHECK_SPAN(off0 && off1 && off0->value_ == 0 && off1->value_ == 0, op->span_)
+            << "tile.store flat MX scale into 2D tensor requires offsets [0, 0], got non-zero "
+               "or dynamic offsets";
+        flat_into_2d = true;
+        std::string src_ptr = codegen.GetTensorBasePtr(output_tensor);
+        std::string g_code = codegen.GetOrEmitConstant(tw->value_, DataType::INDEX);
+        std::string one_code = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+        tensor_view = codegen.NewNamedTemp(output_tensor->name_hint_ + "_flat_store_view");
+        std::ostringstream mv;
+        mv << tensor_view << " = pto.make_tensor_view " << src_ptr << ", shape = [" << one_code << ", "
+           << g_code << "], strides = [" << g_code << ", " << one_code
+           << "] {layout = #pto.layout<nd>}: " << tensor_view_type;
+        codegen.Emit(mv.str());
+        partition_type = MakePartitionTensorViewType({"1", std::to_string(tw->value_)}, dtype_str);
+        // Offsets stay [0, 0] in the flattened view (caller still passes 2D zeros).
+        std::string z0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+        partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
+                                              partition_type, {z0, z0}, {one_code, g_code}, codegen);
+      }
+    }
+    if (!flat_into_2d) {
+      // Standard 1D/2D path
+      std::string height_dim = "?", width_dim = "?";
+      if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
+      if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
+      partition_type = MakePartitionTensorViewType({height_dim, width_dim}, dtype_str);
+      partition_view = EmitPartitionViewPTO(
+          output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
+          GetIndexOffsetCodes(offsets_tuple->elements_, codegen), {height_code, width_code}, codegen);
+    }
   }
 
   std::ostringstream tstore_line;

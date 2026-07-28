@@ -15,6 +15,7 @@
  */
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -26,9 +27,11 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -427,8 +430,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
-    {"tile.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
-    {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
     // tile.matmul_acc and tile.gemv_acc have custom codegen (in-place accumulation)
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     {"tile.gemv",            "pto.tgemv",            2},
@@ -493,25 +494,229 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // RowMajor while AIC TPOP expects Mat ColMajor — silent numerical FAIL.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
+    CHECK(op->args_.size() == 1 || op->args_.size() == 2)
+        << "tile.move requires 1 or 2 arguments (tile[, target_shape]), got " << op->args_.size();
+    // target_shape (args[1]) is type-only metadata consumed by DeduceTileMoveType.
+    // When src/dst physical shapes differ (Mat→LeftScale reshape of flat scale),
+    // plain tmov is rejected for MAT sources; emit treshape view + tmov instead.
+
+    auto emit_tmov = [&](const std::string& src, const std::string& src_ty, const std::string& dst,
+                         const std::string& dst_ty) {
+      std::ostringstream oss;
+      oss << "pto.tmov ins(" << src;
+      if (!src_ty.empty()) {
+        oss << " : " << src_ty;
+      }
+      oss << ") outs(" << dst;
+      if (!dst_ty.empty()) {
+        oss << " : " << dst_ty;
+      }
+      oss << ")";
+      codegen.Emit(oss.str());
+    };
+
+    auto emit_move = [&]() {
+      std::string src = codegen.GetExprAsCode(op->args_[0]);
+      std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+      std::string dst = codegen.GetCurrentResultTarget();
+      std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
+
+      const bool is_reshape_move = op->args_.size() == 2;
+      if (is_reshape_move) {
+        auto src_tile = As<ir::TileType>(op->args_[0]->GetType());
+        auto dst_var = codegen.GetCurrentResultVar();
+        auto dst_tile = dst_var ? As<ir::TileType>(dst_var->GetType()) : nullptr;
+        if (src_tile && dst_tile && src_tile->shape_.size() == 2 && dst_tile->shape_.size() == 2) {
+          auto sr = As<ir::ConstInt>(src_tile->shape_[0]);
+          auto sc = As<ir::ConstInt>(src_tile->shape_[1]);
+          auto dr = As<ir::ConstInt>(dst_tile->shape_[0]);
+          auto dc = As<ir::ConstInt>(dst_tile->shape_[1]);
+          if (sr && sc && dr && dc && (sr->value_ != dr->value_ || sc->value_ != dc->value_)) {
+            auto dst_space = dst_tile->GetMemorySpace();
+            const bool dst_is_scale = dst_space.has_value() && (*dst_space == ir::MemorySpace::LeftScale ||
+                                                                *dst_space == ir::MemorySpace::RightScale);
+            if (dst_is_scale) {
+              // Canonical MX scale path (pto-isa TMov CommonCheckMX + ptoas):
+              // keep Mat staging as ui8, treshape flat→[M,K/32] in Mat, then
+              // tmov ui8 Mat → f8 LeftScale/RightScale. Mat↔Scaling treshape is
+              // rejected by ptoas (different loc); we do not rely on f8E8M0
+              // treshape. Prefer reshape from the *src SSA* (critical for
+              // MemRef-less V2C tpop — never alloc_tile at a guessed addr=0).
+              auto replace_dim = [](std::string ty, const char* key, int64_t val) {
+                std::string pat = std::string(key) + "=";
+                auto pos = ty.find(pat);
+                if (pos == std::string::npos) return ty;
+                auto start = pos + pat.size();
+                auto end = ty.find_first_of(",>", start);
+                if (end == std::string::npos) return ty;
+                ty.replace(start, end - start, std::to_string(val));
+                return ty;
+              };
+              auto replace_token = [](std::string ty, const char* key, const std::string& val) {
+                std::string pat = std::string(key) + "=";
+                auto pos = ty.find(pat);
+                if (pos == std::string::npos) return ty;
+                auto start = pos + pat.size();
+                auto end = ty.find_first_of(",>", start);
+                if (end == std::string::npos) return ty;
+                ty.replace(start, end - start, val);
+                return ty;
+              };
+              auto force_dyn_valid = [](std::string ty) {
+                auto pos = ty.find("v_row=");
+                if (pos != std::string::npos) {
+                  auto start = pos + 6;
+                  auto end = ty.find_first_of(",>", start);
+                  if (end != std::string::npos) {
+                    ty.replace(start, end - start, "?");
+                  }
+                }
+                pos = ty.find("v_col=");
+                if (pos != std::string::npos) {
+                  auto start = pos + 6;
+                  auto end = ty.find_first_of(",>", start);
+                  if (end != std::string::npos) {
+                    ty.replace(start, end - start, "?");
+                  }
+                }
+                return ty;
+              };
+
+              std::optional<int64_t> src_off;
+              if (src_tile->memref_.has_value()) {
+                if (auto off = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_)) {
+                  if (off->value_ >= 0) {
+                    src_off = off->value_;
+                  }
+                }
+              }
+
+              // Prefer ui8 SSA linked to the real payload. For f8 sources with a
+              // known MemRef offset, alias the same bytes as ui8 (treshape cannot
+              // touch f8E8M0). Never invent addr=0 for MemRef-less tpop.
+              const bool src_is_ui8 = src_ty.find("dtype=ui8") != std::string::npos;
+
+              std::string flat_ui8 = src;
+              std::string flat_ui8_ty = force_dyn_valid(src_ty);
+              if (!src_is_ui8) {
+                flat_ui8 = codegen.NewNamedTemp("move_scale_flat_ui8");
+                flat_ui8_ty = replace_token(flat_ui8_ty, "dtype", "ui8");
+                codegen.RegisterTileBufType(flat_ui8, flat_ui8_ty);
+                if (codegen.EmitTileAddr() && src_off.has_value()) {
+                  std::string addr = codegen.GetOrEmitConstant(*src_off, DataType::INT64);
+                  std::string vr = codegen.GetOrEmitConstant(sr->value_, DataType::INDEX);
+                  std::string vc = codegen.GetOrEmitConstant(sc->value_, DataType::INDEX);
+                  codegen.Emit(flat_ui8 + " = pto.alloc_tile addr = " + addr + " valid_row = " + vr +
+                               " valid_col = " + vc + " : " + flat_ui8_ty);
+                } else {
+                  INTERNAL_UNREACHABLE_SPAN(op->span_)
+                      << "tile.move target_shape→Scale requires ui8 Mat src "
+                         "(or f8 Mat with known MemRef); cannot reshape MemRef-less "
+                         "!pto.f8E8M0 tpop. Keep Mat staging as UINT8 so V2C tpop "
+                         "stays ui8 (canonical: ui8 reshape + ui8→f8 Scale tmov).";
+                }
+              }
+              // MemRef-less ui8 tpop: reshape in place (A5 rejects Mat→Mat tmov, so
+              // we cannot copy out of the FIFO). tfree is deferred while pending
+              // scale fills still alias the tpop SSA.
+
+              // Reshape destination: MX scale fractal=32 + Left/RightScale layout.
+              // ptoas requires Mat-source tmov to use matching src/dst shapes, so
+              // flat [1,groups] must treshape to [M,K/32] before Mat→Scale.
+              std::string mat_view_ui8_ty = flat_ui8_ty;
+              mat_view_ui8_ty = replace_dim(mat_view_ui8_ty, "rows", dr->value_);
+              mat_view_ui8_ty = replace_dim(mat_view_ui8_ty, "cols", dc->value_);
+              mat_view_ui8_ty = replace_token(mat_view_ui8_ty, "fractal", "32");
+              if (*dst_space == ir::MemorySpace::LeftScale) {
+                mat_view_ui8_ty = replace_token(mat_view_ui8_ty, "blayout", "row_major");
+                mat_view_ui8_ty = replace_token(mat_view_ui8_ty, "slayout", "row_major");
+              } else {
+                mat_view_ui8_ty = replace_token(mat_view_ui8_ty, "blayout", "col_major");
+                mat_view_ui8_ty = replace_token(mat_view_ui8_ty, "slayout", "col_major");
+              }
+              mat_view_ui8_ty = force_dyn_valid(mat_view_ui8_ty);
+
+              std::string view_ui8 = codegen.NewNamedTemp("move_scale_view_ui8");
+              codegen.RegisterTileBufType(view_ui8, mat_view_ui8_ty);
+              codegen.Emit(view_ui8 + " = pto.treshape " + flat_ui8 + " : " + flat_ui8_ty + " -> " +
+                           mat_view_ui8_ty);
+
+              // Defer tmov until tget_scale_addr rebinds Scale to GetScaleAddr.
+              // Works for owned Mat (GM load) and MemRef-less V2C tpop alike:
+              // FinalizeTpopTfrees keeps the source alive until the pending fill
+              // runs, then tfrees — provided the next tpop does not start before
+              // tget (caller must tget before another V2C). Immediate tmov here
+              // would write the provisional Scale addr and be wrong after tget.
+              codegen.RegisterPendingScaleFill(dst, {view_ui8, mat_view_ui8_ty});
+              return;
+            }
+
+            // Non-scale reshape: treshape view in src space, then tmov (legacy path).
+            auto replace_dim = [](std::string ty, const char* key, int64_t val) {
+              std::string pat = std::string(key) + "=";
+              auto pos = ty.find(pat);
+              if (pos == std::string::npos) return ty;
+              auto start = pos + pat.size();
+              auto end = ty.find_first_of(",>", start);
+              if (end == std::string::npos) return ty;
+              ty.replace(start, end - start, std::to_string(val));
+              return ty;
+            };
+            std::string view_ty = src_ty;
+            view_ty = replace_dim(view_ty, "rows", dr->value_);
+            view_ty = replace_dim(view_ty, "cols", dc->value_);
+            view_ty = replace_dim(view_ty, "v_row", dr->value_);
+            view_ty = replace_dim(view_ty, "v_col", dc->value_);
+            auto qpos = view_ty.find("v_row=?");
+            if (qpos != std::string::npos) {
+              view_ty.replace(qpos, 7, "v_row=" + std::to_string(dr->value_));
+            }
+            qpos = view_ty.find("v_col=?");
+            if (qpos != std::string::npos) {
+              view_ty.replace(qpos, 7, "v_col=" + std::to_string(dc->value_));
+            }
+            std::string view = codegen.NewNamedTemp("move_reshape_view");
+            codegen.RegisterTileBufType(view, view_ty);
+            codegen.Emit(view + " = pto.treshape " + src + " : " + src_ty + " -> " + view_ty);
+            emit_tmov(view, view_ty, dst, dst_ty);
+            return;
+          }
+        }
+      }
+      // Same-shape Mat→LeftScale/RightScale: defer tmov until tget_scale_addr
+      // rebinds the Scale tile (matches the target_shape pending-fill path).
+      if (auto dst_var = codegen.GetCurrentResultVar()) {
+        if (auto dst_tile = As<ir::TileType>(dst_var->GetType())) {
+          auto dst_space = dst_tile->GetMemorySpace();
+          if (dst_space.has_value() &&
+              (*dst_space == ir::MemorySpace::LeftScale || *dst_space == ir::MemorySpace::RightScale)) {
+            codegen.RegisterPendingScaleFill(dst, {src, src_ty});
+            return;
+          }
+        }
+      }
+      emit_tmov(src, src_ty, dst, dst_ty);
+    };
 
     // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
     // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
     // comparison below would see `-1 == -1` and elide EVERY move — including the
     // loop-carry write-back YieldFixupMutator inserts. There, two vars denote one
     // buffer exactly when they collapsed onto the same tile_buf handle.
+    // Never elide when target_shape reshapes (different physical shapes).
+    const bool is_reshape_move = op->args_.size() == 2;
     if (!codegen.EmitTileAddr()) {
       std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
-      if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
+      if (!is_reshape_move && !src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
         return std::string("");  // no-op: one handle, the op already wrote in place
       }
-      codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+      emit_move();
       return std::string("");
     }
 
     auto src_var = AsVarLike(op->args_[0]);
     auto dst_var = codegen.GetCurrentResultVar();
-    if (src_var && dst_var) {
+    if (!is_reshape_move && src_var && dst_var) {
       auto src_tile = As<ir::TileType>(src_var->GetType());
       auto dst_tile = As<ir::TileType>(dst_var->GetType());
       if (src_tile && dst_tile && src_tile->memref_.has_value() && dst_tile->memref_.has_value()) {
@@ -526,20 +731,19 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
             const bool same_layout = src_view.blayout == dst_view.blayout &&
                                      src_view.slayout == dst_view.slayout &&
                                      src_view.fractal == dst_view.fractal;
-            if (same_layout) {
-              // Alias the destination to the source SSA value so downstream
-              // references use the source's defined buffer, not the destination's
-              // alloc_tile (which would be unwritten after eliding the tmov).
+            const bool same_shape =
+                src_tile->shape_.size() == dst_tile->shape_.size() &&
+                ir::tile_view_semantics::ShapeExprListsEquivalent(src_tile->shape_, dst_tile->shape_);
+            if (same_layout && same_shape) {
               codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
               return std::string("");  // no-op: same space, same address, same layout
             }
-            // Different layout at the same address: keep pto.tmov (ND↔NZ adapt).
           }
         }
       }
     }
 
-    codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+    emit_move();
     return std::string("");
   });
 

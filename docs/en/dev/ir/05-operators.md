@@ -130,6 +130,45 @@ INT32 for integer inputs (mirroring `tile.matmul_acc`). At conversion time
 this batched path whenever any operand has rank > 2; `FlattenTileNdTo2D`
 later unrolls the batched form into per-batch 2D ops.
 
+### MX block-scale (Ascend950)
+
+MX uses dedicated `LeftScale` / `RightScale` memory spaces and `FP8E8M0` scale dtype.
+This PR (#2147) lands the **minimal host-prequant MXFP8 matmul** path; `tquant` /
+`matmul_mx_acc` / `_bias` / MXFP4 / ND A-scale rewrite land in #2117.
+
+| IR / DSL | Notes |
+| -------- | ----- |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; **data `FP8E4M3FN` only** (FP8E5M2 / FP4 rejected here); scale `FP8E8M0`; `K % 32 == 0` |
+| `tile.tget_scale_addr` / `pl.tget_scale_addr` | Bind scale address from Left/Right (A5); flushes deferred Mat→Scale fills |
+| `tile.load(..., mx_layout=...)` | MX scale GM layouts `mx_a_*` / `mx_b_*` (dtype FP8E8M0 or UINT8) |
+| `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move; may register a pending fill until `tget_scale_addr` |
+
+Canonical sample: `M=128,K=64,N=64`, A/B=`FP8E4M3FN`, scale=`FP8E8M0` (`[128,2]` / `[2,64]`),
+GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); align M↑16, K↑64, N↑32 (fp8).
+
+#### MX / Ascend950: pto-isa constraints
+
+| Constraint | Detail |
+| ---------- | ------ |
+| Distinct scale buffers | Cube does **not** fold scales into Left/Right data; `TileType::ScaleLeft` / `ScaleRight` (L0A/L0B sidecars) ↔ PyPTO `LeftScale` / `RightScale` |
+| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; this stage allows MX data **`FP8E4M3FN` only** (**rejects `FP8E5M2`**); `K%32==0`, fractal=32 |
+| Layouts | `MX_A_*` → row-major ZZ; `MX_B_*` → col-major NN; `TLoadMxCube*` (AZZ2ZZ / AND2ZZ / …) |
+| `TMov` `CommonCheckMX` | Allows `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale |
+| Bind-then-fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound |
+| Alignment | Same as ISA `tmatmul_mx`: M↑16, K↑64, N↑32 (fp8) |
+
+#### MX / Ascend950: PTOAS constraints
+
+| Constraint | Detail |
+| ---------- | ------ |
+| Single `loc=scaling` | No distinct left/right_scale locs yet; both PyPTO spaces lower to `loc=scaling`; EmitC recovers ScaleLeft/Right |
+| Dtype must be `!pto.f8E8M0` | `ui8` + `scaling` wrongly becomes Fixpipe `TileType::Scaling`; promote before entering LeftScale/RightScale |
+| No Mat↔Scaling `treshape` | Different locs; reshape stays in Mat (ui8), then `tmov` into scaling |
+| Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first |
+| Order | `tget_scale_addr` **before** Mat→scaling fill; PyPTO uses `PendingScaleFill`, flushed at tget |
+| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage ST uses **host ZZ/NN** (AZZ2ZZ) and does **not** rely on EmitC ND rewrite (rewrite / AIC `PIPE_ALL` → #2117) |
+| Coverage here | `pto.tmatmul.mx` + `pto.tget_scale_addr`; `pto.tquant.mx` / acc·bias → #2117 |
+
 ## Python Usage
 
 ```python
@@ -441,7 +480,9 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 | -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
+| `tile_ops/matmul.cpp` | TileOp: matmul, matmul_mx, gemv |
 | `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
+| `tile_ops/mx.cpp` | TileOp: tget_scale_addr |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
 | `tile_ops/unary.cpp` | TileOp: sqrt |

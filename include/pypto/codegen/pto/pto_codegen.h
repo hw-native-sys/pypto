@@ -409,6 +409,46 @@ class PTOCodegen : public CodegenBase {
   SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa);
   const SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa) const;
 
+  /// Deferred Mat→LeftScale/RightScale fill: tmov must run AFTER tget_scale_addr
+  /// rebinds the Scale tile to GetScaleAddr(Left/Right), otherwise the extract
+  /// lands at the provisional alloc address and is orphaned. Matches ptoas
+  /// PTOA5NormalizeTMovPass (tget before matching mat→scaling tmov) and ISA
+  /// sidecar bind-then-fill.
+  struct PendingScaleFill {
+    std::string src_ssa;
+    std::string src_ty;
+  };
+  void RegisterPendingScaleFill(const std::string& dst_ssa, PendingScaleFill fill);
+  [[nodiscard]] bool HasPendingScaleFill(const std::string& dst_ssa) const;
+  std::optional<PendingScaleFill> TakePendingScaleFill(const std::string& dst_ssa);
+  /// Deferred set_validshape on a Scale tile that still has a pending fill:
+  /// apply after tget + fill so TMov/GetValid* and matmul see the runtime M.
+  struct PendingSetValidShape {
+    std::string valid_row_ssa;
+    std::string valid_col_ssa;
+    std::string tile_buf_type;
+  };
+  void RegisterPendingSetValidShape(const std::string& dst_ssa, PendingSetValidShape pending);
+  std::optional<PendingSetValidShape> TakePendingSetValidShape(const std::string& dst_ssa);
+  /// True if any deferred Mat→LeftScale/RightScale fill is still pending — a
+  /// scale move registered a fill that the bind-then-fill sequence has not yet
+  /// flushed. GenerateFunction asserts this is false at function end so an
+  /// unflushed fill cannot silently emit an unwritten scale tile.
+  bool HasPendingScaleFills() const;
+
+  /// A tfree held while a pending Mat→Scale fill aliases the V2C tpop FIFO
+  /// (released once tget_scale_addr flushes the pending tmov). Recorded
+  /// per originating tfree — its core (aiv/aic) and split — so the drain emits
+  /// each `pto.tfree_from_<core> {split = N}` on the correct core/split instead
+  /// of collapsing every deferred tfree onto a single {aiv, split = 0}.
+  struct DeferredTFree {
+    std::string core;  ///< "aiv" or "aic" — the system.tfree_to_<core> target
+    int split = 0;
+  };
+  void DeferTFree(const std::string& core, int split);
+  /// Drain all deferred tfrees (move + clear). Called at tget_scale_addr.
+  std::vector<DeferredTFree> TakeDeferredTFrees();
+
   /**
    * @brief Record the SSA name of the __gm_pipe_buffer function parameter
    *
@@ -785,6 +825,9 @@ class PTOCodegen : public CodegenBase {
     std::vector<ExtraAllocTile> extra_alloc_tiles;
     std::map<std::string, std::string> ssa_to_tile_buf_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
+    std::map<std::string, PendingScaleFill> pending_scale_fills;
+    std::map<std::string, PendingSetValidShape> pending_set_validshapes;
+    std::vector<DeferredTFree> deferred_tfrees;
 
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
@@ -863,6 +906,9 @@ class PTOCodegen : public CodegenBase {
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
       subview_materializations.clear();
+      pending_scale_fills.clear();
+      pending_set_validshapes.clear();
+      deferred_tfrees.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();

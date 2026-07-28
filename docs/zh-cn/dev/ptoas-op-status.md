@@ -114,7 +114,7 @@
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（PR #2147 最小 MXFP8 host-prequant）；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束)；设备数值 follow-up #1975 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov 未支持；PR #1823 ST 暂下架 |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
@@ -164,7 +164,7 @@
 | pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.trandom | TRANDOM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
 | pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
-| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (王淼) |
+| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（PR #2147）；flush PendingScaleFill；见 [operators MX 约束](ir/05-operators.md#mx--ascend950ptoas-约束) |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
 | pto.trowargmax | TROWARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 索引输出 + tmp tile；真机 a2a3 已验证 (feat-add-ptoas-argmax) |

@@ -124,6 +124,45 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 `tensor.matmul` / `tensor.matmul_acc` 在任一操作数 rank > 2 时分派到该批量路径；后续由
 `FlattenTileNdTo2D` 将其展开为逐 batch 的 2D 操作。
 
+### MX block-scale（Ascend950）
+
+MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale dtype。
+本 PR（#2147）落地 **最小 host-prequant MXFP8 matmul** 路径；`tquant` /
+`matmul_mx_acc` / `_bias` / MXFP4 / ND A-scale rewrite 见 #2117。
+
+| IR / DSL | 说明 |
+| -------- | ---- |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；**data 仅 `FP8E4M3FN`**（此处拒绝 FP8E5M2 / FP4）；scale 为 `FP8E8M0`；`K % 32 == 0` |
+| `tile.tget_scale_addr` / `pl.tget_scale_addr` | 从 Left/Right 绑定 scale 地址（A5）；并 flush 延迟的 Mat→Scale fill |
+| `tile.load(..., mx_layout=...)` | MX scale GM layout `mx_a_*` / `mx_b_*`（dtype 为 FP8E8M0 或 UINT8） |
+| `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；可登记 pending fill，直到 `tget_scale_addr` |
+
+规范样例：`M=128,K=64,N=64`，A/B=`FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
+GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）；对齐 M↑16、K↑64、N↑32（fp8）。
+
+#### MX / Ascend950：pto-isa 约束
+
+| 约束 | 要点 |
+| ---- | ---- |
+| 独立 scale buffer | Cube **不**把 scale 折进 Left/Right；`TileType::ScaleLeft` / `ScaleRight`（L0A/L0B sidecar）↔ PyPTO `LeftScale` / `RightScale` |
+| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；本阶段 MX data **仅 `FP8E4M3FN`**（**拒绝 `FP8E5M2`**）；`K%32==0`，fractal=32 |
+| layout | `MX_A_*` → row-major ZZ；`MX_B_*` → col-major NN；`TLoadMxCube*`（AZZ2ZZ / AND2ZZ 等） |
+| `TMov` `CommonCheckMX` | 允许 `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right；canonical：ui8 Mat reshape 再 ui8→f8 Scale |
+| bind-then-fill | **先** `GetScaleAddr(Left/Right)` 再填 sidecar；写 provisional alloc 地址在 rebound 后无效 |
+| 对齐 | 与 ISA `tmatmul_mx` 一致：M↑16、K↑64、N↑32（fp8） |
+
+#### MX / Ascend950：PTOAS 约束
+
+| 约束 | 要点 |
+| ---- | ---- |
+| 单一 `loc=scaling` | 尚无独立 left/right_scale loc；PyPTO 两侧都降到 `loc=scaling`，EmitC 再选 ScaleLeft/Right |
+| dtype 必须 `!pto.f8E8M0` | `ui8`+`scaling` 会错成 Fixpipe `TileType::Scaling`；进 Scale 前需提升为 FP8E8M0 |
+| 禁止 Mat↔Scaling `treshape` | 不同 loc；reshape 留在 Mat（ui8），再 `tmov` 进 scaling |
+| shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
+| 顺序 | `tget_scale_addr` **先于** Mat→scaling fill；PyPTO 用 `PendingScaleFill`，在 tget 时 flush |
+| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；本阶段 ST 用 **host ZZ/NN**（AZZ2ZZ），**不**依赖 EmitC ND rewrite（rewrite / AIC `PIPE_ALL` → #2117） |
+| 本阶段覆盖 | `pto.tmatmul.mx` + `pto.tget_scale_addr`；`pto.tquant.mx` / acc·bias → #2117 |
+
 ## Python 用法
 
 ```python
@@ -435,7 +474,9 @@ class CrossCoreExample:
 | --------- | ---- |
 | `src/ir/op/type_inference.cpp` | 共享的类型推断工具 |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
+| `tile_ops/matmul.cpp` | TileOp: matmul, matmul_mx, gemv |
 | `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
+| `tile_ops/mx.cpp` | TileOp: tget_scale_addr |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls 等 |
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
 | `tile_ops/unary.cpp` | TileOp: sqrt |

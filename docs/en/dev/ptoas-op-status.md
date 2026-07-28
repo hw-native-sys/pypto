@@ -121,7 +121,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (PR #2147 minimal MXFP8 host-prequant); see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints); device numerical follow-up #1975 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov unsupported; PR #1823 ST temporarily pulled |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
@@ -171,7 +171,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
 | pto.trandom | TRANDOM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
 | pto.ttri | TTRI | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
-| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (owner) |
+| pto.tget_scale_addr | TGET_SCALE_ADDR | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (PR #2147); flushes PendingScaleFill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (infra, skip) |
 | pto.trowargmax | TROWARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 index output + tmp tile; verified on a2a3 (feat-add-ptoas-argmax) |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | int32 index output + tmp tile; verified on a2a3 (feat-add-ptoas-argmax) |

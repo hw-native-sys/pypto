@@ -2386,6 +2386,28 @@ class TestTileReinterpretViewIR:
         with pytest.raises(ValueError, match="requires source and target dtypes to differ"):
             tile.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.FP32)
 
+    def test_int8_to_fp8e8m0_keeps_shape(self):
+        # MX scale exponents: UINT8/INT8 staging ↔ FP8E8M0 (same 1-byte width).
+        call = tile.reinterpret_view(self._var([8, 32], DataType.INT8), DataType.FP8E8M0)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP8E8M0
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
+    def test_fp8e8m0_to_int8_keeps_shape(self):
+        call = tile.reinterpret_view(self._var([8, 32], DataType.FP8E8M0), DataType.INT8)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT8
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
+    def test_rejects_fp8e5m2_target(self):
+        # Ascend950 backend does not execute FP8E5M2; reject at IR deduction.
+        with pytest.raises(ValueError, match="FP8E5M2"):
+            tile.reinterpret_view(self._var([8, 32], DataType.INT8), DataType.FP8E5M2)
+
+    def test_rejects_fp8e5m2_source(self):
+        with pytest.raises(ValueError, match="FP8E5M2"):
+            tile.reinterpret_view(self._var([8, 32], DataType.FP8E5M2), DataType.INT8)
+
     def test_rejects_boxed_tile(self):
         boxed = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.row_major)
         with pytest.raises(ValueError, match="only supports flat tiles"):

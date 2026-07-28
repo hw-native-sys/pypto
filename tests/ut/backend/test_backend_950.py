@@ -66,13 +66,17 @@ class TestBackend950MemorySize:
 
         # Test cases: (memory_type, expected_size_in_KB)
         # Based on Create950SoC() in soc.cpp:
-        #   AIC core: Mat=512KB, Left=64KB, Right=64KB, Acc=256KB, Bias=4KB
+        #   AIC core: Mat=512KB, Left=64KB, Right=64KB, Acc=256KB, Bias=4KB,
+        #            LeftScale=4KB, RightScale=4KB
         #   AIV core: Vec=240KB safe (248KB physical, capped per pto-isa#170)
         test_cases = [
             (ir.MemorySpace.Mat, 512),  # 512KB Mat per AIC core
             (ir.MemorySpace.Left, 64),  # 64KB Left per AIC core
             (ir.MemorySpace.Right, 64),  # 64KB Right per AIC core
             (ir.MemorySpace.Acc, 256),  # 256KB Acc per AIC core
+            (ir.MemorySpace.Bias, 4),  # 4KB Bias per AIC core
+            (ir.MemorySpace.LeftScale, 4),  # 4KB L0A MX scale sidecar
+            (ir.MemorySpace.RightScale, 4),  # 4KB L0B MX scale sidecar
             # Safe Vec UB is capped at 240KB (248KB physical) per pto-isa#170;
             # restore to 248 once PTO-ISA stops reserving the top ~8KB.
             (ir.MemorySpace.Vec, 240),  # 240KB safe Vec per AIV core (248KB physical)
@@ -117,6 +121,8 @@ class TestBackend950MemoryPath:
             # Mat connections
             (ir.MemorySpace.Mat, ir.MemorySpace.Left, [ir.MemorySpace.Mat, ir.MemorySpace.Left]),
             (ir.MemorySpace.Mat, ir.MemorySpace.Right, [ir.MemorySpace.Mat, ir.MemorySpace.Right]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.LeftScale, [ir.MemorySpace.Mat, ir.MemorySpace.LeftScale]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.RightScale, [ir.MemorySpace.Mat, ir.MemorySpace.RightScale]),
             # Acc connections
             (ir.MemorySpace.Acc, ir.MemorySpace.Mat, [ir.MemorySpace.Acc, ir.MemorySpace.Mat]),
             (ir.MemorySpace.Acc, ir.MemorySpace.DDR, [ir.MemorySpace.Acc, ir.MemorySpace.DDR]),

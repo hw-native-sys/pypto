@@ -20,9 +20,12 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -140,10 +143,28 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // that case — the pass recomputes TileView via GetImplicitTileView once the
   // space is known.
   std::optional<MemorySpace> target_memory_opt;
+  std::string mx_layout = "none";
   for (const auto& [k, v] : kwargs) {
     if (k == "target_memory") {
       target_memory_opt = AnyCast<MemorySpace>(v, "target_memory");
-      break;
+    } else if (k == "mx_layout") {
+      mx_layout = AnyCast<std::string>(v, "mx_layout");
+    }
+  }
+  const bool is_mx_load = mx_layout != "none" && !mx_layout.empty();
+  if (is_mx_load) {
+    static const std::unordered_set<std::string> kValidMxLayouts = {"mx_a_zz", "mx_a_nd", "mx_a_dn",
+                                                                    "mx_b_nn", "mx_b_nd", "mx_b_dn"};
+    CHECK(kValidMxLayouts.count(mx_layout) > 0)
+        << "The operator " << op_name
+        << " mx_layout must be one of {mx_a_zz, mx_a_nd, mx_a_dn, mx_b_nn, mx_b_nd, mx_b_dn}, but got "
+        << mx_layout;
+    CHECK(tensor_type->dtype_ == DataType::FP8E8M0 || tensor_type->dtype_ == DataType::UINT8)
+        << "The operator " << op_name
+        << " with mx_layout requires FP8E8M0 or UINT8 dtype (same 1-byte MX exp payload), but got "
+        << tensor_type->dtype_.ToString();
+    if (!target_memory_opt.has_value()) {
+      target_memory_opt = MemorySpace::Mat;
     }
   }
   // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
@@ -158,12 +179,34 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   bool source_is_dn =
       tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
   TileView tile_view;
-  if (target_memory_opt.has_value()) {
-    if (*target_memory_opt == MemorySpace::Mat) {
+  if (is_mx_load) {
+    // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
+    const bool is_mx_b = mx_layout.rfind("mx_b_", 0) == 0;
+    if (is_mx_b) {
       tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::col_major;
+    } else {
+      tile_view.blayout = TileLayout::row_major;
       tile_view.slayout = TileLayout::row_major;
-      if (source_is_dn) {
-        std::swap(tile_view.blayout, tile_view.slayout);
+    }
+    tile_view.fractal = 32;
+  } else if (target_memory_opt.has_value()) {
+    if (*target_memory_opt == MemorySpace::Mat) {
+      // Flat ND activation-scale staging (UINT8 / FP8E8M0 without mx_layout):
+      // load into fractal=32 row_major so subsequent ui8 treshape → [M, K/32]
+      // sees contiguous ND bytes. Default Mat fractal=512 pads differently and
+      // poisons LeftScale after alias+reshape. Weight scales use mx_layout and
+      // take the branch above; FP8E4M3FN activation data keeps NZ Mat below.
+      if (tensor_type->dtype_ == DataType::UINT8 || tensor_type->dtype_ == DataType::FP8E8M0) {
+        tile_view.blayout = TileLayout::row_major;
+        tile_view.slayout = TileLayout::row_major;
+        tile_view.fractal = 32;
+      } else {
+        tile_view.blayout = TileLayout::col_major;
+        tile_view.slayout = TileLayout::row_major;
+        if (source_is_dn) {
+          std::swap(tile_view.blayout, tile_view.slayout);
+        }
       }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
                last_dim && last_dim->value_ == 1) {
@@ -283,11 +326,33 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   return output_tensor_type;
 }
 
+namespace {
+
+/// Product of static ConstInt shape dims; returns nullopt if any dim is dynamic.
+std::optional<int64_t> StaticShapeNumel(const std::vector<ExprPtr>& shape) {
+  int64_t numel = 1;
+  for (const auto& dim : shape) {
+    auto ci = As<ConstInt>(dim);
+    if (!ci || ci->value_ <= 0) {
+      return std::nullopt;
+    }
+    if (numel > std::numeric_limits<int64_t>::max() / ci->value_) {
+      return std::nullopt;
+    }
+    numel *= ci->value_;
+  }
+  return numel;
+}
+
+}  // namespace
+
 TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  // Validate args: expect exactly 1 argument (tile)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+  // Validate args: tile[, target_shape MakeTuple]
+  CHECK(args.size() == 1 || args.size() == 2)
+      << "The operator " << op_name << " requires 1 or 2 arguments (tile[, target_shape]), but got "
+      << args.size();
 
   // Validate first argument is TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -305,32 +370,106 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.blayout = source_view.blayout;
   tile_view.slayout = source_view.slayout;
 
-  // Hardcoded layout for Left/Right (hardware requirements)
+  // Hardcoded layout for Left/Right/scale (hardware requirements)
   if (space == MemorySpace::Left) {
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  } else if (space == MemorySpace::LeftScale) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = 32;
+  } else if (space == MemorySpace::RightScale) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::col_major;
+    tile_view.fractal = 32;
   }
 
   // Explicit kwargs override everything
   tile_view.blayout = GetKwarg<TileLayout>(kwargs, "blayout", tile_view.blayout);
   tile_view.slayout = GetKwarg<TileLayout>(kwargs, "slayout", tile_view.slayout);
 
-  // Keep original shape
-  std::vector<ExprPtr> output_shape = input_shape;
+  // Flat MX scale Mat staging: UINT8/FP8E8M0 none_box flat scales use fractal=32
+  // row_major (same as weight-scale Mat / LeftScale) so ui8 treshape to [M,K/32]
+  // is legal. FP8 activation data must keep the default boxed Mat path.
+  // Keep Mat as UINT8 (do NOT promote to FP8E8M0): canonical MX scale path is
+  // ui8 Mat reshape + ui8→f8 Scale tmov (ISA CommonCheckMX). Mat↔Scaling
+  // treshape is rejected by ptoas (different loc); flat→[M,K/32] after V2C
+  // tpop must stay ui8.
+  // LeftScale/RightScale still promote below; TMov CommonCheckMX allows
+  // uint8_t Mat → float8_e8m0 ScaleLeft/Right.
+  if (space == MemorySpace::Mat &&
+      (tile_type->dtype_ == DataType::UINT8 || tile_type->dtype_ == DataType::FP8E8M0) &&
+      tile_view.slayout == TileLayout::none_box) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = 32;
+  }
 
-  // Preserve input valid_shape (may be narrower than shape_)
-  tile_view.valid_shape = source_view.valid_shape.empty() ? input_shape : source_view.valid_shape;
+  // Optional target_shape (args[1] MakeTuple of static ConstInt): byte-preserving reshape
+  // into the destination tile. Used for flat tquant scale [1, groups] → [M, K/32] on the
+  // Mat→LeftScale leg (codegen emits treshape view + tmov; Mat physical [M,K/32] cannot
+  // be allocated boxed).
+  std::vector<ExprPtr> output_shape = input_shape;
+  bool has_target_shape = false;
+  if (args.size() == 2) {
+    auto shape_tuple = As<MakeTuple>(args[1]);
+    CHECK(shape_tuple) << "The operator " << op_name
+                       << " target_shape must be a MakeTuple of static ConstInt dims, but got "
+                       << args[1]->TypeName();
+    CHECK(!shape_tuple->elements_.empty()) << "The operator " << op_name << " target_shape must be non-empty";
+    output_shape.clear();
+    output_shape.reserve(shape_tuple->elements_.size());
+    for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+      auto ci = As<ConstInt>(shape_tuple->elements_[i]);
+      CHECK(ci) << "The operator " << op_name << " target_shape element " << i
+                << " must be a compile-time constant (ConstInt), but got "
+                << shape_tuple->elements_[i]->TypeName();
+      CHECK(ci->value_ > 0) << "The operator " << op_name << " target_shape element " << i
+                            << " must be positive, got " << ci->value_;
+      output_shape.push_back(shape_tuple->elements_[i]);
+    }
+    has_target_shape = true;
+    auto src_numel = StaticShapeNumel(input_shape);
+    auto dst_numel = StaticShapeNumel(output_shape);
+    CHECK(src_numel.has_value() && dst_numel.has_value())
+        << "The operator " << op_name
+        << " target_shape requires static source and destination shapes for element-count check";
+    CHECK(*src_numel == *dst_numel) << "The operator " << op_name
+                                    << " target_shape element count mismatch: source has " << *src_numel
+                                    << " elements, target_shape has " << *dst_numel;
+  }
+
+  if (has_target_shape) {
+    // Physical reshape: valid defaults to the new physical shape (runtime narrowing
+    // is applied later via tile.set_validshape).
+    tile_view.valid_shape = output_shape;
+  } else {
+    // Preserve input valid_shape (may be narrower than shape_)
+    tile_view.valid_shape = source_view.valid_shape.empty() ? input_shape : source_view.valid_shape;
+  }
 
   // Preserve pad value from input tile
   if (source_view.pad != PadValue::null) {
     tile_view.pad = source_view.pad;
   }
 
-  // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft
+  // (ui8+scaling wrongly becomes Fixpipe TileType::Scaling). tquant emits ui8 bytes.
+  DataType out_dtype = tile_type->dtype_;
+  if ((space == MemorySpace::LeftScale || space == MemorySpace::RightScale) && out_dtype == DataType::UINT8) {
+    out_dtype = DataType::FP8E8M0;
+  }
+
+  // Stamp memory_space_ only for MX scale destinations. Stamping Mat/Left/Right
+  // here skips InferTileMemorySpace's tile_view refresh to the destination's
+  // implicit layout and regresses existing Vec↔Mat / matmul / rmsnorm paths.
+  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
+    return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view, space);
+  }
+  return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
@@ -816,6 +955,7 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")
+    .set_attr<std::string>("mx_layout")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")
@@ -919,8 +1059,11 @@ REGISTER_OP("tile.mscatter")
 
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
-    .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
+    .set_description(
+        "Move tile between memory levels (Vec/Mat/Left/Right). Optional target_shape "
+        "(2nd arg MakeTuple) byte-preserves a reshape into the destination.")
     .add_argument("tile", "Input tile (TileType)")
+    .add_argument("target_shape", "Optional static shape MakeTuple for dest reshape")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<TileLayout>("blayout")
     .set_attr<TileLayout>("slayout")
