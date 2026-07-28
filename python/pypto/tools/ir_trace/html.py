@@ -26,8 +26,9 @@ _STYLE = """
   --accent: #0969da;
   --accent-text: #ffffff;
   --insert-bg: #dafbe1;
+  --insert-highlight: #aceebb;
   --delete-bg: #ffebe9;
-  --replace-bg: #fff8c5;
+  --delete-highlight: #ffcecb;
   --warning-bg: #fff8c5;
   --warning-border: #d4a72c;
   --keyword: #cf222e;
@@ -49,8 +50,9 @@ _STYLE = """
   --accent: #2f81f7;
   --accent-text: #ffffff;
   --insert-bg: #123820;
+  --insert-highlight: #1f6f3f;
   --delete-bg: #491b1f;
-  --replace-bg: #3b3213;
+  --delete-highlight: #78191b;
   --warning-bg: #3b3213;
   --warning-border: #bb8009;
   --keyword: #ff7b72;
@@ -250,9 +252,12 @@ button:focus-visible, input:focus-visible {
   min-height: 1.5em;
 }
 
-.code-line.insert { background: var(--insert-bg); }
-.code-line.delete { background: var(--delete-bg); }
-.code-line.replace { background: var(--replace-bg); }
+.code-line.after.insert,
+.code-line.after.replace { background: var(--insert-bg); }
+.code-line.before.delete,
+.code-line.before.replace { background: var(--delete-bg); }
+.diff-insert { background: var(--insert-highlight); }
+.diff-delete { background: var(--delete-highlight); }
 
 .line-number {
   padding: 0 0.6rem;
@@ -409,7 +414,7 @@ function renderSidebar() {
 
 function createCodeLine(side, row) {
   const line = document.createElement("div");
-  line.className = `code-line ${row.kind}`;
+  line.className = `code-line ${side} ${row.kind}`;
 
   const number = document.createElement("span");
   number.className = "line-number";

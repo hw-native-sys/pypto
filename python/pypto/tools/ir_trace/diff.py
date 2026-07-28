@@ -31,20 +31,12 @@ def _escape_html(text: str, *, quote: bool = False) -> str:
     return html.escape(text, quote=quote).replace("\u2028", "&#x2028;").replace("\u2029", "&#x2029;")
 
 
-def highlight_python(text: str) -> tuple[str, ...]:
-    """Return one safely escaped HTML fragment for each Python source line.
-
-    Args:
-        text: Python source text to highlight.
-
-    Returns:
-        Escaped per-line HTML fragments. Invalid source falls back to escaped
-        plain text so rendering remains safe.
-    """
-    lines = split_source_lines(text)
-    escaped_lines = tuple(_escape_html(line, quote=True) for line in lines)
+def _python_token_spans(
+    text: str,
+    lines: tuple[str, ...],
+) -> list[list[tuple[int, int, str]]] | None:
+    """Collect non-overlapping syntax spans, or return None for invalid source."""
     spans: list[list[tuple[int, int, str]]] = [[] for _ in lines]
-
     try:
         tokens = tokenize.generate_tokens(io.StringIO(text).readline)
         for item in tokens:
@@ -65,34 +57,140 @@ def highlight_python(text: str) -> tuple[str, ...]:
                 if not 0 <= span_start <= span_end <= len(lines[line_index]):
                     raise ValueError("token column is outside source line")
                 spans[line_index].append((span_start, span_end, css_class))
-    except (tokenize.TokenError, SyntaxError, ValueError):
-        return escaped_lines
 
-    highlighted: list[str] = []
-    for line, line_spans in zip(lines, spans, strict=True):
-        current_column = 0
-        fragments: list[str] = []
-        for span_start, span_end, css_class in line_spans:
-            if span_start < current_column:
-                return escaped_lines
-            fragments.append(_escape_html(line[current_column:span_start]))
-            fragments.append(f'<span class="{css_class}">{_escape_html(line[span_start:span_end])}</span>')
-            current_column = span_end
-        fragments.append(_escape_html(line[current_column:]))
-        highlighted.append("".join(fragments))
-    return tuple(highlighted)
+        for line_spans in spans:
+            current_column = 0
+            for span_start, span_end, _css_class in line_spans:
+                if span_start < current_column:
+                    raise ValueError("token spans overlap")
+                current_column = span_end
+    except (tokenize.TokenError, SyntaxError, ValueError):
+        return None
+    return spans
+
+
+def _render_highlighted_line(
+    line: str,
+    token_spans: list[tuple[int, int, str]],
+    changed_ranges: tuple[tuple[int, int], ...],
+    change_class: str | None,
+    *,
+    escape_quotes: bool,
+) -> str:
+    """Render one escaped line with syntax and change classes."""
+    boundaries = {0, len(line)}
+    for span_start, span_end, _css_class in token_spans:
+        boundaries.update((span_start, span_end))
+    for range_start, range_end in changed_ranges:
+        boundaries.update((range_start, range_end))
+
+    fragments: list[str] = []
+    ordered = sorted(boundaries)
+    for start, end in zip(ordered, ordered[1:], strict=False):
+        classes: list[str] = []
+        token_class = next(
+            (
+                css_class
+                for span_start, span_end, css_class in token_spans
+                if span_start <= start and end <= span_end
+            ),
+            None,
+        )
+        if token_class is not None:
+            classes.append(token_class)
+        if change_class is not None and any(
+            range_start <= start and end <= range_end for range_start, range_end in changed_ranges
+        ):
+            classes.append(change_class)
+
+        fragment = _escape_html(line[start:end], quote=escape_quotes)
+        if classes:
+            class_names = " ".join(classes)
+            fragment = f'<span class="{class_names}">{fragment}</span>'
+        fragments.append(fragment)
+    return "".join(fragments)
+
+
+def _highlight_python(
+    text: str,
+    changed_ranges: dict[int, tuple[tuple[int, int], ...]] | None = None,
+    change_class: str | None = None,
+) -> tuple[str, ...]:
+    """Highlight Python syntax and optional changed character ranges."""
+    lines = split_source_lines(text)
+    token_spans = _python_token_spans(text, lines)
+    tokenization_failed = token_spans is None
+    if token_spans is None:
+        token_spans = [[] for _ in lines]
+    changes = changed_ranges or {}
+    return tuple(
+        _render_highlighted_line(
+            line,
+            spans,
+            changes.get(index, ()),
+            change_class,
+            escape_quotes=tokenization_failed,
+        )
+        for index, (line, spans) in enumerate(zip(lines, token_spans, strict=True))
+    )
+
+
+def highlight_python(text: str) -> tuple[str, ...]:
+    """Return one safely escaped HTML fragment for each Python source line.
+
+    Args:
+        text: Python source text to highlight.
+
+    Returns:
+        Escaped per-line HTML fragments. Invalid source falls back to escaped
+        plain text so rendering remains safe.
+    """
+    return _highlight_python(text)
+
+
+def _intraline_ranges(
+    before_line: str,
+    after_line: str,
+) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+    """Return deleted and inserted character ranges for aligned lines."""
+    before_ranges: list[tuple[int, int]] = []
+    after_ranges: list[tuple[int, int]] = []
+    matcher = difflib.SequenceMatcher(a=before_line, b=after_line, autojunk=False)
+    for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+        if tag in ("delete", "replace") and before_start != before_end:
+            before_ranges.append((before_start, before_end))
+        if tag in ("insert", "replace") and after_start != after_end:
+            after_ranges.append((after_start, after_end))
+    return tuple(before_ranges), tuple(after_ranges)
 
 
 def _diff_rows(before: Snapshot, after: Snapshot) -> tuple[tuple[DiffRow, ...], int, int]:
     """Align two snapshots into display rows and count inserted/deleted lines."""
-    before_html = highlight_python(before.text)
-    after_html = highlight_python(after.text)
     rows: list[DiffRow] = []
     inserted = 0
     deleted = 0
     matcher = difflib.SequenceMatcher(a=before.lines, b=after.lines, autojunk=False)
+    opcodes = matcher.get_opcodes()
+    before_changes: dict[int, tuple[tuple[int, int], ...]] = {}
+    after_changes: dict[int, tuple[tuple[int, int], ...]] = {}
 
-    for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+    for tag, before_start, before_end, after_start, after_end in opcodes:
+        if tag != "replace":
+            continue
+        paired_count = min(before_end - before_start, after_end - after_start)
+        for offset in range(paired_count):
+            before_index = before_start + offset
+            after_index = after_start + offset
+            before_ranges, after_ranges = _intraline_ranges(
+                before.lines[before_index], after.lines[after_index]
+            )
+            before_changes[before_index] = before_ranges
+            after_changes[after_index] = after_ranges
+
+    before_html = _highlight_python(before.text, before_changes, "diff-delete")
+    after_html = _highlight_python(after.text, after_changes, "diff-insert")
+
+    for tag, before_start, before_end, after_start, after_end in opcodes:
         before_count = before_end - before_start
         after_count = after_end - after_start
         if tag == "insert":

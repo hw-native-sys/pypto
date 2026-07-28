@@ -340,6 +340,43 @@ def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
     assert [(row.before_number, row.after_number) for row in changed_rows] == [(2, 2), (None, 3)]
 
 
+def test_build_trace_marks_each_changed_substring_in_replace_row(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "value = old_name + 1\n",
+            "01_after_TestPass.py": "value = new_name + 2\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+    row = next(row for hunk in trace.hunks for row in hunk.rows if row.kind == "replace")
+
+    assert row.before_html.count("diff-delete") == 2
+    assert '<span class="diff-delete">old</span>' in row.before_html
+    assert '<span class="tok-number diff-delete">1</span>' in row.before_html
+    assert row.after_html.count("diff-insert") == 2
+    assert '<span class="diff-insert">new</span>' in row.after_html
+    assert '<span class="tok-number diff-insert">2</span>' in row.after_html
+
+
+def test_build_trace_keeps_intraline_highlights_safe_when_tokenization_fails(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "value = (<old>\n",
+            "01_after_TestPass.py": "value = (<new>\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+    row = next(row for hunk in trace.hunks for row in hunk.rows if row.kind == "replace")
+
+    assert "<old>" not in row.before_html and "<new>" not in row.after_html
+    assert '&lt;<span class="diff-delete">old</span>&gt;' in row.before_html
+    assert '&lt;<span class="diff-insert">new</span>&gt;' in row.after_html
+
+
 @pytest.mark.parametrize(
     ("before", "after", "kind", "before_number", "after_number"),
     [
@@ -622,6 +659,12 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
     assert ':root[data-theme="light"]' in report
     assert ':root[data-theme="dark"]' in report
     assert "var(--" in report
+    assert "--insert-highlight:" in report and "--delete-highlight:" in report
+    assert ".code-line.after.replace { background: var(--insert-bg); }" in report
+    assert ".code-line.before.replace { background: var(--delete-bg); }" in report
+    assert ".diff-insert { background: var(--insert-highlight); }" in report
+    assert ".diff-delete { background: var(--delete-highlight); }" in report
+    assert "line.className = `code-line ${side} ${row.kind}`" in report
     assert 'matchMedia("(prefers-color-scheme: dark)")' in report
     assert 'document.getElementById("source-name").textContent = data.sourceName' in report
 
