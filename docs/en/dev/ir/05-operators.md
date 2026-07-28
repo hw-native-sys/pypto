@@ -171,14 +171,20 @@ TypePtr DeduceCastType(const std::vector<ExprPtr>& args,
                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
   auto input = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
 
+  // `kwargs` is a vector of pairs, not a map — scan it to look a key up.
+  auto find_kwarg = [&kwargs](const std::string& key) {
+    return std::find_if(kwargs.begin(), kwargs.end(),
+                        [&key](const auto& kv) { return kv.first == key; });
+  };
+
   // Required kwargs — `cast` declares both `target_type` and `mode`, and codegen
   // reads `mode` unconditionally, so a missing one must fail here rather than
   // silently default to round_mode NONE.
-  auto it = kwargs.find("target_type");
+  auto it = find_kwarg("target_type");
   CHECK(it != kwargs.end()) << "tensor.cast requires 'target_type'";
   DataType target = static_cast<DataType>(std::any_cast<int>(it->second));
 
-  CHECK(kwargs.find("mode") != kwargs.end()) << "tensor.cast requires 'mode'";
+  CHECK(find_kwarg("mode") != kwargs.end()) << "tensor.cast requires 'mode'";
 
   return std::make_shared<TensorType>(input->shape_, target);
 }
