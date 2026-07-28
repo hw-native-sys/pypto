@@ -3455,7 +3455,7 @@ class TestTileBitwiseArithmeticOps:
 
         assert _tile_result_dtype(call) == dtype
         assert isinstance(call.type, ir.TileType)
-        assert call.type.shape == src0.type.shape
+        assert call.type.shape == [8, 16]
         assert _valid_of(call.type) == [7, 13]
 
     @pytest.mark.parametrize(
