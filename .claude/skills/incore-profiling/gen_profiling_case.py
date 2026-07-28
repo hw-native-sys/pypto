@@ -9,16 +9,11 @@
 """Generate a standalone simulator or real-NPU testcase for one PTOAS kernel.
 
 This is the **profiling-focused** testcase generator for the incore-profiling skill.
-It is a drop-in replacement for the legacy PTOAS validation-harness generator:
-same CLI, same output files, but ~10x smaller because it does ONE job — produce a
-buildable+runnable sim testcase so the camodel can time the kernel — and drops the
-entire correctness-validation machinery (golden compare, ULP tolerances, scatter/
-gather/mrgsort special-casing, runtime int-expression buffer-size inference).
-
-Why it can be small: buffer sizes come straight from the sibling ``<kernel>.pto``'s
-``make_tensor_view`` shape constants (static), instead of being inferred from the
-compiled C++ kernel's runtime pointer arithmetic. The kernel ABI (name, arg types,
-order) comes from the one ``__global__``/``_aic`` declaration line in the ``.cpp``.
+It produces a buildable standalone testcase without the legacy validation
+harness's golden-comparison special cases. The kernel ABI comes from PTOAS C++;
+the sibling PTO supplies baseline tensor sizes. Pure NPU cases refine those
+sizes from the generated ``GlobalTensor`` accesses, including partition offsets,
+loop bounds, and SPMD block coverage.
 
 Simulator mode sizes buffers from the sibling ``.pto`` and uses synthetic data.
 NPU mode accepts deterministic synthetic ABI inputs, caller-supplied input
@@ -55,6 +50,7 @@ from types import ModuleType
 from typing import Any
 
 import numpy as np
+from standalone_extent_analysis import ExtentAnalysis, analyze_pointer_extents
 
 # ── Type maps: .pto pointee / C++ type -> (host C type, numpy dtype) ──────────
 # host type sizes the .bin and the host-side buffers; bf16/half are carried as
@@ -1166,8 +1162,61 @@ def _copy_real_inputs(
                 f"input {source} has {file_size} bytes, which is not a positive multiple of "
                 f"the {item_size}-byte ABI type {param.cpp_type}"
             )
-        counts[param.name] = file_size // item_size
+        actual_elements = file_size // item_size
+        required_elements = counts[param.name]
+        if actual_elements < required_elements:
+            raise ValueError(
+                f"input {source} has {actual_elements} elements, but the generated kernel may access "
+                f"{required_elements}; provide the full physical buffer, not only the logical tile view"
+            )
+        counts[param.name] = actual_elements
         shutil.copy2(source, output_dir / source.name)
+
+
+def _integer_scalar_values(params: list[Param], scalar_values: dict[str, str]) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for param in params:
+        if param.is_ptr or param.cpp_type not in _SYNTHETIC_INTEGER_DTYPES:
+            continue
+        raw = scalar_values[param.name]
+        try:
+            values[param.name] = int(raw, 0)
+        except ValueError as error:
+            raise ValueError(
+                f"integer scalar {param.name} must be an exact integer literal for physical-span "
+                f"analysis, got {raw!r}"
+            ) from error
+    return values
+
+
+def _infer_physical_extents(
+    cpp_text: str,
+    pto_text: str,
+    function_name: str,
+    params: list[Param],
+    scalar_values: dict[str, str],
+) -> ExtentAnalysis:
+    pto_names = _pto_function_param_names(pto_text, function_name)
+    if len(pto_names) != len(params):
+        raise ValueError(
+            f"PTO/PTOAS parameter count differs for {function_name}: {len(pto_names)} != {len(params)}"
+        )
+    spmd_block_index = None
+    if "__pypto_spmd_block_idx" in pto_names:
+        spmd_block_index = params[pto_names.index("__pypto_spmd_block_idx")].name
+    analysis = analyze_pointer_extents(
+        cpp_text,
+        {param.name for param in params if param.is_ptr},
+        _integer_scalar_values(params, scalar_values),
+        spmd_block_index=spmd_block_index,
+    )
+    if analysis.unresolved:
+        details = "; ".join(analysis.unresolved)
+        raise ValueError(
+            "cannot prove full physical input spans from PTOAS-generated C++; "
+            f"unresolved pointer expressions: {details}"
+        )
+    return analysis
 
 
 def _parse_scalar_assignments(assignments: list[str]) -> dict[str, str]:
@@ -1378,7 +1427,7 @@ def _extract_dump_invocation(
     return scalar_values, capture
 
 
-def generate(  # noqa: PLR0913
+def generate(  # noqa: PLR0912, PLR0913
     input_cpp: Path,
     testcase: str,
     output_root: Path,
@@ -1442,8 +1491,6 @@ def generate(  # noqa: PLR0913
             params,
             counts,
         )
-    if input_dir is not None:
-        _copy_real_inputs(input_dir, out_dir, params, counts)
     scalar_values = scalar_values or {}
     conflicting_scalars = {
         name
@@ -1465,6 +1512,19 @@ def generate(  # noqa: PLR0913
             "real-NPU standalone cases require every scalar ABI argument explicitly; "
             f"missing: {missing_scalars}"
         )
+    extent_analysis: ExtentAnalysis | None = None
+    if run_mode == "npu" and not is_mixed and dump_selection is None:
+        extent_analysis = _infer_physical_extents(
+            cpp_text,
+            pto_text,
+            name,
+            params,
+            scalar_values,
+        )
+        for pointer, extent in extent_analysis.pointers.items():
+            counts[pointer] = max(counts[pointer], extent.required_elements)
+    if input_dir is not None:
+        _copy_real_inputs(input_dir, out_dir, params, counts)
     if synthetic_seed is not None:
         _write_synthetic_inputs(
             out_dir,
@@ -1539,6 +1599,7 @@ def generate(  # noqa: PLR0913
             else {}
         ),
         **({"capture": capture} if capture is not None else {}),
+        **({"physical_extent_analysis": extent_analysis.manifest()} if extent_analysis is not None else {}),
         "parameters": [
             {
                 "name": param.name,
