@@ -44,22 +44,32 @@ class MemRef : public Var {
   ExprPtr byte_offset_;  ///< Byte offset from base (0 for full alloc, view offset for views)
   uint64_t size_;        ///< Size in bytes of this MemRef
 
+  /// An author's `pl.Buffer("name")` binding awaiting resolution, rather than a
+  /// compiler allocation. True only between the parser and `InitMemRef`, which
+  /// resolves the binding into an ordinary MemRef (real size, flag cleared) plus
+  /// a `pinned=True` alloc. Printed as `pl.Buffer("name")`, so the distinction
+  /// survives a print/parse round trip without being inferred from `size_`.
+  bool is_user_buffer_;
+
   /**
    * @brief Construct MemRef from base pointer, expression offset, and size.
    * Name is derived from the base Ptr's name.
    */
-  MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown());
+  MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown(),
+         bool is_user_buffer = false);
 
   /**
    * @brief Convenience: construct with integer byte_offset (auto-wrapped in ConstInt).
    */
-  MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span = Span::unknown());
+  MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span = Span::unknown(),
+         bool is_user_buffer = false);
 
   /**
    * @brief Construct with explicit variable name. Used by deserialization and
    * address allocation where the name must be preserved exactly.
    */
-  MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown());
+  MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown(),
+         bool is_user_buffer = false);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::MemRef; }
   [[nodiscard]] std::string TypeName() const override { return "MemRef"; }
@@ -73,10 +83,12 @@ class MemRef : public Var {
   static bool MayAlias(const MemRefPtr& a, const MemRefPtr& b);
 
   static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Var::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&MemRef::base_, "base"),
-                                          reflection::UsualField(&MemRef::byte_offset_, "byte_offset"),
-                                          reflection::UsualField(&MemRef::size_, "size")));
+    return std::tuple_cat(
+        Var::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&MemRef::base_, "base"),
+                        reflection::UsualField(&MemRef::byte_offset_, "byte_offset"),
+                        reflection::UsualField(&MemRef::size_, "size"),
+                        reflection::UsualField(&MemRef::is_user_buffer_, "is_user_buffer")));
   }
 };
 

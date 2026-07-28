@@ -61,16 +61,21 @@ program_with_memrefs = init_pass(program)
 拥有的 buffer 上。命名同一个 buffer 的 tile 共享一块分配，且 `MemoryReuse` 绝不会把其他
 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#用户-buffer)。
 
-**绑定如何抵达本 pass。** 解析器把 `pl.Buffer("name")` 解析为一个 `MemRef`，其 `base_` Ptr
-按名字 intern（因此命名同一 buffer 的两处注解共享同一个 base），`byte_offset = 0`、
-`size = 0`。**这个 size-0 标记正是绑定的识别依据**——重新解析 post-allocation dump 时同样会
-在 `TileType` 上出现 MemRef，但那些带有真实大小；以标记而非"存在 MemRef"为判据，使该分类成为
-数据自身的属性，而不是"pass 恰好站在流水线哪个位置"的副产品。
+**绑定如何抵达本 pass。** 解析器把 buffer 引用解析为一个 `MemRef`，其 `base_` Ptr 按名字
+intern（因此命名同一 buffer 的两处注解共享同一个 base），`byte_offset = 0`、不带大小，并且
+**置上 `is_user_buffer_`**。这个标志位正是绑定的识别依据——重新解析 post-allocation dump 时
+同样会在 `TileType` 上出现 MemRef，而那些是编译器分配。把它显式记录下来（而不是从哨兵大小、或
+"pass 站在流水线哪个位置"去推断），使该分类成为数据自身的属性，也让打印器可以把绑定输出为
+`pl.Buffer("name")`——无需编造大小与地址即可完成往返。
 
-有两个 pass 必须主动携带绑定，而不能重建类型时丢掉它：`ConvertToSSA` 把注解上的 MemRef 合并进
-由 RHS 推导出的权威类型（算子类型推导永远不产生 MemRef，所以 LHS 上的 MemRef 是增量信息而非过
-期覆盖）；`FlattenTileNdTo2D` 在把 ND tile 重建为 2D 时保留它（展平后的 tile 是同一块存储）。
-其余 pass 只克隆类型，绑定与 base 身份因此完整存活。
+本 pass 会**消费**掉这个绑定：它产出的 MemRef 是一个携带推导大小的普通 MemRef，标志位已清除。
+此后由分配点的 `pinned=True` kwarg 标记该 buffer 归用户所有。
+
+绑定位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
+推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
+合并；`FlattenTileNdTo2D` 在三处重建中都携带（ND 展平、≤2D `tile.load`、通用 tile 算子）；
+`InferTileMemorySpace` 在把 Var 类型同步到重建后的 Call 时保留它。只克隆而不重建的 pass（包括
+`LowerPipelineLoops` 产出的各流水级 body）经由 `MemRef` 的克隆路径保留它。
 
 **本 pass 推导的内容。** 作者既不写大小也不写地址：
 

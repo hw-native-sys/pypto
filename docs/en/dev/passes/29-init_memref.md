@@ -62,20 +62,26 @@ kernel author owns. Tiles naming the same buffer share one allocation; `MemoryRe
 never packs anything else into it. This is manual reuse control — see
 [MemoryReuse](31-memory_reuse.md#user-buffers) for why an author would want it.
 
-**How the binding reaches this pass.** The parser resolves `pl.Buffer("name")` to a
+**How the binding reaches this pass.** The parser resolves a buffer reference to a
 `MemRef` whose `base_` Ptr is interned by name (so two annotations naming one buffer
-share one base), with `byte_offset = 0` and `size = 0`. That **size-0 marker is what
-identifies a binding** — re-parsing a post-allocation dump also puts MemRefs on
-`TileType`s, but those carry a real size, so keying on the marker rather than on
-"a MemRef exists" keeps the classification a property of the data instead of an
-artifact of where in the pipeline the pass happens to sit.
+share one base), with `byte_offset = 0`, no size, and **`is_user_buffer_` set**. That
+flag is what identifies a binding — re-parsing a post-allocation dump also puts MemRefs
+on `TileType`s, and those are compiler allocations. Recording it explicitly rather than
+inferring it (from a sentinel size, or from where in the pipeline the pass sits) keeps
+the classification a property of the data, and lets the printer emit the binding as
+`pl.Buffer("name")` so a dump round-trips without inventing a size or address.
 
-Two passes must actively carry the binding rather than rebuild the type without it:
-`ConvertToSSA` merges the annotation's MemRef into the RHS-derived authoritative type
-(op type deduction never produces a MemRef, so an LHS MemRef is additional
-information, not a stale override), and `FlattenTileNdTo2D` keeps it when it rebuilds
-an ND tile as 2D (the flattened tile is the same storage). Every other pass only
-clones types, so the binding and its base identity survive intact.
+This pass **consumes** the binding: the MemRef it produces is an ordinary one carrying
+the derived size, with the flag cleared. From there on the allocation's `pinned=True`
+kwarg is what marks the buffer as user-owned.
+
+The binding lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
+it into the Var's type and op type deduction never produces a MemRef — so any pass that
+rebuilds a type from the Call must carry it over explicitly. `ConvertToSSA` does the
+merge; `FlattenTileNdTo2D` carries it through all three of its rebuilds (ND flatten,
+≤2D `tile.load`, generic tile op); `InferTileMemorySpace` keeps it when syncing the Var
+type to a rebuilt Call. Passes that clone rather than rebuild (including the per-stage
+bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 **What the pass derives.** The author writes neither a size nor an address:
 

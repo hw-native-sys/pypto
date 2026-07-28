@@ -1058,6 +1058,25 @@ class MemRef(Var):
     size_: int
     """Size in bytes (64-bit unsigned)."""
 
+    is_user_buffer_: bool
+    """True for an unresolved ``pl.Buffer(...)`` binding, false for a compiler allocation."""
+
+    @staticmethod
+    def user_buffer(base: Var, span: Span = ...) -> MemRef:
+        """Create an unresolved ``pl.Buffer(...)`` binding on an interned base Ptr.
+
+        Size and address are left unset; ``InitMemRef`` derives both from the
+        tiles bound to the buffer.
+
+        Args:
+            base: Interned base Ptr, shared by every annotation naming this buffer
+            span: Source location
+
+        Returns:
+            A MemRef with ``is_user_buffer_`` set
+        """
+        ...
+
     @overload
     def __init__(self, base: Var, byte_offset: int, size: int, span: Span = ...) -> None: ...
     @overload

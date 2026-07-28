@@ -119,24 +119,22 @@ std::optional<uint64_t> ShapedTypeSizeBytes(const ShapedTypePtr& type) {
 /// Base Ptr of a user buffer -> the size it must hold (the largest bound tile).
 using UserBufferMap = std::map<const Var*, uint64_t>;
 
-/// The unresolved-size marker the parser writes for `pl.Buffer("name")`.
-///
-/// It is what distinguishes a *binding* from an ordinary MemRef: re-parsing a
-/// post-allocation dump also puts MemRefs on TileTypes, but those carry a real
-/// size (and a real address). Keying on the marker rather than on "we are
-/// standing before InitMemRef" keeps the classification a property of the data,
-/// so a dump can be reparsed and re-run without its buffers turning into
-/// user-owned ones.
-constexpr uint64_t kUserBufferSizeUnresolved = 0;
-
 /// The binding MemRef `type` carries, or null when it carries none.
+///
+/// `MemRef::is_user_buffer_` is what distinguishes a *binding* from an ordinary
+/// MemRef: re-parsing a post-allocation dump also puts MemRefs on TileTypes, and
+/// those are compiler allocations. Keying on an explicit field rather than on
+/// "we are standing before InitMemRef" keeps the classification a property of
+/// the data, so a dump can be reparsed and re-run without its allocations
+/// turning into user-owned buffers.
+///
 /// Returning the MemRef (not just its base) spares every caller a second,
 /// unchecked unwrap of the same optional.
 MemRefPtr GetUserBufferBinding(const TypePtr& type) {
   auto tile_type = As<TileType>(type);
   if (!tile_type || !tile_type->memref_.has_value()) return nullptr;
   const auto& memref = *tile_type->memref_;
-  if (!memref->base_ || memref->size_ != kUserBufferSizeUnresolved) return nullptr;
+  if (!memref->base_ || !memref->is_user_buffer_) return nullptr;
   return memref;
 }
 

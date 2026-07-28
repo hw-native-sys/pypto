@@ -18,11 +18,21 @@ coalescing them creates a false dependency that serializes the two.
 
 
 class Buffer:
-    """A user-owned buffer, identified by name within a function.
+    """A user-owned buffer.
 
-    Bind a tile to a buffer by naming it in the ``pl.Tile[...]`` annotation's
-    trailing slot. Two tiles naming the same buffer share one allocation; a tile
-    naming its own buffer is never packed together with anything else.
+    Declare one, then reference it in the ``pl.Tile[...]`` annotation's trailing
+    slot. Two tiles referencing the same buffer share one allocation; a tile with
+    a buffer to itself is never packed together with anything else::
+
+        scratch = pl.Buffer()   # takes its name from the variable
+
+        t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(x, [0, 0], [64, 64])
+
+    Prefer this declare-then-reference form: a misspelled reference is a Python
+    ``NameError``, whereas a misspelled string in the inline
+    ``pl.Buffer("scratch")`` form silently declares a second buffer. The inline
+    form remains valid — it is what the IR printer emits, so a dumped program can
+    be reparsed without a surrounding Python scope.
 
     Neither a size nor a memory space is written here — both are derived by the
     ``InitMemRef`` pass from the tiles actually bound to the buffer (size = the
@@ -56,19 +66,20 @@ class Buffer:
         is valid Python that type-checkers accept.
     """
 
-    def __init__(self, name: str) -> None:
-        """Name a user-owned buffer.
+    def __init__(self, name: str | None = None) -> None:
+        """Declare a user-owned buffer.
 
         Args:
-            name: Buffer name. Buffers are identified by name within a function —
-                two annotations naming the same buffer bind to one allocation.
-                The parser is what validates it (a non-empty string literal); this
-                constructor only exists so the annotation type-checks.
+            name: Buffer name. Optional when the buffer is declared as a variable
+                and referenced by name in the annotation — it then takes that
+                variable's name, so the buffer is named once rather than twice.
+                Required for the inline ``pl.Tile[..., pl.Buffer("scratch"), ...]``
+                form, where there is no variable to take a name from.
         """
         self.name = name
 
     def __repr__(self) -> str:
-        return f"Buffer({self.name!r})"
+        return "Buffer()" if self.name is None else f"Buffer({self.name!r})"
 
 
 __all__ = ["Buffer"]

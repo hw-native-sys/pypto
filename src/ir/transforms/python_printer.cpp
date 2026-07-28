@@ -2830,6 +2830,15 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 // Helper methods for MemRef and TileView printing
 std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   std::ostringstream oss;
+
+  // An unresolved user binding prints in the form the author wrote. It carries
+  // no size or address to print — InitMemRef derives both — and printing it as
+  // `pl.MemRef(...)` would lose the distinction on reparse.
+  if (memref.is_user_buffer_) {
+    oss << prefix_ << ".Buffer(\"" << GetVarName(memref.base_.get()) << "\")";
+    return oss.str();
+  }
+
   oss << prefix_ << ".MemRef(";
 
   // Base Ptrs defined in the function body (by alloc statements) are printed as

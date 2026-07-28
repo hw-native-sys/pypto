@@ -264,8 +264,9 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         // NOTE: MemRef is identity-bearing — each result must get a fresh
         // unique_id_, so build it via the explicit constructor (MutableCopy is
         // static_assert-forbidden for Var/MemRef).
-        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_,
-                                                   member_addr_expr, old_memref->size_, old_memref->span_);
+        auto new_memref =
+            std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, member_addr_expr,
+                                     old_memref->size_, old_memref->span_, old_memref->is_user_buffer_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
     }

@@ -155,6 +155,105 @@ class Collide:
         assert len(allocs) == 1 and "pinned=True" in allocs[0], allocs
         assert "pl.Ptr = pl.tile.alloc" in allocs[0], f"alloc must bind a Ptr, got {allocs[0]}"
 
+    def test_declared_buffer_object_is_referenced_by_variable(self):
+        """The preferred form: declare once, reference by variable.
+
+        A misspelled reference is a Python ``NameError`` rather than a silently
+        distinct buffer, which is what the inline string form cannot give. An
+        unnamed ``pl.Buffer()`` takes the name of the variable it is bound to,
+        so the buffer is named once instead of twice.
+        """
+        ping = pl.Buffer()
+        pong = pl.Buffer()
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        bases = _base_names(after)
+        assert bases["t0"] == bases["t2"] == "ping"
+        assert bases["t1"] == "pong"
+        assert len(_alloc_lines(after)) == 2
+
+    def test_declared_buffer_object_honors_an_explicit_name(self):
+        """An explicit name overrides the variable name it is bound to."""
+        slot = pl.Buffer("l0c_ping")
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, slot, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                return pl.store(t0, [0, 0], out)
+
+        assert _base_names(passes.init_mem_ref()(Before))["t0"] == "l0c_ping"
+
+    def test_binding_is_an_explicit_flag_not_a_zero_size(self):
+        """A zero-sized ordinary MemRef is a compiler allocation, not a binding.
+
+        The binding is carried by ``MemRef.is_user_buffer_``. Inferring it from
+        ``size_ == 0`` instead would make the classification depend on a value
+        the size field is merely unlikely to hold, rather than on what the IR
+        actually says.
+        """
+        source = """
+import pypto.language as pl
+
+
+@pl.program
+class Zero:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mybuf", 0, 0), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(t0, [0, 0], out)
+"""
+        parsed = pl.parse_program(source)
+        memref = _tile_memrefs(parsed)["t0"]
+        assert memref.size_ == 0 and not memref.is_user_buffer_
+        assert "pinned=True" not in passes.init_mem_ref()(parsed).as_python()
+
+    def test_unresolved_binding_prints_as_buffer_and_round_trips(self):
+        """The printed form of a binding is the form the author wrote.
+
+        A binding carries no size or address to print — InitMemRef derives both —
+        so printing it as ``pl.MemRef(...)`` would have to invent them and would
+        lose the distinction on reparse.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                return pl.store(t0, [0, 0], out)
+
+        dumped = Before.as_python()
+        assert 'pl.Buffer("scratch")' in dumped, dumped
+        ir.assert_structural_equal(Before, pl.parse_program(dumped))
+        # Resolution consumes the binding: the pinned alloc carries it from here on.
+        assert "pl.Buffer" not in passes.init_mem_ref()(Before).as_python()
+
     def test_binds_a_transpose_output(self):
         """`tile.transpose` owns its output buffer, so it may be bound.
 

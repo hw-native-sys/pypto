@@ -76,18 +76,35 @@ naming the same buffer share one allocation; nothing else is ever packed into it
 Use it when the packer coalesces tiles you want to stay independent — sharing a
 buffer adds a WAR dependency that serializes them.
 
+Declare a buffer, then reference it by variable. An unnamed `pl.Buffer()` takes the
+name of the variable it is bound to, so the buffer is named once rather than twice.
+
 ```python
+ping = pl.Buffer()
+pong = pl.Buffer()
+
 # Two tiles explicitly share one buffer; a third is kept private.
-t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
-t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 ```
 
-Buffers are identified by name within a function, in their own namespace — a buffer
-name never resolves to a Python variable that happens to share it. Neither a size nor
-an address is written: the compiler sizes the buffer to its largest member. The memory
-space **is** required (a `TileType` always pairs a MemRef with a space). Tiles left
-unannotated keep the default automatic reuse.
+Prefer this form: a misspelled reference is a Python `NameError`, whereas a misspelled
+string in the inline `pl.Buffer("ping")` form silently declares a second buffer. The
+inline form stays valid — it is what the IR printer emits, so a dumped program reparses
+without a surrounding Python scope.
+
+Whether a MemRef is a user binding is recorded explicitly on the IR node
+(`MemRef.is_user_buffer_`), not inferred from its size or from which pass is running.
+`InitMemRef` consumes the binding: from there on the allocation carries `pinned=True`
+and the MemRef is an ordinary one, so re-parsing a post-allocation dump cannot turn
+compiler allocations into user-owned buffers.
+
+Buffer names live in their own namespace — a buffer name never resolves to a Python
+variable that happens to share it. Neither a size nor an address is written: the
+compiler sizes the buffer to its largest member. The memory space **is** required (a
+`TileType` always pairs a MemRef with a space). Tiles left unannotated keep the default
+automatic reuse.
 
 Buffers do not clone per pipeline stage, so a binding inside a `pl.pipeline(stage=2)`
 body is **rejected**: the cloned stages would make the tile co-live with itself on one

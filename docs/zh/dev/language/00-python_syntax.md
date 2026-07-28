@@ -75,16 +75,31 @@ tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 共享一块分配，其他 tile 绝不会被塞进去。当 packer 合并了你希望保持独立的 tile 时使用它——
 共用 buffer 会引入一条 WAR 依赖，使二者串行。
 
+先声明一块 buffer，再用变量引用它。不带名字的 `pl.Buffer()` 会取所绑定变量的名字，这样
+buffer 只需命名一次而不是两次。
+
 ```python
+ping = pl.Buffer()
+pong = pl.Buffer()
+
 # 两个 tile 显式共用一块 buffer；第三个保持独占。
-t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
-t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 ```
 
-buffer 在函数内按名字标识，且自成命名空间——buffer 名不会解析到恰好同名的 Python 变量。
-既不写大小也不写地址：编译器按最大成员定型。内存空间**必须**写（`TileType` 始终要求 MemRef
-与空间成对出现）。未加注解的 tile 保持默认的自动复用。
+推荐这种写法：引用拼错会直接得到 Python 的 `NameError`，而内联的 `pl.Buffer("ping")` 形式
+里字符串拼错只会静默地多声明一块 buffer。内联形式仍然有效——IR 打印器输出的就是它，这样
+dump 出来的程序不依赖外层 Python 作用域即可重新解析。
+
+一个 MemRef 是否为用户绑定，由 IR 节点上的显式字段（`MemRef.is_user_buffer_`）记录，既不靠
+大小推断，也不靠"当前跑到哪个 pass"。`InitMemRef` 会消费掉这个绑定：此后分配点带上
+`pinned=True`，MemRef 变回普通 MemRef，所以重新解析一份分配后的 dump 不会把编译器分配误当成
+用户 buffer。
+
+buffer 名自成命名空间——不会解析到恰好同名的 Python 变量。既不写大小也不写地址：编译器按最大
+成员定型。内存空间**必须**写（`TileType` 始终要求 MemRef 与空间成对出现）。未加注解的 tile
+保持默认的自动复用。
 
 buffer 不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内绑定会被**拒绝**：复制出的各级
 会让同一个 tile 在同一块分配上与自身同时存活。具名槽位与"交给编译器做多缓冲"是二选一，不能
