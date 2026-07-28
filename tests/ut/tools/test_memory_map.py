@@ -44,6 +44,21 @@ class _jit_demo:
         return y
 """
 
+# A function whose only tile memory arrives as a parameter.
+PARAM_TILE_DUMP = """# pypto.program: _jit_param
+import pypto.language as pl
+
+
+@pl.program
+class _jit_param:
+    @pl.function(type=pl.FunctionType.InCore, level=pl.Level.AIV, role=pl.Role.SubWorker)
+    def helper(
+        in__tile: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_vec_0, pl.const(0, pl.INT64), 4096), pl.Mem.Vec],
+    ) -> pl.Tile[[16, 64], pl.FP32]:
+        out__tile: pl.Tile[[16, 64], pl.FP32, pl.MemRef(mem_vec_1, pl.const(4096, pl.INT64), 4096), pl.Mem.Vec] = pl.tile.add(in__tile, in__tile)
+        return out__tile
+"""
+
 # Two Mat bases both still at offset 0 — what every dump before AllocateMemoryAddr looks like.
 UNALLOCATED_DUMP = """# pypto.program: _jit_demo
 import pypto.language as pl
@@ -224,6 +239,36 @@ def test_render_scales_panels_by_the_backend_capacity(case: Path):
     assert spaces["Mat"]["limit"] == expected["Mat"]
     assert spaces["Mat"]["hwm"] == 4096
     assert spaces["Acc"]["bases"] == 1
+
+
+def test_every_space_has_a_colour_in_the_template():
+    # A space with no --sp-<Name> token renders with no fill or outline, since
+    # the unresolved var makes the whole declaration invalid. The fallback
+    # covers a backend newer than the template; SPACE_ORDER must not need it.
+    template = memory_map._TEMPLATE.read_text()
+    for space in memory_map.SPACE_ORDER:
+        assert f"--sp-{space}:" in template, f"template has no colour for {space}"
+    assert "--sp-unknown:" in template
+
+    for name in memory_map.backend_names():
+        for space in memory_map.backend_limits(name):
+            assert f"--sp-{space}:" in template, f"{name} reports {space}, template has no colour"
+
+
+def test_tile_typed_parameters_are_mapped(tmp_path: Path):
+    # A tile-typed parameter owns caller-allocated memory and carries its MemRef
+    # on the arg rather than on an assignment; missing it would drop the buffer
+    # from the map, and a function whose only tile is a parameter would be
+    # rejected as having none at all.
+    dump = tmp_path / "32_after_AllocateMemoryAddr.py"
+    dump.write_text(PARAM_TILE_DUMP)
+    boxes = _boxes_by_name(memory_map.parse_dump(dump))
+
+    assert set(boxes) == {"in__tile", "out__tile"}
+    param = boxes["in__tile"]
+    assert (param.space, param.base, param.offset, param.size) == ("Vec", "mem_vec_0", 0, 4096)
+    assert param.op == "param"
+    assert param.start < param.end  # live from the signature to its last use
 
 
 def test_render_emits_self_contained_page(case: Path):

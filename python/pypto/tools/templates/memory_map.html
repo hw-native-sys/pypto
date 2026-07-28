@@ -35,6 +35,11 @@
     --sp-Left:  #1baf7a;
     --sp-Right: #eda100;
     --sp-Acc:   #e87ba4;
+    --sp-Bias:  #8a5cd0;
+    /* Fallback for a space this template has no colour for. Every name in
+       SPACE_ORDER is covered above and tests/ut/tools enforces that, so this
+       only catches a backend reporting something newer than the template. */
+    --sp-unknown: #7b858c;
 
     --good:     #0ca30c;
     --warning:  #fab219;
@@ -49,7 +54,8 @@
       --line: #383937; --line-soft: #292a29;
       --ink: #f1f1ee; --ink-2: #b2b3ac; --ink-3: #82837d;
       --sp-Vec: #3987e5; --sp-Mat: #d95926; --sp-Left: #199e70;
-      --sp-Right: #c98500; --sp-Acc: #d55181;
+      --sp-Right: #c98500; --sp-Acc: #d55181; --sp-Bias: #9b71dd;
+      --sp-unknown: #82837d;
       --tint: 20%;
     }
   }
@@ -59,7 +65,8 @@
     --line: #383937; --line-soft: #292a29;
     --ink: #f1f1ee; --ink-2: #b2b3ac; --ink-3: #82837d;
     --sp-Vec: #3987e5; --sp-Mat: #d95926; --sp-Left: #199e70;
-    --sp-Right: #c98500; --sp-Acc: #d55181;
+    --sp-Right: #c98500; --sp-Acc: #d55181; --sp-Bias: #9b71dd;
+    --sp-unknown: #82837d;
     --tint: 20%;
   }
 
@@ -313,6 +320,9 @@ const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const usageColor = p => p >= 95 ? "var(--critical)" : p >= 80 ? "var(--warning)" : "var(--good)";
 
+/** Colour for a memory space, falling back when the template has no token. */
+const spaceColor = space => `var(--sp-${space}, var(--sp-unknown))`;
+
 /** Per-card view state, keyed by the function index the card renders. */
 const STATE = DATA.functions.map(() => ({
   expanded: false,
@@ -336,7 +346,7 @@ document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
   const pills = fn.spaces.map(s => {
     const used = s.hwm / s.limit * 100;
     return `<span class="pill${used >= 95 ? " hot" : ""}">
-      <span class="dot" style="background:var(--sp-${s.space})"></span>${s.space}
+      <span class="dot" style="background:${spaceColor(s.space)}"></span>${s.space}
       <span>${fmtBytes(s.hwm)}/${fmtBytes(s.limit)}</span>
       <span class="pct" style="color:${usageColor(used)}">${used.toFixed(1)}%</span></span>`;
   }).join("");
@@ -344,7 +354,7 @@ document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
   const spaceToggles = fn.spaces.length < 2 ? "" : `<span class="space-toggles">
       <span class="lbl">show</span>
       ${fn.spaces.map(s => `<button type="button" class="sp-toggle" data-space="${s.space}"
-          aria-pressed="true" style="--c:var(--sp-${s.space})"><span class="dot"></span>${s.space}</button>`).join("")}
+          aria-pressed="true" style="--c:${spaceColor(s.space)}"><span class="dot"></span>${s.space}</button>`).join("")}
     </span>`;
 
   return `<details class="fn"${index === 0 ? " open" : ""} data-index="${index}">
@@ -364,7 +374,7 @@ document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
       </div>
       <div class="scroller"><div class="plot"></div></div>
       <div class="legend">
-        <span class="item"><span class="k" style="background:color-mix(in srgb, var(--sp-${fn.spaces[0].space}) var(--tint), var(--surface-1));box-shadow:inset 0 0 0 1px var(--sp-${fn.spaces[0].space})"></span>tile live range</span>
+        <span class="item"><span class="k" style="background:color-mix(in srgb, ${spaceColor(fn.spaces[0].space)} var(--tint), var(--surface-1));box-shadow:inset 0 0 0 1px ${spaceColor(fn.spaces[0].space)}"></span>tile live range</span>
         <span class="item"><span class="k" style="border:2px dashed var(--ink-3)"></span>view into the same base</span>
         <span class="item"><span class="k" style="box-shadow:inset 0 0 0 2px var(--critical)"></span>cross-base address + lifetime overlap</span>
         <span class="item">&#9478; high-water mark</span>
@@ -435,7 +445,7 @@ function renderPlot(card) {
 
   const heads = `<div class="colhead gutter"><div class="lbl">${view.expanded ? "IR source" : "line"}</div></div>` +
     shown.map(s => `<div class="colhead">
-      <div class="sp"><span class="dot" style="background:var(--sp-${s.space})"></span>${s.space}</div>
+      <div class="sp"><span class="dot" style="background:${spaceColor(s.space)}"></span>${s.space}</div>
       <div class="rng"><span>0</span><span>${fmtBytes(spanOf(s))}</span></div>
     </div>`).join("");
 
@@ -455,7 +465,7 @@ function renderPlot(card) {
 
   const lanes = shown.map(space => {
     const span = spanOf(space);
-    const hwm = `<div class="hwm" style="left:${space.hwm / span * 100}%;color:var(--sp-${space.space})"></div>`;
+    const hwm = `<div class="hwm" style="left:${space.hwm / span * 100}%;color:${spaceColor(space.space)}"></div>`;
     const boxes = fn.boxes.map((b, bi) => [b, bi]).filter(([b]) => b.space === space.space).map(([b, bi]) => {
       const top = (b.start - fn.src_start) * LINE_H;
       const boxHeight = Math.max((b.end - b.start + 1) * LINE_H, LINE_H) - 1;
@@ -463,7 +473,7 @@ function renderPlot(card) {
       const cls = "box" + (boxHeight < 2 * LINE_H ? " short" : "") +
         (b.view ? " view" : "") + (b.conflict ? " conflict" : "") + (pinned ? " pinned" : "");
       return `<div class="${cls}" tabindex="0" role="button" aria-pressed="${pinned}"
-        style="--c:var(--sp-${space.space});left:${b.offset / span * 100}%;
+        style="--c:${spaceColor(space.space)};left:${b.offset / span * 100}%;
                width:${b.size / span * 100}%;top:${top}px;height:${boxHeight}px"
         data-bi="${bi}">
         <span class="n">${esc(b.name)}${b.aliases.length ? ` <span class="badge">+${b.aliases.length}</span>` : ""}</span>
@@ -502,7 +512,7 @@ function renderPinChip(card) {
   const chip = card.querySelector(".pin");
   chip.hidden = !view.pinned;
   if (!view.pinned) return;
-  chip.innerHTML = `<span class="dot" style="background:var(--sp-${view.pinned.space})"></span>
+  chip.innerHTML = `<span class="dot" style="background:${spaceColor(view.pinned.space)}"></span>
     pinned <b>${esc(view.pinned.name)}</b>
     <button type="button" title="Clear selection (Esc)">&times;</button>`;
   chip.querySelector("button").addEventListener("click", () => setPinned(card, null));
@@ -516,7 +526,7 @@ function applyLineHighlight(card) {
     const line = Number(el.dataset.line);
     const on = box !== null && line >= box.start && line <= box.end;
     el.classList.toggle("hi", on);
-    el.style.setProperty("--hi", box ? `var(--sp-${box.space})` : "");
+    el.style.setProperty("--hi", box ? spaceColor(box.space) : "");
   });
 }
 
@@ -533,7 +543,7 @@ function setPinned(card, box) {
 const tip = document.getElementById("tip");
 
 function showTip(box) {
-  tip.innerHTML = `<div class="h"><span class="dot" style="background:var(--sp-${box.space})"></span>${esc(box.name)}</div>
+  tip.innerHTML = `<div class="h"><span class="dot" style="background:${spaceColor(box.space)}"></span>${esc(box.name)}</div>
     <dl>
       <dt>space</dt><dd>${box.space}</dd>
       <dt>shape / dtype</dt><dd>[${box.shape.join(", ")}] ${esc(box.dtype)}</dd>

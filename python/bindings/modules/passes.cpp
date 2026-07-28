@@ -253,8 +253,7 @@ void BindPass(nb::module_& m) {
 
   // ReportInstrument
   nb::class_<ReportInstrument, PassInstrument>(
-      passes, "ReportInstrument",
-      "Instrument that names the directory pipeline artifacts are written to")
+      passes, "ReportInstrument", "Instrument that names the directory pipeline artifacts are written to")
       .def(nb::init<std::string>(), nb::arg("output_dir"), "Create a report instrument with output directory")
       .def("get_output_dir", &ReportInstrument::GetOutputDir,
            "Path of the directory that holds report files (used by perf hints to "

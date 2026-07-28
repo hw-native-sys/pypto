@@ -127,7 +127,7 @@ space cannot be switched off. The setting is per function card.
 
 Pinning opens the IR source if it was collapsed, since locating the tile there
 is the point. Hovering another box still previews its tooltip without disturbing
-the pin. Click the pinned box again, press <kbd>Esc</kbd>, or use the chip's `×`
+the pin. Click the pinned box again, press `Esc`, or use the chip's `×`
 to clear it. Each function card holds its own selection.
 
 ### IR source

@@ -224,23 +224,54 @@ def _function_kwargs(func: ast.FunctionDef) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _tile_from_annotation(
+    name: str, annotation: ast.expr, lineno: int, end_lineno: int, op: str
+) -> Tile | None:
+    """Build a tile from an annotated name, or None if it owns no tile memory."""
+    if not _is_tile_annotation(annotation):
+        return None
+    memref = _find_memref(annotation)
+    space = _find_space(annotation)
+    if memref is None or space is None or space == "DDR":
+        return None
+    base, offset, size = memref
+    return Tile(
+        name=name,
+        space=space,
+        base=base,
+        offset=offset,
+        size=size,
+        shape=_shape_of(annotation),
+        dtype=_dtype_of(annotation),
+        op=op,
+        start=lineno,
+        end=end_lineno,
+    )
+
+
 def _collect_tiles(func: ast.FunctionDef) -> dict[str, Tile]:
     """Collect every tile binding in a function, keyed by SSA name."""
     tiles: dict[str, Tile] = {}
     loads: list[ast.Name] = []
+
+    # A tile-typed parameter owns caller-allocated memory that is live for the
+    # whole callee; its MemRef lives on the arg, not on an assignment.
+    args = func.args
+    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
+        if arg is None or arg.annotation is None:
+            continue
+        tile = _tile_from_annotation(
+            arg.arg, arg.annotation, arg.lineno, arg.end_lineno or arg.lineno, "param"
+        )
+        if tile is not None:
+            tiles[arg.arg] = tile
+
     for stmt in ast.walk(func):
         if isinstance(stmt, ast.Name) and isinstance(stmt.ctx, ast.Load):
             loads.append(stmt)  # applied below, once every binding is known
         if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
             continue
-        if not _is_tile_annotation(stmt.annotation):
-            continue
-        memref = _find_memref(stmt.annotation)
-        space = _find_space(stmt.annotation)
-        if memref is None or space is None or space == "DDR":
-            continue
 
-        base, offset, size = memref
         end_line = stmt.end_lineno or stmt.lineno
         existing = tiles.get(stmt.target.id)
         if existing is not None:
@@ -252,18 +283,9 @@ def _collect_tiles(func: ast.FunctionDef) -> dict[str, Tile]:
         producer = ""
         if isinstance(stmt.value, ast.Call):
             producer = (_dotted_name(stmt.value.func) or "").removeprefix("pl.")
-        tiles[stmt.target.id] = Tile(
-            name=stmt.target.id,
-            space=space,
-            base=base,
-            offset=offset,
-            size=size,
-            shape=_shape_of(stmt.annotation),
-            dtype=_dtype_of(stmt.annotation),
-            op=producer,
-            start=stmt.lineno,
-            end=end_line,
-        )
+        tile = _tile_from_annotation(stmt.target.id, stmt.annotation, stmt.lineno, end_line, producer)
+        if tile is not None:
+            tiles[stmt.target.id] = tile
 
     # Extend each live range to the last line that reads the name.
     for node in loads:
