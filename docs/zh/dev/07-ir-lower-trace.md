@@ -73,8 +73,12 @@ pypto-ir-trace build/my_program/passes_dump --context 1 -o build/ir-trace.html
 ### 导航和检查
 
 在侧栏中选择 Pass，可并排比较其输入和输出。按 `j` 或 `Down Arrow` 移至下一个
-可见 Pass，按 `k` 或 `Up Arrow` 移至上一个可见 Pass。当表单控件获得焦点时，
+可见 Pass，按 `k` 或 `Up Arrow` 移至上一个可见 Pass。当文本输入控件获得焦点时，
 键盘导航（keyboard navigation）会被忽略。
+
+替换行使用浅红色和浅绿色的删除/新增背景，并以更深的红色和绿色突出实际变化的
+字符。仅存在于一侧的行仍显示为整行删除或新增。滚动任一代码面板时，前后视图会
+同时同步垂直和水平位置。
 
 ### 复制快照
 

@@ -78,8 +78,13 @@ pass is a no-op.
 
 Select a pass in the sidebar to compare its input and output side by side. Press
 `j` or `Down Arrow` to move to the next visible pass, and `k` or `Up Arrow` to
-move to the previous visible pass. Keyboard navigation is ignored while a form
-control has focus.
+move to the previous visible pass. Keyboard navigation is ignored while a
+text-entry control has focus.
+
+Replacement rows use light delete/insert backgrounds, with the exact changed
+characters emphasized in stronger red and green. Lines present on only one side
+remain full-line deletions or insertions. Scrolling either code pane keeps the
+before and after views synchronized vertically and horizontally.
 
 ### Copy snapshots
 
