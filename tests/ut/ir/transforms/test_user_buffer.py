@@ -334,6 +334,64 @@ class TestPipeline:
         bases = set(_base_names(after).values())
         assert bases == {"nd_buf"}, f"ND binding lost during flattening, got {bases}"
 
+    def test_binding_survives_an_spmd_cube_kernel(self, ascend_backend):
+        """A real on-core kernel: pl.spmd over the Mat/Left/Right/Acc chain.
+
+        Every tile here is already 2D, so the ND-flatten path never runs. The
+        binding instead has to ride two rebuilds that only fire once a function is
+        actually lowered on-core: the ≤2D re-deduction in FlattenTileNdTo2D (whose
+        args get substituted to partition views, so nothing passes through
+        untouched) and the LHS-Var type sync in InferTileMemorySpace. Both rebuild
+        from the RHS Call, whose deduced type never carries a MemRef — reading it
+        from there silently un-binds every tile in the only kernel shape that
+        matters in practice, with no diagnostic.
+
+        Two Acc slots is the point: one accumulator forces a TSTORE between
+        consecutive TMATMULs (issue #2131).
+        """
+        m, k, n = 16, 128, 128
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                q: pl.Tensor[[m, k], pl.BF16],
+                b: pl.Tensor[[k, 2 * n], pl.BF16],
+                out: pl.Out[pl.Tensor[[m, 2 * n], pl.FP32]],
+            ) -> pl.Tensor[[m, 2 * n], pl.FP32]:
+                for _ in pl.spmd(1, name_hint="cube"):
+                    q_l1: pl.Tile[[m, k], pl.BF16, pl.Mem.Mat] = pl.load(
+                        q, [0, 0], [m, k], target_memory=pl.MemorySpace.Mat
+                    )
+                    q_l0: pl.Tile[[m, k], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        q_l1, 0, 0, [m, k], target_memory=pl.MemorySpace.Left
+                    )
+                    b_l1: pl.Tile[[k, 2 * n], pl.BF16, pl.Mem.Mat] = pl.load(
+                        b, [0, 0], [k, 2 * n], target_memory=pl.MemorySpace.Mat
+                    )
+                    b0: pl.Tile[[k, n], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_l1, 0, 0, [k, n], target_memory=pl.MemorySpace.Right
+                    )
+                    acc0: pl.Tile[[m, n], pl.FP32, pl.Buffer("l0c_ping"), pl.Mem.Acc] = pl.tile.matmul(
+                        q_l0, b0
+                    )
+                    r0: pl.Tensor[[m, 2 * n], pl.FP32] = pl.store(acc0, [0, 0], out)
+                    b1: pl.Tile[[k, n], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_l1, 0, n, [k, n], target_memory=pl.MemorySpace.Right
+                    )
+                    acc1: pl.Tile[[m, n], pl.FP32, pl.Buffer("l0c_pong"), pl.Mem.Acc] = pl.tile.matmul(
+                        q_l0, b1
+                    )
+                    r1 = pl.store(acc1, [0, n], r0)
+                return r1
+
+        after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        bases = set(_base_names(after).values())
+        assert {"l0c_ping", "l0c_pong"} <= bases, f"binding lost in an spmd kernel, got {bases}"
+        pinned = [line for line in _alloc_lines(after) if "pinned=True" in line]
+        assert len(pinned) == 2, f"expected two pinned Acc allocations, got {pinned}"
+
     def test_reparsed_dump_is_not_treated_as_user_buffers(self, ascend_backend):
         """A post-allocation dump also carries MemRefs — those are not user buffers.
 
@@ -390,6 +448,37 @@ class TestPipeline:
 
 class TestRejects:
     """Bindings the compiler must refuse, each with a message that says why."""
+
+    def test_rejects_binding_a_pipelined_tile(self, ascend_backend):
+        """One named buffer cannot back two in-flight stages of a pl.pipeline.
+
+        `stage=2` clones the body so iteration i and i+1 overlap; both clones name
+        the same buffer, so the tile is co-live with itself. Naming a buffer and
+        asking the compiler to multi-buffer it are mutually exclusive requests —
+        explicit slots *replace* pipelining at that level, they do not stack on
+        top of it. Rejecting says so; silently honoring one of the two would
+        either corrupt data or quietly drop the binding.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(0, 256, 64, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Buffer("staged"), pl.Mem.Vec] = pl.load(
+                        a, [i, 0], [64, 64]
+                    )
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[256, 64], pl.FP32] = pl.store(e, [i, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        with pytest.raises(ValueError, match="live at the same time"):
+            _run_full_pipeline(Before, "MemoryReuse")
 
     def test_rejects_overlapping_lifetimes(self, ascend_backend):
         """Two co-live tiles on one buffer would corrupt data, not reuse it."""

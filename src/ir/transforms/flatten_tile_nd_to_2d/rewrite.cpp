@@ -32,6 +32,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -62,6 +63,26 @@ bool IsNaturalNzMatLoad(const TileTypePtr& result_tile, bool assume_mat = false)
 bool HasKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& name) {
   return std::any_of(kwargs.begin(), kwargs.end(),
                      [&name](const auto& kwarg) { return kwarg.first == name; });
+}
+
+/// Carry the assignment's MemRef onto a type re-deduced by `OpRegistry::Create`.
+///
+/// Re-deducing yields authoritative shape / dtype / view metadata but never a
+/// MemRef — op type deduction does not produce one. So the assignment's MemRef
+/// is strictly additional information, not a stale override, and the re-created
+/// op denotes the same storage. Dropping it would silently un-bind the two
+/// things that legitimately put a MemRef on a tile before InitMemRef: a user
+/// buffer binding (`pl.Tile[..., pl.Buffer("ping")]`) and a re-parsed
+/// post-allocation dump. Same merge ConvertToSSA applies to an LHS MemRef.
+///
+/// The MemRef is read from the *assigned Var*, not from the RHS Call: ConvertToSSA
+/// merges it into the Var's type only, and op type deduction leaves the Call's
+/// type MemRef-less. Sourcing it from `call->GetType()` silently matches nothing.
+TypePtr WithCarriedMemRef(const TypePtr& deduced, const AssignStmtPtr& assign) {
+  if (!assign || !assign->var_) return deduced;
+  auto memref = GetTypeMemRef(assign->var_->GetType());
+  if (!memref.has_value() || GetTypeMemRef(deduced).has_value()) return deduced;
+  return CloneTypeWithMemRef(deduced, memref);
 }
 
 /**
@@ -650,9 +671,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
         // Carry the MemRef through: the flattened tile is the same storage, and a
         // parse-time `pl.Buffer(...)` binding rides this field to InitMemRef.
-        // Dropping it would silently un-bind every ND user-bound tile.
-        auto flat_tile_type = std::make_shared<TileType>(
-            flat_shape_exprs, result_tile->dtype_, result_tile->memref_, flat_tile_view, flat_memory_space);
+        // Dropping it would silently un-bind every ND user-bound tile. The binding
+        // sits on the assigned Var; `result_tile` is the RHS Call's deduced type,
+        // which never carries a MemRef — see WithCarriedMemRef.
+        auto bound_memref = GetTypeMemRef(assign->var_->GetType());
+        auto flat_tile_type =
+            std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_,
+                                       bound_memref.has_value() ? bound_memref : result_tile->memref_,
+                                       flat_tile_view, flat_memory_space);
 
         // A natural Mat load lowers to ND2NZ, which requires a 2D GlobalTensor.
         // Materialize that source-window collapse in IR with tensor.view; plain
@@ -719,8 +745,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
       // ≤2D tile.load: honor any pending var_map substitutions
       auto deduced_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
+      auto loaded_type = WithCarriedMemRef(deduced_call->GetType(), assign);
       auto new_call = std::make_shared<Call>(deduced_call->op_, deduced_call->args_, deduced_call->kwargs_,
-                                             call->attrs_, deduced_call->GetType(), deduced_call->span_);
+                                             call->attrs_, loaded_type, deduced_call->span_);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
@@ -910,10 +937,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       } else {
         // Re-create tile ops via OpRegistry for proper type deduction with 2D args;
         // non-tile ops keep the original type.
-        auto new_call =
-            (op_name.substr(0, 5) == "tile.")
-                ? op_registry.Create(op_name, new_args, call->kwargs_, span)
-                : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+        CallPtr new_call;
+        if (op_name.substr(0, 5) == "tile.") {
+          auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
+          new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+                                            WithCarriedMemRef(deduced->GetType(), assign), deduced->span_);
+        } else {
+          new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+        }
 
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
