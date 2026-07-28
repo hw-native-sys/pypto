@@ -327,6 +327,50 @@ class CanonicalizeIOOrderMutator : public IRMutator {
       }
     }
 
+    // ISA V2C: each TPUSH is an independent FIFO entry (no atomic data+scale
+    // pair). Preserve relative order of sticky cross-core / MX-scale boundary
+    // ops so canonicalize cannot swap data push ahead of scale push (or the
+    // matching tpop). Chain consecutive sticky stmts in original program order.
+    auto call_of = [](const StmtPtr& st) -> CallPtr {
+      if (auto a = std::dynamic_pointer_cast<const AssignStmt>(st)) {
+        return std::dynamic_pointer_cast<const Call>(a->value_);
+      }
+      if (auto e = std::dynamic_pointer_cast<const EvalStmt>(st)) {
+        return std::dynamic_pointer_cast<const Call>(e->expr_);
+      }
+      return nullptr;
+    };
+    auto is_fifo_sticky = [&](const StmtPtr& st) -> bool {
+      auto c = call_of(st);
+      if (!c) return false;
+      // Registry names are direction-suffixed (not bare tile.tpush / tile.tpop).
+      if (IsOp(c, "tile.tpush_to_aiv") || IsOp(c, "tile.tpush_to_aic") || IsOp(c, "tile.tpop_from_aic") ||
+          IsOp(c, "tile.tpop_from_aiv")) {
+        return true;
+      }
+      // Only MX scale moves are FIFO-sticky. Marking ordinary Left/Right data
+      // moves sticky reorders existing matmul pipelines (golden / treshape
+      // regressions). Scale fills must stay behind their matching tpush/tpop.
+      if (IsOp(c, "tile.move")) {
+        for (const auto& [k, v] : c->kwargs_) {
+          if (k != "target_memory") continue;
+          if (const auto* ms = std::any_cast<MemorySpace>(&v)) {
+            return *ms == MemorySpace::LeftScale || *ms == MemorySpace::RightScale;
+          }
+        }
+      }
+      return false;
+    };
+    size_t prev_sticky = static_cast<size_t>(-1);
+    for (size_t i = 0; i < sort_count; ++i) {
+      if (!is_fifo_sticky(stmts[i])) continue;
+      if (prev_sticky != static_cast<size_t>(-1)) {
+        successors[prev_sticky].push_back(i);
+        ++remaining[i];
+      }
+      prev_sticky = i;
+    }
+
     // Per-statement pipeline stage, read from the ``pipeline_membership`` attr
     // LowerPipelineLoops puts on each clone's tile-producing Call (still present
     // here — MemoryReuse strips it later). A statement's stage is the membership

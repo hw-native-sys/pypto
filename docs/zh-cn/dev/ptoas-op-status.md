@@ -114,7 +114,7 @@
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（PR #2147 最小 MXFP8 host-prequant）；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束)；设备数值 follow-up #1975 |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（#2147 基线 + #2117 acc/bias/MXFP4）；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束)；设备数值 follow-up #1975 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov 未支持；PR #1823 ST 暂下架 |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16；PR #1823 ST 暂下架 |
@@ -141,7 +141,7 @@
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW 前端+codegen+ST；a2a3 真机待 CI（irregular 家族留意 ISA 缺陷） |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **量化** |  |  |  |  |  |  |  |  |
-| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (issue #1975); PTOAS outs arity/attr follow-up |
+| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx`（PR #2117）；2× scratch；见 [operators MX 约束](ir/05-operators.md#mx--ascend950ptoas-约束) |
 | pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (issue #1975); ST follow-up |
 | **固定管线** |  |  |  |  |  |  |  |  |
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |

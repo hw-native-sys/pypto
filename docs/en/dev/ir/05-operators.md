@@ -133,35 +133,46 @@ later unrolls the batched form into per-batch 2D ops.
 ### MX block-scale (Ascend950)
 
 MX uses dedicated `LeftScale` / `RightScale` memory spaces and `FP8E8M0` scale dtype.
-This PR extends #2147 (minimal host-prequant MXFP8 matmul) with on-chip `tquant` /
-`tdequant` and `matmul_mx_acc` / `matmul_mx_bias`; MXFP4 / ND A-scale rewrite land in later #2117 commits.
+This PR (**#2117**) stacks on #2147's host-prequant MXFP8 baseline and adds on-chip
+`tquant` / `tdequant`, `matmul_mx_acc` / `matmul_mx_bias`, MXFP4 packed-K, EmitC ND
+A-scale rewrite + AIC `PIPE_ALL`, and ExpandMixed V2C FIFO sticky.
 
 | IR / DSL | Notes |
 | -------- | ----- |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; **data `FP8E4M3FN` only** (FP8E5M2 / FP4 rejected here); scale `FP8E8M0`; `K % 32 == 0` |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; data `FP8E4M3FN` / `FP4` / `INT8` from tquant (**still rejects `FP8E5M2`**); scale `FP8E8M0` or UINT8; `K % 32 == 0` (logical K for FP4) |
 | `tile.matmul_mx_acc` / `_bias` | Acc / bias variants (same data dtype rules as `matmul_mx`) |
-| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 dynamic quant → `TupleType{quant, scale}`; codegen `pto.tquant.mx` |
+| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 dynamic quant → `TupleType{quant, scale}`; codegen `pto.tquant.mx`; scratch sized for ISA 2× unroll |
 | `tile.tdequant` / `pl.tdequant` | Integer per-row dequant: `dst = (src - offset) * scale` |
 | `tile.tget_scale_addr` / `pl.tget_scale_addr` | Bind scale address from Left/Right (A5); flushes deferred Mat→Scale fills |
 | `tile.load(..., mx_layout=...)` | MX scale GM layouts `mx_a_*` / `mx_b_*` (dtype FP8E8M0 or UINT8) |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move; may register a pending fill until `tget_scale_addr` |
 
-
 Canonical sample: `M=128,K=64,N=64`, A/B=`FP8E4M3FN`, scale=`FP8E8M0` (`[128,2]` / `[2,64]`),
-GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); align M↑16, K↑64, N↑32 (fp8).
+GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack or ND rewrite); align M↑16, K↑64, N↑32 (fp8).
 
 #### MX / Ascend950: pto-isa constraints
+
+Baseline from #2147 (still apply):
 
 | Constraint | Detail |
 | ---------- | ------ |
 | Distinct scale buffers | Cube does **not** fold scales into Left/Right data; `TileType::ScaleLeft` / `ScaleRight` (L0A/L0B sidecars) ↔ PyPTO `LeftScale` / `RightScale` |
-| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; this stage allows MX data **`FP8E4M3FN` only** (**rejects `FP8E5M2`**); `K%32==0`, fractal=32 |
+| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; MX data allows **`FP8E4M3FN` / `FP4`** (**rejects `FP8E5M2`**); `K%32==0` (logical), fractal=32 |
 | Layouts | `MX_A_*` → row-major ZZ; `MX_B_*` → col-major NN; `TLoadMxCube*` (AZZ2ZZ / AND2ZZ / …) |
 | `TMov` `CommonCheckMX` | Allows `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale |
 | Bind-then-fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound |
 | Alignment | Same as ISA `tmatmul_mx`: M↑16, K↑64, N↑32 (fp8) |
 
+##### PR 2117 extensions (pto-isa)
+
+| Constraint | Detail |
+| ---------- | ------ |
+| MXFP4 packed K | IR `shape_` / `valid_shape` K for `FP4` are **storage** units (2 elems/byte); scale groups and K-match use **logical** K (= storage×2) |
+| `tquant` outs / scratch | Dynamic quant writes quant + e8m0 scale; lower_composite sizes max/scaling scratch for ISA unroll **2×** footprint |
+
 #### MX / Ascend950: PTOAS constraints
+
+Baseline from #2147 (still apply):
 
 | Constraint | Detail |
 | ---------- | ------ |
@@ -170,9 +181,14 @@ GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); align M↑16, K↑64, 
 | No Mat↔Scaling `treshape` | Different locs; reshape stays in Mat (ui8), then `tmov` into scaling |
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first |
 | Order | `tget_scale_addr` **before** Mat→scaling fill; PyPTO uses `PendingScaleFill`, flushed at tget |
-| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage ST uses **host ZZ/NN** (AZZ2ZZ) and does **not** rely on EmitC ND rewrite (rewrite / AIC `PIPE_ALL` → #2117) |
-| Coverage here | `pto.tmatmul.mx` + `pto.tmatmul.mx.acc` + `pto.tmatmul.mx.bias` + `pto.tquant.mx` + `pto.tget_scale_addr`; MXFP4 / ND rewrite → #2117 |
 
+##### PR 2117 extensions (PTOAS / ExpandMixed)
+
+| Constraint | Detail |
+| ---------- | ------ |
+| ND A-scale rewrite | EmitC may rewrite `MX_A_ZZ→MX_A_ND` for production ND A-scale; AIC emits `PIPE_ALL` immediately before `mx_a_*` tload (not TPUSH+`dsb`) |
+| ExpandMixed FIFO sticky | Canonicalize chains V2C tpush/tpop and Mat→LeftScale/RightScale moves so scale fills cannot reorder ahead of matching FIFO entries |
+| Coverage here | `pto.tmatmul.mx` (+acc/bias) + `pto.tquant.mx` + `pto.tget_scale_addr` + MXFP4 + ND rewrite / `PIPE_ALL` |
 
 ## Python Usage
 

@@ -127,34 +127,46 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 ### MX block-scale（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale dtype。
-本 PR 在 #2147（最小 host-prequant MXFP8 matmul）基础上扩展片上 `tquant` /
-`tdequant` 以及 `matmul_mx_acc` / `matmul_mx_bias`；MXFP4 / ND A-scale rewrite 见后续 #2117 提交。
+本 PR（**#2117**）叠在 #2147 的 host-prequant MXFP8 基线之上，增加片上
+`tquant` / `tdequant`、`matmul_mx_acc` / `matmul_mx_bias`、MXFP4 packed-K、EmitC ND
+A-scale rewrite + AIC `PIPE_ALL`，以及 ExpandMixed V2C FIFO sticky。
 
 | IR / DSL | 说明 |
 | -------- | ---- |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；**data 仅 `FP8E4M3FN`**（此处拒绝 FP8E5M2 / FP4）；scale 为 `FP8E8M0`；`K % 32 == 0` |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；data 为 `FP8E4M3FN` / `FP4` / tquant 的 `INT8`（**仍拒绝 `FP8E5M2`**）；scale 为 `FP8E8M0` 或 UINT8；`K % 32 == 0`（FP4 用 logical K） |
 | `tile.matmul_mx_acc` / `_bias` | 累加 / bias 变体（与 `matmul_mx` 相同 data dtype 规则） |
-| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 动态量化，返回 `TupleType{quant, scale}`；codegen 为 `pto.tquant.mx` |
+| `tile.tquant` / `pl.tquant` / `pl.mx_quant` | MX block-32 动态量化，返回 `TupleType{quant, scale}`；codegen 为 `pto.tquant.mx`；scratch 按 ISA 2× unroll 计 |
 | `tile.tdequant` / `pl.tdequant` | 整型按行 dequant：`dst = (src - offset) * scale` |
 | `tile.tget_scale_addr` / `pl.tget_scale_addr` | 从 Left/Right 绑定 scale 地址（A5）；并 flush 延迟的 Mat→Scale fill |
 | `tile.load(..., mx_layout=...)` | MX scale GM layout `mx_a_*` / `mx_b_*`（dtype 为 FP8E8M0 或 UINT8） |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；可登记 pending fill，直到 `tget_scale_addr` |
 
 规范样例：`M=128,K=64,N=64`，A/B=`FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
-GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）；对齐 M↑16、K↑64、N↑32（fp8）。
+GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN 或 ND rewrite）；对齐 M↑16、K↑64、N↑32（fp8）。
 
 #### MX / Ascend950：pto-isa 约束
+
+##### PR 2147 基线（仍然适用）
 
 | 约束 | 要点 |
 | ---- | ---- |
 | 独立 scale buffer | Cube **不**把 scale 折进 Left/Right；`TileType::ScaleLeft` / `ScaleRight`（L0A/L0B sidecar）↔ PyPTO `LeftScale` / `RightScale` |
-| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；本阶段 MX data **仅 `FP8E4M3FN`**（**拒绝 `FP8E5M2`**）；`K%32==0`，fractal=32 |
+| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；MX data 允许 **`FP8E4M3FN` / `FP4`**（**拒绝 `FP8E5M2`**）；`K%32==0`（logical），fractal=32 |
 | layout | `MX_A_*` → row-major ZZ；`MX_B_*` → col-major NN；`TLoadMxCube*`（AZZ2ZZ / AND2ZZ 等） |
 | `TMov` `CommonCheckMX` | 允许 `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right；canonical：ui8 Mat reshape 再 ui8→f8 Scale |
 | bind-then-fill | **先** `GetScaleAddr(Left/Right)` 再填 sidecar；写 provisional alloc 地址在 rebound 后无效 |
 | 对齐 | 与 ISA `tmatmul_mx` 一致：M↑16、K↑64、N↑32（fp8） |
 
+##### PR 2117 延伸（pto-isa）
+
+| 约束 | 要点 |
+| ---- | ---- |
+| MXFP4 packed K | `FP4` 的 IR `shape_` / `valid_shape` K 为 **storage** 单位（2 elems/byte）；scale 分组与 K 匹配用 **logical** K（= storage×2） |
+| `tquant` outs / scratch | 动态量化写出 quant + e8m0 scale；lower_composite 按 ISA unroll **2×** footprint 分配 max/scaling scratch |
+
 #### MX / Ascend950：PTOAS 约束
+
+##### PR 2147 基线（仍然适用）
 
 | 约束 | 要点 |
 | ---- | ---- |
@@ -163,9 +175,14 @@ GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）；对齐 M↑16、K�
 | 禁止 Mat↔Scaling `treshape` | 不同 loc；reshape 留在 Mat（ui8），再 `tmov` 进 scaling |
 | shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
 | 顺序 | `tget_scale_addr` **先于** Mat→scaling fill；PyPTO 用 `PendingScaleFill`，在 tget 时 flush |
-| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；本阶段 ST 用 **host ZZ/NN**（AZZ2ZZ），**不**依赖 EmitC ND rewrite（rewrite / AIC `PIPE_ALL` → #2117） |
-| 本阶段覆盖 | `pto.tmatmul.mx` + `pto.tmatmul.mx.acc` + `pto.tmatmul.mx.bias` + `pto.tquant.mx` + `pto.tget_scale_addr`；MXFP4 / ND rewrite → #2117 |
 
+##### PR 2117 延伸（PTOAS / ExpandMixed）
+
+| 约束 | 要点 |
+| ---- | ---- |
+| ND A-scale rewrite | EmitC 可将 `MX_A_ZZ→MX_A_ND`；AIC 在 `mx_a_*` tload 前立即发 `PIPE_ALL`（无需 TPUSH+`dsb`） |
+| ExpandMixed FIFO sticky | Canonicalize 将 V2C tpush/tpop 与 Mat→LeftScale/RightScale move 串成 sticky 链，避免 scale fill 越过匹配的 FIFO 项 |
+| 本阶段覆盖 | `pto.tmatmul.mx`（含 acc/bias）+ `pto.tquant.mx` + `pto.tget_scale_addr` + MXFP4 + ND rewrite / `PIPE_ALL` |
 
 ## Python 用法
 

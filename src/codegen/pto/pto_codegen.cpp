@@ -1472,33 +1472,6 @@ std::vector<PTOCodegen::DeferredTFree> PTOCodegen::TakeDeferredTFrees() {
 
 bool PTOCodegen::HasPendingScaleFills() const { return !fs_.pending_scale_fills.empty(); }
 
-std::optional<PTOCodegen::PendingScaleFill> PTOCodegen::TakePendingScaleFill(const std::string& dst_ssa) {
-  auto it = fs_.pending_scale_fills.find(dst_ssa);
-  if (it == fs_.pending_scale_fills.end()) return std::nullopt;
-  PendingScaleFill fill = std::move(it->second);
-  fs_.pending_scale_fills.erase(it);
-  return fill;
-}
-
-std::optional<PTOCodegen::PendingSetValidShape> PTOCodegen::TakePendingSetValidShape(
-    const std::string& dst_ssa) {
-  auto it = fs_.pending_set_validshapes.find(dst_ssa);
-  if (it == fs_.pending_set_validshapes.end()) return std::nullopt;
-  PendingSetValidShape pending = std::move(it->second);
-  fs_.pending_set_validshapes.erase(it);
-  return pending;
-}
-
-void PTOCodegen::DeferTFree(const std::string& core, int split) {
-  fs_.deferred_tfrees.push_back({core, split});
-}
-
-std::vector<PTOCodegen::DeferredTFree> PTOCodegen::TakeDeferredTFrees() {
-  std::vector<DeferredTFree> out = std::move(fs_.deferred_tfrees);
-  fs_.deferred_tfrees.clear();
-  return out;
-}
-
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype) {
   CHECK(dtype == DataType::FP32) << "__gm_pipe_buffer must use FP32 elements, got " << dtype.ToString();
   fs_.gm_slot_buffer_ssa = ssa;

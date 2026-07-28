@@ -338,17 +338,14 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                   << args[2]->GetType()->TypeName();
   CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D lhs/rhs tiles";
-  CHECK(IsMxDataDtype(lhs_type->dtype_))
-      << "The operator " << op_name << " requires lhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
-         "but got "
-      << lhs_type->dtype_.ToString();
-  CHECK(IsMxDataDtype(rhs_type->dtype_))
-      << "The operator " << op_name << " requires rhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
-         "but got "
-      << rhs_type->dtype_.ToString();
-  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
-      << "The operator " << op_name << " requires matching lhs/rhs data dtypes, but got "
-      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  CHECK(IsMxDataDtype(lhs_type->dtype_)) << "The operator " << op_name
+                                         << " requires lhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
+                                            "but got "
+                                         << lhs_type->dtype_.ToString();
+  CHECK(IsMxDataDtype(rhs_type->dtype_)) << "The operator " << op_name
+                                         << " requires rhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
+                                            "but got "
+                                         << rhs_type->dtype_.ToString();
 
   ExprPtr m_dim = lhs_type->shape_[0];
   ExprPtr k_dim_lhs = lhs_type->shape_[1];
@@ -514,9 +511,9 @@ REGISTER_OP("tile.matmul_bias")
 REGISTER_OP("tile.matmul_mx")
     .set_op_category("TileOp")
     .set_description("MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0, [M, K/32])")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0, [K/32, N])")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
@@ -532,9 +529,9 @@ REGISTER_OP("tile.matmul_mx_acc")
     .set_op_category("TileOp")
     .set_description("MX block-scale matmul with accumulation: acc += matmul_mx(...)")
     .add_argument("acc", "Accumulator tile (TileType, 2D, FP32)")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
@@ -551,9 +548,9 @@ REGISTER_OP("tile.matmul_mx_acc")
 REGISTER_OP("tile.matmul_mx_bias")
     .set_op_category("TileOp")
     .set_description("MX block-scale matmul with bias: C = matmul_mx(...) + bias")
-    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
-    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
+    .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3 / MXFP4)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
     .add_argument("bias", "Bias tile (TileType, [1, N], FP32)")
     .set_input_memory(0, MemorySpace::Left)

@@ -121,7 +121,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | ST: PR #1823 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (PR #2147 minimal MXFP8 host-prequant); see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints); device numerical follow-up #1975 |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (#2147 baseline + #2117 acc/bias/MXFP4); see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints); device numerical follow-up #1975 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 acc→acc pto.tmov unsupported; PR #1823 ST temporarily pulled |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | a2a3 1-row TExtract dstRow%16; PR #1823 ST temporarily pulled |
@@ -148,7 +148,7 @@ an ST will catch it on hardware; **ops without ST are incomplete**
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | NEW frontend+codegen+ST; a2a3 hardware CI pending (watch ISA defects in irregular family) |
 | pto.tprint | TPRINT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING (debug, skip) |
 | **Quantization** |  |  |  |  |  |  |  |  |
-| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (issue #1975); PTOAS outs arity/attr follow-up |
+| pto.tquant | TQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW MX path via `tile.tquant`→`pto.tquant.mx` (PR #2117); 2× scratch; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (issue #1975); ST follow-up |
 | **Fixed pipeline** |  |  |  |  |  |  |  |  |
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
