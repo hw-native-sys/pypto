@@ -94,9 +94,10 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.fmods",
       "tile.maximums",
       "tile.lrelu",
-      "tile.sels",
-      // Gather operands and result are linearly addressed.
-      "tile.gatherb",
+    "tile.sels",
+    // Gather operands and result are linearly addressed.
+    "tile.gatherb",
+    "tile.rems",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
