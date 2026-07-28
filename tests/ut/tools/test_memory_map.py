@@ -255,6 +255,18 @@ def test_every_space_has_a_colour_in_the_template():
             assert f"--sp-{space}:" in template, f"{name} reports {space}, template has no colour"
 
 
+def test_lanes_contain_their_boxes_stacking():
+    # A hovered box takes z-index 5 and a pinned one 6, both above the sticky
+    # source pane (2). They stay behind it only because the lane declares a
+    # numeric z-index, which makes it a stacking context that confines them.
+    template = memory_map._TEMPLATE.read_text()
+    lane_rule = re.search(r"\n  \.lane \{(.*?)\n  \}", template, re.S)
+    assert lane_rule is not None, "no .lane rule in the template"
+    body = lane_rule.group(1)
+    assert re.search(r"position:\s*relative", body), ".lane must be positioned"
+    assert re.search(r"z-index:\s*\d+", body), ".lane needs a numeric z-index to contain its boxes"
+
+
 def test_tile_typed_parameters_are_mapped(tmp_path: Path):
     # A tile-typed parameter owns caller-allocated memory and carries its MemRef
     # on the arg rather than on an assignment; missing it would drop the buffer

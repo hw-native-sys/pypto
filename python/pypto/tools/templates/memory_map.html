@@ -221,7 +221,10 @@
      space colour. Both are inset shadows / backgrounds, so neither consumes
      lane width and the shared byte scale stays exact. */
   .lane {
-    position: relative;
+    /* z-index (not `auto`) makes the lane its own stacking context, so a
+       hovered or pinned box can only rise above its siblings — never above the
+       sticky source pane or the column headers, whatever z-index it takes. */
+    position: relative; z-index: 0;
     background: color-mix(in srgb, var(--c) 4%, transparent);
     box-shadow: inset 2px 0 0 var(--line);
   }
