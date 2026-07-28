@@ -140,7 +140,10 @@ print(pto_code)
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
-| `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
+| `tile.addc(src0, src1, carry)` | `pto.taddc` (`src0 + src1 + carry`) |
+| `tile.subc(src0, src1, carry)` | `pto.tsubc` (`src0 - src1 + carry`) |
+| `tile.addsc(src0, scalar, carry)` | `pto.taddsc` (`src0 + scalar + carry`) |
+| `tile.subsc(src0, scalar, carry)` | `pto.tsubsc` (`src0 - scalar + carry`) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 

@@ -109,10 +109,10 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including overflow and valid_shape; A5 hardware verification pending |
+| pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including borrow and valid_shape; A5 hardware verification pending |
+| pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including overflow and valid_shape; A5 hardware verification pending |
+| pto.tsubsc | TSUBS + TADD | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware, including borrow and valid_shape; A5 hardware verification pending |
 | pto.tabs | TABS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tneg | TNEG | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.texp | TEXP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -274,5 +274,5 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend;
-110 have same-name ST coverage (106 regular STs and 4 distributed STs); 62 lack same-name ST coverage
-(52 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
+114 have same-name ST coverage (110 regular STs and 4 distributed STs); 58 lack same-name ST coverage
+(48 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
