@@ -18,6 +18,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -297,6 +298,73 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
 
+namespace {
+
+TileTypePtr BuildGemvResultType(const TypePtr& inferred, const TileTypePtr& lhs_type,
+                                const TileTypePtr& rhs_type) {
+  auto inferred_type = As<TileType>(inferred);
+  INTERNAL_CHECK(inferred_type) << "Internal error: GEMV type inference must produce TileType";
+
+  auto physical_rows = std::make_shared<ConstInt>(16, DataType::INDEX, lhs_type->shape_[0]->span_);
+  std::vector<ExprPtr> output_shape = {physical_rows, rhs_type->shape_[1]};
+  const auto lhs_valid = GetValidShape(lhs_type);
+  const auto rhs_valid = GetValidShape(rhs_type);
+
+  TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
+  tile_view.valid_shape = {lhs_valid[0], rhs_valid[1]};
+  return std::make_shared<TileType>(output_shape, inferred_type->dtype_, std::nullopt, tile_view);
+}
+
+TypePtr DeduceTileGemvType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
+  TypePtr inferred = DeduceTileMatMulType(args, kwargs, op_name);
+  return BuildGemvResultType(inferred, As<TileType>(args[0]->GetType()), As<TileType>(args[1]->GetType()));
+}
+
+TypePtr DeduceTileGemvAccType(const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
+                          << args.size();
+  auto acc_type = As<TileType>(args[0]->GetType());
+  CHECK(acc_type) << "The operator " << op_name << " requires first argument (acc) to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(acc_type->shape_.size() == 2) << "The operator " << op_name << " requires acc to be 2D, but got "
+                                      << acc_type->shape_.size() << " dimensions";
+
+  std::vector<ExprPtr> product_args = {args[1], args[2]};
+  TypePtr product = DeduceTileMatMulType(product_args, kwargs, op_name);
+  auto expected_type =
+      BuildGemvResultType(product, As<TileType>(args[1]->GetType()), As<TileType>(args[2]->GetType()));
+
+  for (std::size_t axis = 0; axis < 2; ++axis) {
+    auto acc_extent = As<ConstInt>(acc_type->shape_[axis]);
+    auto expected_extent = As<ConstInt>(expected_type->shape_[axis]);
+    if (acc_extent && expected_extent) {
+      CHECK(acc_extent->value_ == expected_extent->value_)
+          << "The operator " << op_name << " requires accumulator physical shape "
+          << FormatShape(expected_type->shape_) << ", but got " << FormatShape(acc_type->shape_);
+    }
+  }
+  CHECK(acc_type->dtype_ == expected_type->dtype_)
+      << "The operator " << op_name << " requires accumulator dtype " << expected_type->dtype_.ToString()
+      << ", but got " << acc_type->dtype_.ToString();
+  return expected_type;
+}
+
+TypePtr DeduceTileGemvBiasType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  TypePtr inferred = DeduceTileMatMulBiasType(args, kwargs, op_name);
+  return BuildGemvResultType(inferred, As<TileType>(args[0]->GetType()), As<TileType>(args[1]->GetType()));
+}
+
+}  // namespace
+
 // ============================================================================
 // Registration Function for Block Matrix Multiplication Operations
 // ============================================================================
@@ -355,7 +423,7 @@ REGISTER_OP("tile.gemv")
     .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileMatMulType(args, kwargs, "tile.gemv");
+      return DeduceTileGemvType(args, kwargs, "tile.gemv");
     });
 
 REGISTER_OP("tile.gemv_acc")
@@ -371,7 +439,7 @@ REGISTER_OP("tile.gemv_acc")
     .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileMatMulAccType(args, kwargs, "tile.gemv_acc");
+      return DeduceTileGemvAccType(args, kwargs, "tile.gemv_acc");
     });
 
 REGISTER_OP("tile.gemv_bias")
@@ -386,7 +454,7 @@ REGISTER_OP("tile.gemv_bias")
     .set_output_memory(MemorySpace::Acc)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileMatMulBiasType(args, kwargs, "tile.gemv_bias");
+      return DeduceTileGemvBiasType(args, kwargs, "tile.gemv_bias");
     });
 
 }  // namespace ir

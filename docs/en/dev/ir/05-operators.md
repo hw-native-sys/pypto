@@ -183,6 +183,16 @@ layout contract is implemented.
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage uses **host ZZ/NN** (AZZ2ZZ). |
 | Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`. |
 
+### Tile-only GEMV family (A2/A3)
+
+The tile-only GEMV family uses logical shape `[1, N]` but follows the Cube
+instruction's padded physical contract. Its Acc result has 16 physical rows,
+while its physical column count follows the RHS tile (and must satisfy the
+target's normal C0 alignment); the bias uses the same physical column count.
+Their `valid_shape` retains the logical `[K, N]`, `[1, N]`, and `[1, N]`
+regions. A single-row Mat load uses `blayout=row_major` and
+`slayout=none_box`, selecting PTO-ISA's row-vector extraction path.
+
 ## Python Usage
 
 ```python

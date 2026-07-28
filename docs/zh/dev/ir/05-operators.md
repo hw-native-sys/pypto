@@ -171,6 +171,15 @@ offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；本阶段用 **host ZZ/NN**（AZZ2ZZ） |
 | 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr` |
 
+### 仅 Tile 的 GEMV 家族（A2/A3）
+
+仅 tile 的 GEMV 家族逻辑形状为 `[1, N]`，但物理形状遵循 Cube 指令的对齐契约：
+Acc 结果使用 16 个物理行，物理列数沿用 RHS tile（并须满足目标平台通常的
+C0 对齐要求），bias 使用相同的物理列数；
+各自的 `valid_shape` 仍保留逻辑 `[K, N]`、`[1, N]` 和 `[1, N]` 区域。
+单行 Mat load 使用 `blayout=row_major` 和 `slayout=none_box`，从而选择
+PTO-ISA 的行向量提取路径。
+
 ## Python 用法
 
 ```python

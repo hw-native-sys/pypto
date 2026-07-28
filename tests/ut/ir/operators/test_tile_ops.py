@@ -2349,7 +2349,7 @@ class TestTileMatMulOps:
             ) -> pl.Tensor[[1, 128], pl.FP32]:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2364,15 +2364,15 @@ class TestTileMatMulOps:
             @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
-                acc_in: pl.Tensor[[1, 128], pl.FP32],
+                acc_in: pl.Tensor[[16, 128], pl.FP32],
                 a: pl.Tensor[[1, 64], pl.FP32],
                 b: pl.Tensor[[64, 128], pl.FP32],
                 output: pl.Tensor[[1, 128], pl.FP32],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
-                tile_acc: pl.Tile[[1, 32], pl.FP32] = pl.load(acc_in, [0, 0], [1, 32])
+                tile_acc: pl.Tile[[16, 32], pl.FP32] = pl.load(acc_in, [0, 0], [16, 32], valid_shapes=[1, 32])
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2395,12 +2395,45 @@ class TestTileMatMulOps:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_bias: pl.Tile[[1, 32], pl.FP32] = pl.load(bias, [0, 0], [1, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
         assert "tile.gemv_bias" in ir_str
+
+    def test_tile_gemv_physical_accumulator_and_logical_valid_shape(self):
+        """GEMV pads Acc rows to 16 while preserving the logical [1, N] extent."""
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+
+        result = tile.gemv(lhs, rhs)
+        result_type = result.type
+        assert isinstance(result_type, ir.TileType)
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+        assert _valid_of(result_type) == [1, 48]
+
+        acc_result = tile.gemv_acc(result, lhs, rhs)
+        bias_result = tile.gemv_bias(lhs, rhs, bias)
+        for call in (acc_result, bias_result):
+            call_type = call.type
+            assert isinstance(call_type, ir.TileType)
+            assert [d.value for d in call_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+            assert _valid_of(call_type) == [1, 48]
 
 
 class TestTileTransformOps:
