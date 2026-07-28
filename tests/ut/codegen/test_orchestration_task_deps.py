@@ -23,6 +23,23 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
+def _assert_dep_edge_rejected(program, edge_name: str) -> str:
+    """Assert the full pipeline rejects ``program`` over its ``edge_name`` dep edge.
+
+    A user-written ``deps=[...]`` edge whose TaskId is no longer bound — its
+    producer sits in a scope that has since closed — must raise a
+    ``pypto::ValueError`` naming that TaskId. Returns the diagnostic so callers
+    can assert on its remaining details.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _generate_orch_full_pipeline(program, allow_relaxed_verification=True)
+
+    msg = str(excinfo.value)
+    assert edge_name in msg, msg
+    assert "cannot be honored" in msg, msg
+    return msg
+
+
 def test_array_slot_task_id_usable_as_submit_dep():
     """Regression for issue #1577.
 
@@ -118,15 +135,20 @@ def test_direct_producer_dep_skips_is_valid_guard():
     assert re.search(r"\.set_dependencies\(", code), code
 
 
-def test_task_id_binding_does_not_leak_past_pl_scope():
-    """Regression for the issue #1577 lifetime hazard.
+def test_user_dep_edge_across_closed_scope_is_rejected():
+    """A user ``deps=[tid]`` naming a TaskId from a closed scope is an error.
 
-    A producer TaskId declared inside a nested AUTO ``pl.scope()`` names a
-    ``PTO2TaskId`` C++ local that dies at the block's closing brace. Codegen must
-    not reference it after the block — before the fix it emitted a
-    ``set_dependencies`` fill from the out-of-scope local (uncompilable C++).
-    The TaskId binding is now scoped to the ``PTO2_SCOPE`` it is produced in, so
-    its identifier appears exactly once (its declaration) in the generated code.
+    Regression for the issue #1577 lifetime hazard *and* for the silent-drop
+    that replaced it. A producer TaskId declared inside a nested AUTO
+    ``pl.scope()`` names a ``PTO2TaskId`` C++ local that dies at the block's
+    closing brace, so codegen cannot reference it afterwards. Emitting the
+    reference produced uncompilable C++ (#1577); silently dropping the edge
+    instead left the consumer unordered against its producer, which surfaces at
+    runtime as a stale read.
+
+    Codegen now rejects the program with an actionable ``pypto::ValueError``
+    rather than emitting either. Compiler-derived edges keep the tolerant
+    skip — see ``test_cross_scope_task_id_is_hoisted_for_set_dependencies``.
     """
 
     @pl.program
@@ -150,15 +172,9 @@ def test_task_id_binding_does_not_leak_past_pl_scope():
             b, _ = pl.submit(self.k2, x, deps=[scoped_tid])
             return b
 
-    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
-
-    # The producer tid is declared inside the inner PTO2_SCOPE block.
-    m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
-    assert m, code
-    tid_name = m.group(1)
-    # It must NOT be referenced after its block closes — the binding is scoped
-    # out, so the only occurrence is its declaration (no dangling dep fill).
-    assert code.count(tid_name) == 1, f"TaskId local '{tid_name}' leaked past its pl.scope():\n{code}"
+    msg = _assert_dep_edge_rejected(P, "scoped_tid")
+    # The diagnostic also explains the fix.
+    assert "inside the scope that produces it" in msg, msg
 
 
 def test_cross_scope_task_id_is_hoisted_for_set_dependencies():
@@ -720,15 +736,17 @@ def test_compiler_auto_manual_scope_is_not_tied_to_function_name():
     assert f"{qk_tid.group(1)} = task_1_outs.task_id();" not in code, code
 
 
-def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
+def test_mixed_in_and_out_of_scope_deps_reports_user_error():
     """A deps= list mixing an in-scope TaskId with one scoped out of a closed
-    ``pl.scope()`` must not abort codegen.
+    ``pl.scope()`` is reported as a clean user error.
 
-    ``CountManualDeps`` skips the out-of-scope edge when sizing the dep stack
-    array, so the count is non-zero (the in-scope edge). ``EmitManualDeps`` must
-    skip the same out-of-scope edge rather than asserting on it — otherwise the
-    mixed case trips an INTERNAL_CHECK and crashes the compiler. The in-scope
-    edge is still wired; the out-of-scope edge is dropped.
+    The partially-satisfiable case must not degrade into either failure mode the
+    codegen has had historically: an ``INTERNAL_CHECK`` abort (compiler crash),
+    or silently wiring only the in-scope edge while dropping the other (the
+    consumer then races its out-of-scope producer). It raises a
+    ``pypto::ValueError`` naming the unsatisfiable edge — a ``ValueError`` in
+    Python, distinct from ``pypto.InternalError`` which derives from
+    ``RuntimeError``.
     """
 
     @pl.program
@@ -757,17 +775,141 @@ def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
             b, _ = pl.submit(self.k3, x, deps=[seed_tid, scoped_tid])
             return b
 
-    # Must not raise (regression: EmitManualDeps used to INTERNAL_CHECK here).
-    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+    # The unsatisfiable edge is named, not the satisfiable ``seed_tid``.
+    msg = _assert_dep_edge_rejected(P, "scoped_tid")
+    # A user-facing diagnostic, not an internal-invariant abort.
+    assert "Internal error" not in msg, msg
 
-    # The in-scope edge is wired; the out-of-scope ``scoped_tid`` is dropped.
-    assert code.count("set_dependencies(") == 1, code
-    # ``seed_tid`` is a fresh direct-producer TaskId (issue #1966): unguarded insert.
-    assert not re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
-    assert re.search(r"\] = seed_tid\w*;", code), code
-    m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
-    assert m, code
-    assert code.count(m.group(1)) == 1, code
+
+def test_user_dep_edge_out_of_compiler_inserted_loop_scope_is_rejected():
+    """The boundary need not be user-written to swallow a ``deps=[...]`` edge.
+
+    ``MaterializeRuntimeScopes`` wraps every ``ForStmt`` body in its own AUTO
+    ``PTO2_SCOPE``, so a TaskId produced in the loop body and depended on after
+    the loop crosses a closed scope even though the source names no scope at
+    all. The loop-carry machinery does hoist a valid C++ ``PTO2TaskId`` to the
+    outer level, but the dep binding is not visible there, so the edge would be
+    dropped — reject instead.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            loop_tid = pl.system.task_invalid()
+            for _i in pl.range(2):
+                _a, loop_tid = pl.submit(self.k1, x)
+            b, _ = pl.submit(self.k2, x, deps=[loop_tid])
+            return b
+
+    msg = _assert_dep_edge_rejected(P, "loop_tid")
+    # The message points at loop bodies / branches as scope openers.
+    assert "pl.range" in msg, msg
+
+
+def test_spmd_grid_tid_dep_across_manual_scope_boundary_is_rejected():
+    """A captured ``with pl.spmd(N) as tid:`` grid TaskId depended on from the
+    auto region after the enclosing ``pl.manual_scope()`` is rejected.
+
+    The grid TaskId is a genuine whole-grid join (the runtime completes the slot
+    only after all N blocks retire), so the edge is meaningful — it just cannot
+    be wired from outside the scope that produced it. Silently dropping it left
+    the reader racing all N blocks.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def producer(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            t = pl.load(a, [0, 0], [64, 64])
+            return pl.store(pl.add(t, t), [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def reader(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            t = pl.load(a, [0, 0], [64, 64])
+            return pl.store(pl.add(t, t), [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            scratch: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.manual_scope():
+                with pl.spmd(4) as grid_tid:
+                    scratch = self.producer(x, scratch)
+            out, _ = pl.submit(self.reader, scratch, out, deps=[grid_tid])
+            return out
+
+    _assert_dep_edge_rejected(P, "grid_tid")
+
+
+def test_grid_tid_dep_inside_producing_manual_scope_still_wires():
+    """Control for the two rejections above: the same grid/reader pair kept
+    inside one ``pl.manual_scope()`` still emits the ``set_dependencies`` edge.
+
+    Pins that the new check rejects only genuinely unsatisfiable edges and does
+    not regress the supported in-scope wiring.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def producer(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            t = pl.load(a, [0, 0], [64, 64])
+            return pl.store(pl.add(t, t), [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def reader(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            t = pl.load(a, [0, 0], [64, 64])
+            return pl.store(pl.add(t, t), [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            scratch: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.manual_scope():
+                with pl.spmd(4) as grid_tid:
+                    scratch = self.producer(x, scratch)
+                out, _ = pl.submit(self.reader, scratch, out, deps=[grid_tid])
+            return out
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+    assert re.search(r"PTO2TaskId grid_tid = task_0_outs\.task_id\(\);", code), code
+    assert re.search(r"\] = grid_tid;", code), code
+    assert ".set_dependencies(" in code, code
 
 
 def test_spmd_submit_emits_launch_spec_and_captures_task_id():

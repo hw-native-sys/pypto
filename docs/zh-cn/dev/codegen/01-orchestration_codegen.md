@@ -473,7 +473,11 @@ call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual
 在被完整覆盖时会成为*编译器自有*的 MANUAL scope，否则保持 AUTO，其可表示的边
 叠加在 runtime 自动追踪之上发出；手工放置的 `pl.scope()` 始终保持
 `manual=false`，一旦分析回退则会剥离其部分推导边。Codegen 会按这个顺序合并两组
-列表，并按 Var identity 去重后再发出栈数组。
+列表，并按 Var identity 去重后再发出栈数组，同时为每个条目标注其来源
+（`DepEdge::user_written`）。
+
+当某条依赖边无法解析到活跃的 TaskId 绑定时，处理方式取决于该来源——参见
+[无法解析的依赖边](#无法解析的依赖边)。
 
 ### TaskId 的来源
 
@@ -503,6 +507,33 @@ call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual
 MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退出时恢复，
 因此在某作用域内产生的绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。
 循环 / 分支的 carry 在其 body 的 `PTO2_SCOPE` *之前*声明，因此能正确地在块结束后存活。
+
+### 无法解析的依赖边
+
+上述生命周期规则带来一个结果：若某条依赖边引用的 TaskId 产生于一个**已经关闭**的
+作用域，则它无法解析——该绑定在作用域退出时已被恢复掉。Codegen 的处理方式取决于
+这条边的来源：
+
+| 边的来源 | 无法解析时的行为 |
+| -------- | ---------------- |
+| 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
+| 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
+
+来源由 attr key 判定，但有一个例外：
+[`ExpandManualPhaseFence`](../passes/37-expand_manual_phase_fence.md) 合成的
+`system.task_dummy` phase-fence barrier 同样把 fanin 放在 `manual_dep_edges` 下，
+因此带有 `attrs["dummy_task"]` 标记的载体被归类为编译器生成，保留静默跳过的行为。
+
+丢弃用户边会让消费者与其生产者之间失去定序，在运行时表现为静默的陈旧数据读取，
+因此 codegen 宁可拒绝生成，也不生成错误的代码。`ResolveDepEdgeBinding` 是唯一的
+解析并校验入口，`CountManualDeps`（数组定长）与 `EmitManualDeps`（数组填充）都经由
+它，因此两者对"哪些边存活"的判断绝不会不一致。
+
+被关闭的作用域不一定由用户书写。`MaterializeRuntimeScopes` 会把每个 `ForStmt`
+body 和每个 `IfStmt` 分支 body 各自包进一个 AUTO 作用域，因此在完全没有出现
+`pl.scope()` / `pl.manual_scope()` 的普通编排代码中也会触发——例如在 `pl.range`
+body 内捕获 TaskId、却在循环之后依赖它。修复方式是把消费者放到生产者所在的
+作用域内，或把生产者外提。
 
 对 `MANUAL` 作用域的 `array_carry_vars_` 恢复有一个例外：在该作用域 *内部* 注册、
 但其底层数组声明于 *外层* 作用域的 array carry 必须在恢复后存活。这就是将
