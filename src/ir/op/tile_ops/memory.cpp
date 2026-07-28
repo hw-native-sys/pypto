@@ -596,19 +596,22 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.slayout = requested_slayout;
 
   // TQUANT produces its exponent bytes as row/row/32 and the MX_B_NN path
-  // materializes col/col/32 with a Vec-to-Vec TMOV.  Vec's ordinary implicit
-  // fractal is 512, so retaining the source's MX-scale marker here keeps the
-  // moved result type consistent with the physical 32-byte scale boxes.  Keep
-  // this exception deliberately narrow: byte-valued scale payloads, complete
-  // row/row or col/col layouts, and a Vec destination.
+  // materializes col/col/32 with a Vec-to-Vec TMOV. Preserve that scale boxing
+  // while staging a public FP8E8M0 scale through Mat for a cross-core transfer.
   const bool source_is_complete_box =
       source_view.blayout == source_view.slayout && source_view.blayout != TileLayout::none_box;
   const bool destination_is_complete_box =
       requested_blayout == requested_slayout && requested_blayout != TileLayout::none_box;
   const bool is_mx_scale_payload =
       tile_type->dtype_ == DataType::UINT8 || tile_type->dtype_ == DataType::FP8E8M0;
-  if (space == MemorySpace::Vec && source_view.fractal == tile_view_semantics::kMXScaleFractal &&
-      source_is_complete_box && destination_is_complete_box && is_mx_scale_payload) {
+  const bool is_vec_move = space == MemorySpace::Vec;
+  const bool is_vec_to_mat_staging =
+      space == MemorySpace::Mat &&
+      (!tile_type->memory_space_.has_value() || tile_type->memory_space_ == MemorySpace::Vec);
+  const bool preserves_mx_scale_boxes = (is_vec_move && is_mx_scale_payload) ||
+                                        (is_vec_to_mat_staging && tile_type->dtype_ == DataType::FP8E8M0);
+  if (preserves_mx_scale_boxes && source_view.fractal == tile_view_semantics::kMXScaleFractal &&
+      source_is_complete_box && destination_is_complete_box) {
     tile_view.fractal = tile_view_semantics::kMXScaleFractal;
   }
 

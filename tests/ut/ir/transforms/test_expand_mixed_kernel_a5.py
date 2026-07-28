@@ -42,6 +42,10 @@ _AUTO_TFREE_OPS = {
     ir.get_op("system.tfree_to_aiv").name,
 }
 
+_TILE_MOVE = ir.get_op("tile.move").name
+_TILE_TRANSPOSE_VIEW = ir.get_op("tile.transpose_view").name
+_TILE_TPOP_FROM_AIV = ir.get_op("tile.tpop_from_aiv").name
+
 
 def _expand_raw(program):
     """Run convert_to_ssa, infer_tile_memory_space then expand_mixed_kernel."""
@@ -66,6 +70,15 @@ def _flatten_top_level_stmts(body):
     if isinstance(body, ir.SeqStmts):
         return list(body.stmts)
     return [body]
+
+
+def _const_tile_shape(tile_type):
+    """Return a statically shaped tile's dimensions as integers."""
+    shape = []
+    for dim in tile_type.shape:
+        assert isinstance(dim, ir.ConstInt)
+        shape.append(dim.value)
+    return shape
 
 
 def _make_stmt_body(stmts, span):
@@ -1466,6 +1479,214 @@ class TestCrossCoreBoundaries:
                 return out_0
 
         ir.assert_structural_equal(After, Expected)
+
+    def test_mx_a_scale_uses_matching_row_major_v2c_view(self):
+        """A matching MX_A scale crosses V2C without a producer adapter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                rhs_data: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                rhs_scale_data: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                quant, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+                quant_mat = pl.move(
+                    quant,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                lhs = pl.move(quant_mat, target_memory=pl.Mem.Left)
+                scale_mat = pl.move(
+                    scale,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                lhs_scale = pl.move(scale_mat, target_memory=pl.Mem.LeftScale)
+                rhs_mat = pl.load(rhs_data, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                rhs = pl.move(rhs_mat, target_memory=pl.Mem.Right)
+                rhs_scale_mat = pl.load(
+                    rhs_scale_data,
+                    [0, 0],
+                    [2, 32],
+                    target_memory=pl.Mem.Mat,
+                )
+                rhs_scale = pl.move(rhs_scale_mat, target_memory=pl.Mem.RightScale)
+                result = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        After = _expand(Before)
+        aiv = After.get_function("main_incore_0_aiv")
+        aic = After.get_function("main_incore_0_aic")
+        assert aiv is not None
+        assert aic is not None
+
+        producer_adapters = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aiv.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name in {_TILE_MOVE, _TILE_TRANSPOSE_VIEW}
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert producer_adapters == []
+
+        scale_tpops = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aic.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_TPOP_FROM_AIV
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert len(scale_tpops) == 1
+        tpop_type = scale_tpops[0].var.type
+        assert isinstance(tpop_type, ir.TileType)
+        assert _const_tile_shape(tpop_type) == [16, 2]
+        tpop_view = tpop_type.get_effective_tile_view()
+        assert (tpop_view.blayout, tpop_view.slayout, tpop_view.fractal) == (
+            pl.TileLayout.row_major,
+            pl.TileLayout.row_major,
+            32,
+        )
+        assert not any(
+            isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_MOVE
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+            and stmt.var.type.memory_space == pl.Mem.Mat
+            for stmt in _flatten_top_level_stmts(aic.body)
+        )
+
+    def test_mx_b_scale_uses_transpose_view_for_v2c_push(self):
+        """MX_B keeps its logical col/col tpop and pushes a row/row transpose view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs_data: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                lhs_scale_data: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                src: pl.Tensor[[32, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                quant, scale = pl.quant_mx(pl.load(src, [0, 0], [32, 64]), group_axis=0)
+                quant_mat = pl.move(
+                    quant,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                rhs = pl.move(quant_mat, target_memory=pl.Mem.Right)
+                scale_mat = pl.move(
+                    scale,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.col_major,
+                )
+                rhs_scale = pl.move(scale_mat, target_memory=pl.Mem.RightScale)
+                lhs_mat = pl.load(lhs_data, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                lhs = pl.move(lhs_mat, target_memory=pl.Mem.Left)
+                lhs_scale_mat = pl.load(
+                    lhs_scale_data,
+                    [0, 0],
+                    [16, 2],
+                    target_memory=pl.Mem.Mat,
+                )
+                lhs_scale = pl.move(lhs_scale_mat, target_memory=pl.Mem.LeftScale)
+                result = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        After = _expand(Before)
+        aiv = After.get_function("main_incore_0_aiv")
+        aic = After.get_function("main_incore_0_aic")
+        assert aiv is not None
+        assert aic is not None
+
+        producer_adapters = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aiv.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name in {_TILE_MOVE, _TILE_TRANSPOSE_VIEW}
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert len(producer_adapters) == 1
+        adapter = producer_adapters[0]
+        assert isinstance(adapter.value, ir.Call)
+        assert adapter.value.op.name == _TILE_TRANSPOSE_VIEW
+        push_type = adapter.var.type
+        assert isinstance(push_type, ir.TileType)
+        assert _const_tile_shape(push_type) == [32, 2]
+        push_view = push_type.get_effective_tile_view()
+        assert (push_view.blayout, push_view.slayout, push_view.fractal) == (
+            pl.TileLayout.row_major,
+            pl.TileLayout.row_major,
+            32,
+        )
+
+        scale_tpops = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aic.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_TPOP_FROM_AIV
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert len(scale_tpops) == 1
+        tpop_type = scale_tpops[0].var.type
+        assert isinstance(tpop_type, ir.TileType)
+        assert _const_tile_shape(tpop_type) == [2, 32]
+        tpop_view = tpop_type.get_effective_tile_view()
+        assert (tpop_view.blayout, tpop_view.slayout, tpop_view.fractal) == (
+            pl.TileLayout.col_major,
+            pl.TileLayout.col_major,
+            32,
+        )
+        assert not any(
+            isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_MOVE
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+            and stmt.var.type.memory_space == pl.Mem.Mat
+            for stmt in _flatten_top_level_stmts(aic.body)
+        )
+
+    def test_mx_scale_v2c_rejects_partial_valid_columns(self):
+        """The byte-exact ND push requires the physical final extent to be fully valid."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+            ):
+                quant, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+                partial_scale = pl.slice(scale, [16, 2], [0, 0], valid_shape=[16, 1])
+                _scale_mat = pl.move(
+                    partial_scale,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+
+        with pytest.raises(pypto.InternalError, match="full-valid final dimension"):
+            _expand_raw(Before)
 
 
 # ---------------------------------------------------------------------------
@@ -4188,7 +4409,7 @@ class TestDCERegression:
 
 
 class TestManualPipeVtoCFractalAdapt:
-    """A hand-written pl.tpush_to_aic gets the same V->C fractal adapter.
+    """A non-MX hand-written pl.tpush_to_aic gets the V->C fractal adapter.
 
     The push is staged into an NZ Vec tile exactly as the boundary-move path
     stages the pipes this pass builds itself, and the original call's kwargs
@@ -4200,6 +4421,74 @@ class TestManualPipeVtoCFractalAdapt:
     test_expand_mixed_kernel_a2a3.py::test_v2c_boundary_uses_nz_layout_on_a2a3,
     which fails as soon as the gate stops being consulted.
     """
+
+    def test_fp8e8m0_mx_scale_push_is_rejected(self):
+        """Manual MX-scale pipes fail instead of guessing the consumer layout."""
+
+        @pl.program
+        class RowMajorBefore:
+            @pl.function(type=pl.FunctionType.AIC)
+            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                v2c = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=512)
+                scale_mat: pl.Tile[
+                    [32, 2],
+                    pl.FP8E8M0,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.row_major,
+                        fractal=32,
+                    ),
+                ] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(scale_mat)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
+                scale = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Vec)
+                pl.tpush_to_aic(scale, split=0)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                self.manual_aic(scale_data)
+                self.manual_aiv(scale_data)
+
+        @pl.program
+        class ColMajorBefore:
+            @pl.function(type=pl.FunctionType.AIC)
+            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                v2c = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=512)
+                scale_mat: pl.Tile[
+                    [2, 32],
+                    pl.FP8E8M0,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.col_major,
+                        slayout=pl.TileLayout.col_major,
+                        fractal=32,
+                    ),
+                ] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(scale_mat)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
+                scale_row_major = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Vec)
+                scale = pl.tile.transpose_view(scale_row_major)
+                pl.tpush_to_aic(scale, split=0)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+                self.manual_aic(scale_data)
+                self.manual_aiv(scale_data)
+
+        for program in (RowMajorBefore, ColMajorBefore):
+            with pytest.raises(ValueError, match="Hand-written tile.tpush_to_aic does not support.*MX-scale"):
+                _expand_raw(program)
 
     def test_push_in_a_hand_written_aiv_function_is_adapted(self):
         """The author already typed the function AIV, so the pass only adapts."""

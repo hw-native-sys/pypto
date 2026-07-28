@@ -118,7 +118,7 @@ Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only 
 
 On both backends, the AIV push side (V→C) inserts a `tile.move` before `tpush_to_aic` to convert the source tile into the required fractal layout. The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
 
-### Hand-written pipes get the same adapter
+### Hand-written pipes and the MX-scale limitation
 
 The rule above describes the boundary-move path, which only sees the pipes this pass
 builds while expanding an InCore function. A pipe authored directly (`pl.reserve_buffer`,
@@ -127,31 +127,19 @@ it. On a backend where `RequiresVtoCFractalAdapt()` holds, such a push would shi
 ND tile into a FIFO the cube reads as fractal, scattering every element of the popped
 tile.
 
-`AdaptManualVtoCPush` closes that gap. It runs as the pass's final phase, over **every**
-AIV function the pass emits — not over the functions it was handed. That distinction
-matters: `tile.tpush_to_aic` declares `CoreAffinity::VECTOR`, so a hand-written push is
-legal inside an InCore body, and such a body only becomes an AIV function during this
-pass. A pure-vector body reaches AIV through the non-mixed conversion, and a mixed body
-carries the statement into its expanded AIV half; both happen after the per-function loop,
-so an earlier hook would still leave the bare ND push behind.
+`AdaptManualVtoCPush` closes that gap for the existing non-MX data-tile paths. It runs as
+the pass's final phase over **every** AIV function the pass emits, including pure-vector
+InCore bodies converted to AIV and the AIV half of a mixed body. It preserves the original
+push kwargs — dropping `id` would collapse a multi-pipe program onto a single FIFO — and
+consults `RequiresVtoCFractalAdapt()` only when a supported manual push is encountered.
 
-Three properties keep the sweep cheap and safe:
-
-- **One fixed boundary, no cross-function analysis.** The adapter asks for the cube-side
-  transfer memory, `GetBoundaryTpopMemory(CoreSide::AIC)`, instead of locating the
-  matching `tpop` in the peer function. That is exact rather than approximate because
-  `BuildCrossCoreTransferView` maps `Mat`, `Left` and `Right` onto the same fractal view:
-  wherever the consumer pops to, the layout it expects is the one this produces.
-- **Idempotent, and it defers to the author.** A push whose source already carries the
-  boundary view is left alone. Re-running the pass adds nothing, a program that stages
-  the move by hand keeps its own, and the pushes the boundary-move path already adapted
-  are not touched twice.
-- **The backend is consulted lazily.** `RequiresVtoCFractalAdapt()` is read inside the
-  mutator, on the first V→C push it meets, so a program with no hand-written push does
-  not need a configured backend to walk past this phase.
-
-The rewritten push preserves the original call's kwargs — dropping `id` would collapse a
-multi-pipe program onto a single FIFO.
+This phase does not pair a hand-written push with its consumer `tpop`, so it cannot safely
+derive an MX-scale carrier. A hand-written `tile.tpush_to_aic` whose source has FP8E8M0
+dtype is rejected instead of being silently rewritten to NZ. Use the automatic mixed-kernel
+boundary described below, or stage the scale through GM. Compiler-generated MX pushes
+carry a temporary internal marker, arrive
+with their carrier already planned from the boundary destination, and have the marker
+removed by this final phase.
 
 ### GM-mediated cross-lane dependencies
 
@@ -188,12 +176,16 @@ Setup is derived from the split bodies:
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
 
-### Known limitation: MX quantization followed by matmul
+### MX scale V2C transport
 
-The automatic setup does not yet support carrying both `quant_mx` data and its
-FP8E8M0 scale to `matmul_mx` inside one mixed task. Keep the operations in
-separate AIV and AIC kernels and stage both values through GM. Automatic paired
-data/scale pipes are deferred to a follow-up change.
+On Ascend950, a mixed `quant_mx` → `matmul_mx` path transports both results over
+V2C. A matching row/row scale is pushed directly. A col/col B-side scale uses a
+zero-copy `tile.transpose_view` for the physical row/row push, while the AIC
+`tpop` retains the public col/col logical shape and layout. This support applies
+to compiler-generated boundaries only; hand-written MX-scale V2C pipes are
+rejected as described above. The physical ND push also requires the final
+dimension to be fully valid; the pass reports an internal error if that
+invariant is violated.
 
 ### Overriding the slot count (`slot_num`)
 

@@ -128,7 +128,7 @@ tile depend on the pad value; see
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| `quant_mx` | `pl.` (t) | Ascend950 MXFP8 block-32 dynamic quantization to FP8E4M3FN data plus FP8E8M0 scales (`group_axis` = PTOAS `grpAxis`). MXFP4 quant is out of scope for this release. Not yet combinable with `matmul_mx` in one InCore mixed task — stage through GM (see [types](../language/00-types.md)) |
+| `quant_mx` | `pl.` (t) | Ascend950 MXFP8 block-32 dynamic quantization to FP8E4M3FN data plus FP8E8M0 scales (`group_axis` = PTOAS `grpAxis`). MXFP4 quant is out of scope for this release. May feed `matmul_mx` in one InCore mixed task through direct data+scale V2C transport (see [types](../language/00-types.md)) |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 exponent X-to-ZZ layout conversion (UINT8). Workspace `tmp` is write-only; axis1 needs `dst_rows`/`dst_cols` for ZZ `[M,G]` over flat TQUANT exp. Typically used via `quant_mx` lowering rather than directly |
 
 ## Linear algebra

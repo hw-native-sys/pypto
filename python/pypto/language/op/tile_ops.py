@@ -1368,10 +1368,9 @@ def quant_mx(
         Cube RHS layout; scale col/col NN.
 
     Note:
-        ``quant_mx`` and ``matmul_mx`` cannot currently share one InCore mixed
-        task. Stage the quantized data and scale through GM between separate
-        AIV and AIC kernels; automatic cross-core data+scale transport is a
-        follow-up.
+        On Ascend950, ``quant_mx`` and ``matmul_mx`` may share one InCore mixed
+        task. The compiler carries both generated results over V2C; the
+        FP8E8M0 scale keeps its logical MX scale layout.
     """
     if group_axis not in (0, 1):
         raise ValueError(f"pl.quant_mx group_axis must be 0 or 1, but got {group_axis!r}")

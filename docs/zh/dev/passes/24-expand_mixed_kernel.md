@@ -89,31 +89,23 @@ Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布�
 
 在两种后端上，AIV 推送侧（V→C）都会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
 
-### 手写 pipe 同样获得该适配
+### 手写 pipe 与 MX scale 限制
 
 上述规则描述的是边界移动路径，它只能看到本 pass 在展开 InCore 函数时构建的 pipe。完全手写的
 pipe（`pl.reserve_buffer`、`pl.{aic,aiv}_initialize_pipe` 与 `pl.tpush_to_aic`）不会经过该
 路径。在 `RequiresVtoCFractalAdapt()` 成立的后端上，这样的推送会把裸 ND tile 送进一个被 cube
 按 fractal 解释的 FIFO，导致弹出 tile 的每个元素都错位。
 
-`AdaptManualVtoCPush` 负责补上这个缺口。它作为本 pass 的最后一个阶段运行，遍历本 pass **产出**
-的每一个 AIV 函数，而不是它收到的那些。这个区别很关键：`tile.tpush_to_aic` 声明的 affinity 是
-`CoreAffinity::VECTOR`，因此手写推送合法地出现在 InCore 体内，而这样的函数体正是在本 pass 中才
-变成 AIV 函数 —— 纯向量体经由非混合转换成为 AIV，混合体则把该语句带进展开后的 AIV 半边；两者都
-发生在逐函数循环之后，所以更早的钩子仍会漏掉那条裸 ND 推送。
+`AdaptManualVtoCPush` 为已有的非 MX data-tile 路径补上这个缺口。它作为本 pass 的最后一个阶段，
+遍历本 pass **产出**的每一个 AIV 函数，包括转成 AIV 的纯向量 InCore 函数，以及 mixed 函数拆出的
+AIV 半边。它保留原 push 的 kwargs —— 丢掉 `id` 会让多 pipe 程序坍缩到同一个 FIFO 上 —— 并且
+仅在遇到受支持的手写 push 时查询 `RequiresVtoCFractalAdapt()`。
 
-三条性质保证这次扫描既省又安全：
-
-- **固定边界，无需跨函数分析。** 适配器取 cube 侧传输内存
-  `GetBoundaryTpopMemory(CoreSide::AIC)`，而不是到对端函数里定位匹配的 `tpop`。这是精确而非
-  近似的，因为 `BuildCrossCoreTransferView` 把 `Mat`、`Left`、`Right` 映射到同一个 fractal
-  视图：无论消费者弹到哪里，它期望的布局都正是这里产出的那个。
-- **幂等，且尊重作者的手写。** 源 tile 已经携带边界视图的推送会被跳过。重复运行本 pass 不会叠加，
-  手工完成该 move 的程序保留自己的写法，边界移动路径已适配过的推送也不会被再插一次。
-- **后端按需查询。** `RequiresVtoCFractalAdapt()` 在 mutator 内部、遇到第一条 V→C 推送时才读取，
-  因此没有手写推送的程序无需配置后端即可走过该阶段。
-
-重写后的推送保留原调用的 kwargs —— 丢掉 `id` 会让多 pipe 程序坍缩到同一个 FIFO 上。
+该阶段不会将手写 push 与消费侧 `tpop` 配对，因此无法安全推导 MX-scale carrier。如果
+手写 `tile.tpush_to_aic` 的源 dtype 是 FP8E8M0，pass 会直接报错，而不是静默改写为 NZ。请使用
+下文的自动 mixed-kernel 边界，或通过 GM 暂存 scale。编译器生成
+的 MX push 会携带一个临时内部标记；其 carrier 已根据边界 destination 完成规划，最后阶段只删除该
+标记。
 
 ### 经 GM 中转的跨核依赖
 
@@ -150,11 +142,14 @@ pipe（`pl.reserve_buffer`、`pl.{aic,aiv}_initialize_pipe` 与 `pl.tpush_to_aic
 
 当跨核方向使用了不同大小的 tile 时，Pass 会取所有观察到的 tile 字节大小的最大值作为 `initialize_pipe` 的公共 `slot_size`。较小 tile 写入时不会填满整个槽位，但不影响硬件正确性。用户手写程序仍然可以通过给 `initialize_pipe` 以及匹配的 `tpush` / `tpop` / `tfree` 传入不同 `id` 来创建多条独立 pipe。
 
-### 已知限制：MX 量化后接矩阵乘
+### MX scale 的 V2C 传输
 
-自动 setup 当前还不支持在同一个 mixed task 内同时把 `quant_mx` 的 data 和
-FP8E8M0 scale 传给 `matmul_mx`。请将两者拆成 AIV 与 AIC kernel，并通过 GM
-暂存这两个值。自动配对的 data/scale pipe 留待后续改动。
+在 Ascend950 上，mixed `quant_mx` → `matmul_mx` 路径会把两个结果都经 V2C
+传递。row/row 匹配的 scale 直接 push；col/col 的 B 侧 scale 使用零拷贝
+`tile.transpose_view` 形成物理 row/row push，AIC `tpop` 则保留公开的
+col/col 逻辑 shape 与 layout。该支持仅适用于编译器生成的边界；手写 MX-scale
+V2C pipe 会按上述规则被拒绝。物理 ND push 的最后一维还必须全部有效；如果
+该约束被破坏，Pass 会报告内部错误。
 
 ### 覆盖槽位数（`slot_num`）
 
