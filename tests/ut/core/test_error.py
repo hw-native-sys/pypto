@@ -17,8 +17,48 @@ This module tests the error classes exposed from C++ to Python, ensuring that:
 4. Error inheritance works as expected
 """
 
+import re
+import sys
+from collections.abc import Callable
+
 import pytest
 from pypto import testing
+
+RaiseFn = Callable[[str], None]
+
+_TRACE_HEADER = "C++ Traceback"
+_NO_TRACE = "No stack trace available"
+
+# Upstream libbacktrace only reads MH_EXECUTE / MH_DYLIB / MH_DSYM Mach-O files, and a CPython
+# extension module is an MH_BUNDLE, so macOS never symbolizes and always takes the documented
+# fallback. See docs/en/dev/02-error-handling.md.
+_MACOS = sys.platform == "darwin"
+
+# Matches the frame lines emitted by Backtrace::FormatStackTrace.
+_FRAME_RE = re.compile(r'^ File "([^"]+)", line (\d+)$', re.MULTILINE)
+
+
+def _assert_has_trace(message: str) -> list[str]:
+    """Assert *message* carries a stack trace and return the source files it names.
+
+    The assertion is strict per platform rather than "trace *or* fallback": that disjunction is a
+    tautology — GetFullMessage() always emits exactly one of the two — and would stay green even if
+    symbolization broke completely. A Linux build without debug info fails here, which is the point.
+    """
+    if _MACOS:
+        assert _NO_TRACE in message, f"expected the macOS fallback, got: {message}"
+        return []
+
+    assert _TRACE_HEADER in message, f"expected a C++ traceback, got: {message}"
+    frames = _FRAME_RE.findall(message.split(_TRACE_HEADER, 1)[1])
+    assert frames, f"traceback header present but no frames were symbolized: {message}"
+    return [path for path, _ in frames]
+
+
+def _assert_no_trace(message: str) -> None:
+    """Assert *message* carries neither a stack trace nor the no-trace fallback."""
+    assert _TRACE_HEADER not in message, f"unexpected traceback in user-facing error: {message}"
+    assert _NO_TRACE not in message, f"unexpected no-trace notice in user-facing error: {message}"
 
 
 class TestErrorTypes:
@@ -115,65 +155,131 @@ class TestErrorMessages:
         assert "Line 1" in str(exc_info.value)
 
 
-class TestStackTraces:
-    """Test that stack traces are captured and included in error messages."""
+@pytest.fixture
+def no_backtrace_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin PTO_BACKTRACE to unset so default behaviour is tested regardless of the caller's env."""
+    monkeypatch.delenv("PTO_BACKTRACE", raising=False)
 
-    def test_stack_trace_present(self):
-        """Test that stack trace is included in error message or tip is shown if not available."""
+
+class TestStackTraceVisibility:
+    """Test which errors carry a C++ stack trace.
+
+    Bug-class exceptions (the INTERNAL_CHECK family) always carry one; user errors (the CHECK
+    family) only under PTO_BACKTRACE=1.
+    """
+
+    @pytest.mark.parametrize(
+        "raise_fn",
+        [
+            testing.raise_value_error,
+            testing.raise_type_error,
+            testing.raise_runtime_error,
+            testing.raise_index_error,
+        ],
+    )
+    def test_user_error_omits_traceback_by_default(self, raise_fn: RaiseFn, no_backtrace_env: None):
+        """A user error is just the message — internal frames are noise to the caller."""
+        with pytest.raises(Exception) as exc_info:
+            raise_fn("user mistake")
+
+        message = str(exc_info.value)
+        assert message == "user mistake"
+        _assert_no_trace(message)
+
+    @pytest.mark.parametrize("raise_fn", [testing.raise_internal_error, testing.raise_assertion_error])
+    def test_bug_error_always_includes_traceback(self, raise_fn: RaiseFn, no_backtrace_env: None):
+        """The INTERNAL_CHECK family signals a PyPTO bug — the trace is the primary artefact."""
+        with pytest.raises(Exception) as exc_info:
+            raise_fn("invariant broken")
+
+        message = str(exc_info.value)
+        assert "invariant broken" in message
+        _assert_has_trace(message)
+
+    def test_user_error_includes_traceback_when_opted_in(self, monkeypatch: pytest.MonkeyPatch):
+        """PTO_BACKTRACE=1 turns the trace back on for user errors."""
+        monkeypatch.setenv("PTO_BACKTRACE", "1")
+
         with pytest.raises(ValueError) as exc_info:
-            testing.raise_value_error("error with trace")
+            testing.raise_value_error("cannot reshape tile")
 
-        error_str = str(exc_info.value)
-        # Check that either C++ stack trace is present or tip message is shown
-        has_traceback = "C++ Traceback" in error_str or "Traceback" in error_str
-        has_tip = "No stack trace available" in error_str or "Tip:" in error_str
-        assert has_traceback or has_tip, f"Expected either traceback or tip message, got: {error_str}"
+        message = str(exc_info.value)
+        assert "cannot reshape tile" in message
+        _assert_has_trace(message)
 
-    def test_stack_trace_contains_function_info(self):
-        """Test that stack trace contains function information or tip if not available."""
-        with pytest.raises(RuntimeError) as exc_info:
-            testing.raise_runtime_error("trace test")
+    def test_user_error_omits_traceback_when_opted_out(self, monkeypatch: pytest.MonkeyPatch):
+        """Only the exact value "1" enables the trace."""
+        monkeypatch.setenv("PTO_BACKTRACE", "0")
 
-        error_str = str(exc_info.value)
-        # The error message should contain the original message
-        assert "trace test" in error_str
+        with pytest.raises(ValueError) as exc_info:
+            testing.raise_value_error("cannot reshape tile")
 
-        # Should have either stack trace with function info or a tip message
-        has_traceback = "C++ Traceback" in error_str or "Traceback" in error_str
-        has_tip = "No stack trace available" in error_str or "Tip:" in error_str
-        assert has_traceback or has_tip, f"Expected either traceback or tip message, got: {error_str}"
+        _assert_no_trace(str(exc_info.value))
 
-    def test_different_errors_have_different_traces(self):
-        """Test that different error locations produce different stack traces or tips."""
-        error1_str = ""
-        error2_str = ""
 
-        try:
+@pytest.mark.skipif(_MACOS, reason="macOS cannot symbolize a CPython MH_BUNDLE extension module")
+class TestStackTraceContents:
+    """Test that captured traces describe the real call path.
+
+    These pin symbolization itself: they fail if the libbacktrace integration regresses, rather
+    than silently degrading to the no-trace fallback.
+    """
+
+    def test_traceback_names_the_real_throw_site(self, no_backtrace_env: None):
+        """The innermost frame must be the binding that threw."""
+        with pytest.raises(Exception) as exc_info:
+            testing.raise_internal_error("invariant broken")
+
+        files = _assert_has_trace(str(exc_info.value))
+        assert any(f.endswith("python/bindings/modules/testing.cpp") for f in files), (
+            f"expected the throwing binding in the trace, got: {files}"
+        )
+
+    def test_traceback_has_no_frames_outside_the_call_path(self, no_backtrace_env: None):
+        """Frames must come from the real call path, not from arbitrary PyPTO sources.
+
+        raise_internal_error is reached straight from the interpreter through nanobind, so the
+        binding itself is the only source file that can legitimately appear — hence an allowlist
+        rather than a denylist of known-bad directories. Passing this module's own path to
+        backtrace_create_state used to register its DWARF at the *interpreter's* load base, which
+        resolved every CPython frame to whichever PyPTO line sat at the same offset.
+        """
+        with pytest.raises(Exception) as exc_info:
+            testing.raise_internal_error("invariant broken")
+
+        files = _assert_has_trace(str(exc_info.value))
+        foreign = [f for f in files if "python/bindings/" not in f]
+        assert not foreign, f"frames attributed to sources not on the call path: {foreign}"
+
+    def test_traceback_omits_check_macro_infrastructure(self, no_backtrace_env: None):
+        """The CHECK/INTERNAL_CHECK throw site in logging.h is noise, not a call-path frame."""
+        with pytest.raises(Exception) as exc_info:
+            testing.raise_internal_error_with_span("boom", "kernel.py", 3, 5)
+
+        files = _assert_has_trace(str(exc_info.value))
+        assert not [f for f in files if f.endswith("core/logging.h")], (
+            f"macro infrastructure leaked into the trace: {files}"
+        )
+
+    def test_different_errors_have_different_traces(self, monkeypatch: pytest.MonkeyPatch):
+        """Distinct throw sites must produce distinct frames, not one cached trace."""
+        monkeypatch.setenv("PTO_BACKTRACE", "1")
+
+        with pytest.raises(ValueError) as value_info:
             testing.raise_value_error("error 1")
-        except ValueError as e:
-            error1_str = str(e)
-
-        try:
+        with pytest.raises(TypeError) as type_info:
             testing.raise_type_error("error 2")
-        except TypeError as e:
-            error2_str = str(e)
 
-        # Both should contain the original error message
-        assert "error 1" in error1_str
-        assert "error 2" in error2_str
+        value_message = str(value_info.value)
+        type_message = str(type_info.value)
+        assert "error 1" in value_message
+        assert "error 2" in type_message
+        _assert_has_trace(value_message)
+        _assert_has_trace(type_message)
 
-        # Both should have either stack traces or tip messages
-        has_traceback_1 = "C++ Traceback" in error1_str or "Traceback" in error1_str
-        has_tip_1 = "No stack trace available" in error1_str or "Tip:" in error1_str
-        assert has_traceback_1 or has_tip_1, (
-            f"Error 1 expected either traceback or tip message, got: {error1_str}"
-        )
-
-        has_traceback_2 = "C++ Traceback" in error2_str or "Traceback" in error2_str
-        has_tip_2 = "No stack trace available" in error2_str or "Tip:" in error2_str
-        assert has_traceback_2 or has_tip_2, (
-            f"Error 2 expected either traceback or tip message, got: {error2_str}"
-        )
+        value_trace = value_message.split(_TRACE_HEADER, 1)[1]
+        type_trace = type_message.split(_TRACE_HEADER, 1)[1]
+        assert value_trace != type_trace, "expected distinct throw sites to symbolize differently"
 
 
 class TestErrorInheritance:

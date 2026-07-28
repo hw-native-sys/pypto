@@ -10,7 +10,6 @@
  */
 
 #include <backtrace.h>
-#include <dlfcn.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -30,12 +29,13 @@ namespace pypto {
 
 /// Patterns to filter out from backtraces (internal/infrastructure frames)
 const std::vector<std::string> kFileNameFilter = {
-    "libbacktrace",  // backtrace infrastructure
-    "nanobind",      // Python binding layer
-    "__libc_",       // C library internals
-    "include/c++/",  // C++ standard library
-    "object.h",      // Python object.h
-    "error.h"        // exception throwing infrastructure
+    "libbacktrace",   // backtrace infrastructure
+    "nanobind",       // Python binding layer
+    "__libc_",        // C library internals
+    "include/c++/",   // C++ standard library
+    "object.h",       // Python object.h
+    "error.h",        // exception throwing infrastructure
+    "core/logging.h"  // CHECK / INTERNAL_CHECK macro throw site
 };
 
 std::string StackFrame::to_string() const {
@@ -63,17 +63,16 @@ Backtrace& Backtrace::GetInstance() {
 }
 
 Backtrace::Backtrace() {
-  // Get the path of the current shared library using dladdr
-  Dl_info info;
-  const char* filename = nullptr;
-
-  // Use the address of this function to find the shared library path
-  if (dladdr(reinterpret_cast<void*>(&Backtrace::GetInstance), &info)) {
-    filename = info.dli_fname;
-  }
-
-  // Use the filename from dladdr - this is the shared library path
-  state_ = backtrace_create_state(filename, 1, ErrorCallback, nullptr);
+  // The filename argument names the *main executable*, not this module. Passing nullptr lets
+  // libbacktrace find it itself (/proc/self/exe on Linux); every loaded shared object, including
+  // this one, is then registered separately via dl_iterate_phdr at its true load address.
+  //
+  // Do not pass this module's own path (e.g. from dladdr): libbacktrace treats it as the
+  // executable, elf_add() rejects the ET_DYN file, and phdr_callback pairs the descriptor with the
+  // real executable instead. That registers *this* module's DWARF at the *executable's* load base,
+  // so every PC in the CPython interpreter resolves to whichever PyPTO line sits at the same
+  // offset — real-looking frames that were never on the call path.
+  state_ = backtrace_create_state(nullptr, 1, ErrorCallback, nullptr);
 }
 
 void Backtrace::ErrorCallback(void* data, const char* msg, int errnum) {

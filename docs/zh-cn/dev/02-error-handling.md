@@ -30,6 +30,32 @@ std::runtime_error
 
 `Error::GetFullMessage()` 返回错误消息加上格式化的 C++ 栈回溯。
 
+### 何时显示栈回溯
+
+每个 `Error` 在构造时都会捕获栈回溯，但异常转换器（`python/bindings/modules/error.cpp`）
+只在有帮助时才把它附加到 Python 消息中：
+
+| 异常 | 抛出来源 | Python 消息中是否包含回溯 |
+| ---- | -------- | ------------------------- |
+| `InternalError`、`AssertionError` | `INTERNAL_CHECK` 系列 | 总是包含——内部不变量失败属于 PyPTO 的 bug，栈帧是首要排查依据 |
+| `ValueError`、`TypeError`、`RuntimeError`、`IndexError`、`NotImplementedError`、`VerificationError` | `CHECK` 系列、用户输入 | 仅在 `PTO_BACKTRACE=1` 时包含 |
+
+用户错误本身已经携带 DSL 源码片段；C++ 栈帧指向用户无法处理的 PyPTO 内部实现，夹在中间还会把
+源码片段挤到更下方。`NotImplementedError` 同样属于这一类：尚未下降的特性是面向用户的、有文档
+记录的能力限制，与 `CHECK` 覆盖的范畴相同，并非内部不变量失败。`PTO_BACKTRACE=1` 与 DSL 诊断
+提示使用的是同一个开关，因此一个环境变量即可同时打开两种回溯。
+
+```bash
+PTO_BACKTRACE=1 python my_kernel.py   # 所有错误都显示 C++ 栈帧，而不仅仅是内部错误
+```
+
+只有精确取值 `1` 才会开启 C++ 回溯，其他取值一律视为关闭。DSL 解析器更严格——除 `0` 和 `1`
+之外的取值都会报错——因此请只使用这两个值。
+
+`Backtrace::FormatStackTrace` 会丢弃属于基础设施而非调用路径的栈帧——`libbacktrace`、`nanobind`、
+libc、C++ 标准库，以及 `error.h` / `logging.h` 中的抛出点（见 `src/core/backtrace.cpp` 的
+`kFileNameFilter`）。
+
 ### 栈回溯的平台支持
 
 `3rdparty/libbacktrace` 跟随上游 [ianlancetaylor/libbacktrace](https://github.com/ianlancetaylor/libbacktrace)。

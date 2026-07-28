@@ -30,6 +30,33 @@ std::runtime_error
 
 `Error::GetFullMessage()` returns the error message plus a formatted C++ stack trace.
 
+### When the stack trace is shown
+
+Every `Error` captures a trace at construction, but the exception translator
+(`python/bindings/modules/error.cpp`) only attaches it to the Python message when it helps:
+
+| Exception | Raised by | Trace in the Python message |
+| --------- | --------- | --------------------------- |
+| `InternalError`, `AssertionError` | `INTERNAL_CHECK` family | Always — a failed invariant is a PyPTO bug, and the frames are the primary artefact |
+| `ValueError`, `TypeError`, `RuntimeError`, `IndexError`, `NotImplementedError`, `VerificationError` | `CHECK` family, user input | Only under `PTO_BACKTRACE=1` |
+
+A user error already carries its own DSL source snippet; the C++ frames name PyPTO internals the
+caller cannot act on, and printing them in between pushes the snippet further down. That includes
+`NotImplementedError`: an unlowered feature is a documented limitation surfaced to the user, the
+same category `CHECK` covers, not a failed invariant. `PTO_BACKTRACE=1` is the same switch the DSL
+diagnostics advertise, so one variable turns on both backtraces.
+
+```bash
+PTO_BACKTRACE=1 python my_kernel.py   # C++ frames on every error, not just internal ones
+```
+
+Only the exact value `1` enables C++ traces; any other value leaves them off. The DSL parser is
+stricter — it rejects anything other than `0` or `1` — so stick to those two values.
+
+`Backtrace::FormatStackTrace` drops frames belonging to infrastructure rather than to the call
+path — `libbacktrace`, `nanobind`, libc, the C++ standard library, and the `error.h` / `logging.h`
+throw sites (`kFileNameFilter` in `src/core/backtrace.cpp`).
+
 ### Platform support for stack traces
 
 `3rdparty/libbacktrace` tracks upstream [ianlancetaylor/libbacktrace](https://github.com/ianlancetaylor/libbacktrace).

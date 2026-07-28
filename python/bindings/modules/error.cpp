@@ -19,12 +19,40 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
 #include "../module.h"
 
 namespace nb = nanobind;
 
 namespace pypto {
 namespace python {
+
+namespace {
+
+/// Whether the user asked for C++ tracebacks on every error via `PTO_BACKTRACE=1`.
+///
+/// Read on each throw rather than cached, so it can be toggled in-process (tests, REPL). The
+/// lookup is negligible next to the stack capture the exception already paid for. Only the exact
+/// value `1` enables traces; unlike the DSL parser, which rejects anything other than `0` / `1`,
+/// an unrecognised value is ignored rather than reported — throwing from inside an exception
+/// translator would replace the error the user is actually trying to read.
+bool TracebackRequested() {
+  const char* env = std::getenv("PTO_BACKTRACE");
+  return env != nullptr && std::string_view(env) == "1";
+}
+
+/// Build the Python-visible message for a *user* error (the `CHECK` family).
+///
+/// The C++ frames name PyPTO internals that mean nothing to the caller, and they push the DSL
+/// source snippet further down the message, so they are opt-in through `PTO_BACKTRACE=1` — the
+/// same switch the DSL diagnostics already advertise. Bug-class exceptions (the `INTERNAL_CHECK`
+/// family) bypass this helper and always report `GetFullMessage()`.
+std::string UserErrorMessage(const Error& e) { return TracebackRequested() ? e.GetFullMessage() : e.what(); }
+
+}  // namespace
 
 void BindErrors(nb::module_& m) {
   // Register custom exception types and map them to Python exceptions
@@ -44,29 +72,36 @@ void BindErrors(nb::module_& m) {
   PyObject* internal_error_type = exc_internal_error.ptr();
   PyObject_SetAttrString(internal_error_type, "__module__", PyUnicode_FromString("pypto"));
 
-  // Register exception translator to convert C++ exceptions to Python exceptions
-  // This translator includes the full stack trace in the Python exception message
+  // Register exception translator to convert C++ exceptions to Python exceptions.
+  // See UserErrorMessage() above for when the C++ stack trace is included in the message.
   nb::register_exception_translator([](const std::exception_ptr& p, void*) {
     try {
       if (p) std::rethrow_exception(p);
     } catch (const pypto::ValueError& e) {
       // Catch most specific exceptions first
-      PyErr_SetString(PyExc_ValueError, e.GetFullMessage().c_str());
+      PyErr_SetString(PyExc_ValueError, UserErrorMessage(e).c_str());
     } catch (const pypto::TypeError& e) {
-      PyErr_SetString(PyExc_TypeError, e.GetFullMessage().c_str());
+      PyErr_SetString(PyExc_TypeError, UserErrorMessage(e).c_str());
     } catch (const pypto::RuntimeError& e) {
-      PyErr_SetString(PyExc_RuntimeError, e.GetFullMessage().c_str());
+      PyErr_SetString(PyExc_RuntimeError, UserErrorMessage(e).c_str());
     } catch (const pypto::NotImplementedError& e) {
-      PyErr_SetString(PyExc_NotImplementedError, e.GetFullMessage().c_str());
+      // User class, not bug class: an unlowered feature is a documented limitation surfaced to the
+      // caller — the same category error-checking.md assigns to CHECK — not a failed invariant.
+      PyErr_SetString(PyExc_NotImplementedError, UserErrorMessage(e).c_str());
     } catch (const pypto::IndexError& e) {
-      PyErr_SetString(PyExc_IndexError, e.GetFullMessage().c_str());
+      PyErr_SetString(PyExc_IndexError, UserErrorMessage(e).c_str());
     } catch (const pypto::AssertionError& e) {
+      // Bug class (the `INTERNAL_CHECK` family, here and in the next handler): a failed internal
+      // invariant is a PyPTO bug, and the traceback is the primary artefact for diagnosing it, so
+      // it is always reported.
       PyErr_SetString(PyExc_AssertionError, e.GetFullMessage().c_str());
     } catch (const pypto::InternalError& e) {
       PyErr_SetString(exc_internal_error.ptr(), e.GetFullMessage().c_str());
     } catch (const pypto::Error& e) {
-      // Catch base Error last as a fallback
-      PyErr_SetString(PyExc_Exception, e.GetFullMessage().c_str());
+      // Catch base Error last as a fallback. VerificationError lands here too: its diagnostic
+      // report already pinpoints the offending IR, and the frames above the throw are always the
+      // same verifier-registry entry, so it follows the user-facing default.
+      PyErr_SetString(PyExc_Exception, UserErrorMessage(e).c_str());
     }
   });
 }
