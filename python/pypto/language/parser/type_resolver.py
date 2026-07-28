@@ -513,12 +513,16 @@ class TypeResolver:
         memory_space_node: ast.expr | None = None
 
         for node in extra_nodes:
-            if self._is_memref_node(node) or self._resolve_memref_var_ref(node) is not None:
+            if (
+                self._is_buffer_node(node)
+                or self._is_memref_node(node)
+                or (self._resolve_memref_var_ref(node) is not None)
+            ):
                 if memref_node is not None:
                     raise ParserTypeError(
                         "Tile annotation can contain at most one memref argument",
                         span=self._get_span(node),
-                        hint="Remove the duplicate pl.MemRef(...) or MemRefType variable argument",
+                        hint="Remove the duplicate pl.Buffer(...) / pl.MemRef(...) / MemRefType argument",
                     )
                 memref_node = node
                 continue
@@ -560,12 +564,15 @@ class TypeResolver:
             raise ParserTypeError(
                 "Tile annotation with a memref argument must also specify explicit memory space",
                 span=self._get_span(memref_node),
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(base, offset, size), pl.Mem.Vec] or "
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(base, offset, size), pl.Mem.Vec], "
+                'pl.Tile[[shape], dtype, pl.Buffer("scratch"), pl.Mem.Vec], or '
                 "pl.Tile[[shape], dtype, memref_var, pl.Mem.Vec]",
             )
 
         if memref_node is None:
             memref = None
+        elif self._is_buffer_node(memref_node):
+            memref = self._resolve_buffer(memref_node)
         elif self._is_memref_node(memref_node):
             memref = self.resolve_memref(memref_node)
         else:
@@ -1579,14 +1586,59 @@ class TypeResolver:
             hint="Use pl.PadValue.null, pl.PadValue.zero, pl.PadValue.max, or pl.PadValue.min",
         )
 
-    def _is_memref_node(self, node: ast.expr) -> bool:
-        """Check if an AST node is a pl.MemRef(...) call."""
+    @staticmethod
+    def _is_call_to(node: ast.expr, name: str) -> bool:
+        """Check if an AST node is a ``pl.<name>(...)`` or bare ``<name>(...)`` call."""
         if not isinstance(node, ast.Call):
             return False
         func = node.func
-        return (isinstance(func, ast.Attribute) and func.attr == "MemRef") or (
-            isinstance(func, ast.Name) and func.id == "MemRef"
+        return (isinstance(func, ast.Attribute) and func.attr == name) or (
+            isinstance(func, ast.Name) and func.id == name
         )
+
+    def _is_memref_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.MemRef(...) call."""
+        return self._is_call_to(node, "MemRef")
+
+    def _is_buffer_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.Buffer("name") call."""
+        return self._is_call_to(node, "Buffer")
+
+    def _resolve_buffer(self, node: ast.expr) -> "ir.MemRef":
+        """Resolve pl.Buffer("name") to a size-less MemRef on the named base Ptr.
+
+        A user buffer carries only its identity: the base Ptr interned from the
+        name. Offset is 0 (a bound tile occupies the whole buffer) and size is 0 —
+        the "derive me" marker ``InitMemRef`` matches on to tell a binding apart
+        from an ordinary MemRef, then replaces with the size of the largest tile
+        bound to this buffer.
+
+        Args:
+            node: AST Call node for pl.Buffer(...)
+
+        Returns:
+            ir.MemRef whose base_ is shared by every annotation naming this buffer
+
+        Raises:
+            ParserTypeError: If the call is not pl.Buffer(<non-empty string literal>)
+        """
+        assert isinstance(node, ast.Call)
+        span = self._get_span(node)
+        if len(node.args) != 1 or node.keywords:
+            raise ParserTypeError(
+                f"pl.Buffer requires exactly one name argument, got {ast.unparse(node)}",
+                span=span,
+                hint='Use pl.Buffer("scratch")',
+            )
+        name_node = node.args[0]
+        if not (isinstance(name_node, ast.Constant) and isinstance(name_node.value, str) and name_node.value):
+            raise ParserTypeError(
+                f"pl.Buffer name must be a non-empty string literal, got {ast.unparse(name_node)}",
+                span=span,
+                hint='Use pl.Buffer("scratch")',
+            )
+        base_var = self._intern_base_ptr(name_node.value, span)
+        return ir.MemRef(base_var, 0, 0, span)
 
     def _is_memory_space_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.Mem.<space> or pl.MemorySpace.<space> reference."""

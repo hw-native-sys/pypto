@@ -226,7 +226,20 @@ from .optimizations import cross_core_slot, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
-from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import (
+    Array,
+    Buffer,
+    DynVar,
+    InOut,
+    IntLike,
+    MemRef,
+    Out,
+    Scalar,
+    Tensor,
+    Tile,
+    Tuple,
+    dynamic,
+)
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
@@ -461,6 +474,7 @@ __all__ = [
     "MemRef",
     "Role",
     "SplitMode",
+    "Buffer",
     "Mem",
     "MemRefType",
     "MemorySpace",

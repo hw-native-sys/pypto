@@ -7912,18 +7912,29 @@ class ASTParser:
         namespace = func.value.attr  # "tile" or "tensor"
         op_name = f"{namespace}.alloc"
 
-        if call.keywords:
-            raise InvalidOperationError(
-                f"{op_name} in printed IR must use positional arguments only",
-                span=self.span_tracker.get_span(call),
-            )
+        # `pinned=True` is the only keyword an alloc carries — it marks a buffer
+        # the kernel author declared via `pl.Buffer(...)`, which MemoryReuse must
+        # leave alone. Everything else stays positional-only.
+        kwargs: dict[str, Any] = {}
+        for keyword in call.keywords:
+            if keyword.arg != "pinned":
+                raise InvalidOperationError(
+                    f"{op_name} in printed IR accepts no keyword argument '{keyword.arg}'",
+                    span=self.span_tracker.get_span(call),
+                )
+            if not (isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool)):
+                raise InvalidOperationError(
+                    f"{op_name} 'pinned' must be a bool literal",
+                    span=self.span_tracker.get_span(call),
+                )
+            kwargs["pinned"] = keyword.value.value
         args = [self.parse_expression(arg) for arg in call.args]
         if len(args) != 2:
             raise InvalidOperationError(
                 f"{op_name} in printed IR expects 2 positional args (memory_space, size), got {len(args)}",
                 span=self.span_tracker.get_span(call),
             )
-        return ir.create_op_call(op_name, args, {}, self.span_tracker.get_span(call))
+        return ir.create_op_call(op_name, args, kwargs, self.span_tracker.get_span(call))
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""

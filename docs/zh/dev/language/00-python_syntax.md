@@ -69,6 +69,24 @@ tensor: pl.Tensor[[64, 128], pl.FP32, pl.MemRef(addr_expr, 8192, 0)]
 tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 ```
 
+### 用户 buffer (Buffer)
+
+`pl.Buffer("name")` 把一块 buffer 从编译器的机会主义复用中收回。命名同一 buffer 的 tile
+共享一块分配，其他 tile 绝不会被塞进去。当 packer 合并了你希望保持独立的 tile 时使用它——
+共用 buffer 会引入一条 WAR 依赖，使二者串行。
+
+```python
+# 两个 tile 显式共用一块 buffer；第三个保持独占。
+t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+```
+
+buffer 在函数内按名字标识。既不写大小也不写地址：编译器按最大成员定型。内存空间**必须**写
+（`TileType` 始终要求 MemRef 与空间成对出现）。未加注解的 tile 保持默认的自动复用。参见
+[InitMemRef](../passes/29-init_memref.md#用户-buffer) 与
+[MemoryReuse](../passes/31-memory_reuse.md#用户-buffer)。
+
 ### Tile 视图 (TileView)
 
 ```python

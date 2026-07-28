@@ -1009,6 +1009,10 @@ REGISTER_OP("tile.alloc")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .add_argument("memory_space", "Memory space (int enum value)")
     .add_argument("size", "Size in bytes (scalar)")
+    // `pinned` marks a user-declared buffer (`pl.Tile[..., pl.Buffer("name")]`).
+    // MemoryReuse leaves such a buffer's membership exactly as the author wrote
+    // it: it neither packs other tiles into it nor moves its tiles elsewhere.
+    .set_attr<bool>("pinned")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

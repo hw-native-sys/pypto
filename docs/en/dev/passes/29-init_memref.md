@@ -44,14 +44,71 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+2. **Resolve user buffers**: Collect every `pl.Buffer(...)` binding and derive each buffer's size and memory space from the tiles bound to it (see [User buffers](#user-buffers))
+3. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
    - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
-3. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-4. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
-5. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+   - **User-bound tiles**: keep the buffer the author named instead of getting a fresh allocation
+4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base is a user buffer
+6. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+
+## User buffers
+
+`pl.Tile[[...], dtype, pl.Buffer("name"), pl.Mem.Vec]` binds a tile to a buffer the
+kernel author owns. Tiles naming the same buffer share one allocation; `MemoryReuse`
+never packs anything else into it. This is manual reuse control — see
+[MemoryReuse](31-memory_reuse.md#user-buffers) for why an author would want it.
+
+**How the binding reaches this pass.** The parser resolves `pl.Buffer("name")` to a
+`MemRef` whose `base_` Ptr is interned by name (so two annotations naming one buffer
+share one base), with `byte_offset = 0` and `size = 0`. That **size-0 marker is what
+identifies a binding** — re-parsing a post-allocation dump also puts MemRefs on
+`TileType`s, but those carry a real size, so keying on the marker rather than on
+"a MemRef exists" keeps the classification a property of the data instead of an
+artifact of where in the pipeline the pass happens to sit.
+
+Two passes must actively carry the binding rather than rebuild the type without it:
+`ConvertToSSA` merges the annotation's MemRef into the RHS-derived authoritative type
+(op type deduction never produces a MemRef, so an LHS MemRef is additional
+information, not a stale override), and `FlattenTileNdTo2D` keeps it when it rebuilds
+an ND tile as 2D (the flattened tile is the same storage). Every other pass only
+clones types, so the binding and its base identity survive intact.
+
+**What the pass derives.** The author writes neither a size nor an address:
+
+| Property | Derived from |
+| -------- | ------------ |
+| Size | The largest tile bound to the buffer |
+| Memory space | The space the bound tiles share (they must agree) |
+| Address | Left to `AllocateMemoryAddr`, exactly as for compiler allocations |
+
+**Rejected bindings** (all `pypto::ValueError`, all with the offending tile's span):
+
+- A bound tile with a dynamic shape — a user buffer must be sized at compile time.
+- Tiles on one buffer disagreeing on memory space.
+- Binding the output of a view / in-place op (`tile.reshape`, `tile.matmul_acc`, …).
+  Such a result physically *is* its source's buffer, so it cannot be placed elsewhere;
+  bind the source instead.
+
+A fourth rule — tiles bound to one buffer must not be live at the same time — needs
+lifetime information and is therefore checked in
+[MemoryReuse](31-memory_reuse.md#user-buffers).
+
+```python
+t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)  # shares t0's buffer
+```
+
+becomes two pinned allocations, with `t0` and `t2` on `ping`:
+
+```python
+ping: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+pong: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+```
 
 ## Example
 

@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_MEMREF_UTILS_H_
 
 #include <algorithm>
+#include <any>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -236,7 +237,7 @@ inline std::optional<uint64_t> ExtractNameCounter(const std::string& name) {
 /// Create an alloc AssignStmt for a MemRef's base Ptr variable.
 /// DDR → tensor.alloc, on-chip → tile.alloc.
 /// Emits: base_ptr: Ptr = {tile,tensor}.alloc(memory_space, size)
-inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) {
+inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space, bool pinned = false) {
   std::string op_name = (memory_space == MemorySpace::DDR) ? "tensor.alloc" : "tile.alloc";
   auto alloc_op = std::make_shared<Op>(op_name);
 
@@ -246,9 +247,25 @@ inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_
       std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
 
   std::vector<ExprPtr> alloc_args = {memspace_expr, size_expr};
-  auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetPtrType(), Span::unknown());
+  // Only emit the kwarg when set, so ordinary compiler allocations print and
+  // compare exactly as before.
+  std::vector<std::pair<std::string, std::any>> alloc_kwargs;
+  if (pinned) alloc_kwargs.emplace_back("pinned", true);
+  auto alloc_call =
+      std::make_shared<Call>(alloc_op, alloc_args, std::move(alloc_kwargs), GetPtrType(), Span::unknown());
 
   return std::make_shared<AssignStmt>(memref->base_, alloc_call, Span::unknown());
+}
+
+/// The base Ptr an alloc statement declares when it is a user-owned (pinned)
+/// buffer, else null. Null for every compiler-created allocation.
+inline VarPtr GetPinnedAllocBase(const StmtPtr& stmt) {
+  auto assign = As<AssignStmt>(stmt);
+  if (!assign) return nullptr;
+  auto call = As<Call>(assign->value_);
+  if (!call || !call->op_) return nullptr;
+  if (!IsOp(call, "tile.alloc") && !IsOp(call, "tensor.alloc")) return nullptr;
+  return call->GetKwarg<bool>("pinned", false) ? assign->var_ : nullptr;
 }
 
 // ============================================================================

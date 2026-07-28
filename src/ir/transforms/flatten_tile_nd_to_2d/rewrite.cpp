@@ -648,8 +648,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         } else {
           flat_tile_view = tile_view_semantics::GetImplicitTileView(flat_shape_exprs, flat_memory_space);
         }
-        auto flat_tile_type = std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_, std::nullopt,
-                                                         flat_tile_view, flat_memory_space);
+        // Carry the MemRef through: the flattened tile is the same storage, and a
+        // parse-time `pl.Buffer(...)` binding rides this field to InitMemRef.
+        // Dropping it would silently un-bind every ND user-bound tile.
+        auto flat_tile_type = std::make_shared<TileType>(
+            flat_shape_exprs, result_tile->dtype_, result_tile->memref_, flat_tile_view, flat_memory_space);
 
         // A natural Mat load lowers to ND2NZ, which requires a 2D GlobalTensor.
         // Materialize that source-window collapse in IR with tensor.view; plain

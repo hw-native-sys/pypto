@@ -69,6 +69,27 @@ tensor: pl.Tensor[[64, 128], pl.FP32, pl.MemRef(addr_expr, 8192, 0)]
 tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 ```
 
+### User Buffers (Buffer)
+
+`pl.Buffer("name")` takes a buffer out of the compiler's opportunistic reuse. Tiles
+naming the same buffer share one allocation; nothing else is ever packed into it.
+Use it when the packer coalesces tiles you want to stay independent — sharing a
+buffer adds a WAR dependency that serializes them.
+
+```python
+# Two tiles explicitly share one buffer; a third is kept private.
+t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+```
+
+Buffers are identified by name within a function. Neither a size nor an address is
+written: the compiler sizes the buffer to its largest member. The memory space **is**
+required (a `TileType` always pairs a MemRef with a space). Tiles left unannotated
+keep the default automatic reuse. See
+[InitMemRef](../passes/29-init_memref.md#user-buffers) and
+[MemoryReuse](../passes/31-memory_reuse.md#user-buffers).
+
 ### Tile Views (TileView)
 
 ```python

@@ -227,6 +227,8 @@ class MaskPattern:
 def alloc(
     memory_space: MemorySpace,
     size: int,
+    *,
+    pinned: bool = False,
 ) -> PtrType:
     """Stub for the internal ``tile.alloc`` IR operation.
 
@@ -242,6 +244,9 @@ def alloc(
     Args:
         memory_space: Target memory space (e.g. ``pl.Mem.Vec``)
         size: Allocation size in bytes
+        pinned: True when this buffer was declared by the author via
+            ``pl.Buffer(...)``. ``MemoryReuse`` then leaves its membership
+            untouched instead of packing other tiles into it.
 
     Returns:
         Opaque ``PtrType`` sentinel (unused at runtime)

@@ -44,14 +44,64 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+2. **解析用户 buffer**：收集所有 `pl.Buffer(...)` 绑定，并从绑定的 tile 推导出每个 buffer 的大小与内存空间（见[用户 buffer](#用户-buffer)）
+3. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
    - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
-3. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-4. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
-5. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+   - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
+4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
+5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于用户 buffer 时带上 `pinned=True`
+6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+
+## 用户 buffer
+
+`pl.Tile[[...], dtype, pl.Buffer("name"), pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者
+拥有的 buffer 上。命名同一个 buffer 的 tile 共享一块分配，且 `MemoryReuse` 绝不会把其他
+tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#用户-buffer)。
+
+**绑定如何抵达本 pass。** 解析器把 `pl.Buffer("name")` 解析为一个 `MemRef`，其 `base_` Ptr
+按名字 intern（因此命名同一 buffer 的两处注解共享同一个 base），`byte_offset = 0`、
+`size = 0`。**这个 size-0 标记正是绑定的识别依据**——重新解析 post-allocation dump 时同样会
+在 `TileType` 上出现 MemRef，但那些带有真实大小；以标记而非"存在 MemRef"为判据，使该分类成为
+数据自身的属性，而不是"pass 恰好站在流水线哪个位置"的副产品。
+
+有两个 pass 必须主动携带绑定，而不能重建类型时丢掉它：`ConvertToSSA` 把注解上的 MemRef 合并进
+由 RHS 推导出的权威类型（算子类型推导永远不产生 MemRef，所以 LHS 上的 MemRef 是增量信息而非过
+期覆盖）；`FlattenTileNdTo2D` 在把 ND tile 重建为 2D 时保留它（展平后的 tile 是同一块存储）。
+其余 pass 只克隆类型，绑定与 base 身份因此完整存活。
+
+**本 pass 推导的内容。** 作者既不写大小也不写地址：
+
+| 属性 | 推导来源 |
+| ---- | -------- |
+| 大小 | 绑定到该 buffer 的最大 tile |
+| 内存空间 | 绑定 tile 共有的空间（必须一致） |
+| 地址 | 交给 `AllocateMemoryAddr`，与编译器分配完全一致 |
+
+**被拒绝的绑定**（均为 `pypto::ValueError`，且携带出错 tile 的 span）：
+
+- 绑定的 tile 是动态 shape——用户 buffer 必须在编译期定型。
+- 同一 buffer 上的 tile 内存空间不一致。
+- 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
+  其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
+
+第四条规则——绑定到同一 buffer 的 tile 生命周期不得重叠——需要生命周期信息，因此在
+[MemoryReuse](31-memory_reuse.md#用户-buffer) 中检查。
+
+```python
+t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)  # 与 t0 共用
+```
+
+会得到两块 pinned 分配，`t0` 与 `t2` 落在 `ping` 上：
+
+```python
+ping: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+pong: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384, pinned=True)
+```
 
 ## 示例
 

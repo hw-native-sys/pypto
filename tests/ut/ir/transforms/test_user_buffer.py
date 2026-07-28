@@ -1,0 +1,496 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Tests for user-owned buffers (``pl.Tile[..., pl.Buffer("name")]``).
+
+A user buffer is manual memory-reuse control: tiles bound to the same buffer
+share one allocation, and ``MemoryReuse`` never packs anything else into it.
+The point is to stop the packer from coalescing tiles whose lifetimes merely
+happen not to overlap — coalescing them creates a false dependency that
+serializes work that could otherwise overlap.
+
+The feature spans three passes, so the tests are grouped by what they pin down:
+  * ``TestBinding``      — InitMemRef derives size / space and shares the base
+  * ``TestReuseControl`` — MemoryReuse leaves user buffers alone
+  * ``TestPipeline``     — the binding survives the real pass pipeline
+  * ``TestRejects``      — bindings the compiler must refuse
+"""
+
+import pypto.language as pl
+import pytest
+from pypto import ir, passes
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+
+
+def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
+    """Map every TileType assignment's var name to its MemRef."""
+    found: dict[str, ir.MemRef] = {}
+
+    def walk(stmt):
+        if stmt is None:
+            return
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
+            memref = stmt.var.type.memref
+            if memref is not None:
+                found[stmt.var.name_hint] = memref
+        for attr in ("body", "then_body", "else_body", "stmts"):
+            sub = getattr(stmt, attr, None)
+            if sub is None:
+                continue
+            for child in sub if isinstance(sub, (list, tuple)) else [sub]:
+                walk(child)
+
+    for func in program.functions.values():
+        walk(func.body)
+    return found
+
+
+def _base_names(program: ir.Program) -> dict[str, str]:
+    """Map every TileType assignment's var name to its allocation's base name."""
+    return {name: memref.base_.name_hint for name, memref in _tile_memrefs(program).items()}
+
+
+def _alloc_lines(program: ir.Program) -> list[str]:
+    """The on-chip allocation lines of the printed program."""
+    return [line.strip() for line in program.as_python().splitlines() if ".alloc(pl.Mem." in line]
+
+
+def _run_memory_pipeline(program: ir.Program) -> ir.Program:
+    """init_mem_ref -> materialize_semantic_aliases -> memory_reuse, as in the real pipeline."""
+    return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
+
+
+def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
+    """Run the Default strategy up to and including ``last_pass``."""
+    manager = PassManager(OptimizationStrategy.Default)
+    names = manager.pass_names
+    stop = names.index(last_pass)
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        for pass_obj in manager.passes[: stop + 1]:
+            pipeline = passes.PassPipeline()
+            pipeline.add_pass(pass_obj)
+            program = pipeline.run(program)
+    return program
+
+
+class TestBinding:
+    """InitMemRef honors the binding and derives what the author did not write."""
+
+    def test_same_buffer_shares_one_allocation(self):
+        """Two tiles naming one buffer end up on one base Ptr, so one allocation."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        bases = _base_names(after)
+        assert bases["t0"] == "scratch"
+        assert bases["t1"] == "scratch"
+        assert len(_alloc_lines(after)) == 1
+
+    def test_distinct_buffers_stay_distinct(self):
+        """Different names are different buffers, even though lifetimes are disjoint."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        bases = _base_names(after)
+        assert bases["t0"] == "ping"
+        assert bases["t1"] == "pong"
+        assert len(_alloc_lines(after)) == 2
+
+    def test_size_is_the_largest_bound_tile(self):
+        """The author writes no byte count: the buffer is sized to hold any member."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out_big: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                out_small: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
+                big: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], out_big)
+                # `big` is dead by now, so `small` may legally take over the buffer.
+                small: pl.Tile[[32, 32], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [32, 32]
+                )
+                r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], out_small)
+                return r_big, r_small
+
+        after = passes.init_mem_ref()(Before)
+        memrefs = _tile_memrefs(after)
+        # 64*64*4 == 16384 dominates 32*32*4 == 4096; both members see that size.
+        assert memrefs["big"].size_ == 16384
+        assert memrefs["small"].size_ == 16384
+
+    def test_allocation_is_marked_pinned(self):
+        """The alloc carries `pinned=True` so later passes can tell it apart."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                return pl.store(t0, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        allocs = _alloc_lines(after)
+        assert len(allocs) == 1
+        assert "pinned=True" in allocs[0]
+
+    def test_pinned_allocation_round_trips(self):
+        """The printed `pinned=True` form re-parses to a structurally equal program."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                return pl.store(t0, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        reparsed = pl.parse_program(after.as_python())
+        ir.assert_structural_equal(after, reparsed)
+
+
+class TestReuseControl:
+    """MemoryReuse packs unbound tiles as before, and leaves user buffers alone."""
+
+    def test_unbound_tiles_are_still_packed(self, ascend_backend):
+        """Baseline: without bindings the packer coalesces the whole chain."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        bases = set(_base_names(_run_memory_pipeline(Before)).values())
+        assert len(bases) == 1, f"expected the packer to coalesce the chain, got {bases}"
+
+    def test_bound_tiles_are_not_packed(self, ascend_backend):
+        """The same chain, bound: three buffers survive — no false dependencies."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("in_buf"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("mid_buf"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("out_buf"), pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        bases = _base_names(_run_memory_pipeline(Before))
+        assert bases["t0"] == "in_buf"
+        assert bases["t1"] == "mid_buf"
+        assert bases["t2"] == "out_buf"
+
+    def test_explicit_sharing_is_preserved(self, ascend_backend):
+        """Author-chosen sharing survives: t0 and t2 on one buffer, t1 on another.
+
+        Also pins the touching-lifetimes rule: t0's last read is the statement
+        producing t1, and t2 is defined after that, so the overlap check accepts
+        the pair rather than treating the shared buffer as a conflict.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        bases = _base_names(_run_memory_pipeline(Before))
+        assert bases["t0"] == bases["t2"] == "ping"
+        assert bases["t1"] == "pong"
+
+    def test_unbound_tiles_never_join_a_user_buffer(self, ascend_backend):
+        """An unbound tile is packed with other unbound tiles, never into a user buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mine: pl.Tile[[64, 64], pl.FP32, pl.Buffer("mine"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                free0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(mine)
+                free1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(free0)
+                return pl.store(free1, [0, 0], out)
+
+        bases = _base_names(_run_memory_pipeline(Before))
+        assert bases["mine"] == "mine"
+        assert bases["free0"] != "mine"
+        assert bases["free1"] != "mine"
+
+
+class TestPipeline:
+    """The binding must survive every pass between the parser and InitMemRef."""
+
+    def test_binding_survives_the_default_pipeline(self, ascend_backend):
+        """ConvertToSSA and friends must carry the MemRef through, not drop it."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        bases = set(_base_names(after).values())
+        assert bases == {"ping", "pong"}, f"binding lost in the pipeline, got {bases}"
+
+    def test_binding_survives_nd_flattening(self, ascend_backend):
+        """FlattenTileNdTo2D rebuilds the TileType; it must carry the binding over.
+
+        The flattened tile is the same storage, so dropping the MemRef there would
+        silently un-bind every ND user-bound tile — no diagnostic, feature gone.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4, 16, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[4, 16, 64], pl.FP32]:
+                t0: pl.Tile[[4, 16, 64], pl.FP32, pl.Buffer("nd_buf"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0, 0], [4, 16, 64]
+                )
+                t1: pl.Tile[[4, 16, 64], pl.FP32, pl.Buffer("nd_buf"), pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0, 0], out)
+
+        after = _run_full_pipeline(Before, "InitMemRef")
+        bases = set(_base_names(after).values())
+        assert bases == {"nd_buf"}, f"ND binding lost during flattening, got {bases}"
+
+    def test_reparsed_dump_is_not_treated_as_user_buffers(self, ascend_backend):
+        """A post-allocation dump also carries MemRefs — those are not user buffers.
+
+        The binding is recognised by the parser's size-0 "derive me" marker, not by
+        "a MemRef exists". Re-running the passes over a printed program must not
+        promote its compiler allocations into pinned, un-reusable buffers.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        dumped = passes.init_mem_ref()(Before).as_python()
+        assert "pinned=True" not in dumped
+        reparsed = pl.parse_program(dumped)
+        # Re-running InitMemRef over the dump must still produce no pinned allocs.
+        assert "pinned=True" not in passes.init_mem_ref()(reparsed).as_python()
+
+    def test_pinned_buffers_stay_on_distinct_bases(self, ascend_backend):
+        """Two user buffers survive to AllocateMemoryAddr as two separate allocations.
+
+        Distinct base Ptrs are what "separate buffers" means at this level — the
+        allocator assigns each base its own address range from there.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        memrefs = _tile_memrefs(after)
+        ping, pong = memrefs["t0__ssa_v0"], memrefs["t1__ssa_v0"]
+        assert ping.base_.name_hint != pong.base_.name_hint
+        assert ping.size_ == pong.size_ == 16384
+        # Two allocations reach the allocator, neither folded into the other.
+        assert len(_alloc_lines(after)) == 2
+
+
+class TestRejects:
+    """Bindings the compiler must refuse, each with a message that says why."""
+
+    def test_rejects_overlapping_lifetimes(self, ascend_backend):
+        """Two co-live tiles on one buffer would corrupt data, not reuse it."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
+                # Overwrites `ping` while t0 is still needed by the add below.
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
+                t3: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong2"), pl.Mem.Vec] = pl.add(t0, t2)
+                return pl.store(t3, [0, 0], out)
+
+        with pytest.raises(ValueError, match="live at the same time"):
+            _run_memory_pipeline(Before)
+
+    def test_rejects_mixed_memory_space(self):
+        """One buffer lives in one memory space; bound tiles must agree on it."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP16],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP16]],
+            ) -> pl.Tensor[[64, 64], pl.FP16]:
+                vec: pl.Tile[[64, 64], pl.FP16, pl.Buffer("shared"), pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                mat: pl.Tile[[64, 64], pl.FP16, pl.Buffer("shared"), pl.Mem.Mat] = pl.tile.move(
+                    vec, target_memory=pl.Mem.Mat
+                )
+                back: pl.Tile[[64, 64], pl.FP16, pl.Mem.Vec] = pl.tile.move(mat, target_memory=pl.Mem.Vec)
+                return pl.store(back, [0, 0], out)
+
+        with pytest.raises(ValueError, match="same memory space"):
+            passes.init_mem_ref()(Before)
+
+    def test_rejects_binding_a_view_output(self):
+        """A view already IS its source's buffer; it cannot be bound elsewhere."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                view: pl.Tile[[32, 128], pl.FP32, pl.Buffer("elsewhere"), pl.Mem.Vec] = pl.reshape(
+                    t0, [32, 128]
+                )
+                return pl.store(view, [0, 0], out)
+
+        with pytest.raises(ValueError, match="reuses its source tile's buffer"):
+            passes.init_mem_ref()(Before)
+
+    def test_requires_explicit_memory_space(self):
+        """TileType pairs a MemRef with a memory space; the annotation must say which."""
+        source = """
+import pypto.language as pl
+
+
+@pl.program
+class Bad:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch")] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(t0, [0, 0], out)
+"""
+        with pytest.raises(Exception, match="explicit memory space"):
+            pl.parse_program(source)
+
+    def test_rejects_non_literal_buffer_name(self):
+        """The name identifies the buffer at parse time, so it must be a literal."""
+        source = """
+import pypto.language as pl
+
+NAME = "scratch"
+
+
+@pl.program
+class Bad:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer(NAME), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(t0, [0, 0], out)
+"""
+        with pytest.raises(Exception, match="string literal"):
+            pl.parse_program(source)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
