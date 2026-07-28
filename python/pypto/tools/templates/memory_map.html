@@ -117,7 +117,7 @@
 
   .fn-body { border-top: 1px solid var(--line-soft); padding: 12px 16px 16px; }
   .toolbar {
-    display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;
     font-size: 11px; color: var(--ink-3);
   }
   .btn {
@@ -127,6 +127,10 @@
   .btn:hover { color: var(--ink); }
   .btn[aria-pressed="true"] { background: var(--ink); color: var(--surface-1); border-color: var(--ink); }
   .btn:focus-visible { outline: 2px solid var(--sp-Vec); outline-offset: 1px; }
+
+  .zoom { display: flex; gap: 3px; align-items: center; }
+  .zoom .btn { min-width: 26px; text-align: center; }
+  .zoom .zoom-level { min-width: 52px; font-variant-numeric: tabular-nums; }
 
   .space-toggles { display: flex; gap: 4px; align-items: center; }
   .space-toggles .lbl { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
@@ -154,6 +158,7 @@
     background: var(--surface-1); border-bottom: 1px solid var(--line);
     padding: 7px 8px 6px; overflow: hidden;
   }
+  .colhead.lane-head { box-shadow: inset 2px 0 0 var(--line), inset 0 3px 0 var(--c); }
   .colhead.gutter { left: 0; z-index: 4; border-right: 1px solid var(--line-soft); }
   .plot.src-open .colhead.gutter { left: auto; }
   .colhead .sp { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; }
@@ -195,7 +200,14 @@
   }
   .pin button:hover { color: var(--ink); }
 
-  .lane { position: relative; box-shadow: inset 1px 0 0 var(--line-soft); }
+  /* Each scope reads as its own band: a solid divider plus a faint wash of the
+     space colour. Both are inset shadows / backgrounds, so neither consumes
+     lane width and the shared byte scale stays exact. */
+  .lane {
+    position: relative;
+    background: color-mix(in srgb, var(--c) 4%, transparent);
+    box-shadow: inset 2px 0 0 var(--line);
+  }
   .lane .rule { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line-soft); }
   .lane .hwm { position: absolute; top: 0; bottom: 0; border-left: 1px dashed currentColor; opacity: .5; }
 
@@ -308,6 +320,9 @@ const GUTTER_COLLAPSED = 62;
 const RULE_EVERY = 5;        // gridline cadence, in source lines
 const MIN_LANE_PX = 72;      // narrowest lane before the whole map is scaled up and scrolls
 const FALLBACK_WIDTH = 1180; // used while a card is closed and has no measurable width
+const ZOOM_STEP = 1.6;       // per button click, and per ctrl/cmd + wheel notch
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 64;
 
 const fmtBytes = n =>
   n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" :
@@ -327,6 +342,7 @@ const spaceColor = space => `var(--sp-${space}, var(--sp-unknown))`;
 const STATE = DATA.functions.map(() => ({
   expanded: false,
   fitUsed: false,
+  zoom: 1,
   hidden: new Set(),
   pinned: null,
   hovered: null,
@@ -369,6 +385,11 @@ document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
         <button type="button" class="btn src-toggle" aria-pressed="false">Show IR source</button>
         <button type="button" class="btn fit-toggle" aria-pressed="false"
                 title="Span each panel by its high-water mark instead of its hardware limit">x&nbsp;axis: limit</button>
+        <span class="zoom" title="Zoom the byte scale — every lane by the same factor. Ctrl/&#8984; + scroll works too.">
+          <button type="button" class="btn zoom-out" aria-label="Zoom out">&minus;</button>
+          <button type="button" class="btn zoom-level" aria-label="Reset zoom">1.0&times;</button>
+          <button type="button" class="btn zoom-in" aria-label="Zoom in">+</button>
+        </span>
         ${spaceToggles}
         <span class="pin" hidden></span>
       </div>
@@ -378,6 +399,7 @@ document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
         <span class="item"><span class="k" style="border:2px dashed var(--ink-3)"></span>view into the same base</span>
         <span class="item"><span class="k" style="box-shadow:inset 0 0 0 2px var(--critical)"></span>cross-base address + lifetime overlap</span>
         <span class="item">&#9478; high-water mark</span>
+        <span class="item">ctrl/&#8984; + scroll to zoom the byte scale</span>
         <span class="item">${fn.src_end - fn.src_start + 1} lines &middot; dump L${fn.src_start}&ndash;L${fn.src_end}</span>
       </div>
       <details class="tbl"><summary>Table view</summary><div class="scroller">${tableFor(fn)}</div></details>
@@ -433,8 +455,9 @@ function renderPlot(card) {
   const totalSpan = shown.reduce((sum, s) => sum + spanOf(s), 0) || 1;
   const narrowest = Math.min(...shown.map(spanOf));
   // Scaling up so the narrowest lane clears MIN_LANE_PX keeps the factor uniform
-  // (the map just gets wider than the pane and scrolls).
-  const pxPerByte = Math.max(available / totalSpan, MIN_LANE_PX / narrowest);
+  // (the map just gets wider than the pane and scrolls). Zoom multiplies that
+  // one factor, so every lane grows together and the scale stays shared.
+  const pxPerByte = Math.max(available / totalSpan, MIN_LANE_PX / narrowest) * view.zoom;
 
   plot.classList.toggle("src-open", view.expanded);
   plot.style.setProperty("--lh", LINE_H + "px");
@@ -444,7 +467,7 @@ function renderPlot(card) {
     shown.map(s => `${(spanOf(s) * pxPerByte).toFixed(2)}px`).join(" ");
 
   const heads = `<div class="colhead gutter"><div class="lbl">${view.expanded ? "IR source" : "line"}</div></div>` +
-    shown.map(s => `<div class="colhead">
+    shown.map(s => `<div class="colhead lane-head" style="--c:${spaceColor(s.space)}">
       <div class="sp"><span class="dot" style="background:${spaceColor(s.space)}"></span>${s.space}</div>
       <div class="rng"><span>0</span><span>${fmtBytes(spanOf(s))}</span></div>
     </div>`).join("");
@@ -473,14 +496,14 @@ function renderPlot(card) {
       const cls = "box" + (boxHeight < 2 * LINE_H ? " short" : "") +
         (b.view ? " view" : "") + (b.conflict ? " conflict" : "") + (pinned ? " pinned" : "");
       return `<div class="${cls}" tabindex="0" role="button" aria-pressed="${pinned}"
-        style="--c:${spaceColor(space.space)};left:${b.offset / span * 100}%;
+        style="left:${b.offset / span * 100}%;
                width:${b.size / span * 100}%;top:${top}px;height:${boxHeight}px"
         data-bi="${bi}">
         <span class="n">${esc(b.name)}${b.aliases.length ? ` <span class="badge">+${b.aliases.length}</span>` : ""}</span>
         <span class="s">${fmtBytes(b.size)} &middot; [${b.offset}, ${b.offset + b.size})</span>
       </div>`;
     }).join("");
-    return `<div class="lane" style="height:${height}px">${rules}${hwm}${boxes}</div>`;
+    return `<div class="lane" style="--c:${spaceColor(space.space)};height:${height}px">${rules}${hwm}${boxes}</div>`;
   }).join("");
 
   plot.innerHTML = heads + gutcol + lanes;
@@ -499,6 +522,10 @@ function syncToolbar(card) {
   const fitToggle = card.querySelector(".fit-toggle");
   fitToggle.setAttribute("aria-pressed", String(view.fitUsed));
   fitToggle.innerHTML = view.fitUsed ? "x&nbsp;axis: used" : "x&nbsp;axis: limit";
+
+  const level = card.querySelector(".zoom-level");
+  level.innerHTML = `${view.zoom.toFixed(view.zoom < 10 ? 1 : 0)}&times;`;
+  level.setAttribute("aria-pressed", String(view.zoom !== 1));
 
   card.querySelectorAll(".sp-toggle").forEach(toggle => {
     toggle.setAttribute("aria-pressed", String(!view.hidden.has(toggle.dataset.space)));
@@ -536,6 +563,32 @@ function setPinned(card, box) {
   // Pinning is about locating the tile in the IR, so bring the source into view.
   if (view.pinned) view.expanded = true;
   renderPlot(card);
+}
+
+/**
+ * Rescale by `factor`, keeping `anchorClientX` (a viewport x) over the same
+ * byte. Without the anchor the lanes would grow away from the pointer and the
+ * tile being inspected would slide off screen.
+ */
+function setZoom(card, factor, anchorClientX) {
+  const view = STATE[Number(card.dataset.index)];
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.zoom * factor));
+  if (next === view.zoom) return;
+
+  const scroller = card.querySelector(".scroller");
+  const gutter = card.querySelector(".gutcol");
+  // Only the lanes scale; the gutter keeps its width, so anchor within the lanes.
+  const gutterWidth = gutter ? gutter.getBoundingClientRect().width : 0;
+  const paneX = anchorClientX === undefined
+    ? scroller.clientWidth / 2
+    : anchorClientX - scroller.getBoundingClientRect().left;
+  const laneX = scroller.scrollLeft + paneX - gutterWidth;
+
+  const ratio = next / view.zoom;
+  view.zoom = next;
+  renderPlot(card);
+
+  if (laneX > 0) scroller.scrollLeft = gutterWidth + laneX * ratio - paneX;
 }
 
 /* ---- interaction --------------------------------------------------------- */
@@ -576,6 +629,16 @@ document.querySelectorAll("details.fn").forEach(card => {
     view.fitUsed = !view.fitUsed;
     renderPlot(card);
   });
+
+  card.querySelector(".zoom-in").addEventListener("click", e => { e.preventDefault(); setZoom(card, ZOOM_STEP); });
+  card.querySelector(".zoom-out").addEventListener("click", e => { e.preventDefault(); setZoom(card, 1 / ZOOM_STEP); });
+  card.querySelector(".zoom-level").addEventListener("click", e => { e.preventDefault(); setZoom(card, 1 / view.zoom); });
+
+  card.querySelector(".scroller").addEventListener("wheel", event => {
+    if (!event.ctrlKey && !event.metaKey) return;  // plain scroll still pans
+    event.preventDefault();
+    setZoom(card, event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, event.clientX);
+  }, { passive: false });
 
   card.querySelectorAll(".sp-toggle").forEach(toggle => {
     toggle.addEventListener("click", event => {

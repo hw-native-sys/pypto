@@ -78,6 +78,10 @@ mark, capacity and usage — the pill turns red at ≥ 95 %.
 | red box | two **different** bases overlap in address *and* lifetime |
 | dashed vertical rule | the space's high-water mark |
 
+Each space is a band: a solid divider on its left edge and a faint wash of the
+space's own colour behind the lane, with a matching accent bar on its column
+header. Both are drawn as insets, so neither consumes lane width.
+
 ### One shared byte scale
 
 A byte is the same number of pixels in every panel. Each lane gets an **absolute
@@ -96,6 +100,18 @@ the narrowest lane under 72 px. Raising it keeps the factor uniform — the map
 simply becomes wider than the pane and scrolls. Boxes also draw at a 2 px floor
 instead of vanishing, and the separator between adjacent boxes is painted
 *outside* the box, so a box is never narrower than the bytes it owns.
+
+### Zooming
+
+`−` / `+` in the toolbar scale the byte factor by 1.6× per click, from 0.2× to
+64×; the middle button shows the current level and resets it. `Ctrl`/`Cmd` +
+scroll over the plot does the same and keeps the byte under the pointer in
+place, so a tile stays put while it grows. Plain scrolling still pans.
+
+Zoom multiplies the one shared factor, so every lane grows together and box
+widths stay comparable across panels — it magnifies the map rather than
+re-fitting it. Use it to inspect a tile that is small relative to its space:
+a 2 KB buffer in a 512 KB `Mat` panel is legible at 8×.
 
 Two spans are available:
 
