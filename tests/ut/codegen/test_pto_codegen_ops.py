@@ -1137,6 +1137,70 @@ class TestB02SelectionAndPreluCodegen:
             self._generate_mlir(Prog, BackendType.Ascend910B)
 
 
+class TestRemainderFamilyCodegen:
+    """The four public tile APIs lower to their exact PTOAS instructions."""
+
+    @staticmethod
+    def _generate_mlir(program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen.PTOCodegen().generate(single)
+
+    @staticmethod
+    def _op_line(mlir: str, op_name: str) -> str:
+        line = next((line for line in mlir.splitlines() if f"{op_name} " in line), "")
+        assert line, f"{op_name} not found in MLIR:\n{mlir}"
+        return line
+
+    @staticmethod
+    def _ins_operand_count(line: str) -> int:
+        ins_start = line.find("ins(")
+        ins_end = line.find(")", ins_start)
+        assert ins_start != -1 and ins_end != -1, f"ins(...) clause not found in: {line}"
+        operands = line[ins_start + len("ins(") : ins_end].split(":", 1)[0]
+        return operands.count(",") + 1
+
+    def test_exact_remainder_op_names_and_arities(self):
+        @pl.program
+        class RemainderProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 16], pl.FP32],
+                rhs: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                tmp2: pl.Tile[[2, 16], pl.FP32] = pl.tile.create(
+                    [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tmp1: pl.Tile[[1, 16], pl.FP32] = pl.tile.create(
+                    [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                out = pl.store(pl.tile.rem(lhs_tile, rhs_tile, tmp2), [0, 0], out)
+                out = pl.store(pl.tile.rems(lhs_tile, -3.0, tmp1), [0, 0], out)
+                out = pl.store(pl.tile.fmod(lhs_tile, rhs_tile), [0, 0], out)
+                out = pl.store(pl.tile.fmods(lhs_tile, -3.0), [0, 0], out)
+                return out
+
+        mlir = self._generate_mlir(RemainderProgram)
+        expected_arities = {
+            "pto.trem": 3,
+            "pto.trems": 3,
+            "pto.tfmod": 2,
+            "pto.tfmods": 2,
+        }
+        for op_name, arity in expected_arities.items():
+            line = self._op_line(mlir, op_name)
+            assert self._ins_operand_count(line) == arity
+            assert ") outs(" in line
+
+
 class TestTileReadWriteOffsetCodegen:
     """Tests verifying tile.read/write multi-dimensional indices generate correct flat offsets."""
 

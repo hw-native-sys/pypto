@@ -3712,6 +3712,131 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.rems" in ir_str
 
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            DataType.INT16,
+            DataType.UINT16,
+            DataType.INT32,
+            DataType.UINT32,
+            DataType.FP16,
+            DataType.FP32,
+        ],
+    )
+    def test_tile_remainder_family_accepts_pto_dtype_union(self, dtype):
+        """The four ops accept the union of the current A2/A3 and A5 contracts."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([8, 16], dtype)
+        src0 = ir.Var("src0", tile_type, span)
+        src1 = ir.Var("src1", tile_type, span)
+        tmp2 = ir.Var("tmp2", ir.TileType([2, 16], dtype), span)
+        tmp1 = ir.Var("tmp1", ir.TileType([1, 16], dtype), span)
+        scalar = ir.ConstFloat(3.0, dtype, span) if dtype.is_float() else ir.ConstInt(3, dtype, span)
+
+        calls = (
+            tile.rem(src0, src1, tmp2),
+            tile.rems(src0, scalar, tmp1),
+            tile.fmod(src0, src1),
+            tile.fmods(src0, scalar),
+        )
+
+        assert [_tile_result_dtype(call) for call in calls] == [dtype] * 4
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
+    def test_tile_remainder_rejects_mixed_dtypes(self, op):
+        """PTO remainder instructions require a single exact src/dst dtype."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match=r"same dtype"):
+            op(lhs, rhs, tmp) if op is tile.rem else op(lhs, rhs)
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
+    def test_tile_remainder_rejects_broadcasting(self, op):
+        """The PTO instructions do not implement elementwise broadcasting."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([1, 16], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match=r"same physical shape"):
+            op(lhs, rhs, tmp) if op is tile.rem else op(lhs, rhs)
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
+    def test_tile_remainder_rejects_mismatched_valid_shapes(self, op):
+        """Equal physical buffers are insufficient when valid extents differ."""
+        span = ir.Span.unknown()
+        lhs_view = ir.TileView(valid_shape=[7, 13])
+        rhs_view = ir.TileView(valid_shape=[7, 12])
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.FP32, tile_view=lhs_view), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.FP32, tile_view=rhs_view), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match=r"same valid_shape"):
+            op(lhs, rhs, tmp) if op is tile.rem else op(lhs, rhs)
+
+    @pytest.mark.parametrize(
+        "op,tmp_shape",
+        [
+            pytest.param(tile.rem, [1, 16], id="trem-needs-two-rows"),
+            pytest.param(tile.rem, [2, 12], id="trem-needs-valid-cols"),
+            pytest.param(tile.rems, [1, 12], id="trems-needs-valid-cols"),
+        ],
+    )
+    def test_tile_remainder_rejects_undersized_tmp(self, op, tmp_shape):
+        """TREM needs two scratch rows; both tmp forms must cover valid columns."""
+        span = ir.Span.unknown()
+        src_view = ir.TileView(valid_shape=[7, 13])
+        src = ir.Var("src", ir.TileType([8, 16], DataType.FP32, tile_view=src_view), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.FP32, tile_view=src_view), span)
+        tmp = ir.Var("tmp", ir.TileType(tmp_shape, DataType.FP32), span)
+
+        with pytest.raises(ValueError, match=r"requires tmp valid_shape"):
+            op(src, rhs, tmp) if op is tile.rem else op(src, 3.0, tmp)
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.rems])
+    def test_tile_remainder_rejects_mismatched_tmp_dtype(self, op):
+        """Scratch bytes and row stride are interpreted using the source dtype."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 16], DataType.FP32), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.INT32), span)
+
+        with pytest.raises(ValueError, match=r"tmp dtype to match"):
+            op(src, rhs, tmp) if op is tile.rem else op(src, 3.0, tmp)
+
+    @pytest.mark.parametrize("op", [tile.rems, tile.fmods])
+    def test_tile_scalar_remainder_rejects_explicit_scalar_dtype_mismatch(self, op):
+        """Explicitly typed scalars are not silently cast by the frontend."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 16], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([1, 16], DataType.FP32), span)
+        scalar = ir.ConstFloat(3.0, DataType.FP16, span)
+
+        with pytest.raises(ValueError, match=r"scalar dtype to match"):
+            op(src, scalar, tmp) if op is tile.rems else op(src, scalar)
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.rems, tile.fmod, tile.fmods])
+    def test_tile_remainder_family_rejects_unsupported_bf16(self, op):
+        """BF16 is absent from the current PTO-ISA remainder dtype union."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([8, 16], DataType.BF16), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.BF16), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.BF16), span)
+        if op is tile.rem:
+            args = (src, rhs, tmp)
+        elif op is tile.rems:
+            args = (src, ir.ConstFloat(3.0, DataType.BF16, span), tmp)
+        elif op is tile.fmod:
+            args = (src, rhs)
+        else:
+            args = (src, ir.ConstFloat(3.0, DataType.BF16, span))
+
+        with pytest.raises(ValueError, match=r"INT16, UINT16, INT32, UINT32, FP16, FP32"):
+            op(*args)
+
     @pytest.mark.parametrize("op_name", ["part_add", "part_mul", "part_max", "part_min"])
     def test_tile_part_ops(self, op_name):
         """Test tile.part_* partial-combine binary operators (tile-tile only)."""

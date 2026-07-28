@@ -9,17 +9,17 @@
 
 """Runtime tests for the tile-level integer bitwise NOT op (TNOT).
 
-``not_`` is the only integer bitwise/remainder tile op that currently assembles
-and runs correctly on a2a3 (TNOT supports int16/uint16). Coverage: multiple
+``not_`` covers the standalone integer bitwise-NOT path on a2a3 (TNOT supports
+int16/uint16). Coverage: multiple
 shapes (square/tall/wide), aligned + narrow valid_shape (combined / rows-only /
 cols-only), int16 and uint16 dtypes, and non-zero store offset.
 
-Blocked on a2a3 (tracked in KNOWN_ISSUES; the tile.rem/rems DSL+codegen already
-carry the scratch tmp operand the ISA requires, ready to re-enable):
-  * rem  — TREM returns wrong values on int32.
-  * rems — TREMS alloc_tile element-type error.
+Blocked on a2a3 (tracked in KNOWN_ISSUES):
   * xor/xors — TXOR/TXORS require int16/uint16 element type.
   * and_/or_/shl/shr (+scalar) — ptoas rejects pto.tand/tor/tshl/tshr.
+
+TREM/TREMS coverage lives in ``test_remainder.py`` after revalidation against
+the current pinned PTO-ISA.
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.

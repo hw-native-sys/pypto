@@ -980,7 +980,8 @@ def rem(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
-        tmp: Temporary tile (TileType) required by the hardware
+        tmp: Same-dtype 2D scratch tile. It needs at least two valid rows and
+            enough valid columns to cover ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -998,7 +999,8 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
     Args:
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
-        tmp: Temporary tile (TileType) required by the hardware
+        tmp: Same-dtype 2D scratch tile. It needs at least one valid row and
+            enough valid columns to cover ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1084,8 +1086,8 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
 def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of two tiles.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMOD hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``; the result follows the dividend sign). Maps to TFMOD.
 
     Args:
         lhs: Left-hand side tile (TileType)
@@ -1102,8 +1104,8 @@ def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
 def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of tile and scalar.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMODS hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``; the result follows the dividend sign). Maps to TFMODS.
 
     Args:
         lhs: Tile (TileType)

@@ -93,7 +93,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tdiv | TDIV | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | verified on A2/A3 hardware; A5 hardware verification pending |
 | pto.tmax | TMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmin | TMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.trem | TREM | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.trem | TREM | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 exact-op hardware ST passed for FP32/INT32, full and tail valid shapes; A5 hardware pending |
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmax | TPARTMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -108,7 +108,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tdivs | TDIVS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.trems | TREMS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 exact-op hardware ST passed for FP32/INT32 scalar forms, including negative values and tail valid shapes; A5 hardware pending |
 | pto.taddc | TADD + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tsubc | TSUB + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.taddsc | TADDS + TADD | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
@@ -124,8 +124,8 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.trelu | TRELU | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tlrelu | TLRELU | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.taddrelu | VADDRELU | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tfmod | TFMOD | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tfmods | TFMODS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tfmod | TFMOD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 exact-op hardware ST passed for FP32 tile-tile forms with full and tail valid shapes; A5 hardware pending |
+| pto.tfmods | TFMODS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 exact-op hardware ST passed for FP32 scalar forms, including negative values and tail valid shapes; A5 hardware pending |
 | pto.tpow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tpows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.trandom | TRANDOM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | PTOAS source-only compatibility interface |
