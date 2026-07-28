@@ -232,6 +232,7 @@ class DiagnosticInstrument : public PassInstrument {
 enum class MemoryPlanner {
   PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
   PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+  Dsa,    ///< Standalone DSA solver allocates unmerged PyPTO buffers (level3)
 };
 
 /**
