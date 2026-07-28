@@ -589,12 +589,13 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 // scratch tiles (max, scaling) as IR-level ``tile.create`` results. Because they
 // are real IR tiles, the AllocateMemoryAddr pass assigns them on-chip addresses
 // — which codegen-internal scratch (AllocNewTileBuf) cannot obtain at
-// --pto-level=level3. The scratch are flat [1, groups] (groups = M*K/32): the
-// ptoas TQuantMxOp verifier only requires their valid element count to equal
-// src-elements/32, and a flat row is already 32-byte aligned. Codegen lowers
-// tile.tquant_dps to the ptoas pto.tquant.mx instruction.
-ExprPtr LowerTileTQuantRule(const CallPtr& call, const std::vector<ExprPtr>& args,
-                            LoweringBuilder& b) {
+// --pto-level=level3. max/scaling are flat [1, groups] (groups = M*K/32) on the
+// non-unroll path; when pto-isa takes ExtractB8ExponentAndScalingUnrolled /
+// StoreScalingUnrolled (src elems > 1024 and % 256 == 0) both are [1, 2*groups]:
+// that path interleaves each scale with itself (2× footprint), and oversizing
+// max keeps the planner's max↔exp co-placement so exp is not parked on scaling.
+// Codegen lowers tile.tquant_dps to the ptoas pto.tquant.mx instruction.
+ExprPtr LowerTileTQuantRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const auto& span = call->span_;
   auto& reg = OpRegistry::GetInstance();
   auto src = args[0];
@@ -609,26 +610,35 @@ ExprPtr LowerTileTQuantRule(const CallPtr& call, const std::vector<ExprPtr>& arg
       << "Internal error: tile.tquant lowering requires static M, K shapes";
   INTERNAL_CHECK_SPAN(k_const->value_ % 32 == 0, span)
       << "Internal error: tile.tquant lowering requires K divisible by 32, got " << k_const->value_;
-  int groups = m_const->value_ * (k_const->value_ / 32);
+  const int64_t m = m_const->value_;
+  const int64_t k = k_const->value_;
+  const int64_t groups = m * (k / 32);
+  // Match TQuant_MXFP8_F32_Quantize::canUnroll (a5 TQuant.hpp).
+  // Unroll StoreScalingUnrolled writes 2×groups floats; size scaling accordingly.
+  // Also oversize max to 2×groups so the memory planner keeps the historical
+  // max↔exp co-placement (exp sits at the base of the max scratch) instead of
+  // parking exp on top of the enlarged scaling buffer (observed pure-AIV fail).
+  const int64_t src_elems = m * k;
+  const bool scaling_unroll_2x = (src_elems > 1024) && (src_elems % 256 == 0);
+  const int64_t scratch_cols = scaling_unroll_2x ? (2 * groups) : groups;
 
-  // Flat [1, groups] write-only scratch (pto-isa flattens per-group max /
-  // scaling to 1D). The ptoas TQuantMxOp verifier requires max/scaling element
-  // type to MATCH src, so the scratch carries src's dtype (fp32 for MXFP8,
-  // fp16/bf16 for MXFP4). The valid element count must equal src-elements/32,
-  // and a flat row is already 32-byte aligned. As IR-level tile.create results
-  // the AllocateMemoryAddr pass gives them real on-chip addresses
-  // (codegen-internal scratch cannot get one at --pto-level=level3).
+  // Flat write-only scratch (pto-isa flattens per-group max / scaling to 1D).
+  // Dtype must MATCH src (ptoas TQuantMxOp). As IR-level tile.create results
+  // the AllocateMemoryAddr pass gives them real on-chip addresses.
   DataType scratch_dtype = src_tile->dtype_;
-  auto flat_shape = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{
-          std::make_shared<ConstInt>(1, DataType::INDEX, span),
-          std::make_shared<ConstInt>(groups, DataType::INDEX, span),
-      },
-      span);
+  auto make_flat = [&](int64_t cols) {
+    return std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{
+            std::make_shared<ConstInt>(1, DataType::INDEX, span),
+            std::make_shared<ConstInt>(cols, DataType::INDEX, span),
+        },
+        span);
+  };
   auto max_tile = b.Bind(
-      "tq_max", reg.Create("tile.create", {flat_shape}, {{"dtype", scratch_dtype}}, span), span);
-  auto scaling_tile = b.Bind(
-      "tq_scaling", reg.Create("tile.create", {flat_shape}, {{"dtype", scratch_dtype}}, span), span);
+      "tq_max", reg.Create("tile.create", {make_flat(scratch_cols)}, {{"dtype", scratch_dtype}}, span), span);
+  auto scaling_tile =
+      b.Bind("tq_scaling",
+             reg.Create("tile.create", {make_flat(scratch_cols)}, {{"dtype", scratch_dtype}}, span), span);
 
   // Emit the internal DPS form (no composite-lowering rule → pass is idempotent);
   // codegen lowers tile.tquant_dps to the ptoas pto.tquant.mx instruction.
