@@ -159,8 +159,8 @@
     padding: 7px 8px 6px; overflow: hidden;
   }
   .colhead.lane-head { box-shadow: inset 2px 0 0 var(--line), inset 0 3px 0 var(--c); }
-  .colhead.gutter { left: 0; z-index: 4; border-right: 1px solid var(--line-soft); }
-  .plot.src-open .colhead.gutter { left: auto; }
+  .colhead.gutter { left: 0; z-index: 4; }
+  .colhead.splitter-head { z-index: 5; background: var(--surface-1); border-bottom: 1px solid var(--line); }
   .colhead .sp { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; }
   .colhead .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
   .colhead .rng {
@@ -171,18 +171,35 @@
 
   .gutcol {
     position: sticky; left: 0; z-index: 2;
-    background: var(--surface-1); border-right: 1px solid var(--line-soft); overflow: hidden;
+    background: var(--surface-1); overflow: hidden;
   }
-  /* With the source shown the column is as wide as the longest line and the
-     pane scrolls to it; pinning it left would hide exactly what was expanded. */
-  .plot.src-open .gutcol { position: static; }
-  .code { display: block; white-space: pre; }
-  .cl { height: var(--lh); display: flex; align-items: center; }
+  /* The source pane keeps a width the user chooses (see .splitter) and scrolls
+     its own long lines, so the map beside it is never pushed off screen. */
+  .plot.src-open .gutcol { overflow-x: auto; }
+  .code { display: block; white-space: pre; width: max-content; min-width: 100%; }
+  .cl { height: var(--lh); display: flex; align-items: center; background: var(--surface-1); }
   .cl.hi { background: color-mix(in srgb, var(--hi, var(--sp-Vec)) 14%, var(--surface-1)); }
   .cl .no {
+    position: sticky; left: 0; z-index: 1; background: inherit;
     display: inline-block; width: 46px; padding-right: 10px; text-align: right;
     color: var(--ink-3); font-size: 10.5px; flex: none;
   }
+
+  /* Drag to trade width between the source and the map. */
+  .splitter {
+    position: sticky; z-index: 5; cursor: col-resize;
+    background: var(--surface-1);
+    box-shadow: inset 1px 0 0 var(--line-soft), inset -1px 0 0 var(--line-soft);
+  }
+  .splitter::after {
+    content: ""; position: absolute; inset: 0 2px;
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    opacity: .55;
+  }
+  .splitter:hover, .splitter.dragging { background: var(--surface-2); }
+  .splitter:hover::after, .splitter.dragging::after { opacity: 1; border-color: var(--sp-Vec); }
+  .splitter:focus-visible { outline: 2px solid var(--sp-Vec); outline-offset: -2px; }
+  body.col-resizing { cursor: col-resize; user-select: none; }
   .cl .tx { font-size: 11.5px; color: var(--ink-2); }
   .cl .tx mark {
     background: color-mix(in srgb, var(--hi, var(--sp-Vec)) 42%, var(--surface-1));
@@ -323,6 +340,10 @@ const FALLBACK_WIDTH = 1180; // used while a card is closed and has no measurabl
 const ZOOM_STEP = 1.6;       // per button click, and per ctrl/cmd + wheel notch
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 64;
+const SPLITTER_PX = 7;       // width of the drag handle between source and map
+const SRC_WIDTH_DEFAULT = 620;
+const SRC_WIDTH_MIN = 140;
+const SRC_WIDTH_MAX = 2400;
 
 const fmtBytes = n =>
   n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" :
@@ -343,6 +364,7 @@ const STATE = DATA.functions.map(() => ({
   expanded: false,
   fitUsed: false,
   zoom: 1,
+  srcWidth: SRC_WIDTH_DEFAULT,
   hidden: new Set(),
   pinned: null,
   hovered: null,
@@ -461,12 +483,17 @@ function renderPlot(card) {
 
   plot.classList.toggle("src-open", view.expanded);
   plot.style.setProperty("--lh", LINE_H + "px");
-  plot.style.gridTemplateColumns =
-    `${view.expanded ? "max-content" : GUTTER_COLLAPSED + "px"} ` +
-    // Sub-pixel widths, so the factor stays exact instead of drifting per lane.
-    shown.map(s => `${(spanOf(s) * pxPerByte).toFixed(2)}px`).join(" ");
+  // Sub-pixel lane widths, so the factor stays exact instead of drifting per lane.
+  const laneCols = shown.map(s => `${(spanOf(s) * pxPerByte).toFixed(2)}px`).join(" ");
+  plot.style.gridTemplateColumns = view.expanded
+    ? `${view.srcWidth}px ${SPLITTER_PX}px ${laneCols}`
+    : `${GUTTER_COLLAPSED}px ${laneCols}`;
 
+  const splitterHead = view.expanded
+    ? `<div class="colhead splitter-head" style="left:${view.srcWidth}px"></div>`
+    : "";
   const heads = `<div class="colhead gutter"><div class="lbl">${view.expanded ? "IR source" : "line"}</div></div>` +
+    splitterHead +
     shown.map(s => `<div class="colhead lane-head" style="--c:${spaceColor(s.space)}">
       <div class="sp"><span class="dot" style="background:${spaceColor(s.space)}"></span>${s.space}</div>
       <div class="rng"><span>0</span><span>${fmtBytes(spanOf(s))}</span></div>
@@ -479,7 +506,12 @@ function renderPlot(card) {
     const body = view.expanded ? `<span class="tx">${markNames(esc(text), pinnedNames)}</span>` : "";
     return `<div class="cl" data-line="${line}"><span class="no">${line}</span>${body}</div>`;
   }).join("");
-  const gutcol = `<div class="gutcol" style="height:${height}px"><div class="code">${rows}</div></div>`;
+  const gutcol = `<div class="gutcol" style="height:${height}px"><div class="code">${rows}</div></div>` +
+    (view.expanded
+      ? `<div class="splitter" role="separator" aria-orientation="vertical" tabindex="0"
+             aria-label="Resize the IR source pane"
+             style="left:${view.srcWidth}px;height:${height}px"></div>`
+      : "");
 
   let rules = "";
   for (let line = fn.src_start; line <= fn.src_end; line += RULE_EVERY) {
@@ -563,6 +595,43 @@ function setPinned(card, box) {
   // Pinning is about locating the tile in the IR, so bring the source into view.
   if (view.pinned) view.expanded = true;
   renderPlot(card);
+}
+
+/**
+ * Apply a source-pane width without re-rendering. Only the grid template and
+ * the two sticky offsets depend on it — box geometry is a percentage of its
+ * lane and lane widths are absolute, so neither moves. That keeps dragging
+ * smooth on a function with thousands of source rows.
+ */
+function applySrcWidth(card, width) {
+  const view = STATE[Number(card.dataset.index)];
+  view.srcWidth = Math.round(Math.min(SRC_WIDTH_MAX, Math.max(SRC_WIDTH_MIN, width)));
+  const plot = card.querySelector(".plot");
+  const cols = plot.style.gridTemplateColumns.split(" ");
+  cols[0] = `${view.srcWidth}px`;
+  plot.style.gridTemplateColumns = cols.join(" ");
+  plot.querySelectorAll(".splitter, .splitter-head").forEach(el => {
+    el.style.left = `${view.srcWidth}px`;
+  });
+}
+
+/** Drag the divider between the source pane and the map. */
+function startSplitterDrag(card, splitter, startX) {
+  const view = STATE[Number(card.dataset.index)];
+  const startWidth = view.srcWidth;
+
+  splitter.classList.add("dragging");
+  document.body.classList.add("col-resizing");
+
+  const onMove = move => applySrcWidth(card, startWidth + (move.clientX - startX));
+  const onUp = () => {
+    splitter.classList.remove("dragging");
+    document.body.classList.remove("col-resizing");
+    removeEventListener("mousemove", onMove);
+    removeEventListener("mouseup", onUp);
+  };
+  addEventListener("mousemove", onMove);
+  addEventListener("mouseup", onUp);
 }
 
 /**
@@ -653,6 +722,23 @@ document.querySelectorAll("details.fn").forEach(card => {
       }
       renderPlot(card);
     });
+  });
+
+  // Delegated: the splitter is re-created by every renderPlot.
+  card.addEventListener("mousedown", event => {
+    const splitter = event.target.closest(".splitter");
+    if (!splitter) return;
+    event.preventDefault();   // no text selection while dragging
+    startSplitterDrag(card, splitter, event.clientX);
+  });
+  card.addEventListener("dblclick", event => {
+    if (event.target.closest(".splitter")) applySrcWidth(card, SRC_WIDTH_DEFAULT);
+  });
+  card.addEventListener("keydown", event => {
+    if (!event.target.closest(".splitter")) return;
+    const step = event.shiftKey ? 80 : 16;
+    if (event.key === "ArrowLeft") { event.preventDefault(); applySrcWidth(card, view.srcWidth - step); }
+    if (event.key === "ArrowRight") { event.preventDefault(); applySrcWidth(card, view.srcWidth + step); }
   });
 
   card.addEventListener("click", event => {

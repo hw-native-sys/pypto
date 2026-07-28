@@ -152,11 +152,21 @@ to clear it. Each function card holds its own selection.
 for line with the plot: a box's top edge sits on the line that defines its tile.
 Hovering a box highlights exactly the lines it is live across.
 
-Collapsed, the line-number gutter is pinned to the left edge while the panels
-scroll. Expanded, the column is as wide as the longest IR line and unpins — the
-pane scrolls horizontally across the full source and on to the panels, since
-pinning would hide exactly what was expanded. The plot pane is capped at 78 % of
-the viewport height so both scrollbars stay reachable on a long function.
+Both states pin the left column so it stays put while the panels scroll:
+collapsed it is a thin line-number gutter, expanded it is a source pane of a
+width you choose.
+
+**Drag the divider** between the source and the map to trade width between
+them. Double-click it to return to the default, or focus it and use the arrow
+keys (`Shift` for a bigger step); the width is clamped to 140–2400 px and is
+remembered per function card. Long IR lines scroll horizontally inside the pane,
+with the line numbers pinned to its left edge.
+
+Resizing only rewrites the grid template — box geometry is a percentage of its
+lane and lane widths are absolute — so neither the map nor the shared scale
+moves, and dragging stays smooth on a function with thousands of source rows.
+The plot pane is capped at 78 % of the viewport height so both scrollbars stay
+reachable on a long function.
 
 ### Alias merging
 
