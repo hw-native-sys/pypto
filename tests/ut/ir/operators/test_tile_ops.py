@@ -3454,6 +3454,7 @@ class TestTileBitwiseArithmeticOps:
         call = op(src0, src1, tmp) if op is tile.xor else op(src0, src1)
 
         assert _tile_result_dtype(call) == dtype
+        assert isinstance(call.type, ir.TileType)
         assert call.type.shape == src0.type.shape
         assert _valid_of(call.type) == [7, 13]
 
