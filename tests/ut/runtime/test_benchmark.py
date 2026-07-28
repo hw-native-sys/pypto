@@ -296,6 +296,41 @@ def test_parse_l3_ignores_prepare_time_prewarm_groups(span_root):
     assert {root.name for root in roots if root is not None} == {span_root}
 
 
+def test_parse_l3_reports_prepare_time_prewarm_without_dispatch(span_root):
+    """Setup markers alone produce no samples and never enter fallback."""
+    lines = [
+        _strace_line(0, "simpler_prewarm.build", 800_000, pid=100, hid="0"),
+        _strace_line(0, "simpler_prewarm.build", 800_000, pid=101, hid="0"),
+    ]
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    assert stats.host_wall_us == []
+    assert stats.device_wall_us == []
+    assert stats.invocations == []
+    assert stats.fallback_flattened is False
+
+
+def test_parse_l3_rejects_nested_canonical_host_span(span_root):
+    """The canonical host name must identify a root, not a nested span."""
+    lines = [
+        _strace_line(0, span_root, 100_000, depth=1, pid=100),
+        _strace_line(
+            0,
+            f"{span_root}.runner_run.device_wall",
+            10_000,
+            depth=2,
+            dev=True,
+            pid=100,
+        ),
+    ]
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    assert stats.host_wall_us == []
+    assert stats.invocations == []
+
+
 def test_parse_l3_keeps_dispatch_missing_one_device_marker(span_root):
     """A real dispatch with no device span remains aligned and reports zero."""
     lines = [_strace_line(0, span_root, 100_000, depth=0, pid=100)]
@@ -308,6 +343,18 @@ def test_parse_l3_keeps_dispatch_missing_one_device_marker(span_root):
     assert stats.fallback_flattened is False
     assert stats.per_rank("device") == {100: [0.0, 30.0], 101: [20.0, 5.0]}
     assert len(stats.rounds_dispatches[0][100]) == 1
+
+
+def test_parse_l3_excludes_host_parent_without_device_marker(span_root):
+    """The host-orch parent does not hide or pollute valid chip ranks."""
+    lines = [_strace_line(0, span_root, 500_000, depth=0, pid=99)]
+    lines += _launch_lines(0, span_root, host_us=100, device_us=10, pid=100)
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    assert stats.per_rank("device") == {100: [10.0]}
+    assert stats.host_wall_us == [100.0]
+    assert len(stats.invocations) == 1
 
 
 def test_parse_l3_recovers_interleaved_records_on_one_line(span_root):
@@ -608,6 +655,16 @@ class _FakeDistributedCompiled:
         return self._rt
 
 
+class _FakeDistributedCompiledEmittingPrewarm(_FakeDistributedCompiled):
+    """An L3 compiled program whose prepare step emits setup-only markers."""
+
+    def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
+        for pid in (100, 101):
+            line = _strace_line(0, "simpler_prewarm.build", 800_000, pid=pid, hid="0")
+            os.write(2, (line + "\n").encode())
+        return super().prepare(config, **kwargs)
+
+
 def test_benchmark_l3_dispatches_via_distributed_worker():
     """An L3 program routes through ``prepare()`` / ``DistributedWorker``, not ``ChipWorker``."""
     rt = _FakeDistributedWorker()
@@ -738,13 +795,6 @@ def test_benchmark_l3_capture_wraps_prepare(span_root):
 def test_benchmark_l3_ignores_prepare_setup_groups(span_root):
     """Setup-only groups captured around ``prepare()`` are not dispatches."""
 
-    class _CompiledEmittingPrewarmAtPrepare(_FakeDistributedCompiled):
-        def prepare(self, config: Any = None) -> _FakeDistributedWorker:
-            for pid in (100, 101):
-                line = _strace_line(0, "simpler_prewarm.build", 800_000, pid=pid, hid="0")
-                os.write(2, (line + "\n").encode())
-            return self._rt
-
     rt = _FakeDistributedWorker()
 
     def emit_dispatch(*_args: Any, **_kwargs: Any) -> None:
@@ -759,7 +809,7 @@ def test_benchmark_l3_ignores_prepare_setup_groups(span_root):
         patch("pypto.runtime.bench.current_level", return_value=20),
     ):
         stats = benchmark(
-            _CompiledEmittingPrewarmAtPrepare(rt),
+            _FakeDistributedCompiledEmittingPrewarm(rt),
             [MagicMock(name="arg")],
             rounds=1,
             warmup=0,
@@ -768,6 +818,31 @@ def test_benchmark_l3_ignores_prepare_setup_groups(span_root):
     assert stats.device_wall_us == [20.0]
     assert set(stats.per_rank("device")) == {100, 101}
     assert all(len(dispatches) == 1 for dispatches in stats.rounds_dispatches[0].values())
+
+
+def test_benchmark_l3_reports_setup_markers_without_dispatch(span_root):
+    """Captured setup markers are distinguished from no STRACE output."""
+    rt = _FakeDistributedWorker()
+
+    with (
+        patch.object(dcp_mod, "DistributedCompiledProgram", _FakeDistributedCompiled),
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        pytest.raises(
+            RuntimeError, match="captured 2 .* but none formed usable L3 dispatch timing"
+        ) as exc_info,
+    ):
+        benchmark(
+            _FakeDistributedCompiledEmittingPrewarm(rt),
+            [MagicMock(name="arg")],
+            rounds=1,
+            warmup=0,
+        )
+
+    assert f"depth-0 dispatch root {span_root!r}" in str(exc_info.value)
+    device_name = f"{span_root}.runner_run.device_wall"
+    assert f"chip-rank marker {device_name!r}" in str(exc_info.value)
+    assert "trace may contain only setup markers" in str(exc_info.value)
 
 
 def test_benchmark_raises_when_no_markers_captured():

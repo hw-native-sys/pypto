@@ -50,7 +50,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from .log_config import configure_log, current_level
 from .runner import RunConfig
@@ -693,7 +693,10 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
     number of dispatches per launch, so its ``inv``-ordered stream splits into
     ``warmup + rounds`` equal chunks; chunk *k* (after dropping warmup) is round
     *k*. Segmentation is by count only — independent of ``hid`` — so repeated and
-    heterogeneous dispatches to one card are handled.
+    heterogeneous dispatches to one card are handled. Before this segmentation,
+    invocation groups without the installed runtime's canonical depth-0 host root
+    are excluded, removing prepare-time setup traces such as
+    ``simpler_prewarm.build``.
 
     Per round, a rank's busy time is the **sum** of its dispatch spans (a card
     runs its dispatches serially); the headline (:attr:`BenchmarkStats.device_wall_us`)
@@ -710,19 +713,22 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
     launches = warmup + rounds
 
     # The capture must begin before ``prepare()`` so forked chip workers inherit
-    # its fd, but prepare-time setup can emit unrelated invocation groups such as
-    # ``simpler_prewarm.build``. Only a depth-0 canonical run root identifies an
-    # actual dispatch. Do not filter on ``device_wall`` per invocation: retaining
-    # a real run with a missing device marker preserves its round alignment and
-    # exposes a zero metric.
+    # its fd, but prepare-time setup can emit unrelated invocation groups. An
+    # invocation is a dispatch only when it contains the installed runtime's
+    # canonical host span name at depth 0; ``simpler_prewarm.build`` has a
+    # different depth-0 root. Do not filter on ``device_wall`` per invocation:
+    # retaining a real run with a missing device marker preserves its round
+    # alignment and exposes a zero metric.
     names = _span_names()
     host_name = names["host"]
     device_name = names["device"]
-    by_pid: dict[int, list[Any]] = defaultdict(list)
+    dispatches_by_pid: dict[int, list[Any]] = defaultdict(list)
     for inv in invocations:
         if _is_dispatch_invocation(inv, host_name):
-            by_pid[inv.pid].append(inv)
-    for invs in by_pid.values():
+            dispatches_by_pid[inv.pid].append(inv)
+    if not dispatches_by_pid:
+        return stats
+    for invs in dispatches_by_pid.values():
         invs.sort(key=lambda i: i.inv)
 
     # A real chip-child rank emits at least one ``device_wall`` span; the L3
@@ -730,26 +736,25 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
     # ``device_wall``, so its pid must not be grouped as a rank — otherwise it
     # adds a fake zero-device rank that corrupts ``per_rank`` / rank counts and
     # pollutes the ``host_wall`` / ``union`` windows with the parent orch span.
-    by_pid = {
+    rank_dispatches_by_pid = {
         pid: invs
-        for pid, invs in by_pid.items()
-        if invs and any(inv.by_name().get(device_name) is not None for inv in invs)
+        for pid, invs in dispatches_by_pid.items()
+        if any(inv.by_name().get(device_name) is not None for inv in invs)
     }
-    if not by_pid:
+    if not rank_dispatches_by_pid:
         return stats
 
-    segmentable = launches > 0 and all(invs and len(invs) % launches == 0 for invs in by_pid.values())
+    segmentable = launches > 0 and all(len(invs) % launches == 0 for invs in rank_dispatches_by_pid.values())
 
     if not segmentable:
         # Non-deterministic dispatch shape: don't guess round boundaries. Pool
         # every rank's per-dispatch samples, dropping `warmup` leading dispatches
         # per rank as a best effort.
         stats.fallback_flattened = True
-        for invs in by_pid.values():
-            names = _span_names()
+        for invs in rank_dispatches_by_pid.values():
             for inv in invs[min(warmup, len(invs)) :]:
-                stats.host_wall_us.append(_inv_span_us(inv, names["host"]))
-                stats.device_wall_us.append(_inv_span_us(inv, names["device"]))
+                stats.host_wall_us.append(_inv_span_us(inv, host_name))
+                stats.device_wall_us.append(_inv_span_us(inv, device_name))
                 stats.invocations.append(_mirror_invocation(inv))
         return stats
 
@@ -759,7 +764,7 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
     # from it via ``BenchmarkStats.per_rank`` / ``per_round``. The mirrored
     # dispatches are shared with the flat ``invocations`` list.
     stats.rounds_dispatches = [{} for _ in range(rounds)]
-    for pid, invs in by_pid.items():
+    for pid, invs in rank_dispatches_by_pid.items():
         d = len(invs) // launches
         chunks = [invs[k * d : (k + 1) * d] for k in range(launches)][warmup:]
         for k, chunk in enumerate(chunks):
@@ -834,6 +839,33 @@ def _parse_stats_from_strace(
         stats.invocations.append(_mirror_invocation(inv))
 
     return stats
+
+
+def _raise_no_usable_strace(log_text: str, *, launches: int, distributed: bool) -> NoReturn:
+    """Raise an actionable error for empty benchmark timing results."""
+    marker_count = log_text.count("[STRACE]")
+    if not marker_count:
+        raise RuntimeError(
+            f"benchmark(): no [STRACE] markers captured across {launches} launches. "
+            "The runtime emits per-launch timing markers only when built with the "
+            "SIMPLER_HOST_STRACE macro (LOG_INFO_V9 tier); this runtime emitted none. "
+            "Rebuild the runtime with SIMPLER_HOST_STRACE enabled to read benchmark timing."
+        )
+
+    names = _span_names()
+    if distributed:
+        raise RuntimeError(
+            f"benchmark(): captured {marker_count} [STRACE] markers across "
+            f"{launches} launches, but none formed usable L3 dispatch timing. "
+            f"Expected a depth-0 dispatch root {names['host']!r} and chip-rank "
+            f"marker {names['device']!r}; the trace may contain only setup "
+            "markers or come from an incompatible runtime."
+        )
+    raise RuntimeError(
+        f"benchmark(): captured {marker_count} [STRACE] markers across "
+        f"{launches} launches, but none contained the expected "
+        f"host span {names['host']!r}."
+    )
 
 
 def _dispatch_loop(
@@ -936,14 +968,18 @@ def benchmark(
         ValueError: ``rounds <= 0``, ``warmup < 0``, *config* passed together
             with *platform* / *device_id* (L2), or *platform* / *device_id*
             passed for an L3 program.
-        RuntimeError: No ``[STRACE]`` markers were captured at all, so no timing
-            could be read. The markers are gated by the runtime's compile-time
+        RuntimeError: No ``[STRACE]`` markers were captured, or captured L3
+            invocation groups could not be identified as dispatches/chip ranks.
+            The markers are gated by the runtime's compile-time
             ``SIMPLER_HOST_STRACE`` macro; a runtime built without it emits none.
 
     Note:
-        On a ``*sim`` platform the host ``<root>`` span is still emitted but the
-        device-domain spans are not, so every ``device_wall_us`` sample is ``0``
-        — check :attr:`BenchmarkStats.all_zero_device`.
+        On an L2 ``*sim`` platform the host ``<root>`` span is still emitted but
+        the device-domain spans are not, so every ``device_wall_us`` sample is
+        ``0`` — check :attr:`BenchmarkStats.all_zero_device`. L3 needs at least
+        one device marker to identify a PID as a chip rank; if none are emitted,
+        :func:`benchmark` raises ``RuntimeError`` instead of returning zero
+        device samples.
 
         L3 has no DAG-level device wall (only the forked chip children emit
         markers). Each round's ``device_wall_us`` is the **max across ranks** of
@@ -1044,14 +1080,8 @@ def benchmark(
 
     stats = _parse_stats_from_strace(log_text, rounds=rounds, warmup=warmup, distributed=distributed)
     # We dispatched warmup + rounds launches, so a marker-emitting runtime always
-    # yields at least one host span. Zero markers means the runtime emitted none
-    # (built without SIMPLER_HOST_STRACE) — surface that rather than returning a
-    # silently-empty result a caller could misread as "0 device timing".
+    # yields at least one usable host span. Distinguish captured-but-unusable
+    # setup/incompatible markers from a runtime that emitted no markers at all.
     if not stats.host_wall_us:
-        raise RuntimeError(
-            f"benchmark(): no [STRACE] markers captured across {warmup + rounds} launches. "
-            "The runtime emits per-launch timing markers only when built with the "
-            "SIMPLER_HOST_STRACE macro (LOG_INFO_V9 tier); this runtime emitted none. "
-            "Rebuild the runtime with SIMPLER_HOST_STRACE enabled to read benchmark timing."
-        )
+        _raise_no_usable_strace(log_text, launches=warmup + rounds, distributed=distributed)
     return stats
