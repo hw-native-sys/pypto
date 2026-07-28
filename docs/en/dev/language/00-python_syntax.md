@@ -71,8 +71,8 @@ tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 
 ### User Buffers (Buffer)
 
-`pl.Buffer("name")` takes a buffer out of the compiler's opportunistic reuse. Tiles
-naming the same buffer share one allocation; nothing else is ever packed into it.
+`pl.Buffer()` takes a buffer out of the compiler's opportunistic reuse. Tiles
+referencing the same buffer share one allocation; nothing else is ever packed into it.
 Use it when the packer coalesces tiles you want to stay independent — sharing a
 buffer adds a WAR dependency that serializes them.
 
@@ -113,12 +113,14 @@ layers. To manage a level yourself, drive it with `pl.range` and name one buffer
 slot; leave the levels you want the compiler to manage unannotated.
 
 ```python
+l0b_ping, l0b_pong = pl.Buffer(), pl.Buffer()
+
 # Outer level compiler-managed, inner level author-managed ping-pong.
 for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
     b_l1: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.load(b, [stack * K, 0], [K, N])
     for col, (out_inner,) in pl.range(0, N, 2 * STEP, init_values=[out_outer]):
-        ping: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_ping"), pl.Mem.Right] = ...
-        pong: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_pong"), pl.Mem.Right] = ...
+        ping: pl.Tile[[K, STEP], pl.BF16, l0b_ping, pl.Mem.Right] = ...
+        pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
 See [InitMemRef](../passes/29-init_memref.md#user-buffers) and

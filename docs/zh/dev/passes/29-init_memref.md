@@ -57,9 +57,10 @@ program_with_memrefs = init_pass(program)
 
 ## 用户 buffer
 
-`pl.Tile[[...], dtype, pl.Buffer("name"), pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者
-拥有的 buffer 上。命名同一个 buffer 的 tile 共享一块分配，且 `MemoryReuse` 绝不会把其他
-tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#用户-buffer)。
+`pl.Tile[[...], dtype, <buffer>, pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者拥有的
+buffer 上，其中 `<buffer>` 是一个声明后按变量引用的 `pl.Buffer()`（或打印器输出的内联
+`pl.Buffer("name")` 形式）。引用同一个 buffer 的 tile 共享一块分配，且 `MemoryReuse` 绝不会
+把其他 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#用户-buffer)。
 
 **绑定如何抵达本 pass。** 解析器把 buffer 引用解析为一个 `MemRef`，其 `base_` Ptr 按名字
 intern（因此命名同一 buffer 的两处注解共享同一个 base），`byte_offset = 0`、不带大小，并且
@@ -96,9 +97,11 @@ intern（因此命名同一 buffer 的两处注解共享同一个 base），`byt
 [MemoryReuse](31-memory_reuse.md#用户-buffer) 中检查。
 
 ```python
-t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
-t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)  # 与 t0 共用
+ping, pong = pl.Buffer(), pl.Buffer()
+
+t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)  # 与 t0 共用
 ```
 
 会得到两块 pinned 分配，`t0` 与 `t2` 落在 `ping` 上：

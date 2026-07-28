@@ -71,7 +71,7 @@ tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 
 ### 用户 buffer (Buffer)
 
-`pl.Buffer("name")` 把一块 buffer 从编译器的机会主义复用中收回。命名同一 buffer 的 tile
+`pl.Buffer()` 把一块 buffer 从编译器的机会主义复用中收回。引用同一 buffer 的 tile
 共享一块分配，其他 tile 绝不会被塞进去。当 packer 合并了你希望保持独立的 tile 时使用它——
 共用 buffer 会引入一条 WAR 依赖，使二者串行。
 
@@ -107,12 +107,14 @@ buffer 不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内绑定�
 层次则不加注解。
 
 ```python
+l0b_ping, l0b_pong = pl.Buffer(), pl.Buffer()
+
 # 外层交给编译器，内层由作者自己做 ping-pong。
 for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
     b_l1: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.load(b, [stack * K, 0], [K, N])
     for col, (out_inner,) in pl.range(0, N, 2 * STEP, init_values=[out_outer]):
-        ping: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_ping"), pl.Mem.Right] = ...
-        pong: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_pong"), pl.Mem.Right] = ...
+        ping: pl.Tile[[K, STEP], pl.BF16, l0b_ping, pl.Mem.Right] = ...
+        pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
 参见 [InitMemRef](../passes/29-init_memref.md#用户-buffer) 与

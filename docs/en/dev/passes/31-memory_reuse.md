@@ -98,7 +98,7 @@ for one buffer. That is the right default for capacity, but it is not free — t
 tiles sharing a buffer are ordered by a WAR dependency the source never asked for,
 and the hardware must serialize work the scheduler could otherwise overlap.
 
-`pl.Tile[[...], dtype, pl.Buffer("name"), pl.Mem.Vec]` lets the author take a buffer
+Referencing a declared `pl.Buffer()` in a tile annotation lets the author take a buffer
 out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
 (see [InitMemRef](29-init_memref.md#user-buffers)), and this pass then treats it as
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is

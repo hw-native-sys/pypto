@@ -57,9 +57,10 @@ program_with_memrefs = init_pass(program)
 
 ## User buffers
 
-`pl.Tile[[...], dtype, pl.Buffer("name"), pl.Mem.Vec]` binds a tile to a buffer the
-kernel author owns. Tiles naming the same buffer share one allocation; `MemoryReuse`
-never packs anything else into it. This is manual reuse control — see
+`pl.Tile[[...], dtype, <buffer>, pl.Mem.Vec]` binds a tile to a buffer the kernel
+author owns, where `<buffer>` is a declared `pl.Buffer()` referenced by variable (or
+the inline `pl.Buffer("name")` form the printer emits). Tiles referencing the same
+buffer share one allocation; `MemoryReuse` never packs anything else into it. This is manual reuse control — see
 [MemoryReuse](31-memory_reuse.md#user-buffers) for why an author would want it.
 
 **How the binding reaches this pass.** The parser resolves a buffer reference to a
@@ -104,9 +105,11 @@ lifetime information and is therefore checked in
 [MemoryReuse](31-memory_reuse.md#user-buffers).
 
 ```python
-t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
-t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
-t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)  # shares t0's buffer
+ping, pong = pl.Buffer(), pl.Buffer()
+
+t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
+t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)  # shares t0's buffer
 ```
 
 becomes two pinned allocations, with `t0` and `t2` on `ping`:
