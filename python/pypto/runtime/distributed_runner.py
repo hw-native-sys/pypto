@@ -800,6 +800,15 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
             # dispatch must not turn a successful run into a post-processing
             # crash. The raw records remain on disk for manual conversion.
             try:
+                # A dispatch must be rendered from a map this run wrote, so drop
+                # any left by an earlier one before deciding what to write. When
+                # no map is passed, the converter falls back to a sibling
+                # ``name_map*.json``, and a stale one quietly resurrects the
+                # mislabelling below. Doing it here — rather than per branch —
+                # makes that hold whatever the converter's own precedence
+                # between ``--func-names``, ``-k`` and the sibling turns out to be.
+                for stale in disp_dir.glob("name_map*.json"):
+                    stale.unlink(missing_ok=True)
                 program = _read_dispatch_program(disp_dir)
                 if program is None and len(chip_dirs) == 1:
                     # One L2 program in the build: no ambiguity to resolve, so an
@@ -818,12 +827,6 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
                     # program's table.
                     work_dir: Path = output_dir
                     name_map_path: Path | None = None
-                    # With neither option the converter auto-discovers a sibling
-                    # ``name_map*.json``, so a map left by an earlier run would
-                    # quietly resurrect the mislabelling. Drop it: anonymous
-                    # labels are the point of this branch.
-                    for stale in disp_dir.glob("name_map*.json"):
-                        stale.unlink(missing_ok=True)
                 else:
                     # ``work_dir`` feeds the converter's ``-k`` fallback and the
                     # ``name_map`` passed as ``func_names`` takes precedence —

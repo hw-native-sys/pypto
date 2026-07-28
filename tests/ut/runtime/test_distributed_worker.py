@@ -1540,14 +1540,32 @@ class TestCollectL3Swimlane:
     def test_unresolvable_dispatch_drops_a_stale_name_map(
         self, tmp_path, monkeypatch, fake_swimlane_converter
     ):
-        # With neither ``--func-names`` nor ``-k``, the converter auto-discovers
-        # a sibling ``name_map*.json`` — so a map left by an earlier run would
-        # quietly resurrect the mislabelling this fix removes.
+        # With no map passed, the converter auto-discovers a sibling
+        # ``name_map*.json`` — so a map left by an earlier run would quietly
+        # resurrect the mislabelling this fix removes.
         self._spy_generate_swimlane(monkeypatch)
         _write_chip_program(tmp_path, "lm_head", "lm_head_dispatch_push")
         _write_chip_program(tmp_path, "mtp_decode_layer", "mtp_projection_rms")
         dfx = tmp_path / "dfx_outputs"
         _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+        stale = dfx / "rank0" / "d0" / "name_map.json"
+        stale.write_text('{"callable_id_to_name": {"0": "mtp_projection_rms"}}', encoding="utf-8")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not stale.exists()
+
+    def test_resolved_program_without_a_table_drops_a_stale_name_map(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # The program resolves, but its ``kernel_config.py`` names no kernels, so
+        # no map is written for this run. A previous run's map must not survive to
+        # be picked up in its place — this dispatch renders anonymously.
+        self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "lm_head")  # KERNELS = []
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+        _mark_dispatch_program(dfx / "rank0" / "d0", "lm_head")
         stale = dfx / "rank0" / "d0" / "name_map.json"
         stale.write_text('{"callable_id_to_name": {"0": "mtp_projection_rms"}}', encoding="utf-8")
 
