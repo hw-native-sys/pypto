@@ -1288,5 +1288,76 @@ def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
     )
 
 
+def test_user_written_task_dummy_dep_across_closed_scope_is_rejected():
+    """A user ``pl.system.task_dummy(deps=[tid])`` is enforced like ``pl.submit``.
+
+    ``task_dummy`` is a user-facing DSL construct, and the parser stamps
+    ``attrs["dummy_task"]`` on it exactly as ``ExpandManualPhaseFence`` does on
+    the barriers it synthesises. Treating ``dummy_task`` as a compiler-authorship
+    marker would therefore silently drop this user edge, leaving the barrier with
+    no fanin and every consumer gated on it unordered — the failure this change
+    exists to prevent.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def main(
+            self,
+            x: pl.Tensor[[64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            with pl.scope():
+                _a, scoped_tid = pl.submit(self.k1, x)
+            # The barrier's fanin names a TaskId whose scope has closed.
+            barrier = pl.system.task_dummy(deps=[scoped_tid])
+            b, _ = pl.submit(self.k2, x, deps=[barrier])
+            return b
+
+    _assert_dep_edge_rejected(P, "scoped_tid")
+
+
+def test_user_written_task_dummy_with_in_scope_dep_still_wires():
+    """Control for the rejection above: an in-scope ``task_dummy`` fanin wires.
+
+    Proves the enforcement rejects only genuinely unresolvable edges and does not
+    over-reject the supported ``pl.system.task_dummy`` path.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.manual_scope():
+                _a, tid = pl.submit(self.k1, x)
+                barrier = pl.system.task_dummy(deps=[tid])
+                b, _ = pl.submit(self.k2, x, deps=[barrier])
+            return b
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    code = _generate_orch_code(pm.run_passes(P))
+
+    assert "rt_submit_dummy_task(" in code, code
+    assert code.count("set_dependencies(") >= 2, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

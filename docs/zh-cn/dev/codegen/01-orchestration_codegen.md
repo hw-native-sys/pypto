@@ -519,10 +519,11 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 | 编译器推导（`compiler_manual_dep_edges`） | 静默跳过。这类边是尽力而为的 hazard 补丁；`PrepareCrossScopeTaskIdHoists` 已对能处理的部分做了 LCA 提升，丢弃其余是安全的，因为该 pass 只会*增加*定序 |
 | 用户书写（`deps=[...]`） | **硬报错**——`CHECK_SPAN` 抛出 `pypto::ValueError`，并指出该 TaskId 与对应的 DSL 源码行 |
 
-来源由 attr key 判定，但有一个例外：
-[`ExpandManualPhaseFence`](../passes/37-expand_manual_phase_fence.md) 合成的
-`system.task_dummy` phase-fence barrier 同样把 fanin 放在 `manual_dep_edges` 下，
-因此带有 `attrs["dummy_task"]` 标记的载体被归类为编译器生成，保留静默跳过的行为。
+来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
+它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
+[`ExpandManualPhaseFence`](../passes/37-expand_manual_phase_fence.md) 给自己合成的
+barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制校验。合成的 barrier
+只会引用其所改写的 manual scope 内仍然活跃的 TaskId，故其 fanin 必然可解析。
 
 丢弃用户边会让消费者与其生产者之间失去定序，在运行时表现为静默的陈旧数据读取，
 因此 codegen 宁可拒绝生成，也不生成错误的代码。`ResolveDepEdgeBinding` 是唯一的

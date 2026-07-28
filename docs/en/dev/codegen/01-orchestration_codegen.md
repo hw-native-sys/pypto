@@ -540,11 +540,13 @@ on scope exit. Codegen's response depends on the edge's provenance:
 | Compiler-derived (`compiler_manual_dep_edges`) | Silently skipped. These are a best-effort hazard patch; `PrepareCrossScopeTaskIdHoists` already LCA-hoists the ones it can, and dropping the rest is safe because the pass only ever *adds* ordering |
 | User-written (`deps=[...]`) | **Hard error** — `CHECK_SPAN` raises a `pypto::ValueError` naming the TaskId and the DSL source line |
 
-Provenance is the attr key, with one exception: the `system.task_dummy`
-phase-fence barrier synthesised by
-[`ExpandManualPhaseFence`](../passes/37-expand_manual_phase_fence.md) carries its
-fanin under `manual_dep_edges` too, so a carrier marked `attrs["dummy_task"]` is
-classified compiler-authored and keeps the tolerant skip.
+Provenance is the attr key. Note that `attrs["dummy_task"]` is *not* an
+authorship marker: the parser stamps it on a user-written
+`pl.system.task_dummy(deps=[...])` exactly as
+[`ExpandManualPhaseFence`](../passes/37-expand_manual_phase_fence.md) does on the
+barriers it synthesises, so every `manual_dep_edges` carrier is enforced. The
+synthesised barrier only ever names a TaskId live in the manual scope it
+rewrites, so its fanin always resolves.
 
 Dropping a user edge would leave the consumer unordered against its producer and
 surface at runtime as a silent stale read, so codegen refuses to emit rather than

@@ -2473,14 +2473,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
         return;
       }
     };
-    // ``manual_dep_edges`` is the user's ``deps=[...]`` on every carrier except
-    // one: ``ExpandManualPhaseFence`` synthesises a ``system.task_dummy``
-    // barrier under the same key (its fanin contract). That barrier is
-    // compiler-authored, so its edges must keep the tolerant skip — raising a
-    // "you wrote deps=[...]" error for it would name a Var the user never
-    // spelled.
-    const bool is_synthesised_barrier = call->GetAttr<bool>(kAttrDummyTask, false);
-    append_edges(kAttrManualDepEdges, /*user_written=*/!is_synthesised_barrier);
+    // Every ``manual_dep_edges`` carrier is treated as user-authored. The two
+    // shapes that reach here are a ``pl.submit(..., deps=[...])`` (via
+    // ``SubmitToCallView``) and a ``system.task_dummy`` barrier — and the
+    // barrier is NOT reliably compiler-authored: the parser stamps the same
+    // ``dummy_task`` attr on a user-written ``pl.system.task_dummy(deps=[...])``,
+    // whose edges must be enforced like any other user edge.
+    //
+    // ``ExpandManualPhaseFence`` also synthesises barriers under this key, but
+    // it only ever names a TaskId live in the same manual scope it rewrites, so
+    // those always resolve. Were one not to, raising is still the right answer —
+    // a dropped fanin there is a genuinely lost ordering edge.
+    append_edges(kAttrManualDepEdges, /*user_written=*/true);
     append_edges(kAttrCompilerManualDepEdges, /*user_written=*/false);
     return merged;
   }
