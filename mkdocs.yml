@@ -242,6 +242,7 @@ nav:
           - en/dev/passes/41-materialize_dist_tensor_ctx.md
           - en/dev/passes/42-materialize_runtime_scopes.md
           - en/dev/passes/43-classify_iter_arg_carry.md
+          - en/dev/passes/44-insert_comm_fence.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

@@ -58,6 +58,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 41 | [MaterializeDistTensorCtx](41-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
 | 42 | [MaterializeRuntimeScopes](42-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
 | 43 | [ClassifyIterArgCarry](43-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
+| 44 | [InsertCommFence](44-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
 
 ## 默认流水线之外
 

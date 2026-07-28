@@ -472,11 +472,9 @@ def test_remote_load_inlines_offset_arithmetic_with_addptr_at_call_site():
     assert kernel.count("pto.load_scalar") >= 3
     assert "arith.divsi" in kernel
     assert "pto.addptr" in kernel, "addptr must live at the call site"
-    # The addptr's direct downstream is a make_tensor_view in the same
-    # func — that's what makes PTOAS happy.
+    # The addptr's direct downstream is a make_tensor_view in the same func —
+    # that's what makes PTOAS happy.
     addptr_line_idx = next(i for i, line in enumerate(kernel.splitlines()) if "pto.addptr" in line)
-    # The next non-trivial line should be a make_tensor_view (allowing one
-    # arith.muli in between for the dynamic stride[0] computation).
     following = "\n".join(kernel.splitlines()[addptr_line_idx + 1 : addptr_line_idx + 4])
     assert "pto.make_tensor_view" in following, (
         f"addptr must be followed shortly by make_tensor_view, but next lines were:\n{following}"
@@ -808,6 +806,42 @@ def test_notify_emits_comm_tnotify_with_attr():
 
     mlir_add = _generate_mlir(PAdd)
     assert "#pto<notify_op atomic_add>" in mlir_add
+
+
+def test_remote_store_cacheinvalid_fence_before_releasing_notify():
+    """A remote_store followed by a notify lowers to a peer-region
+    ``pto.cmo.cacheinvalid`` + GM ``pto.fence.barrier_all`` (emitted by the
+    remote_store codegen at the peer address), in that order, before the
+    ``pto.comm.tnotify`` that releases it (data-before-signal)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            inp: pl.Tensor[[1, 32], pl.FP32],
+            dst: pld.DistributedTensor[[1, 32], pl.FP32],
+            signal: pld.DistributedTensor[[16, 16], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.load(inp, [0, 0], [1, 32])
+            pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
+
+    mlir = _generate_mlir(P)
+    lines = mlir.splitlines()
+    store_idx = next(i for i, line in enumerate(lines) if "pto.tstore" in line)
+    cinv_idx = next(i for i, line in enumerate(lines) if "pto.cmo.cacheinvalid" in line)
+    fence_idx = next(i for i, line in enumerate(lines) if "pto.fence.barrier_all" in line)
+    tnotify_idx = next(i for i, line in enumerate(lines) if "pto.comm.tnotify(" in line)
+    # Order: publishing store -> cacheinvalid -> GM fence -> tnotify.
+    assert store_idx < cinv_idx < fence_idx < tnotify_idx, (
+        f"expected store({store_idx}) < cacheinvalid({cinv_idx}) < fence({fence_idx}) "
+        f"< tnotify({tnotify_idx})"
+    )
+    assert "#pto.fence_scope<gm>" in lines[fence_idx], lines[fence_idx]
+    # Whole-tensor cacheinvalid: the region form addresses the dst via a partition view.
+    assert "single_cache_line" in lines[cinv_idx], lines[cinv_idx]
 
 
 def test_wait_emits_comm_twait_with_attr():
@@ -1158,13 +1192,15 @@ def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     assert "rows=4" in stage_alloc_line and "cols=32" in stage_alloc_line, (
         f"staging tile must be the [4, 32] chunk, got: {stage_alloc_line}"
     )
-    # A drain barrier is emitted immediately after the tput so a following
-    # cross-rank notify can't race the chunked stores (PTOAS#872 workaround).
+    # After the tput: a tail `pto.barrier <PIPE_ALL>` to drain the DMA pipe (the GM
+    # fence does not drain the MTE pipe — without this, atomic/subregion put flakes
+    # on device), then the peer-region `pto.cmo.cacheinvalid` + GM
+    # `pto.fence.barrier_all` (data-before-signal at the peer address).
     lines = mlir.splitlines()
     tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput(" in line)
-    assert "pto.barrier <PIPE_ALL>" in lines[tput_idx + 1], (
-        f"expected a PIPE_ALL drain right after tput, got: {lines[tput_idx + 1]}"
-    )
+    assert "pto.barrier <PIPE_ALL>" in lines[tput_idx + 1], lines[tput_idx + 1]
+    assert "pto.cmo.cacheinvalid" in lines[tput_idx + 2], lines[tput_idx + 2]
+    assert "pto.fence.barrier_all #pto.fence_scope<gm>" in lines[tput_idx + 3], lines[tput_idx + 3]
 
 
 def test_put_pipeline_emits_two_staging_buffers_in_one_buf_group():

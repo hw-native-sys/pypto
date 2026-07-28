@@ -58,6 +58,17 @@ bool IsBufferAliasingViewOp(const std::string& op_name);
 /// predicate that was previously copy-pasted across the IR and codegen layers.
 bool IsBuiltinOp(const std::string& op_name);
 
+/// True if the Call publishes data that a peer rank may read after a subsequent
+/// `pld.system.notify`, so a GM `system.fence` must separate it from that notify:
+///   - remote writes: `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`;
+///   - a local `tile.store` whose destination tensor (arg 2) is window-bound
+///     (`DistributedTensorType`) — a peer can `remote_load` it;
+///   - a `pld.tile.get` / `pld.tensor.get` whose local destination (arg 0) is
+///     window-bound — same publishing obligation as a local store;
+///   - conservatively, a call to an unregistered op name (a user function whose
+///     body is not analysed interprocedurally).
+bool IsPublishingWrite(const CallPtr& call);
+
 }  // namespace op_predicates
 }  // namespace ir
 }  // namespace pypto

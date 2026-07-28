@@ -20,7 +20,7 @@ System operations handle hardware synchronization and cross-core communication:
 """
 
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, overload, runtime_checkable
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
@@ -232,25 +232,40 @@ def fence(*, span: Span | None = None) -> Call:
     return _create_barrier_op("system.fence", span=span)
 
 
+@overload
+def cacheinvalid(*, span: Span | None = None) -> Call: ...
+@overload
 def cacheinvalid(
     tensor: Expr,
     shapes: Sequence[int | Expr],
     offsets: Sequence[int | Expr],
     *,
     span: Span | None = None,
+) -> Call: ...
+def cacheinvalid(
+    tensor: Expr | None = None,
+    shapes: Sequence[int | Expr] | None = None,
+    offsets: Sequence[int | Expr] | None = None,
+    *,
+    span: Span | None = None,
 ) -> Call:
-    """Invalidate the cache lines backing a tensor sub-region.
+    """Invalidate cache lines: a tensor sub-region, or the whole GM address space.
 
-    The op carries an N-D ``shapes`` and ``offsets`` (both matching the tensor
-    rank). Codegen picks the lowering by the region size:
+    Two forms selected by arity:
 
-    - ``shapes`` all 1 (scalar write): flatten ``offsets`` and lower to
-      ``pto.addptr`` + ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
-    - otherwise (tile store): lower to ``pto.partition_view`` +
-      ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
+    - No arguments: invalidate the entire GM address space; lowers to
+      ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
+    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region. Both
+      ``shapes`` and ``offsets`` are N-D and match the tensor rank. Codegen picks
+      the lowering by region size:
+
+      - ``shapes`` all 1 (scalar write): flatten ``offsets`` and lower to
+        ``pto.addptr`` + ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
+      - otherwise (tile store): lower to ``pto.partition_view`` +
+        ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
 
     Args:
-        tensor: Target tensor whose sub-region is invalidated
+        tensor: Target tensor whose sub-region is invalidated; omit for whole-GM
         shapes: Per-dimension region sizes; length must equal the tensor rank
             (all 1 selects the scalar-write / ptr form)
         offsets: Per-dimension start offsets; length must equal the tensor rank
@@ -260,6 +275,19 @@ def cacheinvalid(
         Call expression for system.cacheinvalid
     """
     actual_span = _get_span_or_capture(span)
+
+    if tensor is None:
+        if shapes is not None or offsets is not None:
+            raise ValueError(
+                "system.cacheinvalid whole-GM form takes no shapes/offsets; "
+                "pass (tensor, shapes, offsets) for the region form"
+            )
+        return _ir_core.create_op_call("system.cacheinvalid", [], {}, actual_span)
+    if shapes is None or offsets is None:
+        raise ValueError(
+            "system.cacheinvalid region form requires both shapes and offsets "
+            "(or pass no arguments for the whole-GM form)"
+        )
 
     tensor_type = tensor.type
     if not isinstance(tensor_type, TensorType):

@@ -420,6 +420,16 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(tstore_line.str());
+
+  // Data-before-signal (ptoas memory-consistency): clean+invalidate the
+  // peer-addressed lines this store dirtied. The peer offset
+  // (`local_ptr + delems(peer)`) is only known here and is not yet expressible in
+  // the IR, so this cacheinvalid is emitted by codegen as a WORKAROUND (a local
+  // `system.cacheinvalid` would address the wrong, local lines). The paired GM
+  // release **fence** is inserted by the InsertCommFence pass as an explicit
+  // `system.fence` op right after this write — do not embed it here. (TODO: give
+  // the peer-region cacheinvalid a first-class IR representation.)
+  codegen.Emit("pto.cmo.cacheinvalid " + partition_view + " single_cache_line : " + partition_type);
   return "";
 }
 
@@ -686,19 +696,21 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   tput << ") {atomicType = #pto<atomic_type " << atomic_attr << ">}";
   codegen.Emit(tput.str());
 
-  // Drain TPUT's writes before returning, so a following `pld.system.notify`
-  // (cross-rank signal that the data has landed) does not race ahead of them.
-  // Emitted unconditionally: the chunked sliding path strictly requires it (its
-  // last chunk's MTE3 store is otherwise still in-flight, a deterministic stale
-  // read), and the single-shot path — though self-draining for that store — has
-  // the same cross-rank data-before-signal obligation, so the extra barrier is
-  // harmless there.
-  //
-  // WORKAROUND for PTOAS#872: the proper fix drains prior stores inside
-  // TNOTIFY_IMPL (`pipe_barrier(PIPE_ALL); dsb(DSB_DDR)` before the signal),
-  // which also adds the DDR-observability fence a pipe barrier alone can't give.
-  // Remove this once that lands.
+  // Tail pipe barrier: drain the TPUT DMA pipe before the release markers. The GM
+  // release fence (inserted by the InsertCommFence pass right after this write)
+  // orders *memory* (DDR observability) but does NOT drain the MTE pipe that
+  // issued the DMA, so without this barrier the following notify can fire before
+  // the (possibly atomic) TPUT has landed at the peer — device tests (test_l3_put
+  // atomic_add / row_put) flake without it. Device-verified: an MTE3-scoped
+  // barrier is NOT enough (TPUT issues on MTE3 but its cross-rank DMA/atomic
+  // completion involves another pipe) — only PIPE_ALL is stable. (WORKAROUND for
+  // PTOAS#872; remove once PTOAS drains the tput itself.)
   codegen.Emit("pto.barrier <PIPE_ALL>");
+
+  // Data-before-signal peer-region cacheinvalid (see remote_store: emitted here as
+  // a WORKAROUND because the peer offset is not yet IR-expressible). The paired GM
+  // release fence is inserted by the InsertCommFence pass — not embedded here.
+  codegen.Emit("pto.cmo.cacheinvalid " + dst_pview + " single_cache_line : " + partition_type);
   return "";
 }
 

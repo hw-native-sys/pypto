@@ -61,6 +61,7 @@ a pipeline pass at all.
 | 41 | [MaterializeDistTensorCtx](41-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
 | 42 | [MaterializeRuntimeScopes](42-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `PTO2_SCOPE` 1:1 |
 | 43 | [ClassifyIterArgCarry](43-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
+| 44 | [InsertCommFence](44-insert_comm_fence.md) | Inserts a whole-tensor `system.cacheinvalid` + GM `system.fence` between each publishing write and the `pld.system.notify` that releases it |
 
 ## Outside the default pipeline
 
