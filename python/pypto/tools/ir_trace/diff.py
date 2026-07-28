@@ -65,7 +65,7 @@ def highlight_python(text: str) -> tuple[str, ...]:
                 if not 0 <= span_start <= span_end <= len(lines[line_index]):
                     raise ValueError("token column is outside source line")
                 spans[line_index].append((span_start, span_end, css_class))
-    except (tokenize.TokenError, IndentationError, ValueError):
+    except (tokenize.TokenError, SyntaxError, ValueError):
         return escaped_lines
 
     highlighted: list[str] = []

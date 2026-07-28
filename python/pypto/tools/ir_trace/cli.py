@@ -55,6 +55,7 @@ def _write_atomic(output: Path, content: str) -> None:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
+                # Best-effort cleanup must not hide the original write failure.
                 pass
         raise IRTraceError(f"failed to write {output}: {error}") from error
 

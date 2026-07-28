@@ -85,9 +85,15 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
     if not indexed:
         raise IRTraceError(f"no pass snapshots found in {directory}")
 
-    for index in range(1, max(indexed) + 1):
+    ordered = sorted(indexed.items())
+    previous_name = frontend.name
+    for index in range(1, ordered[-1][0] + 1):
         if index not in indexed:
-            raise IRTraceError(f"missing snapshot index {index:02d} in {directory}")
+            next_name = next(path.name for next_index, (_, path) in ordered if next_index > index)
+            raise IRTraceError(
+                f"missing snapshot index {index:02d} in {directory} between {previous_name} and {next_name}"
+            )
+        previous_name = indexed[index][1].name
 
     frontend_text = _read_utf8(frontend)
     snapshots = [
@@ -99,7 +105,7 @@ def discover_snapshots(directory: Path) -> tuple[Snapshot, ...]:
             lines=split_source_lines(frontend_text),
         )
     ]
-    for index, (name, path) in sorted(indexed.items()):
+    for index, (name, path) in ordered:
         text = _read_utf8(path)
         warning_path = path.with_suffix(".log")
         warning_text = _read_optional_utf8(warning_path)

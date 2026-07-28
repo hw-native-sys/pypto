@@ -528,7 +528,7 @@ document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
-  if (target && (target.tagName === "INPUT" || target.tagName === "BUTTON")) return;
+  if (target && target.tagName === "INPUT") return;
   const passes = visiblePasses();
   if (passes.length === 0) return;
   const current = passes.findIndex((trace) => trace.index === selectedIndex);

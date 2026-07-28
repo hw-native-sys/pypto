@@ -16,6 +16,7 @@ import subprocess
 import sysconfig
 import tempfile
 import textwrap
+import tokenize
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -508,6 +509,17 @@ def test_highlight_python_escapes_every_line_after_tokenization_error():
     assert all("<script>" not in line for line in highlighted)
 
 
+def test_highlight_python_falls_back_to_escaped_text_on_syntax_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fail_tokenization(_readline: object) -> None:
+        raise SyntaxError("invalid token stream")
+
+    monkeypatch.setattr(tokenize, "generate_tokens", fail_tokenization)
+
+    assert highlight_python("value = <script>\n") == ("value = &lt;script&gt;",)
+
+
 def test_highlight_python_escapes_unicode_line_separators_after_tokenization_error():
     highlighted = highlight_python("value = (<script>\u2028\u2029")
 
@@ -629,7 +641,8 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
     assert 'document.addEventListener("keydown"' in report
     assert 'event.key === "j"' in report and 'event.key === "ArrowDown"' in report
     assert 'event.key === "k"' in report and 'event.key === "ArrowUp"' in report
-    assert 'target.tagName === "INPUT"' in report and 'target.tagName === "BUTTON"' in report
+    assert 'target.tagName === "INPUT"' in report
+    assert 'target.tagName === "BUTTON"' not in report
     assert "data.passes.find((trace) => trace.changed) || data.passes[0]" in report
     assert "navigator.clipboard.writeText(text)" in report
     assert 'document.createElement("textarea")' in report
@@ -694,6 +707,34 @@ def test_viewer_selects_closest_visible_pass_when_filter_hides_selection(tmp_pat
         elements["changed-filter"].checked = false;
         elements["changed-filter"].listeners.change();
         if (selectedIndex !== 1) throw new Error("lower-index pass did not win an equal-distance tie");
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_keyboard_navigation_works_from_focused_pass_button(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "a\n",
+            "01_after_First.py": "b\n",
+            "02_after_Second.py": "c\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        let prevented = false;
+        documentListeners.keydown({
+          target: new Element("button"),
+          key: "j",
+          preventDefault() { prevented = true; }
+        });
+        if (selectedIndex !== 2) throw new Error("focused pass button blocked keyboard navigation");
+        if (!prevented) throw new Error("handled navigation did not prevent the browser default");
         """,
     )
 
@@ -775,6 +816,25 @@ def test_discover_rejects_non_file_snapshot_paths(tmp_path: Path, path_name: str
 
     with pytest.raises(IRTraceError, match=path_name):
         discover_snapshots(dump)
+
+
+def test_discover_reports_gap_between_neighboring_snapshots(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "frontend\n",
+            "01_after_InlineFunctions.py": "after one\n",
+            "03_after_ConvertToSSA.py": "after three\n",
+        },
+    )
+
+    with pytest.raises(IRTraceError) as error:
+        discover_snapshots(dump)
+
+    assert str(error.value) == (
+        f"missing snapshot index 02 in {dump} between "
+        "01_after_InlineFunctions.py and 03_after_ConvertToSSA.py"
+    )
 
 
 @pytest.mark.parametrize(
