@@ -121,7 +121,10 @@ python .claude/skills/incore-profiling/standalone_compare.py \
 
 Synthetic inputs are bounded and emitted in chunks. Integer pointers default to
 zero; use `pointer_fills` or file inputs when kernels require indices,
-sentinels, or positive extents. Every scalar must satisfy tensor-view bounds.
+sentinels, or positive extents. For pure NPU kernels, the generator also bounds
+post-PTOAS `GlobalTensor` partition offsets across loops and SPMD blocks. It
+allocates the complete physical span and rejects unresolved expressions or file
+inputs shorter than that span. Every scalar must satisfy tensor-view bounds.
 
 Mixed AIC/AIV inputs are launched as one co-scheduled group. They require
 `--ptoas-root`; the generator reuses PTOAS's validation-harness wrapper, which
@@ -191,6 +194,6 @@ and scalar bounds with a real workload. NPU capture mode does this automatically
 
 ## How it works
 
-The generator derives ABI and sizes from `.cpp`/`.pto`, emits the harness, builds,
-runs `msprof op simulator`, and records each kernel independently. Mixed
-simulator kernels use a synthetic AIC/AIV dispatcher; real NPU mode rejects it.
+The generator derives ABI and physical spans from `.cpp`/`.pto`, emits the
+harness, builds, runs `msprof op simulator`, and records each kernel
+independently. Mixed NPU kernels use PTOAS's co-scheduled validation wrapper.

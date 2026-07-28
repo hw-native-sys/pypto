@@ -64,7 +64,11 @@ def _write_kernel(root: Path, *, mixed: bool = False) -> Path:
     else:
         signature = 'extern "C" __global__ AICORE void sample(__gm__ float* v0, int32_t n) {}'
     cpp.write_text(signature + "\n", encoding="utf-8")
-    pto = "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n"
+    pto = """\
+func.func @sample(%arg0: !pto.ptr<f32>, %arg1: i32) {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+"""
     if mixed:
         pto = """\
 func.func @sample_aic(%arg0: !pto.ptr<f32>, %__pypto_spmd_block_idx: i32,
@@ -116,6 +120,173 @@ def test_generate_npu_case_with_real_inputs(generator: ModuleType, tmp_path: Pat
     assert "stream, 8);" in main
     launch = (case / "launch.cpp").read_text(encoding="utf-8")
     assert "sample<<<blockDim, nullptr, stream>>>" in launch
+
+
+def test_physical_extent_analysis_unions_spmd_partition_offsets(generator: ModuleType):
+    cpp = """\
+AICORE void sample(
+    __gm__ bfloat16_t* v4, int64_t row, int32_t block_idx, int32_t block_num) {
+  const int64_t stop = 16;
+  const int64_t step = 8;
+  const int64_t tile_rows = 64;
+  const int64_t row_stride = 1024;
+  for (int64_t outer = (int64_t) block_idx; outer < stop; outer += step) {
+    int64_t tile_offset = (int64_t) ((uint64_t) outer * (uint64_t) tile_rows);
+    GlobalTensor<
+        bfloat16_t,
+        pto::Shape<1, 1, 1, 128, 64>,
+        pto::Stride<131072, 131072, 131072, 1024, 1>,
+        pto::Layout::ND> view = GlobalTensor<
+            bfloat16_t,
+            pto::Shape<1, 1, 1, 128, 64>,
+            pto::Stride<131072, 131072, 131072, 1024, 1>,
+            pto::Layout::ND>(v4 + row * row_stride + tile_offset, shape, stride);
+  }
+}
+"""
+
+    result = generator.analyze_pointer_extents(
+        cpp,
+        {"v4"},
+        {"row": 4992, "block_idx": 0, "block_num": 8},
+        spmd_block_index="block_idx",
+    )
+
+    assert result.unresolved == ()
+    assert result.pointers["v4"].max_base_offset == 5_112_768
+    assert result.pointers["v4"].required_elements == 5_242_880
+
+
+def test_physical_extent_analysis_accepts_singleton_sentinel_strides(generator: ModuleType):
+    cpp = """\
+GlobalTensor<
+    float,
+    pto::Shape<1, 1, 1, 1, 8>,
+    pto::Stride<-1, -1, -1, -1, 1>,
+    pto::Layout::ND> view = GlobalTensor<
+        float,
+        pto::Shape<1, 1, 1, 1, 8>,
+        pto::Stride<-1, -1, -1, -1, 1>,
+        pto::Layout::ND>(v0, shape, stride);
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {})
+
+    assert result.unresolved == ()
+    assert result.pointers["v0"].required_elements == 8
+
+
+def test_physical_extent_analysis_bounds_nonmonotone_offsets(generator: ModuleType):
+    cpp = """\
+for (int64_t i = 0; i < 10; i += 1) {
+  GlobalTensor<
+      float,
+      pto::Shape<1>,
+      pto::Stride<1>,
+      pto::Layout::ND> view = GlobalTensor<
+          float,
+          pto::Shape<1>,
+          pto::Stride<1>,
+          pto::Layout::ND>(v0 + 100 - i, shape, stride);
+}
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {})
+
+    assert result.pointers["v0"].max_base_offset == 100
+    assert result.pointers["v0"].required_elements == 101
+
+
+def test_physical_extent_analysis_reports_unsupported_pointer_bases(generator: ModuleType):
+    cpp = """\
+GlobalTensor<
+    float,
+    pto::Shape<8>,
+    pto::Stride<1>,
+    pto::Layout::ND> view = GlobalTensor<
+        float,
+        pto::Shape<8>,
+        pto::Stride<1>,
+        pto::Layout::ND>(select_pointer(v0), shape, stride);
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {})
+
+    assert result.unresolved == ("v0: unsupported base expression 'select_pointer(v0)'",)
+
+
+def _write_strided_partition_kernel(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    cpp = root / "partition.cpp"
+    cpp.write_text(
+        """\
+extern "C" __global__ AICORE void sample(__gm__ float* v0, int64_t row) {
+  const int64_t stride = 4;
+  GlobalTensor<
+      float,
+      pto::Shape<1, 1, 1, 2>,
+      pto::Stride<8, 8, 8, 4>,
+      pto::Layout::ND> view = GlobalTensor<
+          float,
+          pto::Shape<1, 1, 1, 2>,
+          pto::Stride<8, 8, 8, 4>,
+          pto::Layout::ND>(v0 + row * stride, shape, layout);
+}
+""",
+        encoding="utf-8",
+    )
+    cpp.with_suffix(".pto").write_text(
+        """\
+func.func @sample(%arg0: !pto.ptr<f32>, %arg1: index) {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+""",
+        encoding="utf-8",
+    )
+    return cpp
+
+
+def test_generate_npu_case_sizes_full_partition_span(generator: ModuleType, tmp_path: Path):
+    kernel = _write_strided_partition_kernel(tmp_path / "kernel")
+
+    case = generator.generate(
+        kernel,
+        "partition",
+        tmp_path / "output",
+        "dav-c220",
+        run_mode="npu",
+        scalar_values={"row": "4"},
+        synthetic_seed=19,
+    )
+
+    manifest = json.loads((case / "standalone_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["parameters"][0]["elements"] == 21
+    assert manifest["physical_extent_analysis"]["pointers"]["v0"] == {
+        "max_base_offset": 16,
+        "required_elements": 21,
+        "shape": [1, 1, 1, 2],
+        "stride": [8, 8, 8, 4],
+        "view_count": 1,
+    }
+    assert (case / "v0.bin").stat().st_size == 21 * 4
+
+
+def test_generate_npu_case_rejects_truncated_partition_input(generator: ModuleType, tmp_path: Path):
+    kernel = _write_strided_partition_kernel(tmp_path / "kernel")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    np.zeros(8, dtype=np.float32).tofile(inputs / "v0.bin")
+
+    with pytest.raises(ValueError, match="full physical buffer"):
+        generator.generate(
+            kernel,
+            "partition",
+            tmp_path / "output",
+            "dav-c220",
+            run_mode="npu",
+            input_dir=inputs,
+            scalar_values={"row": "4"},
+        )
 
 
 def _write_fake_ptoas_generator(root: Path) -> Path:
@@ -209,7 +380,11 @@ def test_generate_npu_case_with_synthetic_inputs(generator: ModuleType, tmp_path
         encoding="utf-8",
     )
     kernel.with_suffix(".pto").write_text(
-        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        """\
+func.func @sample(%arg0: !pto.ptr<bf16>, %arg1: i32) {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+""",
         encoding="utf-8",
     )
 
@@ -251,7 +426,11 @@ def test_generate_npu_case_from_invocation_profile(generator: ModuleType, tmp_pa
         encoding="utf-8",
     )
     kernel.with_suffix(".pto").write_text(
-        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        """\
+func.func @sample(%arg0: !pto.ptr<i32>, %arg1: i32) {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+""",
         encoding="utf-8",
     )
     profile = tmp_path / "invocation.json"
@@ -352,7 +531,11 @@ def test_generate_npu_synthetic_integer_input_is_safe(generator: ModuleType, tmp
         encoding="utf-8",
     )
     kernel.with_suffix(".pto").write_text(
-        "%view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]\n",
+        """\
+func.func @sample(%arg0: !pto.ptr<i32>) {
+  %view = pto.make_tensor_view %arg0, shape = [%c8_index], strides = [%c1_index]
+}
+""",
         encoding="utf-8",
     )
 
