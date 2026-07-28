@@ -157,7 +157,7 @@ Standard Python operators map to IR operations:
 
 ### Unified Operations
 
-Common `pl.*` operations — see [Operation Reference](02-operation_reference.md) for the complete list:
+Common `pl.*` operations — see [Operation Reference](03-operation_reference.md) for the complete list:
 
 ```python
 c = pl.add(a, b)            # arithmetic (also sub, mul, div)

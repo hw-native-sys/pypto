@@ -143,7 +143,7 @@ tile = pl.tile.adds(tile, 1.0)
 
 ### 统一操作（Unified Operations）
 
-常用 `pl.*` 操作 —— 完整列表参见[操作参考](02-operation_reference.md)：
+常用 `pl.*` 操作 —— 完整列表参见[操作参考](03-operation_reference.md)：
 
 ```python
 c = pl.add(a, b)            # 算术（还有 sub、mul、div）

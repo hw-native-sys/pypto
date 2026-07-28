@@ -565,5 +565,5 @@ with DistributedWorker([prefill_c, decode_c]) as rt:    # one worker, one fork
 
 ## What's Next
 
-- **[Language Guide](01-language_guide.md)** — complete reference for types, operations, control flow, memory, and compilation
-- **[Operation Reference](02-operation_reference.md)** — lookup tables for every `pl.*` operation
+- **[Language Guide](02-language_guide.md)** — complete reference for types, operations, control flow, memory, and compilation
+- **[Operation Reference](03-operation_reference.md)** — lookup tables for every `pl.*` operation

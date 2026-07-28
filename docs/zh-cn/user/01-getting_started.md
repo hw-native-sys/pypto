@@ -529,5 +529,5 @@ with DistributedWorker([prefill_c, decode_c]) as rt:    # 一个 worker,一次 f
 
 ## 下一步
 
-- **[语言指南](01-language_guide.md)** —— 类型、操作、控制流、内存和编译的完整参考
-- **[操作参考](02-operation_reference.md)** —— 所有 `pl.*` 操作的查找表
+- **[语言指南](02-language_guide.md)** —— 类型、操作、控制流、内存和编译的完整参考
+- **[操作参考](03-operation_reference.md)** —— 所有 `pl.*` 操作的查找表
