@@ -99,6 +99,9 @@ fixable = ["ALL"]
 "tests/ut/language/parser/test_text_parser.py" = ["E501"]
 # IR dumps are formatted at 200-col for readability — suppress line-length lint
 "build_output/**" = ["E501"]
+# Embeds a verbatim pass dump as a fixture; tile annotations carry their MemRef
+# inline and cannot be wrapped without changing what is under test.
+"tests/ut/tools/test_memory_map.py" = ["E501"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100

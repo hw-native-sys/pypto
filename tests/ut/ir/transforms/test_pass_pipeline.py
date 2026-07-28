@@ -9,8 +9,6 @@
 
 """Unit tests for PassPipeline and PassContext."""
 
-import re
-
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -410,26 +408,21 @@ class TestVerifyProperties:
 
 
 class TestReportInstrument:
-    """Test ReportInstrument with report generation."""
+    """Test ReportInstrument, which carries the pipeline's output directory."""
 
     def test_get_name(self, tmp_path):
         """Default name is ReportInstrument."""
         instrument = passes.ReportInstrument(str(tmp_path / "report"))
         assert instrument.get_name() == "ReportInstrument"
 
-    def test_enable_report(self, tmp_path):
-        """enable_report() can be called without error."""
+    def test_get_output_dir(self, tmp_path):
+        """The output directory is readable — perf hints write their log there."""
+        report_dir = str(tmp_path / "report")
+        assert passes.ReportInstrument(report_dir).get_output_dir() == report_dir
+
+    def test_writes_nothing_on_its_own(self, tmp_path):
+        """Running a pipeline through it creates no files by itself."""
         instrument = passes.ReportInstrument(str(tmp_path / "report"))
-        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
-
-    def test_report_type_enum(self):
-        """ReportType.Memory is accessible."""
-        assert passes.ReportType.Memory is not None
-
-    def test_no_report_without_enable(self, tmp_path):
-        """No files generated when no reports are enabled."""
-        report_dir = str(tmp_path / "report")
-        instrument = passes.ReportInstrument(report_dir)
 
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.convert_to_ssa())
@@ -438,114 +431,6 @@ class TestReportInstrument:
             pipeline.run(_make_non_ssa_program())
 
         assert not (tmp_path / "report").exists()
-
-    def test_report_only_on_trigger_pass(self, tmp_path):
-        """Report is not generated for non-trigger passes."""
-        report_dir = str(tmp_path / "report")
-        instrument = passes.ReportInstrument(report_dir)
-        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
-
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-
-        with passes.PassContext([instrument]):
-            pipeline.run(_make_non_ssa_program())
-
-        assert not (tmp_path / "report").exists()
-
-    def test_memory_report_includes_aic_and_aiv_functions(self, tmp_path):
-        """Memory report includes post-ExpandMixedKernel compute functions."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.AIV)
-            def vector_kernel(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile = pl.load(x, [0], [64])
-                y_tile = pl.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
-
-            @pl.function(type=pl.FunctionType.AIC)
-            def cube_kernel(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_1: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                out_1: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_1)
-                return out_1
-
-        report_dir = str(tmp_path / "report")
-        (tmp_path / "report").mkdir()
-        instrument = passes.ReportInstrument(report_dir)
-        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
-
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.init_mem_ref())
-        pipeline.add_pass(passes.allocate_memory_addr())
-
-        with passes.PassContext([instrument]):
-            pipeline.run(Program)
-
-        report_path = tmp_path / "report" / "memory_after_AllocateMemoryAddr.txt"
-        assert report_path.exists()
-
-        report_text = report_path.read_text()
-        assert "Functions: 2 compute functions" in report_text
-        assert "vector_kernel" in report_text
-        assert "cube_kernel" in report_text
-
-    def test_memory_report_buffer_detail(self, tmp_path):
-        """Memory report includes a per-buffer breakdown summing to Used."""
-
-        @pl.program
-        class Program:
-            @pl.function(type=pl.FunctionType.AIV)
-            def vector_kernel(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile = pl.load(x, [0], [64])
-                y_tile = pl.add(x_tile, x_tile)
-                z_tile = pl.add(y_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
-                return out_0
-
-        report_dir = str(tmp_path / "report")
-        (tmp_path / "report").mkdir()
-        instrument = passes.ReportInstrument(report_dir)
-        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
-
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.init_mem_ref())
-        pipeline.add_pass(passes.allocate_memory_addr())
-
-        with passes.PassContext([instrument]):
-            pipeline.run(Program)
-
-        report_text = (tmp_path / "report" / "memory_after_AllocateMemoryAddr.txt").read_text()
-
-        # Per-buffer detail block for the Vec space, with the header columns.
-        assert "Buffers (Vec)" in report_text
-        assert "Address range" in report_text
-        assert "Live range" in report_text
-
-        # Three Vec scratch buffers are laid out contiguously from address 0.
-        assert "[0, 256)" in report_text
-        # Each per-buffer row carries a bracketed live range (statement indices).
-        buffer_section = report_text.split("Buffers (Vec)", 1)[1]
-        assert re.search(r"\[\d+, \d+\]", buffer_section) is not None
 
 
 class TestRoundtripInstrument:

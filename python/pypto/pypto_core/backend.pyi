@@ -9,6 +9,8 @@
 
 """Type stubs for backend module."""
 
+from typing import ClassVar
+
 from pypto import ir
 
 class BackendType:
@@ -16,6 +18,8 @@ class BackendType:
 
     Ascend910B: BackendType
     Ascend950: BackendType
+    __members__: ClassVar[dict[str, BackendType]]
+    """Every member, keyed by name — the canonical way to enumerate the enum."""
     @property
     def name(self) -> str:
         """The member name (e.g. ``"Ascend910B"``)."""

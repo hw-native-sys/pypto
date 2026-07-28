@@ -199,25 +199,25 @@ RunConfig(dump_passes=True)                     # == PassDumpLevel.CONCISE
 
 ### ReportInstrument
 
-Instrument that generates reports to files after specified passes. Uses `ReportGeneratorRegistry` to dispatch report generation:
+Carries the directory that on-disk pipeline artifacts are written to. It observes no pass itself — `DiagnosticInstrument` reads its `output_dir` to decide where to append `perf_hints.log`:
 
 ```cpp
 class ReportInstrument : public PassInstrument {
   explicit ReportInstrument(std::string output_dir);
-  void EnableReport(ReportType type, std::string trigger_pass);
+  const std::string& GetOutputDir() const;
 };
 ```
 
 ```python
-# Python: generate memory report after AllocateMemoryAddr
 instrument = passes.ReportInstrument("/path/to/report")
-instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
 
 with passes.PassContext([instrument]):
     pipeline.run(program)
 ```
 
-`compile()` automatically creates a `ReportInstrument` that generates memory reports to `build_output/<name>/report/`.
+`compile()` creates one pointing at `build_output/<name>/report/`.
+
+Memory usage is no longer reported here. It is rendered from a pass dump by `python -m pypto.tools.memory_map` — see [Memory Map](../07-memory-map.md).
 
 ### RoundtripInstrument
 

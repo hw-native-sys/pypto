@@ -188,7 +188,6 @@ def compile(  # noqa: PLR0913
     report_dir = os.path.join(output_dir, "report")
     os.makedirs(report_dir, exist_ok=True)
     report_instrument = _passes.ReportInstrument(report_dir)
-    report_instrument.enable_report(_passes.ReportType.Memory, "AllocateMemoryAddr")
 
     instruments: list[_passes.PassInstrument] = [report_instrument]
     # Resolve effective settings: explicit arg > outer context > global default.

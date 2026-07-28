@@ -228,11 +228,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/window_externalization.cpp
     src/ir/transforms/visitor.cpp
 
-    # IR - Reporter
-    src/ir/reporter/report.cpp
-    src/ir/reporter/memory_report_generator.cpp
-    src/ir/reporter/report_generator_registry.cpp
-
     # IR - Verifier
     src/ir/verifier/verifier.cpp
     src/ir/verifier/property_verifier_registry.cpp

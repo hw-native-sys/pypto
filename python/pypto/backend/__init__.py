@@ -22,6 +22,7 @@ from pypto.pypto_core.backend import (
     Mem,
     SoC,
     # Backend configuration
+    get_backend_instance,
     get_backend_type,
     is_backend_configured,
     reset_for_testing,
@@ -40,6 +41,7 @@ __all__ = [
     "BackendType",
     "set_backend_type",
     "get_backend_type",
+    "get_backend_instance",
     "is_backend_configured",
     "reset_for_testing",
 ]

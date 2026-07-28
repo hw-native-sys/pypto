@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "pypto/core/error.h"
-#include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
@@ -252,16 +251,11 @@ void BindPass(nb::module_& m) {
            nb::arg("name") = "CallbackInstrument",
            "Create a callback instrument with optional before/after callbacks");
 
-  // ReportType enum
-  nb::enum_<ReportType>(passes, "ReportType", "Type of report to generate")
-      .value("Memory", ReportType::Memory, "Memory usage per MemorySpace");
-
   // ReportInstrument
   nb::class_<ReportInstrument, PassInstrument>(
-      passes, "ReportInstrument", "Instrument that generates reports to files after specified passes")
+      passes, "ReportInstrument",
+      "Instrument that names the directory pipeline artifacts are written to")
       .def(nb::init<std::string>(), nb::arg("output_dir"), "Create a report instrument with output directory")
-      .def("enable_report", &ReportInstrument::EnableReport, nb::arg("type"), nb::arg("trigger_pass"),
-           "Enable a report type after a specific pass")
       .def("get_output_dir", &ReportInstrument::GetOutputDir,
            "Path of the directory that holds report files (used by perf hints to "
            "persist `perf_hints.log` alongside other reports)");

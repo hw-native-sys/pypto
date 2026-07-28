@@ -199,25 +199,25 @@ RunConfig(dump_passes=True)                     # == PassDumpLevel.CONCISE
 
 ### ReportInstrument
 
-在指定 Pass 执行后生成报告文件的插桩。使用 `ReportGeneratorRegistry` 分发报告生成：
+承载流水线落盘产物所在的目录。它自身不观察任何 Pass —— `DiagnosticInstrument` 读取它的 `output_dir` 来决定把 `perf_hints.log` 追加到哪里：
 
 ```cpp
 class ReportInstrument : public PassInstrument {
   explicit ReportInstrument(std::string output_dir);
-  void EnableReport(ReportType type, std::string trigger_pass);
+  const std::string& GetOutputDir() const;
 };
 ```
 
 ```python
-# Python: 在 AllocateMemoryAddr 后生成内存报告
 instrument = passes.ReportInstrument("/path/to/report")
-instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
 
 with passes.PassContext([instrument]):
     pipeline.run(program)
 ```
 
-`compile()` 会自动创建 `ReportInstrument`，在 `build_output/<name>/report/` 目录中生成内存报告。
+`compile()` 会自动创建一个指向 `build_output/<name>/report/` 的实例。
+
+内存占用不再由这里生成，改为用 `python -m pypto.tools.memory_map` 从 pass dump 渲染 —— 见[内存地图](../07-memory-map.md)。
 
 ### RoundtripInstrument
 

@@ -1,0 +1,644 @@
+<!doctype html>
+<!--
+  Copyright (c) PyPTO Contributors.
+  This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+  CANN Open Software License Agreement Version 2.0 (the "License").
+  Please refer to the License for details. You may not use this file except in compliance with the License.
+  THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+  INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+  See LICENSE in the root of the software repository for the full text of the License.
+
+  Template for `python -m pypto.tools.memory_map`. The tool substitutes the
+  __PYPTO_MEMORY_MAP_DATA__ placeholder below with the parsed dump; everything
+  else is static. Keep this file free of external references so the generated
+  page works from a file:// URL with no network.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyPTO Memory Map</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f3f5f6;
+    --surface-1: #fcfcfb;
+    --surface-2: #eaedef;
+    --line:      #d6dadd;
+    --line-soft: #e7eaec;
+    --ink:       #14181b;
+    --ink-2:     #4d565d;
+    --ink-3:     #7b858c;
+
+    --sp-Vec:   #2a78d6;
+    --sp-Mat:   #eb6834;
+    --sp-Left:  #1baf7a;
+    --sp-Right: #eda100;
+    --sp-Acc:   #e87ba4;
+
+    --good:     #0ca30c;
+    --warning:  #fab219;
+    --critical: #d03b3b;
+
+    --tint: 15%;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-0: #121313; --surface-1: #1a1a19; --surface-2: #242524;
+      --line: #383937; --line-soft: #292a29;
+      --ink: #f1f1ee; --ink-2: #b2b3ac; --ink-3: #82837d;
+      --sp-Vec: #3987e5; --sp-Mat: #d95926; --sp-Left: #199e70;
+      --sp-Right: #c98500; --sp-Acc: #d55181;
+      --tint: 20%;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #121313; --surface-1: #1a1a19; --surface-2: #242524;
+    --line: #383937; --line-soft: #292a29;
+    --ink: #f1f1ee; --ink-2: #b2b3ac; --ink-3: #82837d;
+    --sp-Vec: #3987e5; --sp-Mat: #d95926; --sp-Left: #199e70;
+    --sp-Right: #c98500; --sp-Acc: #d55181;
+    --tint: 20%;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-0); color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.5; font-variant-numeric: tabular-nums;
+  }
+  .wrap {
+    max-width: 1500px; margin: 0 auto; padding: 34px 22px 90px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+
+  header { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+  .eyebrow { font-size: 10.5px; letter-spacing: .17em; text-transform: uppercase; color: var(--ink-3); }
+  h1 { margin: 0; font-size: 25px; font-weight: 600; letter-spacing: -.015em; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid var(--line); background: var(--surface-1); border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; color: var(--ink-2);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  /* ---- function card ---------------------------------------------------- */
+  details.fn { background: var(--surface-1); border: 1px solid var(--line); border-radius: 6px; }
+  details.fn > summary {
+    list-style: none; cursor: pointer; padding: 13px 16px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  details.fn > summary::-webkit-details-marker { display: none; }
+  details.fn > summary:focus-visible { outline: 2px solid var(--sp-Vec); outline-offset: -2px; }
+  .caret { color: var(--ink-3); transition: transform .12s ease; flex: none; }
+  details.fn[open] .caret { transform: rotate(90deg); }
+  .fn-name { font-size: 14px; font-weight: 600; }
+  .fn-type {
+    font-size: 10.5px; letter-spacing: .08em; color: var(--ink-3);
+    border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px;
+  }
+  .sp-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  .pill {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2);
+    border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px 2px 6px;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .pill .pct { font-weight: 600; }
+  .pill.hot { border-color: var(--critical); }
+
+  .fn-body { border-top: 1px solid var(--line-soft); padding: 12px 16px 16px; }
+  .toolbar {
+    display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
+    font-size: 11px; color: var(--ink-3);
+  }
+  .btn {
+    background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2);
+    border-radius: 4px; padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .btn:hover { color: var(--ink); }
+  .btn[aria-pressed="true"] { background: var(--ink); color: var(--surface-1); border-color: var(--ink); }
+  .btn:focus-visible { outline: 2px solid var(--sp-Vec); outline-offset: 1px; }
+
+  .space-toggles { display: flex; gap: 4px; align-items: center; }
+  .space-toggles .lbl { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+  .sp-toggle {
+    display: flex; align-items: center; gap: 5px;
+    background: none; border: 1px solid var(--line); border-radius: 4px;
+    color: var(--ink-3); font: inherit; font-size: 11px; padding: 2px 7px; cursor: pointer;
+  }
+  .sp-toggle .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--c); flex: none; }
+  .sp-toggle[aria-pressed="false"] { color: var(--ink-3); opacity: .5; }
+  .sp-toggle[aria-pressed="false"] .dot { background: none; box-shadow: inset 0 0 0 1px currentColor; }
+  .sp-toggle[aria-pressed="true"] { color: var(--ink); border-color: var(--c); }
+  .sp-toggle:focus-visible { outline: 2px solid var(--c); outline-offset: 1px; }
+
+  /* ---- plot ------------------------------------------------------------- */
+  .scroller { overflow: auto; max-height: 78vh; border: 1px solid var(--line-soft); border-radius: 5px; }
+  /* Lane widths are absolute pixels off a single px-per-byte factor, so one
+     byte is the same width everywhere and expanding the IR source widens the
+     grid rather than squeezing the lanes. */
+  .plot { display: grid; width: max-content; }
+  .plot > * { min-width: 0; }
+
+  .colhead {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--surface-1); border-bottom: 1px solid var(--line);
+    padding: 7px 8px 6px; overflow: hidden;
+  }
+  .colhead.gutter { left: 0; z-index: 4; border-right: 1px solid var(--line-soft); }
+  .plot.src-open .colhead.gutter { left: auto; }
+  .colhead .sp { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; }
+  .colhead .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .colhead .rng {
+    display: flex; justify-content: space-between; font-size: 9.5px;
+    color: var(--ink-3); margin-top: 2px;
+  }
+  .colhead .lbl { font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+
+  .gutcol {
+    position: sticky; left: 0; z-index: 2;
+    background: var(--surface-1); border-right: 1px solid var(--line-soft); overflow: hidden;
+  }
+  /* With the source shown the column is as wide as the longest line and the
+     pane scrolls to it; pinning it left would hide exactly what was expanded. */
+  .plot.src-open .gutcol { position: static; }
+  .code { display: block; white-space: pre; }
+  .cl { height: var(--lh); display: flex; align-items: center; }
+  .cl.hi { background: color-mix(in srgb, var(--hi, var(--sp-Vec)) 14%, var(--surface-1)); }
+  .cl .no {
+    display: inline-block; width: 46px; padding-right: 10px; text-align: right;
+    color: var(--ink-3); font-size: 10.5px; flex: none;
+  }
+  .cl .tx { font-size: 11.5px; color: var(--ink-2); }
+  .cl .tx mark {
+    background: color-mix(in srgb, var(--hi, var(--sp-Vec)) 42%, var(--surface-1));
+    color: var(--ink); border-radius: 2px; padding: 0 1px; font-weight: 600;
+  }
+
+  .pin {
+    display: flex; align-items: center; gap: 6px; margin-left: auto;
+    font-size: 11px; color: var(--ink-2);
+  }
+  .pin .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .pin button {
+    background: none; border: none; color: var(--ink-3); cursor: pointer;
+    font: inherit; font-size: 12px; padding: 0 2px;
+  }
+  .pin button:hover { color: var(--ink); }
+
+  .lane { position: relative; box-shadow: inset 1px 0 0 var(--line-soft); }
+  .lane .rule { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line-soft); }
+  .lane .hwm { position: absolute; top: 0; bottom: 0; border-left: 1px dashed currentColor; opacity: .5; }
+
+  /* The 2px separator is painted OUTSIDE the box (spread shadow, not a border)
+     so a box is exactly as wide as the bytes it owns. A 4 KB tile in a 512 KB
+     panel is under 1 px — min-width keeps it visible, and the "used" x-scale
+     exists for when that distortion matters. */
+  .box {
+    position: absolute; border-radius: 3px; min-width: 2px;
+    background: color-mix(in srgb, var(--c) var(--tint), var(--surface-1));
+    box-shadow: 0 0 0 1.5px var(--surface-1), inset 0 0 0 1px var(--c);
+    padding: 1px 5px; overflow: hidden; cursor: pointer;
+  }
+  .box:hover { box-shadow: 0 0 0 1.5px var(--surface-1), inset 0 0 0 2px var(--c); z-index: 5; }
+  .box.view {
+    background: none; box-shadow: 0 0 0 1.5px var(--surface-1);
+    outline: 2px dashed var(--c); outline-offset: -2px;
+  }
+  .box.conflict, .box.conflict:hover {
+    box-shadow: 0 0 0 1.5px var(--surface-1), inset 0 0 0 2px var(--critical);
+  }
+  .box.pinned {
+    box-shadow: 0 0 0 1.5px var(--surface-1), inset 0 0 0 2px var(--c),
+                0 0 0 3.5px color-mix(in srgb, var(--c) 45%, transparent);
+    z-index: 6;
+  }
+  .box:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+  /* The labels must not take pointer events: crossing from the box's padding
+     onto its own text would otherwise re-fire mouseover/mouseout. */
+  .box .n, .box .s { pointer-events: none; }
+  .box .n {
+    font-size: 10.5px; font-weight: 600; color: var(--ink); display: block;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .box .s { font-size: 9.5px; color: var(--ink-2); white-space: nowrap; }
+  .box .badge { font-size: 9px; color: var(--ink-3); }
+  .box.short { padding: 0 4px; line-height: 1.15; }
+  .box.short .s { display: none; }
+
+  /* ---- tooltip ---------------------------------------------------------- */
+  #tip {
+    position: fixed; z-index: 40; pointer-events: none; opacity: 0; transition: opacity .08s ease;
+    background: var(--surface-1); border: 1px solid var(--line); border-radius: 5px;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .18); padding: 9px 11px; font-size: 11.5px; max-width: 340px;
+  }
+  #tip .h { font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  #tip .h .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  #tip dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 12px; }
+  #tip dt { color: var(--ink-3); }
+  #tip dd { margin: 0; text-align: right; }
+  #tip .al {
+    margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line-soft);
+    color: var(--ink-3); font-size: 10.5px; white-space: normal;
+  }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 11px; font-size: 10.5px; color: var(--ink-3); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .k { width: 15px; height: 9px; border-radius: 3px; flex: none; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--ink-3); font-weight: 500; letter-spacing: .04em; }
+  details.tbl > summary { cursor: pointer; font-size: 11px; color: var(--ink-3); margin-top: 12px; }
+
+  .note {
+    font-size: 11px; color: var(--ink-3); line-height: 1.7;
+    border-left: 2px solid var(--line); padding-left: 11px;
+  }
+  .note b { color: var(--ink-2); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">PyPTO &middot; memory map</div>
+    <h1 id="title">Memory Map</h1>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div id="fns" class="fns"></div>
+
+  <p class="note">
+    Down is lifetime: the y axis is the dump's own line number, which is statement order.
+    Across is address, on <b>one shared byte scale</b>: every panel is as wide as the space it shows,
+    so a box's width means the same number of bytes wherever it sits and the panels are comparable
+    against each other. By default a panel spans its hardware limit, so the filled fraction is the
+    usage; <b>x axis: used</b> shrinks every panel to its high-water mark instead, which spends the
+    width on the bytes actually allocated. One box is one tile's live range over the bytes its MemRef owns.
+    <b>Click a box</b> to keep its lines highlighted and mark every mention of its name in the IR source,
+    and switch individual spaces off when you only care about one of them.
+    SSA aliases that share a slot with touching live ranges (phi / yield chains) are merged into a single box,
+    with <b>+N</b> counting the names folded in; a dashed box is a <b>view</b> into a larger allocation on the
+    same base; a red box means two <b>different</b> bases overlap in address and lifetime at once.
+  </p>
+</div>
+
+<div id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+
+const DATA = /*__PYPTO_MEMORY_MAP_DATA__*/null;
+
+const LINE_H = 17;           // px per source line — the plot and the code share this rhythm
+const GUTTER_COLLAPSED = 62;
+const RULE_EVERY = 5;        // gridline cadence, in source lines
+const MIN_LANE_PX = 72;      // narrowest lane before the whole map is scaled up and scrolls
+const FALLBACK_WIDTH = 1180; // used while a card is closed and has no measurable width
+
+const fmtBytes = n =>
+  n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" :
+  n >= 1024 ? (n / 1024).toFixed(n % 1024 ? 1 : 0) + " KB" : n + " B";
+
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const usageColor = p => p >= 95 ? "var(--critical)" : p >= 80 ? "var(--warning)" : "var(--good)";
+
+/** Per-card view state, keyed by the function index the card renders. */
+const STATE = DATA.functions.map(() => ({
+  expanded: false,
+  fitUsed: false,
+  hidden: new Set(),
+  pinned: null,
+  hovered: null,
+}));
+
+/* ---- page chrome --------------------------------------------------------- */
+
+document.getElementById("title").textContent = "Memory Map — " + DATA.pass_name;
+document.getElementById("meta").innerHTML =
+  `<span class="chip">dump <b>${esc(DATA.dump)}</b></span>
+   <span class="chip">compute functions <b>${DATA.functions.length}</b></span>
+   <span class="chip">tiles <b>${DATA.functions.reduce((a, f) => a + f.boxes.length, 0)}</b></span>
+   <span class="chip">capacities <b>${esc(DATA.backend.name)}</b> (${esc(DATA.backend.arch)})${
+     DATA.backend.detected ? "" : " &mdash; assumed"}</span>`;
+
+document.getElementById("fns").innerHTML = DATA.functions.map((fn, index) => {
+  const pills = fn.spaces.map(s => {
+    const used = s.hwm / s.limit * 100;
+    return `<span class="pill${used >= 95 ? " hot" : ""}">
+      <span class="dot" style="background:var(--sp-${s.space})"></span>${s.space}
+      <span>${fmtBytes(s.hwm)}/${fmtBytes(s.limit)}</span>
+      <span class="pct" style="color:${usageColor(used)}">${used.toFixed(1)}%</span></span>`;
+  }).join("");
+
+  const spaceToggles = fn.spaces.length < 2 ? "" : `<span class="space-toggles">
+      <span class="lbl">show</span>
+      ${fn.spaces.map(s => `<button type="button" class="sp-toggle" data-space="${s.space}"
+          aria-pressed="true" style="--c:var(--sp-${s.space})"><span class="dot"></span>${s.space}</button>`).join("")}
+    </span>`;
+
+  return `<details class="fn"${index === 0 ? " open" : ""} data-index="${index}">
+    <summary>
+      <span class="caret">&#9654;</span>
+      <span class="fn-name">${esc(fn.name)}</span>
+      <span class="fn-type">${esc(fn.ftype)}</span>
+      <span class="sp-pills">${pills}</span>
+    </summary>
+    <div class="fn-body">
+      <div class="toolbar">
+        <button type="button" class="btn src-toggle" aria-pressed="false">Show IR source</button>
+        <button type="button" class="btn fit-toggle" aria-pressed="false"
+                title="Span each panel by its high-water mark instead of its hardware limit">x&nbsp;axis: limit</button>
+        ${spaceToggles}
+        <span class="pin" hidden></span>
+      </div>
+      <div class="scroller"><div class="plot"></div></div>
+      <div class="legend">
+        <span class="item"><span class="k" style="background:color-mix(in srgb, var(--sp-${fn.spaces[0].space}) var(--tint), var(--surface-1));box-shadow:inset 0 0 0 1px var(--sp-${fn.spaces[0].space})"></span>tile live range</span>
+        <span class="item"><span class="k" style="border:2px dashed var(--ink-3)"></span>view into the same base</span>
+        <span class="item"><span class="k" style="box-shadow:inset 0 0 0 2px var(--critical)"></span>cross-base address + lifetime overlap</span>
+        <span class="item">&#9478; high-water mark</span>
+        <span class="item">${fn.src_end - fn.src_start + 1} lines &middot; dump L${fn.src_start}&ndash;L${fn.src_end}</span>
+      </div>
+      <details class="tbl"><summary>Table view</summary><div class="scroller">${tableFor(fn)}</div></details>
+    </div>
+  </details>`;
+}).join("");
+
+/* ---- rendering ----------------------------------------------------------- */
+
+function tableFor(fn) {
+  const rows = fn.boxes.map(b => `<tr>
+    <td>${esc(b.name)}${b.aliases.length ? ` <span class="badge">+${b.aliases.length}</span>` : ""}</td>
+    <td>${b.space}</td><td>${esc(b.base)}</td><td>${fmtBytes(b.size)}</td>
+    <td>[${b.offset}, ${b.offset + b.size})</td><td>L${b.start}&ndash;L${b.end}</td>
+    <td>${b.conflict ? "conflict" : b.view ? "view" : ""}</td></tr>`).join("");
+  return `<table><thead><tr><th>Tile</th><th>Space</th><th>Base</th><th>Size</th>
+    <th>Address</th><th>Live lines</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+/** Match every mention of a pinned tile's own name plus its merged aliases. */
+function namePattern(box) {
+  if (!box) return null;
+  return new RegExp(`\\b(${[box.name, ...box.aliases].map(escRe).join("|")})\\b`, "g");
+}
+
+/** Wrap each mention the way a search hit reads. */
+const markNames = (escapedText, pattern) =>
+  pattern ? escapedText.replace(pattern, "<mark>$1</mark>") : escapedText;
+
+/** Resolve the box an event landed on, or null. Boxes are addressed by index. */
+function boxAt(card, target) {
+  const el = target.closest(".box");
+  if (!el) return null;
+  return DATA.functions[Number(card.dataset.index)].boxes[Number(el.dataset.bi)];
+}
+
+function renderPlot(card) {
+  const index = Number(card.dataset.index);
+  const fn = DATA.functions[index];
+  const view = STATE[index];
+  const plot = card.querySelector(".plot");
+  const height = (fn.src_end - fn.src_start + 1) * LINE_H;
+
+  // Panel span: the hardware limit (usage is readable) or the high-water mark
+  // (the allocated bytes get the whole width). Either way ONE scale for all.
+  const spanOf = space => (view.fitUsed ? space.hwm : space.limit) || 1;
+  const shown = fn.spaces.filter(s => !view.hidden.has(s.space));
+
+  // Lanes are sized in absolute pixels off a single px-per-byte factor. Sharing
+  // out `fr` units instead would let the IR-source column — which is as wide as
+  // the longest line — squeeze every lane down to nothing.
+  const available = Math.max((card.querySelector(".scroller").clientWidth || FALLBACK_WIDTH) - GUTTER_COLLAPSED, 400);
+  const totalSpan = shown.reduce((sum, s) => sum + spanOf(s), 0) || 1;
+  const narrowest = Math.min(...shown.map(spanOf));
+  // Scaling up so the narrowest lane clears MIN_LANE_PX keeps the factor uniform
+  // (the map just gets wider than the pane and scrolls).
+  const pxPerByte = Math.max(available / totalSpan, MIN_LANE_PX / narrowest);
+
+  plot.classList.toggle("src-open", view.expanded);
+  plot.style.setProperty("--lh", LINE_H + "px");
+  plot.style.gridTemplateColumns =
+    `${view.expanded ? "max-content" : GUTTER_COLLAPSED + "px"} ` +
+    // Sub-pixel widths, so the factor stays exact instead of drifting per lane.
+    shown.map(s => `${(spanOf(s) * pxPerByte).toFixed(2)}px`).join(" ");
+
+  const heads = `<div class="colhead gutter"><div class="lbl">${view.expanded ? "IR source" : "line"}</div></div>` +
+    shown.map(s => `<div class="colhead">
+      <div class="sp"><span class="dot" style="background:var(--sp-${s.space})"></span>${s.space}</div>
+      <div class="rng"><span>0</span><span>${fmtBytes(spanOf(s))}</span></div>
+    </div>`).join("");
+
+  // Compiled once per render, not once per source line.
+  const pinnedNames = namePattern(view.pinned);
+  const rows = fn.source.map((text, i) => {
+    const line = fn.src_start + i;
+    const body = view.expanded ? `<span class="tx">${markNames(esc(text), pinnedNames)}</span>` : "";
+    return `<div class="cl" data-line="${line}"><span class="no">${line}</span>${body}</div>`;
+  }).join("");
+  const gutcol = `<div class="gutcol" style="height:${height}px"><div class="code">${rows}</div></div>`;
+
+  let rules = "";
+  for (let line = fn.src_start; line <= fn.src_end; line += RULE_EVERY) {
+    rules += `<div class="rule" style="top:${(line - fn.src_start) * LINE_H}px"></div>`;
+  }
+
+  const lanes = shown.map(space => {
+    const span = spanOf(space);
+    const hwm = `<div class="hwm" style="left:${space.hwm / span * 100}%;color:var(--sp-${space.space})"></div>`;
+    const boxes = fn.boxes.map((b, bi) => [b, bi]).filter(([b]) => b.space === space.space).map(([b, bi]) => {
+      const top = (b.start - fn.src_start) * LINE_H;
+      const boxHeight = Math.max((b.end - b.start + 1) * LINE_H, LINE_H) - 1;
+      const pinned = view.pinned === b;
+      const cls = "box" + (boxHeight < 2 * LINE_H ? " short" : "") +
+        (b.view ? " view" : "") + (b.conflict ? " conflict" : "") + (pinned ? " pinned" : "");
+      return `<div class="${cls}" tabindex="0" role="button" aria-pressed="${pinned}"
+        style="--c:var(--sp-${space.space});left:${b.offset / span * 100}%;
+               width:${b.size / span * 100}%;top:${top}px;height:${boxHeight}px"
+        data-bi="${bi}">
+        <span class="n">${esc(b.name)}${b.aliases.length ? ` <span class="badge">+${b.aliases.length}</span>` : ""}</span>
+        <span class="s">${fmtBytes(b.size)} &middot; [${b.offset}, ${b.offset + b.size})</span>
+      </div>`;
+    }).join("");
+    return `<div class="lane" style="height:${height}px">${rules}${hwm}${boxes}</div>`;
+  }).join("");
+
+  plot.innerHTML = heads + gutcol + lanes;
+  syncToolbar(card);
+  applyLineHighlight(card);
+}
+
+/** The toolbar shows view state; deriving it here keeps one source of truth. */
+function syncToolbar(card) {
+  const view = STATE[Number(card.dataset.index)];
+
+  const srcToggle = card.querySelector(".src-toggle");
+  srcToggle.setAttribute("aria-pressed", String(view.expanded));
+  srcToggle.textContent = view.expanded ? "Hide IR source" : "Show IR source";
+
+  const fitToggle = card.querySelector(".fit-toggle");
+  fitToggle.setAttribute("aria-pressed", String(view.fitUsed));
+  fitToggle.innerHTML = view.fitUsed ? "x&nbsp;axis: used" : "x&nbsp;axis: limit";
+
+  card.querySelectorAll(".sp-toggle").forEach(toggle => {
+    toggle.setAttribute("aria-pressed", String(!view.hidden.has(toggle.dataset.space)));
+  });
+
+  renderPinChip(card);
+}
+
+function renderPinChip(card) {
+  const view = STATE[Number(card.dataset.index)];
+  const chip = card.querySelector(".pin");
+  chip.hidden = !view.pinned;
+  if (!view.pinned) return;
+  chip.innerHTML = `<span class="dot" style="background:var(--sp-${view.pinned.space})"></span>
+    pinned <b>${esc(view.pinned.name)}</b>
+    <button type="button" title="Clear selection (Esc)">&times;</button>`;
+  chip.querySelector("button").addEventListener("click", () => setPinned(card, null));
+}
+
+/** The pinned box wins; hover only previews while nothing is pinned. */
+function applyLineHighlight(card) {
+  const view = STATE[Number(card.dataset.index)];
+  const box = view.pinned || view.hovered;
+  card.querySelectorAll(".cl").forEach(el => {
+    const line = Number(el.dataset.line);
+    const on = box !== null && line >= box.start && line <= box.end;
+    el.classList.toggle("hi", on);
+    el.style.setProperty("--hi", box ? `var(--sp-${box.space})` : "");
+  });
+}
+
+function setPinned(card, box) {
+  const view = STATE[Number(card.dataset.index)];
+  view.pinned = view.pinned === box ? null : box;
+  // Pinning is about locating the tile in the IR, so bring the source into view.
+  if (view.pinned) view.expanded = true;
+  renderPlot(card);
+}
+
+/* ---- interaction --------------------------------------------------------- */
+
+const tip = document.getElementById("tip");
+
+function showTip(box) {
+  tip.innerHTML = `<div class="h"><span class="dot" style="background:var(--sp-${box.space})"></span>${esc(box.name)}</div>
+    <dl>
+      <dt>space</dt><dd>${box.space}</dd>
+      <dt>shape / dtype</dt><dd>[${box.shape.join(", ")}] ${esc(box.dtype)}</dd>
+      <dt>producer</dt><dd>${esc(box.op || "—")}</dd>
+      <dt>base</dt><dd>${esc(box.base)}</dd>
+      <dt>size</dt><dd>${fmtBytes(box.size)}</dd>
+      <dt>address</dt><dd>[${box.offset}, ${box.offset + box.size})</dd>
+      <dt>live lines</dt><dd>L${box.start} &ndash; L${box.end}</dd>
+    </dl>
+    ${box.aliases.length ? `<div class="al">merged aliases: ${box.aliases.map(esc).join(", ")}</div>` : ""}
+    ${box.view ? `<div class="al">view into ${esc(box.base)} — shares bytes with its parent tile by design</div>` : ""}
+    ${box.conflict ? `<div class="al" style="color:var(--critical)">overlaps a different base in address AND lifetime</div>` : ""}`;
+  tip.style.opacity = "1";
+}
+
+document.querySelectorAll("details.fn").forEach(card => {
+  const view = STATE[Number(card.dataset.index)];
+  // A closed card cannot be measured, and its plot would be discarded on open.
+  if (card.open) renderPlot(card);
+  card.addEventListener("toggle", () => { if (card.open) renderPlot(card); });
+
+  card.querySelector(".src-toggle").addEventListener("click", event => {
+    event.preventDefault();
+    view.expanded = !view.expanded;
+    renderPlot(card);
+  });
+
+  card.querySelector(".fit-toggle").addEventListener("click", event => {
+    event.preventDefault();
+    view.fitUsed = !view.fitUsed;
+    renderPlot(card);
+  });
+
+  card.querySelectorAll(".sp-toggle").forEach(toggle => {
+    toggle.addEventListener("click", event => {
+      event.preventDefault();
+      const space = toggle.dataset.space;
+      if (view.hidden.has(space)) {
+        view.hidden.delete(space);
+      } else {
+        const spaceCount = DATA.functions[Number(card.dataset.index)].spaces.length;
+        if (spaceCount - view.hidden.size === 1) return;  // never hide the last lane
+        view.hidden.add(space);
+      }
+      renderPlot(card);
+    });
+  });
+
+  card.addEventListener("click", event => {
+    const box = boxAt(card, event.target);
+    if (box) setPinned(card, box);
+  });
+
+  card.addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const box = boxAt(card, event.target);
+    if (!box) return;
+    event.preventDefault();
+    setPinned(card, box);
+  });
+
+  card.addEventListener("mouseover", event => {
+    const box = boxAt(card, event.target);
+    if (!box || box === view.hovered) return;
+    view.hovered = box;
+    showTip(box);
+    applyLineHighlight(card);
+  });
+  card.addEventListener("mouseout", event => {
+    if (!boxAt(card, event.target)) return;
+    view.hovered = null;
+    tip.style.opacity = "0";
+    applyLineHighlight(card);
+  });
+});
+
+addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  document.querySelectorAll("details.fn").forEach(card => {
+    if (STATE[Number(card.dataset.index)].pinned) setPinned(card, null);
+  });
+});
+
+let resizeTimer = 0;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    document.querySelectorAll("details.fn").forEach(card => { if (card.open) renderPlot(card); });
+  }, 120);
+});
+
+function positionTip(clientX, clientY) {
+  const pad = 14;
+  const rect = tip.getBoundingClientRect();
+  let x = clientX + pad;
+  let y = clientY + pad;
+  if (x + rect.width > innerWidth) x = clientX - rect.width - pad;
+  if (y + rect.height > innerHeight) y = clientY - rect.height - pad;
+  tip.style.left = Math.max(4, x) + "px";
+  tip.style.top = Math.max(4, y) + "px";
+}
+
+addEventListener("mousemove", event => {
+  if (tip.style.opacity === "1") positionTip(event.clientX, event.clientY);
+});
+</script>
+</body>
+</html>

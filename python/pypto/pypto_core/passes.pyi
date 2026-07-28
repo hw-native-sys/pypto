@@ -235,21 +235,11 @@ class DiagnosticInstrument(PassInstrument):
         """Create a diagnostic instrument running the given check set."""
         ...
 
-class ReportType(Enum):
-    """Type of report to generate."""
-
-    Memory = ...
-    """Memory usage per MemorySpace."""
-
 class ReportInstrument(PassInstrument):
-    """Instrument that generates reports to files after specified passes."""
+    """Instrument that names the directory pipeline artifacts are written to."""
 
     def __init__(self, output_dir: str) -> None:
         """Create a report instrument with output directory."""
-        ...
-
-    def enable_report(self, type: ReportType, trigger_pass: str) -> None:
-        """Enable a report type after a specific pass."""
         ...
 
     def get_output_dir(self) -> str:
@@ -859,7 +849,6 @@ __all__ = [
     "PassInstrument",
     "VerificationInstrument",
     "CallbackInstrument",
-    "ReportType",
     "ReportInstrument",
     "PassContext",
     "PassPipeline",
