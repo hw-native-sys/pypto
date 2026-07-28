@@ -319,6 +319,7 @@ const snapshotControls = ["copy-before", "copy-after", "expand-all", "collapse-a
 );
 const expandedHunks = new Set();
 let selectedIndex = null;
+let synchronizingScroll = false;
 
 function visiblePasses() {
   return data.passes.filter((trace) =>
@@ -510,6 +511,17 @@ function toggleTheme() {
   root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
 }
 
+function synchronizeScroll(source, target) {
+  if (synchronizingScroll) return;
+  if (target.scrollTop === source.scrollTop && target.scrollLeft === source.scrollLeft) return;
+  synchronizingScroll = true;
+  target.scrollTop = source.scrollTop;
+  target.scrollLeft = source.scrollLeft;
+  window.requestAnimationFrame(() => {
+    synchronizingScroll = false;
+  });
+}
+
 function applyFilters() {
   const passes = visiblePasses();
   if (!passes.some((trace) => trace.index === selectedIndex)) {
@@ -525,6 +537,8 @@ function applyFilters() {
 
 changedFilter.addEventListener("change", applyFilters);
 noopFilter.addEventListener("change", applyFilters);
+beforePane.addEventListener("scroll", () => synchronizeScroll(beforePane, afterPane), { passive: true });
+afterPane.addEventListener("scroll", () => synchronizeScroll(afterPane, beforePane), { passive: true });
 document.getElementById("copy-before").addEventListener("click", () => copySnapshot("before"));
 document.getElementById("copy-after").addEventListener("click", () => copySnapshot("after"));
 document.getElementById("expand-all").addEventListener("click", () => setAllHunks(true));

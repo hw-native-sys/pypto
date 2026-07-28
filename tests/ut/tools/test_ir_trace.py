@@ -55,6 +55,8 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
             this.disabled = false;
             this.hidden = false;
             this.listeners = {{}};
+            this.scrollLeft = 0;
+            this.scrollTop = 0;
             this.style = {{}};
             this.textContent = "";
           }}
@@ -82,7 +84,10 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
           execCommand() {{ throw new Error("copy fallback must not run without a selected trace"); }},
           getElementById(id) {{ return elements[id]; }}
         }};
-        const window = {{ matchMedia() {{ return {{ matches: false }}; }} }};
+        const window = {{
+          matchMedia() {{ return {{ matches: false }}; }},
+          requestAnimationFrame(callback) {{ callback(); return 1; }}
+        }};
         Object.defineProperty(
           globalThis,
           "navigator",
@@ -778,6 +783,40 @@ def test_viewer_keyboard_navigation_works_from_focused_pass_button(tmp_path: Pat
         });
         if (selectedIndex !== 2) throw new Error("focused pass button blocked keyboard navigation");
         if (!prevented) throw new Error("handled navigation did not prevent the browser default");
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_synchronizes_both_scroll_axes_in_both_directions(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "before\n",
+            "01_after_ChangedPass.py": "after\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        const before = elements["before-pane"];
+        const after = elements["after-pane"];
+        before.scrollTop = 120;
+        before.scrollLeft = 45;
+        before.listeners.scroll();
+        if (after.scrollTop !== 120 || after.scrollLeft !== 45) {
+          throw new Error("before-to-after scroll synchronization failed");
+        }
+
+        after.scrollTop = 300;
+        after.scrollLeft = 80;
+        after.listeners.scroll();
+        if (before.scrollTop !== 300 || before.scrollLeft !== 80) {
+          throw new Error("after-to-before scroll synchronization failed");
+        }
         """,
     )
 
