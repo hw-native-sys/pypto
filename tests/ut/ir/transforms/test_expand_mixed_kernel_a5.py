@@ -364,9 +364,12 @@ def _make_cube_bias_expected(cube_op: str):
                     slayout=pl.TileLayout.row_major,
                 )
                 pl.tpush_to_aic(bias_tile_nz, split=0)
-                c_vec: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
+                c_vec: pl.Tile[
+                    [16, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[1, 128]),
+                ] = pl.tpop_from_aic(split=0)
                 out_0_store = pl.store(c_vec, [0, 0], out_0)
                 return out_0_store
 
