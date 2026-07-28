@@ -82,9 +82,25 @@ t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
 t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
 ```
 
-buffer 在函数内按名字标识。既不写大小也不写地址：编译器按最大成员定型。内存空间**必须**写
-（`TileType` 始终要求 MemRef 与空间成对出现）。未加注解的 tile 保持默认的自动复用。参见
-[InitMemRef](../passes/29-init_memref.md#用户-buffer) 与
+buffer 在函数内按名字标识，且自成命名空间——buffer 名不会解析到恰好同名的 Python 变量。
+既不写大小也不写地址：编译器按最大成员定型。内存空间**必须**写（`TileType` 始终要求 MemRef
+与空间成对出现）。未加注解的 tile 保持默认的自动复用。
+
+buffer 不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内绑定会被**拒绝**：复制出的各级
+会让同一个 tile 在同一块分配上与自身同时存活。具名槽位与"交给编译器做多缓冲"是二选一，不能
+叠加。要自己管理某一层，就用 `pl.range` 驱动它并为每个槽位命名一块 buffer；希望编译器管理的
+层次则不加注解。
+
+```python
+# 外层交给编译器，内层由作者自己做 ping-pong。
+for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
+    b_l1: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.load(b, [stack * K, 0], [K, N])
+    for col, (out_inner,) in pl.range(0, N, 2 * STEP, init_values=[out_outer]):
+        ping: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_ping"), pl.Mem.Right] = ...
+        pong: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_pong"), pl.Mem.Right] = ...
+```
+
+参见 [InitMemRef](../passes/29-init_memref.md#用户-buffer) 与
 [MemoryReuse](../passes/31-memory_reuse.md#用户-buffer)。
 
 ### Tile 视图 (TileView)

@@ -147,7 +147,10 @@ class UserBufferCollector : public IRVisitor {
   UserBufferMap buffers;
 
   // Every binding reaches this pass on a Var's type, so one VarLike override
-  // covers assignment LHSs, params, and iter_args alike.
+  // covers assignment LHSs and iter_args alike. Parameters are NOT visited —
+  // the traversal starts at the body — which is sound because the parser refuses
+  // `pl.Buffer(...)` in a parameter annotation ("Tile trailing arguments must be
+  // MemRef, MemorySpace, or TileView"), so no binding can arrive on a param.
   void VisitVarLike_(const VarPtr& op) override {
     if (op) Record(op);
     IRVisitor::VisitVarLike_(op);

@@ -1637,7 +1637,14 @@ class TypeResolver:
                 span=span,
                 hint='Use pl.Buffer("scratch")',
             )
-        base_var = self._intern_base_ptr(name_node.value, span)
+        # Buffer names are their own namespace, unrelated to Python variable
+        # names, so this must not reach `scope_lookup`. That fallback exists for
+        # `pl.MemRef(base, ...)` naming an alloc-defined Ptr; a buffer never has
+        # one (it is resolved before InitMemRef creates any). Left in, a buffer
+        # whose name merely collides with an in-scope variable — a tensor
+        # parameter `a` and `pl.Buffer("a")` — would silently take that
+        # variable, of arbitrary type, as its allocation base.
+        base_var = self._intern_base_ptr(name_node.value, span, skip_scope_lookup=True)
         return ir.MemRef(base_var, 0, 0, span)
 
     def _is_memory_space_node(self, node: ast.expr) -> bool:
@@ -1715,15 +1722,25 @@ class TypeResolver:
             hint="Use pl.MemRef(base_name, byte_offset, size)",
         )
 
-    def _intern_base_ptr(self, name: str, span: "ir.Span") -> "ir.Var":
+    def _intern_base_ptr(self, name: str, span: "ir.Span", skip_scope_lookup: bool = False) -> "ir.Var":
         """Get or create a shared Var for a base Ptr name.
 
         Ensures that two MemRef annotations referencing the same base name
         share the same Var instance, so MemRef.SameAllocation() works after
         parse round-trips. Checks scope_lookup first (for alloc-defined vars),
         then falls back to a per-resolver cache.
+
+        Args:
+            name: Base Ptr name to intern
+            span: Source location, used when a fresh Var is created
+            skip_scope_lookup: Resolve only through the resolver-local cache.
+                Set for ``pl.Buffer(...)`` names, which live in their own
+                namespace — see ``_resolve_buffer``.
+
+        Returns:
+            The shared Var for this base name
         """
-        if self.scope_lookup is not None:
+        if self.scope_lookup is not None and not skip_scope_lookup:
             existing = self.scope_lookup(name)
             if existing is not None:
                 return existing

@@ -37,6 +37,19 @@ class Buffer:
         b: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.exp(a)
         c: pl.Tile[[64, 64], pl.FP32, pl.Buffer("scratch"), pl.Mem.Vec] = pl.exp(b)
 
+    Buffers are function-scoped and do not clone per pipeline stage, so a binding
+    inside a ``pl.pipeline(stage=2)`` body is rejected: the cloned stages would
+    make the tile co-live with itself on one allocation. Naming slots and asking
+    the compiler to multi-buffer are alternatives, not layers — to manage a level
+    yourself, drive it with ``pl.range`` and name one buffer per slot::
+
+        # Author-managed ping-pong: two slots over a 2x-unrolled body.
+        for i, (acc,) in pl.range(0, N, 2 * STEP, init_values=[out]):
+            ping: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.load(x, [i, 0], [64, 64])
+            pong: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.load(
+                x, [i + STEP, 0], [64, 64]
+            )
+
     Note:
         ``pl.Buffer(...)`` inside a ``@pl.program`` body is resolved by the
         parser (``parser/type_resolver.py``); this class exists so the annotation

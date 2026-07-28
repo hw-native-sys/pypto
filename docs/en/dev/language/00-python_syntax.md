@@ -83,11 +83,28 @@ t1: pl.Tile[[64, 64], pl.FP32, pl.Buffer("pong"), pl.Mem.Vec] = pl.exp(t0)
 t2: pl.Tile[[64, 64], pl.FP32, pl.Buffer("ping"), pl.Mem.Vec] = pl.exp(t1)
 ```
 
-Buffers are identified by name within a function. Neither a size nor an address is
-written: the compiler sizes the buffer to its largest member. The memory space **is**
-required (a `TileType` always pairs a MemRef with a space). Tiles left unannotated
-keep the default automatic reuse. See
-[InitMemRef](../passes/29-init_memref.md#user-buffers) and
+Buffers are identified by name within a function, in their own namespace — a buffer
+name never resolves to a Python variable that happens to share it. Neither a size nor
+an address is written: the compiler sizes the buffer to its largest member. The memory
+space **is** required (a `TileType` always pairs a MemRef with a space). Tiles left
+unannotated keep the default automatic reuse.
+
+Buffers do not clone per pipeline stage, so a binding inside a `pl.pipeline(stage=2)`
+body is **rejected**: the cloned stages would make the tile co-live with itself on one
+allocation. Naming slots and asking the compiler to multi-buffer are alternatives, not
+layers. To manage a level yourself, drive it with `pl.range` and name one buffer per
+slot; leave the levels you want the compiler to manage unannotated.
+
+```python
+# Outer level compiler-managed, inner level author-managed ping-pong.
+for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
+    b_l1: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.load(b, [stack * K, 0], [K, N])
+    for col, (out_inner,) in pl.range(0, N, 2 * STEP, init_values=[out_outer]):
+        ping: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_ping"), pl.Mem.Right] = ...
+        pong: pl.Tile[[K, STEP], pl.BF16, pl.Buffer("l0b_pong"), pl.Mem.Right] = ...
+```
+
+See [InitMemRef](../passes/29-init_memref.md#user-buffers) and
 [MemoryReuse](../passes/31-memory_reuse.md#user-buffers).
 
 ### Tile Views (TileView)

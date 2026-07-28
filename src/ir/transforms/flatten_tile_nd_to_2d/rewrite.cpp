@@ -830,9 +830,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           new_args.push_back(Substitute(call->args_[i], ctx.var_map));
         }
 
-        auto new_call = op_registry.Create(op_name, new_args, call->kwargs_, span);
-        auto flat_var =
-            std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+        auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
+        auto created_type = WithCarriedMemRef(deduced->GetType(), assign);
+        auto new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_,
+                                               deduced->attrs_, created_type, deduced->span_);
+        auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, created_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
         ctx.Insert(assign->var_, flat_var);
         continue;

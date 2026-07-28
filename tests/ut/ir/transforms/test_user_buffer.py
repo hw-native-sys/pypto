@@ -126,6 +126,59 @@ class TestBinding:
         assert bases["t1"] == "pong"
         assert len(_alloc_lines(after)) == 2
 
+    def test_buffer_name_does_not_capture_a_same_named_variable(self):
+        """Buffer names are their own namespace, not Python variable names.
+
+        The base-Ptr interner falls back to a scope lookup so `pl.MemRef(base, ...)`
+        can name an alloc-defined Ptr. A buffer has no such Ptr — it is resolved
+        before InitMemRef makes one — so that fallback could only misfire: a buffer
+        named after an in-scope variable would take that variable, of arbitrary
+        type, as its allocation base, and the alloc would then declare a
+        Tensor-typed var as a base Ptr.
+        """
+        source = """
+import pypto.language as pl
+
+
+@pl.program
+class Collide:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, pl.Buffer("a"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(t0, [0, 0], out)
+"""
+        after = passes.init_mem_ref()(pl.parse_program(source))
+        base = _tile_memrefs(after)["t0"].base_
+        assert isinstance(base.type, ir.PtrType), f"buffer base must be a Ptr, got {base.type}"
+        allocs = _alloc_lines(after)
+        assert len(allocs) == 1 and "pinned=True" in allocs[0], allocs
+        assert "pl.Ptr = pl.tile.alloc" in allocs[0], f"alloc must bind a Ptr, got {allocs[0]}"
+
+    def test_binds_a_transpose_output(self):
+        """`tile.transpose` owns its output buffer, so it may be bound.
+
+        It inherits the input's memory *space*, but `pto.ttrans` is registered
+        `not_inplace_safe()` — the permute lands in a fresh buffer. Treating
+        space inheritance as buffer inheritance would refuse a binding the
+        hardware has no problem with.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                t0: pl.Tile[[64, 32], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 32])
+                tr: pl.Tile[[32, 64], pl.FP32, pl.Buffer("trans"), pl.Mem.Vec] = pl.tile.transpose(t0, 0, 1)
+                return pl.store(tr, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        assert _base_names(after)["tr"] == "trans"
+
     def test_size_is_the_largest_bound_tile(self):
         """The author writes no byte count: the buffer is sized to hold any member."""
 
@@ -391,6 +444,32 @@ class TestPipeline:
         assert {"l0c_ping", "l0c_pong"} <= bases, f"binding lost in an spmd kernel, got {bases}"
         pinned = [line for line in _alloc_lines(after) if "pinned=True" in line]
         assert len(pinned) == 2, f"expected two pinned Acc allocations, got {pinned}"
+
+    def test_binding_survives_nd_tile_create_flattening(self, ascend_backend):
+        """The rank>2 `tile.create` / `tile.full` rewrite must carry the binding too.
+
+        That path re-deduces the 2D call through the OpRegistry, same as the
+        tile.load and generic-op paths — and the deduced type carries no MemRef.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4, 16, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[4, 16, 64], pl.FP32]:
+                made: pl.Tile[[4, 16, 64], pl.FP32, pl.Buffer("made_buf"), pl.Mem.Vec] = pl.tile.create(
+                    [4, 16, 64], pl.FP32
+                )
+                loaded: pl.Tile[[4, 16, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0, 0], [4, 16, 64])
+                summed: pl.Tile[[4, 16, 64], pl.FP32, pl.Mem.Vec] = pl.add(made, loaded)
+                return pl.store(summed, [0, 0, 0], out)
+
+        after = _run_full_pipeline(Before, "InitMemRef")
+        bases = set(_base_names(after).values())
+        assert "made_buf" in bases, f"tile.full binding lost during flattening, got {bases}"
 
     def test_reparsed_dump_is_not_treated_as_user_buffers(self, ascend_backend):
         """A post-allocation dump also carries MemRefs — those are not user buffers.
