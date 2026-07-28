@@ -453,18 +453,15 @@ params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
 
 只有当 TaskId 可能合法地持有 `PTO2TaskId::invalid()` 哨兵时，dep 槽位才被
-`if (task_id.is_valid())` 包裹——`None` 循环 carry 种子、循环首次迭代的
-iter_arg carry，或未写入的数组槽——因为 invalid id 绝不能进入
-`set_dependencies`。而**新鲜的直接生产者** TaskId（同一直线作用域中更早的
-`pl.submit(...)` 的输出）静态上恒为有效，因此其插入不加守卫（issue #1966），
-从编排热路径上消除了这个恒真分支。
+`if (task_id.is_valid())` 包裹，因为 invalid id 绝不能进入
+`set_dependencies`；而**新鲜的直接生产者** TaskId 静态上恒为有效，因此其插入
+不加守卫（issue #1966）。完整的分类见 [TaskId 的来源](#taskid-的来源)。
 
 不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
-`Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边
-用户依赖来自 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])`
-kwarg 写入类型化的 `Submit::deps_` 字段；codegen 通过临时的 `SubmitToCallView`
-读取它们——该 view 把 `deps_` 合成为 `attrs["manual_dep_edges"]`（一个
-`vector<VarPtr>`，每项为 `Scalar[TASK_ID]` 类型的 Var）。普通 `Call` 携带
+`Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。用户依赖来自
+parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类型化的
+`Submit::deps_` 字段；codegen 通过临时的 `SubmitToCallView` 读取它们——该 view
+把 `deps_` 合成为 `attrs["manual_dep_edges"]`。普通 `Call` 携带
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的依赖边来自
@@ -472,10 +469,11 @@ kwarg 写入类型化的 `Submit::deps_` 字段；codegen 通过临时的 `Submi
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
 显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
-`analyze_auto_scopes_for_deps` 打开时才生效：被完整覆盖的区域随后会被物化为
-*编译器自有*的 MANUAL scope；部分覆盖的默认模式区域保持 AUTO，其可表示的边叠加
-在 runtime 自动追踪之上发出；手工放置的 `pl.scope()` 一旦回退，则会剥离其部分
-推导边。Codegen 会按这个顺序合并两组列表，并按 Var identity 去重后再发出栈数组。
+`analyze_auto_scopes_for_deps` 打开时才生效。默认模式（`auto_scope=True`）区域
+在被完整覆盖时会成为*编译器自有*的 MANUAL scope，否则保持 AUTO，其可表示的边
+叠加在 runtime 自动追踪之上发出；手工放置的 `pl.scope()` 始终保持
+`manual=false`，一旦分析回退则会剥离其部分推导边。Codegen 会按这个顺序合并两组
+列表，并按 Var identity 去重后再发出栈数组。
 
 ### TaskId 的来源
 

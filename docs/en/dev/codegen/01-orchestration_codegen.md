@@ -464,23 +464,19 @@ if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // loop c
 params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
 
-A dep slot is wrapped in `if (task_id.is_valid())` only when the TaskId may
-legitimately hold the `PTO2TaskId::invalid()` sentinel — a `None` loop-carry
-seed, an early loop iteration's iter_arg carry, or an unwritten array slot —
-because an invalid id must never reach `set_dependencies`. A **fresh
-direct-producer** TaskId (the output of a `pl.submit(...)` earlier in the same
-straight-line scope) is statically always-valid, so its insert is emitted
-unguarded (issue #1966), dropping the redundant always-true branch from the
-orchestration hot path.
+A dep slot is guarded with `if (task_id.is_valid())` only when the TaskId may
+legitimately hold the `PTO2TaskId::invalid()` sentinel, because an invalid id
+must never reach `set_dependencies`; a **fresh direct-producer** TaskId is
+statically always-valid and is emitted unguarded (issue #1966). See
+[TaskId sourcing](#taskid-sourcing) for the full case list.
 
-There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
-— the runtime `Arg::set_dependencies` primitive has no upper bound, and the
-stack array is sized to the exact count. User edges come from the parser:
-it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg into the typed
-`Submit::deps_` field; codegen reads them through the transient
-`SubmitToCallView`, which surfaces `deps_` as a synthesised
-`attrs["manual_dep_edges"]` entry (a `vector<VarPtr>` of `Scalar[TASK_ID]`
-variables). Plain `Call` carriers of `manual_dep_edges` no longer exist — the
+There is no `params.add_dep(...)` call and no 16-dep cap — the runtime
+`Arg::set_dependencies` primitive has no upper bound, and the stack array is
+sized to the exact count. User edges come from the parser: it writes the user's
+`pl.submit(..., deps=[tid1, tid2])` kwarg into the typed `Submit::deps_` field;
+codegen reads them through the transient `SubmitToCallView`, which surfaces
+`deps_` as a synthesised `attrs["manual_dep_edges"]` entry. Plain `Call`
+carriers of `manual_dep_edges` no longer exist — the
 ManualDepsOnSubmitOnly structural property verifies that no cross-function
 `Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
 its fanin contract. Compiler-derived edges come from
@@ -489,20 +485,19 @@ in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
 calls). That pass never analyzes a user-written MANUAL scope — inside
 `pl.manual_scope()` the explicit `deps=[...]` list stays the only source of
 dependency edges. It analyzes AUTO regions only, and only under the compile-time
-`analyze_auto_scopes_for_deps` switch: a fully covered region is then
-materialized as a *compiler-owned* MANUAL scope, a partially covered
-default-mode region stays AUTO with its representable edges emitted on top of
-runtime auto-tracking, and a hand-placed `pl.scope()` that falls back has its
-partial edges stripped. Codegen merges the two lists in that order and
+`analyze_auto_scopes_for_deps` switch. A default-mode (`auto_scope=True`) region
+becomes a *compiler-owned* MANUAL scope when fully covered, and otherwise stays
+AUTO with its representable edges emitted on top of runtime auto-tracking. A
+hand-placed `pl.scope()` always keeps `manual=false`, and has its partial edges
+stripped if analysis falls back. Codegen merges the two lists in that order and
 deduplicates by Var identity before emitting the stack array.
 
 ### TaskId sourcing
 
-Every kernel task launch inside a manual scope is a `Submit`; the
-`SubmitToCallView` adapter presents its `deps_` to codegen as
-`manual_dep_edges` — a `vector<VarPtr>` of `Scalar[TASK_ID]` variables.
-Compiler-derived edges arrive as `attrs["compiler_manual_dep_edges"]` on
-plain calls. Each entry resolves at codegen time through
+Every kernel task launch inside a manual scope is a `Submit`. Each dep entry —
+`manual_dep_edges` synthesised from `deps_` by `SubmitToCallView`, or
+`compiler_manual_dep_edges` on a plain call — is a TaskId `VarPtr`
+(`Scalar[TASK_ID]` or `Array[N, TASK_ID]`) and resolves at codegen time through
 `manual_task_id_map_` to one of the following forms:
 
 | Producer kind | C++ source emitted by codegen |

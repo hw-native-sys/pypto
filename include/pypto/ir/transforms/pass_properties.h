@@ -356,8 +356,9 @@ inline const PassProperties kExpandManualPhaseFenceProperties{
 // MANUAL scopes are never analyzed: their explicit ``deps=[...]`` edges remain
 // the only task dependencies. AUTO-scope analysis is controlled by the pass
 // option and remains off by default at high-level pipeline entry points. The
-// pass preserves CallDirectionsResolved because it does not rewrite call args
-// or direction attrs.
+// pass preserves CallDirectionsResolved because it does not rewrite call args:
+// in an analyzed AUTO region it only refines already-resolved directions
+// (``Input -> NoDep``, ``InOut -> OutputExisting``), leaving every arg resolved.
 inline const PassProperties kAutoDeriveTaskDependenciesProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
     .produced = {IRProperty::CallDirectionsResolved}};
