@@ -43,6 +43,7 @@ namespaces the prefix per dispatch:
 ```text
 <work_dir>/dfx_outputs/
 ├── rank0/d0/          # rank 0, its 0th dispatch
+│   └── dispatch_program.json   # which next_levels/<program> ran here
 ├── rank0/d1/          # rank 0, its 1st dispatch
 └── rank1/d0/
 ```
@@ -54,6 +55,15 @@ under the chip it was placed on — those are handed out round-robin over
 the program's chips in submit order. Each leaf holds the flat artefacts
 from the table above, so the L2 contract applies unchanged within one
 dispatch directory.
+
+The path records *where* a dispatch ran, not *what* it ran, so
+`_submit_chip` also drops a `dispatch_program.json` naming the
+`next_levels/<program>` behind it. Kernel names must be resolved through
+it: `func_id` is a per-L2-program namespace — every program numbers its
+kernels from 0 — so a name map merged across programs relabels one
+program's tasks with another's names, silently and plausibly. A dispatch
+whose program cannot be resolved is converted with anonymous labels
+instead of guessed ones.
 
 ## L2 swimlane runs the kernel twice (onboard)
 
@@ -286,6 +296,8 @@ this hint at the end of every scope-stats-enabled run.
 | Pipeline bundle | [runner.py](../../../python/pypto/runtime/runner.py) | `_DfxOpts` dataclass + `_DfxOpts.from_run_config` |
 | Per-flag post-run dispatch | [runner.py](../../../python/pypto/runtime/runner.py) | `_collect_dfx_artifacts` |
 | Kernel-name map synthesis | [runner.py](../../../python/pypto/runtime/runner.py) | `_write_name_map` |
+| L3 per-dispatch program marker | [distributed_runner.py](../../../python/pypto/runtime/distributed_runner.py) | `_record_dispatch_program` / `_read_dispatch_program` |
+| L3 per-dispatch swimlane conversion | [distributed_runner.py](../../../python/pypto/runtime/distributed_runner.py) | `_collect_l3_swimlane` / `_write_dispatch_name_map` |
 | pytest entry | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness pipeline ctx | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 

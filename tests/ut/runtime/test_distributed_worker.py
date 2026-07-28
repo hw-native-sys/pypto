@@ -17,6 +17,8 @@ domains, and a complete synchronous cleanup boundary for every caller-visible
 request.
 """
 
+import importlib.util
+import json
 import sys
 import threading
 import weakref
@@ -38,6 +40,7 @@ from pypto.runtime.distributed_runner import (
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
     _make_call_config,
+    _reset_dfx_dispatch_state,
     _submit_chip,
 )
 from pypto.runtime.runner import RunConfig
@@ -1288,6 +1291,39 @@ class TestSubmitChip:
         _submit_chip(orch, "chip", "ta", cfg, 1)
         assert [c[1] for c in orch.calls] == [1, 0, 1]
 
+    def test_records_each_dispatchs_l2_program(self, tmp_path):
+        # Issue #2169: ``rank{w}/d{k}`` says where a dispatch ran, not what it
+        # ran, and ``func_id`` only means something within one L2 program. The
+        # marker written here is what lets the offline post-pass label a
+        # dispatch's records with its own program's kernel names.
+        chip_cids = {"lm_head": object(), "mtp_decode_layer": object()}
+        orch = _RecordingOrch()
+        _reset_dfx_dispatch_state(orch, chip_cids)
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+
+        # One card, two different programs -> d0 and d1 name their own program.
+        _submit_chip(orch, chip_cids["mtp_decode_layer"], "ta", cfg, 0)
+        _submit_chip(orch, chip_cids["lm_head"], "ta", cfg, 0)
+
+        assert json.loads((tmp_path / "rank0" / "d0" / "dispatch_program.json").read_text()) == {
+            "program": "mtp_decode_layer"
+        }
+        assert json.loads((tmp_path / "rank0" / "d1" / "dispatch_program.json").read_text()) == {
+            "program": "lm_head"
+        }
+
+    def test_no_marker_when_chip_names_unstamped(self, tmp_path):
+        # A caller that bypassed ``_reset_dfx_dispatch_state`` leaves no name
+        # table on ``orch``; the dispatch must still go through (the marker is a
+        # diagnostic, never a precondition).
+        orch = _RecordingOrch()
+        cfg = _SpyDfxConfig(output_prefix=str(tmp_path))
+
+        _submit_chip(orch, "chip_a", "ta", cfg, 0)
+
+        assert orch.calls == [("chip_a", 0, f"{tmp_path}/rank0/d0")]
+        assert not (tmp_path / "rank0" / "d0" / "dispatch_program.json").exists()
+
 
 def _write_dfx_dispatch_dirs(dfx: Path, *rels: str) -> None:
     """Lay down ``<dfx>/<rel>/l2_swimlane_records.json`` for each dispatch dir.
@@ -1298,6 +1334,54 @@ def _write_dfx_dispatch_dirs(dfx: Path, *rels: str) -> None:
     for rel in rels:
         (dfx / rel).mkdir(parents=True)
         (dfx / rel / "l2_swimlane_records.json").write_text("{}", encoding="utf-8")
+
+
+def _write_chip_program(output_dir: Path, program: str, *kernel_names: str) -> None:
+    """Lay down ``next_levels/<program>/kernel_config.py`` naming *kernel_names*.
+
+    Every L2 program numbers its kernels from ``func_id`` 0 — that shared
+    numbering is exactly what makes a name map merged across programs wrong
+    (issue #2169), so each program written here starts at 0 on purpose.
+    """
+    chip_dir = output_dir / "next_levels" / program
+    chip_dir.mkdir(parents=True)
+    kernels = [{"func_id": i, "name": name} for i, name in enumerate(kernel_names)]
+    (chip_dir / "kernel_config.py").write_text(f"KERNELS = {kernels!r}\n", encoding="utf-8")
+
+
+def _mark_dispatch_program(disp_dir: Path, program: str) -> None:
+    """Stamp the marker ``_submit_chip`` writes for a dispatch of *program*."""
+    (disp_dir / "dispatch_program.json").write_text(json.dumps({"program": program}), encoding="utf-8")
+
+
+@pytest.fixture
+def fake_swimlane_converter(monkeypatch):
+    """Register a fake ``simpler_setup.tools.swimlane_converter``.
+
+    The real module ships with the optional ``simpler`` runtime package, which is
+    not installed in CI. The fake reproduces the one function pypto calls,
+    ``load_kernel_config``, with the real contract: import the ``kernel_config.py``
+    and return its ``func_id`` (as ``str``) -> ``name`` mapping. Tests therefore
+    still exercise the genuine on-disk layout.
+    """
+    pkg = ModuleType("simpler_setup")
+    tools = ModuleType("simpler_setup.tools")
+    mod = ModuleType("simpler_setup.tools.swimlane_converter")
+
+    def load_kernel_config(config_path: str) -> dict[str, str]:
+        spec = importlib.util.spec_from_file_location("kernel_config", config_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return {str(k["func_id"]): k["name"] for k in module.KERNELS}
+
+    mod.load_kernel_config = load_kernel_config  # pyright: ignore[reportAttributeAccessIssue]
+    tools.swimlane_converter = mod  # pyright: ignore[reportAttributeAccessIssue]
+    pkg.tools = tools  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setitem(sys.modules, "simpler_setup", pkg)
+    monkeypatch.setitem(sys.modules, "simpler_setup.tools", tools)
+    monkeypatch.setitem(sys.modules, "simpler_setup.tools.swimlane_converter", mod)
+    return mod
 
 
 class TestClearDfxDispatchDirs:
@@ -1330,14 +1414,16 @@ class TestCollectL3Swimlane:
     """``_collect_l3_swimlane`` converts every ``rank*/d{k}`` dispatch's records."""
 
     @staticmethod
-    def _spy_generate_swimlane(monkeypatch) -> list[Path]:
-        """Record which dispatch dirs the converter was invoked on."""
+    def _spy_generate_swimlane(monkeypatch) -> list[SimpleNamespace]:
+        """Record each converter invocation (dispatch dir, ``-k`` dir, name map)."""
         import pypto.runtime.runner as _runner  # noqa: PLC0415
 
-        seen: list[Path] = []
+        seen: list[SimpleNamespace] = []
 
-        def _fake(work_dir, out_dir, records, func_names=None):  # noqa: ANN001, ARG001
-            seen.append(out_dir)
+        def _fake(work_dir, out_dir, records, func_names=None):  # noqa: ANN001
+            seen.append(
+                SimpleNamespace(work_dir=work_dir, out_dir=out_dir, records=records, func_names=func_names)
+            )
 
         monkeypatch.setattr(_runner, "_generate_swimlane", _fake)
         return seen
@@ -1358,7 +1444,7 @@ class TestCollectL3Swimlane:
 
         _collect_l3_swimlane(tmp_path, "a2a3")
 
-        assert sorted(str(p.relative_to(dfx)) for p in seen) == [
+        assert sorted(str(s.out_dir.relative_to(dfx)) for s in seen) == [
             "rank0/d0",
             "rank0/d1",
             "rank1/d0",
@@ -1381,6 +1467,112 @@ class TestCollectL3Swimlane:
         _collect_l3_swimlane(tmp_path, "a2a3")
 
         assert seen == []
+
+    def test_name_map_is_scoped_to_each_dispatchs_own_program(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # Regression for issue #2169. Two L2 programs both number their kernels
+        # from func_id 0, so a name map merged across them relabels one
+        # program's tasks with the other's names — silently and plausibly
+        # (``lm_head_dispatch_wait``, a cross-card spin-wait, printed as
+        # ``mtp_projection_norm``). Each dispatch must get its own program's map.
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "lm_head", "lm_head_dispatch_push", "lm_head_dispatch_wait")
+        _write_chip_program(tmp_path, "mtp_decode_layer", "mtp_projection_rms", "mtp_projection_norm")
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0", "rank0/d1")
+        _mark_dispatch_program(dfx / "rank0" / "d0", "mtp_decode_layer")
+        _mark_dispatch_program(dfx / "rank0" / "d1", "lm_head")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        by_dir = {s.out_dir.name: s for s in seen}
+        assert set(by_dir) == {"d0", "d1"}
+        # Each dispatch's name map holds its own program's kernels...
+        for disp, program, names in (
+            ("d0", "mtp_decode_layer", ["mtp_projection_rms", "mtp_projection_norm"]),
+            ("d1", "lm_head", ["lm_head_dispatch_push", "lm_head_dispatch_wait"]),
+        ):
+            name_map = json.loads((dfx / "rank0" / disp / "name_map.json").read_text())
+            assert name_map["callable_id_to_name"] == {"0": names[0], "1": names[1]}
+            assert by_dir[disp].func_names == dfx / "rank0" / disp / "name_map.json"
+            # ...and the converter's ``-k`` fallback names the same program, so
+            # the two label sources can never disagree.
+            assert by_dir[disp].work_dir == tmp_path / "next_levels" / program
+
+    def test_sole_program_names_an_unmarked_dispatch(self, tmp_path, monkeypatch, fake_swimlane_converter):
+        # Only one L2 program in the build: there is no namespace to confuse, so
+        # a dispatch without a marker (e.g. artifacts from an older run) is still
+        # labelled rather than degraded to anonymous tasks.
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "only_chip", "rms", "matmul")
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        name_map = json.loads((dfx / "rank0" / "d0" / "name_map.json").read_text())
+        assert name_map["callable_id_to_name"] == {"0": "rms", "1": "matmul"}
+        assert seen[0].work_dir == tmp_path / "next_levels" / "only_chip"
+
+    def test_unresolvable_dispatch_converts_without_names(
+        self, tmp_path, monkeypatch, fake_swimlane_converter, capsys
+    ):
+        # Several programs and no marker: the program is genuinely unknown. The
+        # records still convert, but with anonymous labels — a wrong name is
+        # worse than no name, since it reads as a real measurement.
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "lm_head", "lm_head_dispatch_push")
+        _write_chip_program(tmp_path, "mtp_decode_layer", "mtp_projection_rms")
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert len(seen) == 1
+        assert seen[0].func_names is None
+        assert not (dfx / "rank0" / "d0" / "name_map.json").exists()
+        # ``work_dir`` holds no kernel_config.py, so no other program's table is
+        # handed to the converter's ``-k`` fallback either.
+        assert not (seen[0].work_dir / "kernel_config.py").exists()
+        assert "No L2 program recorded for rank0/d0" in capsys.readouterr().out
+
+    def test_unresolvable_dispatch_drops_a_stale_name_map(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # With neither ``--func-names`` nor ``-k``, the converter auto-discovers
+        # a sibling ``name_map*.json`` — so a map left by an earlier run would
+        # quietly resurrect the mislabelling this fix removes.
+        self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "lm_head", "lm_head_dispatch_push")
+        _write_chip_program(tmp_path, "mtp_decode_layer", "mtp_projection_rms")
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+        stale = dfx / "rank0" / "d0" / "name_map.json"
+        stale.write_text('{"callable_id_to_name": {"0": "mtp_projection_rms"}}', encoding="utf-8")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert not stale.exists()
+
+    def test_stray_subdir_does_not_hide_the_sole_program(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        # ``next_levels/`` may hold a subdir that is not an L2 program (no
+        # kernel_config.py). Counting it would make the build look multi-program
+        # and needlessly drop the unmarked dispatch to anonymous labels.
+        seen = self._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "only_chip", "rms")
+        (tmp_path / "next_levels" / "scratch").mkdir()
+        dfx = tmp_path / "dfx_outputs"
+        _write_dfx_dispatch_dirs(dfx, "rank0/d0")
+
+        _collect_l3_swimlane(tmp_path, "a2a3")
+
+        assert seen[0].work_dir == tmp_path / "next_levels" / "only_chip"
+        assert json.loads((dfx / "rank0" / "d0" / "name_map.json").read_text())["callable_id_to_name"] == {
+            "0": "rms"
+        }
 
 
 class _BoolStrictCallConfig:

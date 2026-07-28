@@ -39,6 +39,7 @@ dispatch——若共用同一 prefix，各次 dispatch 会互相覆盖同名产�
 ```text
 <work_dir>/dfx_outputs/
 ├── rank0/d0/          # rank 0 的第 0 次 dispatch
+│   └── dispatch_program.json   # 本次 dispatch 运行的 next_levels/<program>
 ├── rank0/d1/          # rank 0 的第 1 次 dispatch
 └── rank1/d0/
 ```
@@ -48,6 +49,14 @@ dispatch——若共用同一 prefix，各次 dispatch 会互相覆盖同名产�
 comm-less 的（没有 `device=`）则按被分配到的芯片——这类 dispatch 按提交
 顺序在程序的各芯片间轮询分配。每个叶子目录内是上表所述的扁平产物，
 因此在单个 dispatch 目录内 L2 契约完全适用。
+
+该路径只记录 dispatch 跑在**哪里**，不记录它跑的是**什么**，因此
+`_submit_chip` 还会写一份 `dispatch_program.json`，指明背后的
+`next_levels/<program>`。kernel 名称必须经由它解析：`func_id` 是
+**每个 L2 program 独立的命名空间**——每个 program 的 kernel 都从 0 开始
+编号，所以跨 program 合并的 name map 会把一个 program 的 task 标成另一个
+program 的名字，既静默又看似合理。若某次 dispatch 的 program 无法解析，
+转换时使用匿名标签，而不是猜一个名字。
 
 ## L2 泳道会把 kernel 跑两遍（onboard）
 
@@ -257,6 +266,8 @@ python runtime/tools/scope_stats_plot.py \
 | 流水线打包 | [runner.py](../../../python/pypto/runtime/runner.py) | `_DfxOpts` dataclass + `_DfxOpts.from_run_config` |
 | 按 flag 后处理分发 | [runner.py](../../../python/pypto/runtime/runner.py) | `_collect_dfx_artifacts` |
 | kernel 名称映射合成 | [runner.py](../../../python/pypto/runtime/runner.py) | `_write_name_map` |
+| L3 每次 dispatch 的 program 标记 | [distributed_runner.py](../../../python/pypto/runtime/distributed_runner.py) | `_record_dispatch_program` / `_read_dispatch_program` |
+| L3 每次 dispatch 的泳道转换 | [distributed_runner.py](../../../python/pypto/runtime/distributed_runner.py) | `_collect_l3_swimlane` / `_write_dispatch_name_map` |
 | pytest 入口 | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness 流水线上下文 | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 

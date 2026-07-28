@@ -1120,7 +1120,9 @@ def _generate_swimlane(
     Output is written to *swimlane_dir* alongside the input ``l2_swimlane_records_*.json``.
 
     Args:
-        work_dir: Directory containing ``kernel_config.py``.
+        work_dir: Directory containing ``kernel_config.py``. Passed to the
+            converter as ``-k`` when the file exists, and omitted when it does
+            not (the converter rejects a missing path).
         swimlane_dir: Directory where swimlane JSON files are written.
         perf_file: Path to the ``l2_swimlane_records_*.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
@@ -1153,9 +1155,13 @@ def _generate_swimlane(
         str(perf_file),
         "-o",
         str(output_path),
-        "-k",
-        str(kernel_config_path),
     ]
+    # The converter *errors out* on a ``-k`` path that does not exist, so only
+    # pass it when there is a config to read: a caller with no single owning
+    # program (see ``_collect_l3_swimlane``) still gets a swimlane, just with
+    # anonymous task labels.
+    if kernel_config_path.exists():
+        cmd += ["-k", str(kernel_config_path)]
     # ``--func-names`` (the synthesised name_map) takes precedence over ``-k``
     # for label resolution; ``-k`` stays as the fallback when no map was written.
     if func_names is not None:

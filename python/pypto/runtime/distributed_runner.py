@@ -507,6 +507,13 @@ def _make_call_config(
 _RANK_DIR_GLOB = "rank*"
 _DISPATCH_DIR_GLOB = "d[0-9]*"
 
+# Written by ``_submit_chip`` into each dispatch dir and read back by
+# ``_collect_l3_swimlane``. ``rank{w}/d{k}`` records *where* a dispatch ran but not
+# *what* it ran, and a kernel's ``func_id`` only means something within one
+# ``next_levels/<program>`` — so naming a dispatch's tasks needs this marker
+# (issue #2169).
+_DISPATCH_PROGRAM_FILE = "dispatch_program.json"
+
 
 def _dfx_rank_label(worker: int) -> str:
     """Directory name namespacing one card's DFX artifacts.
@@ -544,6 +551,53 @@ def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
     return seq % chip_count
 
 
+def _reset_dfx_dispatch_state(orch: Any, chip_cids: dict[str, Any]) -> None:
+    """Reset the per-run dispatch state :func:`_submit_chip` reads off ``orch``.
+
+    ``_dfx_dispatch_idx`` numbers each card's dispatches ``d0, d1, ...`` fresh per
+    run, so the swimlane two-pass files one dispatch under one directory.
+
+    ``_dfx_chip_names`` reverses the registered ``callables`` mapping so
+    ``_submit_chip`` can name the L2 program behind an otherwise opaque
+    ``CallableHandle``. Keyed by ``id()``: the handle is not required to be
+    hashable, and ``chip_cids`` holds every one alive for the whole run, so the
+    ids are stable and unique.
+    """
+    orch._dfx_dispatch_idx = {}
+    orch._dfx_chip_names = {id(cid): name for name, cid in chip_cids.items()}
+
+
+def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> None:
+    """Record which L2 program a dispatch runs, for the swimlane post-pass.
+
+    A kernel's ``func_id`` is a per-L2-program namespace — every
+    ``next_levels/<program>/kernel_config.py`` numbers its kernels from 0 — so
+    labelling a dispatch's records requires knowing the program that produced
+    them. This wrapper is the only place that sees both the dispatch directory
+    and the callable being dispatched, so it stamps the pairing on disk
+    (:data:`_DISPATCH_PROGRAM_FILE`) for :func:`_collect_l3_swimlane` to read
+    back. Going through the filesystem keeps the two halves independent of where
+    the runtime places the L3 orchestrator, and the marker is rewritten
+    identically by both swimlane passes.
+
+    Best-effort: a marker that cannot be written costs kernel labels, never the
+    run. Silent when the caller bypassed :func:`_reset_dfx_dispatch_state` and
+    left no name table on ``orch``.
+    """
+    name = getattr(orch, "_dfx_chip_names", {}).get(id(callable_id))
+    if name is None:
+        return
+    try:
+        disp_dir.mkdir(parents=True, exist_ok=True)
+        (disp_dir / _DISPATCH_PROGRAM_FILE).write_text(json.dumps({"program": name}), encoding="utf-8")
+    except OSError as e:
+        print(
+            f"Could not record the dispatch program for {disp_dir} ({type(e).__name__}: {e}); "
+            "its swimlane falls back to anonymous task labels unless the build has a single "
+            "L2 program"
+        )
+
+
 def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None) -> Any:
     """``orch.submit_next_level`` with per-dispatch DFX ``output_prefix`` isolation.
 
@@ -561,8 +615,11 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     so it never races the already-queued task.
 
     ``k`` comes from a per-card counter on ``orch`` reset at the top of every
-    run (see ``_dispatch.orch_fn``), so the numbering is deterministic and
-    matches across the swimlane two-pass.
+    run (see :func:`_reset_dfx_dispatch_state`), so the numbering is
+    deterministic and matches across the swimlane two-pass. The dispatched
+    program is stamped into the same directory by
+    :func:`_record_dispatch_program`, so the offline post-pass can label the
+    records with the right program's kernel names.
 
     Every dispatch is namespaced ``rank{worker}/d{k}`` by the chip it runs on.
     When DFX is off (``output_prefix`` unset) the call is forwarded unchanged.
@@ -585,6 +642,7 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     k = idx_map.get(rank_label, 0)
     idx_map[rank_label] = k + 1
     config.output_prefix = f"{base}/{rank_label}/d{k}"
+    _record_dispatch_program(orch, callable_id, Path(config.output_prefix))
     try:
         return orch.submit_next_level(callable_id, task_args, config, worker=worker)
     finally:
@@ -615,6 +673,65 @@ def _clear_dfx_dispatch_dirs(dfx_base: Path) -> None:
                 shutil.rmtree(disp_dir, ignore_errors=True)
 
 
+def _read_dispatch_program(disp_dir: Path) -> str | None:
+    """Name of the L2 program that ran this dispatch, or ``None`` if unrecorded.
+
+    Reads back the marker :func:`_record_dispatch_program` wrote. A missing or
+    malformed marker is not an error — it only means the labels for this dispatch
+    cannot be resolved (see :func:`_collect_l3_swimlane`).
+    """
+    marker = disp_dir / _DISPATCH_PROGRAM_FILE
+    if not marker.exists():
+        return None
+    try:
+        program = json.loads(marker.read_text(encoding="utf-8"))["program"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return str(program)
+
+
+def _write_dispatch_name_map(disp_dir: Path, chip_dir: Path, cache: dict[str, dict[str, str]]) -> Path | None:
+    """Write *disp_dir*'s ``name_map.json`` from *chip_dir*'s ``kernel_config.py``.
+
+    The map is the one the L2 path synthesises (:func:`~pypto.runtime.runner._write_name_map`),
+    scoped to a single program: ``func_id`` numbering restarts per
+    ``next_levels/<program>``, so merging several programs' tables would silently
+    relabel one program's tasks with another's names (issue #2169).
+
+    *cache* memoises the per-program table across the dispatches that share a
+    program, so each ``kernel_config.py`` is exec'd once per run.
+
+    Returns the written path, or ``None`` when no table could be resolved (the
+    converter then falls back to anonymous ``task(rXtY)`` labels).
+    """
+    program = chip_dir.name
+    if program not in cache:
+        kc = chip_dir / "kernel_config.py"
+        table: dict[str, str] = {}
+        if kc.exists():
+            try:
+                from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+                    load_kernel_config,
+                )
+
+                table = load_kernel_config(str(kc))
+            except Exception as e:  # noqa: BLE001 - best-effort label resolution, never fatal
+                print(
+                    f"Skipping L3 swimlane name_map for {program} ({type(e).__name__}: {e}); "
+                    "its labels fall back to defaults"
+                )
+        cache[program] = table
+    table = cache[program]
+    if not table:
+        return None
+    name_map_path = disp_dir / "name_map.json"
+    name_map_path.write_text(
+        json.dumps({"level": 2, "orchestrator_name": None, "callable_id_to_name": table}, indent=2),
+        encoding="utf-8",
+    )
+    return name_map_path
+
+
 def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
@@ -624,12 +741,18 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
     swimlane). Globbing ``rank*`` — rather than iterating a rank count — picks up
     whichever cards actually ran, so a comm-less / single-card L3 program (which never
     creates ``rank{0..n}``) still has its records converted. This best-effort
-    post-pass runs the offline ``swimlane_converter`` once per dispatch dir,
-    resolving kernel names from a merged map of every chip callable's
-    ``kernel_config.py`` (``next_levels/*/``). Each dispatch's records are
-    single-chip, so the L2 converter applies unchanged — and a card that ran
-    several (possibly different) programs keeps one swimlane per dispatch instead
-    of overwriting down to the last.
+    post-pass runs the offline ``swimlane_converter`` once per dispatch dir. Each
+    dispatch's records are single-chip, so the L2 converter applies unchanged —
+    and a card that ran several (possibly different) programs keeps one swimlane
+    per dispatch instead of overwriting down to the last.
+
+    Kernel names are resolved **per dispatch**, from the ``kernel_config.py`` of
+    the ``next_levels/<program>`` that :func:`_record_dispatch_program` stamped on
+    that dispatch. ``func_id`` numbering restarts in every program, so a table
+    merged across programs would relabel one program's tasks with another's names
+    — silently and plausibly (issue #2169). A dispatch whose program cannot be
+    resolved is therefore converted with anonymous labels rather than guessed
+    ones, and says so.
 
     Onboard-only: the simulator emits records but not the task metadata the
     converter joins against, so conversion is skipped there (mirrors the L2
@@ -647,19 +770,18 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
 
     # ``glob("*/")`` directory filtering is only reliable on 3.11+; filter
     # explicitly so this works on the 3.10 baseline too.
-    chip_dirs = sorted(d for d in (output_dir / "next_levels").glob("*") if d.is_dir())
-    merged: dict = {}
-    try:
-        from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-            load_kernel_config,
-        )
-
-        for chip_dir in chip_dirs:
-            kc = chip_dir / "kernel_config.py"
-            if kc.exists():
-                merged.update(load_kernel_config(str(kc)))
-    except Exception as e:  # noqa: BLE001 - best-effort label resolution, never fatal
-        print(f"Skipping L3 swimlane name_map ({type(e).__name__}: {e}); labels fall back to defaults")
+    # A ``next_levels/<name>/`` is an L2 program exactly when it carries a
+    # ``kernel_config.py`` — the same test ``_assemble_chip_callables`` applies,
+    # so both halves count the same programs and a stray subdir cannot make the
+    # single-program fallback below look ambiguous.
+    chip_dirs = {
+        d.name: d
+        for d in sorted((output_dir / "next_levels").glob("*"))
+        if d.is_dir() and (d / "kernel_config.py").exists()
+    }
+    # program name -> its ``func_id`` table; filled on first use by
+    # ``_write_dispatch_name_map`` so each config is loaded once per run.
+    name_map_cache: dict[str, dict[str, str]] = {}
 
     dfx_base = output_dir / "dfx_outputs"
     # See the docstring for why we glob rather than iterate a rank count.
@@ -678,19 +800,36 @@ def _collect_l3_swimlane(output_dir: Path, platform: str) -> None:
             # dispatch must not turn a successful run into a post-processing
             # crash. The raw records remain on disk for manual conversion.
             try:
-                name_map_path: Path | None = None
-                if merged:
-                    name_map_path = disp_dir / "name_map.json"
-                    name_map_path.write_text(
-                        json.dumps(
-                            {"level": 2, "orchestrator_name": None, "callable_id_to_name": merged},
-                            indent=2,
-                        ),
-                        encoding="utf-8",
+                program = _read_dispatch_program(disp_dir)
+                if program is None and len(chip_dirs) == 1:
+                    # One L2 program in the build: no ambiguity to resolve, so an
+                    # unmarked dispatch (e.g. artifacts from an older run) can
+                    # still be named correctly.
+                    program = next(iter(chip_dirs))
+                if program is None or program not in chip_dirs:
+                    print(
+                        f"No L2 program recorded for {rank_dir.name}/{disp_dir.name}; converting with "
+                        "anonymous task labels. For real kernel names, re-run: python -m "
+                        "simpler_setup.tools.swimlane_converter "
+                        f"{records} -k {output_dir / 'next_levels'}/<program>/kernel_config.py"
                     )
-                # ``work_dir`` only feeds the converter's ``-k`` fallback; the
-                # merged ``name_map`` passed as ``func_names`` takes precedence.
-                work_dir = chip_dirs[0] if chip_dirs else output_dir
+                    # No ``kernel_config.py`` here, so ``_generate_swimlane``
+                    # omits ``-k`` rather than pointing the converter at another
+                    # program's table.
+                    work_dir: Path = output_dir
+                    name_map_path: Path | None = None
+                    # With neither option the converter auto-discovers a sibling
+                    # ``name_map*.json``, so a map left by an earlier run would
+                    # quietly resurrect the mislabelling. Drop it: anonymous
+                    # labels are the point of this branch.
+                    for stale in disp_dir.glob("name_map*.json"):
+                        stale.unlink(missing_ok=True)
+                else:
+                    # ``work_dir`` feeds the converter's ``-k`` fallback and the
+                    # ``name_map`` passed as ``func_names`` takes precedence —
+                    # both must name the program that ran this dispatch.
+                    work_dir = chip_dirs[program]
+                    name_map_path = _write_dispatch_name_map(disp_dir, work_dir, name_map_cache)
                 _generate_swimlane(work_dir, disp_dir, records, func_names=name_map_path)
             except Exception as e:  # noqa: BLE001 - best-effort post-pass, never fatal
                 print(
@@ -740,8 +879,10 @@ def _dispatch(
         # ``_submit_chip`` numbers a card's dispatches ``d0, d1, ...`` fresh each
         # pass. Two-pass swimlane reissues the same dispatch order, so pass 1
         # (deps.json) and pass 2 (records) land the same dispatch in the same
-        # ``rank{w}/d{k}`` dir — letting the converter join them.
-        orch._dfx_dispatch_idx = {}
+        # ``rank{w}/d{k}`` dir — letting the converter join them. The same call
+        # publishes the callable -> L2 program names ``_submit_chip`` stamps into
+        # each dispatch dir.
+        _reset_dfx_dispatch_state(orch, chip_cids)
         # Comm-less dispatches carry no rank, so ``_resolve_chip_worker`` hands
         # them out round-robin over the program's chips; both the count and the
         # sequence live on ``orch`` so the wrapper stays a pure function of the
@@ -1331,7 +1472,7 @@ class DistributedWorker(Worker):
                     program_domains = domains_by_program.get(program_id)
                     if program_domains and self._reset_persistent_windows:
                         self._reset_persistent_domains(orch, program_domains)
-                    orch._dfx_dispatch_idx = {}
+                    _reset_dfx_dispatch_state(orch, request.state["chip_cids"])
                     request.state["entry_fn"](
                         orch,
                         None,
