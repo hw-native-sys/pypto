@@ -1547,8 +1547,9 @@ bool IsPipelineAccumulatorProfitable(const PipelineAccumulatorCandidate& candida
 ///     count (no separately lowered tail group);
 ///   * no nested control flow in the candidate body;
 ///   * exactly one cube MAD, and it is plain ``tile.matmul`` over Left/Right;
-///   * exactly one operand is a recognized per-iteration Mat->L0 transfer; the
-///     stationary operand is defined outside the loop and is not an IterArg;
+///   * the selected moving operand is a recognized per-iteration Mat->L0
+///     transfer; the stationary operand is defined outside the loop and is not
+///     an IterArg;
 ///   * no other Acc definition/read or store-like operation in the body;
 ///   * one canonical loop-carried ``tile.store`` or ``tile.assemble`` chain:
 ///     the drain targets IterArg i and its result is yielded at index i.
@@ -1722,22 +1723,24 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(const For
 /// over-approximates liveness but guarantees that the loop-wide schedule change
 /// cannot turn a previously fitting function into an L0C overflow.
 std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
-  std::unordered_set<const ForStmt*> empty;
   const auto* ctx = PassContext::Current();
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   // #2131 explicitly targets the PyPTO planner. PTOAS already gives the
   // reproduced loop four distinct Acc placements and showed no measurable
   // benefit from this source-level marker.
-  if (planner != MemoryPlanner::PyPTO) return empty;
+  if (planner != MemoryPlanner::PyPTO) return {};
 
-  auto policy = pypto::backend::BackendConfig::IsConfigured()
-                    ? pypto::backend::GetBackend()->CreateMemoryAllocatorPolicy()
-                    : std::make_unique<DefaultMemoryAllocatorPolicy>();
-  if (!policy) return empty;
+  // Profitability and capacity are backend-specific. Direct pass invocation
+  // without a configured backend must leave an already-L0 pipeline unchanged,
+  // just as it did before this recognizer existed.
+  if (!pypto::backend::BackendConfig::IsConfigured()) return {};
+
+  auto policy = pypto::backend::GetBackend()->CreateMemoryAllocatorPolicy();
+  if (!policy) return {};
 
   AccFootprintCollector footprint(*policy);
   footprint.VisitFunction(func);
-  if (!footprint.valid) return empty;
+  if (!footprint.valid) return {};
 
   class CandidateCollector : public IRVisitor {
    public:
@@ -1756,11 +1759,11 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
     const MemoryAllocatorPolicy& policy_;
   } candidates(*policy);
   candidates.VisitStmt(func->body_);
-  if (candidates.candidates.empty()) return empty;
+  if (candidates.candidates.empty()) return {};
 
   const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
   const uint64_t l0c_bytes = handler ? handler->GetL0cCapacityBytes() : 0;
-  if (l0c_bytes == 0) return empty;
+  if (l0c_bytes == 0) return {};
 
   for (auto it = candidates.candidates.begin(); it != candidates.candidates.end();) {
     if (!IsPipelineAccumulatorProfitable(it->second, l0c_bytes)) {
@@ -1769,29 +1772,27 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
       ++it;
     }
   }
-  if (candidates.candidates.empty()) return empty;
+  if (candidates.candidates.empty()) return {};
 
   uint64_t worst_case = footprint.total_bytes;
   if (ctx && ctx->GetEnablePyptoL0cDoubleBuffer()) {
     // The chooser may also double-buffer any other Acc result in this function;
     // reserve a second slot for the full inventory rather than trying to
     // duplicate its profitability decision here.
-    if (worst_case > std::numeric_limits<uint64_t>::max() - footprint.total_bytes) return empty;
+    if (worst_case > std::numeric_limits<uint64_t>::max() - footprint.total_bytes) return {};
     worst_case += footprint.total_bytes;
   } else {
-    for (const auto& [loop, candidate] : candidates.candidates) {
-      (void)loop;
-      if (worst_case > std::numeric_limits<uint64_t>::max() - candidate.aligned_acc_bytes) return empty;
+    for (const auto& entry : candidates.candidates) {
+      const auto& candidate = entry.second;
+      if (worst_case > std::numeric_limits<uint64_t>::max() - candidate.aligned_acc_bytes) return {};
       worst_case += candidate.aligned_acc_bytes;
     }
   }
-  if (worst_case > l0c_bytes) return empty;
+  if (worst_case > l0c_bytes) return {};
 
-  for (const auto& [loop, candidate] : candidates.candidates) {
-    (void)candidate;
-    empty.insert(loop);
-  }
-  return empty;
+  std::unordered_set<const ForStmt*> plan;
+  for (const auto& entry : candidates.candidates) plan.insert(entry.first);
+  return plan;
 }
 
 class AutoTileMutator : public IRMutator {

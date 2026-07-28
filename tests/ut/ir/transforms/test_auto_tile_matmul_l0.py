@@ -2067,6 +2067,16 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
             After = passes.auto_tile_matmul_l0()(self._single_matmul_pipeline())
         assert "pipeline_double_buffer_c" not in ir.python_print(After)
 
+    def test_no_backend_leaves_existing_pipeline_unchanged(self):
+        """Backend-specific profitability is unavailable, so recognition is a no-op."""
+        _backend.reset_for_testing()
+        Before = self._single_matmul_pipeline()
+
+        After = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(After, Before)
+        assert "pipeline_double_buffer_c" not in ir.python_print(After)
+
     def test_preserves_explicit_one_accumulator_policy_on_rerun(self):
         """A chooser-emitted dbC=1 loop is an explicit policy, not a new candidate."""
         _backend.reset_for_testing()
@@ -2200,7 +2210,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                     )
                     c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_i, b_l0)
                     out_s: pl.Tensor[[16, 512], pl.FP32] = pl.store(c, [0, ni], out_i)
-                    q_r, out_r = pl.yield_(q_i, out_s)
+                    _q_r, out_r = pl.yield_(q_i, out_s)
                 return out_r
 
         After = passes.auto_tile_matmul_l0()(Before)

@@ -59,8 +59,7 @@ std::string RotateInnermostPipelineStage(const std::string& packed, int32_t dept
   stage = ((stage % depth) + depth) % depth;
   std::string result;
   for (const auto& [group, member_stage] : memberships) {
-    if (!result.empty()) result += ";";
-    result += std::to_string(group) + ":" + std::to_string(member_stage);
+    result = AppendPipelineMembership(result, group, member_stage);
   }
   return result;
 }
