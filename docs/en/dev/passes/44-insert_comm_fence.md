@@ -3,8 +3,11 @@
 ## Overview
 
 `InsertCommFence` implements the *data-before-signal* memory-consistency contract
-the latest PTOAS enforces in its `pto-memory-consistency` pass and pushes onto the
-compiler. The contract is **two-sided**:
+the latest PTOAS defines in its `pto-memory-consistency` pass and pushes onto the
+compiler. "Pushes onto the compiler" is literal: ptoas requires the markers but
+does not check for them, so satisfying the contract is entirely this pass's job
+(see [ptoas does not gate this](#ptoas-does-not-gate-this--the-markers-are-the-compilers-obligation)).
+The contract is **two-sided**:
 
 - **Publish side.** A `pto.comm.tnotify` requires an explicit
   `pto.fence.barrier_all #pto.fence_scope<gm>` after the matching
@@ -75,7 +78,35 @@ loop — is already satisfied by that write's `cacheinvalid; fence`; the fence d
 **not** need to sit next to the notify. A pure barrier notify (no data at all)
 requires nothing. (This was verified by removing the notify-side markers from the
 ring-allreduce `.pto` and confirming ptoas 0.50 still accepts it; removing the
-wait-side `cacheinvalid all`, by contrast, is rejected.)
+wait-side `cacheinvalid all`, by contrast, was rejected on 0.50.)
+
+### ptoas does not gate this — the markers are the compiler's obligation
+
+**ptoas 0.52 accepts a module with the markers missing.** Re-running the check
+above on 0.52, against the same `ring_step` kernel from
+`tests/st/distributed/collectives/test_l3_allreduce_ring.py`:
+
+| Variant | ptoas 0.52 |
+| ------- | ---------- |
+| unmodified | accepted |
+| wait-side `cacheinvalid all` removed (rejected on 0.50) | accepted |
+| every `cacheinvalid` **and** `system.fence` removed | accepted |
+
+Nothing is diagnosed; the corresponding instructions are simply not emitted:
+
+| IR marker | Instruction lost when absent |
+| --------- | ---------------------------- |
+| region `cacheinvalid` | `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)` |
+| whole-GM `cacheinvalid()` | `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)` |
+| `system.fence` | `pipe_barrier(PIPE_MTE2/MTE3/FIX); dsb(DSB_DDR)` |
+
+So there is **no compile-time safety net**. A missing marker is not a build
+error but a data race: the reader may observe a stale cache line, dependent on
+timing, cache state, transfer size and rank count. Do not read a green test run
+as evidence that a marker is unnecessary — the pass's own history shows the
+failure mode is silent. While the pin was on ptoas 0.50 the publish-side region
+`cacheinvalid` emitted no call at all (`hw-native-sys/PTOAS#995`), so it never
+reached the device, and the distributed suite stayed green throughout.
 
 The region cacheinvalid currently covers the **whole target tensor** (region
 `[0, …]` offsets over the tensor's full shape), reusing the tensor type's dim

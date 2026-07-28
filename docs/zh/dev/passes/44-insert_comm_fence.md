@@ -2,8 +2,10 @@
 
 ## 概述
 
-`InsertCommFence` 实现最新 PTOAS 在其 `pto-memory-consistency` pass 中强制、并下放给
-编译器的 *data-before-signal* 内存一致性契约。该契约是**双向**的：
+`InsertCommFence` 实现最新 PTOAS 在其 `pto-memory-consistency` pass 中定义、并下放给
+编译器的 *data-before-signal* 内存一致性契约。「下放给编译器」是字面意思：ptoas 要求这些
+标记，但**不检查**它们是否存在，因此满足契约完全是本 pass 的职责
+（见 [ptoas 不做守门](#ptoas-不做守门--插标记是编译器的义务)）。该契约是**双向**的：
 
 - **发布侧。** `pto.comm.tnotify` 要求在其匹配的 `pto.cmo.cacheinvalid` 释放标记之后、
   信号之前，显式插入一条 `pto.fence.barrier_all #pto.fence_scope<gm>` —— 跨 rank 的写
@@ -61,7 +63,32 @@ notify 为何无需标记、fence 为何落在写：ptoas 把所需的释放 fen
 `cacheinvalid`，而非 notify。因此发布「先前（哪怕在*另一个*循环里）写入」数据的 `tnotify`
 已由该写的 `cacheinvalid; fence` 满足 —— fence **不必**紧挨 notify。纯 barrier notify
 （完全无数据）什么都不需要。（此结论经实测验证：从 ring-allreduce 的 `.pto` 删掉 notify 侧
-标记后 ptoas 0.50 仍接受；而删掉 wait 侧的 `cacheinvalid all` 则被拒绝。）
+标记后 ptoas 0.50 仍接受；而删掉 wait 侧的 `cacheinvalid all` 在 0.50 上则被拒绝。）
+
+### ptoas 不做守门 —— 插标记是编译器的义务
+
+**ptoas 0.52 接受缺失标记的模块。** 在 0.52 上重跑上述检查，用的是
+`tests/st/distributed/collectives/test_l3_allreduce_ring.py` 里同一个 `ring_step` kernel：
+
+| 变体 | ptoas 0.52 |
+| ---- | ---------- |
+| 原样 | 接受 |
+| 删掉 wait 侧 `cacheinvalid all`（0.50 上会被拒） | 接受 |
+| 删光所有 `cacheinvalid` **和** `system.fence` | 接受 |
+
+没有任何诊断信息，只是对应的指令不再生成：
+
+| IR 标记 | 缺失时丢掉的指令 |
+| ------- | ---------------- |
+| 区域 `cacheinvalid` | `PTOAS__DCCI_SINGLE_CACHE_LINE(<GlobalTensor>)` |
+| 全 GM `cacheinvalid()` | `dcci((__gm__ void*)0, cache_line_t::ENTIRE_DATA_CACHE)` |
+| `system.fence` | `pipe_barrier(PIPE_MTE2/MTE3/FIX); dsb(DSB_DDR)` |
+
+所以**不存在编译期的安全网**。缺一条标记不会构建失败，而是一个数据竞争：读方可能读到
+陈旧的 cache 行，是否发生取决于时序、cache 状态、传输大小和 rank 数。**不要把测试全绿
+当作某条标记不必要的证据** —— 本 pass 自身的历史就说明这种失败是静默的：pin 还在 ptoas
+0.50 期间，发布侧的区域 `cacheinvalid` 压根没有生成任何调用（`hw-native-sys/PTOAS#995`），
+从未到达设备，而分布式测试套件全程保持绿色。
 
 区域 cacheinvalid 目前覆盖**整个目标张量**（以全 `0` offset 覆盖完整 shape），复用类型的
 dim 表达式。收窄为精确写入子区域（写自身的 `(shapes, offsets)` 就在写入点旁边）是后续
