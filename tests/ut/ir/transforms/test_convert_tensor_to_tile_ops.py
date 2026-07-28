@@ -3045,11 +3045,7 @@ class TestScatterUpdateConversion:
                 result: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(index, src)
                 return result
 
-        # NOTE: bypass tracks a known pass bug — ConvertTensorToTileOps scatter_update
-        # emits tile.cast without the declared `mode` attr (op_conversion_registry.cpp),
-        # which fails the print->parse roundtrip. Remove NONE once the pass is fixed.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            After = passes.convert_tensor_to_tile_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         text = ir.python_print(After)
         # Assert exact op presence: scatter_update must lower to the index-form tile.scatter,
         # never the mask-form tile.scatter_mask (substring "tile.scatter" would match both).
@@ -3057,6 +3053,12 @@ class TestScatterUpdateConversion:
         assert "pl.tile.scatter_mask(" not in text
         assert text.count("pl.tile.scatter(") >= 1
         assert "scatter_update" not in text
+        # The flat-index narrowing cast must carry the declared `mode` attr: codegen reads
+        # it unconditionally when emitting `pto.tcvt {rmode = ...}`. This i32 -> i16 index
+        # cast cannot round, so it must be `none`(0), not `round`(2).
+        casts = _find_calls_to(_require_function(After, "main_incore_0"), "tile.cast")
+        assert len(casts) == 1, f"expected one flat-index cast, got {len(casts)}"
+        assert dict(casts[0].kwargs)["mode"] == 0
 
     def test_scatter_update_fp16_rejects_oversized_flat_index(self):
         """2-byte dst with m*d > 32767 overflows the i16 flat index — must raise, not miscompile."""
@@ -3467,6 +3469,41 @@ class TestConvertGatherOp:
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_gather_int16_index_casts_carry_mode(self):
+        """A5 INT16-index gather: both flat-index tile.casts carry the `mode` attr.
+
+        An INT16 index (legal with a 16-bit input) is widened to INT32 for the flat-index
+        arithmetic and narrowed back afterwards. Codegen reads `mode` unconditionally when
+        emitting `pto.tcvt {rmode = ...}`; both casts are int -> int and cannot round, so
+        each must carry `none`(0).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                inp: pl.Tensor[[4, 16], pl.FP16],
+                idx: pl.Tensor[[4, 8], pl.INT16],
+            ) -> pl.Tensor[[4, 8], pl.FP16]:
+                out: pl.Tensor[[4, 8], pl.FP16] = pl.tensor.gather(inp, dim=-1, index=idx)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[4, 16], pl.FP16],
+                idx: pl.Tensor[[4, 8], pl.INT16],
+            ) -> pl.Tensor[[4, 8], pl.FP16]:
+                out: pl.Tensor[[4, 8], pl.FP16] = self.main_incore_0(inp, idx)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        casts = _find_calls_to(_require_function(After, "main_incore_0"), "tile.cast")
+        assert len(casts) == 2, f"expected widen + narrow casts, got {len(casts)}"
+        for cast in casts:
+            assert dict(cast.kwargs)["mode"] == 0
 
     def test_gather_conversion_expand(self):
         """A5 expand gather (K > S1): flat uses src cols, not output cols."""

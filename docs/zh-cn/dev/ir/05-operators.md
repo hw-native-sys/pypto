@@ -165,19 +165,21 @@ TypePtr DeduceCastType(const std::vector<ExprPtr>& args,
                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
   auto input = std::dynamic_pointer_cast<const TensorType>(args[0]->GetType());
 
-  // Required kwarg
+  // Required kwargs — `cast` declares both `target_type` and `mode`, and codegen
+  // reads `mode` unconditionally, so a missing one must fail here rather than
+  // silently default to round_mode NONE.
   auto it = kwargs.find("target_type");
   CHECK(it != kwargs.end()) << "tensor.cast requires 'target_type'";
   DataType target = static_cast<DataType>(std::any_cast<int>(it->second));
 
-  // Optional with default
-  int mode = 0;
-  auto mode_it = kwargs.find("mode");
-  if (mode_it != kwargs.end()) mode = std::any_cast<int>(mode_it->second);
+  CHECK(kwargs.find("mode") != kwargs.end()) << "tensor.cast requires 'mode'";
 
   return std::make_shared<TensorType>(input->shape_, target);
 }
 ```
+
+真正可选的 kwarg（codegen 读取时带回退值，例如 `tile.log` 的 `high_precision`）应使用
+`Call::GetKwarg<T>(key, default_value)` 读取，而不是 `CHECK`——参见 `include/pypto/ir/expr.h`。
 
 ### Python - 使用 Kwargs
 

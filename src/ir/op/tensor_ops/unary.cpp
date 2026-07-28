@@ -16,6 +16,7 @@
  * This file implements unary operations for tensors that operate element-wise.
  */
 
+#include <algorithm>
 #include <any>
 #include <memory>
 #include <string>
@@ -223,7 +224,15 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
       << " equals input dtype; same-dtype cast is not a valid operation. "
       << "Remove the cast or use a different target_type.";
 
-  // mode kwarg is optional, not used in type deduction
+  // `mode` does not affect type deduction, but ConvertTensorToTileOps forwards this
+  // op's kwargs verbatim to tile.cast, whose codegen reads `mode` unconditionally.
+  // Require it here so a missing kwarg is reported against the op the caller wrote
+  // rather than surfacing later as a tile.cast failure inside the conversion pass.
+  const bool found_mode =
+      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kv) { return kv.first == "mode"; });
+  CHECK(found_mode) << "tensor.cast requires a 'mode' kwarg (round mode: none(0), rint(1), "
+                       "round(2), floor(3), ceil(4), trunc(5), odd(6)). Pass mode=\"round\" (2) "
+                       "to match the pl.cast / tensor_ops.cast default.";
 
   // Cast preserves shape and the input's valid region; only dtype changes.
   return DeduceTensorUnaryResultType(tensor_type, target_dtype);

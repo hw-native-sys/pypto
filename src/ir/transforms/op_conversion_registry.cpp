@@ -49,6 +49,15 @@ using tile_conversion_utils::MakeZeroOffsets;
 
 namespace {
 
+// tile.cast round mode: None(0), RINT(1), ROUND(2), FLOOR(3), CEIL(4), TRUNC(5), ODD(6).
+// `mode` is a declared attr that codegen reads unconditionally when emitting
+// `pto.tcvt {rmode = ...}`, so every tile.cast built here must supply one.
+// Follows the LowerCompositeOps convention: ROUND only where a conversion actually
+// rounds (float -> int), NONE where it cannot — all the index casts below are
+// int -> int, where the rounding mode is a no-op.
+constexpr int kCastModeNone = 0;
+constexpr int kCastModeRound = 2;
+
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
 
 // A5 index-form gather needs full-tile flat indices; A2A3 keeps the legacy
@@ -248,7 +257,7 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
           if (arg_types[i]->dtype_ == *promoted_dtype) continue;
           std::vector<std::pair<std::string, std::any>> cast_kwargs = {
               {"target_type", *promoted_dtype},
-              {"mode", 2},  // round
+              {"mode", kCastModeRound},
           };
           auto cast_call = op_reg.Create("tile.cast", {converted_args[i]}, cast_kwargs, span);
           const std::string name = i == 0 ? "div_lhs_cast" : "div_rhs_cast";
@@ -563,7 +572,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
     // row_base[k] = index.flat[k] * d, broadcast across cols; flat_idx = index.flat[k]*d + c.
     ExprPtr idx_src = args[1];
     if (idx_tile->dtype_ != compute_dtype) {
-      idx_src = emit("tile.cast", {idx_src}, {{"target_type", compute_dtype}}, "su_idx_i32");
+      idx_src = emit("tile.cast", {idx_src}, {{"target_type", compute_dtype}, {"mode", kCastModeNone}},
+                     "su_idx_i32");
     }
     auto idx_flat =
         emit("tile.reshape", {idx_src, MakeShapeTuple({make_idx(n), one}, span)}, {}, "su_idx_flat");
@@ -571,7 +581,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
     auto flat_idx = emit("tile.row_expand_add", {col_nd, row_base}, {}, "su_flat_idx");
     // Narrow the finished row-major [n, d] flat indices to the tscatter-required width.
     if (idx_dtype != compute_dtype) {
-      flat_idx = emit("tile.cast", {flat_idx}, {{"target_type", idx_dtype}}, "su_flat_idx_cast");
+      flat_idx = emit("tile.cast", {flat_idx}, {{"target_type", idx_dtype}, {"mode", kCastModeNone}},
+                      "su_flat_idx_cast");
     }
 
     const int dt_bytes = static_cast<int>(dt.GetBit()) / 8;
@@ -1400,13 +1411,13 @@ void OpConversionRegistry::RegisterGatherOps() {
           };
           ExprPtr idx_i32 = idx_2d;
           if (idx_dtype != compute_dtype) {
-            idx_i32 =
-                emit_to(stmts, "tile.cast", {idx_2d}, {{"target_type", compute_dtype}}, prefix + "_idx_i32");
+            idx_i32 = emit_to(stmts, "tile.cast", {idx_2d},
+                              {{"target_type", compute_dtype}, {"mode", kCastModeNone}}, prefix + "_idx_i32");
           }
           if (rows == 1) {
-            return idx_dtype == compute_dtype ? idx_i32
-                                              : emit_to(stmts, "tile.cast", {idx_i32},
-                                                        {{"target_type", idx_dtype}}, prefix + "_flat_cast");
+            if (idx_dtype == compute_dtype) return idx_i32;
+            return emit_to(stmts, "tile.cast", {idx_i32},
+                           {{"target_type", idx_dtype}, {"mode", kCastModeNone}}, prefix + "_flat_cast");
           }
 
           std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", compute_dtype},
@@ -1432,7 +1443,8 @@ void OpConversionRegistry::RegisterGatherOps() {
             flat = emit_to(stmts, "tile.row_expand_add", {idx_i32, row_base}, {}, prefix + "_flat_idx");
           }
           if (idx_dtype != compute_dtype) {
-            return emit_to(stmts, "tile.cast", {flat}, {{"target_type", idx_dtype}}, prefix + "_flat_cast");
+            return emit_to(stmts, "tile.cast", {flat}, {{"target_type", idx_dtype}, {"mode", kCastModeNone}},
+                           prefix + "_flat_cast");
           }
           return flat;
         };

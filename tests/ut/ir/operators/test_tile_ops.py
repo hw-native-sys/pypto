@@ -635,6 +635,28 @@ class TestTileUnaryOps:
         with pytest.raises(ValueError, match="same-dtype cast is not a valid operation"):
             tile.cast(src_var, DataType.FP32)
 
+    def test_tile_cast_requires_mode_kwarg(self):
+        """tile.cast must reject a missing `mode` kwarg at construction time.
+
+        `mode` is a declared attr that codegen reads unconditionally when emitting
+        `pto.tcvt {rmode = ...}`. A missing kwarg reads back as 0 (round_mode NONE)
+        instead of the DSL default ROUND, so DeduceTileCastType rejects it rather
+        than letting a mode-less cast reach the backend.
+        """
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        src_var = ir.Var("src", src_type, span)
+
+        with pytest.raises(ValueError, match="requires a 'mode' kwarg"):
+            ir.create_op_call("tile.cast", [src_var], {"target_type": DataType.INT16}, span)
+
+        # The canonical DSL constructor injects mode="round" — it must still work.
+        call = tile.cast(src_var, DataType.INT16)
+        assert dict(call.kwargs)["mode"] == 2
+
     def test_tile_rsqrt_preserves_input_valid_shape(self):
         """tile.rsqrt must propagate the source TileView's valid_shape (issue #1370)."""
         sliced = self._make_sliced_tile_with_valid_shape()

@@ -400,8 +400,9 @@ def test_cast_with_datatype_kwarg():
     type_fp16 = ir.TensorType([dim8], DataType.FP16)
     var_a = ir.Var("a", type_fp16, span)
 
-    # Cast from FP16 to FP32
-    kwargs = {"target_type": DataType.FP32}
+    # Cast from FP16 to FP32. `mode` is a declared attr codegen reads unconditionally,
+    # so tensor.cast requires it alongside target_type (2 == round, the DSL default).
+    kwargs = {"target_type": DataType.FP32, "mode": 2}
     call = ir.create_op_call("tensor.cast", [var_a], kwargs, span)
 
     # Check result type

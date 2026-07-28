@@ -17,6 +17,7 @@
  * Unary operations take a TileType and return a TileType with the same shape.
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -138,6 +139,18 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK(found_target_type) << "tile.cast requires 'target_type' kwarg";
+
+  // `mode` is a declared attr that codegen reads unconditionally
+  // (MakeModalCodegenPTO -> pto.tcvt {rmode = ...}). A missing kwarg silently
+  // reads back as 0 == round_mode NONE instead of the DSL default ROUND, so
+  // require it here rather than let a mode-less cast reach the backend.
+  const bool found_mode =
+      std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kv) { return kv.first == "mode"; });
+  CHECK(found_mode) << op_name
+                    << " requires a 'mode' kwarg (round mode: none(0), rint(1), round(2), "
+                       "floor(3), ceil(4), trunc(5), odd(6)). Pass mode=\"round\" (2) to match "
+                       "the pl.cast / tile_ops.cast default, or mode=\"none\" (0) when the "
+                       "conversion cannot round (e.g. int -> int).";
 
   // Reject same-dtype cast: the hardware pto.tcvt instruction is for
   // cross-dtype conversion, and a same-dtype invocation can corrupt values
