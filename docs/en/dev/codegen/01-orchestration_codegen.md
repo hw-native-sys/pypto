@@ -483,11 +483,18 @@ it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg into the typed
 variables). Plain `Call` carriers of `manual_dep_edges` no longer exist — the
 ManualDepsOnSubmitOnly structural property verifies that no cross-function
 `Call` carries it; only the `system.task_dummy` barrier op keeps the attr as
-its fanin contract. Compiler-derived manual-scope edges come from
+its fanin contract. Compiler-derived edges come from
 [`AutoDeriveTaskDependencies`](../passes/36-auto_derive_task_dependencies.md)
 in `Call.attrs["compiler_manual_dep_edges"]` (a separate key, allowed on plain
-calls). Codegen merges the two lists in that order and deduplicates by Var
-identity before emitting the stack array.
+calls). That pass never analyzes a user-written MANUAL scope — inside
+`pl.manual_scope()` the explicit `deps=[...]` list stays the only source of
+dependency edges. It analyzes AUTO regions only, and only under the compile-time
+`analyze_auto_scopes_for_deps` switch: a fully covered region is then
+materialized as a *compiler-owned* MANUAL scope, a partially covered
+default-mode region stays AUTO with its representable edges emitted on top of
+runtime auto-tracking, and a hand-placed `pl.scope()` that falls back has its
+partial edges stripped. Codegen merges the two lists in that order and
+deduplicates by Var identity before emitting the stack array.
 
 ### TaskId sourcing
 

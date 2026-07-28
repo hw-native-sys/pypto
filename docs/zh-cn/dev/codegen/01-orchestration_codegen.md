@@ -467,11 +467,15 @@ kwarg 写入类型化的 `Submit::deps_` 字段；codegen 通过临时的 `Submi
 `vector<VarPtr>`，每项为 `Scalar[TASK_ID]` 类型的 Var）。普通 `Call` 携带
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
-契约保留该 attr。编译器推导的 manual-scope 依赖来自
+契约保留该 attr。编译器推导的依赖边来自
 [`AutoDeriveTaskDependencies`](../passes/36-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
-call 上）。Codegen 会按这个顺序合并两组列表，并按 Var identity 去重后再发出
-栈数组。
+call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
+显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
+`analyze_auto_scopes_for_deps` 打开时才生效：被完整覆盖的区域随后会被物化为
+*编译器自有*的 MANUAL scope；部分覆盖的默认模式区域保持 AUTO，其可表示的边叠加
+在 runtime 自动追踪之上发出；手工放置的 `pl.scope()` 一旦回退，则会剥离其部分
+推导边。Codegen 会按这个顺序合并两组列表，并按 Var identity 去重后再发出栈数组。
 
 ### TaskId 的来源
 

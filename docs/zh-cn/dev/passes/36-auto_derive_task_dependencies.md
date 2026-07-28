@@ -137,4 +137,4 @@ deps，并保持 AUTO tracking。已实现的 fallback 触发条件包括：
 - Lowering: [Orchestration Code Generation][orchestration-lowering]
 
 [pass-source]: ../../../../src/ir/transforms/auto_derive_task_dependencies_pass.cpp
-[orchestration-lowering]: ../codegen/01-orchestration_codegen.md#manual-scope-and-taskid-lowering
+[orchestration-lowering]: ../codegen/01-orchestration_codegen.md#manual-scope-与-taskid-降级
