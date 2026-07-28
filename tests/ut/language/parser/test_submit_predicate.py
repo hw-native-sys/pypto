@@ -636,5 +636,223 @@ def test_scope_predicate_deps_hint_matches_the_form():
     assert "as tid" in hint, hint
 
 
+# ---------------------------------------------------------------------------
+# Scope form — ``with pl.at(level=pl.Level.CORE_GROUP, predicate=...)``
+# ---------------------------------------------------------------------------
+#
+# Same expression, validation and lowering as the pl.spmd scope form; the
+# predicate rides on ``InCoreScopeStmt.attrs`` until ``OutlineIncoreScopes``
+# moves it onto ``Submit.predicate``. Two things differ from pl.spmd and are
+# what these tests pin:
+#
+#   * ``deps=`` is accepted on *every* pl.at form (no ``as tid`` requirement),
+#     so the remediation hint is always "add deps=[tid]".
+#   * a predicate only has a runtime carrier where the scope becomes an
+#     independently submitted L0 task, so it is restricted to
+#     ``level=pl.Level.CORE_GROUP`` and to a scope that is not nested inside
+#     pl.cluster() / pl.spmd() / another pl.at.
+
+
+def _at_incore_scopes(prog):
+    """All InCoreScopeStmts in ``main``, in source order."""
+    found = []
+
+    def walk(stmt):
+        if isinstance(stmt, ir.InCoreScopeStmt):
+            found.append(stmt)
+        for field in ("stmts", "body"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif value is not None:
+                walk(value)
+
+    walk(prog.get_function("main").body)
+    return found
+
+
+def _at_program(predicate_src: str = "rc[0, 0] > 0", deps_src: str = "deps=[g_tid], "):
+    """Two pl.at scopes; the second carries ``predicate_src`` (as-tid form).
+
+    The first scope writes ``rc`` through ``pl.store``, so it is registered as
+    the operand's producer by ``_record_scope_producer``.
+    """
+    return pl.parse_program(
+        f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: pl.Out[{_INT32_T}]
+    ) -> {_FP32_T}:
+        with pl.at(level=pl.Level.CORE_GROUP) as g_tid:
+            g = pl.load(rc, [0, 0], [128, 128])
+            rc = pl.store(g, [0, 0], rc)
+        with pl.at(level=pl.Level.CORE_GROUP, {deps_src}predicate=({predicate_src})) as t:
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+    )
+
+
+def test_at_predicate_lands_on_scope_attrs():
+    """The predicate is stored on the InCore scope as the comparison Expr itself."""
+    prog = _at_program("rc[0, 0] > 0")
+    gate_scope, expert_scope = _at_incore_scopes(prog)
+    assert "predicate" not in dict(gate_scope.attrs.items())
+    predicate = dict(expert_scope.attrs.items())["predicate"]
+    assert isinstance(predicate, ir.Gt)
+    assert _pred_const(predicate).value == 0
+    assert _pred_read(predicate).op.name == "tensor.read"
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+
+
+def test_at_predicate_canonical_attr_order():
+    """deps -> task_id_var -> predicate; the print round-trip relies on it."""
+    prog = _at_program()
+    _, expert_scope = _at_incore_scopes(prog)
+    assert [k for k, _ in expert_scope.attrs.items()] == [
+        "manual_dep_edges",
+        "task_id_var",
+        "predicate",
+    ]
+
+
+def test_at_predicate_print_parse_round_trip():
+    prog = _at_program("rc[0, 0] >= 2")
+    printed = python_print(prog)
+    assert "predicate=(" in printed
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(reparsed, prog)
+
+
+def test_at_predicate_without_as_tid():
+    """No ``as tid``: the predicate still lands (the outliner synthesises a tid).
+
+    ``rc`` is a plain parameter here, so it has no tracked producer and the
+    contract check passes without a ``deps=``.
+    """
+    prog = pl.parse_program(
+        f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        with pl.at(level=pl.Level.CORE_GROUP, predicate=(rc[0, 0] > 0)):
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+    )
+    (scope,) = _at_incore_scopes(prog)
+    assert isinstance(dict(scope.attrs.items())["predicate"], ir.Gt)
+
+
+def test_at_predicate_rejected_at_non_core_group_level():
+    """A Hierarchy pl.at is never outlined into a Submit, so the predicate is lost."""
+    with pytest.raises(ParserSyntaxError, match="only supported with level=pl.Level.CORE_GROUP"):
+        pl.parse_program(
+            f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        with pl.at(level=pl.Level.HOST, predicate=(rc[0, 0] > 0)):
+            out = pl.store(pl.load(x, [0, 0], [128, 128]), [0, 0], out)
+        return out
+"""
+        )
+
+
+@pytest.mark.parametrize(
+    "opener,owner",
+    [
+        ("with pl.cluster():", r"pl\.cluster"),
+        ("for i in pl.spmd(4):", r"pl\.spmd"),
+        ("with pl.at(level=pl.Level.CORE_GROUP):", r"another pl\.at"),
+    ],
+    ids=["cluster", "spmd", "at"],
+)
+def test_at_predicate_rejected_when_nested(opener, owner):
+    """Nested inside another outlining scope the dispatch is folded into a
+    wrapper (Group / Spmd) or the enclosing kernel, so the predicate would be
+    silently dropped. ``AssertNoInnerDispatchPredicate`` re-asserts the
+    cluster / spmd cases for hand-built IR."""
+    with pytest.raises(ParserSyntaxError, match=rf"cannot be nested inside `{owner}"):
+        pl.parse_program(
+            f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: {_FP32_T}, out: pl.Out[{_FP32_T}], rc: {_INT32_T}
+    ) -> {_FP32_T}:
+        {opener}
+            with pl.at(level=pl.Level.CORE_GROUP, predicate=(rc[0, 0] > 0)):
+                v = pl.load(x, [0, 0], [128, 128])
+                out = pl.store(v, [0, 0], out)
+        return out
+"""
+        )
+
+
+def test_at_predicate_shape_validation_is_shared():
+    """The call form's shape rules apply verbatim — spot-check two."""
+    with pytest.raises(ParserSyntaxError, match="must compare one tensor element"):
+        _at_program("rc[0, 0] % 8 == 0")
+    with pytest.raises(ParserSyntaxError, match="Only simple comparisons"):
+        _at_program("0 < rc[0, 0] < 8")
+
+
+def test_at_scope_producer_is_tracked_for_the_deps_contract():
+    """A tensor written inside a ``with pl.at(...) as tid:`` body IS tracked.
+
+    Without ``_record_scope_producer`` on the pl.at path both spellings would
+    parse, silently certifying a stale-read predicate.
+    """
+    prog = _at_program("rc[0, 0] > 0", deps_src="deps=[g_tid], ")
+    _, expert_scope = _at_incore_scopes(prog)
+    assert isinstance(dict(expert_scope.attrs.items())["predicate"], ir.Gt)
+    with pytest.raises(ParserSyntaxError, match="produced by the task"):
+        _at_program("rc[0, 0] > 0", deps_src="")
+
+
+def test_at_predicate_deps_hint_always_offers_deps():
+    """Unlike pl.spmd, every pl.at form accepts ``deps=`` — so the hint says so.
+
+    The pl.spmd plain / for-forms reject ``deps=`` outright and are therefore
+    pointed at the ``as tid`` capture form instead; on pl.at that redirection
+    would be wrong advice.
+    """
+    with pytest.raises(ParserSyntaxError) as excinfo:
+        _at_program("rc[0, 0] > 0", deps_src="")
+    hint = excinfo.value.hint
+    assert "deps=[g_tid]" in hint, hint
+    assert "does not accept deps=" not in hint, hint
+
+
+def test_at_without_predicate_has_no_attr():
+    prog = pl.parse_program(
+        f"""
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: {_FP32_T}, out: pl.Out[{_FP32_T}]) -> {_FP32_T}:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            v = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(v, [0, 0], out)
+        return out
+"""
+    )
+    (scope,) = _at_incore_scopes(prog)
+    assert "predicate" not in dict(scope.attrs.items())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -381,7 +381,7 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 | ------- | -------------- | ----- |
 | `result, tid = pl.submit(kernel, *args, deps=[...], allow_early_resolve=False)` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. `allow_early_resolve=True` opts this task in as a speculative early-dispatch producer (lets the scheduler pre-stage its consumers; lowers to `Arg::set_allow_early_resolve(true)`). Also accepts `predicate=(t[i] > 0)` — a dispatch predicate the scheduler evaluates at the dispatch point (see [Dispatch predicate](#dispatch-predicate-predicate)). |
 | `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`) and `predicate=(t[i] > 0)` (see [Dispatch predicate](#dispatch-predicate-predicate)). |
-| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + `Submit`; `tid` captures the synthesized Submit's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. Without `as tid` the outliner synthesizes an unused TaskId Var — deps always travel on `Submit::deps_`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`); it forces the `Submit` shape even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. |
+| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + `Submit`; `tid` captures the synthesized Submit's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. Without `as tid` the outliner synthesizes an unused TaskId Var — deps always travel on `Submit::deps_`. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit`); it forces the `Submit` shape even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. Also accepts `predicate=(t[i] > 0)` (see [Dispatch predicate](#dispatch-predicate-predicate); `level=pl.Level.CORE_GROUP` only, and also forces the `Submit` shape). Cannot nest inside `pl.cluster()` / `pl.spmd()` / another `pl.at`. |
 | `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD dispatch | The SPMD sibling of the `pl.at ... as tid` form. The inline body is auto-outlined into an `InCore` kernel and dispatched across `N` blocks; `tid` captures the grid-wide producer TaskId. `deps=` accepted only with `as tid`. `core_num` / `sync_start` ride on the outlined `Spmd` Function attrs (the lowered `Submit.core_num` is `None`); codegen reads them via the launch-function fallback. Also accepts `allow_early_resolve=True` (same early-dispatch opt-in as `pl.submit` / `pl.at`; valid on all three `pl.spmd` forms, forcing the `Submit` shape even without `as tid`) and `predicate=(t[i] > 0)` (see [Dispatch predicate](#dispatch-predicate-predicate); also valid on all three forms and also forces the `Submit` shape). Cannot nest inside `pl.cluster()`. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
 | `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
@@ -552,16 +552,16 @@ with pl.manual_scope():
 ```
 
 **Scope:** `predicate=` is accepted on `pl.submit` / `pl.spmd_submit` (the
-direct-`Submit` forms) and on the `with pl.spmd(...)` scope form — all three
-spmd spellings (plain `with`, `with ... as tid`, and `for i in pl.spmd(...)`).
-It is not accepted on `pl.at(...)`.
+direct-`Submit` forms), on the `with pl.spmd(...)` scope form — all three spmd
+spellings (plain `with`, `with ... as tid`, and `for i in pl.spmd(...)`) — and
+on `with pl.at(level=pl.Level.CORE_GROUP, ...)`.
 
-##### Scope form
+##### Scope forms
 
-The scope form takes the same expression and the same validation; it differs
-only in how the predicate reaches the IR. It rides on `SpmdScopeStmt.attrs`
-until the scope is outlined, at which point it moves onto `Submit.predicate` —
-so the lowering, the codegen output, and the contract are identical.
+A scope form takes the same expression and the same validation; it differs only
+in how the predicate reaches the IR. It rides on the scope's `attrs` until the
+scope is outlined, at which point it moves onto `Submit.predicate` — so the
+lowering, the codegen output, and the contract are identical.
 
 ```python
 with pl.spmd(1) as g_tid:                                       # producer of rc
@@ -573,11 +573,13 @@ with pl.spmd(4, deps=[g_tid], predicate=(rc[0, 0] > 0)) as tid:  # producer is a
 
 Two things follow from that route:
 
-- **`deps=` needs the `as tid` form.** `deps=` is only accepted on
+- **On `pl.spmd`, `deps=` needs the `as tid` form.** `deps=` is only accepted on
   `with pl.spmd(...) as tid:`. A predicate over a tensor produced elsewhere in
   the same function therefore needs that form — the plain `with` and `for`
   forms can only carry a predicate over a tensor with no in-function producer
   (typically a function parameter), which the contract check permits.
+  (`pl.at` accepts `deps=` on every form, so this restriction does not apply
+  there.)
 - **No `as tid` is required otherwise.** Like `allow_early_resolve=True`, a
   predicate forces the scope to lower to a `Submit`; when the scope has no
   `as tid` the outliner synthesises an unused TaskId Var.
@@ -587,9 +589,36 @@ produces a `Submit`, so `predicate=` (like `allow_early_resolve=`) is rejected
 there at parse time rather than silently dropped.
 
 The contract check covers scope producers too: a tensor assigned inside a
-`with pl.spmd(...) as tid:` body is recorded as produced by that scope, so
-omitting it from a later `deps=` is rejected. The same best-effort limits in the
-table above still apply (aliases, intervening calls, `Array[N, TASK_ID]` deps).
+`with pl.spmd(...) as tid:` / `with pl.at(...) as tid:` body is recorded as
+produced by that scope, so omitting it from a later `deps=` is rejected. The
+same best-effort limits in the table above still apply (aliases, intervening
+calls, `Array[N, TASK_ID]` deps).
+
+###### `pl.at` scope form
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP) as g_tid:                  # producer of rc
+    rc = pl.store(pl.load(rc, [0, 0], [128, 128]), [0, 0], rc)
+
+with pl.at(level=pl.Level.CORE_GROUP,                            # producer is a dep
+           deps=[g_tid], predicate=(rc[0, 0] > 0)) as tid:
+    out = pl.store(pl.load(x, [0, 0], [128, 128]), [0, 0], out)
+```
+
+Two `pl.at`-specific rules, both because a predicate only has a runtime carrier
+where the scope becomes an independently submitted task:
+
+- **`level=pl.Level.CORE_GROUP` only.** Any other level builds a Hierarchy
+  scope, which is never outlined into a task dispatch, so the predicate would be
+  silently dropped. Rejected at parse time.
+- **No nesting inside `pl.cluster()` / `pl.spmd()` / another `pl.at`.** In each
+  case the inner dispatch is folded into the enclosing Group / Spmd wrapper (or
+  into the enclosing kernel body) and codegen emits `set_predicate` from the
+  *outer* call only. Also rejected at parse time.
+
+Unlike `pl.spmd`, `deps=` is accepted on every `pl.at` form, so a predicate over
+a locally produced tensor does not need `as tid` on the *consuming* scope — only
+on the producing one, to name it in `deps=`.
 
 #### `pl.parallel` under manual scope: array-carry fence
 
