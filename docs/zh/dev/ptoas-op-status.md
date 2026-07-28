@@ -153,15 +153,15 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ❌ | — | 前端/codegen 已有，缺同名 ST |
 | **位运算（11）** |  |  |  |  |  |  |  |  |
-| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有/无符号 8/16 位 pattern 与 valid_shape；A5 真机待验证 |
+| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有/无符号 8/16 位 pattern 与 valid_shape；A5 真机待验证 |
+| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有/无符号 8/16 位 pattern、tmp、alias 与 valid_shape；A5 真机待验证 |
 | pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有符号 8/16 位 scalar 编码与 valid_shape；PTOAS 暂不支持显式无符号 scalar 类型 |
+| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有符号 8/16 位 scalar 编码与 valid_shape；PTOAS 暂不支持显式无符号 scalar 类型 |
+| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机已验证有符号 8/16 位 scalar 编码、tmp、alias 与 valid_shape；PTOAS 暂不支持显式无符号 scalar 类型 |
 | pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | **数据重排（15）** |  |  |  |  |  |  |  |  |
@@ -260,5 +260,5 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
 **统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个；
-同名 ST 覆盖 110 个（普通 ST 106，distributed ST 4）；无同名 ST 62 个
-（普通 52，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。
+同名 ST 覆盖 116 个（普通 ST 112，distributed ST 4）；无同名 ST 56 个
+（普通 46，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。

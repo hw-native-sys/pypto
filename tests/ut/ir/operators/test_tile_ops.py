@@ -3427,6 +3427,124 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.xors" in ir_str
 
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            DataType.INT8,
+            DataType.UINT8,
+            DataType.INT16,
+            DataType.UINT16,
+            DataType.INT32,
+            DataType.UINT32,
+        ],
+    )
+    @pytest.mark.parametrize("op", [tile.and_, tile.or_, tile.xor])
+    def test_bitwise_contract_binary_accepts_supported_widths_and_preserves_view(self, dtype, op):
+        """Tile-tile bitwise ops preserve src0 type and require one shared valid region."""
+        span = ir.Span.unknown()
+        view = ir.TileView(
+            valid_shape=[7, 13],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+        src0 = ir.Var("src0", ir.TileType([8, 16], dtype, tile_view=view), span)
+        src1 = ir.Var("src1", ir.TileType([10, 20], dtype, tile_view=view), span)
+        tmp = ir.Var("tmp", ir.TileType([12, 24], dtype, tile_view=view), span)
+
+        call = op(src0, src1, tmp) if op is tile.xor else op(src0, src1)
+
+        assert _tile_result_dtype(call) == dtype
+        assert call.type.shape == src0.type.shape
+        assert _valid_of(call.type) == [7, 13]
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            DataType.INT8,
+            DataType.INT16,
+            DataType.INT32,
+        ],
+    )
+    @pytest.mark.parametrize("op", [tile.ands, tile.ors, tile.xors])
+    def test_bitwise_contract_scalar_literal_matches_tile_dtype(self, dtype, op):
+        """Scalar literal sugar uses the exact tile dtype required by PTO-ISA."""
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.TileType([8, 16], dtype), span)
+        tmp = ir.Var("tmp", ir.TileType([8, 16], dtype), span)
+
+        call = op(value, 1, tmp) if op is tile.xors else op(value, 1)
+
+        assert _operand_dtype(call.args[1]) == dtype
+        assert _tile_result_dtype(call) == dtype
+
+    @pytest.mark.parametrize("op", [tile.and_, tile.or_, tile.xor])
+    def test_bitwise_contract_binary_rejects_dtype_broadcast_and_tmp_mismatch(self, op):
+        """PTO-ISA does not promote or broadcast bitwise tile operands."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([8, 16], DataType.INT16), span)
+        mixed = ir.Var("mixed", ir.TileType([8, 16], DataType.UINT16), span)
+        broadcast = ir.Var("broadcast", ir.TileType([1, 16], DataType.INT16), span)
+
+        with pytest.raises(ValueError, match=r"same dtype"):
+            if op is tile.xor:
+                op(full, mixed, full)
+            else:
+                op(full, mixed)
+        with pytest.raises(ValueError, match=r"same valid_shape"):
+            if op is tile.xor:
+                op(full, broadcast, full)
+            else:
+                op(full, broadcast)
+        if op is tile.xor:
+            with pytest.raises(ValueError, match=r"same dtype"):
+                op(full, full, mixed)
+
+    @pytest.mark.parametrize("op", [tile.ands, tile.ors, tile.xors])
+    def test_bitwise_contract_scalar_rejects_explicit_dtype_and_tmp_mismatch(self, op):
+        """Typed scalar and XOR scratch operands must exactly match the source dtype."""
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.TileType([8, 16], DataType.INT16), span)
+        scalar = ir.ConstInt(1, DataType.INT32, span)
+        mixed_tmp = ir.Var("tmp", ir.TileType([8, 16], DataType.UINT16), span)
+
+        with pytest.raises(ValueError, match=r"same dtype"):
+            if op is tile.xors:
+                op(value, scalar, value)
+            else:
+                op(value, scalar)
+        if op is tile.xors:
+            with pytest.raises(ValueError, match=r"same dtype"):
+                op(value, 1, mixed_tmp)
+
+    @pytest.mark.parametrize("dtype", [DataType.UINT8, DataType.UINT16, DataType.UINT32])
+    @pytest.mark.parametrize("op", [tile.ands, tile.ors, tile.xors])
+    def test_bitwise_contract_scalar_rejects_unsigned_ptoas_encoding_gap(self, dtype, op):
+        """PTOAS scalar operands are signless and cannot encode PyPTO's explicit unsigned scalar types."""
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.TileType([8, 16], dtype), span)
+
+        with pytest.raises(ValueError, match=r"INT8, INT16, INT32"):
+            if op is tile.xors:
+                op(value, 1, value)
+            else:
+                op(value, 1)
+
+    @pytest.mark.parametrize("op", [tile.and_, tile.or_, tile.xor, tile.ands, tile.ors, tile.xors])
+    def test_bitwise_contract_rejects_unsupported_integer_width(self, op):
+        """INT64 is not implemented by the current PTO-ISA bitwise templates."""
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.TileType([8, 16], DataType.INT64), span)
+
+        with pytest.raises(ValueError, match=r"INT8.*INT32"):
+            if op is tile.xor:
+                op(value, value, value)
+            elif op is tile.xors:
+                op(value, 1, value)
+            elif op in (tile.ands, tile.ors):
+                op(value, 1)
+            else:
+                op(value, value)
+
     def test_tile_shl(self):
         """Test tile.shl operator - element-wise bitwise left shift of two tiles."""
 
