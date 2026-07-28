@@ -87,6 +87,30 @@ class TestMatmulMxTypes:
         with pytest.raises(Exception, match="divisible by 32"):
             ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
 
+    def test_matmul_mx_w4a8_fp4_rhs_uses_logical_k(self):
+        # W4A8: lhs FP8 [M, logical_K], rhs FP4 packed [logical_K/2, N].
+        # Scales still follow logical K/32.
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E4M3FN), span)
+        lhs_scale = ir.Var("lhs_scale", ir.TileType([16, 2], DataType.FP8E8M0), span)
+        rhs = ir.Var("rhs", ir.TileType([32, 32], DataType.FP4), span)  # storage K=32 → logical 64
+        rhs_scale = ir.Var("rhs_scale", ir.TileType([2, 32], DataType.FP8E8M0), span)
+        call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
+        assert isinstance(call.type.shape[0], ir.ConstInt) and call.type.shape[0].value == 16
+        assert isinstance(call.type.shape[1], ir.ConstInt) and call.type.shape[1].value == 32
+
+    def test_matmul_mx_rejects_fp4_storage_k_mismatch(self):
+        # lhs logical K=64, rhs storage K=16 → logical 32 — must fail.
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.FP8E4M3FN), span)
+        lhs_scale = ir.Var("lhs_scale", ir.TileType([16, 2], DataType.FP8E8M0), span)
+        rhs = ir.Var("rhs", ir.TileType([16, 32], DataType.FP4), span)
+        rhs_scale = ir.Var("rhs_scale", ir.TileType([2, 32], DataType.FP8E8M0), span)
+        with pytest.raises(Exception, match="matching logical K"):
+            ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
+
 
 class TestTQuantTypes:
     def test_tquant_returns_tuple(self):
@@ -105,6 +129,29 @@ class TestTQuantTypes:
         assert scale.dtype == DataType.UINT8
         assert isinstance(scale.shape[0], ir.ConstInt) and scale.shape[0].value == 1
         assert isinstance(scale.shape[1], ir.ConstInt) and scale.shape[1].value == 32  # 16*64/32
+
+    def test_tquant_mxfp4_packs_dst_k(self):
+        # MXFP4 dst shape is storage units [M, K/2]; scale groups still use logical K.
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 64], DataType.FP32), span)
+        call = ir.op.tile.tquant(src, mode="mxfp4", span=span)
+        assert isinstance(call.type, ir.TupleType)
+        dst, scale = call.type.types
+        assert isinstance(dst, ir.TileType)
+        assert dst.dtype == DataType.FP4
+        assert isinstance(dst.shape[0], ir.ConstInt) and dst.shape[0].value == 16
+        assert isinstance(dst.shape[1], ir.ConstInt) and dst.shape[1].value == 32  # 64/2
+        assert isinstance(scale, ir.TileType)
+        assert scale.dtype == DataType.UINT8
+        assert isinstance(scale.shape[1], ir.ConstInt) and scale.shape[1].value == 32  # 16*64/32
+
+    def test_tquant_mxfp4_rejects_k_not_divisible_by_32(self):
+        # Static K must be %32==0 for MX scale groups; that also implies even K
+        # for FP4 packing. Odd K is rejected at the scale-group check first.
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([16, 48], DataType.FP32), span)
+        with pytest.raises(Exception, match="divisible by 32"):
+            ir.op.tile.tquant(src, mode="mxfp4", span=span)
 
     def test_mx_quant_alias_in_dsl(self):
         @pl.program

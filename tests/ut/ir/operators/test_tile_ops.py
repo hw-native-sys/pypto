@@ -2399,6 +2399,19 @@ class TestTileReinterpretViewIR:
         assert call.type.dtype == DataType.INT8
         assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
 
+    def test_int8_to_fp4_keeps_shape(self):
+        # Packed MXFP4 E2M1x2 is 1 byte/element (same storage as INT8/FP8).
+        call = tile.reinterpret_view(self._var([8, 32], DataType.INT8), DataType.FP4)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP4
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
+    def test_fp4_to_int8_keeps_shape(self):
+        call = tile.reinterpret_view(self._var([8, 32], DataType.FP4), DataType.INT8)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.INT8
+        assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [8, 32]
+
     def test_rejects_fp8e5m2_target(self):
         # Ascend950 backend does not execute FP8E5M2; reject at IR deduction.
         with pytest.raises(ValueError, match="FP8E5M2"):

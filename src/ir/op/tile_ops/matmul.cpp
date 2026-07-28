@@ -262,9 +262,11 @@ static void CheckMxScaleTile(const TileTypePtr& scale_type, const ExprPtr& expec
                              const ExprPtr& expected_cols, const std::string& op_name,
                              const char* scale_name) {
   CHECK(scale_type) << "The operator " << op_name << " requires " << scale_name << " to be a TileType";
-  CHECK(scale_type->dtype_ == DataType::FP8E8M0)
-      << "The operator " << op_name << " requires " << scale_name << " dtype FP8E8M0, but got "
-      << scale_type->dtype_.ToString();
+  // FP8E8M0 scale, or raw UINT8 — the byte representation produced by tile.tquant
+  // (!pto.f8E8M0 is not a valid tile_buf dtype, so the quantized e8m0 scale is uint8).
+  CHECK(scale_type->dtype_ == DataType::FP8E8M0 || scale_type->dtype_ == DataType::UINT8)
+      << "The operator " << op_name << " requires " << scale_name
+      << " dtype FP8E8M0 (or raw UINT8 from tile.tquant), but got " << scale_type->dtype_.ToString();
   CHECK(scale_type->shape_.size() == 2)
       << "The operator " << op_name << " requires " << scale_name << " to be 2D, but got "
       << scale_type->shape_.size() << " dimensions";
@@ -300,6 +302,24 @@ static ExprPtr MxScaleKFromK(const ExprPtr& k_dim, const std::string& op_name) {
   return nullptr;
 }
 
+static bool IsMxDataDtype(DataType dtype) {
+  // FP8E4M3FN / FP4 data tiles, or raw INT8 from tile.tquant (ptoas emits i8).
+  // FP8E5M2 remains rejected (Ascend950 MX path baseline from #2147).
+  return dtype == DataType::FP8E4M3FN || dtype == DataType::FP4 || dtype == DataType::INT8;
+}
+
+// MXFP4 tiles store two logical elements per storage unit (pto-isa
+// float4_e2m1x2_t). IR shape_/valid_shape are in storage units; convert to
+// logical element count for K-matching and scale-group checks.
+static ExprPtr MxLogicalK(DataType dtype, const ExprPtr& storage_k) {
+  if (dtype != DataType::FP4) return storage_k;
+  auto c = As<ConstInt>(storage_k);
+  if (c) {
+    return std::make_shared<ConstInt>(c->value_ * 2, DataType::INDEX, Span::unknown());
+  }
+  return MakeMul(storage_k, std::make_shared<ConstInt>(2, DataType::INDEX, Span::unknown()));
+}
+
 TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
@@ -318,20 +338,30 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                   << args[2]->GetType()->TypeName();
   CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D lhs/rhs tiles";
-  CHECK(lhs_type->dtype_ == DataType::FP8E4M3FN)
-      << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
+  CHECK(IsMxDataDtype(lhs_type->dtype_))
+      << "The operator " << op_name << " requires lhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
+         "but got "
       << lhs_type->dtype_.ToString();
-  CHECK(rhs_type->dtype_ == DataType::FP8E4M3FN)
-      << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
+  CHECK(IsMxDataDtype(rhs_type->dtype_))
+      << "The operator " << op_name << " requires rhs dtype in {FP8E4M3FN, FP4} (or INT8 from tquant), "
+         "but got "
       << rhs_type->dtype_.ToString();
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires matching lhs/rhs data dtypes, but got "
+      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
 
   ExprPtr m_dim = lhs_type->shape_[0];
   ExprPtr k_dim_lhs = lhs_type->shape_[1];
   ExprPtr k_dim_rhs = rhs_type->shape_[0];
   ExprPtr n_dim = rhs_type->shape_[1];
 
+  // Scale shape checks must follow Left/Right *valid* extents (ISA SetValidShape /
+  // GetValidRow), not physical tile bounds — decode pads M to the tile size while
+  // runtime M is smaller. For FP4, valid/shape K are storage units; convert to
+  // logical element counts before matching and deriving scale K (= logical_K/32).
   ExprPtr m_valid = m_dim;
   ExprPtr k_valid_lhs = k_dim_lhs;
+  ExprPtr k_valid_rhs = k_dim_rhs;
   ExprPtr n_valid = n_dim;
   if (lhs_type->tile_view_.has_value()) {
     const auto& vs = lhs_type->tile_view_->valid_shape;
@@ -340,18 +370,21 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   }
   if (rhs_type->tile_view_.has_value()) {
     const auto& vs = rhs_type->tile_view_->valid_shape;
+    if (vs.size() >= 1 && vs[0]) k_valid_rhs = vs[0];
     if (vs.size() >= 2 && vs[1]) n_valid = vs[1];
   }
 
-  auto k_lhs_const = As<ConstInt>(k_dim_lhs);
-  auto k_rhs_const = As<ConstInt>(k_dim_rhs);
+  ExprPtr logical_k_lhs = MxLogicalK(lhs_type->dtype_, k_valid_lhs);
+  ExprPtr logical_k_rhs = MxLogicalK(rhs_type->dtype_, k_valid_rhs);
+  auto k_lhs_const = As<ConstInt>(logical_k_lhs);
+  auto k_rhs_const = As<ConstInt>(logical_k_rhs);
   if (k_lhs_const && k_rhs_const) {
     CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-        << "The operator " << op_name << " requires matching K, but got lhs K=" << k_lhs_const->value_
+        << "The operator " << op_name << " requires matching logical K, but got lhs K=" << k_lhs_const->value_
         << " and rhs K=" << k_rhs_const->value_;
   }
 
-  ExprPtr scale_k = MxScaleKFromK(k_valid_lhs, op_name);
+  ExprPtr scale_k = MxScaleKFromK(logical_k_lhs, op_name);
   if (!scale_k) {
     CHECK(lhs_scale_type && lhs_scale_type->shape_.size() == 2);
     scale_k = lhs_scale_type->shape_[1];

@@ -109,12 +109,36 @@ TypePtr DeduceTileTQuantType(const std::vector<ExprPtr>& args,
   // must be i8/ui8 (FP8 stored as its raw byte, mirrors pto-isa's int8_t FP8
   // tile), while MXFP4_E2M1 dst must be the packed !pto.f4E2M1x2 type. The tstore
   // byte-copies the result into the FP8/FP4 output tensor.
+  //
+  // MXFP4 packs two logical elements into one storage unit (pto-isa
+  // float4_e2m1x2_t). IR shape_/valid_shape for the dst are therefore storage
+  // units [M, K/2]. Scale groups and V2C buffers still size from the PHYSICAL
+  // padded extents (M_phys*K_phys/32) so alloc_tile rows stay 32-byte aligned;
+  // partial validity is applied later via tile.set_validshape, not by shrinking
+  // the physical buffer.
   bool is_mxfp4 = (mode == "mxfp4" || mode == "mxfp4_e2m1");
   DataType dst_dtype = is_mxfp4 ? DataType::FP4 : DataType::INT8;
+  auto pack_fp4_k = [&](const ExprPtr& logical_k) -> ExprPtr {
+    auto c = As<ConstInt>(logical_k);
+    if (c) {
+      CHECK(c->value_ > 0 && (c->value_ % 2) == 0)
+          << "The operator " << op_name << " requires even K for MXFP4 2-elements-per-byte packing, but got "
+          << c->value_;
+      return std::make_shared<ConstInt>(c->value_ / 2, DataType::INDEX, Span::unknown());
+    }
+    return MakeFloorDiv(logical_k, std::make_shared<ConstInt>(2, DataType::INDEX, Span::unknown()));
+  };
+  std::vector<ExprPtr> dst_shape = src_type->shape_;
+  if (is_mxfp4) {
+    dst_shape = {m_dim, pack_fp4_k(k_dim)};
+  }
   TileView dst_view;
-  dst_view.valid_shape = src_type->shape_;
+  // Keep physical (storage) valid_shape so Canonicalize can drop TileView when
+  // valid≡shape — sticking a narrowed valid from a padded source conflicts with
+  // later set_validshape / cross-region reassignment of the same SSA.
+  dst_view.valid_shape = is_mxfp4 ? dst_shape : src_type->shape_;
   InheritTileViewLayout(dst_view, src_type);
-  auto dst_type = std::make_shared<TileType>(src_type->shape_, dst_dtype, std::nullopt, dst_view);
+  auto dst_type = std::make_shared<TileType>(dst_shape, dst_dtype, std::nullopt, dst_view);
 
   // scale (e8m0 exp): raw uint8 bytes as flat [1, groups] (groups = M*K/32).
   // Flat is already 32-byte-row-aligned (one row of groups bytes), so no pad is
@@ -136,8 +160,8 @@ TypePtr DeduceTileTQuantType(const std::vector<ExprPtr>& args,
   scale_view.blayout = TileLayout::row_major;
   scale_view.slayout = TileLayout::none_box;
   scale_view.fractal = 32;
-  auto scale_type = std::make_shared<TileType>(
-      std::vector<ExprPtr>{one, groups_dim}, DataType::UINT8, std::nullopt, scale_view);
+  auto scale_type = std::make_shared<TileType>(std::vector<ExprPtr>{one, groups_dim}, DataType::UINT8,
+                                               std::nullopt, scale_view);
 
   std::vector<TypePtr> elements{dst_type, scale_type};
   return std::make_shared<TupleType>(std::move(elements));
