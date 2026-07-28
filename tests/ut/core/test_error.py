@@ -37,6 +37,10 @@ _MACOS = sys.platform == "darwin"
 # Matches the frame lines emitted by Backtrace::FormatStackTrace.
 _FRAME_RE = re.compile(r'^ File "([^"]+)", line (\d+)$', re.MULTILINE)
 
+# PyPTO's own C++ implementation — everything except the python/bindings/ entry points. CPython's
+# sources (Python/, Objects/, Modules/, Include/) do not match: its include dir is capitalised.
+_PYPTO_IMPL_RE = re.compile(r"(?:^|/)(?:src|include/pypto)/")
+
 
 def _assert_has_trace(message: str) -> list[str]:
     """Assert *message* carries a stack trace and return the source files it names.
@@ -235,21 +239,26 @@ class TestStackTraceContents:
             f"expected the throwing binding in the trace, got: {files}"
         )
 
-    def test_traceback_has_no_frames_outside_the_call_path(self, no_backtrace_env: None):
-        """Frames must come from the real call path, not from arbitrary PyPTO sources.
+    def test_traceback_has_no_frames_from_pypto_internals(self, no_backtrace_env: None):
+        """No PyPTO implementation file may appear in a trace that never entered one.
 
         raise_internal_error is reached straight from the interpreter through nanobind, so the
-        binding itself is the only source file that can legitimately appear — hence an allowlist
-        rather than a denylist of known-bad directories. Passing this module's own path to
-        backtrace_create_state used to register its DWARF at the *interpreter's* load base, which
-        resolved every CPython frame to whichever PyPTO line sat at the same offset.
+        binding is the only PyPTO source on the path — nothing under src/ or include/pypto/.
+        Passing this module's own path to backtrace_create_state used to register its DWARF at the
+        *interpreter's* load base, so CPython PCs resolved to whichever PyPTO line sat at the same
+        offset; every fabricated frame therefore named a PyPTO implementation file.
+
+        Interpreter frames (CPython's own Python/ceval.c, Objects/call.c, ...) are *not* filtered
+        out: they are the genuine callers, and they appear whenever the running Python itself was
+        built with debug info. Their presence is correct, so the assertion targets PyPTO sources
+        rather than allowlisting the binding.
         """
         with pytest.raises(Exception) as exc_info:
             testing.raise_internal_error("invariant broken")
 
         files = _assert_has_trace(str(exc_info.value))
-        foreign = [f for f in files if "python/bindings/" not in f]
-        assert not foreign, f"frames attributed to sources not on the call path: {foreign}"
+        fabricated = [f for f in files if _PYPTO_IMPL_RE.search(f)]
+        assert not fabricated, f"frames attributed to PyPTO internals not on the call path: {fabricated}"
 
     def test_traceback_omits_check_macro_infrastructure(self, no_backtrace_env: None):
         """The CHECK/INTERNAL_CHECK throw site in logging.h is noise, not a call-path frame."""
