@@ -261,6 +261,15 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   }
   codegen.Emit(oss.str());
 
+  // ExpandMixed gm_sync of MX A-scales: AIV TSTOREs ND bytes to GM and also
+  // V2C-pushes the flat e8m0 tile. AIC must drain that TPOP (PIPE_ALL) before
+  // TFREE / the subsequent mx_a_* GM TLOAD; otherwise prefill_indexer score
+  // drifts past the 5% ratio budget. Mirrors the legacy post-EmitC regex that
+  // inserted pipe_barrier after TPOP<..., float8_e8m0_t, 1, G, ...>.
+  if (result_type.find("f8E8M0") != std::string::npos) {
+    codegen.Emit("pto.barrier <PIPE_ALL>");
+  }
+
   return "";
 }
 
@@ -280,6 +289,8 @@ static std::string MakeTfreeCodegenPTO(const char* target, const CallPtr& op,
 
   // Deferred Mat→Scale fills still alias the V2C tpop FIFO (A5 cannot Mat→Mat
   // copy). Hold the slot until tget_scale_addr flushes the pending tmov.
+  // Record this tfree's own core/split so the drain releases it correctly
+  // (per-object + per-split), not as a global count onto {aiv, split=0}.
   if (codegen.HasPendingScaleFills()) {
     codegen.DeferTFree(target, split);
     return "";

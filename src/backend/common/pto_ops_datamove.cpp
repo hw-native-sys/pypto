@@ -394,7 +394,8 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // NZ fractal granularity: M0 = 16 rows; the C0 lane count along columns is
   // fractal_bytes / dtype_bytes / M0 (both collapse to 16 for fp16/bf16).
   constexpr int64_t kNZFractalRows = 16;
-  const int64_t dtype_bytes = std::max<int64_t>(1, static_cast<int64_t>(dst_tile_type->dtype_.GetBit()) / 8);
+  // GetByte() is ceil(bits/8); for sub-byte FP4 this is 1 (packed unit), not 0.
+  const int64_t dtype_bytes = static_cast<int64_t>(dst_tile_type->dtype_.GetByte());
   const int64_t box_cols =
       view_info.fractal > 0
           ? std::max<int64_t>(1, static_cast<int64_t>(view_info.fractal) / dtype_bytes / kNZFractalRows)
@@ -640,8 +641,8 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
 // op's static TupleType (indices 2,3).
 static std::string MakeTQuantCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  CHECK(op->args_.size() == 3)
-      << "tile.tquant_dps requires 3 arguments (src, max, scaling), but got " << op->args_.size();
+  CHECK(op->args_.size() == 3) << "tile.tquant_dps requires 3 arguments (src, max, scaling), but got "
+                               << op->args_.size();
 
   ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
   INTERNAL_CHECK_SPAN(tuple_var, op->span_)
@@ -683,9 +684,9 @@ static std::string MakeTQuantCodegenPTO(const CallPtr& op, codegen::CodegenBase&
   if (!src_ty.empty()) {
     oss << " : " << src_ty;
   }
-  oss << ") outs(" << dst << ", " << scale << ", " << max_v << ", " << scaling
-      << " : " << dst_ty << ", " << scale_ty << ", " << max_ty << ", " << scaling_ty
-      << ") {quant_type = #pto<quant_type " << quant_type << ">}";
+  oss << ") outs(" << dst << ", " << scale << ", " << max_v << ", " << scaling << " : " << dst_ty << ", "
+      << scale_ty << ", " << max_ty << ", " << scaling_ty << ") {quant_type = #pto<quant_type " << quant_type
+      << ">}";
   codegen.Emit(oss.str());
   return "";
 }
@@ -736,6 +737,9 @@ static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::Codeg
     }
     tmov << ")";
     codegen.Emit(tmov.str());
+    // Release any V2C FIFO slots held while the pending fill aliased tpop.
+    // Each deferred tfree carries its own core/split — emit each on the
+    // correct core+split rather than collapsing them onto {aiv, split = 0}.
     for (const auto& dtf : codegen.TakeDeferredTFrees()) {
       codegen.Emit("pto.tfree_from_" + dtf.core + " {split = " + std::to_string(dtf.split) + "}");
     }
@@ -1351,6 +1355,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       if (!(result_has_memref && !existing_type.empty() && existing_type == result_type)) {
         auto shape = result_tile->shape_;
         INTERNAL_CHECK_SPAN(shape.size() >= 2, op->span_);
+        // alloc_tile valid_row/valid_col size the physical buffer and must keep
+        // ptoas's 32-byte row alignment — use the physical shape here. Partial
+        // validity is applied afterward via tile.set_validshape, not by
+        // shrinking this alias below the padded storage size.
         auto r = ir::As<ir::ConstInt>(shape[0]);
         auto c = ir::As<ir::ConstInt>(shape[1]);
         INTERNAL_CHECK_SPAN(r && c, op->span_);

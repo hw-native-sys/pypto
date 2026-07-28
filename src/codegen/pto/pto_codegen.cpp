@@ -662,8 +662,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       const bool is_acc = type_str.find("loc=acc") != std::string::npos;
       auto it = fs_.memref_identity_to_mlir.find(ident);
       auto type_it = fs_.memref_identity_type.find(ident);
-      if (is_acc && it != fs_.memref_identity_to_mlir.end() &&
-          type_it != fs_.memref_identity_type.end() && type_it->second == type_str) {
+      if (is_acc && it != fs_.memref_identity_to_mlir.end() && type_it != fs_.memref_identity_type.end() &&
+          type_it->second == type_str) {
         ssa_name = it->second;
       } else {
         ssa_name = NewNamedTemp(tile_var->name_hint_);
@@ -906,6 +906,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   INTERNAL_CHECK(!HasPendingScaleFills())
       << "Internal error: unflushed deferred scale fill at end of function — a "
          "tile.move to LeftScale/RightScale requires a matching tget_scale_addr";
+  INTERNAL_CHECK(fs_.deferred_tfrees.empty())
+      << "Internal error: undrained deferred tfree(s) at end of function — every "
+         "tfree held while a scale fill aliased the V2C tpop FIFO must be released "
+         "by a matching tget_scale_addr";
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
@@ -1383,8 +1387,7 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) c
     return it->second;
   }
   auto type_it = fs_.memref_identity_type.find(ident);
-  if (type_it != fs_.memref_identity_type.end() &&
-      type_it->second.find("loc=acc") != std::string::npos) {
+  if (type_it != fs_.memref_identity_type.end() && type_it->second.find("loc=acc") != std::string::npos) {
     return it->second;
   }
   return "";
@@ -1468,6 +1471,33 @@ std::vector<PTOCodegen::DeferredTFree> PTOCodegen::TakeDeferredTFrees() {
 }
 
 bool PTOCodegen::HasPendingScaleFills() const { return !fs_.pending_scale_fills.empty(); }
+
+std::optional<PTOCodegen::PendingScaleFill> PTOCodegen::TakePendingScaleFill(const std::string& dst_ssa) {
+  auto it = fs_.pending_scale_fills.find(dst_ssa);
+  if (it == fs_.pending_scale_fills.end()) return std::nullopt;
+  PendingScaleFill fill = std::move(it->second);
+  fs_.pending_scale_fills.erase(it);
+  return fill;
+}
+
+std::optional<PTOCodegen::PendingSetValidShape> PTOCodegen::TakePendingSetValidShape(
+    const std::string& dst_ssa) {
+  auto it = fs_.pending_set_validshapes.find(dst_ssa);
+  if (it == fs_.pending_set_validshapes.end()) return std::nullopt;
+  PendingSetValidShape pending = std::move(it->second);
+  fs_.pending_set_validshapes.erase(it);
+  return pending;
+}
+
+void PTOCodegen::DeferTFree(const std::string& core, int split) {
+  fs_.deferred_tfrees.push_back({core, split});
+}
+
+std::vector<PTOCodegen::DeferredTFree> PTOCodegen::TakeDeferredTFrees() {
+  std::vector<DeferredTFree> out = std::move(fs_.deferred_tfrees);
+  fs_.deferred_tfrees.clear();
+  return out;
+}
 
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype) {
   CHECK(dtype == DataType::FP32) << "__gm_pipe_buffer must use FP32 elements, got " << dtype.ToString();
@@ -1585,9 +1615,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       auto it = fs_.tuple_makeexprs.find(base_var.get());
       if (it != fs_.tuple_makeexprs.end() && tge->index_ >= 0 &&
           static_cast<size_t>(tge->index_) < it->second->elements_.size()) {
-        auto modified = std::make_shared<ir::AssignStmt>(op->var_,
-                                                          it->second->elements_[tge->index_],
-                                                          op->span_);
+        auto modified =
+            std::make_shared<ir::AssignStmt>(op->var_, it->second->elements_[tge->index_], op->span_);
         return VisitStmt_(modified);
       }
     }

@@ -110,6 +110,26 @@ class TestMxDslProgram:
         assert "make_tensor_view" in mlir and "#pto.layout<mx_a_zz>" in mlir
         assert "#pto.layout<mx_b_nn>" in mlir
         assert "pto.tload" in mlir
+        # AIC codegen must emit PIPE_ALL immediately before mx_a_* tload so
+        # AIV GM TSTORE → AIC TLOAD visibility survives insert-sync.
+        lines = [ln.strip() for ln in mlir.splitlines()]
+        mx_a_tload_idxs = [
+            i for i, ln in enumerate(lines) if "pto.tload" in ln and "#pto.layout<mx_a_zz>" in ln
+        ]
+        assert mx_a_tload_idxs, f"mx_a_zz tload not found in MLIR:\n{mlir}"
+        for i in mx_a_tload_idxs:
+            assert i > 0 and lines[i - 1] == "pto.barrier <PIPE_ALL>", (
+                f"expected pto.barrier <PIPE_ALL> immediately before mx_a tload; "
+                f"got prev={lines[i - 1]!r} at line {i}:\n{mlir}"
+            )
+        # mx_b_* loads must not get the A-scale GM visibility barrier.
+        mx_b_tload_idxs = [
+            i for i, ln in enumerate(lines) if "pto.tload" in ln and "#pto.layout<mx_b_nn>" in ln
+        ]
+        for i in mx_b_tload_idxs:
+            assert lines[i - 1] != "pto.barrier <PIPE_ALL>", (
+                f"unexpected PIPE_ALL before mx_b tload at line {i}:\n{mlir}"
+            )
 
     def test_matmul_mx_acc_accumulates_in_place(self):
         @pl.program
@@ -183,12 +203,11 @@ class TestTQuantProgram:
                 qa, sa = pl.mx_quant(ta, mode="mxfp8_e4m3")
                 qb_t, sb_t = pl.mx_quant(tb_t, mode="mxfp8_e4m3")
                 qb = pl.tile.transpose_view(qb_t)
-                qa_m = pl.move(
-                    pl.tile.reinterpret_view(qa, pl.FP8E4M3FN), target_memory=pl.Mem.Mat
-                )
-                qb_m = pl.move(
-                    pl.tile.reinterpret_view(qb, pl.FP8E4M3FN), target_memory=pl.Mem.Mat
-                )
+                # Data: reinterpret raw i8 → FP8E4M3FN before Left/Right moves.
+                qa_m = pl.move(pl.tile.reinterpret_view(qa, pl.FP8E4M3FN), target_memory=pl.Mem.Mat)
+                qb_m = pl.move(pl.tile.reinterpret_view(qb, pl.FP8E4M3FN), target_memory=pl.Mem.Mat)
+                # Scale: flat [1, groups] ui8 through Mat; LeftScale target_shape
+                # reshapes Mat ui8 then tmov ui8→f8 ScaleLeft (treshape rejects f8E8M0).
                 sa_m = pl.move(sa, target_memory=pl.Mem.Mat)
                 sb_m = pl.move(sb_t, target_memory=pl.Mem.Mat)
                 la = pl.move(qa_m, target_memory=pl.Mem.Left)
@@ -210,6 +229,8 @@ class TestTQuantProgram:
         reshape_lines = [ln for ln in mlir.splitlines() if "pto.treshape" in ln and "dtype=ui8" in ln]
         assert reshape_lines, f"expected ui8 treshape for LeftScale target_shape, got:\n{mlir}"
         assert any("loc=mat" in ln and "dtype=ui8" in ln for ln in mlir.splitlines())
-        assert any(
-            "pto.tmov" in ln and "loc=scaling" in ln for ln in mlir.splitlines()
-        ), f"expected tmov into scaling, got:\n{mlir}"
+        # ui8 → scaling tmov must appear (immediate for V2C tpop; deferred after
+        # tget_scale_addr when the Mat scale has a MemRef / GM staging).
+        assert any("pto.tmov" in ln and "loc=scaling" in ln for ln in mlir.splitlines()), (
+            f"expected tmov into scaling, got:\n{mlir}"
+        )

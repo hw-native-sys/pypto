@@ -154,6 +154,16 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string partition_view = EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type,
                                                     partition_type, offset_codes, size_codes, codegen);
 
+  // AIV stores MX A-scales ND-flat to GM; AIC TLOAD (MTE2) must not race ahead.
+  // Emit an explicit pipe barrier immediately before the mx_a_* tload so the
+  // ordering survives --enable-insert-sync (unlike a freestanding IR barrier
+  // that insert-sync may relocate). Prefer this over post-EmitC regex.
+  const bool is_mx_a_scale_load =
+      (mx_layout == "mx_a_zz" || mx_layout == "mx_a_nd" || mx_layout == "mx_a_dn");
+  if (is_mx_a_scale_load) {
+    codegen.Emit("pto.barrier <PIPE_ALL>");
+  }
+
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
@@ -880,6 +890,30 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
         << "system.fence takes no arguments, got " << op->args_.size();
     codegen.Emit("pto.fence.barrier_all #pto.fence_scope<gm>");
+    return std::string("");
+  });
+
+  // Pipe barriers (distinct from system.fence / pto.fence.barrier_all which is
+  // a GM memory fence). Matches distributed codegen's `pto.barrier <PIPE_ALL>`.
+  reg("system.bar_all", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+        << "system.bar_all takes no arguments, got " << op->args_.size();
+    codegen.Emit("pto.barrier <PIPE_ALL>");
+    return std::string("");
+  });
+  reg("system.bar_v", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+        << "system.bar_v takes no arguments, got " << op->args_.size();
+    codegen.Emit("pto.barrier <PIPE_V>");
+    return std::string("");
+  });
+  reg("system.bar_m", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+        << "system.bar_m takes no arguments, got " << op->args_.size();
+    codegen.Emit("pto.barrier <PIPE_M>");
     return std::string("");
   });
 

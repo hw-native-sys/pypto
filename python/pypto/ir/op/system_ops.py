@@ -220,7 +220,10 @@ def bar_m(*, span: Span | None = None) -> Call:
 
 
 def bar_all(*, span: Span | None = None) -> Call:
-    """Global barrier synchronization."""
+    """Global pipe barrier (``pto.barrier <PIPE_ALL>`` → ``pipe_barrier(PIPE_ALL)``).
+
+    Distinct from :func:`fence`, which lowers to ``pto.fence.barrier_all`` (GM fence).
+    """
     return _create_barrier_op("system.bar_all", span=span)
 
 

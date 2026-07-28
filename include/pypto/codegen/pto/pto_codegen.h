@@ -420,6 +420,8 @@ class PTOCodegen : public CodegenBase {
   };
   void RegisterPendingScaleFill(const std::string& dst_ssa, PendingScaleFill fill);
   [[nodiscard]] bool HasPendingScaleFill(const std::string& dst_ssa) const;
+  /// Drain (extract + erase) the deferred Mat→Scale fill recorded for dst_ssa,
+  /// at tget_scale_addr. Returns nullopt if none pending for dst_ssa.
   std::optional<PendingScaleFill> TakePendingScaleFill(const std::string& dst_ssa);
   /// Deferred set_validshape on a Scale tile that still has a pending fill:
   /// apply after tget + fill so TMov/GetValid* and matmul see the runtime M.
@@ -429,6 +431,8 @@ class PTOCodegen : public CodegenBase {
     std::string tile_buf_type;
   };
   void RegisterPendingSetValidShape(const std::string& dst_ssa, PendingSetValidShape pending);
+  /// Drain (extract + erase) the deferred set_validshape recorded for dst_ssa,
+  /// at tget_scale_addr. Returns nullopt if none pending for dst_ssa.
   std::optional<PendingSetValidShape> TakePendingSetValidShape(const std::string& dst_ssa);
   /// True if any deferred Mat→LeftScale/RightScale fill is still pending — a
   /// scale move registered a fill that the bind-then-fill sequence has not yet
