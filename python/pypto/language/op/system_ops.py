@@ -239,18 +239,14 @@ def cacheinvalid(
 
     - No arguments: invalidate the entire GM address space; lowers to
       ``pto.cmo.cacheinvalid all #pto.address_space<gm>``.
-    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region. Codegen
-      picks the lowering by region size:
-
-      - ``shapes`` all 1 (scalar write): ``pto.addptr`` +
-        ``pto.cmo.cacheinvalid %write_ptr single_cache_line``.
-      - otherwise (tile store): ``pto.partition_view`` +
-        ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``.
+    - ``(tensor, shapes, offsets)``: invalidate one tensor sub-region; lowers to
+      ``pto.partition_view`` +
+      ``pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>``
+      for every region size, a single element included.
 
     Args:
         tensor: Target tensor whose sub-region is invalidated; omit for whole-GM.
-        shapes: Per-dimension region sizes; length must equal the tensor rank
-            (all 1 selects the scalar-write / ptr form).
+        shapes: Per-dimension region sizes; length must equal the tensor rank.
         offsets: Per-dimension start offsets; length must equal the tensor rank.
         span: Optional source span for debugging (auto-captured if not provided).
     """
