@@ -995,7 +995,6 @@ class TestConvertTensorToTileOps:
 
     def test_div_row_broadcast_requires_divisor_valid_rows_to_cover_dividend(self):
         """The row-expand template reads one divisor scalar for every valid output row."""
-        span = ir.Span.unknown()
         lhs_type = ir.TensorType(
             [8, 16],
             DataType.FP32,
@@ -1008,17 +1007,15 @@ class TestConvertTensorToTileOps:
             None,
             ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[6, 1]),
         )
+        # The elementwise valid-region rule rejects this at type deduction, before
+        # the conversion pass gets a chance to apply its own divisor-cover check:
+        # 7 and 6 are both non-broadcast row extents and are provably unequal.
         ib = IRBuilder()
         with ib.function("kernel", type=ir.FunctionType.InCore) as f:
             lhs = f.param("lhs", lhs_type)
             rhs = f.param("rhs", rhs_type)
-            result = ib.let("result", tensor_ops.div(lhs, rhs))
-            f.return_type(result.type)
-            ib.return_stmt(result)
-        before = ir.Program([f.get_result()], "ShortDivisorValidRows", span)
-
-        with pytest.raises(ValueError, match=r"divisor valid rows to cover the dividend"):
-            passes.convert_tensor_to_tile_ops()(before)
+            with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+                ib.let("result", tensor_ops.div(lhs, rhs))
 
     def test_div_row_broadcast_dynamic_valid_rows_must_be_provably_covered(self):
         """A shared runtime extent is safe, while unrelated extents need a runtime guard."""
@@ -1052,8 +1049,11 @@ class TestConvertTensorToTileOps:
         kernel = _require_function(converted, "kernel")
         assert _find_first_call_to(kernel, "tile.row_expand_div") is not None
 
-        with pytest.raises(ValueError, match=r"divisor valid rows to cover the dividend"):
-            passes.convert_tensor_to_tile_ops()(make_program(unrelated_rows, "UnknownDivValidRows"))
+        # Unrelated symbols cannot be proven equal, so the elementwise valid-region
+        # rule rejects the program while it is still being built — earlier than the
+        # conversion pass's own divisor-cover check.
+        with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+            make_program(unrelated_rows, "UnknownDivValidRows")
 
     def test_div_mixed_float_row_broadcast_inserts_explicit_cast(self):
         """Row-expand division receives one exact floating dtype after tensor promotion."""
@@ -1122,7 +1122,6 @@ class TestConvertTensorToTileOps:
 
     def test_div_rejects_mismatched_valid_shapes_conversion(self):
         """Equal physical shapes with different source valid regions cannot lower to tdiv."""
-        span = ir.Span.unknown()
         lhs_type = ir.TensorType(
             [8, 16],
             DataType.FP32,
@@ -1135,17 +1134,14 @@ class TestConvertTensorToTileOps:
             None,
             ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[8, 16]),
         )
+        # Rejected at type deduction now: 7 and 8 are provably unequal non-broadcast
+        # row extents, so the program cannot be built for the pass to inspect.
         ib = IRBuilder()
         with ib.function("kernel", type=ir.FunctionType.InCore) as f:
             lhs = f.param("lhs", lhs_type)
             rhs = f.param("rhs", rhs_type)
-            result = ib.let("result", tensor_ops.div(lhs, rhs))
-            f.return_type(result.type)
-            ib.return_stmt(result)
-        before = ir.Program([f.get_result()], "MismatchedDivValidShapes", span)
-
-        with pytest.raises(ValueError, match=r"requires src0, src1, and dst to have the same valid_shape"):
-            passes.convert_tensor_to_tile_ops()(before)
+            with pytest.raises(ValueError, match=r"do not provably agree on the valid extent"):
+                ib.let("result", tensor_ops.div(lhs, rhs))
 
     def test_subs_mixed_dtype_conversion_preserves_lhs_dtype(self):
         """An explicit FP32 scalar stays FP32 while the i16 tsubs result stays i16."""
