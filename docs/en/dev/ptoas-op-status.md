@@ -65,7 +65,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | **DMA Data Movement (10)** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ✅ | — | Emitted by `pl.prefetch.*` (`make_context` / `async_prefetch` / `session` / `wait`); not a tile/tensor frontend. PTOAS op availability does not imply runtime SDMA workspace provision; artifact metadata enables it automatically, with ST coverage currently limited to onboard a2a3. Platforms without a provider fail during initialization rather than degrading to a no-op |
 | pto.make_prefetch_async_context | pto::PrefetchAsyncContext | internal | ✅ | — | — | — | — | validated as part of async-prefetch integration |
 | pto.get_prefetch_async_session | .session | internal | ✅ | — | — | — | — | validated as part of async-prefetch integration |
 | pto.tstore | TSTORE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
