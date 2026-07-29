@@ -355,6 +355,204 @@ def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
     ]
 
 
+def test_build_trace_extracts_decorated_and_qualified_function_regions(tmp_path: Path):
+    source = textwrap.dedent(
+        """\
+        header = 1
+
+        @pl.program
+        def first():
+            def inner():
+                return 1
+            return inner()
+
+        class Program:
+            @staticmethod
+            def run():
+                return 2
+
+        class Other:
+            def run():
+                return 3
+
+        async def fetch():
+            return 4
+
+        tail = 4
+        """
+    )
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": source,
+            "01_after_TestPass.py": source,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=20)[0]
+    functions = [section for section in trace.sections if section.function_key is not None]
+
+    assert [(section.function_key, section.function_name) for section in functions] == [
+        ("first", "first"),
+        ("Program.run", "run"),
+        ("Other.run", "run"),
+        ("fetch", "fetch"),
+    ]
+    assert functions[0].hunks[0].rows[0].before_number == 3
+    assert "program" in functions[0].hunks[0].rows[0].before_html
+    assert all(section.function_key != "inner" for section in trace.sections)
+
+
+def test_build_trace_falls_back_to_whole_file_when_function_extraction_fails(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "def broken(:\n    pass\n",
+            "01_after_TestPass.py": "def valid():\n    pass\n",
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    assert [(section.function_key, section.function_name) for section in trace.sections] == [(None, None)]
+    assert [row.kind for hunk in trace.sections[0].hunks for row in hunk.rows] == ["replace", "equal"]
+
+
+def test_build_trace_falls_back_when_qualified_function_keys_are_duplicated(tmp_path: Path):
+    source = textwrap.dedent(
+        """\
+        class Program:
+            def run():
+                return 1
+
+            def run():
+                return 2
+        """
+    )
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": source,
+            "01_after_TestPass.py": source,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+
+    assert [(section.function_key, section.function_name) for section in trace.sections] == [(None, None)]
+
+
+def test_build_trace_aligns_insertions_inside_their_function(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        def first():
+            a = pl.tile.sqrt(x)
+            b = pl.tile.recip(a)
+
+        def second():
+            c = pl.tile.sqrt(y)
+            d = pl.tile.recip(c)
+        """
+    )
+    after = textwrap.dedent(
+        """\
+        def first():
+            a = pl.tile.sqrt(x)
+            b = pl.tile.recip(a)
+
+        def second():
+            reshaped = pl.tile.reshape(y, [1, 16])
+            c = pl.tile.sqrt(y)
+            normalized = pl.tile.reshape(c, [16, 1])
+            d = pl.tile.recip(c)
+        """
+    )
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=20)[0]
+    first = next(section for section in trace.sections if section.function_key == "first")
+    second = next(section for section in trace.sections if section.function_key == "second")
+
+    assert all(row.kind == "equal" for hunk in first.hunks for row in hunk.rows)
+    changed = [row for hunk in second.hunks for row in hunk.rows if row.kind != "equal"]
+    assert [(row.kind, row.before_number, row.after_number) for row in changed] == [
+        ("insert", None, 6),
+        ("insert", None, 8),
+    ]
+
+
+def test_build_trace_emits_added_and_deleted_functions_as_one_sided_sections(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        def stable():
+            return 1
+
+        def removed():
+            return 2
+
+        def tail():
+            return 3
+        """
+    )
+    after = textwrap.dedent(
+        """\
+        def stable():
+            return 1
+
+        def added():
+            return 4
+
+        def tail():
+            return 3
+        """
+    )
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=20)[0]
+    functions = [section for section in trace.sections if section.function_key is not None]
+
+    assert [section.function_key for section in functions] == ["stable", "removed", "added", "tail"]
+    removed = next(section for section in functions if section.function_key == "removed")
+    added = next(section for section in functions if section.function_key == "added")
+    assert {row.kind for hunk in removed.hunks for row in hunk.rows} == {"delete"}
+    assert {row.kind for hunk in added.hunks for row in hunk.rows} == {"insert"}
+    assert (removed.inserted, removed.deleted) == (0, 2)
+    assert (added.inserted, added.deleted) == (2, 0)
+    assert (trace.inserted, trace.deleted) == (
+        sum(section.inserted for section in trace.sections),
+        sum(section.deleted for section in trace.sections),
+    )
+
+    before_numbers = [
+        row.before_number
+        for section in trace.sections
+        for hunk in section.hunks
+        for row in hunk.rows
+        if row.before_number is not None
+    ]
+    after_numbers = [
+        row.after_number
+        for section in trace.sections
+        for hunk in section.hunks
+        for row in hunk.rows
+        if row.after_number is not None
+    ]
+    assert before_numbers == list(range(1, len(before.splitlines()) + 1))
+    assert after_numbers == list(range(1, len(after.splitlines()) + 1))
+
+
 def test_build_trace_aligns_matching_operations_around_inserted_lines(tmp_path: Path):
     dump = _write_dump(
         tmp_path,

@@ -17,6 +17,7 @@ import keyword
 import textwrap
 import token
 import tokenize
+from dataclasses import dataclass
 from typing import Literal
 
 from .model import DiffHunk, DiffRow, DiffSection, IRTraceError, PassTrace, Snapshot, split_source_lines
@@ -30,6 +31,30 @@ _TOKEN_CLASSES = {
 
 _RowKind = Literal["equal", "insert", "delete", "replace"]
 _AlignedRow = tuple[_RowKind, int | None, int | None]
+
+
+@dataclass(frozen=True)
+class _SourceRegion:
+    function_key: str | None
+    function_name: str | None
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _RegionPair:
+    before: _SourceRegion | None
+    after: _SourceRegion | None
+    function_key: str | None
+    function_name: str | None
+
+
+@dataclass(frozen=True)
+class _SectionAlignment:
+    pair: _RegionPair
+    rows: tuple[_AlignedRow, ...]
+    inserted: int
+    deleted: int
 
 
 def _escape_html(text: str, *, quote: bool = False) -> str:
@@ -247,17 +272,38 @@ def _align_replace_rows(
     return tuple(rows)
 
 
-def _diff_rows(before: Snapshot, after: Snapshot) -> tuple[tuple[DiffRow, ...], int, int]:
-    """Align two snapshots into display rows and count inserted/deleted lines."""
+def _align_rows(
+    before: Snapshot,
+    after: Snapshot,
+    before_range: tuple[int, int] | None = None,
+    after_range: tuple[int, int] | None = None,
+) -> tuple[
+    tuple[_AlignedRow, ...],
+    int,
+    int,
+    dict[int, tuple[tuple[int, int], ...]],
+    dict[int, tuple[tuple[int, int], ...]],
+]:
+    """Align source ranges and return global indexes plus intraline changes."""
     inserted = 0
     deleted = 0
-    matcher = difflib.SequenceMatcher(a=before.lines, b=after.lines, autojunk=False)
+    before_start_offset, before_end_offset = before_range or (0, len(before.lines))
+    after_start_offset, after_end_offset = after_range or (0, len(after.lines))
+    matcher = difflib.SequenceMatcher(
+        a=before.lines[before_start_offset:before_end_offset],
+        b=after.lines[after_start_offset:after_end_offset],
+        autojunk=False,
+    )
     opcodes = matcher.get_opcodes()
     aligned_rows: list[_AlignedRow] = []
     before_changes: dict[int, tuple[tuple[int, int], ...]] = {}
     after_changes: dict[int, tuple[tuple[int, int], ...]] = {}
 
     for tag, before_start, before_end, after_start, after_end in opcodes:
+        before_start += before_start_offset
+        before_end += before_start_offset
+        after_start += after_start_offset
+        after_end += after_start_offset
         before_count = before_end - before_start
         after_count = after_end - after_start
         if tag == "equal":
@@ -291,10 +337,16 @@ def _diff_rows(before: Snapshot, after: Snapshot) -> tuple[tuple[DiffRow, ...], 
         before_changes[before_index] = before_ranges
         after_changes[after_index] = after_ranges
 
-    before_html = _highlight_python(before.text, before_changes, "diff-delete")
-    after_html = _highlight_python(after.text, after_changes, "diff-insert")
+    return tuple(aligned_rows), inserted, deleted, before_changes, after_changes
 
-    rows = tuple(
+
+def _materialize_rows(
+    aligned_rows: tuple[_AlignedRow, ...],
+    before_html: tuple[str, ...],
+    after_html: tuple[str, ...],
+) -> tuple[DiffRow, ...]:
+    """Convert aligned global indexes into rendered diff rows."""
+    return tuple(
         DiffRow(
             kind=kind,
             before_number=before_index + 1 if before_index is not None else None,
@@ -304,7 +356,222 @@ def _diff_rows(before: Snapshot, after: Snapshot) -> tuple[tuple[DiffRow, ...], 
         )
         for kind, before_index, after_index in aligned_rows
     )
+
+
+def _diff_rows(
+    before: Snapshot,
+    after: Snapshot,
+    before_range: tuple[int, int] | None = None,
+    after_range: tuple[int, int] | None = None,
+) -> tuple[tuple[DiffRow, ...], int, int]:
+    """Align two snapshot ranges into display rows and count changed lines."""
+    aligned_rows, inserted, deleted, before_changes, after_changes = _align_rows(
+        before, before_range=before_range, after=after, after_range=after_range
+    )
+    before_html = _highlight_python(before.text, before_changes, "diff-delete")
+    after_html = _highlight_python(after.text, after_changes, "diff-insert")
+    rows = _materialize_rows(aligned_rows, before_html, after_html)
     return rows, inserted, deleted
+
+
+def _function_bounds(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, int] | None:
+    """Return zero-based source bounds including decorators for one function."""
+    end = node.end_lineno
+    if end is None:
+        return None
+    first_line = min((decorator.lineno for decorator in node.decorator_list), default=node.lineno)
+    return first_line - 1, end
+
+
+def _extract_source_regions(snapshot: Snapshot) -> tuple[_SourceRegion, ...] | None:
+    """Partition a snapshot into direct function regions and anonymous gaps."""
+    try:
+        module = ast.parse(snapshot.text)
+    except SyntaxError:
+        return None
+
+    functions: list[_SourceRegion] = []
+
+    def add_function(node: ast.FunctionDef | ast.AsyncFunctionDef, owner: str | None = None) -> bool:
+        bounds = _function_bounds(node)
+        if bounds is None:
+            return False
+        start, end = bounds
+        if not 0 <= start < end <= len(snapshot.lines):
+            return False
+        key = f"{owner}.{node.name}" if owner is not None else node.name
+        functions.append(_SourceRegion(key, node.name, start, end))
+        return True
+
+    for statement in module.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not add_function(statement):
+                return None
+        elif isinstance(statement, ast.ClassDef):
+            for child in statement.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and not add_function(
+                    child, statement.name
+                ):
+                    return None
+
+    functions.sort(key=lambda region: region.start)
+    keys = [region.function_key for region in functions]
+    if len(keys) != len(set(keys)):
+        return None
+
+    regions: list[_SourceRegion] = []
+    cursor = 0
+    for function in functions:
+        if function.start < cursor:
+            return None
+        regions.append(_SourceRegion(None, None, cursor, function.start))
+        regions.append(function)
+        cursor = function.end
+    regions.append(_SourceRegion(None, None, cursor, len(snapshot.lines)))
+    return tuple(regions)
+
+
+def _fallback_section(before: Snapshot, after: Snapshot, context: int) -> DiffSection:
+    """Build the existing whole-file diff when section extraction is unavailable."""
+    rows, inserted, deleted = _diff_rows(before, after)
+    return DiffSection(
+        function_key=None,
+        function_name=None,
+        inserted=inserted,
+        deleted=deleted,
+        hunks=_fold_rows(rows, context),
+    )
+
+
+def _pair_source_regions(
+    before_regions: tuple[_SourceRegion, ...],
+    after_regions: tuple[_SourceRegion, ...],
+) -> tuple[_RegionPair, ...]:
+    """Pair exact function anchors and preserve all one-sided source regions."""
+    before_gaps = before_regions[::2]
+    after_gaps = after_regions[::2]
+    before_functions = before_regions[1::2]
+    after_functions = after_regions[1::2]
+    matcher = difflib.SequenceMatcher(
+        a=[region.function_key for region in before_functions],
+        b=[region.function_key for region in after_functions],
+        autojunk=False,
+    )
+    pairs = [_RegionPair(before_gaps[0], after_gaps[0], None, None)]
+
+    for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+        if tag == "equal":
+            for before_index, after_index in zip(
+                range(before_start, before_end), range(after_start, after_end), strict=True
+            ):
+                before_function = before_functions[before_index]
+                after_function = after_functions[after_index]
+                pairs.append(
+                    _RegionPair(
+                        before_function,
+                        after_function,
+                        before_function.function_key,
+                        before_function.function_name,
+                    )
+                )
+                pairs.append(
+                    _RegionPair(before_gaps[before_index + 1], after_gaps[after_index + 1], None, None)
+                )
+        elif tag == "delete":
+            for before_index in range(before_start, before_end):
+                before_function = before_functions[before_index]
+                pairs.append(
+                    _RegionPair(
+                        before_function,
+                        None,
+                        before_function.function_key,
+                        before_function.function_name,
+                    )
+                )
+                pairs.append(_RegionPair(before_gaps[before_index + 1], None, None, None))
+        elif tag == "insert":
+            for after_index in range(after_start, after_end):
+                after_function = after_functions[after_index]
+                pairs.append(
+                    _RegionPair(
+                        None,
+                        after_function,
+                        after_function.function_key,
+                        after_function.function_name,
+                    )
+                )
+                pairs.append(_RegionPair(None, after_gaps[after_index + 1], None, None))
+        elif tag == "replace":
+            for before_index in range(before_start, before_end):
+                before_function = before_functions[before_index]
+                pairs.append(
+                    _RegionPair(
+                        before_function,
+                        None,
+                        before_function.function_key,
+                        before_function.function_name,
+                    )
+                )
+                if before_index + 1 < before_end:
+                    pairs.append(_RegionPair(before_gaps[before_index + 1], None, None, None))
+            for after_index in range(after_start, after_end):
+                after_function = after_functions[after_index]
+                pairs.append(
+                    _RegionPair(
+                        None,
+                        after_function,
+                        after_function.function_key,
+                        after_function.function_name,
+                    )
+                )
+                if after_index + 1 < after_end:
+                    pairs.append(_RegionPair(None, after_gaps[after_index + 1], None, None))
+            pairs.append(_RegionPair(before_gaps[before_end], after_gaps[after_end], None, None))
+    return tuple(pairs)
+
+
+def _build_sections(before: Snapshot, after: Snapshot, context: int) -> tuple[DiffSection, ...]:
+    """Build function-aware source sections with one highlight pass per snapshot."""
+    before_regions = _extract_source_regions(before)
+    after_regions = _extract_source_regions(after)
+    if before_regions is None or after_regions is None:
+        return (_fallback_section(before, after, context),)
+
+    alignments: list[_SectionAlignment] = []
+    all_before_changes: dict[int, tuple[tuple[int, int], ...]] = {}
+    all_after_changes: dict[int, tuple[tuple[int, int], ...]] = {}
+    for pair in _pair_source_regions(before_regions, after_regions):
+        before_range = (pair.before.start, pair.before.end) if pair.before is not None else (0, 0)
+        after_range = (pair.after.start, pair.after.end) if pair.after is not None else (0, 0)
+        rows, inserted, deleted, before_changes, after_changes = _align_rows(
+            before,
+            after,
+            before_range,
+            after_range,
+        )
+        all_before_changes.update(before_changes)
+        all_after_changes.update(after_changes)
+        alignments.append(
+            _SectionAlignment(
+                pair=pair,
+                rows=rows,
+                inserted=inserted,
+                deleted=deleted,
+            )
+        )
+
+    before_html = _highlight_python(before.text, all_before_changes, "diff-delete")
+    after_html = _highlight_python(after.text, all_after_changes, "diff-insert")
+    return tuple(
+        DiffSection(
+            function_key=alignment.pair.function_key,
+            function_name=alignment.pair.function_name,
+            inserted=alignment.inserted,
+            deleted=alignment.deleted,
+            hunks=_fold_rows(_materialize_rows(alignment.rows, before_html, after_html), context),
+        )
+        for alignment in alignments
+    )
 
 
 def _fold_rows(rows: tuple[DiffRow, ...], context: int) -> tuple[DiffHunk, ...]:
@@ -381,14 +648,9 @@ def build_trace(snapshots: tuple[Snapshot, ...], context: int) -> tuple[PassTrac
 
     traces: list[PassTrace] = []
     for before, after in zip(snapshots, snapshots[1:], strict=False):
-        rows, inserted, deleted = _diff_rows(before, after)
-        section = DiffSection(
-            function_key=None,
-            function_name=None,
-            inserted=inserted,
-            deleted=deleted,
-            hunks=_fold_rows(rows, context),
-        )
+        sections = _build_sections(before, after, context)
+        inserted = sum(section.inserted for section in sections)
+        deleted = sum(section.deleted for section in sections)
         traces.append(
             PassTrace(
                 index=after.index,
@@ -397,7 +659,7 @@ def build_trace(snapshots: tuple[Snapshot, ...], context: int) -> tuple[PassTrac
                 after=after,
                 inserted=inserted,
                 deleted=deleted,
-                sections=(section,),
+                sections=sections,
             )
         )
     return tuple(traces)
