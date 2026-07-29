@@ -273,6 +273,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | **Source Compatibility / Manual Mode (1)** |  |  |  |  |  |  |  |  |
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
-**Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend;
-110 have same-name ST coverage (106 regular STs and 4 distributed STs); 62 lack same-name ST coverage
-(52 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
+**Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend
+(plus four non-tile/tensor `pl.prefetch.*` ops); 111 have same-name ST coverage
+(107 regular STs and 4 distributed STs); 61 lack same-name ST coverage (51 regular and 10 distributed);
+within these 204, another 32 ops are not suitable for standalone STs.
