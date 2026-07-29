@@ -875,7 +875,7 @@ def part_min(lhs: Tensor, rhs: Tensor) -> Tensor:
 
 
 def fmod(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
-    """Element-wise floating-point remainder of tensor and tensor or scalar.
+    """Element-wise truncating remainder of tensor and tensor or scalar.
 
     Automatically selects between tensor.fmod (tensor, tensor) and
     tensor.fmods (tensor, scalar) based on the rhs type. The result matches
@@ -894,7 +894,7 @@ def fmod(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
 
 
 def fmods(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
-    """Element-wise floating-point remainder of tensor and scalar.
+    """Element-wise truncating remainder of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor

@@ -1538,6 +1538,21 @@ def test_tensor_fmod():
     assert call_fmods.op.name == "tensor.fmods"
 
 
+def test_tensor_fmod_rejects_contracts_that_tile_lowering_cannot_emit():
+    span = ir.Span.unknown()
+    fp32 = ir.Var("fp32", ir.TensorType([8, 16], DataType.FP32), span)
+    fp16 = ir.Var("fp16", ir.TensorType([8, 16], DataType.FP16), span)
+    broadcast = ir.Var("broadcast", ir.TensorType([1, 16], DataType.FP32), span)
+    scalar = ir.Var("scalar", ir.ScalarType(DataType.FP16), span)
+
+    with pytest.raises(ValueError, match="matching operand dtypes"):
+        ir.op.tensor.fmod(fp32, fp16)
+    with pytest.raises(ValueError, match="matching operand shapes"):
+        ir.op.tensor.fmod(fp32, broadcast)
+    with pytest.raises(ValueError, match="scalar dtype to match"):
+        ir.op.tensor.fmods(fp32, scalar)
+
+
 def test_const_float():
     """Test ConstFloat expression creation and usage."""
     span = ir.Span.unknown()

@@ -17,11 +17,14 @@ current pinned PTO-ISA contract:
 * TFMOD/TFMODS: FP32;
 * TREM uses a same-dtype scratch tile with two valid rows;
 * TREMS uses a same-dtype scratch tile with one valid row.
+* TREM/TFMOD cover default and ``high_precision`` PTOAS attributes; A2/A3
+  accepts but ignores the high-precision selection, as specified by PTO-ISA.
 
 Inputs combine positive, negative, and zero dividends with positive and
-negative, strictly non-zero divisors. Both full and narrowed valid regions are
-covered. Invalid output cells remain zero through a zero-initialized InOut
-tensor, so the tests never rely on uninitialized tile contents.
+negative, strictly non-zero divisors. Full, row-tail, column-tail, and combined
+row-and-column-tail valid regions are covered. Invalid output cells remain zero
+through a zero-initialized InOut tensor, so the tests never rely on
+uninitialized tile contents.
 """
 
 from typing import Any
@@ -33,7 +36,9 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 M = 16
 N = 64
-TAIL = (11, 47)
+ROW_TAIL = (11, N)
+COL_TAIL = (M, 47)
+COMBINED_TAIL = (11, 47)
 
 _PL_DT = {
     DataType.FP32: pl.FP32,
@@ -62,6 +67,7 @@ def _make_program(
     dtype: DataType,
     valid_shape: tuple[int, int],
     scalar: int | float | None,
+    high_precision: bool,
 ):
     pl_dtype = _PL_DT[dtype]
     valid = list(valid_shape)
@@ -77,12 +83,12 @@ def _make_program(
                 rhs: pl.Tensor[[M, N], pl_dtype],
                 out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
             ) -> pl.Tensor[[M, N], pl_dtype]:
-                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
-                rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shapes=valid)
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
+                rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
                 tmp: pl.Tile[[2, N], pl_dtype] = pl.tile.create(
                     [2, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                 )
-                result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
+                result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
                 return pl.store(result, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -107,7 +113,7 @@ def _make_program(
                 lhs: pl.Tensor[[M, N], pl_dtype],
                 out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
             ) -> pl.Tensor[[M, N], pl_dtype]:
-                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
                 tmp: pl.Tile[[1, N], pl_dtype] = pl.tile.create(
                     [1, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec
                 )
@@ -135,9 +141,9 @@ def _make_program(
                 rhs: pl.Tensor[[M, N], pl_dtype],
                 out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
             ) -> pl.Tensor[[M, N], pl_dtype]:
-                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
-                rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shapes=valid)
-                result = pl.tile.fmod(lhs_tile, rhs_tile)
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
+                rhs_tile = pl.load(rhs, [0, 0], [M, N], valid_shape=valid)
+                result = pl.tile.fmod(lhs_tile, rhs_tile, high_precision=high_precision)
                 return pl.store(result, [0, 0], out)
 
             @pl.function(type=pl.FunctionType.Orchestration)
@@ -162,7 +168,7 @@ def _make_program(
             lhs: pl.Tensor[[M, N], pl_dtype],
             out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
         ) -> pl.Tensor[[M, N], pl_dtype]:
-            lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
+            lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shape=valid)
             result = pl.tile.fmods(lhs_tile, scalar)
             return pl.store(result, [0, 0], out)
 
@@ -189,17 +195,21 @@ class RemainderCase(PTOTestCase):
         dtype: DataType,
         valid_shape: tuple[int, int],
         scalar: int | float | None = None,
+        high_precision: bool = False,
     ):
         super().__init__()
         self.op_name = op_name
         self.dtype = dtype
         self.valid_shape = valid_shape
         self.scalar = scalar
+        self.high_precision = high_precision
 
     def get_name(self) -> str:
         scalar_tag = f"_s{self.scalar}" if self.scalar is not None else ""
+        precision_tag = "_high_precision" if self.high_precision else ""
         return (
-            f"tile_{self.op_name}_{self.dtype.value}_v{self.valid_shape[0]}x{self.valid_shape[1]}{scalar_tag}"
+            f"tile_{self.op_name}_{self.dtype.value}_v{self.valid_shape[0]}x{self.valid_shape[1]}"
+            f"{scalar_tag}{precision_tag}"
         )
 
     def define_tensors(self) -> list[TensorSpec]:
@@ -212,7 +222,13 @@ class RemainderCase(PTOTestCase):
         return specs
 
     def get_program(self) -> Any:
-        return _make_program(self.op_name, self.dtype, self.valid_shape, self.scalar)
+        return _make_program(
+            self.op_name,
+            self.dtype,
+            self.valid_shape,
+            self.scalar,
+            self.high_precision,
+        )
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         valid_rows, valid_cols = self.valid_shape
@@ -231,18 +247,34 @@ class RemainderCase(PTOTestCase):
 
 
 _CASES = [
-    pytest.param("rem", DataType.FP32, (M, N), None, id="trem-f32-full"),
-    pytest.param("rem", DataType.FP32, TAIL, None, id="trem-f32-tail"),
-    pytest.param("rem", DataType.INT32, (M, N), None, id="trem-i32-full"),
-    pytest.param("rem", DataType.INT32, TAIL, None, id="trem-i32-tail"),
-    pytest.param("rems", DataType.FP32, (M, N), 3.0, id="trems-f32-positive"),
-    pytest.param("rems", DataType.FP32, TAIL, -3.0, id="trems-f32-negative-tail"),
-    pytest.param("rems", DataType.INT32, (M, N), 3, id="trems-i32-positive"),
-    pytest.param("rems", DataType.INT32, TAIL, -3, id="trems-i32-negative-tail"),
-    pytest.param("fmod", DataType.FP32, (M, N), None, id="tfmod-full"),
-    pytest.param("fmod", DataType.FP32, TAIL, None, id="tfmod-tail"),
-    pytest.param("fmods", DataType.FP32, (M, N), 3.0, id="tfmods-positive"),
-    pytest.param("fmods", DataType.FP32, TAIL, -3.0, id="tfmods-negative-tail"),
+    pytest.param("rem", DataType.FP32, (M, N), None, False, id="trem-f32-full"),
+    pytest.param("rem", DataType.FP32, ROW_TAIL, None, False, id="trem-f32-row-tail"),
+    pytest.param("rem", DataType.FP32, COL_TAIL, None, False, id="trem-f32-col-tail"),
+    pytest.param("rem", DataType.FP32, COMBINED_TAIL, None, False, id="trem-f32-combined-tail"),
+    pytest.param("rem", DataType.FP32, (M, N), None, True, id="trem-f32-high-precision-full"),
+    pytest.param("rem", DataType.FP32, COMBINED_TAIL, None, True, id="trem-f32-high-precision-combined-tail"),
+    pytest.param("rem", DataType.INT32, (M, N), None, False, id="trem-i32-full"),
+    pytest.param("rem", DataType.INT32, ROW_TAIL, None, False, id="trem-i32-row-tail"),
+    pytest.param("rem", DataType.INT32, COL_TAIL, None, False, id="trem-i32-col-tail"),
+    pytest.param("rem", DataType.INT32, COMBINED_TAIL, None, False, id="trem-i32-combined-tail"),
+    pytest.param("rems", DataType.FP32, (M, N), 3.0, False, id="trems-f32-positive"),
+    pytest.param("rems", DataType.FP32, ROW_TAIL, -3.0, False, id="trems-f32-negative-row-tail"),
+    pytest.param("rems", DataType.FP32, COL_TAIL, 3.0, False, id="trems-f32-positive-col-tail"),
+    pytest.param("rems", DataType.FP32, COMBINED_TAIL, -3.0, False, id="trems-f32-negative-combined-tail"),
+    pytest.param("rems", DataType.INT32, (M, N), 3, False, id="trems-i32-positive"),
+    pytest.param("rems", DataType.INT32, ROW_TAIL, -3, False, id="trems-i32-negative-row-tail"),
+    pytest.param("rems", DataType.INT32, COL_TAIL, 3, False, id="trems-i32-positive-col-tail"),
+    pytest.param("rems", DataType.INT32, COMBINED_TAIL, -3, False, id="trems-i32-negative-combined-tail"),
+    pytest.param("fmod", DataType.FP32, (M, N), None, False, id="tfmod-full"),
+    pytest.param("fmod", DataType.FP32, ROW_TAIL, None, False, id="tfmod-row-tail"),
+    pytest.param("fmod", DataType.FP32, COL_TAIL, None, False, id="tfmod-col-tail"),
+    pytest.param("fmod", DataType.FP32, COMBINED_TAIL, None, False, id="tfmod-combined-tail"),
+    pytest.param("fmod", DataType.FP32, (M, N), None, True, id="tfmod-high-precision-full"),
+    pytest.param("fmod", DataType.FP32, COMBINED_TAIL, None, True, id="tfmod-high-precision-combined-tail"),
+    pytest.param("fmods", DataType.FP32, (M, N), 3.0, False, id="tfmods-positive"),
+    pytest.param("fmods", DataType.FP32, ROW_TAIL, -3.0, False, id="tfmods-negative-row-tail"),
+    pytest.param("fmods", DataType.FP32, COL_TAIL, 3.0, False, id="tfmods-positive-col-tail"),
+    pytest.param("fmods", DataType.FP32, COMBINED_TAIL, -3.0, False, id="tfmods-negative-combined-tail"),
 ]
 
 
@@ -250,14 +282,15 @@ class TestRemainderFamily:
     """A2/A3 exact-op coverage for TREM, TREMS, TFMOD, and TFMODS."""
 
     @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar", _CASES)
-    def test_remainder(self, test_runner, op_name, dtype, valid_shape, scalar):
+    @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar,high_precision", _CASES)
+    def test_remainder(self, test_runner, op_name, dtype, valid_shape, scalar, high_precision):
         result = test_runner.run(
             RemainderCase(
                 op_name=op_name,
                 dtype=dtype,
                 valid_shape=valid_shape,
                 scalar=scalar,
+                high_precision=high_precision,
             )
         )
         assert result.passed, f"Test failed: {result.error}"

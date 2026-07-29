@@ -1139,9 +1139,9 @@ class TestRemainderFamilyCodegen:
     """The four public tile APIs lower to their exact PTOAS instructions."""
 
     @staticmethod
-    def _generate_mlir(program_cls) -> str:
+    def _generate_mlir(program_cls, backend_type=BackendType.Ascend910B) -> str:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(backend_type)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
@@ -1197,6 +1197,195 @@ class TestRemainderFamilyCodegen:
             line = self._op_line(mlir, op_name)
             assert self._ins_operand_count(line) == arity
             assert ") outs(" in line
+
+    @pytest.mark.parametrize(
+        "op_name,pto_name,attr_kind",
+        [
+            pytest.param("rem", "pto.trem", "rem_precision", id="trem"),
+            pytest.param("fmod", "pto.tfmod", "fmod_precision", id="tfmod"),
+        ],
+    )
+    def test_tile_remainder_precision_attribute(self, op_name, pto_name, attr_kind):
+        def make_rem_program(high_precision):
+            @pl.program
+            class RemProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], pl.FP32],
+                    rhs: pl.Tensor[[16, 16], pl.FP32],
+                    out: pl.Tensor[[16, 16], pl.FP32],
+                ) -> pl.Tensor[[16, 16], pl.FP32]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                    tmp: pl.Tile[[2, 16], pl.FP32] = pl.tile.create(
+                        [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.tile.rem(lhs_tile, rhs_tile, tmp, high_precision=high_precision)
+                    return pl.store(result, [0, 0], out)
+
+            return RemProgram
+
+        def make_fmod_program(high_precision):
+            @pl.program
+            class FmodProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], pl.FP32],
+                    rhs: pl.Tensor[[16, 16], pl.FP32],
+                    out: pl.Tensor[[16, 16], pl.FP32],
+                ) -> pl.Tensor[[16, 16], pl.FP32]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                    result = pl.tile.fmod(lhs_tile, rhs_tile, high_precision=high_precision)
+                    return pl.store(result, [0, 0], out)
+
+            return FmodProgram
+
+        make_program = make_rem_program if op_name == "rem" else make_fmod_program
+
+        default_line = self._op_line(self._generate_mlir(make_program(False)), pto_name)
+        high_precision_line = self._op_line(self._generate_mlir(make_program(True)), pto_name)
+        assert "precisionType" not in default_line
+        assert high_precision_line.endswith(f"{{precisionType = #pto<{attr_kind} high_precision>}}")
+        assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")
+
+    @pytest.mark.parametrize(
+        "op_name,dtype",
+        [
+            pytest.param("rem", pl.FP16, id="trem-fp16"),
+            pytest.param("rem", pl.UINT32, id="trem-uint32"),
+            pytest.param("rems", pl.INT16, id="trems-int16"),
+            pytest.param("fmod", pl.INT32, id="tfmod-int32"),
+            pytest.param("fmods", pl.FP16, id="tfmods-fp16"),
+        ],
+    )
+    def test_a2a3_rejects_unsupported_remainder_dtypes(self, op_name, dtype):
+        if op_name == "rem":
+
+            @pl.program
+            class UnsupportedRemProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], dtype],
+                    rhs: pl.Tensor[[16, 16], dtype],
+                    out: pl.Tensor[[16, 16], dtype],
+                ) -> pl.Tensor[[16, 16], dtype]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                    tmp: pl.Tile[[2, 16], dtype] = pl.tile.create(
+                        [2, 16], dtype=dtype, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = UnsupportedRemProgram
+
+        elif op_name == "rems":
+
+            @pl.program
+            class UnsupportedRemsProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], dtype],
+                    rhs: pl.Tensor[[16, 16], dtype],
+                    out: pl.Tensor[[16, 16], dtype],
+                ) -> pl.Tensor[[16, 16], dtype]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    tmp: pl.Tile[[1, 16], dtype] = pl.tile.create(
+                        [1, 16], dtype=dtype, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.tile.rems(lhs_tile, 3, tmp)
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = UnsupportedRemsProgram
+
+        elif op_name == "fmod":
+
+            @pl.program
+            class UnsupportedFmodProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], dtype],
+                    rhs: pl.Tensor[[16, 16], dtype],
+                    out: pl.Tensor[[16, 16], dtype],
+                ) -> pl.Tensor[[16, 16], dtype]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                    result = pl.tile.fmod(lhs_tile, rhs_tile)
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = UnsupportedFmodProgram
+
+        else:
+
+            @pl.program
+            class UnsupportedFmodsProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], dtype],
+                    rhs: pl.Tensor[[16, 16], dtype],
+                    out: pl.Tensor[[16, 16], dtype],
+                ) -> pl.Tensor[[16, 16], dtype]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    result = pl.tile.fmods(lhs_tile, pl.const(3.0, dtype))
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = UnsupportedFmodsProgram
+
+        with pytest.raises(ValueError, match=r"not supported on A2/A3"):
+            self._generate_mlir(program_cls)
+
+    @pytest.mark.parametrize("op_name", ["rem", "rems"])
+    def test_a2a3_accepts_int32_floor_remainder(self, op_name):
+        if op_name == "rem":
+
+            @pl.program
+            class Int32RemProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], pl.INT32],
+                    rhs: pl.Tensor[[16, 16], pl.INT32],
+                    out: pl.Tensor[[16, 16], pl.INT32],
+                ) -> pl.Tensor[[16, 16], pl.INT32]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    rhs_tile = pl.load(rhs, [0, 0], [16, 16])
+                    tmp: pl.Tile[[2, 16], pl.INT32] = pl.tile.create(
+                        [2, 16], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.tile.rem(lhs_tile, rhs_tile, tmp)
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = Int32RemProgram
+
+        else:
+
+            @pl.program
+            class Int32RemsProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    lhs: pl.Tensor[[16, 16], pl.INT32],
+                    rhs: pl.Tensor[[16, 16], pl.INT32],
+                    out: pl.Tensor[[16, 16], pl.INT32],
+                ) -> pl.Tensor[[16, 16], pl.INT32]:
+                    lhs_tile = pl.load(lhs, [0, 0], [16, 16])
+                    tmp: pl.Tile[[1, 16], pl.INT32] = pl.tile.create(
+                        [1, 16], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.tile.rems(lhs_tile, 3, tmp)
+                    return pl.store(result, [0, 0], out)
+
+            program_cls = Int32RemsProgram
+
+        pto_name = "pto.trem" if op_name == "rem" else "pto.trems"
+        assert pto_name in self._generate_mlir(program_cls)
 
 
 class TestTileReadWriteOffsetCodegen:

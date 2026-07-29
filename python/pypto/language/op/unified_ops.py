@@ -417,19 +417,28 @@ def part_min(lhs, rhs):
 
 
 @overload
-def fmod(lhs: Tensor, rhs: Tensor | int | float | Scalar) -> Tensor: ...
+def fmod(
+    lhs: Tensor,
+    rhs: Tensor | int | float | Scalar,
+    high_precision: Literal[False] = False,
+) -> Tensor: ...
 @overload
-def fmod(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
-def fmod(lhs, rhs):
-    """Element-wise floating-point remainder, dispatched by input type.
+def fmod(lhs: Tile, rhs: Tile | int | float | Scalar, high_precision: bool = False) -> Tile: ...
+def fmod(lhs, rhs, high_precision: bool = False):
+    """Element-wise truncating remainder, dispatched by input type.
 
     Matches ``torch.fmod`` (the remainder takes the sign of the dividend).
+    ``high_precision`` is available only for the tile-tile form.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
+        if high_precision:
+            raise ValueError("pl.fmod: high_precision is supported only for Tile operands")
         return _tensor.fmod(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
-        return _tile.fmod(lhs, rhs)
+        return _tile.fmod(lhs, rhs, high_precision=high_precision)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+        if high_precision:
+            raise ValueError("pl.fmod: high_precision requires a Tile rhs")
         return _tile.fmods(lhs, rhs)
     _raise_type_dispatch_error("fmod", lhs, rhs)
 
@@ -442,7 +451,7 @@ def fmods(lhs: Tensor, rhs: int | float | Scalar) -> Tensor: ...
 @overload
 def fmods(lhs: Tile, rhs: int | float | Scalar) -> Tile: ...
 def fmods(lhs, rhs):
-    """Element-wise floating-point remainder with a scalar, dispatched by input type."""
+    """Element-wise truncating remainder with a scalar, dispatched by input type."""
     if isinstance(lhs, Tensor):
         return _tensor.fmods(lhs, rhs)
     if isinstance(lhs, Tile):
