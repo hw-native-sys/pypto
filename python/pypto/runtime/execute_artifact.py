@@ -181,9 +181,9 @@ def execute_batch_manifest(
     that share the batch's ``(platform, runtime)`` reuse the worker; a differing
     one falls back to a fresh one-shot worker inside ``_execute_on_device``.
     Before opening the shared worker, the batch reconstructs every artifact so
-    it can provision SDMA when any usable artifact requires it.  Ordinary
-    artifacts can run on that SDMA-enabled worker, while an all-ordinary batch
-    keeps SDMA disabled.
+    it can provision SDMA when any usable artifact on the shared worker's
+    binding requires it.  Ordinary artifacts can run on that SDMA-enabled
+    worker, while an all-ordinary batch keeps SDMA disabled.
 
     Each artifact runs under its own ``try`` so one failure doesn't abort the
     rest, and emits a per-artifact marker the harness parses::
@@ -298,10 +298,15 @@ def execute_batch_manifest(
     first_entry, first_rebound, _ = prepared[first_usable_idx]
     assert first_rebound is not None
     _, first_runtime, _ = first_rebound
-    shared_enable_sdma = any(rebound[2] for _, rebound, _ in prepared if rebound is not None)
+    shared_platform = str(first_entry["platform"])
+    shared_enable_sdma = any(
+        rebound[2]
+        for entry, rebound, _ in prepared
+        if rebound is not None and str(entry["platform"]) == shared_platform and rebound[1] == first_runtime
+    )
 
     with ChipWorker(
-        config=RunConfig(platform=str(first_entry["platform"]), device_id=device_id),
+        config=RunConfig(platform=shared_platform, device_id=device_id),
         runtime=first_runtime,
         enable_sdma=shared_enable_sdma,
     ):

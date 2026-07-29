@@ -261,6 +261,64 @@ def test_execute_batch_mixed_sdma_capability_is_order_independent(
     ]
 
 
+@pytest.mark.parametrize(
+    ("platforms", "runtimes"),
+    [
+        pytest.param(
+            ("a2a3sim", "a2a3"),
+            ("tensormap_and_ringbuffer", "tensormap_and_ringbuffer"),
+            id="different-platform",
+        ),
+        pytest.param(
+            ("a2a3", "a2a3"),
+            ("first_runtime", "second_runtime"),
+            id="different-runtime",
+        ),
+    ],
+)
+def test_execute_batch_ignores_fallback_artifact_for_shared_sdma_capability(
+    tmp_path,
+    capsys,
+    stub_compile_and_assemble,
+    platforms,
+    runtimes,
+):
+    """An SDMA artifact on another binding must not configure the shared worker."""
+    wd1, wd2 = tmp_path / "ordinary", tmp_path / "sdma"
+    manifest = tmp_path / "mixed-bindings.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {"work_dir": str(wd1), "platform": platforms[0]},
+                {"work_dir": str(wd2), "platform": platforms[1]},
+            ]
+        )
+    )
+    artifacts_by_work_dir = {
+        wd1: (object(), runtimes[0], {}),
+        wd2: (object(), runtimes[1], {"enable_sdma": True}),
+    }
+
+    def reconstruct(work_dir, _platform):
+        return artifacts_by_work_dir[work_dir]
+
+    stub_compile_and_assemble.side_effect = reconstruct
+    with (
+        patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
+        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+    ):
+        all_ok = execute_batch_manifest(manifest, 3, validate=False)
+
+    assert all_ok is True
+    assert worker_cls.call_args.kwargs["enable_sdma"] is False
+    assert [call.kwargs["enable_sdma"] for call in on_dev.call_args_list] == [False, True]
+    markers = [line for line in capsys.readouterr().out.splitlines() if line.startswith("PYPTO_EXEC_RESULT=")]
+    assert markers == [
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=3",
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=3",
+    ]
+
+
 def test_execute_batch_one_failure_does_not_abort_rest(tmp_path, capsys, stub_compile_and_assemble):
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
     manifest = _manifest(tmp_path, wd1, wd2)
