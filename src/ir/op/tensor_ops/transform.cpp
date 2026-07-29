@@ -147,6 +147,9 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.reshape requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << "tensor.reshape does not support MX-layout tensors";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
@@ -254,6 +257,9 @@ TypePtr DeduceTensorReinterpretViewType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK_SPAN(tensor_type, args[0]->span_)
       << kOpName << " requires data to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << kOpName << " does not support MX-layout tensors";
   CHECK_SPAN(!tensor_type->shape_.empty(), args[0]->span_) << kOpName << " requires a tensor rank >= 1";
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
@@ -314,6 +320,9 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   auto tensor_type = As<TensorType>(args[0]->GetType());
   CHECK(tensor_type) << "tensor.transpose requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << "tensor.transpose does not support MX-layout tensors";
 
   const auto& input_shape = tensor_type->shape_;
   size_t ndim = input_shape.size();
@@ -471,6 +480,8 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
+  CHECK_SPAN(!IsMxTensorLayout(src_layout) && !IsMxTensorLayout(new_layout), args[0]->span_)
+      << "tensor.view does not support MX layouts";
   CHECK(new_layout != TensorLayout::NZ)
       << "tensor.view: NZ layout is not allowed on TensorType (NZ is tile-only)";
   CHECK(src_layout != TensorLayout::NZ)

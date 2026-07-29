@@ -380,7 +380,8 @@ def load(
             coordinate system.
         shapes: Shape of the region to load in each dimension. Always in the
             source tensor's coordinate system.
-        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat).
+            MX-layout tensors require an explicit MemorySpace.Mat.
         valid_shapes: Valid shape of the tile in each dimension. When provided, sets
             TileView.valid_shape in the output TileType. When omitted, shapes is used
             as valid_shape. Uses the same coordinate convention as shapes. Narrows
@@ -600,14 +601,20 @@ def move(
 
     Args:
         tile: Input tile
-        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right,
+            .LeftScale, .RightScale)
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
 
     Returns:
         Tile wrapping the move operation
     """
-    call_expr = _ir_ops.move(tile.unwrap(), target_memory, blayout=blayout, slayout=slayout)
+    call_expr = _ir_ops.move(
+        tile.unwrap(),
+        target_memory,
+        blayout=blayout,
+        slayout=slayout,
+    )
     return Tile(expr=call_expr)
 
 

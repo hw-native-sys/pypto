@@ -106,6 +106,8 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
   auto dist_type = As<DistributedTensorType>(args[0]->GetType());
   CHECK(dist_type) << "pld.tile.remote_load target must be a DistributedTensor (window-bound), got "
                    << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!dist_type->tensor_view_ || !IsMxTensorLayout(dist_type->tensor_view_->layout), args[0]->span_)
+      << "pld.tile.remote_load does not support MX-layout tensors";
 
   // peer must be a scalar (integer rank index). Allow any ScalarType — dtype
   // narrowing to integer is handled at codegen time when emitting the
@@ -197,6 +199,9 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
         break;
       case TensorLayout::NZ:
         break;
+      case TensorLayout::MX_A_ZZ:
+      case TensorLayout::MX_B_NN:
+        INTERNAL_CHECK(false) << "MX layouts were rejected before remote-load layout deduction";
     }
   }
 

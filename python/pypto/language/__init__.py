@@ -254,6 +254,8 @@ Ptr = PtrType
 ND = TensorLayout.ND
 DN = TensorLayout.DN
 NZ = TensorLayout.NZ
+MX_A_ZZ = TensorLayout.MX_A_ZZ
+MX_B_NN = TensorLayout.MX_B_NN
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
@@ -495,6 +497,8 @@ __all__ = [
     "ND",
     "DN",
     "NZ",
+    "MX_A_ZZ",
+    "MX_B_NN",
     "FP4",
     "FP8E4M3FN",
     "FP8E5M2",

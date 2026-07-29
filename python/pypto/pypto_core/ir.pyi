@@ -344,6 +344,12 @@ class TensorLayout(enum.Enum):
     NZ = ...
     """NZ layout."""
 
+    MX_A_ZZ = ...
+    """MX Left/A scale GM pack (ZZ)."""
+
+    MX_B_NN = ...
+    """MX Right/B scale GM pack (NN)."""
+
 class TileLayout(enum.Enum):
     """Tile layout enumeration (shared by blayout and slayout)."""
 
@@ -999,6 +1005,10 @@ class MemorySpace(enum.Enum):
 
     Bias = ...
     """Bias buffer."""
+    LeftScale = ...
+    """L0A-side MX block-scale buffer (A5)."""
+    RightScale = ...
+    """L0B-side MX block-scale buffer (A5)."""
 
     ScalarLocal = ...
     """On-core scalar register file / C stack (ArrayType)."""

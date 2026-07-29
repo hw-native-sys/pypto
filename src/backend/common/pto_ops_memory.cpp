@@ -114,6 +114,17 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
+  // PTOAS needs the MX layout on tload in addition to the source TensorView.
+  std::string pto_layout;
+  if (tensor_type->tensor_view_.has_value()) {
+    if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ) {
+      pto_layout = "mx_a_zz";
+    } else if (tensor_type->tensor_view_->layout == ir::TensorLayout::MX_B_NN) {
+      pto_layout = "mx_b_nn";
+    }
+  }
+  const bool is_mx_load = !pto_layout.empty();
+
   // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
   // canonical coordinates (matching the source TensorType's shape). There is
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
@@ -129,6 +140,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
+  if (is_mx_load) {
+    tload_line << " {layout = #pto.layout<" << pto_layout << ">}";
+  }
   codegen.Emit(tload_line.str());
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
@@ -747,6 +761,12 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
         break;
       case ir::TensorLayout::NZ:
         layout_str = "nz";
+        break;
+      case ir::TensorLayout::MX_A_ZZ:
+        layout_str = "mx_a_zz";
+        break;
+      case ir::TensorLayout::MX_B_NN:
+        layout_str = "mx_b_nn";
         break;
       case ir::TensorLayout::ND:
         break;

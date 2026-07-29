@@ -95,7 +95,7 @@ inline std::vector<ExprPtr> BuildLogicalStridesFromLayout(const std::vector<Expr
   size_t ndim = shape.size();
   if (ndim == 0) return {};
 
-  if (layout == TensorLayout::ND) {
+  if (layout == TensorLayout::ND || IsMxTensorLayout(layout)) {
     return BuildRowMajorStrides(shape);
   }
 
@@ -226,9 +226,9 @@ inline CanonicalCheckResult CheckCanonicalView(const std::vector<ExprPtr>& shape
 
   size_t n = shape.size();
 
-  if (layout == TensorLayout::ND) {
+  if (layout == TensorLayout::ND || IsMxTensorLayout(layout)) {
     if (!detail::IsConstOne(stride[n - 1])) {
-      return {false, "ND layout requires innermost stride to be ConstInt(1)"};
+      return {false, TensorLayoutToString(layout) + " layout requires innermost stride to be ConstInt(1)"};
     }
     // Outer-dim strided family: stride[k] >= stride[k+1] * shape[k+1].
     // Statically decidable cases enforce; symbolic cases pass under relaxed_symbolic.
@@ -237,12 +237,13 @@ inline CanonicalCheckResult CheckCanonicalView(const std::vector<ExprPtr>& shape
       auto cmp = detail::StaticGreaterEqual(stride[k], packed);
       if (cmp.has_value() && !*cmp) {
         std::ostringstream oss;
-        oss << "ND stride[" << k << "] is smaller than packed stride[" << (k + 1) << "] * shape[" << (k + 1)
-            << "]";
+        oss << TensorLayoutToString(layout) << " stride[" << k << "] is smaller than packed stride["
+            << (k + 1) << "] * shape[" << (k + 1) << "]";
         return {false, oss.str()};
       }
       if (!cmp.has_value() && !relaxed_symbolic) {
-        return {false, "ND outer-dim stride relation is symbolic and cannot be statically verified"};
+        return {false, TensorLayoutToString(layout) +
+                           " outer-dim stride relation is symbolic and cannot be statically verified"};
       }
     }
     return {true, ""};

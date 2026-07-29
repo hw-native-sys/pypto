@@ -135,10 +135,17 @@ using ScalarTypePtr = std::shared_ptr<const ScalarType>;
  * - NZ: NZ layout
  */
 enum class TensorLayout {
-  ND,  ///< ND layout
-  DN,  ///< DN layout
-  NZ   ///< NZ layout
+  ND,       ///< ND layout
+  DN,       ///< DN layout
+  NZ,       ///< NZ layout
+  MX_A_ZZ,  ///< MX Left/A scale GM pack (ZZ)
+  MX_B_NN   ///< MX Right/B scale GM pack (NN)
 };
+
+/** True when layout selects the MX scale GM load path (TLoadMxCube*). */
+inline bool IsMxTensorLayout(TensorLayout layout) {
+  return layout == TensorLayout::MX_A_ZZ || layout == TensorLayout::MX_B_NN;
+}
 
 /**
  * @brief Convert TensorLayout enum to string

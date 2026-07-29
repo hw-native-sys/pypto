@@ -38,6 +38,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -146,6 +147,34 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       break;
     }
   }
+  const bool is_mx_load =
+      tensor_type->tensor_view_.has_value() && IsMxTensorLayout(tensor_type->tensor_view_->layout);
+  if (is_mx_load) {
+    CHECK(tensor_type->dtype_ == DataType::FP8E8M0 || tensor_type->dtype_ == DataType::UINT8)
+        << "The operator " << op_name << " of an MX-layout tensor requires FP8E8M0 or UINT8 dtype, but got "
+        << tensor_type->dtype_.ToString();
+    CHECK(tensor_type->shape_.size() == 2)
+        << "The operator " << op_name << " of an MX-layout tensor requires a 2D tensor, got rank "
+        << tensor_type->shape_.size();
+    CHECK(shapes_tuple->elements_.size() == 2)
+        << "The operator " << op_name << " of an MX-layout tensor requires a 2D load window, got rank "
+        << shapes_tuple->elements_.size();
+    CHECK(valid_shapes_tuple->elements_.size() == 2)
+        << "The operator " << op_name << " of an MX-layout tensor requires 2D valid_shapes, got rank "
+        << valid_shapes_tuple->elements_.size();
+    const TensorView& source_view = *tensor_type->tensor_view_;
+    const auto packed_stride =
+        tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, source_view.layout);
+    CHECK(source_view.stride.empty() ||
+          tile_view_semantics::ShapeExprListsEquivalent(source_view.stride, packed_stride))
+        << "The operator " << op_name
+        << " of an MX-layout tensor only supports packed 2D sources; strided sources are not supported";
+    // MX cube scale loads are Mat-only (TLoadMxCube*) and require the caller to
+    // spell the target explicitly. The public load interface keeps its ordinary
+    // Vec default, so an omitted target fails instead of being silently changed.
+    CHECK(target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat)
+        << "The operator " << op_name << " of an MX-layout tensor requires target_memory=MemorySpace.Mat";
+  }
   // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
   // the default-constructed view is kept and InferTileMemorySpace rebuilds it
   // once the memory space is resolved.
@@ -158,7 +187,18 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   bool source_is_dn =
       tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
   TileView tile_view;
-  if (target_memory_opt.has_value()) {
+  if (is_mx_load) {
+    // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
+    const bool is_mx_b = tensor_type->tensor_view_->layout == TensorLayout::MX_B_NN;
+    if (is_mx_b) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::col_major;
+    } else {
+      tile_view.blayout = TileLayout::row_major;
+      tile_view.slayout = TileLayout::row_major;
+    }
+    tile_view.fractal = 32;
+  } else if (target_memory_opt.has_value()) {
     if (*target_memory_opt == MemorySpace::Mat) {
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::row_major;
@@ -373,18 +413,36 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.blayout = source_view.blayout;
   tile_view.slayout = source_view.slayout;
 
-  // Hardcoded layout for Left/Right (hardware requirements)
+  // Hardcoded layout for Left/Right/scale (hardware requirements)
   if (space == MemorySpace::Left) {
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  } else if (space == MemorySpace::LeftScale) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = 32;
+  } else if (space == MemorySpace::RightScale) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::col_major;
+    tile_view.fractal = 32;
   }
 
-  // Explicit kwargs override everything
-  tile_view.blayout = GetKwarg<TileLayout>(kwargs, "blayout", tile_view.blayout);
-  tile_view.slayout = GetKwarg<TileLayout>(kwargs, "slayout", tile_view.slayout);
+  // Ordinary destinations permit explicit layouts. Scale destinations have
+  // hardware-fixed layouts because PTOAS uses them to distinguish ScaleLeft
+  // from ScaleRight even though both lower to loc=scaling.
+  const TileLayout requested_blayout = GetKwarg<TileLayout>(kwargs, "blayout", tile_view.blayout);
+  const TileLayout requested_slayout = GetKwarg<TileLayout>(kwargs, "slayout", tile_view.slayout);
+  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
+    CHECK(requested_blayout == tile_view.blayout && requested_slayout == tile_view.slayout)
+        << "The operator " << op_name
+        << " does not allow blayout/slayout to override the hardware-fixed layout for "
+        << MemorySpaceToString(space);
+  }
+  tile_view.blayout = requested_blayout;
+  tile_view.slayout = requested_slayout;
 
   // Keep original shape
   std::vector<ExprPtr> output_shape = input_shape;
@@ -397,6 +455,37 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.pad = source_view.pad;
   }
 
+  // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft
+  // (ui8+scaling wrongly becomes Fixpipe TileType::Scaling). Host-prequant may load UINT8.
+  DataType out_dtype = tile_type->dtype_;
+  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
+    CHECK(input_shape.size() == 2) << "The operator " << op_name
+                                   << " into LeftScale/RightScale requires a 2D tile, got rank "
+                                   << input_shape.size();
+    CHECK(tile_type->memory_space_ == MemorySpace::Mat)
+        << "The operator " << op_name
+        << " into LeftScale/RightScale requires the input tile to be in Mat memory";
+    CHECK(out_dtype == DataType::UINT8 || out_dtype == DataType::FP8E8M0)
+        << "The operator " << op_name
+        << " into LeftScale/RightScale requires UINT8 or FP8E8M0 dtype, but got " << out_dtype.ToString();
+    const TileLayout required_layout =
+        space == MemorySpace::LeftScale ? TileLayout::row_major : TileLayout::col_major;
+    CHECK(source_view.blayout == required_layout && source_view.slayout == required_layout &&
+          source_view.fractal == 32)
+        << "The operator " << op_name << " into " << MemorySpaceToString(space)
+        << " requires the source Mat tile to use the matching "
+        << (space == MemorySpace::LeftScale ? "row/row/32" : "col/col/32") << " layout";
+    if (out_dtype == DataType::UINT8) {
+      out_dtype = DataType::FP8E8M0;
+    }
+  }
+
+  // Stamp memory_space_ only for MX scale destinations. Stamping Mat/Left/Right
+  // here skips InferTileMemorySpace's tile_view refresh to the destination's
+  // implicit layout and regresses existing Vec↔Mat / matmul / rmsnorm paths.
+  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
+    return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view, space);
+  }
   // Return TileType with computed shape and same dtype (no explicit MemRef)
   return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -456,6 +545,11 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
       break;
     }
   }
+  CHECK(!target_memory_opt.has_value() ||
+        (*target_memory_opt != MemorySpace::LeftScale && *target_memory_opt != MemorySpace::RightScale))
+      << "The operator " << op_name
+      << " does not support target_memory=LeftScale/RightScale; create the scale tile with tile.load "
+         "to Mat followed by tile.move";
 
   TileView tile_view;
   // `transpose=true` requests the transposed Mat (ZN) fractal layout
@@ -987,7 +1081,7 @@ REGISTER_OP("tile.mscatter")
 
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
-    .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
+    .set_description("Move tile between memory levels (Vec/Mat/Left/Right/LeftScale/RightScale)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<TileLayout>("blayout")

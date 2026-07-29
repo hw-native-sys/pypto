@@ -80,6 +80,9 @@ program_inferred = infer_pass(program)
 
 阶段 1 **从不**覆盖已有的 `target_memory` kwarg。如果用户写了 `pl.load(..., target_memory=Mat)`，而下游 `matmul` 需要 `Left`，则 load 仍保持 `Mat`，并由后续插入 `tile.move`。
 
+源类型为 `TensorLayout.MX_A_ZZ` / `MX_B_NN` 的 `tile.load` 必须显式携带
+`target_memory=Mat`；如果省略或传入其他目标，类型推导会在本 pass 运行前报错。
+
 ### 阶段 2 — Move 收集（`MoveCollector`）
 
 再次遍历函数体。对每个其算子带 `input_constraints` 的 `Call`，检查每个受约束输入变量在 `var_memory_` 中的解析结果是否在允许列表内。任何不匹配都会记录为 `MoveKey = (producer_var, target_space)` 加入 `needed_moves_`，其中 `target_space` 取该输入槽允许列表的第一个。阶段 3 会在每个外层 `SeqStmts` 作用域（即每个插入点缓存作用域）内最多为每个唯一 key 物化一个 `tile.move`，因此同一 `(producer_var, target_space)` 仍可能在兄弟作用域（如 `then` / `else` 分支）中分别物化。

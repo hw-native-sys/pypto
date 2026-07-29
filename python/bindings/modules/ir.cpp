@@ -359,6 +359,8 @@ void BindIR(nb::module_& m) {
       .value("ND", TensorLayout::ND, "ND layout")
       .value("DN", TensorLayout::DN, "DN layout")
       .value("NZ", TensorLayout::NZ, "NZ layout")
+      .value("MX_A_ZZ", TensorLayout::MX_A_ZZ, "MX Left/A scale GM pack (ZZ)")
+      .value("MX_B_NN", TensorLayout::MX_B_NN, "MX Right/B scale GM pack (NN)")
       .export_values();
 
   // PadValue enum - must be before both TensorView and TileView since both carry it
@@ -596,6 +598,8 @@ void BindIR(nb::module_& m) {
       .value("Right", MemorySpace::Right, "Right matrix operand buffer")
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
+      .value("LeftScale", MemorySpace::LeftScale, "L0A-side MX block-scale buffer (A5)")
+      .value("RightScale", MemorySpace::RightScale, "L0B-side MX block-scale buffer (A5)")
       .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
 

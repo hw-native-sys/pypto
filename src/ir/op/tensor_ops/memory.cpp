@@ -166,6 +166,9 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type) << "tensor.slice requires first argument to be a TensorType or DistributedTensorType, "
                         "but got "
                      << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
+             args[0]->span_)
+      << "tensor.slice does not support MX-layout tensors";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());

@@ -153,6 +153,10 @@ std::string TensorLayoutToString(TensorLayout layout) {
       return "DN";
     case TensorLayout::NZ:
       return "NZ";
+    case TensorLayout::MX_A_ZZ:
+      return "MX_A_ZZ";
+    case TensorLayout::MX_B_NN:
+      return "MX_B_NN";
     default:
       throw TypeError("Unknown TensorLayout value: " + std::to_string(static_cast<int>(layout)));
   }
@@ -165,6 +169,10 @@ TensorLayout StringToTensorLayout(const std::string& str) {
     return TensorLayout::DN;
   } else if (str == "NZ") {
     return TensorLayout::NZ;
+  } else if (str == "MX_A_ZZ") {
+    return TensorLayout::MX_A_ZZ;
+  } else if (str == "MX_B_NN") {
+    return TensorLayout::MX_B_NN;
   }
   throw TypeError("Unknown TensorLayout string: " + str);
 }

@@ -393,6 +393,27 @@ def test_remote_load_returns_tile_type_with_target_dtype():
     assert call.type.shape[0].value == 32
 
 
+@pytest.mark.parametrize("layout", [ir.TensorLayout.MX_A_ZZ, ir.TensorLayout.MX_B_NN])
+def test_remote_load_rejects_mx_layout(layout):
+    span = ir.Span.unknown()
+    shape_exprs = [ir.ConstInt(8, DataType.INT64, span), ir.ConstInt(8, DataType.INT64, span)]
+    view = ir.TensorView([], layout)
+    target = ir.Var(
+        "data",
+        ir.DistributedTensorType(shape_exprs, DataType.FP8E8M0, None, view),
+        span,
+    )
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(ValueError, match="does not support MX-layout tensors"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, _make_shape_tuple([0, 0], span), _make_shape_tuple([8, 8], span)],
+            {},
+            span,
+        )
+
+
 def test_remote_load_infers_col_major_for_single_column_tile():
     """A [M, 1] remote Vec tile follows the standard implicit col-major layout."""
     span = ir.Span.unknown()

@@ -931,10 +931,10 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // time codegen executes, so the IR's TensorView fields can be transcribed
   // verbatim.
   //
-  // The one exception is the ``[M, 1]`` column-vector special case: PTOAS
-  // *infers* DN for shape ``[M, 1]`` with degenerate strides regardless of
-  // the IR-declared layout, so the codegen forces DN + ``[1, M]`` strides
-  // here to match what PTOAS expects.
+  // The one exception is the ordinary ``[M, 1]`` column-vector special case:
+  // PTOAS *infers* DN for shape ``[M, 1]`` with degenerate strides regardless
+  // of an ND declaration, so codegen forces DN + ``[1, M]`` strides. MX
+  // layouts are explicit hardware contracts and bypass this legacy override.
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
@@ -963,7 +963,8 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     if (tensor_type->tensor_view_.has_value()) {
       layout = tensor_type->tensor_view_->layout;
     }
-    if (is_column_vector) layout = ir::TensorLayout::DN;
+    const bool force_column_vector_dn = is_column_vector && !IsMxTensorLayout(layout);
+    if (force_column_vector_dn) layout = ir::TensorLayout::DN;
 
     // Materialize one shape dimension as an MLIR SSA value.
     auto get_shape_dim_mlir = [&](size_t dim_idx) -> std::string {
@@ -1014,7 +1015,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       for (size_t j = 0; j < rank; ++j) {
         stride_names[j] = get_stride_mlir(strides[j]);
       }
-    } else if (is_column_vector) {
+    } else if (force_column_vector_dn) {
       // Forced-DN ``[..., M, 1]`` legacy stride pattern (PTOAS column-vector
       // convention): trailing pair degenerates to ``stride[rank-2]=1`` and
       // ``stride[rank-1]=shape[rank-1]=1``; outer dims walk row-major over the
@@ -1088,6 +1089,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         break;
       case ir::TensorLayout::NZ:
         layout_str = "nz";
+        break;
+      case ir::TensorLayout::MX_A_ZZ:
+        layout_str = "mx_a_zz";
+        break;
+      case ir::TensorLayout::MX_B_NN:
+        layout_str = "mx_b_nn";
         break;
       case ir::TensorLayout::ND:
         break;

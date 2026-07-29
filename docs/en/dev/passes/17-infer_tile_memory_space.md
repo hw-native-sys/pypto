@@ -76,6 +76,10 @@ For each `ForStmt` with `return_vars_`, after visiting the body the analyzer cop
 | `HasRetargetableMemoryKwarg()` op (e.g. `tile.load`, `tile.create`) and resolver returned `None` (kwarg absent) | Phase-0 demand if it is `Vec` or `Mat`; otherwise input-inherit; else `Vec` |
 | `tile.*` op with `deduce_output_memory` returning `None` and not retargetable / not inherit | Input-inherit; else `Vec` |
 
+`tile.load` of a `TensorLayout.MX_A_ZZ` / `MX_B_NN` source must carry an
+explicit `target_memory=Mat`; type deduction rejects an omitted or different
+target before this pass runs.
+
 The "clamp to `{Vec, Mat}`" step on retargetable producers is deliberate: a DDR-facing `tile.load` cannot directly produce `Left`/`Right`/`Acc`/`Bias`, so even when downstream demand is one of those, the producer must stop at `Mat` (or `Vec`) and Phase 2 inserts a `tile.move` to reach the specialized space.
 
 The pass *never* overrides a present `target_memory` kwarg in Phase 1. If a user wrote `pl.load(..., target_memory=Mat)` and a downstream `matmul` demands `Left`, the load stays at `Mat` and a `tile.move` is inserted.

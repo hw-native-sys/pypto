@@ -125,6 +125,46 @@ INT32 for integer inputs (mirroring `tile.matmul_acc`). At conversion time
 this batched path whenever any operand has rank > 2; `FlattenTileNdTo2D`
 later unrolls the batched form into per-batch 2D ops.
 
+### MX scale memory and data movement (Ascend950)
+
+MX uses dedicated `LeftScale` / `RightScale` memory spaces and `FP8E8M0` scale dtype.
+This change lands the **scale memspace + load/move** path (no matmul yet).
+
+| IR / DSL | Notes |
+| -------- | ----- |
+| `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | MX scale GM layouts are carried by the source TensorLayout. Dtype is FP8E8M0 or UINT8 and `target_memory=Mat` must be passed explicitly. Strided sources are rejected. |
+| `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly |
+| `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; create scale data through MX load to Mat followed by move |
+
+MX tensor subviews are a known legacy limitation: `tensor.slice`, `tensor.reshape`,
+`tensor.transpose`, `tensor.reinterpret_view`, and `tensor.view` reject MX-layout
+sources because the current MX hardware path cannot represent a subview base offset.
+`pld.tile.remote_load` also rejects MX layouts until its complete scale layout
+contract is implemented.
+
+Canonical sample for scale tiles: scale=`FP8E8M0` with shapes `[M, ceil(K/32)]` / `[ceil(K/32), N]`,
+GM scale layouts `mx_a_zz` / `mx_b_nn` (host ZZ/NN pack); fractal=32.
+
+#### MX / Ascend950: pto-isa constraints
+
+| Constraint | Detail |
+| ---------- | ------ |
+| Distinct scale buffers | Cube does **not** fold scales into Left/Right data; `TileType::ScaleLeft` / `ScaleRight` (L0A/L0B sidecars) ↔ PyPTO `LeftScale` / `RightScale` |
+| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; physical scale groups `ceil(K/32)`, fractal=32 |
+| Layouts | `mx_a_zz` → row-major ZZ; `mx_b_nn` → col-major NN; `TLoadMxCube*` (AZZ2ZZ / …) |
+| `TMov` `CommonCheckMX` | Allows `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale |
+
+#### MX / Ascend950: PTOAS constraints
+
+| Constraint | Detail |
+| ---------- | ------ |
+| Single `loc=scaling` | No distinct left/right_scale locs yet; both PyPTO spaces lower to `loc=scaling`; EmitC recovers ScaleLeft/Right |
+| Dtype must be `!pto.f8E8M0` | `ui8` + `scaling` wrongly becomes Fixpipe `TileType::Scaling`; promote before entering LeftScale/RightScale |
+| No Mat↔Scaling `treshape` | Different locs; reshape stays in Mat (ui8), then `tmov` into scaling |
+| Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first |
+| Order | PyPTO emits the Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` can reorder bind-before-fill when `tget_scale_addr` is present |
+| `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / … |
+
 ## Python Usage
 
 ```python
@@ -545,6 +585,7 @@ workspace or silently turn a requested prefetch into a no-op. See
 | -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
+| `tile_ops/matmul.cpp` | TileOp: matmul, gemv |
 | `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |

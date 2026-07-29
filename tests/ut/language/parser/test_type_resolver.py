@@ -1471,6 +1471,8 @@ class TestLayoutResolution:
         [
             ("pl.NZ", ir.TensorLayout.NZ),
             ("pl.ND", ir.TensorLayout.ND),
+            ("pl.MX_A_ZZ", ir.TensorLayout.MX_A_ZZ),
+            ("pl.MX_B_NN", ir.TensorLayout.MX_B_NN),
         ],
     )
     def test_resolve_tensor_with_layout(self, layout_str, expected_layout):
@@ -1682,6 +1684,8 @@ class TestLayoutIntegration:
         [
             (pl.ND, ir.TensorLayout.ND),
             (pl.NZ, ir.TensorLayout.NZ),
+            (pl.MX_A_ZZ, ir.TensorLayout.MX_A_ZZ),
+            (pl.MX_B_NN, ir.TensorLayout.MX_B_NN),
         ],
     )
     def test_parametrized_layout(self, layout, expected):

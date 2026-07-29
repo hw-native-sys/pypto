@@ -37,7 +37,7 @@ COMPUTE_FUNC_TYPES = frozenset({"AIC", "AIV", "InCore"})
 
 #: Left-to-right panel order. Spaces the backend reports but that are missing
 #: here are appended rather than dropped, so a new memory space still maps.
-SPACE_ORDER = ("Vec", "Mat", "Left", "Right", "Acc", "Bias")
+SPACE_ORDER = ("Vec", "Mat", "Left", "LeftScale", "Right", "RightScale", "Acc", "Bias")
 
 #: Used when the dump's target architecture cannot be determined.
 DEFAULT_BACKEND = "Ascend910B"
@@ -460,9 +460,9 @@ def backend_limits(backend_name: str) -> dict[str, int]:
     """Read the capacity of every on-chip memory space a backend describes.
 
     Walking the SoC rather than querying a fixed list of spaces means a backend
-    that carries an extra space (Ascend950 has ``Bias``) gets a real capacity
-    instead of falling back to its own high-water mark, which would render that
-    panel permanently full.
+    that carries an extra space (Ascend950 has ``Bias`` / ``LeftScale`` /
+    ``RightScale``) gets a real capacity instead of falling back to its own
+    high-water mark, which would render that panel permanently full.
 
     Args:
         backend_name: A :class:`BackendType` member name, e.g. ``"Ascend910B"``.

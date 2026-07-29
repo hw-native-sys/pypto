@@ -103,6 +103,10 @@ std::string MemorySpaceToMLIR(ir::MemorySpace space) {
     return "acc";
   } else if (space == ir::MemorySpace::Bias) {
     return "bias";
+  } else if (space == ir::MemorySpace::LeftScale || space == ir::MemorySpace::RightScale) {
+    // PTOAS v0.48 exposes a single MLIR loc `scaling` for scale / fixpipe buffers
+    // (TileType::ScaleLeft/ScaleRight are not yet distinct tile_buf locs).
+    return "scaling";
   } else {
     throw ValueError("Invalid MemorySpace value");
   }

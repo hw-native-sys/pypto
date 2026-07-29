@@ -117,7 +117,7 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 **TensorView 字段：**
 
 - `stride`：每个维度的步长
-- `layout`：`TensorLayout.ND` / `DN` / `NZ`
+- `layout`：`TensorLayout.ND` / `DN` / `NZ` / `MX_A_ZZ` / `MX_B_NN`
 - `valid_shape`：可选的有效区域维度（为空表示使用完整 shape）
 - `pad`：`PadValue.null`（默认）/ `zero` / `max` / `min`，用于访问超出
   `valid_shape` 部分时的填充模式。与 `TileView.pad` 对称；

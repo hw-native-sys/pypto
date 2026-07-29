@@ -28,17 +28,21 @@ namespace ir {
  * - Right: Right matrix operand buffer
  * - Acc: Accumulator buffer
  * - Bias: Bias buffer
+ * - LeftScale: L0A-side MX block-scale buffer (A5)
+ * - RightScale: L0B-side MX block-scale buffer (A5)
  * - ScalarLocal: On-core scalar register file / C stack (for ArrayType)
  */
 enum class MemorySpace {
-  DDR,          ///< DDR memory (off-chip)
-  Vec,          ///< Vector/unified buffer (on-chip)
-  Mat,          ///< Matrix/L1 buffer
-  Left,         ///< Left matrix operand buffer
-  Right,        ///< Right matrix operand buffer
-  Acc,          ///< Accumulator buffer
-  Bias,         ///< Bias buffer
-  ScalarLocal,  ///< On-core scalar register file / C stack (for ArrayType)
+  DDR = 0,          ///< DDR memory (off-chip)
+  Vec = 1,          ///< Vector/unified buffer (on-chip)
+  Mat = 2,          ///< Matrix/L1 buffer
+  Left = 3,         ///< Left matrix operand buffer
+  Right = 4,        ///< Right matrix operand buffer
+  Acc = 5,          ///< Accumulator buffer
+  Bias = 6,         ///< Bias buffer
+  ScalarLocal = 7,  ///< On-core scalar register file / C stack (for ArrayType)
+  LeftScale = 8,    ///< L0A-side MX block-scale buffer (A5)
+  RightScale = 9,   ///< L0B-side MX block-scale buffer (A5)
 };
 
 /**

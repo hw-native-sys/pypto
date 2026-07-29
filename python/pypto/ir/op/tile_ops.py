@@ -28,6 +28,7 @@ from pypto.pypto_core.ir import (
     PadValue,
     ScalarType,
     Span,
+    TensorLayout,
     TileLayout,
 )
 
@@ -187,7 +188,8 @@ def load(
             the actual valid data region differs from the allocated tile size.
             Uses the same coordinate convention as shapes. This is a *request*: it
             narrows the tile, but cannot widen it past what the source has.
-        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat)
+        target_memory: Target memory space (MemorySpace.Vec default, or MemorySpace.Mat).
+            MX-layout tensors require an explicit MemorySpace.Mat.
         clamp: Sanction a read that runs off the end of the source. By default a
             load asserts that ``offsets + valid_shapes`` stays inside the source
             and is rejected when that provably fails; with ``clamp=True`` the
@@ -201,6 +203,16 @@ def load(
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
     """
+    tensor_view = getattr(tensor.type, "tensor_view", None)
+    source_layout = getattr(tensor_view, "layout", None)
+    is_mx = source_layout in (TensorLayout.MX_A_ZZ, TensorLayout.MX_B_NN)
+
+    if is_mx and target_memory != MemorySpace.Mat:
+        raise ValueError(
+            "tile.load of an MX-layout tensor requires explicit target_memory=MemorySpace.Mat "
+            f"(MX scale loads are L1/Mat only); got {target_memory}"
+        )
+
     # Validate target_memory: only Vec and Mat are allowed for load
     if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
@@ -216,7 +228,6 @@ def load(
     kwargs: dict[str, Any] = {"target_memory": target_memory}
     if clamp:
         kwargs["clamp"] = True
-
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:
         valid_shapes_tuple = _to_make_tuple(valid_shapes, actual_span)
@@ -472,7 +483,8 @@ def move(
 
     Args:
         tile: Input tile (TileType)
-        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right,
+            .LeftScale, .RightScale)
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
         span: Optional source span for debugging (auto-captured if not provided)
@@ -481,8 +493,6 @@ def move(
         Call expression that returns a TileType in the target memory space
     """
     actual_span = _get_span_or_capture(span)
-    args = [tile]
-
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
     }
@@ -491,7 +501,7 @@ def move(
     if slayout is not None:
         kwargs["slayout"] = slayout
 
-    return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.move", [tile], kwargs, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:
