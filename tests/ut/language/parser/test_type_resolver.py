@@ -88,6 +88,24 @@ class TestTypeResolver:
             assert isinstance(result, ir.TensorType)
             assert result.dtype == expected_dtype
 
+    @pytest.mark.parametrize(
+        ("annotation", "expected_type"),
+        [
+            ("pl.PrefetchAsyncContext", ir.PrefetchAsyncContextType),
+            ("pl.AsyncEvent", ir.AsyncEventType),
+            ("pl.AsyncSession", ir.AsyncSessionType),
+            ("pl.PrefetchAsyncContextType", ir.PrefetchAsyncContextType),
+            ("pl.AsyncEventType", ir.AsyncEventType),
+            ("pl.AsyncSessionType", ir.AsyncSessionType),
+        ],
+    )
+    def test_resolve_prefetch_handle_wrapper_and_legacy_type_names(self, annotation, expected_type):
+        """Public wrapper names and legacy IR type aliases resolve identically."""
+        resolver = _make_resolver()
+        node = ast.parse(annotation, mode="eval").body
+
+        assert isinstance(resolver.resolve_type(node), expected_type)
+
     def test_resolve_dtype_attribute(self):
         """Test resolving dtype from attribute access."""
         resolver = _make_resolver()

@@ -9,9 +9,14 @@
 
 """Tests for the ``prefetch.*`` async GM->L2 prefetch op family."""
 
+import ast
+import linecache
+
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
+from pypto.ir.op import prefetch as ir_prefetch
+from pypto.ir.op import tensor as ir_tensor
 from pypto.pypto_core import ir as _ir_core
 
 
@@ -55,10 +60,10 @@ class TestPrefetchOpTypes:
         assert "prefetch.async_prefetch" in ir_str
         assert "prefetch.session" in ir_str
         assert "prefetch.wait" in ir_str
-        # Handle-typed bindings are annotated with the singleton marker types.
-        assert "pl.PrefetchAsyncContextType" in ir_str
-        assert "pl.AsyncEventType" in ir_str
-        assert "pl.AsyncSessionType" in ir_str
+        # Handle-typed bindings use the exported public wrapper names.
+        assert "pl.PrefetchAsyncContext" in ir_str
+        assert "pl.AsyncEvent" in ir_str
+        assert "pl.AsyncSession" in ir_str
 
     def test_roundtrip_through_printer(self):
         """Printed IR re-parses to a structurally identical program."""
@@ -78,6 +83,37 @@ class TestPrefetchOpTypes:
 
         reparsed = pl.parse_program(str(Program))
         ir.assert_structural_equal(reparsed, Program)
+
+    def test_verbose_printer_output_executes_with_public_namespace(self):
+        """Printed annotations resolve under ordinary ``pypto.language`` imports."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[1, 256], pl.FP32],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                ctx = pl.prefetch.make_context()
+                evt = pl.prefetch.async_prefetch(x, ctx)
+                session = pl.prefetch.session(ctx)
+                pl.prefetch.wait(evt, session)
+                return x
+
+        printed = str(Program)
+        filename = "<test_prefetch_verbose_printer_exec>"
+        linecache.cache[filename] = (len(printed), None, printed.splitlines(keepends=True), filename)
+        try:
+            namespace = {"pl": pl}
+            for node in ast.walk(ast.parse(printed, filename=filename)):
+                if isinstance(node, ast.AnnAssign):
+                    eval(compile(ast.Expression(node.annotation), filename, "eval"), namespace)  # noqa: S307
+            exec(compile(printed, filename, "exec"), namespace)  # noqa: S102
+        finally:
+            linecache.cache.pop(filename, None)
+
+        executed = namespace["Program"]
+        ir.assert_structural_equal(executed, Program)
 
     def test_logical_1d_multi_dim_source_accepted(self):
         """A ``[1, 1, N]`` source is logically 1D and is accepted."""
@@ -113,6 +149,27 @@ class TestPrefetchOpVerification:
                     ctx = pl.prefetch.make_context()
                     pl.prefetch.async_prefetch(x, ctx)
                     return x
+
+    def test_non_var_tensor_expression_rejected_before_codegen(self):
+        """A Tensor-typed Call is not a legal PTOAS partition-view source."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([256], DataType.FP32), span)
+        reshaped = ir_tensor.reshape(src, [256], span=span)
+        ctx = ir_prefetch.make_context(span)
+
+        with pytest.raises(ValueError, match="expects src to be a Var or IterArg"):
+            ir_prefetch.async_prefetch(reshaped, ctx, span)
+
+    def test_iter_arg_source_remains_accepted(self):
+        """Loop-carried tensor bindings are Var-like PTOAS view sources."""
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([256], DataType.FP32)
+        init = ir.Var("init", tensor_type, span)
+        src = ir.IterArg("src", tensor_type, init, span)
+        ctx = ir_prefetch.make_context(span)
+
+        event = ir_prefetch.async_prefetch(src, ctx, span)
+        assert isinstance(event.type, ir.AsyncEventType)
 
     def test_make_context_rejects_workspace_argument(self):
         with pytest.raises(TypeError, match="make_context.*positional"):

@@ -216,14 +216,18 @@ class TestPrefetchCoreAffinity:
 
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(MixedPrefetchProgram)
 
+        lowered_prefetch_ops = (
+            "pto.make_prefetch_async_context",
+            "pto.tprefetch_async",
+            "pto.get_prefetch_async_session",
+            "pto.comm.wait_async_event",
+        )
         per_core: dict[str, int] = {}
         for func in optimized.functions.values():
             if func.func_type.name not in ("AIC", "AIV"):
                 continue
             mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
-            per_core[func.func_type.name] = mlir.count("pto.tprefetch_async") + mlir.count(
-                "pto.make_prefetch_async_context"
-            )
+            per_core[func.func_type.name] = sum(mlir.count(op_name) for op_name in lowered_prefetch_ops)
 
         assert "AIC" in per_core and "AIV" in per_core, f"expected a mixed AIC/AIV split, got {per_core}"
         assert per_core["AIC"] == 0, f"prefetch leaked onto the cube lane: {per_core}"

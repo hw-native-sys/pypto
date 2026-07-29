@@ -86,6 +86,8 @@ void CheckHandle(const std::string& op_name, const std::string& arg_role, const 
  * message instead of surfacing much later as a PTOAS verification error.
  */
 void CheckFlatContiguous1DSource(const std::string& op_name, const ExprPtr& src) {
+  CHECK(AsVarLike(src)) << op_name << " expects src to be a Var or IterArg";
+
   auto tensor_type = AsTensorTypeLike(src->GetType());
   CHECK(tensor_type) << op_name << " expects src to be a GM Tensor (prefetch reads global memory), got "
                      << src->GetType()->TypeName();
