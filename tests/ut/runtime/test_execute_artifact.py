@@ -220,6 +220,47 @@ def test_execute_batch_enables_sdma_worker_for_prefetch_artifact(
     assert on_dev.call_args.kwargs["enable_sdma"] is True
 
 
+@pytest.mark.parametrize(
+    "runtime_configs",
+    [
+        pytest.param(({}, {"enable_sdma": True}), id="ordinary-then-sdma"),
+        pytest.param(({"enable_sdma": True}, {}), id="sdma-then-ordinary"),
+    ],
+)
+def test_execute_batch_mixed_sdma_capability_is_order_independent(
+    tmp_path,
+    capsys,
+    stub_compile_and_assemble,
+    runtime_configs,
+):
+    """Any SDMA artifact enables the shared worker, independent of manifest order."""
+    wd1, wd2 = tmp_path / "a", tmp_path / "b"
+    manifest = _manifest(tmp_path, wd1, wd2)
+    configs_by_work_dir = dict(zip((wd1, wd2), runtime_configs, strict=True))
+
+    def reconstruct(work_dir, _platform):
+        return object(), "tensormap_and_ringbuffer", configs_by_work_dir[work_dir]
+
+    stub_compile_and_assemble.side_effect = reconstruct
+    with (
+        patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
+        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+    ):
+        all_ok = execute_batch_manifest(manifest, 3, validate=False)
+
+    assert all_ok is True
+    assert worker_cls.call_args.kwargs["enable_sdma"] is True
+    assert [call.kwargs["enable_sdma"] for call in on_dev.call_args_list] == [
+        bool(config.get("enable_sdma", False)) for config in runtime_configs
+    ]
+    out = capsys.readouterr().out
+    markers = [line for line in out.splitlines() if line.startswith("PYPTO_EXEC_RESULT=")]
+    assert markers == [
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=3",
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=3",
+    ]
+
+
 def test_execute_batch_one_failure_does_not_abort_rest(tmp_path, capsys, stub_compile_and_assemble):
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
     manifest = _manifest(tmp_path, wd1, wd2)
@@ -246,12 +287,13 @@ def test_execute_batch_first_rebind_failure_marks_infra_and_continues(
     """
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
     manifest = _manifest(tmp_path, wd1, wd2)
-    # 1st rebind (probe wd1) fails; 2nd (probe wd2) + 3rd (run wd2) succeed.
-    stub_compile_and_assemble.side_effect = [
-        RuntimeError("bad .so"),
-        (object(), "tensormap_and_ringbuffer", {}),
-        (object(), "tensormap_and_ringbuffer", {}),
-    ]
+
+    def reconstruct(work_dir, _platform):
+        if work_dir == wd1:
+            raise RuntimeError("bad .so")
+        return object(), "tensormap_and_ringbuffer", {}
+
+    stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
         patch.object(execute_artifact, "_execute_on_device"),
@@ -259,17 +301,24 @@ def test_execute_batch_first_rebind_failure_marks_infra_and_continues(
         all_ok = execute_batch_manifest(manifest, 0, validate=False)
     assert all_ok is False
     out = capsys.readouterr().out
-    assert f"PYPTO_EXEC_RESULT=INFRA work_dir={wd1}" in out
-    assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=0" in out
+    markers = [line for line in out.splitlines() if line.startswith("PYPTO_EXEC_RESULT=")]
+    assert markers == [
+        f"PYPTO_EXEC_RESULT=INFRA work_dir={wd1}",
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=0",
+    ]
 
 
 def test_execute_batch_setup_failure_marks_infra_not_fail(tmp_path, capsys, stub_compile_and_assemble):
     """A mid-batch rebind failure is INFRA (infra), a device-run failure is FAIL."""
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
     manifest = _manifest(tmp_path, wd1, wd2)
-    # Probe wd1 ok (opens worker); run wd1 ok; rebind wd2 fails → INFRA for wd2.
-    good = (object(), "tensormap_and_ringbuffer", {})
-    stub_compile_and_assemble.side_effect = [good, good, RuntimeError("wd2 cache miss")]
+
+    def reconstruct(work_dir, _platform):
+        if work_dir == wd2:
+            raise RuntimeError("wd2 cache miss")
+        return object(), "tensormap_and_ringbuffer", {}
+
+    stub_compile_and_assemble.side_effect = reconstruct
     with (
         patch("pypto.runtime.ChipWorker", return_value=MagicMock()),
         patch.object(execute_artifact, "_execute_on_device"),
@@ -277,9 +326,11 @@ def test_execute_batch_setup_failure_marks_infra_not_fail(tmp_path, capsys, stub
         all_ok = execute_batch_manifest(manifest, 0, validate=False)
     assert all_ok is False
     out = capsys.readouterr().out
-    assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=0" in out
-    assert f"PYPTO_EXEC_RESULT=INFRA work_dir={wd2}" in out
-    assert f"PYPTO_EXEC_RESULT=FAIL work_dir={wd2}" not in out
+    markers = [line for line in out.splitlines() if line.startswith("PYPTO_EXEC_RESULT=")]
+    assert markers == [
+        f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=0",
+        f"PYPTO_EXEC_RESULT=INFRA work_dir={wd2}",
+    ]
 
 
 if __name__ == "__main__":

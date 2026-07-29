@@ -180,6 +180,10 @@ def execute_batch_manifest(
     per artifact) — the fix for the per-artifact cold-start cost.  Artifacts
     that share the batch's ``(platform, runtime)`` reuse the worker; a differing
     one falls back to a fresh one-shot worker inside ``_execute_on_device``.
+    Before opening the shared worker, the batch reconstructs every artifact so
+    it can provision SDMA when any usable artifact requires it.  Ordinary
+    artifacts can run on that SDMA-enabled worker, while an all-ordinary batch
+    keeps SDMA disabled.
 
     Each artifact runs under its own ``try`` so one failure doesn't abort the
     rest, and emits a per-artifact marker the harness parses::
@@ -258,37 +262,72 @@ def execute_batch_manifest(
             _run_and_mark(entry)
         return all_ok
 
-    # Reuse one ChipWorker for the batch, bound to the runtime of the first
-    # artifact that rebinds. Probe entries in order so a leading un-rebindable
-    # artifact gets its own INFRA marker instead of aborting the batch before the
-    # worker opens. compile_and_assemble is a cache hit, so the probe is cheap.
-    first_runtime: str | None = None
-    first_enable_sdma = False
-    start_idx = 0
-    for i, entry in enumerate(entries):
+    # Reconstruct the whole batch before opening the shared worker so its SDMA
+    # capability does not depend on manifest order. Keep setup failures in the
+    # prepared list and emit their INFRA markers in manifest order below.
+    prepared: list[tuple[dict, tuple[Any, str, bool] | None, str | None]] = []
+    for entry in entries:
         try:
-            _, first_runtime, first_enable_sdma = _rebind(
-                Path(entry["work_dir"]),
-                entry["platform"],
-            )
-            start_idx = i
-            break
+            rebound = _rebind(Path(entry["work_dir"]), entry["platform"])
         except Exception:
-            work_dir = Path(entry["work_dir"])
-            print(traceback.format_exc(), flush=True)
-            print(f"{_RESULT_PREFIX}=INFRA work_dir={work_dir}", flush=True)
-            all_ok = False
-    else:
-        # No artifact could be rebound — every entry already got an INFRA marker.
+            prepared.append((entry, None, traceback.format_exc()))
+        else:
+            prepared.append((entry, rebound, None))
+
+    def _mark_setup_failure(entry: dict, setup_traceback: str | None) -> None:
+        nonlocal all_ok
+        assert setup_traceback is not None
+        print(setup_traceback, flush=True)
+        print(f"{_RESULT_PREFIX}=INFRA work_dir={Path(entry['work_dir'])}", flush=True)
+        all_ok = False
+
+    first_usable_idx = next(
+        (i for i, (_, rebound, _) in enumerate(prepared) if rebound is not None),
+        None,
+    )
+    if first_usable_idx is None:
+        for entry, _, setup_traceback in prepared:
+            _mark_setup_failure(entry, setup_traceback)
         return False
 
+    # Preserve the historical leading-failure behavior: publish each leading
+    # INFRA marker before attempting to open the worker for the remaining batch.
+    for entry, _, setup_traceback in prepared[:first_usable_idx]:
+        _mark_setup_failure(entry, setup_traceback)
+
+    first_entry, first_rebound, _ = prepared[first_usable_idx]
+    assert first_rebound is not None
+    _, first_runtime, _ = first_rebound
+    shared_enable_sdma = any(rebound[2] for _, rebound, _ in prepared if rebound is not None)
+
     with ChipWorker(
-        config=RunConfig(platform=str(entries[start_idx]["platform"]), device_id=device_id),
+        config=RunConfig(platform=str(first_entry["platform"]), device_id=device_id),
         runtime=first_runtime,
-        enable_sdma=first_enable_sdma,
+        enable_sdma=shared_enable_sdma,
     ):
-        for entry in entries[start_idx:]:
-            _run_and_mark(entry)
+        for entry, rebound, setup_traceback in prepared[first_usable_idx:]:
+            work_dir = Path(entry["work_dir"])
+            if rebound is None:
+                _mark_setup_failure(entry, setup_traceback)
+                continue
+
+            chip_callable, runtime_name, enable_sdma = rebound
+            try:
+                _run_on_device(
+                    work_dir,
+                    entry["platform"],
+                    device_id,
+                    chip_callable,
+                    runtime_name,
+                    enable_sdma,
+                    dfx=dfx,
+                    validate=validate,
+                )
+                print(f"{_RESULT_PREFIX}=PASS work_dir={work_dir} device={device_id}", flush=True)
+            except Exception:
+                print(traceback.format_exc(), flush=True)
+                print(f"{_RESULT_PREFIX}=FAIL work_dir={work_dir}", flush=True)
+                all_ok = False
     return all_ok
 
 
