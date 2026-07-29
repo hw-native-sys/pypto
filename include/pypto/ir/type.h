@@ -801,12 +801,11 @@ inline CommCtxTypePtr GetCommCtxType() {
 /**
  * @brief Opaque handle to an asynchronous GM->L2 prefetch context.
  *
- * Produced by ``prefetch.make_context(workspace)`` from a GM ``INT8`` scratch
- * tensor, and consumed by ``prefetch.async_prefetch`` / ``prefetch.session``.
+ * Produced by ``prefetch.make_context()`` and consumed by
+ * ``prefetch.async_prefetch`` / ``prefetch.session``.
  * Lowers to PTOAS ``!pto.prefetch_async_context`` (C++ ``pto::PrefetchAsyncContext``).
  *
- * Carries no per-instance fields; the backing workspace is recovered at codegen
- * time from the producing ``prefetch.make_context`` argument.
+ * Carries no per-instance fields; the runtime injects the backing SDMA workspace.
  */
 class PrefetchAsyncContextType : public Type {
  public:

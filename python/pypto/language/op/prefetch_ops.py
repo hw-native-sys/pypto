@@ -16,14 +16,15 @@ kernel is numerically identical with or without it — only performance differs.
 
 Typical usage::
 
-    ctx = pl.prefetch.make_context(ws)             # ws: pl.Tensor[[K], pl.INT8]
+    ctx = pl.prefetch.make_context()
     evt = pl.prefetch.async_prefetch(x, ctx)
     session = pl.prefetch.session(ctx)
     ...                                            # unrelated compute overlaps
     pl.prefetch.wait(evt, session)                 # x is now resident in L2
 
-The SDMA CMO path is only effective on A3/A5; on other targets PTOAS degrades
-the prefetch to a functional no-op, so kernels using these ops stay portable.
+The runtime injects the SDMA scratch workspace. The SDMA CMO path is only
+effective on A3/A5; on other targets PTOAS degrades the prefetch to a functional
+no-op, so kernels using these ops stay portable.
 """
 
 from typing import Any
@@ -46,19 +47,14 @@ def _unwrap(value: Any) -> Any:
     return value
 
 
-def make_context(workspace: Tensor) -> PrefetchAsyncContext:
-    """Build an asynchronous-prefetch context from a GM scratch workspace.
-
-    Args:
-        workspace: A GM scratch :class:`pl.Tensor` with ``INT8`` element type.
-            The op verifier (C++) rejects any other element type — the SDMA path
-            needs raw bytes.
+def make_context() -> PrefetchAsyncContext:
+    """Build an asynchronous-prefetch context with a runtime-injected workspace.
 
     Returns:
         A :class:`PrefetchAsyncContext` handle to pass to :func:`async_prefetch`
         and :func:`session`.
     """
-    return PrefetchAsyncContext(expr=_ir_prefetch.make_context(_unwrap(workspace)))
+    return PrefetchAsyncContext(expr=_ir_prefetch.make_context())
 
 
 def async_prefetch(src: Tensor, ctx: PrefetchAsyncContext) -> AsyncEvent:

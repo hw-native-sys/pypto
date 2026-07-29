@@ -12,7 +12,7 @@
 These ops express a latency-hiding cache hint: they warm L2 with a global-memory
 region while unrelated compute proceeds, and change no tensor values.
 
-- make_context: build a prefetch context from a GM INT8 scratch workspace
+- make_context: build a prefetch context backed by a runtime-injected workspace
 - async_prefetch: start one async GM -> L2 prefetch, returning a completion event
 - session: project the async session bound to a context
 - wait: wait for a prefetch event to complete within its session
@@ -27,18 +27,17 @@ from pypto.pypto_core.ir import Call, Expr, Span
 from ..utils import _get_span_or_capture
 
 
-def make_context(workspace: Expr, span: Span | None = None) -> Call:
-    """Build an asynchronous-prefetch context from a GM scratch workspace.
+def make_context(span: Span | None = None) -> Call:
+    """Build an asynchronous-prefetch context with a runtime-injected workspace.
 
     Args:
-        workspace: A GM scratch Tensor with INT8 element type, backing the SDMA path
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression producing a ``PrefetchAsyncContextType`` handle
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("prefetch.make_context", [workspace], {}, actual_span)
+    return _ir_core.create_op_call("prefetch.make_context", [], {}, actual_span)
 
 
 def async_prefetch(src: Expr, ctx: Expr, span: Span | None = None) -> Call:

@@ -16,7 +16,7 @@
  *
  * DSL surface::
  *
- *     ctx     = pl.prefetch.make_context(ws)             # PrefetchAsyncContext
+ *     ctx     = pl.prefetch.make_context()               # PrefetchAsyncContext
  *     evt     = pl.prefetch.async_prefetch(src, ctx)     # AsyncEvent
  *     session = pl.prefetch.session(ctx)                 # AsyncSession
  *     done    = pl.prefetch.wait(evt, session)           # BOOL scalar
@@ -112,13 +112,13 @@ void CheckFlatContiguous1DSource(const std::string& op_name, const ExprPtr& src)
 }  // namespace
 
 // ============================================================================
-// prefetch.make_context — build a PrefetchAsyncContext from a GM i8 workspace
+// prefetch.make_context — build a context with a runtime-injected workspace
 // ============================================================================
 
 REGISTER_OP("prefetch.make_context")
     .set_description(
-        "Materialize an asynchronous-prefetch context (PrefetchAsyncContextType) from a "
-        "GM INT8 scratch workspace. The workspace backs the SDMA path used by "
+        "Materialize an asynchronous-prefetch context (PrefetchAsyncContextType). The runtime "
+        "injects the workspace backing the SDMA path used by "
         "prefetch.async_prefetch; the resulting handle also carries the async session "
         "projected by prefetch.session.")
     .set_op_category("PrefetchOp")
@@ -128,18 +128,11 @@ REGISTER_OP("prefetch.make_context")
     // Without this, these ops carry no tile operand, fall through to SHARED,
     // and ExpandMixedKernel duplicates them onto the cube lane too.
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
-    .add_argument("workspace", "A GM scratch Tensor with INT8 element type")
+    .no_argument()
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
-      CheckArity("prefetch.make_context", "a workspace Tensor", 1, args, kwargs);
-      auto workspace_type = AsTensorTypeLike(args[0]->GetType());
-      CHECK(workspace_type) << "prefetch.make_context expects workspace to be a GM Tensor, got "
-                            << args[0]->GetType()->TypeName();
-      CHECK(workspace_type->dtype_ == DataType::INT8)
-          << "prefetch.make_context expects an INT8 workspace (raw byte scratch for the SDMA "
-             "path), got "
-          << workspace_type->dtype_.ToString();
+      CheckArity("prefetch.make_context", "no arguments", 0, args, kwargs);
       return GetPrefetchAsyncContextType();
     });
 

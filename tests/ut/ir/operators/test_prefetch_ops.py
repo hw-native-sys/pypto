@@ -43,9 +43,8 @@ class TestPrefetchOpTypes:
             def main(
                 self,
                 x: pl.Tensor[[4096], pl.FP32],
-                ws: pl.Tensor[[1024], pl.INT8],
             ) -> pl.Tensor[[4096], pl.FP32]:
-                ctx = pl.prefetch.make_context(ws)
+                ctx = pl.prefetch.make_context()
                 evt = pl.prefetch.async_prefetch(x, ctx)
                 session = pl.prefetch.session(ctx)
                 pl.prefetch.wait(evt, session)
@@ -70,9 +69,8 @@ class TestPrefetchOpTypes:
             def main(
                 self,
                 x: pl.Tensor[[1, 256], pl.FP32],
-                ws: pl.Tensor[[512], pl.INT8],
             ) -> pl.Tensor[[1, 256], pl.FP32]:
-                ctx = pl.prefetch.make_context(ws)
+                ctx = pl.prefetch.make_context()
                 evt = pl.prefetch.async_prefetch(x, ctx)
                 session = pl.prefetch.session(ctx)
                 pl.prefetch.wait(evt, session)
@@ -90,9 +88,8 @@ class TestPrefetchOpTypes:
             def main(
                 self,
                 x: pl.Tensor[[1, 1, 256], pl.FP32],
-                ws: pl.Tensor[[512], pl.INT8],
             ) -> pl.Tensor[[1, 1, 256], pl.FP32]:
-                ctx = pl.prefetch.make_context(ws)
+                ctx = pl.prefetch.make_context()
                 pl.prefetch.async_prefetch(x, ctx)
                 return x
 
@@ -112,26 +109,14 @@ class TestPrefetchOpVerification:
                 def main(
                     self,
                     x: pl.Tensor[[4, 32], pl.FP32],
-                    ws: pl.Tensor[[512], pl.INT8],
                 ) -> pl.Tensor[[4, 32], pl.FP32]:
-                    ctx = pl.prefetch.make_context(ws)
+                    ctx = pl.prefetch.make_context()
                     pl.prefetch.async_prefetch(x, ctx)
                     return x
 
-    def test_non_int8_workspace_rejected(self):
-        """The SDMA workspace must be raw INT8 bytes."""
-        with pytest.raises(Exception, match="INT8 workspace"):
-
-            @pl.program
-            class Program:
-                @pl.function(type=pl.FunctionType.InCore)
-                def main(
-                    self,
-                    x: pl.Tensor[[256], pl.FP32],
-                    ws: pl.Tensor[[512], pl.FP32],
-                ) -> pl.Tensor[[256], pl.FP32]:
-                    pl.prefetch.make_context(ws)
-                    return x
+    def test_make_context_rejects_workspace_argument(self):
+        with pytest.raises(TypeError, match="make_context.*positional"):
+            pl.prefetch.make_context(object())
 
     def test_wait_rejects_mismatched_handle(self):
         """``wait`` requires an AsyncSession, not the context it was projected from."""
@@ -143,9 +128,8 @@ class TestPrefetchOpVerification:
                 def main(
                     self,
                     x: pl.Tensor[[256], pl.FP32],
-                    ws: pl.Tensor[[512], pl.INT8],
                 ) -> pl.Tensor[[256], pl.FP32]:
-                    ctx = pl.prefetch.make_context(ws)
+                    ctx = pl.prefetch.make_context()
                     evt = pl.prefetch.async_prefetch(x, ctx)
                     # Deliberately wrong handle type — the runtime verifier must reject it,
                     # so the static type error here is the point of the test.
@@ -162,9 +146,8 @@ class TestPrefetchOpVerification:
                 def main(
                     self,
                     x: pl.Tensor[[256], pl.FP32],
-                    ws: pl.Tensor[[512], pl.INT8],
                 ) -> pl.Tensor[[256], pl.FP32]:
-                    ctx = pl.prefetch.make_context(ws)
+                    ctx = pl.prefetch.make_context()
                     evt = pl.prefetch.async_prefetch(x, ctx)
                     # Deliberately wrong handle type — see note above.
                     pl.prefetch.async_prefetch(x, evt)  # type: ignore[arg-type]
