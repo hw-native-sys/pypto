@@ -344,6 +344,8 @@ TypePtr DeduceTileOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType, but got "
                << args[2]->GetType()->TypeName();
     CheckBitwiseTileMatches(src0, tmp, "tmp", op_name);
+    CHECK(args[2].get() != args[0].get() && args[2].get() != args[1].get())
+        << "The operator " << op_name << " requires tmp to be distinct from src operands";
   }
 
   TileView tile_view;
@@ -378,6 +380,8 @@ TypePtr DeduceTileOpBitwiseScalarType(const std::vector<ExprPtr>& args,
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType, but got "
                << args[2]->GetType()->TypeName();
     CheckBitwiseTileMatches(src, tmp, "tmp", op_name);
+    CHECK(args[2].get() != args[0].get())
+        << "The operator " << op_name << " requires tmp to be distinct from src";
   }
 
   TileView tile_view;

@@ -18,7 +18,10 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 M = 16
 N = 64
-TAIL = (11, 47)
+FULL = (M, N)
+ROW_TAIL = (11, N)
+COL_TAIL = (M, 47)
+COMBINED_TAIL = (11, 47)
 
 _PL_DT = {
     DataType.INT8: pl.INT8,
@@ -61,6 +64,7 @@ def _make_program(
     dtype: DataType,
     valid_shape: tuple[int, int],
     scalar: int | None,
+    scalar_encoding: str,
 ):
     pl_dtype = _PL_DT[dtype]
     valid = list(valid_shape)
@@ -152,7 +156,7 @@ def _make_program(
 
     assert scalar is not None
 
-    if op_name == "ands":
+    if op_name == "ands" and scalar_encoding == "immediate":
 
         @pl.program
         class AndsProgram:
@@ -175,7 +179,31 @@ def _make_program(
 
         return AndsProgram
 
-    if op_name == "ors":
+    if op_name == "ands":
+
+        @pl.program
+        class AndsSSAProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                scalar_value: pl.Scalar[pl_dtype] = pl.read(lhs, [0, 2])
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
+                return pl.store(pl.tile.ands(lhs_tile, scalar_value), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                return self.kernel(lhs, out)
+
+        return AndsSSAProgram
+
+    if op_name == "ors" and scalar_encoding == "immediate":
 
         @pl.program
         class OrsProgram:
@@ -198,16 +226,70 @@ def _make_program(
 
         return OrsProgram
 
+    if op_name == "ors":
+
+        @pl.program
+        class OrsSSAProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                scalar_value: pl.Scalar[pl_dtype] = pl.read(lhs, [0, 2])
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
+                return pl.store(pl.tile.ors(lhs_tile, scalar_value), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                return self.kernel(lhs, out)
+
+        return OrsSSAProgram
+
     assert op_name == "xors"
 
+    if scalar_encoding == "immediate":
+
+        @pl.program
+        class XorsProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
+                tmp: pl.Tile[
+                    [M, N],
+                    pl_dtype,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                ] = pl.tile.create([M, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec)
+                return pl.store(pl.tile.xors(lhs_tile, scalar, tmp), [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                lhs: pl.Tensor[[M, N], pl_dtype],
+                out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
+            ) -> pl.Tensor[[M, N], pl_dtype]:
+                return self.kernel(lhs, out)
+
+        return XorsProgram
+
     @pl.program
-    class XorsProgram:
+    class XorsSSAProgram:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
             lhs: pl.Tensor[[M, N], pl_dtype],
             out: pl.InOut[pl.Tensor[[M, N], pl_dtype]],
         ) -> pl.Tensor[[M, N], pl_dtype]:
+            scalar_value: pl.Scalar[pl_dtype] = pl.read(lhs, [0, 2])
             lhs_tile = pl.load(lhs, [0, 0], [M, N], valid_shapes=valid)
             tmp: pl.Tile[
                 [M, N],
@@ -215,7 +297,7 @@ def _make_program(
                 pl.MemorySpace.Vec,
                 pl.TileView(valid_shape=[valid_rows, valid_cols]),
             ] = pl.tile.create([M, N], dtype=pl_dtype, target_memory=pl.MemorySpace.Vec)
-            return pl.store(pl.tile.xors(lhs_tile, scalar, tmp), [0, 0], out)
+            return pl.store(pl.tile.xors(lhs_tile, scalar_value, tmp), [0, 0], out)
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def orchestrator(
@@ -225,7 +307,7 @@ def _make_program(
         ) -> pl.Tensor[[M, N], pl_dtype]:
             return self.kernel(lhs, out)
 
-    return XorsProgram
+    return XorsSSAProgram
 
 
 class BitwiseCase(PTOTestCase):
@@ -240,17 +322,20 @@ class BitwiseCase(PTOTestCase):
         dtype: DataType,
         valid_shape: tuple[int, int],
         scalar: int | None = None,
+        scalar_encoding: str = "immediate",
+        platform: str = "a2a3",
     ):
-        super().__init__()
+        super().__init__(platform=platform)
         self.op_name = op_name
         self.dtype = dtype
         self.valid_shape = valid_shape
         self.scalar = scalar
+        self.scalar_encoding = scalar_encoding
 
     def get_name(self) -> str:
         scalar_tag = f"_s{self.scalar}" if self.scalar is not None else ""
         valid_tag = f"v{self.valid_shape[0]}x{self.valid_shape[1]}"
-        return f"tile_{self.op_name}_{self.dtype.value}_{valid_tag}{scalar_tag}"
+        return f"tile_{self.op_name}_{self.dtype.value}_{valid_tag}_{self.scalar_encoding}{scalar_tag}"
 
     def define_tensors(self) -> list[TensorSpec]:
         specs = [
@@ -262,7 +347,13 @@ class BitwiseCase(PTOTestCase):
         return specs
 
     def get_program(self) -> Any:
-        return _make_program(self.op_name, self.dtype, self.valid_shape, self.scalar)
+        return _make_program(
+            self.op_name,
+            self.dtype,
+            self.valid_shape,
+            self.scalar,
+            self.scalar_encoding,
+        )
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         rows, cols = self.valid_shape
@@ -270,6 +361,8 @@ class BitwiseCase(PTOTestCase):
         rhs: torch.Tensor | int
         if self.scalar is None:
             rhs = tensors["rhs"][:rows, :cols]
+        elif self.scalar_encoding == "ssa":
+            rhs = tensors["lhs"][0, 2].item()
         else:
             rhs = self.scalar
         if self.op_name in {"and", "ands"}:
@@ -291,32 +384,112 @@ _A2A3_TILE_DTYPES = [
 ]
 _A2A3_SCALAR_DTYPES = [DataType.INT8, DataType.INT16]
 
-_CASES = [
-    *[
-        pytest.param(op_name, dtype, TAIL, None, id=f"t{op_name}-{dtype.value}-tail")
-        for op_name in ("and", "or", "xor")
-        for dtype in _A2A3_TILE_DTYPES
-    ],
-    *[
-        pytest.param(op_name, dtype, TAIL, _scalar(dtype), id=f"t{op_name}-{dtype.value}-tail")
-        for op_name in ("ands", "ors", "xors")
-        for dtype in _A2A3_SCALAR_DTYPES
-    ],
+_A5_TILE_DTYPES = [
+    DataType.INT8,
+    DataType.UINT8,
+    DataType.INT16,
+    DataType.UINT16,
+    DataType.INT32,
+    DataType.UINT32,
 ]
+_A5_SCALAR_DTYPES = [DataType.INT8, DataType.INT16, DataType.INT32]
+
+
+def _cases(
+    tile_dtypes: list[DataType],
+    scalar_dtypes: list[DataType],
+) -> list[Any]:
+    cases = [
+        *[
+            pytest.param(
+                op_name,
+                dtype,
+                COMBINED_TAIL,
+                None,
+                "immediate",
+                id=f"t{op_name}-{dtype.value}-combined-tail",
+            )
+            for op_name in ("and", "or", "xor")
+            for dtype in tile_dtypes
+        ],
+        *[
+            pytest.param(
+                op_name,
+                dtype,
+                COMBINED_TAIL,
+                _scalar(dtype),
+                "immediate",
+                id=f"t{op_name}-{dtype.value}-combined-tail-immediate",
+            )
+            for op_name in ("ands", "ors", "xors")
+            for dtype in scalar_dtypes
+        ],
+    ]
+
+    representative_dtype = scalar_dtypes[-1]
+    cases.extend(
+        pytest.param(
+            op_name,
+            representative_dtype,
+            valid_shape,
+            _scalar(representative_dtype) if op_name.endswith("s") else None,
+            "immediate",
+            id=f"t{op_name}-{representative_dtype.value}-{valid_tag}",
+        )
+        for op_name in ("and", "or", "xor", "ands", "ors", "xors")
+        for valid_shape, valid_tag in (
+            (FULL, "full"),
+            (ROW_TAIL, "row-tail"),
+            (COL_TAIL, "col-tail"),
+        )
+    )
+    cases.extend(
+        pytest.param(
+            op_name,
+            representative_dtype,
+            COMBINED_TAIL,
+            _scalar(representative_dtype),
+            "ssa",
+            id=f"t{op_name}-{representative_dtype.value}-combined-tail-ssa",
+        )
+        for op_name in ("ands", "ors", "xors")
+    )
+    return cases
+
+
+_A2A3_CASES = _cases(_A2A3_TILE_DTYPES, _A2A3_SCALAR_DTYPES)
+_A5_CASES = _cases(_A5_TILE_DTYPES, _A5_SCALAR_DTYPES)
 
 
 class TestBitwiseBinaryFamily:
     """A2/A3 same-name coverage for six tile bitwise instructions."""
 
     @pytest.mark.platforms("a2a3")
-    @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar", _CASES)
-    def test_bitwise_binary(self, test_runner, op_name, dtype, valid_shape, scalar):
+    @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar,scalar_encoding", _A2A3_CASES)
+    def test_bitwise_binary(self, test_runner, op_name, dtype, valid_shape, scalar, scalar_encoding):
         result = test_runner.run(
             BitwiseCase(
                 op_name=op_name,
                 dtype=dtype,
                 valid_shape=valid_shape,
                 scalar=scalar,
+                scalar_encoding=scalar_encoding,
+                platform="a2a3",
+            )
+        )
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5")
+    @pytest.mark.parametrize("op_name,dtype,valid_shape,scalar,scalar_encoding", _A5_CASES)
+    def test_bitwise_binary_a5(self, test_runner, op_name, dtype, valid_shape, scalar, scalar_encoding):
+        result = test_runner.run(
+            BitwiseCase(
+                op_name=op_name,
+                dtype=dtype,
+                valid_shape=valid_shape,
+                scalar=scalar,
+                scalar_encoding=scalar_encoding,
+                platform="a5",
             )
         )
         assert result.passed, f"Test failed: {result.error}"

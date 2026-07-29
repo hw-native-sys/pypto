@@ -3517,6 +3517,18 @@ class TestTileBitwiseArithmeticOps:
             with pytest.raises(ValueError, match=r"same dtype"):
                 op(value, 1, mixed_tmp)
 
+    def test_xor_scratch_must_be_distinct_from_sources(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([8, 16], DataType.INT16), span)
+        rhs = ir.Var("rhs", ir.TileType([8, 16], DataType.INT16), span)
+
+        with pytest.raises(ValueError, match="tmp to be distinct"):
+            tile.xor(lhs, rhs, lhs)
+        with pytest.raises(ValueError, match="tmp to be distinct"):
+            tile.xor(lhs, rhs, rhs)
+        with pytest.raises(ValueError, match="tmp to be distinct"):
+            tile.xors(lhs, 1, lhs)
+
     @pytest.mark.parametrize("dtype", [DataType.UINT8, DataType.UINT16, DataType.UINT32])
     @pytest.mark.parametrize("op", [tile.ands, tile.ors, tile.xors])
     def test_bitwise_contract_scalar_rejects_unsigned_ptoas_encoding_gap(self, dtype, op):
