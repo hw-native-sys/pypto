@@ -326,7 +326,8 @@ def test_nz_on_tensor_rejected_by_paired_verifier():
     # NZ on a TensorType is invalid IR. The pass leaves the slot untouched
     # rather than CHECK-failing inside BuildLogicalStridesFromLayout — but
     # because the pass produces TensorViewCanonical, PassPipeline runs the
-    # paired verifier, which surfaces the bug as a thrown ValueError.
+    # paired verifier, which surfaces the bug as a thrown VerificationError
+    # (pypto.Error on the Python side).
     @pl.program
     class Before:
         @pl.function

@@ -19,8 +19,12 @@ class Error(Exception):
     `VerificationError` from the IR verifier.
     """
 
-class InternalError(Exception):
-    """Exception raised when an internal system error occurs"""
+class InternalError(RuntimeError):
+    """Exception raised when an internal system error occurs.
+
+    Registered against `PyExc_RuntimeError`, so it is a sibling of `Error` rather than a
+    subclass -- the C++ hierarchy does not carry over to Python.
+    """
 
 class LogLevel(IntEnum):
     """Enumeration of available log levels"""

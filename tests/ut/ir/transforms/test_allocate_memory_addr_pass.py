@@ -168,7 +168,7 @@ def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
     with pytest.raises(
         # Message is now emitted by the shared reserve_buffer_utils resolver (used by both
         # AllocateMemoryAddr and MemoryReuse), so match the pass-agnostic substring.
-        Exception,
+        pypto.InternalError,
         match=re.escape("overlapping reserve_buffer ranges"),
     ):
         program = passes.init_mem_ref()(Before)

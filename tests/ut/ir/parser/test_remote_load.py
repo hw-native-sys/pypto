@@ -329,7 +329,7 @@ def test_remote_load_rejects_non_list_offsets():
 
 def test_remote_load_rejects_unknown_subop():
     """``pld.tile.<other>`` is rejected at 3-segment dispatch."""
-    with pytest.raises(InvalidOperationError, match="pld.tile"):
+    with pytest.raises(InvalidOperationError, match=r"pld\.tile"):
 
         @pl.program
         class P:  # noqa: F841

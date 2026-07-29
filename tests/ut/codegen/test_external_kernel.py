@@ -139,7 +139,7 @@ def test_all_external_graph_emits_manifest_when_ptoas_is_skipped(tmp_path):
 def test_external_source_requires_aic_or_aiv(tmp_path):
     """external_source on a non-AIC/AIV function is rejected with a clear error."""
     cpp = _write_kernel(tmp_path)
-    with pytest.raises(ParserTypeError, match="external_source is only valid on FunctionType.AIC"):
+    with pytest.raises(ParserTypeError, match=r"external_source is only valid on FunctionType\.AIC"):
 
         @pl.program
         class BadType:

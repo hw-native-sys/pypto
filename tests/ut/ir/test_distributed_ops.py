@@ -249,7 +249,7 @@ def test_tensor_allreduce_rejects_unknown_reduce_op_value():
     span = ir.Span.unknown()
     src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
     signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
-    with pytest.raises(ValueError, match="ReduceOp.Sum, Max, Min, or Prod"):
+    with pytest.raises(ValueError, match=r"ReduceOp\.Sum, Max, Min, or Prod"):
         ir.create_op_call(
             "pld.tensor.allreduce",
             [src, signal],

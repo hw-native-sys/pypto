@@ -164,7 +164,7 @@ def test_remote_store_rejects_plain_tensor_target():
 
 def test_remote_store_rejects_unknown_subop():
     """``pld.tile.<other>`` is rejected at 3-segment dispatch."""
-    with pytest.raises(InvalidOperationError, match="pld.tile"):
+    with pytest.raises(InvalidOperationError, match=r"pld\.tile"):
 
         @pl.program
         class P:  # noqa: F841

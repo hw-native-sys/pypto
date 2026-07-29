@@ -1315,7 +1315,7 @@ class TestDynamicShapeEdgeCases:
         """User typos variable name — should get a clear error."""
         shape = [128, 64]  # noqa: F841 — intentionally unused; typo below
 
-        with pytest.raises(NameError, match="shaep|Cannot resolve|Unknown|undefined"):
+        with pytest.raises(NameError, match=r"shaep|Cannot resolve|Unknown|undefined"):
 
             @pl.function
             def func(x: pl.Tensor[shaep, pl.FP32]) -> pl.Tensor[shaep, pl.FP32]:  # noqa: F821
@@ -1325,7 +1325,7 @@ class TestDynamicShapeEdgeCases:
         """User accidentally passes a string as shape."""
         shape = "128x64"
 
-        with pytest.raises(ParserTypeError, match="must be a list or tuple|Failed to evaluate"):
+        with pytest.raises(ParserTypeError, match=r"must be a list or tuple|Failed to evaluate"):
 
             @pl.function
             def func(x: pl.Tensor[shape, pl.FP32]) -> pl.Tensor[shape, pl.FP32]:
@@ -1335,7 +1335,7 @@ class TestDynamicShapeEdgeCases:
         """User accidentally uses floats in shape."""
         shape = [128.0, 64.0]
 
-        with pytest.raises(ParserTypeError, match="must be int|element"):
+        with pytest.raises(ParserTypeError, match=r"must be int|element"):
 
             @pl.function
             def func(x: pl.Tensor[shape, pl.FP32]) -> pl.Tensor[shape, pl.FP32]:

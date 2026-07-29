@@ -9,39 +9,38 @@
 """
 Script to check that tests assert concrete exception types.
 
-`pytest.raises(Exception)` discards the distinction PyPTO deliberately maintains across the
-C++/Python boundary: `CHECK` surfaces a user error (`ValueError`), `INTERNAL_CHECK` surfaces a
-compiler bug (`pypto.InternalError`), and the verifier raises `pypto.Error`. A test catching
-`Exception` still passes when a `CHECK` is silently downgraded to an `INTERNAL_CHECK` -- exactly
-the regression the rule in `.claude/rules/error-checking.md` exists to prevent.
+Catching a bare ``Exception`` discards the distinction PyPTO deliberately maintains across the
+C++/Python boundary: ``CHECK`` surfaces a user error (``ValueError``), ``INTERNAL_CHECK`` surfaces a
+compiler bug (``pypto.InternalError``), and the verifier raises ``pypto.Error``. A test catching the
+base class still passes when a ``CHECK`` is silently downgraded to an ``INTERNAL_CHECK`` -- exactly
+the regression the rule in ``.claude/rules/error-checking.md`` exists to prevent.
 
-Note that ruff's B017 is not sufficient here: it exempts `pytest.raises(Exception, match=...)`,
-which was the overwhelming majority of historical occurrences.
+ruff's B017 is not a substitute: it exempts the ``match=`` form, which is the overwhelming majority
+of real occurrences, and neither ``B`` nor ``PT`` is in this repo's ruff ``select`` list.
+
+The check parses each file rather than scanning text, so prose in comments and docstrings is never
+flagged, and a broad type is caught anywhere in a tuple -- not just as its first element.
 """
 
 import argparse
-import re
+import ast
 import subprocess
 import sys
 from pathlib import Path
 
-# Files that legitimately assert the exception *hierarchy* itself (e.g. "ValueError is catchable
-# as Exception"). For these the broad `Exception` is the property under test, not an omission.
+# Tests that legitimately assert the exception *hierarchy* itself (e.g. "ValueError is catchable as
+# Exception"). Scoped to the exact class or function under test -- not the whole file -- so an
+# unrelated broad assertion added to one of these files later is still reported. Each entry is
+# "<repo-relative path>::<dotted qualname prefix>".
 ALLOWLIST = frozenset(
     {
-        "tests/ut/core/test_error.py",
-        "tests/ut/core/test_logging.py",
+        "tests/ut/core/test_error.py::TestErrorInheritance",
+        "tests/ut/core/test_logging.py::TestCheckFunctions.test_check_preserves_exception_hierarchy",
+        "tests/ut/core/test_logging.py::TestCheckFunctions.test_internal_check_preserves_exception_hierarchy",
     }
 )
 
-# Subtrees under tests/ that hold checker scripts rather than tests. They are not test code, and
-# their source legitimately spells out the forbidden pattern -- this file's own docstring does.
-EXCLUDED_PREFIXES = ("tests/lint/",)
-
-# Matches the context-manager and callable forms, a wrapped `pytest.raises(\n Exception`, and a
-# leading tuple entry (`pytest.raises((Exception, ...))`) -- a tuple led by Exception is exactly as
-# broad as Exception alone. A tuple of concrete types, e.g. `(ValueError, pypto.Error)`, is fine.
-BROAD_RAISES = re.compile(r"pytest\.raises\(\s*\(?\s*(Exception|BaseException)\b")
+BROAD_NAMES = frozenset({"Exception", "BaseException"})
 
 
 def get_git_tracked_test_files(root_dir: Path) -> list[Path]:
@@ -64,19 +63,58 @@ def get_git_tracked_test_files(root_dir: Path) -> list[Path]:
     files = []
     for line in result.stdout.splitlines():
         path = root_dir / line
-        if line.endswith(".py") and not line.startswith(EXCLUDED_PREFIXES) and path.is_file():
+        if line.endswith(".py") and path.is_file():
             files.append(path)
     return files
 
 
+def _is_raises_call(node: ast.Call, aliases: set[str]) -> bool:
+    """Whether *node* calls ``pytest.raises`` (or a name imported from pytest as ``raises``)."""
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "raises":
+        return isinstance(func.value, ast.Name) and func.value.id == "pytest"
+    return isinstance(func, ast.Name) and func.id in aliases
+
+
+def _broad_names(expected: ast.expr) -> list[str]:
+    """Return the broad exception names used in a ``pytest.raises`` first argument."""
+    elements = expected.elts if isinstance(expected, ast.Tuple) else [expected]
+    return [e.id for e in elements if isinstance(e, ast.Name) and e.id in BROAD_NAMES]
+
+
+def _raises_aliases(tree: ast.Module) -> set[str]:
+    """Names bound by ``from pytest import raises [as X]`` at module level."""
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "pytest"
+        for alias in node.names
+        if alias.name == "raises"
+    }
+
+
 def find_violations(path: Path) -> list[tuple[int, str, str]]:
-    """Return (line_number, exception_name, source_line) for each broad raises in `path`."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
-    violations = []
-    for match in BROAD_RAISES.finditer(text):
-        lineno = text.count("\n", 0, match.start()) + 1
-        violations.append((lineno, match.group(1), lines[lineno - 1].strip()))
+    """Return (line_number, exception_name, enclosing qualname) for each broad raises in *path*."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError as e:
+        print(f"Error: Failed to parse {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    aliases = _raises_aliases(tree)
+    violations: list[tuple[int, str, str]] = []
+
+    def walk(node: ast.AST, scope: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                walk(child, (*scope, child.name))
+                continue
+            if isinstance(child, ast.Call) and _is_raises_call(child, aliases) and child.args:
+                for name in _broad_names(child.args[0]):
+                    violations.append((child.lineno, name, ".".join(scope)))
+            walk(child, scope)
+
+    walk(tree, ())
     return violations
 
 
@@ -94,11 +132,11 @@ def main() -> int:
     total = 0
     for path in get_git_tracked_test_files(root_dir):
         rel = path.relative_to(root_dir).as_posix()
-        if rel in ALLOWLIST:
-            continue
-        for lineno, exc_name, source in find_violations(path):
-            print(f"{rel}:{lineno}: pytest.raises({exc_name}) is too broad")
-            print(f"    {source}")
+        for lineno, exc_name, qualname in find_violations(path):
+            site = f"{rel}::{qualname}"
+            if any(site == a or site.startswith(f"{a}.") for a in ALLOWLIST):
+                continue
+            print(f"{rel}:{lineno}: pytest.raises({exc_name}) is too broad, in {qualname or '<module>'}")
             total += 1
 
     if total:
@@ -110,8 +148,9 @@ def main() -> int:
             "    pypto.Error             -- VerificationError and other pypto::Error subclasses\n"
             "    ParserSyntaxError, ParserTypeError, InvalidOperationError\n"
             "                            -- from pypto.language.parser.diagnostics\n"
-            "If a test genuinely asserts the exception *hierarchy*, add its path to ALLOWLIST in\n"
-            f"{Path(__file__).name}.",
+            "A tuple of concrete types, e.g. (ValueError, pypto.Error), is fine when a call can\n"
+            "legitimately raise either. If a test genuinely asserts the exception *hierarchy*, add\n"
+            f"its `<path>::<qualname>` to ALLOWLIST in {Path(__file__).name}.",
             file=sys.stderr,
         )
         return 1

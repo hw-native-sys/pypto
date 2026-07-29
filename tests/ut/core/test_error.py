@@ -184,7 +184,7 @@ class TestStackTraceVisibility:
     )
     def test_user_error_omits_traceback_by_default(self, raise_fn: RaiseFn, no_backtrace_env: None):
         """A user error is just the message — internal frames are noise to the caller."""
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises((ValueError, TypeError, RuntimeError, IndexError)) as exc_info:
             raise_fn("user mistake")
 
         message = str(exc_info.value)
@@ -194,7 +194,7 @@ class TestStackTraceVisibility:
     @pytest.mark.parametrize("raise_fn", [testing.raise_internal_error, testing.raise_assertion_error])
     def test_bug_error_always_includes_traceback(self, raise_fn: RaiseFn, no_backtrace_env: None):
         """The INTERNAL_CHECK family signals a PyPTO bug — the trace is the primary artefact."""
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises((pypto.InternalError, AssertionError)) as exc_info:
             raise_fn("invariant broken")
 
         message = str(exc_info.value)
@@ -232,7 +232,7 @@ class TestStackTraceContents:
 
     def test_traceback_names_the_real_throw_site(self, no_backtrace_env: None):
         """The innermost frame must be the binding that threw."""
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(pypto.InternalError) as exc_info:
             testing.raise_internal_error("invariant broken")
 
         files = _assert_has_trace(str(exc_info.value))
@@ -254,7 +254,7 @@ class TestStackTraceContents:
         built with debug info. Their presence is correct, so the assertion targets PyPTO sources
         rather than allowlisting the binding.
         """
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(pypto.InternalError) as exc_info:
             testing.raise_internal_error("invariant broken")
 
         files = _assert_has_trace(str(exc_info.value))
@@ -263,7 +263,7 @@ class TestStackTraceContents:
 
     def test_traceback_omits_check_macro_infrastructure(self, no_backtrace_env: None):
         """The CHECK/INTERNAL_CHECK throw site in logging.h is noise, not a call-path frame."""
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(pypto.InternalError) as exc_info:
             testing.raise_internal_error_with_span("boom", "kernel.py", 3, 5)
 
         files = _assert_has_trace(str(exc_info.value))
