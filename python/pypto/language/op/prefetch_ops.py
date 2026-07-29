@@ -22,9 +22,8 @@ Typical usage::
     ...                                            # unrelated compute overlaps
     pl.prefetch.wait(evt, session)                 # x is now resident in L2
 
-The runtime injects the SDMA scratch workspace. The SDMA CMO path is only
-effective on A3/A5; on other targets PTOAS degrades the prefetch to a functional
-no-op, so kernels using these ops stay portable.
+The runtime injects the SDMA scratch workspace. Executing kernels that use these
+operations requires an SDMA-capable runtime provider.
 """
 
 from typing import Any
