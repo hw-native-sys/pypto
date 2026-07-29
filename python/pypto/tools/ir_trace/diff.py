@@ -9,12 +9,15 @@
 
 """Build safely highlighted, foldable diffs between IR pass snapshots."""
 
+import ast
 import difflib
 import html
 import io
 import keyword
+import textwrap
 import token
 import tokenize
+from typing import Literal
 
 from .model import DiffHunk, DiffRow, IRTraceError, PassTrace, Snapshot, split_source_lines
 
@@ -24,6 +27,9 @@ _TOKEN_CLASSES = {
     token.COMMENT: "tok-comment",
     token.OP: "tok-operator",
 }
+
+_RowKind = Literal["equal", "insert", "delete", "replace"]
+_AlignedRow = tuple[_RowKind, int | None, int | None]
 
 
 def _escape_html(text: str, *, quote: bool = False) -> str:
@@ -164,57 +170,141 @@ def _intraline_ranges(
     return tuple(before_ranges), tuple(after_ranges)
 
 
+def _qualified_name(node: ast.expr) -> str | None:
+    """Return a dotted name for a Python expression when one is available."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _qualified_name(node.value)
+        return f"{owner}.{node.attr}" if owner is not None else None
+    return None
+
+
+def _line_operation_key(line: str) -> str | None:
+    """Return the called operation for one complete assignment/expression line."""
+    try:
+        module = ast.parse(textwrap.dedent(line))
+    except (IndentationError, SyntaxError):
+        return None
+    if len(module.body) != 1:
+        return None
+
+    statement = module.body[0]
+    if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr)):
+        return None
+    value = statement.value
+    if not isinstance(value, ast.Call):
+        return None
+    return _qualified_name(value.func)
+
+
+def _align_replace_rows(
+    before_lines: tuple[str, ...],
+    after_lines: tuple[str, ...],
+    before_start: int,
+    before_end: int,
+    after_start: int,
+    after_end: int,
+) -> tuple[_AlignedRow, ...]:
+    """Align a replace block around ordered pairs of matching operations."""
+    before_ops = [
+        (index, key)
+        for index in range(before_start, before_end)
+        if (key := _line_operation_key(before_lines[index])) is not None
+    ]
+    after_ops = [
+        (index, key)
+        for index in range(after_start, after_end)
+        if (key := _line_operation_key(after_lines[index])) is not None
+    ]
+    matcher = difflib.SequenceMatcher(
+        a=[key for _index, key in before_ops],
+        b=[key for _index, key in after_ops],
+        autojunk=False,
+    )
+    pairs = tuple(
+        (before_ops[match.a + offset][0], after_ops[match.b + offset][0])
+        for match in matcher.get_matching_blocks()
+        for offset in range(match.size)
+    )
+
+    rows: list[_AlignedRow] = []
+    if not pairs:
+        paired = min(before_end - before_start, after_end - after_start)
+        rows.extend(("replace", before_start + offset, after_start + offset) for offset in range(paired))
+        rows.extend(("delete", index, None) for index in range(before_start + paired, before_end))
+        rows.extend(("insert", None, index) for index in range(after_start + paired, after_end))
+        return tuple(rows)
+
+    before_cursor, after_cursor = before_start, after_start
+    for before_index, after_index in pairs:
+        rows.extend(("delete", index, None) for index in range(before_cursor, before_index))
+        rows.extend(("insert", None, index) for index in range(after_cursor, after_index))
+        rows.append(("replace", before_index, after_index))
+        before_cursor, after_cursor = before_index + 1, after_index + 1
+    rows.extend(("delete", index, None) for index in range(before_cursor, before_end))
+    rows.extend(("insert", None, index) for index in range(after_cursor, after_end))
+    return tuple(rows)
+
+
 def _diff_rows(before: Snapshot, after: Snapshot) -> tuple[tuple[DiffRow, ...], int, int]:
     """Align two snapshots into display rows and count inserted/deleted lines."""
-    rows: list[DiffRow] = []
     inserted = 0
     deleted = 0
     matcher = difflib.SequenceMatcher(a=before.lines, b=after.lines, autojunk=False)
     opcodes = matcher.get_opcodes()
+    aligned_rows: list[_AlignedRow] = []
     before_changes: dict[int, tuple[tuple[int, int], ...]] = {}
     after_changes: dict[int, tuple[tuple[int, int], ...]] = {}
 
     for tag, before_start, before_end, after_start, after_end in opcodes:
-        if tag != "replace":
-            continue
-        paired_count = min(before_end - before_start, after_end - after_start)
-        for offset in range(paired_count):
-            before_index = before_start + offset
-            after_index = after_start + offset
-            before_ranges, after_ranges = _intraline_ranges(
-                before.lines[before_index], after.lines[after_index]
+        before_count = before_end - before_start
+        after_count = after_end - after_start
+        if tag == "equal":
+            aligned_rows.extend(
+                ("equal", before_start + offset, after_start + offset) for offset in range(before_count)
             )
-            before_changes[before_index] = before_ranges
-            after_changes[after_index] = after_ranges
+        elif tag == "insert":
+            inserted += after_count
+            aligned_rows.extend(("insert", None, index) for index in range(after_start, after_end))
+        elif tag == "delete":
+            deleted += before_count
+            aligned_rows.extend(("delete", index, None) for index in range(before_start, before_end))
+        elif tag == "replace":
+            inserted += after_count
+            deleted += before_count
+            aligned_rows.extend(
+                _align_replace_rows(
+                    before.lines,
+                    after.lines,
+                    before_start,
+                    before_end,
+                    after_start,
+                    after_end,
+                )
+            )
+
+    for kind, before_index, after_index in aligned_rows:
+        if kind != "replace" or before_index is None or after_index is None:
+            continue
+        before_ranges, after_ranges = _intraline_ranges(before.lines[before_index], after.lines[after_index])
+        before_changes[before_index] = before_ranges
+        after_changes[after_index] = after_ranges
 
     before_html = _highlight_python(before.text, before_changes, "diff-delete")
     after_html = _highlight_python(after.text, after_changes, "diff-insert")
 
-    for tag, before_start, before_end, after_start, after_end in opcodes:
-        before_count = before_end - before_start
-        after_count = after_end - after_start
-        if tag == "insert":
-            inserted += after_count
-        elif tag == "delete":
-            deleted += before_count
-        elif tag == "replace":
-            inserted += after_count
-            deleted += before_count
-
-        row_count = max(before_count, after_count)
-        for offset in range(row_count):
-            before_index = before_start + offset if offset < before_count else None
-            after_index = after_start + offset if offset < after_count else None
-            rows.append(
-                DiffRow(
-                    kind=tag,
-                    before_number=before_index + 1 if before_index is not None else None,
-                    before_html=before_html[before_index] if before_index is not None else "",
-                    after_number=after_index + 1 if after_index is not None else None,
-                    after_html=after_html[after_index] if after_index is not None else "",
-                )
-            )
-    return tuple(rows), inserted, deleted
+    rows = tuple(
+        DiffRow(
+            kind=kind,
+            before_number=before_index + 1 if before_index is not None else None,
+            before_html=before_html[before_index] if before_index is not None else "",
+            after_number=after_index + 1 if after_index is not None else None,
+            after_html=after_html[after_index] if after_index is not None else "",
+        )
+        for kind, before_index, after_index in aligned_rows
+    )
+    return rows, inserted, deleted
 
 
 def _fold_rows(rows: tuple[DiffRow, ...], context: int) -> tuple[DiffHunk, ...]:

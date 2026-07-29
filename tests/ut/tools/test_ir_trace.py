@@ -341,8 +341,46 @@ def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
     assert trace.changed
     assert len(trace.hunks) == 1
     assert not trace.hunks[0].collapsed
-    changed_rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind == "replace"]
-    assert [(row.before_number, row.after_number) for row in changed_rows] == [(2, 2), (None, 3)]
+    changed_rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind != "equal"]
+    assert [(row.kind, row.before_number, row.after_number) for row in changed_rows] == [
+        ("replace", 2, 2),
+        ("insert", None, 3),
+    ]
+
+
+def test_build_trace_aligns_matching_operations_around_inserted_lines(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": ("t5: pl.Tile = pl.tile.sqrt(variance)\ninv: pl.Tile = pl.tile.recip(t5)\n"),
+            "01_after_ResolveBackendOpLayouts.py": (
+                "sqrt_in: pl.Tile = pl.tile.reshape(variance, [1, 16])\n"
+                "sqrt_out: pl.Tile = pl.tile.sqrt(sqrt_in)\n"
+                "t5: pl.Tile = pl.tile.reshape(sqrt_out, [16, 1])\n"
+                "recip_in: pl.Tile = pl.tile.reshape(t5, [1, 16])\n"
+                "recip_out: pl.Tile = pl.tile.recip(recip_in)\n"
+                "inv: pl.Tile = pl.tile.reshape(recip_out, [16, 1])\n"
+            ),
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=3)[0]
+    rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind != "equal"]
+
+    assert [(row.kind, row.before_number, row.after_number) for row in rows] == [
+        ("insert", None, 1),
+        ("replace", 1, 2),
+        ("insert", None, 3),
+        ("insert", None, 4),
+        ("replace", 2, 5),
+        ("insert", None, 6),
+    ]
+    assert "diff-delete" in rows[1].before_html
+    assert "diff-insert" in rows[1].after_html
+    assert "diff-delete" in rows[4].before_html
+    assert "diff-insert" in rows[4].after_html
+    assert all("diff-delete" not in row.before_html for row in rows if row.kind == "insert")
+    assert all("diff-insert" not in row.after_html for row in rows if row.kind == "insert")
 
 
 def test_build_trace_marks_each_changed_substring_in_replace_row(tmp_path: Path):
