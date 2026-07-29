@@ -61,6 +61,15 @@ class DiffHunk:
 
 
 @dataclass(frozen=True)
+class DiffSection:
+    function_key: str | None
+    function_name: str | None
+    inserted: int
+    deleted: int
+    hunks: tuple[DiffHunk, ...]
+
+
+@dataclass(frozen=True)
 class PassTrace:
     index: int
     name: str
@@ -68,7 +77,12 @@ class PassTrace:
     after: Snapshot
     inserted: int
     deleted: int
-    hunks: tuple[DiffHunk, ...]
+    sections: tuple[DiffSection, ...]
+
+    @property
+    def hunks(self) -> tuple[DiffHunk, ...]:
+        """Return every section hunk in whole-file display order."""
+        return tuple(hunk for section in self.sections for hunk in section.hunks)
 
     @property
     def changed(self) -> bool:

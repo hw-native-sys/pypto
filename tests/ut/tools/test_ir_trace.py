@@ -340,6 +340,12 @@ def test_build_trace_counts_and_aligns_replace(tmp_path: Path):
 
     assert (trace.inserted, trace.deleted, trace.changed) == (2, 1, True)
     assert trace.changed
+    assert len(trace.sections) == 1
+    assert trace.sections[0].function_key is None
+    assert trace.hunks == trace.sections[0].hunks
+    assert sum(len(hunk.rows) for hunk in trace.hunks) == sum(
+        len(hunk.rows) for section in trace.sections for hunk in section.hunks
+    )
     assert len(trace.hunks) == 1
     assert not trace.hunks[0].collapsed
     changed_rows = [row for hunk in trace.hunks for row in hunk.rows if row.kind != "equal"]

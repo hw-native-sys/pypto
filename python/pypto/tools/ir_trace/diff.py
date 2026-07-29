@@ -19,7 +19,7 @@ import token
 import tokenize
 from typing import Literal
 
-from .model import DiffHunk, DiffRow, IRTraceError, PassTrace, Snapshot, split_source_lines
+from .model import DiffHunk, DiffRow, DiffSection, IRTraceError, PassTrace, Snapshot, split_source_lines
 
 _TOKEN_CLASSES = {
     token.STRING: "tok-string",
@@ -382,6 +382,13 @@ def build_trace(snapshots: tuple[Snapshot, ...], context: int) -> tuple[PassTrac
     traces: list[PassTrace] = []
     for before, after in zip(snapshots, snapshots[1:], strict=False):
         rows, inserted, deleted = _diff_rows(before, after)
+        section = DiffSection(
+            function_key=None,
+            function_name=None,
+            inserted=inserted,
+            deleted=deleted,
+            hunks=_fold_rows(rows, context),
+        )
         traces.append(
             PassTrace(
                 index=after.index,
@@ -390,7 +397,7 @@ def build_trace(snapshots: tuple[Snapshot, ...], context: int) -> tuple[PassTrac
                 after=after,
                 inserted=inserted,
                 deleted=deleted,
-                hunks=_fold_rows(rows, context),
+                sections=(section,),
             )
         )
     return tuple(traces)
