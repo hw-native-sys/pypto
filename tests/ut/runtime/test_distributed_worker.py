@@ -39,6 +39,7 @@ from pypto.runtime.distributed_runner import (
     _assemble_chip_callables,
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
+    _construct_worker,
     _make_call_config,
     _reset_dfx_dispatch_state,
     _submit_chip,
@@ -73,7 +74,7 @@ def patched_setup():
     worker._orch.malloc.return_value = 0xDEAD0000
 
     mod = "pypto.runtime.distributed_runner"
-    chip_callables = ({"chip_orch": object()}, "rt_name")
+    chip_callables = ({"chip_orch": object()}, "rt_name", False)
     with (
         patch(f"{mod}._assemble_chip_callables", return_value=chip_callables) as assemble,
         patch(f"{mod}._load_orch_entry", return_value=(MagicMock(name="entry_fn"), None)) as load_entry,
@@ -740,6 +741,34 @@ class TestOneShotRegression:
         patched_setup["dispatch"].assert_called_once()
         patched_setup["worker"].close.assert_called_once()
 
+    def test_one_shot_enables_sdma_when_a_chip_requires_it(self, patched_setup):
+        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+
+        patched_setup["assemble"].return_value = ({"chip_orch": object()}, "rt_name", True)
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        execute_distributed(compiled, [torch.zeros(8, 8, dtype=torch.float32)])
+
+        assert patched_setup["construct"].call_args.kwargs["enable_sdma"] is True
+
+
+class TestWorkerConstruction:
+    def test_forwards_enable_sdma_to_simpler_worker(self, monkeypatch):
+        worker_cls = MagicMock(name="simpler.Worker")
+        monkeypatch.setitem(sys.modules, "simpler.worker", SimpleNamespace(Worker=worker_cls))
+        dc = DistributedConfig(device_ids=[0, 1])
+
+        _construct_worker(dc, "a2a3", "tensormap_and_ringbuffer", 3, enable_sdma=True)
+
+        worker_cls.assert_called_once_with(
+            level=3,
+            device_ids=[0, 1],
+            num_sub_workers=3,
+            platform="a2a3",
+            runtime="tensormap_and_ringbuffer",
+            enable_sdma=True,
+        )
+
 
 class TestExplicitDispatchAPI:
     """The new ``run`` / ``register`` surface that mirrors ChipWorker.
@@ -961,6 +990,26 @@ class TestMultiProgram:
         assert m["construct"].call_args.args[3] == 2
         rt.close()
 
+    def test_enables_sdma_when_any_program_requires_it(self, patched_setup):
+        m = patched_setup
+        m["assemble"].side_effect = [
+            ({"chip_a": object()}, "rt_name", False),
+            ({"chip_b": object()}, "rt_name", True),
+        ]
+        prog_a = _fake_compiled([_param("a", [4])], [])
+        prog_b = _fake_compiled([_param("b", [8])], [])
+
+        rt = DistributedWorker([prog_a, prog_b])
+
+        assert m["construct"].call_args.kwargs["enable_sdma"] is True
+        rt.close()
+
+    def test_single_program_preserves_default_sdma_capability(self, patched_setup):
+        rt = DistributedWorker(_fake_compiled([_param("a", [4])], []))
+
+        assert patched_setup["construct"].call_args.kwargs["enable_sdma"] is False
+        rt.close()
+
     def test_single_program_list_keeps_call_shortcut(self, patched_setup):
         # A one-element list is what ``compiled.prepare()`` builds; the
         # ``rt(*args)`` shortcut must keep working for it.
@@ -1095,8 +1144,8 @@ class TestMultiProgram:
     def test_rejects_mismatched_runtime(self, patched_setup):
         m = patched_setup
         m["assemble"].side_effect = [
-            ({"chip_orch": object()}, "rt_name"),
-            ({"chip_orch": object()}, "other_rt"),
+            ({"chip_orch": object()}, "rt_name", False),
+            ({"chip_orch": object()}, "other_rt", False),
         ]
         prog_a = _fake_compiled([_param("a", [4])], [])
         prog_b = _fake_compiled([_param("b", [8])], [])
@@ -1132,13 +1181,32 @@ class TestAssembleChipCallables:
         compiled = self._build(tmp_path, ["chip_a", "chip_b"], stray=True)
         ca = MagicMock(return_value=(MagicMock(name="ChipCallable"), "tensormap_and_ringbuffer", {}))
         self._stub_device_runner(monkeypatch, ca)
-        chip_callables, runtime_name = _assemble_chip_callables(compiled)
+        chip_callables, runtime_name, enable_sdma = _assemble_chip_callables(compiled)
 
         assert set(chip_callables) == {"chip_a", "chip_b"}  # stray dir skipped
         assert runtime_name == "tensormap_and_ringbuffer"
+        assert enable_sdma is False
         called_dirs = {call.args[0] for call in ca.call_args_list}
         assert called_dirs == {tmp_path / "next_levels" / "chip_a", tmp_path / "next_levels" / "chip_b"}
         assert all(call.args[1] == "a2a3sim" for call in ca.call_args_list)
+
+    def test_aggregates_enable_sdma_across_chip_configs(self, tmp_path, monkeypatch):
+        compiled = self._build(tmp_path, ["chip_a", "chip_b"])
+        ca = MagicMock(
+            side_effect=[
+                (MagicMock(name="ChipCallableA"), "tensormap_and_ringbuffer", {}),
+                (
+                    MagicMock(name="ChipCallableB"),
+                    "tensormap_and_ringbuffer",
+                    {"enable_sdma": True},
+                ),
+            ]
+        )
+        self._stub_device_runner(monkeypatch, ca)
+
+        _, _, enable_sdma = _assemble_chip_callables(compiled)
+
+        assert enable_sdma is True
 
     def test_raises_on_inconsistent_runtime(self, tmp_path, monkeypatch):
         compiled = self._build(tmp_path, ["chip_a", "chip_b"])

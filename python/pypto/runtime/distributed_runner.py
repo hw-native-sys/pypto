@@ -191,7 +191,9 @@ def _load_generated_module(path: Path) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _assemble_chip_callables(compiled: DistributedCompiledProgram) -> tuple[dict[str, Any], str]:
+def _assemble_chip_callables(
+    compiled: DistributedCompiledProgram,
+) -> tuple[dict[str, Any], str, bool]:
     """Build a ChipCallable for each chip-level task under ``next_levels/{name}/``.
 
     Driven entirely by the on-disk layout — each ``next_levels/{name}/`` that
@@ -202,6 +204,7 @@ def _assemble_chip_callables(compiled: DistributedCompiledProgram) -> tuple[dict
     """
     chip_callables: dict[str, Any] = {}
     runtime_name: str | None = None
+    enable_sdma = False
     next_levels_dir = compiled.output_dir / "next_levels"
     if next_levels_dir.is_dir():
         for chip_dir in sorted(next_levels_dir.iterdir()):
@@ -212,8 +215,11 @@ def _assemble_chip_callables(compiled: DistributedCompiledProgram) -> tuple[dict
             # heavy device_runner → simpler toolchain import.
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, chip_runtime, _ = compile_and_assemble(chip_dir, compiled.platform)
+            chip_callable, chip_runtime, chip_runtime_config = compile_and_assemble(
+                chip_dir, compiled.platform
+            )
             chip_callables[chip_dir.name] = chip_callable
+            enable_sdma = enable_sdma or bool(chip_runtime_config.get("enable_sdma", False))
             if runtime_name is None:
                 runtime_name = chip_runtime
             elif chip_runtime != runtime_name:
@@ -230,7 +236,7 @@ def _assemble_chip_callables(compiled: DistributedCompiledProgram) -> tuple[dict
         )
     # Non-empty chip_callables guarantees the loop set runtime_name at least once.
     assert runtime_name is not None
-    return chip_callables, runtime_name
+    return chip_callables, runtime_name, enable_sdma
 
 
 # Sentinel attribute that DistributedCodegen sets on the generated host
@@ -309,6 +315,7 @@ def _construct_worker(
     platform: str,
     runtime_name: str,
     num_sub: int,
+    enable_sdma: bool = False,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
     from simpler.worker import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
@@ -321,6 +328,7 @@ def _construct_worker(
         num_sub_workers=num_sub,
         platform=platform,
         runtime=runtime_name,
+        enable_sdma=enable_sdma,
     )
 
 
@@ -947,7 +955,7 @@ def execute_distributed(
     dc = compiled._distributed_config
     output_dir = compiled.output_dir
 
-    chip_callables, runtime_name = _assemble_chip_callables(compiled)
+    chip_callables, runtime_name, enable_sdma = _assemble_chip_callables(compiled)
     entry_fn, alloc_fn = _load_orch_entry(output_dir)
 
     # Build tensor mapping from parameter names. Host torch.Tensor inputs must
@@ -993,7 +1001,13 @@ def execute_distributed(
         """
         w = None
         try:
-            w = _construct_worker(dc, compiled.platform, runtime_name, num_sub)
+            w = _construct_worker(
+                dc,
+                compiled.platform,
+                runtime_name,
+                num_sub,
+                enable_sdma=enable_sdma,
+            )
             sub_ids, chip_cids = _register_callables(w, sub_worker_fns, chip_callables)
             # Prewarm with this dispatch's own config so the single run below hits
             # the prebuilt runtime-arena cache instead of paying the ~800ms cold
@@ -1241,6 +1255,7 @@ class DistributedWorker(Worker):
             # must exist before ``init()`` forks so the children inherit them.
             runtime_name: str | None = None
             num_sub = 0
+            enable_sdma = False
             # (program, chip_callables, sub_worker_fns) deferred to phase 2 so all
             # registrations happen on one already-constructed worker.
             loaded: list[tuple[DistributedCompiledProgram, dict[str, Any], dict[str, Any]]] = []
@@ -1254,8 +1269,9 @@ class DistributedWorker(Worker):
             consumed: set[str] = set()
             for program_index, prog in enumerate(programs):
                 self._check_compatible(prog, primary)
-                chip_callables, prog_runtime = _assemble_chip_callables(prog)
+                chip_callables, prog_runtime, prog_enable_sdma = _assemble_chip_callables(prog)
                 runtime_name = self._unify_runtime(runtime_name, prog_runtime)
+                enable_sdma = enable_sdma or prog_enable_sdma
                 entry_fn, alloc_fn = _load_orch_entry(prog.output_dir)
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
@@ -1292,7 +1308,13 @@ class DistributedWorker(Worker):
             # Phase 2: one worker for all programs. Register every program's
             # callables before ``init()`` so the L3 fork inherits the whole
             # registry via COW; each program keeps its own cids in its state.
-            self._w = _construct_worker(self.dc, primary.platform, runtime_name, num_sub)
+            self._w = _construct_worker(
+                self.dc,
+                primary.platform,
+                runtime_name,
+                num_sub,
+                enable_sdma=enable_sdma,
+            )
             self._validate_persistent_runtime_hooks()
             for prog, chip_callables, sub_worker_fns in loaded:
                 sub_ids, chip_cids = _register_callables(self._w, sub_worker_fns, chip_callables)
