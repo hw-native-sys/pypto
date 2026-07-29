@@ -591,6 +591,53 @@ def test_build_trace_aligns_matching_operations_around_inserted_lines(tmp_path: 
     assert all("diff-insert" not in row.after_html for row in rows if row.kind == "insert")
 
 
+def test_build_trace_aligns_dedented_control_flow_rows(tmp_path: Path):
+    before = """\
+def run():
+    if enabled:
+        seed = pl.system.task_dummy()
+        with pl.scope(mode=pl.ScopeMode.MANUAL):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                for index in pl.range(4):
+                    if index >= limit:
+                        value = pl.tile.sqrt(source)
+                    result = pl.tile.recip(value)
+"""
+    after = """\
+def run():
+    seed = pl.system.task_dummy()
+    with pl.scope(mode=pl.ScopeMode.MANUAL):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            for index in pl.range(4):
+                if limit <= index:
+                    value = pl.tile.sqrt(source)
+                result = pl.tile.recip(value)
+"""
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_Simplify.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=20)[0]
+    section = next(section for section in trace.sections if section.function_key == "run")
+    rows = [row for hunk in section.hunks for row in hunk.rows]
+
+    assert [(row.kind, row.before_number, row.after_number) for row in rows] == [
+        ("equal", 1, 1),
+        ("delete", 2, None),
+        ("replace", 3, 2),
+        ("replace", 4, 3),
+        ("replace", 5, 4),
+        ("replace", 6, 5),
+        ("replace", 7, 6),
+        ("replace", 8, 7),
+        ("replace", 9, 8),
+    ]
+
+
 def test_build_trace_marks_each_changed_substring_in_replace_row(tmp_path: Path):
     dump = _write_dump(
         tmp_path,

@@ -223,7 +223,7 @@ def _line_operation_key(line: str) -> str | None:
     return _qualified_name(value.func)
 
 
-def _align_replace_rows(
+def _align_operation_rows(
     before_lines: tuple[str, ...],
     after_lines: tuple[str, ...],
     before_start: int,
@@ -231,7 +231,7 @@ def _align_replace_rows(
     after_start: int,
     after_end: int,
 ) -> tuple[_AlignedRow, ...]:
-    """Align a replace block around ordered pairs of matching operations."""
+    """Align a replacement range around ordered matching operations."""
     before_ops = [
         (index, key)
         for index in range(before_start, before_end)
@@ -269,6 +269,60 @@ def _align_replace_rows(
         before_cursor, after_cursor = before_index + 1, after_index + 1
     rows.extend(("delete", index, None) for index in range(before_cursor, before_end))
     rows.extend(("insert", None, index) for index in range(after_cursor, after_end))
+    return tuple(rows)
+
+
+def _align_replace_rows(
+    before_lines: tuple[str, ...],
+    after_lines: tuple[str, ...],
+    before_start: int,
+    before_end: int,
+    after_start: int,
+    after_end: int,
+) -> tuple[_AlignedRow, ...]:
+    """Align a replacement block by normalized text, then operation name."""
+    matcher = difflib.SequenceMatcher(
+        a=[line.lstrip() for line in before_lines[before_start:before_end]],
+        b=[line.lstrip() for line in after_lines[after_start:after_end]],
+        autojunk=False,
+    )
+    rows: list[_AlignedRow] = []
+    for (
+        tag,
+        local_before_start,
+        local_before_end,
+        local_after_start,
+        local_after_end,
+    ) in matcher.get_opcodes():
+        block_before_start = before_start + local_before_start
+        block_before_end = before_start + local_before_end
+        block_after_start = after_start + local_after_start
+        block_after_end = after_start + local_after_end
+        if tag == "equal":
+            for before_index, after_index in zip(
+                range(block_before_start, block_before_end),
+                range(block_after_start, block_after_end),
+                strict=True,
+            ):
+                kind: _RowKind = (
+                    "equal" if before_lines[before_index] == after_lines[after_index] else "replace"
+                )
+                rows.append((kind, before_index, after_index))
+        elif tag == "insert":
+            rows.extend(("insert", None, index) for index in range(block_after_start, block_after_end))
+        elif tag == "delete":
+            rows.extend(("delete", index, None) for index in range(block_before_start, block_before_end))
+        elif tag == "replace":
+            rows.extend(
+                _align_operation_rows(
+                    before_lines,
+                    after_lines,
+                    block_before_start,
+                    block_before_end,
+                    block_after_start,
+                    block_after_end,
+                )
+            )
     return tuple(rows)
 
 
