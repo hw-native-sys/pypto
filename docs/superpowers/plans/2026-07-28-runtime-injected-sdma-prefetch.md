@@ -65,8 +65,7 @@ Keep the existing source-shape and handle-type verifier tests so only workspace 
 Run:
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/ir/operators/test_prefetch_ops.py -q
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/ir/operators/test_prefetch_ops.py -q
 ```
 
 Expected: valid programs fail because `make_context` still requires `workspace`.
@@ -96,8 +95,7 @@ Run:
 
 ```bash
 cmake --build build --parallel
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/ir/operators/test_prefetch_ops.py -q
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/ir/operators/test_prefetch_ops.py -q
 ```
 
 - [ ] **Step 5: Commit the API change**
@@ -155,8 +153,7 @@ Add a non-prefetch program assertion that its wrapper has no DMA intrinsic and i
 Run:
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/codegen/test_prefetch_codegen.py -q
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/codegen/test_prefetch_codegen.py -q
 ```
 
 Expected: `prefetch.make_context` still expects a workspace SSA, and wrappers/configs contain no runtime injection.
@@ -198,8 +195,7 @@ Run:
 
 ```bash
 cmake --build build --parallel
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/codegen/test_prefetch_codegen.py \
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/codegen/test_prefetch_codegen.py \
   tests/ut/codegen/test_pto_codegen.py -q
 ```
 
@@ -263,8 +259,7 @@ Also assert an SDMA-enabled active worker can run an ordinary dispatch.
 Run:
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/runtime/test_worker_reuse.py \
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/runtime/test_worker_reuse.py \
   tests/ut/runtime/test_run_config.py -q
 ```
 
@@ -289,8 +284,7 @@ and forward it through `runner._execute_on_device`, normal compiled execution, d
 Run:
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/runtime/test_worker_reuse.py \
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/runtime/test_worker_reuse.py \
   tests/ut/runtime/test_run_config.py \
   tests/ut/runtime/test_execute_artifact.py \
   tests/ut/runtime/test_task_submit_dispatch.py -q
@@ -336,8 +330,7 @@ Assert one-shot and reusable distributed workers pass `enable_sdma=True` to `_co
 Run:
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest tests/ut/runtime/test_distributed_worker.py -q
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ut/runtime/test_distributed_worker.py -q
 ```
 
 - [ ] **Step 3: Implement L3 aggregation**
@@ -368,8 +361,8 @@ git commit -m "fix(runtime): Propagate SDMA to distributed workers"
 
 - Modify: `tests/st/runtime/ops/test_prefetch_async.py`
 - Modify: `docs/en/dev/ir/05-operators.md`
-- Modify: `docs/zh-cn/dev/ir/05-operators.md`
-- Modify: `docs/zh-cn/dev/ptoas-op-status.md`
+- Modify: `docs/zh/dev/ir/05-operators.md`
+- Modify: `docs/zh/dev/ptoas-op-status.md`
 - Modify: prefetch docstrings in `python/pypto/ir/op/prefetch_ops.py`, `python/pypto/language/op/prefetch_ops.py`, and `src/ir/op/prefetch/prefetch_async.cpp`
 
 **Interfaces:**
@@ -416,8 +409,8 @@ rg -n "make_context\(ws\)|sdma_prefetch_workspace_addr|WORKSPACE_BYTES" \
 
 ```bash
 git add tests/st/runtime/ops/test_prefetch_async.py \
-  docs/en/dev/ir/05-operators.md docs/zh-cn/dev/ir/05-operators.md \
-  docs/zh-cn/dev/ptoas-op-status.md python/pypto/ir/op/prefetch_ops.py \
+  docs/en/dev/ir/05-operators.md docs/zh/dev/ir/05-operators.md \
+  docs/zh/dev/ptoas-op-status.md python/pypto/ir/op/prefetch_ops.py \
   python/pypto/language/op/prefetch_ops.py src/ir/op/prefetch/prefetch_async.cpp
 git commit -m "test(runtime): Cover injected SDMA prefetch"
 ```
@@ -427,7 +420,7 @@ git commit -m "test(runtime): Cover injected SDMA prefetch"
 **Files:**
 
 - Review: all files changed since `7b3aeff7`
-- Inspect: `/data/linyifan/pypto/KNOWN_ISSUES.md`
+- Inspect: the repository's known-issues record, if present
 
 **Interfaces:**
 
@@ -445,8 +438,7 @@ Expected: exit 0 with no new warnings.
 - [ ] **Step 2: Run focused and surrounding unit suites**
 
 ```bash
-PYTHONPATH=$PWD/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-python -S -m pytest \
+PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" python -m pytest \
   tests/ut/ir/operators/test_prefetch_ops.py \
   tests/ut/codegen/test_prefetch_codegen.py \
   tests/ut/codegen/test_pto_codegen.py \
@@ -466,12 +458,12 @@ python tests/lint/clang_tidy.py --diff-base upstream/main
 git diff --check upstream/main...HEAD
 ```
 
-Classify any known main-branch clang-tidy findings using `KNOWN_ISSUES.md`; fix every finding on changed lines.
+Classify known main-branch clang-tidy findings using the repository's known-issues record, if present; fix every finding on changed lines.
 
 - [ ] **Step 4: Run the required architecture precheck and hardware ST**
 
 ```bash
-source /usr/local/Ascend/cann/set_env.sh
+source "${CANN_SET_ENV:?Set CANN_SET_ENV to the CANN set_env.sh path}"
 runtime/.claude/skills/onboard-arch-precheck/check.sh a2a3
 task-submit --list
 ```
@@ -479,13 +471,13 @@ task-submit --list
 Then submit the focused test with the worktree-local PyPTO/runtime Python paths and per-run `ASCEND_PROCESS_LOG_PATH`:
 
 ```bash
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+RUN_PYTHONPATH="$PROJECT_ROOT/python:$PROJECT_ROOT/runtime:$PROJECT_ROOT/runtime/python${PYTHONPATH:+:$PYTHONPATH}"
 task-submit --device auto --timeout 3600 --max-time 1800 \
-  --env ASCEND_PROCESS_LOG_PATH=/data/linyifan/pypto/.claude/worktrees/pr-2089/build/st-prefetch-logs/ascend \
-  --run 'cd /data/linyifan/pypto/.claude/worktrees/pr-2089 && source /usr/local/Ascend/cann/set_env.sh && \
-    PYTHONPATH=/data/linyifan/pypto/.claude/worktrees/pr-2089/python:/data/linyifan/pypto/.claude/worktrees/pr-2089/runtime:/data/linyifan/pypto/.claude/worktrees/pr-2089/runtime/python:/data/linyifan/.conda/envs/lyf/lib/python3.10/site-packages \
-    runtime/.venv/bin/python -S -m pytest \
-    tests/st/runtime/ops/test_prefetch_async.py -v --forked \
-    --platform=a2a3 --device=$TASK_DEVICE'
+  --env ASCEND_PROCESS_LOG_PATH="$PROJECT_ROOT/build/st-prefetch-logs/ascend" \
+  --run "cd '$PROJECT_ROOT' && source '$CANN_SET_ENV' && \
+    PYTHONPATH='$RUN_PYTHONPATH' runtime/.venv/bin/python -m pytest \
+    tests/st/runtime/ops/test_prefetch_async.py -v --forked --platform=a2a3 --device=\$TASK_DEVICE"
 ```
 
 Expected: one test passes, output is bit-exact, and the device log contains the SDMA stream provisioning message.
