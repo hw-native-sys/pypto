@@ -3743,6 +3743,45 @@ class TestTileBitwiseArithmeticOps:
         assert [_tile_result_dtype(call) for call in calls] == [dtype] * 4
 
     @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
+    def test_tile_remainder_precision_kwarg(self, op):
+        """Only the canonical tile-tile ops carry their PTOAS precision attribute."""
+        span = ir.Span("remainder_precision.py", 9, 4, 9, 29)
+        src0 = ir.Var("src0", ir.TileType([8, 16], DataType.FP32), span)
+        src1 = ir.Var("src1", ir.TileType([8, 16], DataType.FP32), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], DataType.FP32), span)
+
+        default_call = op(src0, src1, tmp) if op is tile.rem else op(src0, src1)
+        high_precision_call = (
+            op(src0, src1, tmp, high_precision=True)
+            if op is tile.rem
+            else op(src0, src1, high_precision=True)
+        )
+        positional_span_call = op(src0, src1, tmp, span) if op is tile.rem else op(src0, src1, span)
+
+        assert dict(default_call.kwargs) == {}
+        assert dict(high_precision_call.kwargs) == {"high_precision": True}
+        assert positional_span_call.span.filename == span.filename
+        assert positional_span_call.span.begin_line == span.begin_line
+        assert positional_span_call.span.begin_column == span.begin_column
+        assert positional_span_call.span.end_line == span.end_line
+        assert positional_span_call.span.end_column == span.end_column
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
+    @pytest.mark.parametrize("dtype", [DataType.INT32, DataType.FP16])
+    def test_tile_remainder_rejects_non_fp32_high_precision(self, op, dtype):
+        """PTO-ISA defines the remainder high-precision algorithm only for float."""
+        span = ir.Span.unknown()
+        src0 = ir.Var("src0", ir.TileType([8, 16], dtype), span)
+        src1 = ir.Var("src1", ir.TileType([8, 16], dtype), span)
+        tmp = ir.Var("tmp", ir.TileType([2, 16], dtype), span)
+
+        with pytest.raises(ValueError, match=r"high_precision only for FP32"):
+            if op is tile.rem:
+                op(src0, src1, tmp, high_precision=True)
+            else:
+                op(src0, src1, high_precision=True)
+
+    @pytest.mark.parametrize("op", [tile.rem, tile.fmod])
     def test_tile_remainder_rejects_mixed_dtypes(self, op):
         """PTO remainder instructions require a single exact src/dst dtype."""
         span = ir.Span.unknown()
@@ -3851,7 +3890,7 @@ class TestTileBitwiseArithmeticOps:
         assert call.op.name == f"tile.{op_name}"
 
     def test_tile_fmod(self):
-        """Test tile.fmod operator - element-wise floating-point remainder of two tiles."""
+        """Test tile.fmod operator - element-wise truncating remainder of two tiles."""
 
         @pl.program
         class Program:
@@ -3872,7 +3911,7 @@ class TestTileBitwiseArithmeticOps:
         assert "tile.fmod" in ir_str
 
     def test_tile_fmods(self):
-        """Test tile.fmods operator - element-wise floating-point remainder of tile and scalar."""
+        """Test tile.fmods operator - element-wise truncating remainder of tile and scalar."""
 
         @pl.program
         class Program:

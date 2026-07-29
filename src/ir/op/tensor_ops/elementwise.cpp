@@ -77,6 +77,53 @@ static std::optional<std::vector<ExprPtr>> GetMatchingElementwiseValidShape(
   return lhs_valid_shape;
 }
 
+static bool IsRemainderDataType(DataType dtype) {
+  return dtype == DataType::INT16 || dtype == DataType::UINT16 || dtype == DataType::INT32 ||
+         dtype == DataType::UINT32 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
+TypePtr DeduceTensorRemainderType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+  auto lhs_type = AsTensorTypeLike(args[0]->GetType());
+  auto rhs_type = AsTensorTypeLike(args[1]->GetType());
+  CHECK(lhs_type && rhs_type) << "The operator " << op_name << " requires two tensor operands";
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires matching operand dtypes, but got "
+      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  CHECK(IsRemainderDataType(lhs_type->dtype_))
+      << "The operator " << op_name << " does not support dtype " << lhs_type->dtype_.ToString();
+  CHECK(lhs_type->shape_.size() == rhs_type->shape_.size())
+      << "The operator " << op_name << " requires matching operand shapes, but got "
+      << FormatShape(lhs_type->shape_) << " and " << FormatShape(rhs_type->shape_);
+  for (std::size_t axis = 0; axis < lhs_type->shape_.size(); ++axis) {
+    CHECK(DimensionsEqual(lhs_type->shape_[axis], rhs_type->shape_[axis]))
+        << "The operator " << op_name << " requires matching operand shapes, but got "
+        << FormatShape(lhs_type->shape_) << " and " << FormatShape(rhs_type->shape_);
+  }
+  if (auto valid_shape = GetMatchingElementwiseValidShape(lhs_type, rhs_type)) {
+    return MakeFreshTensorType(lhs_type->shape_, lhs_type->dtype_, std::move(*valid_shape));
+  }
+  return std::make_shared<TensorType>(lhs_type->shape_, lhs_type->dtype_);
+}
+
+TypePtr DeduceTensorScalarRemainderType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+  auto lhs_type = AsTensorTypeLike(args[0]->GetType());
+  auto rhs_type = As<ScalarType>(args[1]->GetType());
+  CHECK(lhs_type && rhs_type) << "The operator " << op_name << " requires a tensor and a scalar";
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires scalar dtype to match tensor dtype, but got "
+      << rhs_type->dtype_.ToString() << " and " << lhs_type->dtype_.ToString();
+  CHECK(IsRemainderDataType(lhs_type->dtype_))
+      << "The operator " << op_name << " does not support dtype " << lhs_type->dtype_.ToString();
+  if (As<TensorType>(args[0]->GetType())) {
+    return MakeFreshTensorType(lhs_type->shape_, lhs_type->dtype_, GetValidShape(lhs_type));
+  }
+  return std::make_shared<TensorType>(lhs_type->shape_, lhs_type->dtype_);
+}
+
 TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                                             const std::string& op_name,
@@ -398,22 +445,22 @@ REGISTER_OP("tensor.part_min")
 
 REGISTER_OP("tensor.fmod")
     .set_op_category("TensorOp")
-    .set_description("Element-wise floating-point remainder of two tensors")
+    .set_description("Element-wise truncating remainder of two tensors with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.fmod");
+      return DeduceTensorRemainderType(args, "tensor.fmod");
     });
 
 REGISTER_OP("tensor.fmods")
     .set_op_category("TensorOp")
-    .set_description("Element-wise floating-point remainder of tensor and scalar")
+    .set_description("Element-wise truncating remainder of tensor and scalar with matching dtype")
     .add_argument("lhs", "Left-hand side tensor (TensorType)")
     .add_argument("rhs", "Right-hand side scalar (ScalarType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.fmods");
+      return DeduceTensorScalarRemainderType(args, "tensor.fmods");
     });
 
 REGISTER_OP("tensor.maximum")

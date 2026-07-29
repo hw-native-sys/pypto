@@ -461,7 +461,7 @@ def test_tensor_unary_preserves_symbolic_valid_shape():
     assert valid[1] == vlen  # the symbolic extent is carried through unchanged
 
 
-@pytest.mark.parametrize("op_name", ["adds", "subs", "muls", "divs", "maximum", "minimum"])
+@pytest.mark.parametrize("op_name", ["adds", "subs", "muls", "divs", "fmods", "maximum", "minimum"])
 def test_tensor_scalar_elementwise_preserves_partial_valid_shape(op_name):
     """Fresh scalar-elementwise results keep content validity, not source alias metadata."""
     partial = _partial_tensor_var([32, 256], [28, 250])
@@ -556,7 +556,7 @@ def test_tensor_cmp_does_not_claim_partial_valid_shape_before_lowering_support(r
     assert result_type.tensor_view is None
 
 
-@pytest.mark.parametrize("op_name", ["adds", "ands", "shls"])
+@pytest.mark.parametrize("op_name", ["adds", "fmods", "ands", "shls"])
 def test_tensor_scalar_elementwise_does_not_preserve_distributed_valid_shape(op_name):
     """Direct distributed windows need a separate valid-shape lowering contract."""
     window = _partial_distributed_tensor_var([32, 256], [28, 250], dtype=DataType.INT32)
@@ -1751,6 +1751,21 @@ def test_tensor_fmod():
     call_fmods = ir.op.tensor.fmods(var_a, 3.0)
     assert isinstance(call_fmods, ir.Call)
     assert call_fmods.op.name == _OP_TENSOR_FMODS
+
+
+def test_tensor_fmod_rejects_contracts_that_tile_lowering_cannot_emit():
+    span = ir.Span.unknown()
+    fp32 = ir.Var("fp32", ir.TensorType([8, 16], DataType.FP32), span)
+    fp16 = ir.Var("fp16", ir.TensorType([8, 16], DataType.FP16), span)
+    broadcast = ir.Var("broadcast", ir.TensorType([1, 16], DataType.FP32), span)
+    scalar = ir.Var("scalar", ir.ScalarType(DataType.FP16), span)
+
+    with pytest.raises(ValueError, match="matching operand dtypes"):
+        ir.op.tensor.fmod(fp32, fp16)
+    with pytest.raises(ValueError, match="matching operand shapes"):
+        ir.op.tensor.fmod(fp32, broadcast)
+    with pytest.raises(ValueError, match="scalar dtype to match"):
+        ir.op.tensor.fmods(fp32, scalar)
 
 
 def test_const_float():

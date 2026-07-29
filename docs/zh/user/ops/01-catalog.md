@@ -36,7 +36,7 @@
 | ---- | ---- | ---- |
 | `add` `sub` `mul` `div` | `pl.` | 二元算术；右侧给 Python 数字会选中标量操作数形式 |
 | `neg` `abs` `recip` | `pl.` | 取负、绝对值、倒数 |
-| `rem` `rems` `fmod` `fmods` | `pl.` | 求余与浮点取模，张量与标量形式 |
+| `rem` `rems` `fmod` `fmods` | `pl.` | floor 取余（`rem*`）与截断取余（`fmod*`）。Tensor 操作数的 shape 和 dtype 必须一致；tile-tile 操作数的物理 shape 与 valid shape 必须一致。A2/A3 的 `rem*` 支持 FP32/INT32，`fmod*` 仅支持 FP32；A2/A3 INT32 `rem*` 的每个 source/scalar 值必须位于 PTO-ISA 闭区间 `[-2^24, 2^24]`。A2/A3 scalar 形式的 valid extent 必须可证明为正。Tile `rem` / `rems` 的 scratch 物理容量和有效容量都必须可证明足够（分别为两行 / 一行并覆盖全部 source 列），且在 A2/A3 上不得与仍存活的 source 重叠。A5 接受更宽的前端 dtype 集合。`high_precision=True` 仅适用于 FP32 tile-tile（A5 定义，A2/A3 接受但忽略） |
 | `addc` `subc` `addsc` `subsc` | `pl.` (t) | 带进位操作数的三输入加 / 减 |
 | `part_add` `part_mul` `part_max` `part_min` | `pl.` | 分段算术 |
 

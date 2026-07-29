@@ -328,7 +328,9 @@ static void CheckRemainderTileContract(const std::shared_ptr<const TileType>& lh
       << " requires dtype in {INT16, UINT16, INT32, UINT32, FP16, FP32}, but got " << lhs->dtype_.ToString();
 
   CHECK(lhs->shape_.size() == rhs->shape_.size())
-      << "The operator " << op_name << " requires src0, src1, and dst to have the same physical shape rank";
+      << "The operator " << op_name
+      << " requires src0, src1, and dst to have the same physical shape rank, but got " << lhs->shape_.size()
+      << " and " << rhs->shape_.size();
   for (size_t i = 0; i < lhs->shape_.size(); ++i) {
     CHECK(DimensionsEqual(lhs->shape_[i], rhs->shape_[i]))
         << "The operator " << op_name
@@ -340,7 +342,9 @@ static void CheckRemainderTileContract(const std::shared_ptr<const TileType>& lh
   const auto lhs_valid = GetValidShape(lhs);
   const auto rhs_valid = GetValidShape(rhs);
   CHECK(lhs_valid.size() == rhs_valid.size())
-      << "The operator " << op_name << " requires src0, src1, and dst to have the same valid_shape rank";
+      << "The operator " << op_name
+      << " requires src0, src1, and dst to have the same valid_shape rank, but got " << lhs_valid.size()
+      << " and " << rhs_valid.size();
   for (size_t i = 0; i < lhs_valid.size(); ++i) {
     CHECK(ProveValidExtentEqual(lhs_valid[i], rhs_valid[i]) == ProofResult::kTrue)
         << "The operator " << op_name
@@ -383,6 +387,10 @@ TypePtr DeduceTileRemainderType(const std::vector<ExprPtr>& args,
   CHECK(lhs) << "The operator " << op_name << " requires first argument to be a TileType";
   CHECK(rhs) << "The operator " << op_name << " requires second argument to be a TileType";
   CheckRemainderTileContract(lhs, rhs, op_name);
+  CHECK(!GetKwargOr<bool>(kwargs, "high_precision", false) || lhs->dtype_ == DataType::FP32)
+      << "The operator " << op_name
+      << " supports high_precision only for FP32 because the PTO-ISA high-precision algorithm is "
+         "defined only for float";
   if (has_tmp) {
     auto tmp = As<TileType>(args[2]->GetType());
     CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
@@ -523,6 +531,7 @@ REGISTER_OP("tile.rem")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType) required by the hardware")
+    .set_attr<bool>("high_precision")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
@@ -595,6 +604,7 @@ REGISTER_OP("tile.fmod")
     .set_description("Element-wise truncating remainder of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_attr<bool>("high_precision")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -677,7 +687,7 @@ REGISTER_OP("tile.rems")
 REGISTER_OP("tile.fmods")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
-    .set_description("Element-wise floating-point remainder of tile and scalar")
+    .set_description("Element-wise truncating remainder of tile and scalar with matching dtype")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)

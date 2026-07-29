@@ -718,7 +718,7 @@ def part_min(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
 
 
 def fmod(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise floating-point remainder of tensor and tensor or scalar.
+    """Element-wise truncating remainder of tensor and tensor or scalar.
 
     Automatically selects between tensor.fmod (tensor, tensor) and
     tensor.fmods (tensor, scalar) based on the rhs type. The result matches
@@ -730,7 +730,7 @@ def fmod(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for element-wise floating-point remainder
+        Call expression for element-wise truncating remainder
     """
     actual_span = _get_span_or_capture(span)
     rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span, fallback_int_dtype=DataType.FP32)
@@ -743,7 +743,7 @@ def fmod(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
 
 def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise floating-point remainder of tensor and scalar.
+    """Element-wise truncating remainder of tensor and scalar.
 
     Args:
         lhs: Left-hand side tensor
@@ -751,7 +751,7 @@ def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for element-wise floating-point remainder with scalar
+        Call expression for element-wise truncating remainder with scalar
     """
     actual_span = _get_span_or_capture(span)
     rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span, fallback_int_dtype=DataType.FP32)
