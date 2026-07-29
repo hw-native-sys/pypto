@@ -32,6 +32,7 @@ site_dir: site
 # Build inputs that live under docs/ but are not content.
 exclude_docs: |
   requirements.txt
+  /superpowers/
 
 # Broken internal links must fail the build, not warn. `mkdocs build --strict`
 # promotes every warning to an error; these settings decide what counts as one.
