@@ -1016,12 +1016,11 @@ void ConstructExperimentalPairEdges(ReusePenaltyRecognition* recognition) {
   recognition->edges.clear();
   std::set<std::pair<size_t, size_t>> promoted;
   for (const RecognizedReuseCandidate& candidate : recognition->candidates) {
-    if (candidate.hazard != RecognizedReuseHazard::CrossResource || candidate.ordered_by_logical_dag ||
-        candidate.requires_alias_contract || candidate.partial_access || candidate.incomplete_access_set ||
+    if (candidate.hazard != RecognizedReuseHazard::CrossResource || candidate.requires_alias_contract ||
+        candidate.partial_access || candidate.incomplete_access_set ||
         candidate.conservative_initial_anchor) {
       continue;
     }
-    if (candidate.loop_carried) continue;
     if (!promoted.emplace(candidate.first_interval, candidate.second_interval).second) continue;
     recognition->edges.push_back(
         {candidate.first_interval, candidate.second_interval, candidate.hazard, candidate.nested_control});

@@ -106,17 +106,18 @@ source/destination routes from resolved
 memory spaces, then compares per-resource terminal-access and initial-write
 frontiers for all lifetime-compatible allocation pairs, including nested and
 distance-one loop handoffs. Each abstract resource is modeled as one
-completion-ordered issue chain. The current implementation also uses real SSA
-def-use reachability as an experimental ordering proxy; for nested accesses it
-tests representatives in the nearest common enclosing region. Bare lexical
-statement order is not used.
+completion-ordered issue chain. Real SSA def-use reachability is retained as
+ordering provenance; for nested accesses the recognizer tests representatives
+in the nearest common enclosing region. It does not use SSA reachability or
+bare lexical statement order as proof that cross-resource execution has
+completed.
 
 Exact-placement device experiments have since shown that SSA reachability does
 not prove asynchronous hardware completion: an SSA-ordered `V -> MTE2` WAR
 still required a new PTOAS handoff. Consequently `dag_path` is useful
-provenance, but not a sound production suppression predicate. The current v4
-edge policy still suppresses such records and is therefore an experimental
-baseline, not a supported cost model. See
+provenance, but not a sound production suppression predicate. The current v5
+edge policy retains such records and distance-one loop handoffs, but remains an
+experimental baseline rather than a supported cost model. See
 [DSA Reuse-Penalty Modeling](../proposals/dsa_reuse_penalty_modeling.md) for
 the implementation/evidence boundary and the current completion-frontier
 conjecture.
@@ -124,13 +125,13 @@ conjecture.
 The initial frontier is the complete antichain of accesses minimal under those
 relations, rather than the lexically first access. Partial-view and
 same-operation handoffs are reported
-but remain unpriced. The experimental v4 policy first constructs one soft edge
+but remain unpriced. The experimental v5 policy first constructs one soft edge
 per qualifying cross-resource buffer pair, then applies a separate experimental
-unit-weight model. Complete distance-zero handoffs inside structured control
-are eligible; this covers the nested M-to-MTE1 mechanism observed in device
-experiments. Same-resource, loop-carried, partial-range, same-operation,
-incompletely observed, conservatively anchored, and records ordered by the
-current experimental proxy remain report-only.
+unit-weight model. Complete distance-zero and distance-one handoffs inside
+structured control are eligible, and SSA order remains provenance rather than
+a filter. Same-resource, partial-range, same-operation, incompletely observed,
+and conservatively anchored records remain report-only. The unit model does not
+estimate completion-frontier exposure or critical-path latency.
 Operation-registry effects distinguish execution-time accesses from declarations
 and metadata-only views; mutating inherit-input operations and tuple outputs
 remain visible to the access frontier. Weight calibration is a separate modeling
@@ -154,8 +155,9 @@ The construction is deterministic:
 4. Compare lifetime-disjoint allocations in the same address space, including
    compatible nested control and explicit distance-one loop handoffs.
 5. Record every candidate with its WAR/WAW, route, range, control, and ordering
-   evidence. Construct a pair edge only from complete, full-range,
-   distance-zero cross-resource evidence; assign its weight afterward.
+   evidence. Construct a pair edge only from complete, full-range
+   cross-resource evidence at distance zero or one; assign its weight
+   afterward.
 
 For controlled placement studies, `dsa_reference_placement=COMPACT` labels the
 normal validated DSA result, while `LOOSE` greedily reduces physical reuse
@@ -228,15 +230,15 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    compares access frontiers for all lifetime-compatible pairs while preserving
    exact arenas, control-path, loop, and byte-range context. A terminal
    read or write followed by an initial write becomes a WAR or WAW candidate;
-   same-resource issue order and real SSA def-use currently act as experimental
-   ordering proxies, while lexical order alone is not used. The experimental
-   v4 policy promotes only complete, full-range, distance-zero cross-resource
-   candidates without such a proxy to unit `cross_pipe` schema edges. Nested
-   distance-zero candidates are eligible; same-resource, loop-carried,
-   partial-range, conservatively anchored, and uncertain candidates remain
-   report-only. This policy is known to be over-broad for unordered pairs and
-   to suppress some ordered pairs that still require synchronization; keep it
-   disabled outside controlled experiments. Metadata
+   same-resource issue order contributes to access-frontier construction,
+   while real SSA def-use is retained as ordering provenance rather than used
+   as a completion proof. The experimental v5 policy converts complete,
+   full-range cross-resource candidates into unit `cross_pipe` schema edges.
+   Nested distance-zero and distance-one candidates are eligible, including
+   records with SSA ordering evidence. Same-resource, partial-range,
+   conservatively anchored, and uncertain candidates remain report-only.
+   Completion-frontier exposure and critical-path cost are not modeled; keep
+   the unit policy disabled outside controlled experiments. Metadata
    `recognized_reuse_candidate_records_v4` contains the raw candidates before
    this policy filter. An ordered record carries a deterministic `dag_path` in
    region/statement coordinates from the same SSA dependency graph used by the

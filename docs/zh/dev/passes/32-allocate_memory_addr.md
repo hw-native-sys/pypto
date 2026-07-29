@@ -98,25 +98,26 @@ dsa_export_dir="build/dsa-corpus")`。
 已解析的 memory space 推导抽象 source/destination route，再对所有生命周期可复用的
 allocation pair 比较每种执行资源上的终止访问 frontier 和初始写
 frontier，并覆盖嵌套控制流和跨一次循环回边的交接。每个抽象执行资源被建模为一条
-按完成顺序发射的链；当前实现还把真实 SSA def-use reachability 当作实验性的
-ordering proxy，而单纯的词法顺序不参与判断。对于嵌套访问，分析会在最近的共同
-外层 region 中检查代表语句。
+按完成顺序发射的链；真实 SSA def-use reachability 仅保留为 ordering provenance。
+对于嵌套访问，分析会在最近的共同外层 region 中检查代表语句。SSA reachability
+和单纯的词法顺序都不能证明 cross-resource 执行已经完成。
 
 精确 placement 的设备实验已经证明，SSA reachability 不能证明异步硬件访问已经
 完成：一个 SSA 有序的 `V -> MTE2` WAR 仍然需要 PTOAS 新增 handoff。因此
-`dag_path` 只应作为 provenance，不能作为生产级 suppression predicate。当前 v4
-edge policy 仍会抑制这类记录，所以它只是实验 baseline，而不是已支持的 cost model。
+`dag_path` 只应作为 provenance，不能作为生产级 suppression predicate。当前 v5
+edge policy 保留这类记录以及 distance-one loop handoff，但仍只是实验 baseline，
+而不是已支持的 cost model。
 实现与证据的边界以及当前 completion-frontier conjecture 见
 [DSA 复用惩罚建模](../proposals/dsa_reuse_penalty_modeling.md)。
 
 初始 frontier 是这些关系下
 所有极小访问组成的 antichain，而不是词法上的第一次访问。
-partial view 和同一操作内部的交接会被记录，但不会定价。实验性的 v4 policy 先把
+partial view 和同一操作内部的交接会被记录，但不会定价。实验性的 v5 policy 先把
 符合条件的 cross-resource 记录聚合为每个 buffer pair 一条 soft edge，再通过独立的
-实验性模型赋予单位权重。结构化控制流内部完整的 distance-zero 交接可以构造 edge；
-这覆盖了设备实验中观察到的嵌套 M-to-MTE1 机制。same-resource、loop-carried、
-partial-range、同一操作、访问集合不完整、使用保守初始锚点，或被当前实验性
-ordering proxy 标记为有序的记录仍只用于报告。
+实验性模型赋予单位权重。结构化控制流内部完整的 distance-zero 与 distance-one
+交接都可以构造 edge，SSA order 只作为 provenance 而不是 filter。same-resource、
+partial-range、同一操作、访问集合不完整和使用保守初始锚点的记录仍只用于报告。
+unit model 不估计 completion-frontier exposure 或 critical-path latency。
 operation registry 中的 effect 会区分执行期访问、纯声明和仅修改元数据的 view；
 会修改数据的 inherit-input 操作以及 tuple 输出仍会进入 access frontier。
 权重标定属于独立建模问题。该实现是在 PyPTO 阶段对“maximal access 到 first
@@ -135,7 +136,8 @@ write” hazard 构造的近似：PyPTO 尚不具备 PTOAS 最终的 completion 
 4. 比较同一地址空间内生命周期不相交的 allocation，并覆盖兼容的嵌套控制流和显式的
    distance-one 循环交接。
 5. 为每个 candidate 记录 WAR/WAW、route、range、控制流和顺序证据。只有完整、
-   full-range、distance-zero 的 cross-resource 证据会构造 pair edge；权重在之后赋值。
+   full-range、distance-zero 或 distance-one 的 cross-resource 证据会构造 pair
+   edge；权重在之后赋值。
 
 对于受控 placement 实验，`dsa_reference_placement=COMPACT` 标记正常且已验证的
 DSA 结果；`LOOSE` 在不超过容量的前提下贪心减少物理地址复用。
@@ -194,13 +196,14 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    `external`、`UB`、`L1`、`L0` memory class 映射到抽象传输或计算资源，再针对所有
    lifetime 可复用 pair 比较 access frontier，并保留精确 arena、control path、loop 和
    byte range 上下文。末端读写后若出现首次写入，就记录 WAR 或 WAW candidate；SSA
-   def-use 和同一资源的发射顺序目前只是实验性的 ordering proxy，词法顺序本身不参与
-   判断。实验性 v4 policy 只把信息完整、full-range、distance-zero、cross-resource
-   且没有这些 proxy 的 candidate 转换成单位权重 `cross_pipe` schema edge。嵌套的
-   distance-zero candidate 可以构造 edge；same-resource、loop-carried、partial-range、
-   使用保守初始锚点和不确定的 candidate 仅记录而不定价。已知该 policy 会对
-   unordered pair 过度 promotion，也会错误抑制仍需同步的 ordered pair；除受控实验外
-   应保持关闭。元数据 `recognized_reuse_candidate_records_v4`
+   def-use 仅保留为 provenance，同一资源的发射顺序用于构造 access frontier；
+   词法顺序本身不参与判断。实验性 v5 policy 把信息完整、full-range、
+   cross-resource 的 candidate 转换成单位权重 `cross_pipe` schema edge，并纳入
+   distance-zero、distance-one 和带 SSA ordering evidence 的记录。same-resource、
+   partial-range、使用保守初始锚点和不确定的 candidate 仅记录而不定价。
+   completion-frontier exposure 与 critical-path cost 尚未建模；除受控实验外应保持
+   关闭。元数据
+   `recognized_reuse_candidate_records_v4`
    记录 policy 过滤前的全部 raw candidate。已有顺序的记录携带确定性的
    `dag_path`（使用 recognizer 同一 SSA 依赖图中的 region/statement 坐标），无此
    顺序的记录携带 `dag_path=none`。实验必须筛选这些 raw record，而不是
