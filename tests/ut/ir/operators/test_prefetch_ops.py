@@ -11,6 +11,7 @@
 
 import ast
 import linecache
+from typing import cast
 
 import pypto.language as pl
 import pytest
@@ -112,7 +113,7 @@ class TestPrefetchOpTypes:
         finally:
             linecache.cache.pop(filename, None)
 
-        executed = namespace["Program"]
+        executed = cast(ir.Program, namespace["Program"])
         ir.assert_structural_equal(executed, Program)
 
     def test_logical_1d_multi_dim_source_accepted(self):

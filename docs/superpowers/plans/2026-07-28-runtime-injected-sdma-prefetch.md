@@ -23,6 +23,7 @@
 ### Task 1: Make the prefetch context API parameterless
 
 **Files:**
+
 - Modify: `tests/ut/ir/operators/test_prefetch_ops.py`
 - Modify: `python/pypto/ir/op/prefetch_ops.py`
 - Modify: `python/pypto/language/op/prefetch_ops.py`
@@ -30,6 +31,7 @@
 - Modify: `include/pypto/ir/type.h`
 
 **Interfaces:**
+
 - Produces: `pypto.ir.op.prefetch_ops.make_context(span: Span | None = None) -> Call`
 - Produces: `pypto.language.prefetch.make_context() -> PrefetchAsyncContext`
 - Consumes: existing `PrefetchAsyncContextType` and `prefetch.make_context` registry name
@@ -111,6 +113,7 @@ git commit -m "fix(ir): Use runtime-owned prefetch context"
 ### Task 2: Inject the hidden SDMA pointer through PTOCodegen and the kernel wrapper
 
 **Files:**
+
 - Modify: `tests/ut/codegen/test_prefetch_codegen.py`
 - Modify: `include/pypto/codegen/pto/pto_codegen.h`
 - Modify: `src/codegen/pto/pto_codegen.cpp`
@@ -118,6 +121,7 @@ git commit -m "fix(ir): Use runtime-owned prefetch context"
 - Modify: `python/pypto/backend/pto_backend.py`
 
 **Interfaces:**
+
 - Produces: `PTOCodegen::GetSdmaWorkspaceArgSSA() const -> std::string`
 - Produces: `_uses_sdma_workspace(func: Function) -> bool`
 - Produces: `_generate_config_file(..., enable_sdma: bool = False) -> str`
@@ -212,6 +216,7 @@ git commit -m "fix(codegen): Inject runtime SDMA workspace"
 ### Task 3: Propagate the SDMA capability through L2 execution
 
 **Files:**
+
 - Modify: `tests/ut/runtime/test_worker_reuse.py`
 - Modify: `tests/ut/runtime/test_run_config.py`
 - Modify: `python/pypto/runtime/worker.py`
@@ -222,6 +227,7 @@ git commit -m "fix(codegen): Inject runtime SDMA workspace"
 - Modify: `tests/st/harness/core/test_runner.py`
 
 **Interfaces:**
+
 - Produces: `ChipWorker(..., enable_sdma: bool = False)`
 - Produces: `execute_on_device(..., enable_sdma: bool = False) -> None`
 - Produces: `ChipWorker.current(..., require_sdma: bool = False) -> ChipWorker | None`
@@ -304,10 +310,12 @@ git commit -m "fix(runtime): Enable SDMA for prefetch artifacts"
 ### Task 4: Propagate the SDMA capability through distributed execution
 
 **Files:**
+
 - Modify: `tests/ut/runtime/test_distributed_worker.py`
 - Modify: `python/pypto/runtime/distributed_runner.py`
 
 **Interfaces:**
+
 - Produces: `_assemble_chip_callables(...) -> tuple[dict[str, Any], str, bool]`
 - Produces: `_construct_worker(..., enable_sdma: bool = False) -> Any`
 - Consumes: every chip artifact's `RUNTIME_CONFIG["enable_sdma"]`
@@ -357,6 +365,7 @@ git commit -m "fix(runtime): Propagate SDMA to distributed workers"
 ### Task 5: Replace the ST and synchronize user documentation
 
 **Files:**
+
 - Modify: `tests/st/runtime/ops/test_prefetch_async.py`
 - Modify: `docs/en/dev/ir/05-operators.md`
 - Modify: `docs/zh-cn/dev/ir/05-operators.md`
@@ -364,6 +373,7 @@ git commit -m "fix(runtime): Propagate SDMA to distributed workers"
 - Modify: prefetch docstrings in `python/pypto/ir/op/prefetch_ops.py`, `python/pypto/language/op/prefetch_ops.py`, and `src/ir/op/prefetch/prefetch_async.cpp`
 
 **Interfaces:**
+
 - Consumes: parameterless `pl.prefetch.make_context()`
 - Consumes: artifact-driven one-shot `enable_sdma=True`
 - Produces: onboard a2a3 test with only `(a, out)` user tensors
@@ -415,10 +425,12 @@ git commit -m "test(runtime): Cover injected SDMA prefetch"
 ### Task 6: Full verification, review, hardware ST, and PR update
 
 **Files:**
+
 - Review: all files changed since `7b3aeff7`
 - Inspect: `/data/linyifan/pypto/KNOWN_ISSUES.md`
 
 **Interfaces:**
+
 - Consumes: completed implementation and test suite
 - Produces: reviewed commits pushed to PR #2089 with verified CI restart
 

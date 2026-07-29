@@ -767,7 +767,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // before SPMD identity params. The Python wrapper mirrors this exact order.
   if (uses_sdma_workspace) {
     if (!first_param) stream_ << ", ";
-    first_param = false;
     fs_.sdma_workspace_arg_ssa = "%arg" + std::to_string(next_arg_idx++);
     stream_ << fs_.sdma_workspace_arg_ssa << ": !pto.ptr<i8>";
   }

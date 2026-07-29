@@ -56,7 +56,6 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto {
