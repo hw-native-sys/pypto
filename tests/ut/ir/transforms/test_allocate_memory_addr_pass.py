@@ -1615,9 +1615,14 @@ def test_dsa_quadratic_reuse_recognizer_exports_cross_resource_edges(tmp_path):
     assert int(document["metadata"]["recognized_write_after_read_candidates"]) >= len(expected_pairs)
     assert document["metadata"]["recognized_nested_control_candidates"] == "0"
     assert document["metadata"]["recognized_reuse_edges"] == str(len(expected_pairs))
-    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_pair_v4"
+    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_completion_pair_v5"
     assert document["metadata"]["reuse_penalty_weight_model"] == "unit_v1"
-    assert document["metadata"]["reuse_penalty_promotion_policy"] == "cross_resource_pair_unit_v4"
+    assert document["metadata"]["reuse_penalty_completion_exposure_model"] == "unmodeled_v1"
+    assert document["metadata"]["reuse_penalty_promotion_policy"] == "cross_resource_completion_pair_unit_v5"
+    assert (
+        document["metadata"]["reuse_cost_model"]
+        == "cross_resource_completion_pair_v5+unit_v1+unmodeled_exposure_v1"
+    )
     assert "external->ub@inbound_dma" in document["metadata"]["recognized_reuse_candidate_records_v3"]
 
     solution = json.loads((export_dir / "pypto_reuse_recognizer.dsa.solution.json").read_text())
@@ -1745,8 +1750,8 @@ def test_dsa_reuse_recognizer_records_same_resource_waw_without_promoting_it(tmp
 
 
 @requires_dsa
-def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promoting_it(tmp_path):
-    """The current v4 policy records and suppresses its SSA-ordering proxy."""
+def test_dsa_reuse_recognizer_promotes_logically_ordered_cross_resource_handoff(tmp_path):
+    """SSA ordering remains provenance and does not suppress a physical handoff."""
     export_dir = tmp_path / "quadratic"
     _allocate_with_dsa(
         _dsa_directly_ordered_handoff_program(),
@@ -1762,18 +1767,22 @@ def test_dsa_reuse_recognizer_records_logically_ordered_handoff_without_promotin
         document["metadata"]["recognized_ordered_evidence_candidates"]
         == document["metadata"]["recognized_reuse_candidates"]
     )
-    assert document["metadata"]["recognized_reuse_edges"] == "0"
-    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
+    assert document["metadata"]["recognized_reuse_edges"] == "1"
+    assert document["metadata"]["recognized_reuse_penalties"] == "1"
+    assert document["metadata"]["recognized_reuse_edge_records_v1"]
     witnessed_records = document["metadata"]["recognized_reuse_candidate_records_v4"].split(";")
     assert witnessed_records
     assert all("logical_order" in record and "dag_path=none" not in record for record in witnessed_records)
     assert all(re.search(r"dag_path=r\d+s\d+>r\d+s\d+", record) for record in witnessed_records)
-    assert "cost_model" not in document["problem"]
+    penalties = document["problem"]["cost_model"]["reuse_penalties"]
+    assert len(penalties) == 1
+    assert penalties[0]["reason"] == "cross_pipe"
+    assert penalties[0]["cost"] == 1
 
 
 @requires_dsa
-def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path):
-    """The current v4 policy records transitive SSA ordering as suppression evidence."""
+def test_dsa_quadratic_recognizer_keeps_transitive_order_as_edge_provenance(tmp_path):
+    """Transitive SSA evidence is exported without suppressing cross-resource edges."""
     _allocate_with_dsa(
         _dsa_transitively_ordered_handoff_program(),
         str(tmp_path),
@@ -1788,13 +1797,13 @@ def test_dsa_quadratic_recognizer_records_transitive_order_as_evidence(tmp_path)
         document["metadata"]["recognized_ordered_evidence_candidates"]
         == document["metadata"]["recognized_reuse_candidates"]
     )
-    assert document["metadata"]["recognized_reuse_edges"] == "0"
-    assert document["metadata"]["recognized_reuse_edge_records_v1"] == ""
+    assert document["metadata"]["recognized_reuse_edges"] == "3"
+    assert document["metadata"]["recognized_reuse_penalties"] == "3"
+    assert len(document["problem"]["cost_model"]["reuse_penalties"]) == 3
     witnessed_records = document["metadata"]["recognized_reuse_candidate_records_v4"].split(";")
     paths = [record.rsplit("dag_path=", 1)[1] for record in witnessed_records]
     assert paths and all(path != "none" for path in paths)
     assert any(path.count(">") >= 2 for path in paths)
-    assert "cost_model" not in document["problem"]
 
 
 @requires_dsa
@@ -1864,7 +1873,7 @@ def test_dsa_quadratic_recognizer_constructs_nested_cross_resource_edge(tmp_path
     document = json.loads((tmp_path / "pypto_nested_cross_resource.dsa.json").read_text())
     # The load feeding the vector consumer is not maximal: the consumer's
     # vector access dominates it.  Consequently (0, 3) is correctly absent.
-    expected_edges = {(0, 2), (1, 2), (2, 3)}
+    expected_edges = {(0, 1), (0, 2), (1, 2), (2, 3)}
     edge_records = document["metadata"]["recognized_reuse_edge_records_v1"].split(";")
     assert {
         (int(fields[0]), int(fields[1])) for fields in (record.split(",") for record in edge_records)
@@ -1872,18 +1881,20 @@ def test_dsa_quadratic_recognizer_constructs_nested_cross_resource_edge(tmp_path
     assert all(record.endswith(",cross_resource,nested") for record in edge_records)
     assert document["metadata"]["recognized_reuse_edges"] == str(len(expected_edges))
     assert document["metadata"]["recognized_reuse_penalties"] == str(len(expected_edges))
-    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_pair_v4"
+    assert document["metadata"]["reuse_edge_construction_policy"] == "cross_resource_completion_pair_v5"
     assert document["metadata"]["reuse_penalty_weight_model"] == "unit_v1"
+    assert document["metadata"]["reuse_penalty_completion_exposure_model"] == "unmodeled_v1"
     penalties = document["problem"]["cost_model"]["reuse_penalties"]
     assert {(entry["first"], entry["second"]) for entry in penalties} == expected_edges
     assert all(entry["reason"] == "cross_pipe" and entry["cost"] == 1 for entry in penalties)
-    # Pair (0, 1) has a cross-resource distance-one candidate, but no
-    # qualifying distance-zero record. Loop-carried evidence stays report-only.
+    # Pair (0, 1) is a cross-resource distance-one handoff. Loop-carried
+    # evidence remains eligible because SSA/source order does not prove
+    # asynchronous completion across the loop backedge.
     assert (
         "0,1,1->0,ub->ub@vector_compute=>external->ub@inbound_dma"
         in document["metadata"]["recognized_reuse_candidate_records_v3"]
     )
-    assert (0, 1) not in expected_edges
+    assert (0, 1) in expected_edges
 
 
 @requires_dsa

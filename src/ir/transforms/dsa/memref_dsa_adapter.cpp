@@ -298,11 +298,12 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
         std::to_string(recognition.in_loop_candidates);
     exported.document.metadata["recognized_loop_carried_candidates"] =
         std::to_string(recognition.loop_carried_candidates);
-    exported.document.metadata["reuse_edge_construction_policy"] = "cross_resource_pair_v4";
+    exported.document.metadata["reuse_edge_construction_policy"] = "cross_resource_completion_pair_v5";
     exported.document.metadata["reuse_penalty_weight_model"] = "unit_v1";
+    exported.document.metadata["reuse_penalty_completion_exposure_model"] = "unmodeled_v1";
     // Compatibility key for experiment readers created before edge
     // construction and weight assignment were separated.
-    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_resource_pair_unit_v4";
+    exported.document.metadata["reuse_penalty_promotion_policy"] = "cross_resource_completion_pair_unit_v5";
     std::ostringstream candidate_records;
     bool first_record = true;
     for (const RecognizedReuseCandidate& candidate : recognition.candidates) {
@@ -405,7 +406,8 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     exported.document.profile = ::dsa::BenchmarkProfile::kPyptoResearchV1;
     exported.document.problem.objective = ::dsa::FitThenMinimizeReuseCostObjective();
     exported.document.metadata["experimental_features"] = "recognized_reuse_penalties";
-    exported.document.metadata["reuse_cost_model"] = "cross_resource_pair_v4+unit_v1";
+    exported.document.metadata["reuse_cost_model"] =
+        "cross_resource_completion_pair_v5+unit_v1+unmodeled_exposure_v1";
     exported.document.metadata["recognized_reuse_penalties"] =
         std::to_string(exported.document.problem.cost_model->reuse_penalties.size());
   }
