@@ -286,8 +286,9 @@ class TestSubstituteExpr:
         x_new = _var("x_new")
         add_expr = ir.Add(x, y, DataType.INT64, _span())
         result = ir.substitute_expr(add_expr, [(x, x_new)])
-        assert isinstance(result, ir.Add)
         assert result is not add_expr
+        # Only the mapped operand is replaced; `y` keeps its identity.
+        ir.assert_structural_equal(result, ir.Add(x_new, y, DataType.INT64, _span()))
 
     def test_binary_no_change(self):
         """BinaryExpr with no matching vars is returned as-is."""
@@ -316,8 +317,8 @@ class TestSubstituteExpr:
         x_new = _var("x_new")
         neg = ir.Neg(x, DataType.INT64, _span())
         result = ir.substitute_expr(neg, [(x, x_new)])
-        assert isinstance(result, ir.Neg)
         assert result is not neg
+        ir.assert_structural_equal(result, ir.Neg(x_new, DataType.INT64, _span()))
 
     def test_unary_no_change(self):
         """UnaryExpr with no matching vars is returned as-is."""
@@ -334,8 +335,9 @@ class TestSubstituteExpr:
         op = ir.Op("test_op")
         call = ir.Call(op, [x], ir.ScalarType(DataType.INT64), _span())
         result = ir.substitute_expr(call, [(x, x_new)])
-        assert isinstance(result, ir.Call)
         assert result is not call
+        expected = ir.Call(op, [x_new], ir.ScalarType(DataType.INT64), _span())
+        ir.assert_structural_equal(result, expected)
 
     def test_call_no_change(self):
         """Call with no matching vars is returned as-is."""
@@ -353,8 +355,8 @@ class TestSubstituteExpr:
         x_new = _var("x_new")
         tup = ir.MakeTuple([x, y], _span())
         result = ir.substitute_expr(tup, [(x, x_new)])
-        assert isinstance(result, ir.MakeTuple)
         assert result is not tup
+        ir.assert_structural_equal(result, ir.MakeTuple([x_new, y], _span()))
 
     def test_make_tuple_no_change(self):
         """MakeTuple with no matching vars is returned as-is."""
@@ -372,8 +374,9 @@ class TestSubstituteExpr:
         tup = ir.MakeTuple([x, y], _span())
         get_item = ir.TupleGetItemExpr(tup, 0, _span())
         result = ir.substitute_expr(get_item, [(x, x_new)])
-        assert isinstance(result, ir.TupleGetItemExpr)
         assert result is not get_item
+        expected = ir.TupleGetItemExpr(ir.MakeTuple([x_new, y], _span()), 0, _span())
+        ir.assert_structural_equal(result, expected)
 
     def test_tuple_get_item_no_change(self):
         """TupleGetItemExpr with no matching vars is returned as-is."""
@@ -400,66 +403,134 @@ class TestSubstituteStmt:
         y_new = _var("y_new")
         stmt = ir.AssignStmt(x, y, _span())
         result = ir.substitute_stmt(stmt, [(y, y_new)])
+        # RHS becomes y_new; the LHS def site `x` is untouched. Def fields are
+        # auto-mapped by structural equality, so `x` needs an identity check.
         assert isinstance(result, ir.AssignStmt)
+        assert result.var is x
+        ir.assert_structural_equal(result, ir.AssignStmt(x, y_new, _span()))
+
+    def test_substitute_at_def_site(self):
+        """Substitution also rewrites the AssignStmt LHS (definition site).
+
+        Definition sites are compared with auto-mapping by structural equality
+        (see StructuralEqualImpl::VisitDefField), so the LHS is asserted by
+        object identity — a structural comparison alone would accept the
+        unsubstituted Var.
+        """
+        x = _var("x")
+        x_new = _var("x_new")
+        stmt = ir.AssignStmt(x, _const(1), _span())
+        result = ir.substitute_stmt(stmt, [(x, x_new)])
+        assert isinstance(result, ir.AssignStmt)
+        assert result.var is x_new
+        ir.assert_structural_equal(result, ir.AssignStmt(x_new, _const(1), _span()))
+
+    def test_def_and_use_stay_consistent(self):
+        """A Var substituted at its def site is also rewritten at every use."""
+        x = _var("x")
+        x_new = _var("x_new")
+        y, use = _assign("y", ir.Add(x, _const(1), DataType.INT64, _span()))
+        seq = ir.SeqStmts([ir.AssignStmt(x, _const(0), _span()), use], _span())
+        result = ir.substitute_stmt(seq, [(x, x_new)])
+        assert isinstance(result, ir.SeqStmts)
+        new_def, new_use = result.stmts
+        assert isinstance(new_def, ir.AssignStmt)
+        assert isinstance(new_use, ir.AssignStmt)
+        assert isinstance(new_use.value, ir.Add)
+        # Def and use must both point at the replacement — same object.
+        assert new_def.var is x_new
+        assert new_use.value.left is x_new
+        expected = ir.SeqStmts(
+            [
+                ir.AssignStmt(x_new, _const(0), _span()),
+                ir.AssignStmt(y, ir.Add(x_new, _const(1), DataType.INT64, _span()), _span()),
+            ],
+            _span(),
+        )
+        ir.assert_structural_equal(result, expected)
 
     def test_empty_map(self):
-        """Empty substitution map returns structurally equal stmt."""
+        """Empty substitution map returns the original stmt (copy-on-write)."""
         x = _var("x")
         stmt = ir.AssignStmt(x, _const(1), _span())
         result = ir.substitute_stmt(stmt, [])
-        assert result is not None
+        assert result is stmt
+
+    def test_no_match_returns_original(self):
+        """A map that matches nothing leaves the subtree untouched."""
+        x = _var("x")
+        _, inner = _assign("a", x)
+        seq = ir.SeqStmts([inner], _span())
+        result = ir.substitute_stmt(seq, [(_var("other"), _var("w"))])
+        assert result is seq
 
     def test_substitute_in_seq(self):
         """Substitution works through SeqStmts."""
         x = _var("x")
         y = _var("y")
         x_new = _var("x_new")
-        _, s1 = _assign("a", x)
-        _, s2 = _assign("b", y)
+        a, s1 = _assign("a", x)
+        b, s2 = _assign("b", y)
         seq = ir.SeqStmts([s1, s2], _span())
         result = ir.substitute_stmt(seq, [(x, x_new)])
+        expected = ir.SeqStmts([ir.AssignStmt(a, x_new, _span()), ir.AssignStmt(b, y, _span())], _span())
+        ir.assert_structural_equal(result, expected)
+        # The statement with no match keeps its identity (copy-on-write).
         assert isinstance(result, ir.SeqStmts)
+        assert result.stmts[1] is s2
 
     def test_for_stmt(self):
         """Substitution works through ForStmt start/stop/body."""
         x = _var("x")
         x_new = _var("x_new")
+        n = _var("n")
+        n_new = _var("n_new")
         loop_var = _var("i")
-        _, body_assign = _assign("r", x)
+        r, body_assign = _assign("r", x)
         body = ir.SeqStmts([body_assign, ir.YieldStmt(_span())], _span())
-        for_stmt = ir.ForStmt(loop_var, _const(0), _const(10), _const(1), [], body, [], _span())
-        result = ir.substitute_stmt(for_stmt, [(x, x_new)])
-        assert isinstance(result, ir.ForStmt)
+        for_stmt = ir.ForStmt(loop_var, _const(0), n, _const(1), [], body, [], _span())
+        result = ir.substitute_stmt(for_stmt, [(x, x_new), (n, n_new)])
+        expected_body = ir.SeqStmts([ir.AssignStmt(r, x_new, _span()), ir.YieldStmt(_span())], _span())
+        expected = ir.ForStmt(loop_var, _const(0), n_new, _const(1), [], expected_body, [], _span())
+        ir.assert_structural_equal(result, expected)
 
     def test_if_stmt(self):
         """Substitution works through IfStmt condition and branches."""
         x = _var("x")
         x_new = _var("x_new")
-        _, then_assign = _assign("a", x)
-        _, else_assign = _assign("b", _const(0))
-        cond = _const(1)
-        if_stmt = ir.IfStmt(cond, then_assign, else_assign, [], _span())
-        result = ir.substitute_stmt(if_stmt, [(x, x_new)])
-        assert isinstance(result, ir.IfStmt)
+        c = _var("c")
+        c_new = _var("c_new")
+        a, then_assign = _assign("a", x)
+        b, else_assign = _assign("b", _const(0))
+        if_stmt = ir.IfStmt(c, then_assign, else_assign, [], _span())
+        result = ir.substitute_stmt(if_stmt, [(x, x_new), (c, c_new)])
+        expected = ir.IfStmt(
+            c_new, ir.AssignStmt(a, x_new, _span()), ir.AssignStmt(b, _const(0), _span()), [], _span()
+        )
+        ir.assert_structural_equal(result, expected)
 
     def test_while_stmt(self):
         """Substitution works through WhileStmt condition and body."""
         x = _var("x")
         x_new = _var("x_new")
-        _, body_assign = _assign("w", x)
+        c = _var("c")
+        c_new = _var("c_new")
+        w, body_assign = _assign("w", x)
         body = ir.SeqStmts([body_assign, ir.YieldStmt(_span())], _span())
-        cond = _const(1)
-        while_stmt = ir.WhileStmt(cond, [], body, [], _span())
-        result = ir.substitute_stmt(while_stmt, [(x, x_new)])
-        assert isinstance(result, ir.WhileStmt)
+        while_stmt = ir.WhileStmt(c, [], body, [], _span())
+        result = ir.substitute_stmt(while_stmt, [(x, x_new), (c, c_new)])
+        expected_body = ir.SeqStmts([ir.AssignStmt(w, x_new, _span()), ir.YieldStmt(_span())], _span())
+        expected = ir.WhileStmt(c_new, [], expected_body, [], _span())
+        ir.assert_structural_equal(result, expected)
 
     def test_substitute_iter_arg_in_stmt(self):
         """Substitution replaces IterArg references in statement subtree."""
         ia = ir.IterArg("ia", ir.ScalarType(DataType.INT64), _const(0), _span())
         replacement = _var("ia_new")
-        stmt = ir.AssignStmt(_var("out"), ia, _span())
+        out = _var("out")
+        stmt = ir.AssignStmt(out, ia, _span())
         result = ir.substitute_stmt(stmt, [(ia, replacement)])
-        assert isinstance(result, ir.AssignStmt)
+        ir.assert_structural_equal(result, ir.AssignStmt(out, replacement, _span()))
 
     def test_eval_stmt(self):
         """Substitution works through EvalStmt."""
@@ -469,7 +540,8 @@ class TestSubstituteStmt:
         call = ir.Call(op, [x], ir.ScalarType(DataType.INT64), _span())
         eval_stmt = ir.EvalStmt(call, _span())
         result = ir.substitute_stmt(eval_stmt, [(x, x_new)])
-        assert isinstance(result, ir.EvalStmt)
+        expected = ir.EvalStmt(ir.Call(op, [x_new], ir.ScalarType(DataType.INT64), _span()), _span())
+        ir.assert_structural_equal(result, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +604,10 @@ class TestSubstituteTypeEmbeddedRefs:
         assert isinstance(new_defn, ir.AssignStmt)
         assert isinstance(new_use, ir.EvalStmt)
         assert isinstance(new_use.expr, ir.Call)
+        # A fresh Var must have been minted (`z`'s type embeds a substituted
+        # Var) — without this the shared-identity check below is trivially
+        # true for an unsubstituted tree.
+        assert new_defn.var is not z
         assert new_defn.var is new_use.expr.args[0]
 
     def test_chained_substitution_resolves_transitively(self):
@@ -566,7 +642,10 @@ class TestSubstituteTypeEmbeddedRefs:
         call = ir.Call(op, [a], ir.ScalarType(DataType.INT64), _span())
         # Should complete without crashing or hanging.
         result = ir.substitute_expr(call, [(a, b), (b, a)])
-        assert isinstance(result, ir.Call)
+        # The cycle guard stops transitive resolution but must not drop the
+        # substitution itself: the use of `a` still becomes `b`.
+        expected = ir.Call(op, [b], ir.ScalarType(DataType.INT64), _span())
+        ir.assert_structural_equal(result, expected)
 
     def test_call_return_type_is_remapped(self):
         """A Call's return type can be a TileType embedding a substituted Var.
