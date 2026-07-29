@@ -14,7 +14,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
@@ -38,10 +38,9 @@ class PrefetchProgram:
     def main(
         self,
         x: pl.Tensor[[1, 4096], pl.FP32],
-        ws: pl.Tensor[[1024], pl.INT8],
         out: pl.Tensor[[1, 128], pl.FP32],
     ) -> pl.Tensor[[1, 128], pl.FP32]:
-        ctx = pl.prefetch.make_context(ws)
+        ctx = pl.prefetch.make_context()
         evt = pl.prefetch.async_prefetch(x, ctx)
         session = pl.prefetch.session(ctx)
         pl.prefetch.wait(evt, session)
@@ -52,11 +51,12 @@ class PrefetchProgram:
 class TestPrefetchPTOCodegen:
     """Each prefetch op lowers to its PTOAS counterpart with the right operand types."""
 
-    def test_make_context_lowers_from_i8_pointer(self):
-        """The INT8 workspace param feeds ``pto.make_prefetch_async_context`` as ``!pto.ptr<i8>``."""
+    def test_make_context_lowers_from_hidden_i8_pointer(self):
+        """A synthetic INT8 pointer feeds ``pto.make_prefetch_async_context``."""
         mlir = _generate_mlir(PrefetchProgram)
+        assert re.search(r"func\.func @main\([^)]*!pto\.ptr<i8>[^)]*\)", mlir), mlir
         assert re.search(
-            r"= pto\.make_prefetch_async_context\(%\w+ : !pto\.ptr<i8>\) -> !pto\.prefetch_async_context",
+            r"pto\.make_prefetch_async_context\(%\w+ : !pto\.ptr<i8>\)",
             mlir,
         ), mlir
 
@@ -119,16 +119,15 @@ class MixedPrefetchProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def main(
         self,
-        a: pl.Tensor[[128, 128], pl.FP16],
+        a: pl.Tensor[[1, 128], pl.FP16],
         b: pl.Tensor[[128, 128], pl.FP16],
-        ws: pl.Tensor[[65536], pl.INT8],
-        out: pl.Tensor[[128, 128], pl.FP32],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        ctx = pl.prefetch.make_context(ws)
-        evt = pl.prefetch.async_prefetch(ws, ctx)
+        out: pl.Tensor[[1, 128], pl.FP32],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        ctx = pl.prefetch.make_context()
+        evt = pl.prefetch.async_prefetch(a, ctx)
         session = pl.prefetch.session(ctx)
         pl.prefetch.wait(evt, session)
-        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_a = pl.load(a, [0, 0], [1, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         return pl.store(pl.tile.matmul(tile_a, tile_b), [0, 0], out)
 
@@ -164,6 +163,82 @@ class TestPrefetchCoreAffinity:
         assert "AIC" in per_core and "AIV" in per_core, f"expected a mixed AIC/AIV split, got {per_core}"
         assert per_core["AIC"] == 0, f"prefetch leaked onto the cube lane: {per_core}"
         assert per_core["AIV"] > 0, f"prefetch missing from the vector lane: {per_core}"
+
+
+@pl.program
+class PrefetchArtifactProgram:
+    """End-to-end backend artifact with a runtime-injected SDMA workspace."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self,
+        x: pl.Tensor[[1, 4096], pl.FP32],
+        out: pl.Tensor[[1, 128], pl.FP32],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        ctx = pl.prefetch.make_context()
+        evt = pl.prefetch.async_prefetch(x, ctx)
+        session = pl.prefetch.session(ctx)
+        pl.prefetch.wait(evt, session)
+        return pl.store(pl.load(x, [0, 0], [1, 128]), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrate(self, x: pl.Tensor[[1, 4096], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+        out = pl.create_tensor([1, 128], dtype=pl.FP32)
+        return self.main(x, out)
+
+
+@pl.program
+class NonPrefetchArtifactProgram:
+    """Control backend artifact that does not require SDMA runtime state."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def plain(
+        self,
+        x: pl.Tensor[[1, 128], pl.FP32],
+        out: pl.Tensor[[1, 128], pl.FP32],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        return pl.store(pl.load(x, [0, 0], [1, 128]), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrate(self, x: pl.Tensor[[1, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+        out = pl.create_tensor([1, 128], dtype=pl.FP32)
+        return self.plain(x, out)
+
+
+class TestPrefetchBackendArtifact:
+    """The backend injects SDMA state without exposing a user argument."""
+
+    @staticmethod
+    def _generate(program_cls, output_dir, monkeypatch) -> dict[str, str]:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        monkeypatch.setattr(
+            pto_backend,
+            "_compile_pto_module",
+            lambda _pto_code, _module_name, _output_dir, _memory_planner=None: (
+                'extern "C" __global__ AICORE void test_func() {}\n'
+            ),
+        )
+        return pto_backend.generate(optimized, str(output_dir), skip_ptoas=False)
+
+    def test_prefetch_artifact_injects_hidden_sdma_workspace(self, tmp_path, monkeypatch):
+        result = self._generate(PrefetchArtifactProgram, tmp_path / "prefetch", monkeypatch)
+
+        wrapper = result["kernels/aiv/main.cpp"]
+        assert "get_dma_workspace(args, DMA_WORKSPACE_SDMA)" in wrapper
+        assert re.search(r"main\(x\w*, out\w*, __pypto_sdma_workspace", wrapper), wrapper
+        assert '"enable_sdma": True' in result["kernel_config.py"]
+        assert "workspace" not in result["orchestration/orchestrate.cpp"]
+        assert '"signature": [_D.IN, _D.OUT]' in result["kernel_config.py"]
+
+    def test_non_prefetch_artifact_does_not_enable_sdma(self, tmp_path, monkeypatch):
+        result = self._generate(NonPrefetchArtifactProgram, tmp_path / "plain", monkeypatch)
+
+        wrapper = result["kernels/aiv/plain.cpp"]
+        assert "get_dma_workspace" not in wrapper
+        assert '#include "intrinsic.h"' not in wrapper
+        assert '"enable_sdma"' not in result["kernel_config.py"]
 
 
 if __name__ == "__main__":

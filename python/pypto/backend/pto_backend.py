@@ -504,6 +504,7 @@ _SPMD_BLOCK_OPS = frozenset(
     {_ir_core.get_op("tile.get_block_idx").name, _ir_core.get_op("tile.get_block_num").name}
 )
 _SUBBLOCK_OPS = frozenset({_ir_core.get_op("tile.get_subblock_idx").name})
+_SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -544,6 +545,11 @@ def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
     return _function_uses_ops(func, _SUBBLOCK_OPS)
 
 
+def _uses_sdma_workspace(func: _ir_core.Function) -> bool:
+    """Return whether the function needs the runtime-owned SDMA workspace."""
+    return _function_uses_ops(func, _SDMA_WORKSPACE_OPS)
+
+
 def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
     """Return whether the function must be dispatched on both AIV lanes."""
     split_mode = getattr(func, "split", None)
@@ -575,7 +581,11 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
 
 
 def _generate_kernel_header(
-    func: _ir_core.Function, *, uses_spmd: bool | None = None, uses_subblock: bool | None = None
+    func: _ir_core.Function,
+    *,
+    uses_spmd: bool | None = None,
+    uses_subblock: bool | None = None,
+    uses_sdma: bool | None = None,
 ) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
@@ -606,17 +616,17 @@ def _generate_kernel_header(
             """
         )
 
-    # SPMD: include intrinsic.h so the wrapper can call get_block_idx(args) /
-    # get_block_num(args) / get_sub_block_id(args). The identity values flow
-    # into the kernel as trailing wrapper-passed parameters, so there is no
-    # macro shadow, no [[block_local]] static / thread_local storage, and no
-    # __CPU_SIM fork. subblock_idx needs the include even when the function
-    # uses no block ops.
+    # Include intrinsic.h when the wrapper needs runtime SPMD identity or the
+    # SDMA workspace. The SPMD values flow into the kernel as trailing
+    # wrapper-passed parameters, so there is no macro shadow, no
+    # [[block_local]] static / thread_local storage, and no __CPU_SIM fork.
     if uses_spmd is None:
         uses_spmd = _uses_spmd_block_ops(func)
     if uses_subblock is None:
         uses_subblock = _uses_dynamic_subblock_id(func)
-    needs_intrinsic = uses_spmd or uses_subblock
+    if uses_sdma is None:
+        uses_sdma = _uses_sdma_workspace(func)
+    needs_intrinsic = uses_spmd or uses_subblock or uses_sdma
     spmd_override = '#include "intrinsic.h"\n' if needs_intrinsic else ""
 
     return _KERNEL_HEADER.format(
@@ -642,7 +652,13 @@ def _generate_kernel_wrapper(
     func_uses_spmd = _uses_spmd_block_ops(func)
     uses_spmd = group_uses_spmd or func_uses_spmd
     func_uses_subblock = _uses_dynamic_subblock_id(func)
-    header = _generate_kernel_header(func, uses_spmd=uses_spmd, uses_subblock=func_uses_subblock)
+    func_uses_sdma = _uses_sdma_workspace(func)
+    header = _generate_kernel_header(
+        func,
+        uses_spmd=uses_spmd,
+        uses_subblock=func_uses_subblock,
+        uses_sdma=func_uses_sdma,
+    )
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
     runtime_subblock_setup = ""
@@ -680,11 +696,20 @@ def _generate_kernel_wrapper(
             "    int32_t __pypto_spmd_subblock_idx = get_sub_block_id(args);\n\n"
         )
 
-    # PTOCodegen appends the synthetic i32 identity params at the end of the
-    # func.func signature in canonical order (block_idx, block_num,
-    # subblock_idx), each gated on the ops func itself uses. Mirror that exact
-    # order here when forwarding the call.
+    sdma_setup = ""
+    if func_uses_sdma:
+        sdma_setup = (
+            "    __gm__ int8_t* __pypto_sdma_workspace = "
+            "reinterpret_cast<__gm__ int8_t*>("
+            "get_dma_workspace(args, DMA_WORKSPACE_SDMA));\n\n"
+        )
+
+    # PTOCodegen appends the SDMA workspace after user-derived arguments, then
+    # the synthetic i32 identity params in canonical order (block_idx,
+    # block_num, subblock_idx). Mirror that exact order here.
     call_args_list = list(var_names)
+    if func_uses_sdma:
+        call_args_list.append("__pypto_sdma_workspace")
     if func_uses_spmd:
         call_args_list = call_args_list + ["__pypto_spmd_block_idx", "__pypto_spmd_block_num"]
     if func_uses_subblock:
@@ -700,6 +725,7 @@ def _generate_kernel_wrapper(
         f"{spmd_args_setup}"
         f"{subblock_arg_setup}"
         f"{unpacking_code}\n"
+        f"{sdma_setup}"
         f"    // Forward to ptoas-generated function\n"
         f"    {func.name}({call_args});\n"
         "}\n"
@@ -725,6 +751,7 @@ def _generate_config_file(
     orchestration_signature: list[str] | None = None,
     func_name_to_external_source: dict[str, str] | None = None,
     func_name_to_external_include_dirs: dict[str, tuple[str, ...]] | None = None,
+    enable_sdma: bool = False,
 ) -> str:
     """Generate kernel_config.py content.
 
@@ -750,6 +777,9 @@ def _generate_config_file(
 
     ``func_name_to_external_include_dirs`` maps external kernel names to their
     ordered CCEC include search paths. Non-external kernels ignore this map.
+
+    ``enable_sdma`` records that at least one emitted kernel consumes the
+    runtime-owned SDMA workspace.
     """
     func_name_to_signature = func_name_to_signature or {}
     func_name_to_external_source = func_name_to_external_source or {}
@@ -761,8 +791,10 @@ def _generate_config_file(
         "RUNTIME_CONFIG = {",
         '\t"runtime": "tensormap_and_ringbuffer",',
         '\t"aicpu_thread_num": 4,',
-        "}\n",
     ]
+    if enable_sdma:
+        runtime_lines.append('\t"enable_sdma": True,')
+    runtime_lines.append("}\n")
 
     header = [
         "# Kernel and Orchestration Configuration\n",
@@ -1498,6 +1530,10 @@ def _generate_single_chip(
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
+    emitted_incore_funcs = [
+        func for members in groups.values() for func in members if _external_source_of(func) is None
+    ] + [func for func in ungrouped if _external_source_of(func) is None]
+
     # External kernels are referenced at their original path in the manifest
     # (kept beside their sibling sources so relative #include "../..." resolve),
     # so PyPTO neither codegens nor copies them.
@@ -1603,6 +1639,7 @@ def _generate_single_chip(
                     orch_result.orchestration_signature,
                     func_name_to_external_source,
                     func_name_to_external_include_dirs,
+                    enable_sdma=any(_uses_sdma_workspace(func) for func in emitted_incore_funcs),
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

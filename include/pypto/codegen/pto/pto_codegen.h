@@ -424,6 +424,17 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetGMSlotBufferSSA() const;
 
   /**
+   * @brief SSA name of the synthetic SDMA workspace pointer parameter.
+   *
+   * When the current function uses prefetch.make_context, PTOCodegen appends
+   * one ``!pto.ptr<i8>`` parameter after the user-derived arguments and before
+   * the synthetic SPMD identity parameters. The kernel wrapper resolves the
+   * pointer from the runtime DMA workspace and forwards it as a hidden call
+   * argument. Returns empty when the function does not use prefetch.
+   */
+  [[nodiscard]] std::string GetSdmaWorkspaceArgSSA() const { return fs_.sdma_workspace_arg_ssa; }
+
+  /**
    * @brief SSA name of the synthetic SPMD block_idx param.
    *
    * When the current function uses tile.get_block_idx / tile.get_block_num,
@@ -822,6 +833,10 @@ class PTOCodegen : public CodegenBase {
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
     std::set<const ir::Var*> ffts_workspace_vars;
 
+    /// SSA name of the synthetic runtime-owned SDMA workspace pointer param.
+    /// Empty when the current function does not use prefetch.make_context.
+    std::string sdma_workspace_arg_ssa;
+
     /// SSA names of the synthetic SPMD block_idx/block_num params, appended at
     /// the func.func signature tail. Empty when the current function does not
     /// use tile.get_block_idx / tile.get_block_num.
@@ -885,6 +900,7 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_region_by_pipe.clear();
       ffts_workspace_vars.clear();
 
+      sdma_workspace_arg_ssa.clear();
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
       spmd_subblock_idx_arg.clear();

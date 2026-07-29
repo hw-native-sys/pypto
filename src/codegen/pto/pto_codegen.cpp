@@ -297,9 +297,9 @@ std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
 }
 
 // Visitor to collect all MemRef objects from TileType variables. Also
-// piggy-backs SPMD identity detection (tile.get_block_idx / tile.get_block_num
-// / tile.get_subblock_idx) on the same body walk so callers do not need a
-// separate IR traversal.
+// piggy-backs synthetic-parameter detection (prefetch.make_context and the
+// SPMD identity ops) on the same body walk so callers do not need a separate
+// IR traversal.
 class MemRefCollectorVisitor : public ir::IRVisitor {
  public:
   MemRefCollectorVisitor() = default;
@@ -308,6 +308,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   [[nodiscard]] const std::map<const ir::Var*, std::shared_ptr<const TileType>>& GetMemRefTileTypes() const {
     return memref_tile_types_;
   }
+
+  /// Returns true when the visited body invokes prefetch.make_context. Drives
+  /// PTOCodegen's decision to append the hidden runtime-owned SDMA workspace
+  /// pointer to the emitted func.func signature.
+  [[nodiscard]] bool UsesSdmaWorkspace() const { return uses_sdma_workspace_; }
 
   /// Returns true when the visited body invokes tile.get_block_idx or
   /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
@@ -339,6 +344,9 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
   void VisitExpr_(const ir::CallPtr& op) override {
     if (op->op_) {
+      if (!uses_sdma_workspace_ && ir::IsOp(op, "prefetch.make_context")) {
+        uses_sdma_workspace_ = true;
+      }
       if (!uses_spmd_block_ops_ &&
           (ir::IsOp(op, "tile.get_block_idx") || ir::IsOp(op, "tile.get_block_num"))) {
         uses_spmd_block_ops_ = true;
@@ -360,6 +368,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::set<const ir::Var*> seen_bases_;
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
+  bool uses_sdma_workspace_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
   std::set<const ir::Var*> ffts_workspace_vars_;
@@ -584,21 +593,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   BuildVarToMemRefMapping(func);
 
-  // One body walk: collects MemRefs and detects SPMD identity usage. SPMD
-  // identity params are injected at codegen time (not at IR level) when the
-  // function body invokes tile.get_block_idx / tile.get_block_num /
-  // tile.get_subblock_idx; they are appended at the end of the func.func
-  // signature with named SSAs, and the ops lower to arith.index_cast of those
-  // params (the kernel wrapper supplies the runtime values via
-  // intrinsic.h::get_block_idx(args) / get_block_num(args) /
-  // get_sub_block_id(args)).
+  // One body walk: collects MemRefs and detects hidden runtime parameters.
+  // The SDMA workspace and SPMD identity params are injected at codegen time
+  // (not at IR level) when the function body invokes the corresponding ops.
   MemRefCollectorVisitor collector;
   if (func->body_) {
     collector.VisitStmt(func->body_);
   }
+  const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
   fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
+  if (uses_sdma_workspace) {
+    fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
+  }
   if (uses_spmd_params) {
     fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
     fs_.used_ssa_names.insert("__pypto_spmd_block_num");
@@ -755,10 +763,17 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(dyn_var, arg_name);
   }
 
-  // Append SPMD identity params after dynamic-dim args, in canonical order
-  // (block_idx, block_num, subblock_idx). Each is appended independently based
-  // on the ops the function actually uses; the Python kernel wrapper
-  // (pto_backend.py) mirrors this exact order when forwarding the call args.
+  // Append the hidden SDMA workspace pointer after user-derived arguments and
+  // before SPMD identity params. The Python wrapper mirrors this exact order.
+  if (uses_sdma_workspace) {
+    fs_.sdma_workspace_arg_ssa = "%arg" + std::to_string(next_arg_idx++);
+    stream_ << ", " << fs_.sdma_workspace_arg_ssa << ": !pto.ptr<i8>";
+  }
+
+  // Append SPMD identity params after the dynamic-dim and SDMA workspace args,
+  // in canonical order (block_idx, block_num, subblock_idx). Each is appended
+  // independently based on the ops the function actually uses; the Python
+  // kernel wrapper mirrors this exact order when forwarding the call args.
   // Named SSAs make the synthetic origin obvious in the emitted MLIR and let
   // lowerings refer to them via PTOCodegen::GetSpmd{Block,Subblock}*ArgSSA().
   if (uses_spmd_params) {

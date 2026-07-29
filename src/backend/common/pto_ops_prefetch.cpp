@@ -22,7 +22,7 @@
  *
  * Emitted shape for the full sequence::
  *
- *     %ctx = pto.make_prefetch_async_context(%arg1 : !pto.ptr<i8>)
+ *     %ctx = pto.make_prefetch_async_context(%arg2 : !pto.ptr<i8>)
  *         -> !pto.prefetch_async_context
  *     %x_pview = pto.partition_view %x_view, offsets = [%c0], sizes = [%c4096]
  *         : !pto.tensor_view<4096xf32> -> !pto.partition_tensor_view<4096xf32>
@@ -136,26 +136,17 @@ void RegisterPrefetchOps(Backend& backend, const std::unordered_set<std::string>
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
-  // prefetch.make_context(workspace) -> pto.make_prefetch_async_context.
-  // The workspace is an INT8 GM tensor, whose function-parameter SSA is already
-  // the `!pto.ptr<i8>` that PTOAS expects — no view needed.
+  // prefetch.make_context() -> pto.make_prefetch_async_context.
+  // PTOCodegen injects the runtime-owned `!pto.ptr<i8>` function parameter.
   reg("prefetch.make_context", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = AsPto(codegen_base);
-    pto_ops_detail::CheckArity(op, "pto.make_prefetch_async_context", 1);
-    auto workspace = ir::AsVarLike(op->args_[0]);
-    INTERNAL_CHECK_SPAN(workspace, op->span_)
-        << "prefetch.make_context workspace must be a Var or IterArg, got " << op->args_[0]->TypeName();
-    auto workspace_type = ir::AsTensorTypeLike(workspace->GetType());
-    INTERNAL_CHECK_SPAN(workspace_type, op->span_)
-        << "prefetch.make_context workspace must have TensorType, got " << workspace->GetType()->TypeName();
-
-    const std::string ws_ptr = cg.GetTensorBasePtr(workspace);
+    pto_ops_detail::CheckArity(op, "pto.make_prefetch_async_context", 0);
+    const std::string ws_ptr = cg.GetSdmaWorkspaceArgSSA();
     INTERNAL_CHECK_SPAN(!ws_ptr.empty(), op->span_)
-        << "prefetch.make_context: no base pointer bound for workspace '" << workspace->name_hint_ << "'";
+        << "Internal error: prefetch.make_context was not detected by PTOCodegen's function pre-scan";
 
     const std::string ctx = ResultSSA(cg);
-    cg.Emit(ctx + " = pto.make_prefetch_async_context(" + ws_ptr + " : !pto.ptr<" +
-            cg.GetTypeString(workspace_type->dtype_) + ">) -> " + kCtxType);
+    cg.Emit(ctx + " = pto.make_prefetch_async_context(" + ws_ptr + " : !pto.ptr<i8>) -> " + kCtxType);
     cg.SetCurrentExprValue(ctx);
     return "";
   });
