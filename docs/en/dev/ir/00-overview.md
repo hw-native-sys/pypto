@@ -4,7 +4,7 @@
 
 PyPTO is a compiler framework for AI accelerators. Users describe computation programs using the Python DSL, which then flows through the compilation pipeline to produce C++ kernel code that runs on the target hardware.
 
-![PyPTO Architecture](../../../images/pypto-arch.png)
+![PyPTO Architecture](../../../assets/pypto-arch.png)
 
 The compilation pipeline is organized into four main layers:
 

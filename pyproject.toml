@@ -45,6 +45,23 @@ dev = [
     "ruff==0.14.8",
     "clang-tidy==21.1.0",
 ]
+# Documentation site toolchain (see mkdocs.yml). These build the site from the
+# markdown under `docs/` and do NOT require pypto itself to be installed --
+# mkdocstrings reads docstrings statically via griffe -- so CI installs this list
+# directly rather than through `pip install -e ".[docs]"`, which would trigger a
+# full C++ build for a docs-only job.
+docs = [
+    "mkdocs>=1.6.0,<2",
+    "mkdocs-material>=9.5.0,<10",
+    "mkdocs-static-i18n>=1.2.0,<2",
+    "mkdocstrings[python]>=0.26.0,<1",
+    # Chinese word segmentation for the search index (`plugins.search.lang: [en, zh]`).
+    "jieba>=0.42.1",
+    # Version selector. Not wired into the deploy job yet -- enabling it depends on
+    # PyPTO's release cadence landing first, so a documented version is a fixed
+    # thing to cite rather than a moving target.
+    "mike>=2.1.0,<3",
+]
 
 [project.urls]
 Homepage = "https://github.com/hw-native-sys/pypto"

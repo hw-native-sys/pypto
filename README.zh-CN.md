@@ -121,6 +121,30 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 系统测试请参见 `tests/st/README.md`。
 
+## 文档
+
+文档站点发布在 **<https://hw-native-sys.github.io/pypto/>**。
+其源文件是 [`docs/`](docs/) 下的 markdown，在 GitHub 上可直接阅读：
+
+| 章节 | 内容 |
+| ---- | ---- |
+| [用户手册](docs/zh-cn/user/index.md) | 入门、语言指南、操作参考、调试 |
+| [参考](docs/zh-cn/reference/index.md) | PTO ISA —— 集群架构、TPUSH/TPOP、缓冲区管理 |
+| [开发者](docs/zh-cn/dev/index.md) | IR、passes、代码生成、后端分派 |
+| [运行时](https://hw-native-sys.github.io/simpler/) | 执行已编译程序的 `simpler` 运行时 |
+
+英文文档位于 [`docs/en/`](docs/en/)（以英文为准），可从站点的语言菜单切换。
+
+本地构建站点：
+
+```bash
+# 只需文档工具链 —— 构建站点不需要已编译的 pypto
+pip install "mkdocs>=1.6" "mkdocs-material" "mkdocs-static-i18n" "mkdocstrings[python]" jieba
+
+mkdocs serve            # 在 http://127.0.0.1:8000 实时预览
+mkdocs build --strict   # 与 CI 一致；断链会导致构建失败
+```
+
 ## 许可证
 
 本项目基于 **CANN Open Software License Agreement Version 2.0** 许可。

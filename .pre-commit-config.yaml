@@ -34,11 +34,19 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-docs-nav
+          name: check-docs-nav
+          entry: python tests/lint/check_docs_nav.py
+          language: python
+          language_version: python3
+          additional_dependencies: [pyyaml]
+          pass_filenames: false
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
         - id: check-added-large-files
-          exclude: ^docs/images/
+          exclude: ^docs/assets/
         - id: check-yaml
         - id: end-of-file-fixer
         - id: trailing-whitespace

@@ -1,0 +1,260 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+#
+# MkDocs configuration for the PyPTO documentation site.
+#
+# The markdown under `docs/` is the single source of truth and must stay readable
+# directly on GitHub; this file only describes how it is rendered. The built site
+# is never committed -- CI publishes it to the `gh-pages` branch.
+#
+# Build locally:
+#   pip install -e ".[docs]"
+#   mkdocs serve            # live preview on http://127.0.0.1:8000
+#   mkdocs build --strict   # what CI runs; warnings (broken links) fail the build
+
+site_name: PyPTO
+site_description: A high-performance programming framework for tile-centric computing
+site_url: https://hw-native-sys.github.io/pypto/
+repo_url: https://github.com/hw-native-sys/pypto
+repo_name: hw-native-sys/pypto
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; PyPTO Contributors
+
+docs_dir: docs
+site_dir: site
+
+# Broken internal links must fail the build, not warn. `mkdocs build --strict`
+# promotes every warning to an error; these settings decide what counts as one.
+validation:
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+  nav:
+    omitted_files: warn
+    not_found: warn
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  # `lang: [en, zh]` needs `jieba` for Chinese word segmentation -- it ships in
+  # the `docs` extra of pyproject.toml.
+  - search:
+      lang:
+        - en
+        - zh
+  # Folder-structured i18n: `docs/en/**` is the default locale and is served at
+  # the site root, `docs/zh-cn/**` under `/zh-cn/`. The `nav` below is declared
+  # with default-locale (`en/...`) paths; the plugin swaps in the localized file
+  # for every other locale, so page titles come from each locale's own H1.
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: zh-cn
+          name: 简体中文
+          build: true
+          nav_translations:
+            Home: 首页
+            User Manual: 用户手册
+            Reference: 参考
+            Developer: 开发者
+            Runtime: 运行时
+            PTO ISA: PTO ISA
+            IR: IR
+            Passes: Passes
+            Language: 语言
+            Code Generation: 代码生成
+            Backend: 后端
+            Debug: 调试
+  # Renders `pl.*` / `pypto.runtime.*` API pages from source docstrings. No
+  # generated pages are wired into the nav yet -- that lands with the Reference
+  # chapter (see issue #2120); the handler is configured here so the contract
+  # (Google-style docstrings) is fixed from day one.
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            members_order: source
+
+# Rewrites repo-relative links that escape `docs/` (source files, `.claude/rules`,
+# `examples/`) into GitHub blob URLs at build time. The markdown keeps working
+# relative links for readers browsing the repo, and the site gets links that
+# resolve -- without which `--strict` fails on every such reference.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/hw-native-sys/pypto
+      name: PyPTO on GitHub
+
+# Every page under `docs/en/` must appear below, and every one of them must have a
+# `docs/zh-cn/` mirror. `tests/lint/check_docs_nav.py` enforces both in CI, so adding a
+# doc without a nav entry (which would leave it reachable only by direct URL) fails.
+nav:
+  - Home: en/index.md
+  - User Manual:
+      - en/user/index.md
+      - en/user/00-getting_started.md
+      - en/user/01-language_guide.md
+      - en/user/02-operation_reference.md
+      - en/user/03-torch_codegen_debug.md
+  - Reference:
+      - en/reference/index.md
+      - PTO ISA:
+          - en/reference/pto-isa/index.md
+          - en/reference/pto-isa/00-cluster_architecture.md
+          - en/reference/pto-isa/01-tpush_tpop.md
+          - en/reference/pto-isa/02-buffer_management.md
+  - Developer:
+      - en/dev/index.md
+      - en/dev/00-ecosystem.md
+      - en/dev/01-compile-profiling.md
+      - en/dev/02-error-handling.md
+      - en/dev/03-logging.md
+      - en/dev/03-runtime-dfx.md
+      - en/dev/04-simulator-trace-cleaning.md
+      - en/dev/05-runtime-ring-sizing.md
+      - en/dev/06-persistent-l3.md
+      - en/dev/07-memory-map.md
+      - en/dev/distributed_ops.md
+      - en/dev/ptoas-op-status.md
+      - IR:
+          - en/dev/ir/index.md
+          - en/dev/ir/00-overview.md
+          - en/dev/ir/01-hierarchy.md
+          - en/dev/ir/02-types.md
+          - en/dev/ir/03-structural_comparison.md
+          - en/dev/ir/04-serialization.md
+          - en/dev/ir/05-operators.md
+          - en/dev/ir/06-builder.md
+          - en/dev/ir/07-parser.md
+      - Passes:
+          - en/dev/passes/index.md
+          - en/dev/passes/00-pass_manager.md
+          - en/dev/passes/01-inline_functions.md
+          - en/dev/passes/02-unroll_loops.md
+          - en/dev/passes/03-ctrl_flow_transform.md
+          - en/dev/passes/04-convert_to_ssa.md
+          - en/dev/passes/05-simplify.md
+          - en/dev/passes/06-flatten_call_expr.md
+          - en/dev/passes/07-outline_hierarchy_scopes.md
+          - en/dev/passes/08-outline_incore_scopes.md
+          - en/dev/passes/09-outline_cluster_scopes.md
+          - en/dev/passes/10-convert_tensor_to_tile_ops.md
+          - en/dev/passes/11-optimize_orch_tensors.md
+          - en/dev/passes/12-lower_composite_ops.md
+          - en/dev/passes/13-flatten_tile_nd_to_2d.md
+          - en/dev/passes/14-legalize_tile_cast.md
+          - en/dev/passes/15-auto_tile_matmul_l0.md
+          - en/dev/passes/16-canonicalize_tile_slice.md
+          - en/dev/passes/17-infer_tile_memory_space.md
+          - en/dev/passes/18-resolve_backend_op_layouts.md
+          - en/dev/passes/19-lower_auto_vector_split.md
+          - en/dev/passes/20-expand_mixed_kernel.md
+          - en/dev/passes/21-inject_gm_pipe_buffer.md
+          - en/dev/passes/22-split_vector_kernel.md
+          - en/dev/passes/23-stamp_tfree_split.md
+          - en/dev/passes/24-normalize_return_order.md
+          - en/dev/passes/25-skew_cross_core_pipeline.md
+          - en/dev/passes/26-lower_pipeline_loops.md
+          - en/dev/passes/27-canonicalize_io_order.md
+          - en/dev/passes/28-materialize_tensor_strides.md
+          - en/dev/passes/29-init_memref.md
+          - en/dev/passes/30-materialize_semantic_aliases.md
+          - en/dev/passes/31-memory_reuse.md
+          - en/dev/passes/32-allocate_memory_addr.md
+          - en/dev/passes/33-fold_no_op_reshape.md
+          - en/dev/passes/34-fuse_create_assemble_to_slice.md
+          - en/dev/passes/35-derive_call_directions.md
+          - en/dev/passes/36-auto_derive_task_dependencies.md
+          - en/dev/passes/37-expand_manual_phase_fence.md
+          - en/dev/passes/38-synthesize_allreduce_signals.md
+          - en/dev/passes/39-materialize_comm_domain_scopes.md
+          - en/dev/passes/40-lower_host_tensor_collectives.md
+          - en/dev/passes/41-materialize_dist_tensor_ctx.md
+          - en/dev/passes/42-materialize_runtime_scopes.md
+          - en/dev/passes/43-classify_iter_arg_carry.md
+          - en/dev/passes/91-utility_passes.md
+          - en/dev/passes/92-diagnostics.md
+          - en/dev/passes/99-verifier.md
+          - en/dev/passes/loop-carried-dep-compression.md
+          - en/dev/passes/utils.md
+      - Language:
+          - en/dev/language/index.md
+          - en/dev/language/00-python_syntax.md
+          - en/dev/language/01-external-kernels.md
+      - Code Generation:
+          - en/dev/codegen/index.md
+          - en/dev/codegen/00-pto_codegen.md
+          - en/dev/codegen/01-orchestration_codegen.md
+      - Backend:
+          - en/dev/backend/index.md
+          - en/dev/backend/00-backend_handler.md
+      - Debug:
+          - en/dev/debug/index.md
+          - en/dev/debug/00-torch_codegen.md
+  - Runtime: https://hw-native-sys.github.io/simpler/

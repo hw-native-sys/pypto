@@ -4,7 +4,7 @@
 
 PyPTO 是一个面向 AI 加速器的编译框架。用户使用 Python DSL 描述计算程序，经过编译管线最终生成可在硬件上执行的 C++ 内核代码。
 
-![PyPTO 架构](../../../images/pypto-arch.png)
+![PyPTO 架构](../../../assets/pypto-arch.png)
 
 编译管线由四个主要层次组成：
 
