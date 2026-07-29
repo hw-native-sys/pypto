@@ -81,10 +81,14 @@ Select a pass in the sidebar to compare its input and output side by side. Press
 move to the previous visible pass. Keyboard navigation is ignored while a
 text-entry control has focus.
 
-Replacement rows use light delete/insert backgrounds, with the exact changed
-characters emphasized in stronger red and green. Lines present on only one side
-remain full-line deletions or insertions. Scrolling either code pane keeps the
-before and after views synchronized vertically and horizontally.
+Within replacement blocks, the viewer aligns single-line Python calls by their
+qualified operation name. This keeps related operations paired when a pass adds
+layout conversions around them, while the surrounding lines remain full-line
+deletions or insertions. Replacement rows use light delete/insert backgrounds,
+with the exact changed characters emphasized in stronger red and green. Both
+panes use the same scrollable canvas width so row backgrounds cover the complete
+code line. Scrolling either pane keeps the before and after views synchronized
+vertically and horizontally.
 
 ### Copy snapshots
 
