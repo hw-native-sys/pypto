@@ -22,6 +22,7 @@ truth and stays clickable on GitHub.
 See https://www.mkdocs.org/user-guide/configuration/#hooks for the hook protocol.
 """
 
+import os
 import posixpath
 import re
 from typing import Any
@@ -30,9 +31,12 @@ from typing import Any
 # with an optional `"title"` after the target. Group 3 is the target.
 _LINK = re.compile(r'(!?)\[([^\]]*)\]\(([^)\s]+)((?:\s+"[^"]*")?)\)')
 
-# Line ranges (`#L38`, `#L63-L81`) are GitHub anchors, not markdown headings, and
-# must survive the rewrite intact.
-_GITHUB_BLOB = "https://github.com/hw-native-sys/pypto/blob/main/"
+_REPO_URL = "https://github.com/hw-native-sys/pypto"
+
+# Ref the rewritten links point at. CI sets DOCS_REF -- `main` on a push, the
+# commit SHA on a pull request, where a newly added source file does not exist on
+# main yet and a `blob/main` link would 404. A local build falls back to main.
+_REF = os.environ.get("DOCS_REF", "main")
 
 # Fenced code blocks must not be rewritten — a link inside an example is content,
 # not navigation.
@@ -49,6 +53,18 @@ def _is_repo_relative(target: str) -> bool:
 def _split_fragment(target: str) -> tuple[str, str]:
     path, sep, fragment = target.partition("#")
     return path, sep + fragment
+
+
+def _repo_url(repo_path: str, was_directory: bool) -> str:
+    """Build the GitHub URL for a repo-relative path.
+
+    GitHub serves directories under `tree/` and files under `blob/`; a `blob/` URL
+    for a directory 404s. A trailing slash in the source link is the signal, the
+    same heuristic the runtime's docs hook uses -- the alternative, stat-ing the
+    path, would make the build depend on the working tree's layout.
+    """
+    kind = "tree" if was_directory else "blob"
+    return f"{_REPO_URL}/{kind}/{_REF}/{repo_path}"
 
 
 def _code_spans(markdown: str) -> list[tuple[int, int]]:
@@ -89,7 +105,11 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
             return match.group(0)
 
         bang, label, target, title = match.groups()
-        if not _is_repo_relative(target):
+        # Images are left alone: a `blob/` URL renders as an HTML page, not an
+        # image, so rewriting one would silently produce a broken image. Every
+        # image in the docs lives under `docs/assets/`; if one ever points outside
+        # `docs/`, `--strict` should surface it rather than this hook hiding it.
+        if bang or not _is_repo_relative(target):
             return match.group(0)
 
         path, fragment = _split_fragment(target)
@@ -105,6 +125,6 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
         if repo_path.startswith("../"):  # escaped the repository itself — leave it
             return match.group(0)
 
-        return f"{bang}[{label}]({_GITHUB_BLOB}{repo_path}{fragment}{title})"
+        return f"[{label}]({_repo_url(repo_path, path.endswith('/'))}{fragment}{title})"
 
     return _LINK.sub(rewrite, markdown)

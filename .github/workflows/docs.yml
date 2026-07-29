@@ -1,129 +1,86 @@
 name: Docs
 
-# Builds the documentation site from `docs/` and publishes it to the `gh-pages`
-# branch, which GitHub Pages serves at https://hw-native-sys.github.io/pypto/.
+# Builds the documentation site from `docs/` and publishes it to GitHub Pages at
+# https://hw-native-sys.github.io/pypto/.
 #
-# Pull requests run the build only -- `mkdocs build --strict` turns broken links
-# and every other warning into a failure, so a PR that breaks a cross-reference is
-# caught before it reaches main.
+# Pull requests build only -- `mkdocs build --strict` turns broken links, pages
+# missing from the nav, and every other warning into a failure, so a PR that
+# breaks a cross-reference is caught before it reaches main.
 #
-# The site is a build artifact and is never committed to main; the markdown under
-# `docs/` stays the single source of truth.
+# Publishing goes through actions/deploy-pages rather than a `gh-pages` branch,
+# matching the runtime's docs job (hw-native-sys/simpler). The site is a build
+# artifact and is never committed; the markdown under `docs/` stays the single
+# source of truth.
+#
+# Repository setting required once: Settings -> Pages -> Source = "GitHub Actions".
 
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - "scripts/mkdocs_hooks.py"
-      - "tests/lint/check_docs_nav.py"
-      - "pyproject.toml"
-      - ".github/workflows/docs.yml"
   pull_request:
-    branches: [ "main" ]
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - "scripts/mkdocs_hooks.py"
-      - "tests/lint/check_docs_nav.py"
-      - "pyproject.toml"
-      - ".github/workflows/docs.yml"
+  # Republish without a code change, and exercise the deploy path on demand.
   workflow_dispatch:
 
+# Allow one deploy at a time; skip superseded runs rather than queueing them.
 concurrency:
-  group: docs-${{ github.workflow }}-${{ github.ref }}
+  group: docs-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        # Full history so `git-revision-date` style plugins keep working if added
-        # later; also required by `mkdocs gh-deploy` in the deploy job.
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install documentation toolchain
-        # Installs only the `docs` extra's dependencies, not pypto itself: the
-        # site needs no compiled extension (mkdocstrings analyses docstrings
-        # statically), and `pip install -e ".[docs]"` would run the full C++ build.
-        run: |
-          python - <<'PY' > /tmp/docs-requirements.txt
-          import tomllib
-          with open("pyproject.toml", "rb") as f:
-              config = tomllib.load(f)
-          print("\n".join(config["project"]["optional-dependencies"]["docs"]))
-          PY
-          cat /tmp/docs-requirements.txt
-          python -m pip install --upgrade pip
-          python -m pip install -r /tmp/docs-requirements.txt
+      # Deliberately not `pip install -e ".[docs]"`: that runs scikit-build-core
+      # and builds the C++ extension. mkdocstrings reads `python/pypto` through
+      # griffe, which parses statically, so the docs need neither a CANN toolkit
+      # nor the built nanobind extension.
+      - name: Install docs toolchain
+        run: pip install -r docs/requirements.txt
 
+      # Fast, MkDocs-independent check: no page missing from the nav, no nav entry
+      # pointing at a deleted file. Runs first so those failures are reported
+      # without waiting for a full build. (docs/en <-> docs/zh-cn parity is
+      # enforced separately by the pre-commit job in ci.yml.)
       - name: Check nav coverage
-        # Fast, MkDocs-independent check: no page missing from the nav, no nav
-        # entry pointing at a deleted file. Runs first so these failures are
-        # reported without waiting for a full build. (docs/en <-> docs/zh-cn
-        # parity is enforced separately by the pre-commit job in ci.yml.)
         run: python tests/lint/check_docs_nav.py
 
       - name: Build site
-        # --strict promotes warnings (broken links, unresolved nav) to errors.
+        env:
+          # Ref that scripts/mkdocs_hooks.py points repo links at. On a pull
+          # request the new files do not exist on main yet, so link at the commit.
+          DOCS_REF: ${{ github.event_name == 'push' && 'main' || github.sha }}
+        # --strict fails on a dead intra-docs link, a page missing from nav, or a
+        # bad anchor.
         run: mkdocs build --strict
 
-      - name: Upload site artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: site
-          path: site/
-          retention-days: 7
+          path: site
 
   deploy:
-    # Only publish from main. PRs stop after `build`.
-    if: github.event_name != 'pull_request'
+    # Only main publishes; a pull request builds to prove the docs still compile.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install documentation toolchain
-        run: |
-          python - <<'PY' > /tmp/docs-requirements.txt
-          import tomllib
-          with open("pyproject.toml", "rb") as f:
-              config = tomllib.load(f)
-          print("\n".join(config["project"]["optional-dependencies"]["docs"]))
-          PY
-          python -m pip install --upgrade pip
-          python -m pip install -r /tmp/docs-requirements.txt
-
-      - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Deploy to gh-pages
-        # Rebuilds and force-pushes the rendered site to the `gh-pages` branch.
-        # Repository setting required once: Settings -> Pages -> Source =
-        # "Deploy from a branch", branch `gh-pages`, folder `/ (root)`.
-        run: mkdocs gh-deploy --force --strict
+      - id: deploy
+        uses: actions/deploy-pages@v4

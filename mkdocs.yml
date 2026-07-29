@@ -14,7 +14,7 @@
 # is never committed -- CI publishes it to the `gh-pages` branch.
 #
 # Build locally:
-#   pip install -e ".[docs]"
+#   pip install -r docs/requirements.txt
 #   mkdocs serve            # live preview on http://127.0.0.1:8000
 #   mkdocs build --strict   # what CI runs; warnings (broken links) fail the build
 
@@ -28,6 +28,10 @@ copyright: Copyright &copy; PyPTO Contributors
 
 docs_dir: docs
 site_dir: site
+
+# Build inputs that live under docs/ but are not content.
+exclude_docs: |
+  requirements.txt
 
 # Broken internal links must fail the build, not warn. `mkdocs build --strict`
 # promotes every warning to an error; these settings decide what counts as one.
@@ -69,7 +73,7 @@ theme:
 
 plugins:
   # `lang: [en, zh]` needs `jieba` for Chinese word segmentation -- it ships in
-  # the `docs` extra of pyproject.toml.
+  # docs/requirements.txt.
   - search:
       lang:
         - en

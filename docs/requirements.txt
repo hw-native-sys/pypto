@@ -1,0 +1,20 @@
+# Documentation site toolchain, deliberately separate from the project's own
+# dependencies: installing pypto would run scikit-build-core and compile the C++
+# extension, which the docs build does not need. mkdocstrings reads
+# `python/pypto` through griffe, which parses the source statically -- nothing is
+# imported, so neither a CANN toolkit nor a built extension is required.
+#
+# Kept alongside the docs rather than as a pyproject extra so CI installs it with
+# a plain `pip install -r`, matching the runtime's docs job
+# (hw-native-sys/simpler, docs/requirements.txt).
+mkdocs>=1.6
+mkdocs-material>=9.5
+mkdocs-static-i18n>=1.2
+mkdocstrings[python]>=0.26
+
+# Chinese word segmentation for the search index (`plugins.search.lang: [en, zh]`).
+jieba>=0.42.1
+
+# `mike` (version selector) is intentionally absent: the selector should track
+# PyPTO's release cadence rather than an arbitrary latest/dev split, so it lands
+# with that process rather than here. See issue #2120.

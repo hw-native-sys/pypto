@@ -140,7 +140,7 @@ To build the site locally:
 
 ```bash
 # Only the docs toolchain is needed -- the site does not require a built pypto
-pip install "mkdocs>=1.6" "mkdocs-material" "mkdocs-static-i18n" "mkdocstrings[python]" jieba
+pip install -r docs/requirements.txt
 
 mkdocs serve            # live preview at http://127.0.0.1:8000
 mkdocs build --strict   # what CI runs; broken links fail the build

@@ -139,7 +139,7 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 ```bash
 # 只需文档工具链 —— 构建站点不需要已编译的 pypto
-pip install "mkdocs>=1.6" "mkdocs-material" "mkdocs-static-i18n" "mkdocstrings[python]" jieba
+pip install -r docs/requirements.txt
 
 mkdocs serve            # 在 http://127.0.0.1:8000 实时预览
 mkdocs build --strict   # 与 CI 一致；断链会导致构建失败
