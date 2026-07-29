@@ -19,6 +19,7 @@ from typing import cast
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 def _outer_for(program: ir.Program) -> ir.ForStmt:
@@ -112,7 +113,7 @@ class TestPipelineKwargRejection:
     """The parser must reject invalid pl.pipeline calls with clear errors."""
 
     def test_missing_stage_rejected(self):
-        with pytest.raises(Exception, match=r"pl\.pipeline\(\) requires stage="):
+        with pytest.raises(ParserSyntaxError, match=r"pl\.pipeline\(\) requires stage="):
 
             @pl.program
             class _P:
@@ -123,7 +124,7 @@ class TestPipelineKwargRejection:
                     return x
 
     def test_stage_zero_rejected(self):
-        with pytest.raises(Exception, match=r"pl\.pipeline\(\) stage must be >= 1"):
+        with pytest.raises(ParserSyntaxError, match=r"pl\.pipeline\(\) stage must be >= 1"):
 
             @pl.program
             class _P:
@@ -134,7 +135,7 @@ class TestPipelineKwargRejection:
                     return x
 
     def test_stage_negative_rejected(self):
-        with pytest.raises(Exception, match=r"pl\.pipeline\(\) stage must be >= 1"):
+        with pytest.raises(ParserSyntaxError, match=r"pl\.pipeline\(\) stage must be >= 1"):
 
             @pl.program
             class _P:
@@ -146,7 +147,7 @@ class TestPipelineKwargRejection:
 
     def test_stage_runtime_value_rejected(self):
         """Non-constant ``stage`` is rejected by the parser (must be a literal int)."""
-        with pytest.raises(Exception, match=r"stage must be a compile-time constant"):
+        with pytest.raises(ParserSyntaxError, match=r"stage must be a compile-time constant"):
 
             @pl.program
             class _P:
@@ -159,7 +160,7 @@ class TestPipelineKwargRejection:
                     return x
 
     def test_stage_on_range_rejected(self):
-        with pytest.raises(Exception, match=r"stage= is only supported on pl\.pipeline"):
+        with pytest.raises(ParserSyntaxError, match=r"stage= is only supported on pl\.pipeline"):
 
             @pl.program
             class _P:
@@ -170,7 +171,7 @@ class TestPipelineKwargRejection:
                     return x
 
     def test_stage_on_unroll_rejected(self):
-        with pytest.raises(Exception, match=r"stage= is only supported on pl\.pipeline"):
+        with pytest.raises(ParserSyntaxError, match=r"stage= is only supported on pl\.pipeline"):
 
             @pl.program
             class _P:

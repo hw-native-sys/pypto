@@ -11,6 +11,7 @@
 
 from collections.abc import Callable
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -2267,7 +2268,7 @@ class TestNestedControlFlow:
         func = ir.Function("incore", [x_param], [tensor_type], body, span, ir.FunctionType.InCore)
         prog = ir.Program([func], "test_program", span)
 
-        with pytest.raises(Exception, match="has no registered tile conversion"):
+        with pytest.raises(pypto.InternalError, match="has no registered tile conversion"):
             passes.convert_tensor_to_tile_ops()(prog)
 
     def test_iter_arg_init_from_tensor_param_gets_preloaded(self):
@@ -3084,7 +3085,7 @@ class TestScatterUpdateConversion:
                 result: pl.Tensor[[128, 256], pl.FP16] = self.main_incore_0(index, src)
                 return result
 
-        with pytest.raises(Exception, match="i16 flat-index limit"):
+        with pytest.raises(ValueError, match="i16 flat-index limit"):
             passes.convert_tensor_to_tile_ops()(Before)
 
     def test_scatter_update_rejects_4d(self):
@@ -3111,7 +3112,7 @@ class TestScatterUpdateConversion:
                 result: pl.Tensor[[4, 4, 1, 64], pl.FP32] = self.main_incore_0(index, src)
                 return result
 
-        with pytest.raises(Exception, match="only 2D input/src is currently supported"):
+        with pytest.raises(ValueError, match="only 2D input/src is currently supported"):
             passes.convert_tensor_to_tile_ops()(Before)
 
 

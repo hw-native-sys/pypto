@@ -9,6 +9,7 @@
 
 """Unit tests for OutlineClusterScopes pass."""
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -771,7 +772,7 @@ class TestOutlineClusterScopes:
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.ClusterOutlined)
 
-        with pytest.raises(Exception, match="Verification failed"):
+        with pytest.raises(pypto.Error, match="Verification failed"):
             passes.verify_properties(props, Program, "OutlineClusterScopes")
 
 

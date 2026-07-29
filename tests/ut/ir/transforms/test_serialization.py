@@ -955,7 +955,7 @@ class TestRobustness:
         """Test that deserializing invalid data raises an error."""
         invalid_data = b"invalid msgpack data"
 
-        with pytest.raises(ValueError):  # Should raise some kind of error
+        with pytest.raises(ValueError):  # deserializer CHECK -> pypto::ValueError
             ir.deserialize(invalid_data)
 
     def test_deserialize_nonexistent_file(self):

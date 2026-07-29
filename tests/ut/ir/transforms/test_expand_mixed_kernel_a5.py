@@ -20,6 +20,7 @@ Backend setup (Ascend950) is handled by the directory-level ``conftest.py``.
 
 import re
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -1906,7 +1907,7 @@ class TestPropertyVerification:
         prop_set = passes.IRPropertySet()
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
-        with pytest.raises(Exception, match=re.escape("tile.tpop_from_aiv result in MemorySpace::Mat")):
+        with pytest.raises(pypto.Error, match=re.escape("tile.tpop_from_aiv result in MemorySpace::Mat")):
             passes.verify_properties(prop_set, BadProgram, "test")
 
     def test_verifier_rejects_aiv_tpop_from_aic_into_mat(self):
@@ -1921,7 +1922,7 @@ class TestPropertyVerification:
         prop_set = passes.IRPropertySet()
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
-        with pytest.raises(Exception, match=re.escape("tile.tpop_from_aic result in MemorySpace::Vec")):
+        with pytest.raises(pypto.Error, match=re.escape("tile.tpop_from_aic result in MemorySpace::Vec")):
             passes.verify_properties(prop_set, BadProgram, "test")
 
     def test_verifier_rejects_cross_core_missing_pipe_setup(self):
@@ -1947,7 +1948,7 @@ class TestPropertyVerification:
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
         with pytest.raises(
-            Exception,
+            pypto.Error,
             match=re.escape("uses cross-core tile ops but has no 'system.aic_initialize_pipe' call"),
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
@@ -1967,7 +1968,7 @@ class TestPropertyVerification:
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
         with pytest.raises(
-            Exception,
+            pypto.Error,
             match=re.escape("uses tile.tpop_from_aic but has no matching 'system.tfree_to_aic' call"),
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
@@ -2071,7 +2072,7 @@ class TestPropertyVerification:
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
         with pytest.raises(
-            Exception,
+            pypto.Error,
             match=re.escape(
                 "Function 'cube_consumer' has fewer 'system.reserve_buffer' calls than initialized pipe "
                 "directions require"
@@ -2098,7 +2099,7 @@ class TestPropertyVerification:
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
         with pytest.raises(
-            Exception,
+            pypto.Error,
             match=re.escape(
                 "has 'system.tfree_to_aic' without a matching outstanding tpop on the same tile value"
             ),
@@ -2125,7 +2126,7 @@ class TestPropertyVerification:
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
         with pytest.raises(
-            Exception,
+            pypto.Error,
             match=re.escape("uses cross-core tile ops but has no 'system.aiv_initialize_pipe' call"),
         ):
             passes.verify_properties(prop_set, BadProgram, "test")

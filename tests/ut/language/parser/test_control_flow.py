@@ -12,7 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics import InvalidOperationError
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserSyntaxError
 
 
 class TestForLoops:
@@ -402,7 +402,7 @@ class TestParallelForLoops:
 
     def test_invalid_iterator_rejected(self):
         """Test that invalid iterator (not range or parallel) is rejected."""
-        with pytest.raises(Exception):
+        with pytest.raises(ParserSyntaxError):
 
             @pl.function
             def bad_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

@@ -31,6 +31,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import DataType
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
 
@@ -167,7 +168,7 @@ def test_rank_and_nranks_compose_in_expression():
 
 def test_get_comm_ctx_rejects_plain_tensor():
     """The C++ verifier refuses a plain ``pl.Tensor`` — precise ObjectKind match."""
-    with pytest.raises(Exception, match="DistributedTensor"):
+    with pytest.raises(InvalidOperationError, match="DistributedTensor"):
 
         @pl.program
         class P:  # noqa: F841
@@ -178,7 +179,7 @@ def test_get_comm_ctx_rejects_plain_tensor():
 
 def test_rank_rejects_non_comm_ctx_arg():
     """The C++ verifier refuses any non-CommCtx argument to pld.system.rank."""
-    with pytest.raises(Exception, match="CommCtx"):
+    with pytest.raises(InvalidOperationError, match="CommCtx"):
 
         @pl.program
         class P:  # noqa: F841
@@ -189,7 +190,7 @@ def test_rank_rejects_non_comm_ctx_arg():
 
 def test_unknown_system_op_rejected():
     """Unknown 3-segment ``pld.system.<foo>`` produces a clear parser error."""
-    with pytest.raises(Exception, match=r"pld\.system\.foo"):
+    with pytest.raises(InvalidOperationError, match=r"pld\.system\.foo"):
 
         @pl.program
         class P:  # noqa: F841

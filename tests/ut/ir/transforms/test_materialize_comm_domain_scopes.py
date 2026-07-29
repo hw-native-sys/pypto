@@ -49,6 +49,7 @@ import ast
 import textwrap
 from typing import cast
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -909,7 +910,7 @@ def test_implicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         _apply(P)
 
 
@@ -930,7 +931,7 @@ def test_implicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         _apply(P)
 
 
@@ -953,7 +954,7 @@ def test_explicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         _apply(P)
 
 
@@ -976,7 +977,7 @@ def test_explicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         _apply(P)
 
 
@@ -998,7 +999,7 @@ def test_nested_explicit_allreduce_expression_is_rejected():
             wrapped = (pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum),)
             return wrapped
 
-    with pytest.raises(Exception, match="must be a direct assignment"):
+    with pytest.raises(ValueError, match="must be a direct assignment"):
         _apply(P)
 
 
@@ -1018,7 +1019,7 @@ def test_nested_implicit_allreduce_expression_is_rejected():
             wrapped = (pld.tensor.allreduce(data, op=pld.ReduceOp.Sum),)
             return wrapped
 
-    with pytest.raises(Exception, match="must be a direct assignment"):
+    with pytest.raises(ValueError, match="must be a direct assignment"):
         _apply(P)
 
 
@@ -1256,7 +1257,7 @@ def test_dead_alloc_no_window_materialisation_raises():
             buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())  # noqa: F841  # never windowed
             return 0
 
-    with pytest.raises(Exception, match=r"no pld\.tensor\.window materialisation"):
+    with pytest.raises(pypto.InternalError, match=r"no pld\.tensor\.window materialisation"):
         _apply(P)
 
 
@@ -1274,7 +1275,7 @@ def test_dead_alloc_no_dispatch_raises():
             _ = pld.window(buf, [256], dtype=pl.FP32)
             return 0
 
-    with pytest.raises(Exception, match="not consumed by any chip_orch dispatch"):
+    with pytest.raises(pypto.InternalError, match="not consumed by any chip_orch dispatch"):
         _apply(P)
 
 
@@ -1306,7 +1307,7 @@ def test_non_unit_step_device_loop_raises():
                 self.chip_orch(data, device=r)
             return 0
 
-    with pytest.raises(Exception, match="non-unit-step loop is not supported"):
+    with pytest.raises(pypto.InternalError, match="non-unit-step loop is not supported"):
         _apply(P)
 
 

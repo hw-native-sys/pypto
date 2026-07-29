@@ -9,6 +9,7 @@
 
 """Unit tests for PassPipeline and PassContext."""
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -164,7 +165,7 @@ class TestPassContext:
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
-            with pytest.raises(Exception, match="Pre-verification failed"):
+            with pytest.raises(pypto.Error, match="Pre-verification failed"):
                 passes.outline_incore_scopes()(program)
 
     def test_before_mode_succeeds_when_property_holds(self):
@@ -196,7 +197,7 @@ class TestPassContext:
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
-            with pytest.raises(Exception, match="Pre-verification failed"):
+            with pytest.raises(pypto.Error, match="Pre-verification failed"):
                 passes.outline_incore_scopes()(program)
 
     def test_pipeline_with_context(self):
@@ -403,7 +404,7 @@ class TestVerifyProperties:
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.SSAForm)
 
-        with pytest.raises(Exception, match="Verification failed"):
+        with pytest.raises(pypto.Error, match="Verification failed"):
             passes.verify_properties(props, program, "TestPass")
 
 

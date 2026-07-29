@@ -25,6 +25,7 @@ expressed via the DSL:
 
 from typing import cast
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -841,7 +842,7 @@ class TestEdgeCases:
         func = ir.Function("test_func", [], [dynamic_tile_type], body, span)
         program = ir.Program([func], "test_program", span)
 
-        with pytest.raises(Exception, match="InitMemRef requires static shape"):
+        with pytest.raises(pypto.InternalError, match="InitMemRef requires static shape"):
             passes.init_mem_ref()(program)
 
 

@@ -2116,7 +2116,7 @@ def test_tensor_transpose_valid_shape_rank_mismatch_rejected():
     dim16 = ir.ConstInt(16, DataType.INT32, span)
     tensor_var = ir.Var("t", ir.TensorType([dim8, dim16], DataType.FP32), span)
 
-    with pytest.raises(Exception, match="valid_shape rank"):
+    with pytest.raises(ValueError, match="valid_shape rank"):
         tensor.transpose(tensor_var, 0, 1, valid_shape=[16])
 
 
@@ -2752,7 +2752,7 @@ def test_tensor_set_validshape_rejects_negative():
     tensor_type = ir.TensorType([dim32, dim32], DataType.FP32)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    with pytest.raises(Exception, match="must be >= 0"):
+    with pytest.raises(ValueError, match="must be >= 0"):
         ir.op.tensor.set_validshape(tensor_var, -1, 16)
 
 
@@ -2763,7 +2763,7 @@ def test_tensor_set_validshape_rejects_exceeding_bound():
     tensor_type = ir.TensorType([dim32, dim32], DataType.FP32)
     tensor_var = ir.Var("t", tensor_type, span)
 
-    with pytest.raises(Exception, match="exceeds tensor bound"):
+    with pytest.raises(ValueError, match="exceeds tensor bound"):
         ir.op.tensor.set_validshape(tensor_var, 16, 64)
 
 
@@ -3962,7 +3962,7 @@ def test_tensor_sort32_wrong_dtype():
     src = ir.Var("src", ir.TensorType([d8, d32], DataType.INT32), span)
     idx = ir.Var("idx", ir.TensorType([d8, d32], DataType.INT32), span)
 
-    with pytest.raises(Exception, match=r"FP16 or FP32"):
+    with pytest.raises(ValueError, match=r"FP16 or FP32"):
         ir.op.tensor.sort32(src, idx)
 
 
@@ -3991,7 +3991,7 @@ def test_tensor_mrgsort_format1_invalid_block_len():
     d128 = ir.ConstInt(128, DataType.INT32, span)
     src = ir.Var("src", ir.TensorType([d1, d128], DataType.FP32), span)
 
-    with pytest.raises(Exception, match=r"multiple of 64"):
+    with pytest.raises(ValueError, match=r"multiple of 64"):
         ir.op.tensor.mrgsort(src, block_len=63)
 
 
@@ -4029,7 +4029,7 @@ def test_tensor_mrgsort_format2_dtype_mismatch():
     s2 = ir.Var("s2", src_fp32, span)
     s3 = ir.Var("s3", src_fp32, span)
 
-    with pytest.raises(Exception, match=r"matching dtype"):
+    with pytest.raises(ValueError, match=r"matching dtype"):
         ir.op.tensor.mrgsort(s0, s1, s2, s3)
 
 
@@ -4082,7 +4082,7 @@ def test_tensor_gather_dim_last_axis_positive():
 def test_tensor_gather_rejects_bad_dim():
     inp, idx = _make_gather_inputs()
     # rank=2, valid dims are -2..1. dim=2 is out of range.
-    with pytest.raises(Exception, match=r"dim"):
+    with pytest.raises(ValueError, match=r"dim"):
         ir.op.tensor.gather(inp, dim=2, index=idx)
 
 
@@ -4098,20 +4098,20 @@ def test_tensor_gather_accepts_int16_index_with_16bit_input():
 def test_tensor_gather_rejects_int16_index_with_32bit_input():
     """INT16 index with a 32-bit input is unsafe (tgather b32 reads it as u32)."""
     inp, idx = _make_gather_inputs(src_dtype=DataType.FP32, idx_dtype=DataType.INT16)
-    with pytest.raises(Exception, match=r"16-bit input"):
+    with pytest.raises(ValueError, match=r"16-bit input"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
 def test_tensor_gather_rejects_non_int_index_dtype():
     """A non-integer index dtype (FP32) is rejected outright."""
     inp, idx = _make_gather_inputs(idx_dtype=DataType.FP32)
-    with pytest.raises(Exception, match=r"index dtype INT32"):
+    with pytest.raises(ValueError, match=r"index dtype INT32"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
 def test_tensor_gather_rejects_unsupported_input_dtype():
     inp, idx = _make_gather_inputs(src_dtype=DataType.UINT32)
-    with pytest.raises(Exception, match=r"FP16, FP32, INT16, or INT32"):
+    with pytest.raises(ValueError, match=r"FP16, FP32, INT16, or INT32"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
@@ -4122,7 +4122,7 @@ def test_tensor_gather_rejects_rank_mismatch():
     K = ir.ConstInt(3, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([B, N], DataType.FP32), span)
     idx = ir.Var("idx", ir.TensorType([K], DataType.INT32), span)
-    with pytest.raises(Exception, match=r"rank"):
+    with pytest.raises(ValueError, match=r"rank"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
@@ -4134,7 +4134,7 @@ def test_tensor_gather_rejects_non_matching_outer_dim():
     K = ir.ConstInt(3, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([B, N], DataType.FP32), span)
     idx = ir.Var("idx", ir.TensorType([B2, K], DataType.INT32), span)
-    with pytest.raises(Exception, match=r"non-gather axes"):
+    with pytest.raises(ValueError, match=r"non-gather axes"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
@@ -4192,19 +4192,19 @@ def test_tensor_gather_mask_output_dtype_reinterpret():
 
 def test_tensor_gather_mask_rejects_bad_pattern():
     inp = _make_gather_mask_input()
-    with pytest.raises(Exception, match=r"mask_pattern in range"):
+    with pytest.raises(ValueError, match=r"mask_pattern in range"):
         ir.op.tensor.gather(inp, mask_pattern=0)
 
 
 def test_tensor_gather_mask_rejects_indivisible_cols():
     inp = _make_gather_mask_input(rows=2, cols=33)
-    with pytest.raises(Exception, match=r"divisible by 2"):
+    with pytest.raises(ValueError, match=r"divisible by 2"):
         ir.op.tensor.gather(inp, mask_pattern=1)
 
 
 def test_tensor_gather_mask_rejects_dtype_width_mismatch():
     inp = _make_gather_mask_input(rows=2, cols=32, dtype=DataType.FP16)
-    with pytest.raises(Exception, match=r"same bit width"):
+    with pytest.raises(ValueError, match=r"same bit width"):
         ir.op.tensor.gather(inp, mask_pattern=1, output_dtype=DataType.FP32)
 
 
@@ -4270,7 +4270,7 @@ def test_tensor_scatter_positive_dim():
 def test_tensor_scatter_rejects_unsupported_dim():
     """MVP only supports dim=-1 (last axis)."""
     inp, idx, src = _make_scatter_inputs()
-    with pytest.raises(Exception, match=r"dim=-1"):
+    with pytest.raises(ValueError, match=r"dim=-1"):
         ir.op.tensor.scatter(inp, dim=0, index=idx, src=src)
 
 
@@ -4281,7 +4281,7 @@ def test_tensor_scatter_rejects_dtype_mismatch():
     K = ir.ConstInt(4, DataType.INT32, span)
     N = ir.ConstInt(8, DataType.INT32, span)
     src_wrong = ir.Var("src_bad", ir.TensorType([K, N], DataType.FP16), span)
-    with pytest.raises(Exception, match=r"src dtype"):
+    with pytest.raises(ValueError, match=r"src dtype"):
         ir.op.tensor.scatter(inp, dim=-1, index=idx, src=src_wrong)
 
 
@@ -4301,7 +4301,7 @@ def test_tensor_scatter_rejects_index_size_mismatch(dtype, wrong_idx_dtype):
     K = ir.ConstInt(4, DataType.INT32, span)
     N = ir.ConstInt(8, DataType.INT32, span)
     idx_wrong = ir.Var("idx_bad", ir.TensorType([K, N], wrong_idx_dtype), span)
-    with pytest.raises(Exception, match=r"index dtype"):
+    with pytest.raises(ValueError, match=r"index dtype"):
         ir.op.tensor.scatter(inp, dim=-1, index=idx_wrong, src=src)
 
 
@@ -4337,7 +4337,7 @@ def test_tensor_scatter_mask_rejects_bad_pattern():
     C = ir.ConstInt(8, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
     dst = ir.Var("dst", ir.TensorType([R, C], DataType.FP32), span)
-    with pytest.raises(Exception, match=r"mask_pattern in \[1, 7\]"):
+    with pytest.raises(ValueError, match=r"mask_pattern in \[1, 7\]"):
         ir.op.tensor.scatter(inp, mask_pattern=42, dst=dst)
 
 
@@ -4349,7 +4349,7 @@ def test_tensor_scatter_mask_rejects_col_expansion_mismatch():
     Cwrong = ir.ConstInt(24, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
     dst = ir.Var("dst_bad", ir.TensorType([R, Cwrong], DataType.FP32), span)
-    with pytest.raises(Exception, match=r"mask_pattern=1"):
+    with pytest.raises(ValueError, match=r"mask_pattern=1"):
         ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
 
 
@@ -4365,7 +4365,7 @@ def test_tensor_scatter_mask_rejects_dtype_mismatch():
     C2 = ir.ConstInt(16, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP16), span)
     dst = ir.Var("dst", ir.TensorType([R, C2], DataType.INT16), span)
-    with pytest.raises(Exception, match=r"same dtype"):
+    with pytest.raises(ValueError, match=r"same dtype"):
         ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
 
 

@@ -34,6 +34,7 @@ from pypto.ir.op import tile_ops as _ir_tile_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.op import tensor_ops as _dsl_tensor_ops
 from pypto.language.op import tile_ops as _dsl_tile_ops
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 
 def _build_program(
@@ -185,7 +186,7 @@ def test_tile_gather_row_dsl_interface_roundtrips():
 
 def test_gather_row_rejects_dtype_mismatch():
     """acc and src must share dtype (matmul operand integrity)."""
-    with pytest.raises(Exception, match="share dtype"):
+    with pytest.raises(InvalidOperationError, match="share dtype"):
 
         @pl.program
         class Program:
@@ -259,7 +260,7 @@ def test_gather_row_valid_shape_roundtrips():
 
 def test_gather_row_rejects_valid_shape_exceeding_shapes():
     """A provable valid_shape > shapes is rejected at type deduction."""
-    with pytest.raises(Exception, match="provably exceeds physical shape extent"):
+    with pytest.raises(InvalidOperationError, match="provably exceeds physical shape extent"):
 
         @pl.program
         class Program:
@@ -279,7 +280,7 @@ def test_gather_row_rejects_valid_shape_rank_mismatch(valid_shape):
     type but wrong for an explicit operand — without the rank check it would reach
     the backend and trip an INTERNAL_CHECK instead of telling the user.
     """
-    with pytest.raises(Exception, match="valid_shape to have the same rank as shapes"):
+    with pytest.raises(InvalidOperationError, match="valid_shape to have the same rank as shapes"):
 
         @pl.program
         class Program:
@@ -320,7 +321,7 @@ def test_gather_row_rejects_non_integer_valid_shape():
     rejecting it, so without an explicit dtype check `valid_shape=[1.5, 128]`
     would pass deduction.
     """
-    with pytest.raises(Exception, match="valid_shape\\[0\\] to be an integer extent"):
+    with pytest.raises(InvalidOperationError, match="valid_shape\\[0\\] to be an integer extent"):
 
         @pl.program
         class Program:
@@ -340,7 +341,7 @@ def test_gather_row_rejects_dynamic_shapes_at_trace_time():
     (rather than in the backend) is what makes the error land on the pl.gather_row
     line.
     """
-    with pytest.raises(Exception, match="Pass a dynamic row count through valid_shape instead"):
+    with pytest.raises(InvalidOperationError, match="Pass a dynamic row count through valid_shape instead"):
 
         @pl.program
         class Program:
@@ -361,7 +362,9 @@ def test_gather_row_rejects_dynamic_valid_shape_with_transpose():
     *column* extent on a boxed NZ tile — unverified on device, so it is rejected
     rather than silently emitted.
     """
-    with pytest.raises(Exception, match="does not support a dynamic valid_shape together with transpose"):
+    with pytest.raises(
+        InvalidOperationError, match="does not support a dynamic valid_shape together with transpose"
+    ):
 
         @pl.program
         class Program:
@@ -379,7 +382,7 @@ def test_gather_row_rejects_dynamic_valid_shape_with_transpose():
 
 def test_create_l1_rejects_non_positive_shape():
     """create_l1 shape dims must be positive compile-time ConstInt."""
-    with pytest.raises(Exception, match="positive compile-time ConstInt"):
+    with pytest.raises(InvalidOperationError, match="positive compile-time ConstInt"):
 
         @pl.program
         class Program:
@@ -392,7 +395,9 @@ def test_create_l1_rejects_non_positive_shape():
 
 def test_tile_create_transpose_rejects_non_mat():
     """tile.create transpose=True is a Mat-only (L1) layout; a non-Mat space is rejected."""
-    with pytest.raises(Exception, match="transpose=true only for a 2D tile with target_memory=Mat"):
+    with pytest.raises(
+        InvalidOperationError, match="transpose=true only for a 2D tile with target_memory=Mat"
+    ):
 
         @pl.program
         class Program:

@@ -15,6 +15,7 @@ This package provides Python bindings for the PyPTO C++ library.
 
 from . import arith, codegen, ir, passes, testing
 from .logging import (
+    Error,
     InternalError,
     LogLevel,
     check,
@@ -160,6 +161,7 @@ __all__ = [
     # Code generation
     "codegen",
     # Error classes
+    "Error",
     "InternalError",
     # Logging framework
     "LogLevel",

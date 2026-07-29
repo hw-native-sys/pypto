@@ -9,6 +9,7 @@
 
 """Unit tests for type checking via run_verifier()."""
 
+import pypto
 import pytest
 from pypto import DataType, ir, passes
 
@@ -76,7 +77,7 @@ def test_type_check_for_type_mismatch():
 
     # Run type checking via run_verifier - should raise on type mismatch errors
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="Dtype mismatch in ForStmt"):
+    with pytest.raises(pypto.Error, match="Dtype mismatch in ForStmt"):
         verify_pass(program)
 
 
@@ -101,7 +102,7 @@ def test_type_check_if_type_mismatch():
 
     # Run type checking via run_verifier - should raise on type mismatch error
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="Dtype mismatch in IfStmt"):
+    with pytest.raises(pypto.Error, match="Dtype mismatch in IfStmt"):
         verify_pass(program)
 
 
@@ -143,7 +144,7 @@ def test_type_check_tensor_shape_mismatch():
 
     # Run type checking via run_verifier - should raise on shape mismatch error
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="Shape dimension mismatch in ForStmt"):
+    with pytest.raises(pypto.Error, match="Shape dimension mismatch in ForStmt"):
         verify_pass(program)
 
 
@@ -176,7 +177,7 @@ def test_type_check_dimension_count_mismatch():
 
     # Run type checking via run_verifier - should raise on dimension mismatch error
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="mismatch in IfStmt"):
+    with pytest.raises(pypto.Error, match="mismatch in IfStmt"):
         verify_pass(program)
 
 
@@ -211,7 +212,7 @@ def test_type_check_tile_shape_mismatch():
 
     # Run type checking via run_verifier - should raise on shape mismatch error
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="mismatch in IfStmt"):
+    with pytest.raises(pypto.Error, match="mismatch in IfStmt"):
         verify_pass(program)
 
 
@@ -270,7 +271,7 @@ def test_type_check_if_condition_must_be_bool():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="IfStmt condition dtype must be BOOL"):
+    with pytest.raises(pypto.Error, match="IfStmt condition dtype must be BOOL"):
         verify_pass(program)
 
 
@@ -291,7 +292,7 @@ def test_type_check_while_condition_must_be_bool():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="WhileStmt condition dtype must be BOOL"):
+    with pytest.raises(pypto.Error, match="WhileStmt condition dtype must be BOOL"):
         verify_pass(program)
 
 

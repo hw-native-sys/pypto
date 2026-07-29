@@ -566,7 +566,9 @@ class TestCrossCoreTpushTpopCodegen:
 
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
-        with pytest.raises(Exception, match="tpop valid_shape operand must be integer or index type, got i1"):
+        with pytest.raises(
+            ValueError, match="tpop valid_shape operand must be integer or index type, got i1"
+        ):
             codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_bool_row_program", span))
 
     @pytest.mark.parametrize(
@@ -1110,7 +1112,7 @@ class TestCrossCoreTpushTpopCodegen:
                 pl.tfree_to_aiv(received)
 
         with pytest.raises(
-            Exception,
+            ValueError,
             match=re.escape(
                 "system.tfree_to_aiv requires its tile argument to come from tile.tpop_from_aiv, "
                 "got tile.tpop_from_aic"
@@ -1140,7 +1142,7 @@ class TestCrossCoreTpushTpopCodegen:
                 pl.tfree_to_aiv(received, id=0)
 
         with pytest.raises(
-            Exception,
+            ValueError,
             match=re.escape(
                 "system.tfree_to_aiv pipe id 0 does not match originating tile.tpop_from_aiv pipe id 1"
             ),

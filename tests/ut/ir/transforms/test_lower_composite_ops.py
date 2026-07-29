@@ -643,7 +643,7 @@ def test_allreduce_without_signal_is_rejected_outside_host_orchestrator():
             acc = pl.load(data, [0, 0], [1, SIZE])
             return pl.store(acc, [0, 0], out)
 
-    with pytest.raises(Exception, match="requires an explicit signal outside host orchestrator"):
+    with pytest.raises(ValueError, match="requires an explicit signal outside host orchestrator"):
         passes.lower_composite_ops()(MissingSignal)
 
 
@@ -660,7 +660,7 @@ def test_allreduce_eval_stmt_without_signal_is_rejected_outside_host_orchestrato
             pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="requires an explicit signal outside host orchestrator"):
+    with pytest.raises(ValueError, match="requires an explicit signal outside host orchestrator"):
         passes.lower_composite_ops()(MissingSignalEval)
 
 
@@ -703,7 +703,7 @@ def test_allreduce_in_for_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         passes.lower_composite_ops()(LoopAllreduce)
 
 
@@ -723,7 +723,7 @@ def test_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         passes.lower_composite_ops()(LoopAllreduce)
 
 
@@ -959,7 +959,7 @@ def test_allreduce_rejects_oversized_partial_valid_shape():
             data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="partial valid_shape must fit within one 16384-byte mesh chunk"):
+    with pytest.raises(ValueError, match="partial valid_shape must fit within one 16384-byte mesh chunk"):
         passes.lower_composite_ops()(Before)
 
 
@@ -1067,7 +1067,7 @@ def test_allreduce_mesh_lowering_rejects_noncontiguous_partial_valid_shape():
             data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="valid_shape cannot be represented by a single 2D view"):
+    with pytest.raises(ValueError, match="valid_shape cannot be represented by a single 2D view"):
         passes.lower_composite_ops()(Before)
 
 
@@ -1095,7 +1095,7 @@ def test_allreduce_mesh_lowering_rejects_strided_target_collapse():
             data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="requires a packed source"):
+    with pytest.raises(ValueError, match="requires a packed source"):
         passes.lower_composite_ops()(Before)
 
 
@@ -1151,7 +1151,7 @@ def test_allreduce_mesh_lowering_rejects_fully_valid_dn_target():
         ]:
             return pld.tensor.allreduce(data, signal)
 
-    with pytest.raises(Exception, match="only supports ND layout"):
+    with pytest.raises(ValueError, match="only supports ND layout"):
         passes.lower_composite_ops()(Before)
 
 
@@ -1179,7 +1179,7 @@ def test_allreduce_mesh_lowering_rejects_partial_dn_target_collapse():
             data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(Exception, match="only supports ND layout"):
+    with pytest.raises(ValueError, match="only supports ND layout"):
         passes.lower_composite_ops()(Before)
 
 
@@ -2044,7 +2044,7 @@ def test_ring_allreduce_rejects_noncontiguous_partial_valid_box():
         ]:
             return pld.tensor.allreduce(data, signal, mode="ring")
 
-    with pytest.raises(Exception, match="contiguous row-major prefix"):
+    with pytest.raises(ValueError, match="contiguous row-major prefix"):
         passes.lower_composite_ops()(Before)
 
 
@@ -2071,7 +2071,7 @@ def test_ring_allreduce_rejects_strided_target():
         ]:
             return pld.tensor.allreduce(data, signal, mode="ring")
 
-    with pytest.raises(Exception, match="requires a packed source"):
+    with pytest.raises(ValueError, match="requires a packed source"):
         passes.lower_composite_ops()(Before)
 
 
@@ -2098,7 +2098,7 @@ def test_ring_allreduce_rejects_dn_target():
         ]:
             return pld.tensor.allreduce(data, signal, mode="ring")
 
-    with pytest.raises(Exception, match="only supports ND layout"):
+    with pytest.raises(ValueError, match="only supports ND layout"):
         passes.lower_composite_ops()(Before)
 
 

@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -44,7 +45,7 @@ def test_distributed_codegen_requires_comm_domain_materialization_when_distribut
     # Deliberately omit MaterializeCommDomainScopes.
     program = passes.convert_to_ssa()(Input)
     cg = codegen.DistributedCodegen()
-    with pytest.raises(Exception, match="DistributedCodegen preconditions"):
+    with pytest.raises(pypto.InternalError, match="DistributedCodegen preconditions"):
         cg.generate(program)
 
 
@@ -86,7 +87,7 @@ def test_orchestration_codegen_precondition_entry_point():
             # convert_to_ssa). Codegen proceeds and fails at
             # InferFunctionCoreType because ExpandMixedKernel was not run —
             # proving the precondition did not block execution.
-            with pytest.raises(Exception, match="InferFunctionCoreType"):
+            with pytest.raises(pypto.InternalError, match="InferFunctionCoreType"):
                 codegen.generate_orchestration(program, func)
             return
     pytest.fail("No orchestration function found in program")
@@ -149,7 +150,7 @@ def test_orchestration_codegen_requires_return_params_explicit_for_multi_out_cal
     the result aliases.
     """
     program = _finalize(_MultiOutProgram)
-    with pytest.raises(Exception, match="ReturnParamsExplicit"):
+    with pytest.raises(pypto.Error, match="ReturnParamsExplicit"):
         codegen.generate_orchestration(program, _orch_func(program))
 
 

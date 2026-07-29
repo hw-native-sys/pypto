@@ -30,6 +30,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.language.arg_direction import DIRECTION_TO_NAME, NAME_TO_DIRECTION
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserSyntaxError, ParserTypeError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -263,7 +264,7 @@ class Prog:
         r: pl.Tensor[[64], pl.FP32] = self.kernel(x, attrs={"arg_directions": [pl.adir.bogus]})
         return r
 """
-        with pytest.raises(Exception, match="bogus"):
+        with pytest.raises(ParserSyntaxError, match="bogus"):
             pl.parse(code)
 
     def test_attrs_kwarg_size_mismatch_rejected(self):
@@ -291,7 +292,7 @@ class Prog:
         r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input]})
         return r
 """
-        with pytest.raises(Exception, match=r"(?i)length|match"):
+        with pytest.raises(ParserTypeError, match=r"(?i)length|match"):
             pl.parse(code)
 
     def test_attrs_kwarg_non_bespoke_key_round_trips(self):
@@ -339,7 +340,7 @@ class Prog:
         r: pl.Tensor[[64], pl.FP32] = self.kernel(x, foo=1)
         return r
 """
-        with pytest.raises(Exception, match="foo"):
+        with pytest.raises(ParserTypeError, match="foo"):
             pl.parse(code)
 
     def test_per_argument_wrapper_form_no_longer_supported(self):
@@ -362,7 +363,7 @@ class Prog:
 """
         # The parser routes ``pl.adir.input(x)`` through the generic op-call
         # path, where it is rejected as an unsupported function call.
-        with pytest.raises(Exception):  # noqa: B017, PT011
+        with pytest.raises(InvalidOperationError):
             pl.parse(code)
 
     def test_marker_alias_resolves_to_enum_value(self):

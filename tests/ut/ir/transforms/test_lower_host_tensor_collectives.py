@@ -15,6 +15,7 @@ from typing import cast
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import DataType, ir, passes
 
 
@@ -428,7 +429,7 @@ def test_host_allreduce_rejects_static_signal_smaller_than_explicit_device_count
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(Exception, match=r"signal shape\[0\].*participating device count"):
+    with pytest.raises(ValueError, match=r"signal shape\[0\].*participating device count"):
         passes.lower_host_tensor_collectives()(program)
 
 
@@ -452,12 +453,12 @@ def test_host_allreduce_rejects_rank2_signal_with_dynamic_second_extent():
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(Exception, match=r"rank-2 signal shape\[1\] must be the constant 1"):
+    with pytest.raises(ValueError, match=r"rank-2 signal shape\[1\] must be the constant 1"):
         passes.lower_host_tensor_collectives()(program)
 
 
 def test_host_allreduce_rejects_unsupported_dtype_before_lowering():
-    with pytest.raises(Exception, match="target dtype must be FP16 or FP32"):
+    with pytest.raises(InvalidOperationError, match="target dtype must be FP16 or FP32"):
 
         @pl.program
         class P:
@@ -676,7 +677,7 @@ def test_host_allgather_rejects_aliased_input_target_windows():
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(Exception, match=r"different window allocations"):
+    with pytest.raises(ValueError, match=r"different window allocations"):
         passes.lower_host_tensor_collectives()(program)
 
 
@@ -707,7 +708,7 @@ def test_host_all_to_all_rejects_aliased_input_target_windows():
             return 0
 
     program = passes.materialize_comm_domain_scopes()(P)
-    with pytest.raises(Exception, match=r"different window allocations"):
+    with pytest.raises(ValueError, match=r"different window allocations"):
         passes.lower_host_tensor_collectives()(program)
 
 

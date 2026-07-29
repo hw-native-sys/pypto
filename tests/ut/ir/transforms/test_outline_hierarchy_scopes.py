@@ -23,6 +23,7 @@ documented semantics (``docs/en/dev/passes/07-outline_hierarchy_scopes.md`` and
 ``convert_to_ssa`` so SSA naming/phi insertion matches the pass output.
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -608,7 +609,7 @@ class TestHierarchyOutlinedVerifier:
         program = passes.convert_to_ssa()(Input)
 
         # verify_properties should throw because Hierarchy scope remains.
-        with pytest.raises(Exception, match="Hierarchy ScopeStmt"):
+        with pytest.raises(pypto.Error, match="Hierarchy ScopeStmt"):
             passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
 
     def test_program_without_hierarchy_passes_verification(self):

@@ -132,7 +132,7 @@ def test_structural_equal_with_level():
     f2 = _make_empty_func("a", level=ir.Level.HOST, role=ir.Role.SubWorker)
     f3 = _make_empty_func("a", level=ir.Level.POD, role=ir.Role.SubWorker)
     ir.assert_structural_equal(f1, f2)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(f1, f3)
 
 
@@ -140,7 +140,7 @@ def test_structural_equal_none_vs_set():
     """structural_equal distinguishes None from set level."""
     f_none = _make_empty_func("a")
     f_set = _make_empty_func("a", level=ir.Level.HOST)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(f_none, f_set)
 
 

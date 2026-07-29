@@ -80,7 +80,7 @@ def test_tfree_id_mismatch_raises():
             t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1, id=3)
             pl.tfree_to_aic(t, id=0)
 
-    with pytest.raises(Exception, match="does not match originating"):
+    with pytest.raises(ValueError, match="does not match originating"):
         _stamp(Prog)
 
 
@@ -94,7 +94,7 @@ def test_tfree_direction_mismatch_raises():
             t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
             pl.tfree_to_aiv(t)
 
-    with pytest.raises(Exception, match="requires its tile argument to come from"):
+    with pytest.raises(ValueError, match="requires its tile argument to come from"):
         _stamp(Prog)
 
 

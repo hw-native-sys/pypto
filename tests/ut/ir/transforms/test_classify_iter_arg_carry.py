@@ -244,7 +244,7 @@ def test_manual_scope_parallel_dynamic_trip_count_rejected():
                         out, prev_tid = pl.submit(self.kern, x, out, row, col, deps=[prev_tid])
             return out
 
-    with pytest.raises(Exception, match="statically-known trip count"):
+    with pytest.raises(ValueError, match="statically-known trip count"):
         PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
 
 

@@ -1503,7 +1503,7 @@ class TestCrossFunctionDynamicShapeSubstitution:
         M = pl.dynamic("M")
         N = pl.dynamic("N")
 
-        with pytest.raises(Exception, match="conflicting bindings"):
+        with pytest.raises(ParserSyntaxError, match="conflicting bindings"):
 
             @pl.program
             class ShapeMismatch:

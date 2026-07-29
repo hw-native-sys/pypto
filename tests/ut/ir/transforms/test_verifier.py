@@ -9,6 +9,7 @@
 
 """Unit tests for PropertyVerifierRegistry-based verification."""
 
+import pypto
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import builder
@@ -100,7 +101,7 @@ def test_registry_verify_or_throw_with_error():
     program = _make_ssa_violating_program()
 
     props = passes.get_default_verify_properties()
-    with pytest.raises(Exception, match="IR Verification Report"):
+    with pytest.raises(pypto.Error, match="IR Verification Report"):
         passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 
@@ -360,7 +361,7 @@ def test_verification_instrument_checks_structural_before_pass():
     """
     program = _make_nested_seq_stmt_program(nested=True)
 
-    with pytest.raises(Exception, match="Pre-verification failed"):
+    with pytest.raises(pypto.Error, match="Pre-verification failed"):
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             passes.normalize_stmt_structure()(program)
 

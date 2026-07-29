@@ -9,6 +9,7 @@
 
 """Unit tests for OutlineIncoreScopes pass."""
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -1006,7 +1007,7 @@ class TestSplitIncoreOrchVerifier:
         program = passes.convert_to_ssa()(Input)
 
         # verify_properties should throw because InCore scope remains in Opaque function
-        with pytest.raises(Exception, match="InCore ScopeStmt"):
+        with pytest.raises(pypto.Error, match="InCore ScopeStmt"):
             passes.verify_properties(self._split_incore_orch_props(), program, "test")
 
     def test_compute_op_in_orchestration_does_not_fail(self):

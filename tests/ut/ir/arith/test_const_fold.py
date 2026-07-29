@@ -102,11 +102,11 @@ class TestFloorDivMod:
         assert result.value == 2  # floormod(-7, 3) = 2, NOT -1 (truncation)
 
     def test_floordiv_by_zero_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fold_const(ir.FloorDiv(ci(5), ci(0), INT, S))
 
     def test_floormod_by_zero_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fold_const(ir.FloorMod(ci(5), ci(0), INT, S))
 
 
@@ -485,7 +485,7 @@ class TestOverflowAndEdgeCases:
 
     def test_floordiv_int64_min_neg1_raises(self):
         """INT64_MIN // -1 overflows — should raise."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fold_const(ir.FloorDiv(ci(INT64_MIN), ci(-1), INT, S))
 
     def test_pow_exponent_by_squaring(self):

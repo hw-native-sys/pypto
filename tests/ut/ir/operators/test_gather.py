@@ -86,19 +86,19 @@ class TestTileGatherIndexTypes:
         assert isinstance(call.type.shape[1], ir.ConstInt) and call.type.shape[1].value == 16
 
     def test_invalid_src_dtype_raises(self):
-        with pytest.raises(Exception, match="src dtype"):
+        with pytest.raises(ValueError, match="src dtype"):
             _gather(DataType.UINT8, DataType.INT32, DataType.INT32)
 
     @pytest.mark.parametrize("bad_idx_dtype", [DataType.FP32, DataType.INT8])
     def test_invalid_index_dtype_raises(self, bad_idx_dtype):
-        with pytest.raises(Exception, match="indices dtype"):
+        with pytest.raises(ValueError, match="indices dtype"):
             _gather(DataType.FP32, bad_idx_dtype, DataType.INT32)
 
     @pytest.mark.parametrize("wide_src_dtype", [DataType.FP32, DataType.INT32])
     def test_int16_index_requires_16bit_src(self, wide_src_dtype):
         # INT16 indices with a 32-bit src are unsafe on every target (tgather b32
         # reads them as u32), so the deducer rejects the combination outright.
-        with pytest.raises(Exception, match="16-bit src"):
+        with pytest.raises(ValueError, match="16-bit src"):
             _gather(wide_src_dtype, DataType.INT16, DataType.INT32)
 
     def test_non_tile_indices_raises(self):
@@ -106,7 +106,7 @@ class TestTileGatherIndexTypes:
         src = ir.Var("src", ir.TileType([1, 64], DataType.FP32), span)
         scalar_idx = ir.Var("idx", ir.ScalarType(DataType.INT32), span)
         tmp = ir.Var("tmp", ir.TileType([1, 64], DataType.INT32), span)
-        with pytest.raises(Exception, match="TileType"):
+        with pytest.raises(ValueError, match="TileType"):
             tile.gather(src, scalar_idx, tmp)
 
 

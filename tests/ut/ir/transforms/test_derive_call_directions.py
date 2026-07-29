@@ -35,6 +35,7 @@ ill-formed IR, so they assert on the raised error rather than on an ``Expected``
 program.
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -1640,13 +1641,13 @@ class TestVerifyNegative:
     def test_input_with_output_rejected(self):
         # Position 0 is callee In; using Output there must fail.
         prog = self._build_program([ir.ArgDirection.Output, ir.ArgDirection.OutputExisting])
-        with pytest.raises(Exception, match=r"(?i)arg_direction|CallDirectionsResolved"):  # noqa: PT011
+        with pytest.raises(pypto.Error, match=r"(?i)arg_direction|CallDirectionsResolved"):
             _verify_call_directions(prog)
 
     def test_out_with_input_rejected(self):
         # Position 1 is callee Out; using Input there must fail.
         prog = self._build_program([ir.ArgDirection.Input, ir.ArgDirection.Input])
-        with pytest.raises(Exception, match=r"(?i)arg_direction|CallDirectionsResolved"):  # noqa: PT011
+        with pytest.raises(pypto.Error, match=r"(?i)arg_direction|CallDirectionsResolved"):
             _verify_call_directions(prog)
 
 
@@ -2433,7 +2434,7 @@ class TestVerifyWrapperDirections:
                 r = self.group(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.input]})
                 return r
 
-        with pytest.raises(Exception, match="stale param_directions_"):
+        with pytest.raises(pypto.Error, match="stale param_directions_"):
             _verify_call_directions(Stale)
 
     def test_materialized_group_directions_accepted(self):

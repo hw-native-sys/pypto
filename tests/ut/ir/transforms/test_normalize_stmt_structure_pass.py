@@ -25,6 +25,7 @@ directly. A final raw-IR test exercises a structurally-invalid mid-body
 ``YieldStmt`` that the DSL parser likewise cannot emit.
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -370,7 +371,7 @@ def test_no_redundant_blocks_rejects_mid_body_yield():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+    with pytest.raises(pypto.Error, match="YieldStmt before the terminating position"):
         verify_pass(program)
 
 

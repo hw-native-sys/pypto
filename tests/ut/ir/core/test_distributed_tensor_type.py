@@ -91,7 +91,7 @@ def test_assert_structural_equal_passes():
 def test_assert_structural_equal_diagnoses_class_mismatch():
     dt = DistributedTensorType([64], DataType.FP32)
     plain = TensorType([64], DataType.FP32)
-    with pytest.raises(Exception, match="Type name mismatch"):
+    with pytest.raises(ValueError, match="Type name mismatch"):
         assert_structural_equal(dt, plain)
 
 

@@ -25,6 +25,7 @@ sites. The unified short form ``pld.remote_load(...)`` is exercised in
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
 
@@ -173,7 +174,7 @@ def test_remote_load_accepts_valid_shape_for_ragged_tail():
 
 
 def test_remote_load_rejects_zero_positional():
-    with pytest.raises(Exception, match="positional argument"):
+    with pytest.raises(InvalidOperationError, match="positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -190,7 +191,7 @@ def test_remote_load_rejects_zero_positional():
 def test_remote_load_rejects_too_many_positional():
     # The optional fifth argument is valid_shape; a sixth positional arg is
     # still rejected.
-    with pytest.raises(Exception, match="positional argument"):
+    with pytest.raises(InvalidOperationError, match="positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -225,7 +226,7 @@ def test_remote_load_accepts_positional_args():
 
 
 def test_remote_load_rejects_missing_peer():
-    with pytest.raises(Exception, match="required positional argument"):
+    with pytest.raises(InvalidOperationError, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -239,7 +240,7 @@ def test_remote_load_rejects_missing_peer():
 
 
 def test_remote_load_rejects_missing_offsets():
-    with pytest.raises(Exception, match="required positional argument"):
+    with pytest.raises(InvalidOperationError, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -254,7 +255,7 @@ def test_remote_load_rejects_missing_offsets():
 
 
 def test_remote_load_rejects_missing_shape():
-    with pytest.raises(Exception, match="required positional argument"):
+    with pytest.raises(InvalidOperationError, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -269,7 +270,7 @@ def test_remote_load_rejects_missing_shape():
 
 
 def test_remote_load_rejects_unknown_kwarg():
-    with pytest.raises(Exception, match="unexpected keyword argument"):
+    with pytest.raises(InvalidOperationError, match="unexpected keyword argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -292,7 +293,7 @@ def test_remote_load_rejects_unknown_kwarg():
 
 def test_remote_load_rejects_plain_tensor_target():
     """The parser refuses a ``pl.Tensor`` target — must be window-bound."""
-    with pytest.raises(Exception, match="DistributedTensor"):
+    with pytest.raises(InvalidOperationError, match="DistributedTensor"):
 
         @pl.program
         class P:  # noqa: F841
@@ -312,7 +313,7 @@ def test_remote_load_rejects_non_list_offsets():
     Mirrors ``pl.tile.load``: a non-iterable ``offsets`` is rejected by
     ``_normalize_intlike`` and surfaces as a ``pld.tile`` dispatch error.
     """
-    with pytest.raises(Exception, match="remote_load"):
+    with pytest.raises(InvalidOperationError, match="remote_load"):
 
         @pl.program
         class P:  # noqa: F841
@@ -328,7 +329,7 @@ def test_remote_load_rejects_non_list_offsets():
 
 def test_remote_load_rejects_unknown_subop():
     """``pld.tile.<other>`` is rejected at 3-segment dispatch."""
-    with pytest.raises(Exception, match="pld.tile"):
+    with pytest.raises(InvalidOperationError, match="pld.tile"):
 
         @pl.program
         class P:  # noqa: F841

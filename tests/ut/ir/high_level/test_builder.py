@@ -1352,7 +1352,7 @@ class TestIRBuilderProgram:
         """Test that getting an undeclared GlobalVar raises an error."""
         ib = IRBuilder()
 
-        with pytest.raises(Exception):  # Should raise RuntimeError
+        with pytest.raises(RuntimeError):  # Should raise RuntimeError
             with ib.program("test_program") as p:
                 # Try to get a GlobalVar that wasn't declared
                 p.get_global_var("nonexistent")

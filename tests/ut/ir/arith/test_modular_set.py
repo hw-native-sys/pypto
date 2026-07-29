@@ -320,7 +320,7 @@ class TestModularSetConstraint:
 
 class TestModularSetValidation:
     def test_negative_coeff_raises(self):
-        with pytest.raises(Exception, match="non-negative"):
+        with pytest.raises(ValueError, match="non-negative"):
             analyzer.update(x, ModularSet(-2, 1))
 
 

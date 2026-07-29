@@ -67,10 +67,11 @@ void BindErrors(nb::module_& m) {
   static nb::exception<pypto::AssertionError> exc_assertion_error(m, "AssertionError", PyExc_AssertionError);
   static nb::exception<pypto::InternalError> exc_internal_error(m, "InternalError", PyExc_RuntimeError);
 
-  // Set __module__ to "pypto" so the exception displays as "pypto.InternalError" instead of
-  // "pypto.pypto_core.InternalError"
-  PyObject* internal_error_type = exc_internal_error.ptr();
-  PyObject_SetAttrString(internal_error_type, "__module__", PyUnicode_FromString("pypto"));
+  // Set __module__ to "pypto" so the exceptions display as "pypto.Error" / "pypto.InternalError"
+  // instead of "pypto.pypto_core.Error" / "pypto.pypto_core.InternalError"
+  nb::str module_name("pypto");
+  nb::setattr(exc_error.ptr(), "__module__", module_name);
+  nb::setattr(exc_internal_error.ptr(), "__module__", module_name);
 
   // Register exception translator to convert C++ exceptions to Python exceptions.
   // See UserErrorMessage() above for when the C++ stack trace is included in the message.
@@ -98,10 +99,12 @@ void BindErrors(nb::module_& m) {
     } catch (const pypto::InternalError& e) {
       PyErr_SetString(exc_internal_error.ptr(), e.GetFullMessage().c_str());
     } catch (const pypto::Error& e) {
-      // Catch base Error last as a fallback. VerificationError lands here too: its diagnostic
-      // report already pinpoints the offending IR, and the frames above the throw are always the
-      // same verifier-registry entry, so it follows the user-facing default.
-      PyErr_SetString(PyExc_Exception, UserErrorMessage(e).c_str());
+      // Catch base Error last as a fallback. Raising the registered `pypto.Error` rather than a bare
+      // `Exception` keeps subclasses without a dedicated branch above catchable by type; it derives
+      // from `Exception`, so `except Exception` still works. VerificationError lands here too: its
+      // diagnostic report already pinpoints the offending IR, and the frames above the throw are
+      // always the same verifier-registry entry, so it follows the user-facing trace default.
+      PyErr_SetString(exc_error.ptr(), UserErrorMessage(e).c_str());
     }
   });
 }

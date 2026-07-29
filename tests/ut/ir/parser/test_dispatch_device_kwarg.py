@@ -26,6 +26,7 @@ inspect the resolved expression to derive the per-dispatch device subset:
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import ir
 
 
@@ -188,7 +189,7 @@ def test_device_rejected_on_non_orchestrator_callee():
     """A callee that is not an Orchestrator (default ``Opaque`` /
     ``SubWorker``) does not accept ``device=``. Predicate is on ``role``,
     not ``func_type``."""
-    with pytest.raises(Exception, match="'device'"):
+    with pytest.raises(ParserTypeError, match="'device'"):
 
         @pl.program
         class P:  # noqa: F841

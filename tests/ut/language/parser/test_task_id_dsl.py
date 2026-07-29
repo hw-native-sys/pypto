@@ -230,7 +230,7 @@ class TestDepsKwargAcceptsTaskId:
 
     def test_deps_rejects_tensor_var(self):
         """Tensor variables are not accepted in ``deps=[...]``."""
-        with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
+        with pytest.raises(ParserTypeError):
 
             @pl.program
             class _Prog:
@@ -252,7 +252,7 @@ class TestDepsKwargAcceptsTaskId:
 
     def test_deps_rejects_non_task_id_scalar(self):
         """``deps=[int_scalar]`` (a non-TaskId scalar) errors."""
-        with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
+        with pytest.raises(ParserTypeError):
 
             @pl.program
             class _Prog:

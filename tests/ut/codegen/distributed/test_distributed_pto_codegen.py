@@ -204,7 +204,7 @@ def test_remote_load_rejects_type_only_dynamic_partition_extent():
             )
             return pl.store(tile, [0, 0], out)
 
-    with pytest.raises(Exception, match="depends on unbound symbol 'REMOTE_VALID_N'"):
+    with pytest.raises(ValueError, match="depends on unbound symbol 'REMOTE_VALID_N'"):
         _generate_mlir(P)
 
 

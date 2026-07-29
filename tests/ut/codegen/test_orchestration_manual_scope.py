@@ -1109,7 +1109,7 @@ class TestManualScopeCodegen:
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        with pytest.raises(Exception, match="statically-known trip count"):
+        with pytest.raises(ValueError, match="statically-known trip count"):
             _generate_orch_code(pm.run_passes(Prog))
 
     def test_manual_scope_double_buffered_array_carry_above_legacy_16_cap(self):

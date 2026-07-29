@@ -12,6 +12,13 @@ from enum import IntEnum
 
 from pypto.pypto_core.ir import Span
 
+class Error(Exception):
+    """Base class for PyPTO errors that have no more specific Python counterpart.
+
+    Raised for `pypto::Error` subclasses without a dedicated translation, notably
+    `VerificationError` from the IR verifier.
+    """
+
 class InternalError(Exception):
     """Exception raised when an internal system error occurs"""
 

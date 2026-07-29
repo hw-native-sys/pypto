@@ -32,6 +32,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import DataType
+from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
 
@@ -155,7 +156,7 @@ def test_alloc_window_buffer_long_form():
 
 def test_alloc_window_buffer_rejects_non_name_lhs():
     """Tuple-unpacking / subscript / attribute LHS is rejected — name must be a bare identifier."""
-    with pytest.raises(Exception, match="must appear as the RHS of a simple assignment"):
+    with pytest.raises(ParserSyntaxError, match="must appear as the RHS of a simple assignment"):
 
         @pl.program
         class P:  # noqa: F841
@@ -166,7 +167,7 @@ def test_alloc_window_buffer_rejects_non_name_lhs():
 
 
 def test_alloc_window_buffer_rejects_duplicate_names():
-    with pytest.raises(Exception, match="already declared"):
+    with pytest.raises(ParserSyntaxError, match="already declared"):
 
         @pl.program
         class P:  # noqa: F841
@@ -179,7 +180,7 @@ def test_alloc_window_buffer_rejects_duplicate_names():
 
 def test_alloc_window_buffer_rejects_user_kwargs():
     """``dtype=`` is rejected on the scalar byte form — it is only valid with the shape form."""
-    with pytest.raises(Exception, match="dtype= is only valid when the first argument is a shape"):
+    with pytest.raises(ParserSyntaxError, match="dtype= is only valid when the first argument is a shape"):
 
         @pl.program
         class P:  # noqa: F841
@@ -191,7 +192,7 @@ def test_alloc_window_buffer_rejects_user_kwargs():
 
 def test_alloc_window_buffer_rejects_explicit_name_kwarg():
     """``name`` is parser-injected from the LHS and can't be passed explicitly."""
-    with pytest.raises(Exception, match="'name' kwarg cannot be passed explicitly"):
+    with pytest.raises(ParserSyntaxError, match="'name' kwarg cannot be passed explicitly"):
 
         @pl.program
         class P:  # noqa: F841
@@ -203,7 +204,7 @@ def test_alloc_window_buffer_rejects_explicit_name_kwarg():
 
 def test_alloc_window_buffer_rejects_bare_call_outside_assignment():
     """Without an assignment LHS there is no globally-unique name to bind to."""
-    with pytest.raises(Exception, match="must appear as the RHS of a simple assignment"):
+    with pytest.raises(ParserSyntaxError, match="must appear as the RHS of a simple assignment"):
 
         @pl.program
         class P:  # noqa: F841
@@ -215,7 +216,7 @@ def test_alloc_window_buffer_rejects_bare_call_outside_assignment():
 
 def test_alloc_window_buffer_rejects_list_without_dtype():
     """A list/tuple without ``dtype=`` is rejected — the shape form requires dtype."""
-    with pytest.raises(Exception, match="requires dtype="):
+    with pytest.raises(ParserSyntaxError, match="requires dtype="):
 
         @pl.program
         class P:  # noqa: F841
@@ -276,7 +277,7 @@ def test_alloc_window_buffer_shaped_long_form():
 
 def test_alloc_window_buffer_rejects_empty_shape():
     """An empty shape list is rejected with a clear error."""
-    with pytest.raises(Exception, match="shape must be non-empty"):
+    with pytest.raises(ParserSyntaxError, match="shape must be non-empty"):
 
         @pl.program
         class P:  # noqa: F841
@@ -288,7 +289,7 @@ def test_alloc_window_buffer_rejects_empty_shape():
 
 def test_alloc_window_buffer_rejects_non_positive_static_dim():
     """Zero and negative static dimensions are rejected with a clear error."""
-    with pytest.raises(Exception, match="all dimensions must be positive"):
+    with pytest.raises(ParserSyntaxError, match="all dimensions must be positive"):
 
         @pl.program
         class P:  # noqa: F841
@@ -297,7 +298,7 @@ def test_alloc_window_buffer_rejects_non_positive_static_dim():
                 buf = pld.alloc_window_buffer([0, 128], dtype=pl.FP32)  # noqa: F841
                 return buf
 
-    with pytest.raises(Exception, match="all dimensions must be positive"):
+    with pytest.raises(ParserSyntaxError, match="all dimensions must be positive"):
 
         @pl.program
         class P:  # noqa: F841

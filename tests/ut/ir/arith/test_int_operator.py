@@ -9,6 +9,7 @@
 
 """Tests for arith integer operator utilities (floordiv, floormod, GCD, LCM, ExtEuclid)."""
 
+import pypto
 import pytest
 from pypto.arith import extended_euclidean, floordiv, floormod, gcd, lcm
 
@@ -33,11 +34,11 @@ class TestFloorDiv:
         assert floordiv(0, 5) == 0
 
     def test_by_zero_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(pypto.InternalError):
             floordiv(5, 0)
 
     def test_int64_min_div_neg1_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(pypto.InternalError):
             floordiv(-(2**63), -1)
 
 
@@ -58,7 +59,7 @@ class TestFloorMod:
         assert floormod(6, 3) == 0
 
     def test_by_zero_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(pypto.InternalError):
             floormod(5, 0)
 
 

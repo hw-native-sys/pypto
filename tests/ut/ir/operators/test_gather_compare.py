@@ -19,6 +19,7 @@ Type contract (enforced by the op's type deduction):
 
 import pypto.language as pl
 import pytest
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 _VALID_SRC_DTYPES = [pl.FP16, pl.FP32, pl.INT16, pl.INT32]
 _INVALID_SRC_DTYPES = [pl.UINT16, pl.UINT32, pl.UINT8, pl.INT64]
@@ -57,11 +58,11 @@ class TestTileGatherCompareTypes:
 
     @pytest.mark.parametrize("src_dtype", _INVALID_SRC_DTYPES)
     def test_invalid_src_dtype_raises(self, src_dtype):
-        with pytest.raises(Exception, match="src dtype"):
+        with pytest.raises(InvalidOperationError, match="src dtype"):
             _build_program(src_dtype=src_dtype)
 
     def test_kvalue_dtype_mismatch_raises(self):
-        with pytest.raises(Exception, match="kvalue dtype"):
+        with pytest.raises(InvalidOperationError, match="kvalue dtype"):
 
             @pl.program
             class Bad:
@@ -96,11 +97,11 @@ class TestTileGatherCompareCmpMode:
         assert "tile.gather_compare" in str(prog)
 
     def test_invalid_cmp_mode_string(self):
-        with pytest.raises(Exception, match="cmp_mode"):
+        with pytest.raises(InvalidOperationError, match="cmp_mode"):
             _build_program(cmp_mode="bogus")
 
     def test_invalid_cmp_mode_int(self):
-        with pytest.raises(Exception, match="cmp_mode"):
+        with pytest.raises(InvalidOperationError, match="cmp_mode"):
             _build_program(cmp_mode=99)
 
 
@@ -129,7 +130,7 @@ class TestTensorGatherCompareTypes:
 
     @pytest.mark.parametrize("src_dtype", _INVALID_SRC_DTYPES)
     def test_invalid_src_dtype_raises(self, src_dtype):
-        with pytest.raises(Exception, match="input dtype"):
+        with pytest.raises(InvalidOperationError, match="input dtype"):
             _build_tensor_compare_program(src_dtype=src_dtype)
 
     def test_compare_with_offset(self):
@@ -137,7 +138,7 @@ class TestTensorGatherCompareTypes:
         assert "tensor.gather_compare" in str(prog)
 
     def test_mutually_exclusive_index_and_compare(self):
-        with pytest.raises(Exception, match="mutually exclusive"):
+        with pytest.raises(InvalidOperationError, match="mutually exclusive"):
 
             @pl.program
             class Bad:
@@ -151,7 +152,7 @@ class TestTensorGatherCompareTypes:
                     return pl.tensor.gather(src, dim=-1, index=idx, kvalue=kv, cmp_mode="eq", out_cols=8)
 
     def test_mutually_exclusive_mask_and_compare(self):
-        with pytest.raises(Exception, match="mutually exclusive"):
+        with pytest.raises(InvalidOperationError, match="mutually exclusive"):
 
             @pl.program
             class Bad:

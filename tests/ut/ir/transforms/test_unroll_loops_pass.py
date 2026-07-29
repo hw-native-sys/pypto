@@ -18,6 +18,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.ir.printer import python_print
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 def _unroll_and_ssa(program):
@@ -239,7 +240,7 @@ class TestUnrollLimits:
                     x = pl.add(x, 1.0)
                 return x
 
-        with pytest.raises(Exception, match="exceeds maximum allowed"):
+        with pytest.raises(ValueError, match="exceeds maximum allowed"):
             passes.unroll_loops()(Before)
 
 
@@ -248,7 +249,7 @@ class TestParserValidation:
 
     def test_unroll_with_init_values_rejected(self):
         """pl.unroll() cannot be combined with init_values."""
-        with pytest.raises(Exception, match="cannot be combined with init_values"):
+        with pytest.raises(ParserSyntaxError, match="cannot be combined with init_values"):
 
             @pl.program
             class _:

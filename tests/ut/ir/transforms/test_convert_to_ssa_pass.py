@@ -15,6 +15,7 @@ self-contained programs, so the default strict-identity mode (with DefField
 auto-mapping at def sites) is sufficient.
 """
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -1887,7 +1888,7 @@ class TestMidBodyYieldGuard:
         program = ir.Program([func], "test_program", span)
 
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-        with ctx, pytest.raises(Exception, match="YieldStmt at position"):
+        with ctx, pytest.raises(pypto.InternalError, match="YieldStmt at position"):
             passes.convert_to_ssa()(program)
 
     def test_function_body_with_mid_body_yield_rejected(self):
@@ -1910,7 +1911,7 @@ class TestMidBodyYieldGuard:
         program = ir.Program([func], "test_program", span)
 
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-        with ctx, pytest.raises(Exception, match="YieldStmt at position"):
+        with ctx, pytest.raises(pypto.InternalError, match="YieldStmt at position"):
             passes.convert_to_ssa()(program)
 
 

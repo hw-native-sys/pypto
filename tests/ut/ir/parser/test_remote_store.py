@@ -24,6 +24,7 @@ sites.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir
 
 
@@ -147,7 +148,7 @@ def test_remote_store_round_trips_through_printer():
 
 def test_remote_store_rejects_plain_tensor_target():
     """The parser refuses a ``pl.Tensor`` target — must be window-bound."""
-    with pytest.raises(Exception, match="DistributedTensor"):
+    with pytest.raises(InvalidOperationError, match="DistributedTensor"):
 
         @pl.program
         class P:  # noqa: F841
@@ -163,7 +164,7 @@ def test_remote_store_rejects_plain_tensor_target():
 
 def test_remote_store_rejects_unknown_subop():
     """``pld.tile.<other>`` is rejected at 3-segment dispatch."""
-    with pytest.raises(Exception, match="pld.tile"):
+    with pytest.raises(InvalidOperationError, match="pld.tile"):
 
         @pl.program
         class P:  # noqa: F841

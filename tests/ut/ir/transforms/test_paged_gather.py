@@ -28,6 +28,7 @@ import pytest
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType, is_backend_configured, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 
 def _build_program(
@@ -174,7 +175,7 @@ def test_paged_gather_survives_full_pipeline(is_trans):
 
 def test_paged_gather_rejects_non_2d_src():
     """src must be 2D."""
-    with pytest.raises(Exception, match="2D src"):
+    with pytest.raises(InvalidOperationError, match="2D src"):
 
         @pl.program
         class Program:
@@ -190,7 +191,7 @@ def test_paged_gather_rejects_non_2d_src():
 
 def test_paged_gather_rejects_non_int32_indices():
     """indices must be INT32."""
-    with pytest.raises(Exception, match="indices dtype"):
+    with pytest.raises(InvalidOperationError, match="indices dtype"):
 
         @pl.program
         class Program:

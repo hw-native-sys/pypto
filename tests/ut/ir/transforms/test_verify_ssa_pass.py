@@ -9,6 +9,7 @@
 
 """Unit tests for SSA verification via run_verifier()."""
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -114,7 +115,7 @@ def test_verify_ssa_missing_yield():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="must have YieldStmt"):
+    with pytest.raises(pypto.Error, match="must have YieldStmt"):
         verify_pass(program)
 
 
@@ -137,7 +138,7 @@ def test_verify_ssa_missing_else():
     program = ir.Program([func], "test_program", span)
 
     verify_pass = passes.run_verifier()
-    with pytest.raises(Exception, match="must have else branch"):
+    with pytest.raises(pypto.Error, match="must have else branch"):
         verify_pass(program)
 
 
@@ -281,7 +282,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="used outside its defining scope"):
+        with pytest.raises(pypto.Error, match="used outside its defining scope"):
             verify_pass(program)
 
     def test_var_from_then_branch_used_after_if(self):
@@ -304,7 +305,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"used before definition|used outside its defining scope"):
+        with pytest.raises(pypto.Error, match=r"used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_iter_arg_used_outside_loop(self):
@@ -338,7 +339,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"used before definition|used outside its defining scope"):
+        with pytest.raises(pypto.Error, match=r"used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_loop_var_used_outside_loop(self):
@@ -369,7 +370,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"used before definition|used outside its defining scope"):
+        with pytest.raises(pypto.Error, match=r"used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_if_return_var_not_visible_in_condition(self):
@@ -393,7 +394,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"used before definition|used outside its defining scope"):
+        with pytest.raises(pypto.Error, match=r"used before definition|used outside its defining scope"):
             verify_pass(program)
 
 
@@ -431,7 +432,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"(iter_args count.*return_vars count|size mismatch)"):
+        with pytest.raises(pypto.Error, match=r"(iter_args count.*return_vars count|size mismatch)"):
             verify_pass(program)
 
     def test_for_yield_count_mismatch(self):
@@ -466,7 +467,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"(YieldStmt value count.*iter_args count|size mismatch)"):
+        with pytest.raises(pypto.Error, match=r"(YieldStmt value count.*iter_args count|size mismatch)"):
             verify_pass(program)
 
     def test_if_yield_count_mismatch(self):
@@ -490,7 +491,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match=r"(YieldStmt value count.*return_vars count|size mismatch)"):
+        with pytest.raises(pypto.Error, match=r"(YieldStmt value count.*return_vars count|size mismatch)"):
             verify_pass(program)
 
     # The next four tests construct IR directly via `ir.ForStmt` / `ir.WhileStmt`
@@ -534,7 +535,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+        with pytest.raises(pypto.Error, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
     def test_while_mid_body_yield(self):
@@ -562,7 +563,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+        with pytest.raises(pypto.Error, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
     def test_if_then_mid_body_yield(self):
@@ -589,7 +590,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+        with pytest.raises(pypto.Error, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
     def test_if_else_mid_body_yield(self):
@@ -616,7 +617,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+        with pytest.raises(pypto.Error, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
 

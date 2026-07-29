@@ -24,6 +24,7 @@ at compile time.
 Tests drive the full Default pipeline on Ascend910B (48 VECTOR / 24 CUBE cores).
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import backend
@@ -615,7 +616,7 @@ class TestHardSyncallOccupancy:
 
     def test_partial_aiv_occupancy_rejected(self):
         """pl.spmd(24) < 48 AIV cores + hard aiv_only barrier is rejected at compile time."""
-        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+        with pytest.raises(pypto.Error, match="fill all 48 AIV cores"):
             _run(_aiv_program(24))
 
     def test_full_aiv_occupancy_accepted(self):
@@ -624,12 +625,12 @@ class TestHardSyncallOccupancy:
 
     def test_over_aiv_occupancy_rejected(self):
         """pl.spmd(96) > 48 AIV cores is rejected (hard barrier needs exactly-full occupancy)."""
-        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+        with pytest.raises(pypto.Error, match="fill all 48 AIV cores"):
             _run(_aiv_program(96))
 
     def test_full_aiv_occupancy_without_sync_start_rejected(self):
         """pl.spmd(48) at full occupancy but without sync_start is rejected (blocks not co-resident)."""
-        with pytest.raises(Exception, match="sync_start=True"):
+        with pytest.raises(pypto.Error, match="sync_start=True"):
             _run(_aiv_program_no_sync(48))
 
     def test_soft_form_not_checked(self):
@@ -646,22 +647,22 @@ class TestHardSyncallOccupancy:
 
     def test_mixed_partial_occupancy_rejected(self):
         """Mixed kernel + hard mix barrier at pl.spmd(12) < 24 core-groups is rejected."""
-        with pytest.raises(Exception, match="core-groups"):
+        with pytest.raises(pypto.Error, match="core-groups"):
             _run(_mixed_program(12))
 
     def test_mixed_full_occupancy_without_sync_start_rejected(self):
         """Mixed kernel at full 24 core-groups but without sync_start is rejected."""
-        with pytest.raises(Exception, match="sync_start=True"):
+        with pytest.raises(pypto.Error, match="sync_start=True"):
             _run(_mixed_program_no_sync(24))
 
     def test_standalone_default_mix_barrier_rejected(self):
         """A pure-AIV kernel with the default (mix) hard barrier can never complete (no AIC)."""
-        with pytest.raises(Exception, match="can never complete"):
+        with pytest.raises(pypto.Error, match="can never complete"):
             _run(_aiv_default_mix_program(48))
 
     def test_spmd_submit_partial_occupancy_rejected(self):
         """pl.spmd_submit(core_num=24) carries the block count on the Submit — still checked."""
-        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+        with pytest.raises(pypto.Error, match="fill all 48 AIV cores"):
             _run(_spmd_submit_program(24))
 
     def test_spmd_submit_full_occupancy_accepted(self):
@@ -670,12 +671,12 @@ class TestHardSyncallOccupancy:
 
     def test_spmd_submit_full_occupancy_without_sync_start_rejected(self):
         """pl.spmd_submit(core_num=48) at full occupancy but without sync_start is rejected."""
-        with pytest.raises(Exception, match="sync_start=True"):
+        with pytest.raises(pypto.Error, match="sync_start=True"):
             _run(_spmd_submit_program_no_sync(48))
 
     def test_cluster_spmd_partial_occupancy_rejected(self):
         """pl.cluster()-nested pl.spmd(24) (a Group with core_num) is checked and rejected."""
-        with pytest.raises(Exception, match="fill all 48 AIV cores"):
+        with pytest.raises(pypto.Error, match="fill all 48 AIV cores"):
             _run(_cluster_spmd_program(24))
 
     def test_cluster_spmd_full_occupancy_accepted(self):
@@ -684,7 +685,7 @@ class TestHardSyncallOccupancy:
 
     def test_cluster_spmd_full_occupancy_without_sync_start_rejected(self):
         """pl.cluster()-nested pl.spmd(48) at full occupancy but without sync_start is rejected."""
-        with pytest.raises(Exception, match="sync_start=True"):
+        with pytest.raises(pypto.Error, match="sync_start=True"):
             _run(_cluster_spmd_program_no_sync(48))
 
     def test_aiv_query_width_accepted(self):
@@ -693,12 +694,12 @@ class TestHardSyncallOccupancy:
 
     def test_aiv_query_width_without_sync_start_rejected(self):
         """Occupancy from the query still does not imply co-residency."""
-        with pytest.raises(Exception, match="sync_start=True"):
+        with pytest.raises(pypto.Error, match="sync_start=True"):
             _run(_aiv_query_program_no_sync())
 
     def test_aiv_launch_with_cluster_query_rejected(self):
         """available_cluster_count() sizes an AIV-only launch to the AIC count — rejected."""
-        with pytest.raises(Exception, match=r"available_cluster_count\(\).*available_aiv_count\(\)"):
+        with pytest.raises(pypto.Error, match=r"available_cluster_count\(\).*available_aiv_count\(\)"):
             _run(_aiv_wrong_query_program())
 
     def test_mixed_query_width_accepted(self):
@@ -707,7 +708,7 @@ class TestHardSyncallOccupancy:
 
     def test_mixed_launch_with_aiv_query_rejected(self):
         """available_aiv_count() sizes a mixed launch to the AIV count — rejected."""
-        with pytest.raises(Exception, match=r"available_aiv_count\(\).*available_cluster_count\(\)"):
+        with pytest.raises(pypto.Error, match=r"available_aiv_count\(\).*available_cluster_count\(\)"):
             _run(_mixed_wrong_query_program())
 
 

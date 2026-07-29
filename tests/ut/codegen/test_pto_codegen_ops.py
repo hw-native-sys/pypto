@@ -17,6 +17,7 @@ and verifies the generated orchestration code.
 
 import warnings
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -2722,7 +2723,7 @@ class TestTileStoreAtomicCodegen:
             funcs = list(optimized.functions.values())
             target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
             single = ir.Program([target], target.name, optimized.span)
-            with pytest.raises(Exception, match="bf16 atomic-add requires the Ascend910B"):
+            with pytest.raises(ValueError, match="bf16 atomic-add requires the Ascend910B"):
                 codegen.PTOCodegen().generate(single)
         finally:
             backend.reset_for_testing()
@@ -2818,7 +2819,7 @@ class TestTensorAssembleAtomicCodegen:
                 out = pl.assemble(out, target, [0, 0])
                 return out
 
-        with pytest.raises(Exception, match="global-memory destination"):
+        with pytest.raises(pypto.InternalError, match="global-memory destination"):
             self._generate_mlir(Prog)
 
 

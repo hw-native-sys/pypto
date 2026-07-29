@@ -139,7 +139,7 @@ class TestTupleGetItemExpr:
         ir.TupleGetItemExpr(tuple_var, 1, span)
 
         # Out of bounds index should raise error
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ir.TupleGetItemExpr(tuple_var, 2, span)
 
     def test_tuple_get_item_negative_index(self):
@@ -148,7 +148,7 @@ class TestTupleGetItemExpr:
         tuple_type = ir.TupleType([ir.ScalarType(DataType.INT64)])
         tuple_var = ir.Var("my_tuple", tuple_type, span)
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ir.TupleGetItemExpr(tuple_var, -1, span)
 
     def test_tuple_get_item_wrong_type(self):
@@ -158,7 +158,7 @@ class TestTupleGetItemExpr:
         scalar_var = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
         # Should raise error when trying to access as tuple
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ir.TupleGetItemExpr(scalar_var, 0, span)
 
     def test_nested_tuple_get_item(self):

@@ -22,6 +22,7 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 from pypto.ir.compile import compile as ir_compile
+from pypto.language.parser.diagnostics import ParserSyntaxError, ParserTypeError
 
 _KERNEL_SRC = '#include <cstdint>\nextern "C" void kernel_entry(int64_t* args) { (void)args; }\n'
 
@@ -138,7 +139,7 @@ def test_all_external_graph_emits_manifest_when_ptoas_is_skipped(tmp_path):
 def test_external_source_requires_aic_or_aiv(tmp_path):
     """external_source on a non-AIC/AIV function is rejected with a clear error."""
     cpp = _write_kernel(tmp_path)
-    with pytest.raises(Exception, match="external_source is only valid on FunctionType.AIC"):
+    with pytest.raises(ParserTypeError, match="external_source is only valid on FunctionType.AIC"):
 
         @pl.program
         class BadType:
@@ -162,7 +163,7 @@ def test_external_source_requires_aic_or_aiv(tmp_path):
 def test_external_kernel_requires_empty_body(tmp_path):
     """An external kernel with a non-``...`` body is rejected."""
     cpp = _write_kernel(tmp_path)
-    with pytest.raises(Exception, match="must have an empty"):
+    with pytest.raises(ParserSyntaxError, match="must have an empty"):
 
         @pl.program
         class BadBody:

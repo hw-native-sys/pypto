@@ -74,7 +74,7 @@ class TestManualScopeParsing:
         assert scope.manual is True
 
     def test_parse_manual_scope_rejects_arguments(self):
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+        with pytest.raises(ParserSyntaxError):
 
             @pl.program
             class _Prog:
@@ -185,7 +185,7 @@ class Prog:
 
     def test_plain_call_rejects_deps_kwarg(self):
         """``deps=`` on a plain ``self.kernel(...)`` call is rejected — use pl.submit."""
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserTypeError
+        with pytest.raises(ParserTypeError):
 
             @pl.program
             class _Prog:
@@ -257,7 +257,7 @@ class Prog:
         assert edges[0].type.dtype == pl.TASK_ID
 
     def test_submit_as_bare_expression_is_rejected(self):
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+        with pytest.raises(ParserSyntaxError):
 
             @pl.program
             class _Prog:
@@ -438,7 +438,7 @@ class Prog:
 
     def test_pl_at_as_on_non_at_scope_is_rejected(self):
         """``as`` is only meaningful on ``pl.at(...)``; other constructs reject it."""
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+        with pytest.raises(ParserSyntaxError):
 
             @pl.program
             class _Prog:
@@ -449,7 +449,7 @@ class Prog:
 
     def test_submit_nested_result_tuple_is_rejected(self):
         """pl.submit result targets must be plain names — no nested tuples."""
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+        with pytest.raises(ParserSyntaxError):
 
             @pl.program
             class _Prog:

@@ -19,6 +19,7 @@ from typing import cast
 from . import compile_profiling, ir, language, runtime
 from .pypto_core import (
     DataType,
+    Error,
     InternalError,
     LogLevel,
     check,
@@ -69,6 +70,7 @@ __all__ = [
     "runtime",
     "testing",
     # Logging framework
+    "Error",
     "InternalError",
     "LogLevel",
     "set_log_level",

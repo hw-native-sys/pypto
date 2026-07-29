@@ -207,7 +207,7 @@ def test_a5_uint32_to_fp32_rejects_narrowing_bridge():
             out_t: pl.Tensor[[16, 16], pl.FP32] = pl.store(c, [0, 0], out)
             return out_t
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         _run(Before, BackendType.Ascend950)
     assert "cast" in str(excinfo.value).lower()
 

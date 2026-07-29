@@ -1524,10 +1524,10 @@ class TestGetItemNavigation:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span)], span)
 
-        with pytest.raises(Exception):
+        with pytest.raises(IndexError):
             _ = body[5]
 
-        with pytest.raises(Exception):
+        with pytest.raises(IndexError):
             _ = body[-5]
 
     def test_path_is_copy_pasteable(self):

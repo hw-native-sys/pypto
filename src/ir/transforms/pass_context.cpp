@@ -46,7 +46,12 @@ VerificationInstrument::VerificationInstrument(VerificationMode mode) : mode_(mo
 namespace {
 
 /**
- * @brief Verify properties and throw ValueError on errors (used by VerificationInstrument)
+ * @brief Verify properties and throw VerificationError on errors (used by VerificationInstrument)
+ *
+ * Throws the same type as PropertyVerifierRegistry::VerifyPropertiesOrThrow. Both report a failure
+ * of the *same* properties from the *same* registry, so they must not surface as different Python
+ * types -- otherwise the exception a caller sees depends on whether a VerificationInstrument
+ * happens to be installed (i.e. on PYPTO_VERIFY_LEVEL), which is a test-harness detail.
  */
 void VerifyOrThrowWithContext(const IRPropertySet& properties, const ProgramPtr& program,
                               const std::string& context_msg) {
@@ -61,7 +66,7 @@ void VerifyOrThrowWithContext(const IRPropertySet& properties, const ProgramPtr&
                                 [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Error; });
   if (has_errors) {
     std::string report = PropertyVerifierRegistry::GenerateReport(diagnostics);
-    throw pypto::ValueError(context_msg + ":\n" + report);
+    throw VerificationError(context_msg + ":\n" + report, std::move(diagnostics));
   }
 }
 

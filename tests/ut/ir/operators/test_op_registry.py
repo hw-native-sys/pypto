@@ -135,13 +135,13 @@ def test_tensor_add_wrong_arg_count():
     var_a = ir.Var("a", tensor_type, span)
 
     # Too few arguments
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.create_op_call("tensor.add", [var_a], span)
 
     # Too many arguments
     var_b = ir.Var("b", tensor_type, span)
     var_c = ir.Var("c", tensor_type, span)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.create_op_call("tensor.add", [var_a, var_b, var_c], span)
 
 
@@ -157,7 +157,7 @@ def test_tensor_add_wrong_type():
     tensor_type = ir.TensorType([dim8], DataType.FP32)
     var_tensor = ir.Var("t", tensor_type, span)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.create_op_call("tensor.add", [var_scalar, var_tensor], span)
 
 
@@ -179,7 +179,7 @@ def test_get_op():
     assert tensor_add_op.name == "tensor.add"
 
     # Non-existent operator should raise exception
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.get_op("nonexistent.op")
 
 
@@ -363,7 +363,7 @@ def test_matmul_with_unknown_kwarg():
     # Unknown kwarg should raise ValueError
     kwargs = {"unknown_param": 123, "a_trans": False}
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
 
     # Check error message contains "unknown"
@@ -384,7 +384,7 @@ def test_matmul_with_wrong_type_kwarg():
         "a_trans": "true"  # Should be bool, not string
     }
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(TypeError) as exc_info:
         ir.create_op_call("tensor.matmul", [var_a, var_b], kwargs, span)
 
     # Check error message indicates type mismatch

@@ -17,7 +17,7 @@ All exceptions inherit from `Error`, which captures the C++ stack trace at const
 
 ```text
 std::runtime_error
-  └── Error                  (base: auto stack trace capture)
+  └── Error                  (base: auto stack trace capture, → Python pypto.Error)
         ├── ValueError       (→ Python ValueError)
         ├── TypeError        (→ Python TypeError)
         ├── RuntimeError     (→ Python RuntimeError)
@@ -25,8 +25,18 @@ std::runtime_error
         ├── IndexError
         ├── AssertionError
         ├── InternalError    (→ Python RuntimeError — internal bugs)
-        └── VerificationError (carries vector<Diagnostic>)
+        └── VerificationError (carries vector<Diagnostic>, → Python pypto.Error)
 ```
+
+Subclasses without a dedicated translation fall back to `pypto.Error` — a real Python type, not a
+bare `Exception`, so `VerificationError` stays catchable by type. `pypto.Error` derives from
+`Exception`, so `except Exception` keeps working. Tests must assert the concrete type rather than
+`Exception`; `tests/lint/check_no_broad_raises.py` enforces this.
+
+**The Python mirror is flat, not nested.** Each row above maps to an *independent* Python type, so
+the C++ inheritance shown in the tree does not carry over: `pypto.InternalError` derives from
+Python's `RuntimeError`, not from `pypto.Error`. `except pypto.Error` therefore catches
+`VerificationError` but **not** `InternalError`. Catch `Exception` if you need both.
 
 `Error::GetFullMessage()` returns the error message plus a formatted C++ stack trace.
 

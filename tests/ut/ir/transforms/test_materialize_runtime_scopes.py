@@ -25,6 +25,7 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 @pytest.fixture(autouse=True)
@@ -517,7 +518,7 @@ def test_opt_out_scopes_survive_full_pipeline():
 def test_hand_placed_auto_scope_rejected_in_default_mode():
     # In the default auto_scope=True mode the compiler owns AUTO placement, so a
     # hand-placed `with pl.scope()` is rejected (set auto_scope=False instead).
-    with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    with pytest.raises(ParserSyntaxError):
 
         @pl.program
         class _Prog:

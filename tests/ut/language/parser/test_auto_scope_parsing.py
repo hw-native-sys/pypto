@@ -19,6 +19,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.ir.printer import python_print
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 def _first_runtime_scope(stmt):
@@ -112,7 +113,7 @@ def test_manual_scope_alias_parses_to_same_ir():
 
 
 def test_scope_rejects_positional_args():
-    with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    with pytest.raises(ParserSyntaxError):
 
         @pl.program
         class _Prog:
@@ -124,7 +125,7 @@ def test_scope_rejects_positional_args():
 
 
 def test_auto_scope_rejected_in_default_mode():
-    with pytest.raises(Exception):  # noqa: B017 — AUTO scope requires auto_scope=False
+    with pytest.raises(ParserSyntaxError):  # AUTO scope requires auto_scope=False
 
         @pl.program
         class _Prog:
@@ -199,7 +200,7 @@ def test_manual_scope_in_if_branch_registers_yield_var():
 
 
 def test_auto_scope_rejected_inside_manual_scope():
-    with pytest.raises(Exception):  # noqa: B017 — runtime forbids AUTO nested in MANUAL
+    with pytest.raises(ParserSyntaxError):  # runtime forbids AUTO nested in MANUAL
 
         @pl.program
         class _Prog:

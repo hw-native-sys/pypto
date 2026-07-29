@@ -22,6 +22,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto import DataType
+from pypto.language.parser.diagnostics import InvalidOperationError, ParserSyntaxError
 from pypto.pypto_core import ir
 
 
@@ -118,7 +119,7 @@ def test_world_size_can_drive_pl_range_bound():
 
 
 def test_world_size_rejects_positional_args():
-    with pytest.raises(Exception, match=r"no positional arguments|takes 0 positional"):
+    with pytest.raises(InvalidOperationError, match=r"no positional arguments|takes 0 positional"):
 
         @pl.program
         class P:  # noqa: F841
@@ -129,7 +130,9 @@ def test_world_size_rejects_positional_args():
 
 
 def test_world_size_rejects_kwargs():
-    with pytest.raises(Exception, match=r"does not accept keyword arguments|unexpected keyword argument"):
+    with pytest.raises(
+        InvalidOperationError, match=r"does not accept keyword arguments|unexpected keyword argument"
+    ):
 
         @pl.program
         class P:  # noqa: F841
@@ -142,7 +145,7 @@ def test_world_size_rejects_kwargs():
 def test_world_size_rejected_outside_host_function():
     """``pld.world_size()`` is host-only — calling it from a CORE_GROUP-level
     function body is a parse error."""
-    with pytest.raises(Exception, match="HOST"):
+    with pytest.raises(ParserSyntaxError, match="HOST"):
 
         @pl.program
         class P:  # noqa: F841
@@ -157,7 +160,7 @@ def test_world_size_rejected_in_nested_device_scope_within_host_function():
     """Even inside a HOST orchestrator, ``pld.world_size()`` must be rejected
     when nested inside a device-side scope (InCore / SPMD), since
     the call is not lowerable there."""
-    with pytest.raises(Exception, match="InCore"):
+    with pytest.raises(ParserSyntaxError, match="InCore"):
 
         @pl.program
         class P:  # noqa: F841

@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tile
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 
 def _operand_dtype(expr: ir.Expr) -> DataType:
@@ -2790,7 +2791,7 @@ class TestTileSliceReshapeOps:
         tile_type = ir.TileType([dim16, dim16], DataType.FP32)
         tile_var = ir.Var("tile", tile_type, span)
 
-        with pytest.raises(Exception, match="must be >= 0"):
+        with pytest.raises(ValueError, match="must be >= 0"):
             tile.set_validshape(tile_var, -1, 8)
 
     def test_tile_set_validshape_rejects_exceeding_bound(self):
@@ -2801,7 +2802,7 @@ class TestTileSliceReshapeOps:
         tile_type = ir.TileType([dim16, dim16], DataType.FP32)
         tile_var = ir.Var("tile", tile_type, span)
 
-        with pytest.raises(Exception, match="exceeds tile bound"):
+        with pytest.raises(ValueError, match="exceeds tile bound"):
             tile.set_validshape(tile_var, 32, 8)
 
     def test_transform_operators_registered(self):
@@ -5002,7 +5003,7 @@ class TestTileStoreDistributedDest:
     def test_tile_store_rejects_non_tensor_dst(self):
         """Regression: a Tile destination is still rejected by the verifier."""
 
-        with pytest.raises(Exception, match="requires third argument to be a TensorType"):
+        with pytest.raises(InvalidOperationError, match="requires third argument to be a TensorType"):
 
             @pl.program
             class _Program:
@@ -5049,7 +5050,7 @@ class TestTileLoadDistributedSrc:
     def test_tile_load_rejects_non_tensor_src(self):
         """Regression: a non-tensor (Tile) source is still rejected."""
 
-        with pytest.raises(Exception, match="requires first argument to be a TensorType"):
+        with pytest.raises(InvalidOperationError, match="requires first argument to be a TensorType"):
 
             @pl.program
             class _Program:

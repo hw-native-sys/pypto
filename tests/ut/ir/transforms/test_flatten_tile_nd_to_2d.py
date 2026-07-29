@@ -12,6 +12,7 @@
 from collections.abc import Callable, Sequence
 from typing import cast
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -1068,7 +1069,7 @@ class TestFlattenTileNdTo2DPassProperties:
         )
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.TileOps2D)
-        with pytest.raises(Exception, match="TileOps2D"):
+        with pytest.raises(pypto.Error, match="TileOps2D"):
             passes.verify_properties(props, Unflatten, "test_verifier_fails")
 
     def test_verifier_allows_rank_raising_reinterpret_view(self):

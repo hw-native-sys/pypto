@@ -21,6 +21,7 @@ import re
 import sys
 from collections.abc import Callable
 
+import pypto
 import pytest
 from pypto import testing
 
@@ -105,7 +106,7 @@ class TestErrorTypes:
 
     def test_generic_error_type(self):
         """Test that generic Error is raised with correct type."""
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(pypto.Error) as exc_info:
             testing.raise_generic_error("test generic error")
 
         assert "test generic error" in str(exc_info.value)

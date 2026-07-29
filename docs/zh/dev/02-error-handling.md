@@ -17,7 +17,7 @@ PyPTO 的错误处理框架提供带 C++ 栈回溯的结构化异常、附带 IR
 
 ```text
 std::runtime_error
-  └── Error                  (基类：自动栈回溯捕获)
+  └── Error                  (基类：自动栈回溯捕获，→ Python pypto.Error)
         ├── ValueError       (→ Python ValueError)
         ├── TypeError        (→ Python TypeError)
         ├── RuntimeError     (→ Python RuntimeError)
@@ -25,8 +25,17 @@ std::runtime_error
         ├── IndexError
         ├── AssertionError
         ├── InternalError    (→ Python RuntimeError — 内部 bug)
-        └── VerificationError (携带 vector<Diagnostic>)
+        └── VerificationError (携带 vector<Diagnostic>，→ Python pypto.Error)
 ```
+
+没有专门映射的子类会回退到 `pypto.Error`——这是一个真实的 Python 类型，而非裸 `Exception`，
+因此 `VerificationError` 仍可按类型捕获。`pypto.Error` 继承自 `Exception`，所以 `except Exception`
+依然有效。测试必须断言具体的异常类型而非 `Exception`；`tests/lint/check_no_broad_raises.py` 会强制这一点。
+
+**Python 侧的映射是扁平的，而非嵌套的。** 上表中每一行都映射到一个*独立*的 Python 类型，因此
+上面树状图中的 C++ 继承关系并不会传递过来：`pypto.InternalError` 继承自 Python 的 `RuntimeError`，
+而不是 `pypto.Error`。所以 `except pypto.Error` 能捕获 `VerificationError`，但**捕获不到**
+`InternalError`。如果两者都需要捕获，请捕获 `Exception`。
 
 `Error::GetFullMessage()` 返回错误消息加上格式化的 C++ 栈回溯。
 

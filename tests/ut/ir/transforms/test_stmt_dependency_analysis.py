@@ -16,6 +16,7 @@ Covers:
   variables (RFC #1026 Phase 1, issue #1027).
 """
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -172,7 +173,7 @@ class TestStmtDependencyGraph:
 
 def _assert_violation(body, program, expected_var: str) -> None:
     """The discipline check must raise, and the error message must name the var."""
-    with pytest.raises(Exception, match="InOutUseDiscipline") as excinfo:
+    with pytest.raises(pypto.Error, match="InOutUseDiscipline") as excinfo:
         dep_analysis.check_inout_use_discipline(body, program)
     assert f"'{expected_var}'" in str(excinfo.value)
 
@@ -412,7 +413,7 @@ class TestInOutUseDiscipline:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # VIOLATION
                 return y
 
-        with pytest.raises(Exception, match="InOutUseDiscipline"):
+        with pytest.raises(pypto.Error, match="InOutUseDiscipline"):
             dep_analysis.build_stmt_dependency_graph(_seq_body(P, "main"), P)
 
 
