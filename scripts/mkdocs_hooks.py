@@ -31,6 +31,12 @@ from typing import Any
 # with an optional `"title"` after the target. Group 3 is the target.
 _LINK = re.compile(r'(!?)\[([^\]]*)\]\(([^)\s]+)((?:\s+"[^"]*")?)\)')
 
+# Matches a reference-style link definition on its own line: `[label]: target`,
+# optionally followed by a title. MkDocs resolves these exactly like inline links,
+# so a definition escaping `docs/` fails `--strict` just the same. Group 2 is the
+# target.
+_REF_DEF = re.compile(r"^(\s{0,3}\[[^\]]+\]:[ \t]+)(\S+)([ \t]*.*)$", re.MULTILINE)
+
 _REPO_URL = "https://github.com/hw-native-sys/pypto"
 
 # Ref the rewritten links point at. CI sets DOCS_REF -- `main` on a push, the
@@ -100,7 +106,24 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
     page_dir = posixpath.dirname(page.file.src_uri)
     skip = _code_spans(markdown)
 
-    def rewrite(match: re.Match[str]) -> str:
+    def escaped_url(target: str) -> str | None:
+        """Return the GitHub URL for a target that leaves `docs/`, else None."""
+        if not _is_repo_relative(target):
+            return None
+        path, fragment = _split_fragment(target)
+        if not path:
+            return None
+        # Resolve the target against the repo root. Anything still under `docs/`
+        # is a documentation page and MkDocs resolves it itself; anything else
+        # escaped the docs tree and needs an absolute URL to survive `--strict`.
+        repo_path = posixpath.normpath(posixpath.join("docs", page_dir, path))
+        if repo_path.startswith("docs/") or repo_path == "docs":
+            return None
+        if repo_path.startswith("../"):  # escaped the repository itself — leave it
+            return None
+        return _repo_url(repo_path, path.endswith("/")) + fragment
+
+    def rewrite_link(match: re.Match[str]) -> str:
         if any(start <= match.start() < end for start, end in skip):
             return match.group(0)
 
@@ -109,22 +132,18 @@ def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
         # image, so rewriting one would silently produce a broken image. Every
         # image in the docs lives under `docs/assets/`; if one ever points outside
         # `docs/`, `--strict` should surface it rather than this hook hiding it.
-        if bang or not _is_repo_relative(target):
+        if bang:
+            return match.group(0)
+        url = escaped_url(target)
+        return match.group(0) if url is None else f"[{label}]({url}{title})"
+
+    def rewrite_ref_def(match: re.Match[str]) -> str:
+        if any(start <= match.start() < end for start, end in skip):
             return match.group(0)
 
-        path, fragment = _split_fragment(target)
-        if not path:
-            return match.group(0)
+        prefix, target, suffix = match.groups()
+        url = escaped_url(target)
+        return match.group(0) if url is None else f"{prefix}{url}{suffix}"
 
-        # Resolve the target against the repo root. Anything still under `docs/`
-        # is a documentation page and MkDocs resolves it itself; anything else
-        # escaped the docs tree and needs an absolute URL to survive `--strict`.
-        repo_path = posixpath.normpath(posixpath.join("docs", page_dir, path))
-        if repo_path.startswith("docs/") or repo_path == "docs":
-            return match.group(0)
-        if repo_path.startswith("../"):  # escaped the repository itself — leave it
-            return match.group(0)
-
-        return f"[{label}]({_repo_url(repo_path, path.endswith('/'))}{fragment}{title})"
-
-    return _LINK.sub(rewrite, markdown)
+    markdown = _LINK.sub(rewrite_link, markdown)
+    return _REF_DEF.sub(rewrite_ref_def, markdown)
