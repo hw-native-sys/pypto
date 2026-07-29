@@ -8,11 +8,14 @@ name: Docs
 # breaks a cross-reference is caught before it reaches main.
 #
 # Publishing goes through actions/deploy-pages rather than a `gh-pages` branch,
-# matching the runtime's docs job (hw-native-sys/simpler). The site is a build
-# artifact and is never committed; the markdown under `docs/` stays the single
-# source of truth.
+# matching the runtime's docs job (hw-native-sys/simpler) and, more importantly,
+# the repository's existing Pages configuration: its build type is already
+# "GitHub Actions", under which nothing served from a `gh-pages` branch would be
+# published at all. The `github-pages` environment restricts deployments to
+# `main`, which is why the deploy job below is gated on that ref.
 #
-# Repository setting required once: Settings -> Pages -> Source = "GitHub Actions".
+# The site is a build artifact and is never committed; the markdown under `docs/`
+# stays the single source of truth.
 
 on:
   push:
