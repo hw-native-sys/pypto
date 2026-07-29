@@ -695,6 +695,7 @@ def execute_on_device(  # noqa: PLR0913
     *,
     level: int = 2,
     aicpu_thread_num: int | None = None,
+    enable_sdma: bool = False,
     output_prefix: str | None = None,
     enable_l2_swimlane: bool = False,
     enable_dump_args: int = 0,
@@ -724,6 +725,9 @@ def execute_on_device(  # noqa: PLR0913
             user-API support.
         aicpu_thread_num: Number of AICPU threads. ``None`` leaves the
             field unset and uses the simpler runtime default.
+        enable_sdma: Whether the worker must provision the SDMA workspace
+            required by prefetch artifacts. Defaults to ``False`` for legacy,
+            hand-built, and non-prefetch callables.
         output_prefix: Directory under which the runtime writes diagnostic
             artifacts (``l2_swimlane_records.json`` / ``args_dump/`` /
             ``pmu.csv`` / ``deps.json`` / ``scope_stats/``). Required
@@ -797,12 +801,24 @@ def execute_on_device(  # noqa: PLR0913
         cfg.output_prefix = output_prefix
 
     env = runtime_env or {}
-    active = _PyptoWorker.current(level=level, platform=platform, device_id=device_id, runtime=runtime_name)
+    active = _PyptoWorker.current(
+        level=level,
+        platform=platform,
+        device_id=device_id,
+        runtime=runtime_name,
+        require_sdma=enable_sdma,
+    )
     with _temporary_env(env):
         if active is not None:
             active._run_chip(chip_callable, orch_args, cfg)
             return
-        worker = Worker(level=level, device_id=device_id, platform=platform, runtime=runtime_name)
+        worker = Worker(
+            level=level,
+            device_id=device_id,
+            platform=platform,
+            runtime=runtime_name,
+            enable_sdma=enable_sdma,
+        )
         # Prewarm with this dispatch's own config so the single run below hits the
         # prebuilt runtime-arena cache instead of paying the ~800ms cold build
         # inside the timed dispatch. No-op without a prebuilt arena.

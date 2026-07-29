@@ -179,13 +179,14 @@ def test_task_submit_exec_failure(tmp_path, exc):
 # ---------------------------------------------------------------------------
 
 
-def _artifact(platform):
+def _artifact(platform, *, enable_sdma=False):
     return test_runner.CompileArtifact(
         work_dir=Path("unused_work_dir"),
         resolved_platform=platform,
         error=None,
         runtime_name="rt",
         chip_callable=object(),
+        enable_sdma=enable_sdma,
     )
 
 
@@ -202,10 +203,33 @@ def test_sim_platform_never_borrows_a_card():
         patch.object(test_runner, "_execute_on_device", return_value=timing) as on_dev,
         patch.object(test_runner, "_run_artifact_via_task_submit") as via_ts,
     ):
-        result = test_runner._fused_execute_task(tc, "case_sim@a2a3sim", _artifact("a2a3sim"))
+        result = test_runner._fused_execute_task(
+            tc,
+            "case_sim@a2a3sim",
+            _artifact("a2a3sim", enable_sdma=True),
+        )
     assert result.passed is True
     on_dev.assert_called_once()
+    assert on_dev.call_args.kwargs["enable_sdma"] is True
     via_ts.assert_not_called()
+
+
+def test_fused_compile_records_sdma_capability(tmp_path):
+    fake_compile_and_assemble = Mock(
+        return_value=(object(), "tensormap_and_ringbuffer", {"enable_sdma": True})
+    )
+    fake_device_runner = SimpleNamespace(compile_and_assemble=fake_compile_and_assemble)
+    tc = Mock()
+
+    with (
+        patch.object(test_runner, "_resolve_platform", return_value="a2a3"),
+        patch.object(test_runner, "_cache_key", return_value="prefetch@a2a3"),
+        patch.object(test_runner, "_compile_for_cache"),
+        patch.dict(sys.modules, {"pypto.runtime.device_runner": fake_device_runner}),
+    ):
+        artifact = test_runner._fused_compile_task(tc, tmp_path, "a2a3", False, False)
+
+    assert artifact.enable_sdma is True
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +331,47 @@ def test_batch_submitter_never_mixes_runtimes_within_a_batch(tmp_path):
         assert len(runtimes) == 1, f"batch mixed runtimes: {runtimes}"
     # All four cases assigned; the two runtimes split 2/2.
     assert sorted(len(b) for b in submitted) == [2, 2]
+
+
+def test_batch_submitter_never_mixes_sdma_capabilities_within_a_batch(tmp_path):
+    """An ordinary worker cannot safely host a later SDMA-required artifact."""
+    from concurrent.futures import Future  # noqa: PLC0415
+
+    compile_futures: dict[str, Future] = {}
+    for name, enable_sdma in [("plain", False), ("prefetch", True)]:
+        wd = tmp_path / f"{name}@a2a3"
+        fut: Future = Future()
+        fut.set_result(
+            test_runner.CompileArtifact(
+                work_dir=wd,
+                resolved_platform="a2a3",
+                error=None,
+                runtime_name="tensormap_and_ringbuffer",
+                chip_callable=object(),
+                enable_sdma=enable_sdma,
+            )
+        )
+        compile_futures[f"{name}@a2a3"] = fut
+
+    submitted: list[list[tuple[Path, str]]] = []
+
+    def _fake_submit(_fn, entries, *_args):
+        submitted.append(list(entries))
+        done: Future = Future()
+        done.set_result({})
+        return done
+
+    test_runner._case_to_batch.clear()
+    test_runner._batches_ready.clear()
+    with (
+        patch.object(test_runner, "_execute_pool", SimpleNamespace(submit=_fake_submit)),
+        patch.dict(test_runner._compile_futures, compile_futures, clear=True),
+    ):
+        test_runner._batch_submitter(batch_size=10, cache_dir=tmp_path)
+
+    assert test_runner._batches_ready.is_set()
+    assert len(submitted) == 2
+    assert all(len(batch) == 1 for batch in submitted)
 
 
 def test_marker_value():

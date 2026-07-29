@@ -578,6 +578,50 @@ class TestRunConfigCompileForwarding:
         assert captured["execute"]["args"][3] == "fake_runtime"
         assert captured["execute"]["kwargs"]["aicpu_thread_num"] is None
 
+    @pytest.mark.parametrize(
+        ("runtime_config", "expected_enable_sdma"),
+        [
+            ({}, False),
+            ({"enable_sdma": 1}, True),
+        ],
+    )
+    def test_execute_compiled_forwards_sdma_capability(
+        self,
+        tmp_path,
+        monkeypatch,
+        runtime_config,
+        expected_enable_sdma,
+    ):
+        captured: dict = {}
+
+        def fake_compile_and_assemble(_work_dir, _platform):
+            return object(), "fake_runtime", runtime_config
+
+        def fake_execute_on_device(*_args, **kwargs):
+            captured.update(kwargs)
+
+        class FakeChipStorageTaskArgs:
+            def add_tensor(self, _arg):
+                return None
+
+            def add_scalar(self, _arg):
+                return None
+
+        fake_device_runner = types.SimpleNamespace(
+            ChipStorageTaskArgs=FakeChipStorageTaskArgs,
+            compile_and_assemble=fake_compile_and_assemble,
+            execute_on_device=fake_execute_on_device,
+            make_tensor_arg=lambda _arg: object(),
+            scalar_to_uint64=lambda _arg: 0,
+        )
+        fake_task_interface = types.SimpleNamespace(device_tensor_to_tensor=lambda _arg: object())
+        monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
+        monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", fake_task_interface)
+
+        execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
+
+        assert captured["enable_sdma"] is expected_enable_sdma
+
     def test_compile_program_forwards_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}
 

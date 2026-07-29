@@ -342,6 +342,7 @@ class CompileArtifact:
     error: str | None = None
     runtime_name: str | None = None
     chip_callable: Any | None = None
+    enable_sdma: bool = False
 
 
 def _fused_compile_task(
@@ -375,13 +376,15 @@ def _fused_compile_task(
             )
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-        chip_callable, runtime_name, _ = compile_and_assemble(work_dir, resolved)
+        chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, resolved)
+        enable_sdma = bool(runtime_config.get("enable_sdma", False))
         return CompileArtifact(
             work_dir=work_dir,
             resolved_platform=resolved,
             error=None,
             runtime_name=runtime_name,
             chip_callable=chip_callable,
+            enable_sdma=enable_sdma,
         )
     except Exception as exc:
         return CompileArtifact(
@@ -791,6 +794,7 @@ def _fused_execute_task(
             artifact.resolved_platform,
             device_id,
             dfx=_pipeline_ctx.get("dfx", _DfxOpts()),
+            enable_sdma=artifact.enable_sdma,
         )
         return RunResult(
             passed=True,
@@ -899,15 +903,13 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
         key_by_fut = {cfut: key for key, cfut in _compile_futures.items()}
         batch_idx = 0
         # A batch child opens ONE ChipWorker from its first entry, so a batch must
-        # never mix the (platform, runtime) that the worker is keyed on. ChipWorker
-        # reuse matches on (level, platform, device_id, runtime); level/device_id
-        # are fixed per batch child, so a differing platform OR runtime inside the
-        # batch would miss ChipWorker.current() and open a SECOND Worker.init() on
-        # the same card while the batch worker still holds it — the 2-inits-on-a-
-        # busy-card halMemCtl EACCES hazard. Bucket by (resolved_platform,
-        # runtime_name) to align with that reuse key and chunk within each bucket.
-        # (platform, runtime) → list of (key, wd, platform)
-        pending: dict[tuple[str, str | None], list[tuple[str, Path, str]]] = {}
+        # never mix the (platform, runtime, enable_sdma) that determines whether
+        # that worker can run every artifact. ChipWorker reuse matches on (level,
+        # platform, device_id, runtime), then rejects an SDMA-required dispatch
+        # when the matching worker lacks that capability. level/device_id are fixed
+        # per batch child, so bucket by the remaining binding and capability fields.
+        # (platform, runtime, enable_sdma) → list of (key, wd, platform)
+        pending: dict[tuple[str, str | None, bool], list[tuple[str, Path, str]]] = {}
 
         # Consume in completion order: fill a batch as cases finish compiling and
         # submit it immediately, so execution and compilation overlap.
@@ -920,7 +922,11 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
                 continue
             if artifact.resolved_platform.endswith("sim"):
                 continue
-            bucket_key = (artifact.resolved_platform, artifact.runtime_name)
+            bucket_key = (
+                artifact.resolved_platform,
+                artifact.runtime_name,
+                artifact.enable_sdma,
+            )
             bucket = pending.setdefault(bucket_key, [])
             bucket.append((key_by_fut[cfut], artifact.work_dir, artifact.resolved_platform))
             if len(bucket) >= batch_size:
@@ -928,7 +934,7 @@ def _batch_submitter(batch_size: int, cache_dir: Path) -> None:
                 batch_idx += 1
                 pending[bucket_key] = bucket[batch_size:]
 
-        for leftover in pending.values():  # final short batch per (platform, runtime)
+        for leftover in pending.values():  # final short batch per worker capability
             if leftover:
                 _submit(leftover, batch_idx)
                 batch_idx += 1
@@ -1337,7 +1343,11 @@ class TestRunner:
 
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, runtime_name, _ = compile_and_assemble(work_dir, resolved_platform)
+            chip_callable, runtime_name, runtime_config = compile_and_assemble(
+                work_dir,
+                resolved_platform,
+            )
+            enable_sdma = bool(runtime_config.get("enable_sdma", False))
             # Undiscovered cases (the minority the collection scan can't see)
             # borrow a card via task-submit too, so EVERY device run goes through
             # task-submit's per-card lock. Running these in-process would bypass
@@ -1382,6 +1392,7 @@ class TestRunner:
                 resolved_platform,
                 self.config.device_id,
                 dfx=_DfxOpts.from_run_config(self.config),
+                enable_sdma=enable_sdma,
             )
 
             return RunResult(

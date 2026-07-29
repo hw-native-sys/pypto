@@ -38,6 +38,40 @@ def fake_simpler_worker():
         yield instance
 
 
+@pytest.fixture
+def fake_worker_cls():
+    """Patch and expose the simpler worker constructor for capability assertions."""
+    with (
+        patch("pypto.runtime.worker._SimplerWorker") as cls,
+        patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+    ):
+        yield cls
+
+
+class TestSdmaCapability:
+    def test_constructor_forwards_enabled_sdma(self, fake_worker_cls):
+        ChipWorker(config=RunConfig(platform="a2a3"), enable_sdma=True)
+
+        fake_worker_cls.assert_called_once_with(
+            level=2,
+            device_id=0,
+            platform="a2a3",
+            runtime="tensormap_and_ringbuffer",
+            enable_sdma=True,
+        )
+
+    def test_constructor_defaults_sdma_off(self, fake_worker_cls):
+        ChipWorker(config=RunConfig(platform="a2a3"))
+
+        fake_worker_cls.assert_called_once_with(
+            level=2,
+            device_id=0,
+            platform="a2a3",
+            runtime="tensormap_and_ringbuffer",
+            enable_sdma=False,
+        )
+
+
 class TestLevelGuard:
     def test_level_3_rejected(self, fake_simpler_worker):
         with pytest.raises(ValueError, match="only supports level=2"):
@@ -157,6 +191,32 @@ class TestActiveChipWorkerLookup:
             pass
         fake_simpler_worker.close.assert_called_once()
 
+    def test_sdma_required_rejects_ordinary_active_worker(self, fake_simpler_worker):
+        with ChipWorker(config=RunConfig(platform="a2a3sim")):
+            with pytest.raises(
+                RuntimeError,
+                match="active ChipWorker was created without enable_sdma=True",
+            ):
+                ChipWorker.current(
+                    level=2,
+                    platform="a2a3sim",
+                    device_id=0,
+                    runtime="tensormap_and_ringbuffer",
+                    require_sdma=True,
+                )
+
+    def test_sdma_enabled_worker_accepts_ordinary_lookup(self, fake_simpler_worker):
+        with ChipWorker(config=RunConfig(platform="a2a3sim"), enable_sdma=True) as worker:
+            assert (
+                ChipWorker.current(
+                    level=2,
+                    platform="a2a3sim",
+                    device_id=0,
+                    runtime="tensormap_and_ringbuffer",
+                )
+                is worker
+            )
+
 
 # ``execute_on_device`` lives in ``device_runner`` which eagerly imports the
 # ``simpler`` package. The ChipWorker-only tests above mock just the
@@ -215,7 +275,7 @@ class TestExecuteOnDeviceReuse:
         one_shot = MagicMock()
         with (
             patch("pypto.runtime.device_runner.CallConfig", MagicMock),
-            patch("pypto.runtime.device_runner.Worker", return_value=one_shot),
+            patch("pypto.runtime.device_runner.Worker", return_value=one_shot) as worker_cls,
         ):
             execute_on_device(
                 chip_callable,
@@ -224,9 +284,79 @@ class TestExecuteOnDeviceReuse:
                 runtime_name="host_build_graph",
                 device_id=0,
             )
+        worker_cls.assert_called_once_with(
+            level=2,
+            device_id=0,
+            platform="a2a3sim",
+            runtime="host_build_graph",
+            enable_sdma=False,
+        )
         assert one_shot.init.call_count == 1
         assert one_shot.run.call_count == 1
         assert one_shot.close.call_count == 1
+
+    def test_no_active_worker_forwards_enabled_sdma(self, fake_simpler_worker):
+        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+
+        with (
+            patch("pypto.runtime.device_runner.CallConfig", MagicMock),
+            patch("pypto.runtime.device_runner.Worker") as worker_cls,
+        ):
+            execute_on_device(
+                MagicMock(),
+                MagicMock(),
+                platform="a2a3",
+                runtime_name="tensormap_and_ringbuffer",
+                device_id=0,
+                enable_sdma=True,
+            )
+
+        worker_cls.assert_called_once_with(
+            level=2,
+            device_id=0,
+            platform="a2a3",
+            runtime="tensormap_and_ringbuffer",
+            enable_sdma=True,
+        )
+
+    def test_sdma_required_dispatch_rejects_ordinary_active_worker(self, fake_simpler_worker):
+        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+
+        with (
+            ChipWorker(config=RunConfig(platform="a2a3sim")),
+            patch("pypto.runtime.device_runner.CallConfig", MagicMock),
+            patch("pypto.runtime.device_runner.Worker") as worker_cls,
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="active ChipWorker was created without enable_sdma=True",
+            ):
+                execute_on_device(
+                    MagicMock(),
+                    MagicMock(),
+                    platform="a2a3sim",
+                    runtime_name="tensormap_and_ringbuffer",
+                    device_id=0,
+                    enable_sdma=True,
+                )
+
+        worker_cls.assert_not_called()
+
+    def test_sdma_enabled_active_worker_runs_ordinary_dispatch(self, fake_simpler_worker):
+        from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415
+
+        with ChipWorker(config=RunConfig(platform="a2a3sim"), enable_sdma=True):
+            fake_simpler_worker.run.reset_mock()
+            with patch("pypto.runtime.device_runner.CallConfig", MagicMock):
+                execute_on_device(
+                    MagicMock(),
+                    MagicMock(),
+                    platform="a2a3sim",
+                    runtime_name="tensormap_and_ringbuffer",
+                    device_id=0,
+                )
+
+        fake_simpler_worker.run.assert_called_once()
 
     def test_level_mismatch_rejected(self, fake_simpler_worker):
         from pypto.runtime.device_runner import execute_on_device  # noqa: PLC0415

@@ -836,6 +836,7 @@ def _execute_on_device(
     dfx: _DfxOpts = _DfxOpts(),
     validate: bool = True,
     actual_out_dir: "Path | None" = None,
+    enable_sdma: bool = False,
 ) -> None:
     """Load inputs, execute on device, and validate against golden.
 
@@ -852,6 +853,8 @@ def _execute_on_device(
         runtime_name: Runtime name from ``compile_and_assemble``.
         platform: Target execution platform.
         device_id: Hardware device index.
+        enable_sdma: Whether execution requires an SDMA-capable worker.
+            Defaults to ``False`` for legacy and hand-built callables.
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
@@ -893,6 +896,7 @@ def _execute_on_device(
             platform,
             runtime_name,
             device_id,
+            enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
@@ -1297,6 +1301,7 @@ def execute_compiled(  # noqa: PLR0913
     )
 
     chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
+    enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     # Caller-supplied values take precedence over the RUNTIME_CONFIG baked
     # into kernel_config.py. When neither is provided, the simpler runtime's
@@ -1322,6 +1327,7 @@ def execute_compiled(  # noqa: PLR0913
             device_id,
             level=level,
             aicpu_thread_num=effective_aicpu_thread_num,
+            enable_sdma=enable_sdma,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_l2_swimlane=pass_dfx.enable_l2_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,

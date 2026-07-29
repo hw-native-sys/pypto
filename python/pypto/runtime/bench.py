@@ -869,7 +869,8 @@ def benchmark(
     Dispatches by *compiled* type:
 
     - **L2** (:class:`~pypto.ir.CompiledProgram`): opens a single
-      :class:`~pypto.runtime.ChipWorker`.
+      :class:`~pypto.runtime.ChipWorker` with the capabilities recorded in the
+      compiled artifact.
     - **L3** (:class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`):
       opens a :class:`~pypto.runtime.distributed_runner.DistributedWorker` via
       ``compiled.prepare()``.
@@ -1032,9 +1033,14 @@ def benchmark(
                     if device_id is not None:
                         rc_kwargs["device_id"] = device_id
                     rc = RunConfig(**rc_kwargs)
+                enable_sdma = bool(compiled.runtime_config.get("enable_sdma", False))
                 # L2 runs the chip in-process (no fork), so the parent's fd 2
                 # redirect during the loop captures its markers.
-                with ChipWorker(rc, runtime=compiled.runtime_name) as worker:
+                with ChipWorker(
+                    rc,
+                    runtime=compiled.runtime_name,
+                    enable_sdma=enable_sdma,
+                ) as worker:
                     handle = worker.register(compiled)  # register once; cid cached
                     with _capture_fd_stderr(log_path):
                         _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=rc)

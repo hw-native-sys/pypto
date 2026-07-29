@@ -139,11 +139,15 @@ def test_no_validate_flag_defers_validation(tmp_path):
 
 def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_and_assemble):
     chip = object()
-    stub_compile_and_assemble.return_value = (chip, "tensormap_and_ringbuffer", {})
+    stub_compile_and_assemble.return_value = (
+        chip,
+        "tensormap_and_ringbuffer",
+        {"enable_sdma": True},
+    )
     with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
         execute_artifact_dir(tmp_path, "a2a3", 1)
     stub_compile_and_assemble.assert_called_once_with(tmp_path, "a2a3")
-    args, _ = exec_on_dev.call_args
+    args, kwargs = exec_on_dev.call_args
     # work_dir, golden_path, chip_callable, runtime_name, platform, device_id
     assert args[0] == tmp_path
     assert args[1] == tmp_path / "golden.py"
@@ -151,6 +155,14 @@ def test_execute_artifact_dir_wires_compile_then_execute(tmp_path, stub_compile_
     assert args[3] == "tensormap_and_ringbuffer"
     assert args[4] == "a2a3"
     assert args[5] == 1
+    assert kwargs["enable_sdma"] is True
+
+
+def test_execute_artifact_dir_defaults_sdma_off(tmp_path, stub_compile_and_assemble):
+    with patch.object(execute_artifact, "_execute_on_device") as exec_on_dev:
+        execute_artifact_dir(tmp_path, "a2a3", 1)
+
+    assert exec_on_dev.call_args.kwargs["enable_sdma"] is False
 
 
 def test_work_dir_and_platform_are_required():
@@ -176,11 +188,36 @@ def test_execute_batch_runs_all_in_one_worker(tmp_path, capsys, stub_compile_and
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
     assert all_ok is True
     cw.assert_called_once()  # ONE ChipWorker for the whole batch
+    assert cw.call_args.kwargs["enable_sdma"] is False
     chipworker.__enter__.assert_called_once()
     assert on_dev.call_count == 2  # one device run per artifact, reusing the worker
+    assert all(call.kwargs["enable_sdma"] is False for call in on_dev.call_args_list)
     out = capsys.readouterr().out
     assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=3" in out
     assert f"PYPTO_EXEC_RESULT=PASS work_dir={wd2} device=3" in out
+
+
+def test_execute_batch_enables_sdma_worker_for_prefetch_artifact(
+    tmp_path,
+    stub_compile_and_assemble,
+):
+    wd = tmp_path / "prefetch"
+    manifest = _manifest(tmp_path, wd)
+    stub_compile_and_assemble.return_value = (
+        object(),
+        "tensormap_and_ringbuffer",
+        {"enable_sdma": True},
+    )
+
+    with (
+        patch("pypto.runtime.ChipWorker", return_value=MagicMock()) as worker_cls,
+        patch.object(execute_artifact, "_execute_on_device") as on_dev,
+    ):
+        all_ok = execute_batch_manifest(manifest, 3, validate=False)
+
+    assert all_ok is True
+    assert worker_cls.call_args.kwargs["enable_sdma"] is True
+    assert on_dev.call_args.kwargs["enable_sdma"] is True
 
 
 def test_execute_batch_one_failure_does_not_abort_rest(tmp_path, capsys, stub_compile_and_assemble):

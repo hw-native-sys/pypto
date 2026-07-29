@@ -102,11 +102,20 @@ def execute_artifact_dir(
         Exception: Any device / validation error is propagated to the caller
             (``main`` turns it into ``PYPTO_EXEC_RESULT=FAIL`` + exit ``1``).
     """
-    chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform)
-    _run_on_device(work_dir, platform, device_id, chip_callable, runtime_name, dfx=dfx, validate=validate)
+    chip_callable, runtime_name, enable_sdma = _reconstruct_artifact(work_dir, platform)
+    _run_on_device(
+        work_dir,
+        platform,
+        device_id,
+        chip_callable,
+        runtime_name,
+        enable_sdma,
+        dfx=dfx,
+        validate=validate,
+    )
 
 
-def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str]:
+def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str, bool]:
     """Rebuild the cached artifact, reclassifying any failure as infra.
 
     ``compile_and_assemble`` reuses the cached ``.o``/``.so`` next to each kernel
@@ -117,10 +126,11 @@ def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str]:
     from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
     try:
-        chip_callable, runtime_name, _ = compile_and_assemble(work_dir, platform)
+        chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
     except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
         raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc
-    return chip_callable, runtime_name
+    enable_sdma = bool(runtime_config.get("enable_sdma", False))
+    return chip_callable, runtime_name, enable_sdma
 
 
 def _run_on_device(
@@ -129,6 +139,7 @@ def _run_on_device(
     device_id: int,
     chip_callable: Any,
     runtime_name: str,
+    enable_sdma: bool,
     *,
     dfx: _DfxOpts,
     validate: bool,
@@ -147,6 +158,7 @@ def _run_on_device(
         runtime_name,
         platform,
         device_id,
+        enable_sdma=enable_sdma,
         dfx=dfx,
         validate=validate,
         actual_out_dir=work_dir / "data" / "actual",
@@ -197,15 +209,24 @@ def execute_batch_manifest(
     # the batch lifetime to keep ids distinct.
     live_callables: list[Any] = []
 
-    def _rebind(work_dir: Path, platform: str) -> tuple[Any, str]:
+    def _rebind(work_dir: Path, platform: str) -> tuple[Any, str, bool]:
         # _reconstruct_artifact already wraps a compile failure as ArtifactSetupError.
-        chip_callable, runtime_name = _reconstruct_artifact(work_dir, platform)
+        chip_callable, runtime_name, enable_sdma = _reconstruct_artifact(work_dir, platform)
         live_callables.append(chip_callable)
-        return chip_callable, runtime_name
+        return chip_callable, runtime_name, enable_sdma
 
     def _run_one(work_dir: Path, platform: str) -> None:
-        chip_callable, runtime_name = _rebind(work_dir, platform)
-        _run_on_device(work_dir, platform, device_id, chip_callable, runtime_name, dfx=dfx, validate=validate)
+        chip_callable, runtime_name, enable_sdma = _rebind(work_dir, platform)
+        _run_on_device(
+            work_dir,
+            platform,
+            device_id,
+            chip_callable,
+            runtime_name,
+            enable_sdma,
+            dfx=dfx,
+            validate=validate,
+        )
 
     def _run_and_mark(entry: dict) -> None:
         nonlocal all_ok
@@ -242,10 +263,14 @@ def execute_batch_manifest(
     # artifact gets its own INFRA marker instead of aborting the batch before the
     # worker opens. compile_and_assemble is a cache hit, so the probe is cheap.
     first_runtime: str | None = None
+    first_enable_sdma = False
     start_idx = 0
     for i, entry in enumerate(entries):
         try:
-            _, first_runtime = _rebind(Path(entry["work_dir"]), entry["platform"])
+            _, first_runtime, first_enable_sdma = _rebind(
+                Path(entry["work_dir"]),
+                entry["platform"],
+            )
             start_idx = i
             break
         except Exception:
@@ -260,6 +285,7 @@ def execute_batch_manifest(
     with ChipWorker(
         config=RunConfig(platform=str(entries[start_idx]["platform"]), device_id=device_id),
         runtime=first_runtime,
+        enable_sdma=first_enable_sdma,
     ):
         for entry in entries[start_idx:]:
             _run_and_mark(entry)

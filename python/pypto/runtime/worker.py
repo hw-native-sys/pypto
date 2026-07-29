@@ -110,8 +110,10 @@ class ChipWorker(Worker):
     Inside a ``with`` block, ``CompiledProgram.__call__`` and
     :func:`pypto.runtime.run` find this worker via a ``ContextVar`` and reuse
     its initialized device context instead of creating a fresh worker per call.
-    Reuse only happens when all four binding fields match — otherwise the
-    caller falls through to the one-shot path.
+    Reuse only happens when all four binding fields match and the worker has
+    every capability required by the artifact — otherwise the caller either
+    falls through to the one-shot path (binding mismatch) or raises (capability
+    mismatch on the same device).
 
     .. note::
        Distinct from ``simpler.worker.ChipWorker`` (the C++ L2 backend handle
@@ -130,6 +132,8 @@ class ChipWorker(Worker):
             program is compiled against; otherwise reuse silently falls
             through to the one-shot path. Defaults to
             ``"tensormap_and_ringbuffer"``.
+        enable_sdma: Whether the underlying runtime worker provisions the SDMA
+            workspace required by prefetch artifacts. Defaults to ``False``.
         auto_init: If ``True``, call :meth:`init` from ``__init__``. Default
             is ``True``.
     """
@@ -140,6 +144,7 @@ class ChipWorker(Worker):
         *,
         level: int = 2,
         runtime: str = _DEFAULT_RUNTIME,
+        enable_sdma: bool = False,
         auto_init: bool | None = None,
     ) -> None:
         if level != 2:
@@ -153,6 +158,7 @@ class ChipWorker(Worker):
         self._config = config or RunConfig()
         self._level = level
         self._runtime = runtime
+        self._enable_sdma = bool(enable_sdma)
         self._token: contextvars.Token | None = None
 
         self._impl = _get_simpler_worker_cls()(
@@ -160,6 +166,7 @@ class ChipWorker(Worker):
             device_id=self._config.device_id,
             platform=self._config.platform,
             runtime=runtime,
+            enable_sdma=self._enable_sdma,
         )
         self._initialized = False
         # Maps id(chip_callable) -> handle returned by simpler Worker.register()
@@ -367,16 +374,28 @@ class ChipWorker(Worker):
     # ------------------------------------------------------------------
 
     @classmethod
-    def current(cls, *, level: int, platform: str, device_id: int, runtime: str) -> ChipWorker | None:
+    def current(
+        cls,
+        *,
+        level: int,
+        platform: str,
+        device_id: int,
+        runtime: str,
+        require_sdma: bool = False,
+    ) -> ChipWorker | None:
         """Return the topmost active ChipWorker matching the binding, or ``None``.
 
         Used by :func:`pypto.runtime.device_runner.execute_on_device` to
         decide whether to reuse a user-published ChipWorker or fall through
-        to constructing a fresh one-shot worker.
+        to constructing a fresh one-shot worker. A matching worker without a
+        required SDMA capability raises instead of opening a second worker on
+        the same device.
         """
         target = (level, platform, device_id, runtime)
         for w in reversed(_ACTIVE_WORKERS.get()):
             if w._binding == target:
+                if require_sdma and not w._enable_sdma:
+                    raise RuntimeError("active ChipWorker was created without enable_sdma=True")
                 return w
         return None
 
@@ -385,7 +404,7 @@ class ChipWorker(Worker):
     # ------------------------------------------------------------------
 
     def _check_binding(self, compiled: CompiledProgram) -> None:
-        """Raise ValueError on platform / runtime_name mismatch.
+        """Raise on a binding or worker-capability mismatch.
 
         ``compiled.runtime_name`` triggers ``compile_and_assemble`` lazily,
         which is acceptable because any subsequent dispatch needs it anyway.
@@ -402,6 +421,9 @@ class ChipWorker(Worker):
                 f"ChipWorker was constructed with runtime={self._runtime!r}. "
                 f"Construct ChipWorker(..., runtime={compiled.runtime_name!r})."
             )
+        requires_sdma = bool(compiled.runtime_config.get("enable_sdma", False))
+        if requires_sdma and not self._enable_sdma:
+            raise RuntimeError("ChipWorker was created without enable_sdma=True")
 
     def run(
         self,
@@ -424,7 +446,8 @@ class ChipWorker(Worker):
         Raises:
             ValueError: ``compiled.platform`` != ``self.platform`` or
                 ``compiled.runtime_name`` != ``self.runtime``.
-            RuntimeError: ChipWorker not initialized.
+            RuntimeError: ChipWorker not initialized, or the compiled program
+                requires SDMA but this worker was created without it.
         """
         outputs = self._dispatch(compiled, args, config, op="run")
         return outputs
@@ -483,7 +506,8 @@ class ChipWorker(Worker):
 
         Raises:
             ValueError: Binding mismatch (see :meth:`run`).
-            RuntimeError: ChipWorker not initialized.
+            RuntimeError: ChipWorker not initialized, or the compiled program
+                requires SDMA but this worker was created without it.
         """
         self._require_initialized("register")
         self._check_binding(compiled)

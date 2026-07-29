@@ -513,14 +513,21 @@ class _FakeWorker:
         return self.handle
 
 
-def _compiled_mock() -> MagicMock:
+def _compiled_mock(*, enable_sdma: bool = False) -> MagicMock:
     cp = MagicMock(name="CompiledProgram")
     cp.platform = "a2a3sim"
     cp.runtime_name = "tensormap_and_ringbuffer"
+    cp.runtime_config = {"enable_sdma": True} if enable_sdma else {}
     return cp
 
 
-def _run_benchmark(*, rounds: int, warmup: int, **kwargs: Any):
+def _run_benchmark(
+    *,
+    rounds: int,
+    warmup: int,
+    artifact_enable_sdma: bool = False,
+    **kwargs: Any,
+):
     """Run ``benchmark`` with the worker, log-level, and parse seams patched."""
     worker = _FakeWorker()
     sentinel = BenchmarkStats(device_wall_us=[1.0], host_wall_us=[2.0], rounds=rounds, warmup=warmup)
@@ -530,7 +537,13 @@ def _run_benchmark(*, rounds: int, warmup: int, **kwargs: Any):
         patch("pypto.runtime.bench.current_level", return_value=20),
         patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
     ):
-        stats = benchmark(_compiled_mock(), [MagicMock(name="arg")], rounds=rounds, warmup=warmup, **kwargs)
+        stats = benchmark(
+            _compiled_mock(enable_sdma=artifact_enable_sdma),
+            [MagicMock(name="arg")],
+            rounds=rounds,
+            warmup=warmup,
+            **kwargs,
+        )
     return stats, worker, ctor, cfg, parse
 
 
@@ -554,6 +567,17 @@ def test_benchmark_raises_log_level_to_v9_and_restores():
 def test_benchmark_binds_worker_to_compiled_runtime():
     _stats, _worker, ctor, _cfg, _parse = _run_benchmark(rounds=1, warmup=0)
     assert ctor.call_args.kwargs["runtime"] == "tensormap_and_ringbuffer"
+
+
+@pytest.mark.parametrize(("artifact_enable_sdma", "expected"), [(False, False), (True, True)])
+def test_benchmark_binds_worker_to_compiled_sdma_capability(artifact_enable_sdma, expected):
+    _stats, _worker, ctor, _cfg, _parse = _run_benchmark(
+        rounds=1,
+        warmup=0,
+        artifact_enable_sdma=artifact_enable_sdma,
+    )
+
+    assert ctor.call_args.kwargs["enable_sdma"] is expected
 
 
 def test_benchmark_platform_device_id_build_runconfig():

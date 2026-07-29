@@ -38,12 +38,18 @@ def fake_simpler_worker():
         yield instance
 
 
-def _fake_compiled(platform="a2a3sim", runtime="tensormap_and_ringbuffer"):
+def _fake_compiled(
+    platform="a2a3sim",
+    runtime="tensormap_and_ringbuffer",
+    *,
+    enable_sdma=False,
+):
     """Build a CompiledProgram mock matching ChipWorker(...) bindings."""
     cc = MagicMock(name="chip_callable")
     compiled = MagicMock(name="CompiledProgram")
     compiled.platform = platform
     compiled.runtime_name = runtime
+    compiled.runtime_config = {"enable_sdma": True} if enable_sdma else {}
     compiled.chip_callable = cc
     compiled.output_dir = "/tmp/fake_compiled"
     compiled.output_indices = [2]
@@ -154,6 +160,31 @@ def test_register_rejects_binding_mismatch(fake_simpler_worker):
     compiled = _fake_compiled(platform="a5sim")
     with pytest.raises(ValueError, match="platform"):
         w.register(compiled)
+    w.close()
+
+
+def test_register_rejects_sdma_artifact_on_ordinary_worker(fake_simpler_worker):
+    w = ChipWorker(config=RunConfig(platform="a2a3sim"))
+    compiled = _fake_compiled(enable_sdma=True)
+
+    with pytest.raises(
+        RuntimeError,
+        match="ChipWorker was created without enable_sdma=True",
+    ):
+        w.register(compiled)
+
+    fake_simpler_worker.register.assert_not_called()
+    w.close()
+
+
+def test_register_accepts_ordinary_artifact_on_sdma_worker(fake_simpler_worker):
+    w = ChipWorker(config=RunConfig(platform="a2a3sim"), enable_sdma=True)
+    compiled = _fake_compiled()
+
+    handle = w.register(compiled)
+
+    assert isinstance(handle, RegistrationHandle)
+    fake_simpler_worker.register.assert_called_once()
     w.close()
 
 

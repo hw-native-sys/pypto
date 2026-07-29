@@ -115,6 +115,7 @@ def main(argv: list[str]) -> int:
     level = int(spec.get("level", 2))
 
     chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform)
+    enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     if spec["mode"] == "golden":
         orch_args, _keepalive = _build_golden_orch_args(Path(spec["golden_path"]))
@@ -141,6 +142,7 @@ def main(argv: list[str]) -> int:
         device_id,
         level=level,
         aicpu_thread_num=aicpu_thread_num,
+        enable_sdma=enable_sdma,
         output_prefix=str(dfx_dir),
         enable_dep_gen=True,
     )
