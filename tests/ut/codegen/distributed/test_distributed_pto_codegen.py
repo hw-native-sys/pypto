@@ -15,12 +15,22 @@ Covers the InCore PTO codegen for ``pld.tile.remote_load``,
 - MaterializeDistTensorCtx adds one explicit CommContext IR parameter per
   ``DistributedTensor`` IR param; PTO codegen lowers each one to
   ``!pto.ptr<i64>``.
-- Every remote-op call site reads the CommContext fields, computes the
-  byte→element delta between the local and peer window slices, then emits
-  ``pto.addptr`` + ``pto.make_tensor_view`` in the user kernel. Keeping the
-  complete peer-address calculation in the caller satisfies PTOAS's
-  same-function constraints without requiring newer memory-consistency ops.
-- CommContext byte-offset literals are pinned to the constants in
+- One module-level ``func.func @CommRemoteOffset_<dtype>`` helper is
+  emitted per distinct element dtype consumed by remote ops. The helper
+  reads the CommContext field, computes the byte→element delta between
+  the local rank's window slice and the peer's slice, and returns it as
+  an ``index``. Each remote-op call site is a single
+  ``func.call @CommRemoteOffset_<dtype>(ctx, peer) -> index`` followed by
+  ``pto.addptr`` + ``pto.make_tensor_view`` in the user kernel.
+- ``pto.addptr`` and ``pto.make_tensor_view`` MUST live at the call site,
+  not in the helper: PTOAS verifies per-function that ``addptr`` directly
+  feeds ``make_tensor_view`` / ``initialize_l2g2l_pipe(gm_addr)`` /
+  ``load|store_scalar``, AND ``make_tensor_view`` lowers to a strided
+  memref whose layout cannot be encoded in a ``!pto.tensor_view<…>``
+  return type — so the view cannot be returned across a func boundary
+  either. Returning the offset is the only shape that satisfies both
+  constraints while still sharing the CommContext reads.
+- The helper's byte-offset literals are pinned to the constants in
   ``include/pypto/codegen/distributed/comm_layout.h``.
 - ``pto.tload`` (remote_load), ``pto.comm.tnotify`` (notify) and
   ``pto.comm.twait`` (wait) consume the partition views with the PTOAS
@@ -446,8 +456,8 @@ def _split_module(mlir: str) -> dict[str, str]:
     return funcs
 
 
-def test_remote_load_inlines_offset_arithmetic_with_addptr_at_call_site():
-    """remote_load keeps CommContext reads, addptr, and make_tensor_view in the kernel."""
+def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site():
+    """remote_load lowers to func.call @CommRemoteOffset_<dtype> + addptr + make_tensor_view at call site."""
 
     @pl.program
     class P:
@@ -464,13 +474,28 @@ def test_remote_load_inlines_offset_arithmetic_with_addptr_at_call_site():
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
 
+    # Helper signature: (ctx, peer) → index. No local_ptr arg, no addptr,
+    # no make_tensor_view inside — those live at the call site.
+    helper_name = "CommRemoteOffset_f16"
+    assert helper_name in funcs, f"Expected @{helper_name} in module, got {list(funcs)}"
+    helper = funcs[helper_name]
+    assert f"func.func private @{helper_name}(%ctx: !pto.ptr<i64>, %peer: index) -> index" in helper, helper
+    # Helper body: load_scalar reads + arith + divsi + return %delems : index.
+    assert helper.count("pto.load_scalar") >= 3, helper  # rankId + 2 window slots
+    assert "arith.divsi" in helper
+    assert "return %delems : index" in helper, helper
+    # Critically, none of the addptr / make_tensor_view forbidden ops appear
+    # inside the helper — both must stay at the call site to satisfy
+    # PTOAS's same-func constraints (see module docstring).
+    assert "pto.addptr" not in helper, "addptr must NOT live in the helper"
+    assert "pto.make_tensor_view" not in helper, "make_tensor_view must NOT live in the helper"
+
+    # The kernel calls the helper to get the offset, then emits addptr +
+    # make_tensor_view locally so PTOAS sees the addptr→make_tensor_view
+    # chain within a single func.func.
     kernel = funcs["kernel"]
-    assert "CommRemoteOffset" not in mlir
-    assert "func.call" not in kernel
-    assert "pto.cmo.cacheinvalid all" not in kernel
-    assert "pto.fence.barrier_all" not in kernel
-    assert kernel.count("pto.load_scalar") >= 3
-    assert "arith.divsi" in kernel
+    assert f"func.call @{helper_name}(" in kernel
+    assert "(!pto.ptr<i64>, index) -> index" in kernel, kernel
     assert "pto.addptr" in kernel, "addptr must live at the call site"
     # The addptr's direct downstream is a make_tensor_view in the same
     # func — that's what makes PTOAS happy.
@@ -481,11 +506,13 @@ def test_remote_load_inlines_offset_arithmetic_with_addptr_at_call_site():
     assert "pto.make_tensor_view" in following, (
         f"addptr must be followed shortly by make_tensor_view, but next lines were:\n{following}"
     )
-    assert "pto.load_scalar" in kernel, "CommContext scalar reads must stay in the caller"
+    # The local CommContext scalar arithmetic must stay inside the helper.
+    assert "pto.load_scalar" not in kernel, "CommContext scalar reads belong in the helper"
 
 
 def test_remote_store_emits_tstore_with_partition_view_pattern():
-    """remote_store keeps peer-offset arithmetic and tstore in the caller."""
+    """remote_store lowers to func.call @CommRemoteOffset_<dtype> + addptr +
+    make_tensor_view + partition_view + pto.tstore at the call site."""
 
     @pl.program
     class P:
@@ -509,9 +536,8 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     # the EmitPartitionViewPTO contract.
     assert "pto.tstore" in kernel, kernel
     assert "_peer_pview" in kernel, kernel
-    # Address translation lives entirely at the call site.
-    assert "func.call" not in kernel, kernel
-    assert "pto.load_scalar" in kernel, kernel
+    # Address translation lives at the call site (same constraints as remote_load).
+    assert "func.call @CommRemoteOffset_f16" in kernel, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
 
@@ -550,8 +576,8 @@ def test_remote_store_pads_partition_view_with_ones_for_3d_target():
     assert "pto.tstore" in kernel, kernel
 
 
-def test_remote_offset_arithmetic_uses_each_element_width():
-    """Inline peer offsets divide byte deltas by each target dtype width."""
+def test_one_comm_remote_offset_helper_per_dtype():
+    """The module emits a distinct @CommRemoteOffset_<dtype> helper per element dtype."""
 
     @pl.program
     class P:
@@ -569,16 +595,17 @@ def test_remote_offset_arithmetic_uses_each_element_width():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    assert set(funcs) == {"kernel"}
-    kernel = funcs["kernel"]
-    assert "func.call" not in kernel
-    assert kernel.count("pto.load_scalar") >= 6
-    assert "arith.constant 2 : i64" in kernel
-    assert "arith.constant 4 : i64" in kernel
+    # f16 (data) + i32 (signal) — one helper per dtype consumed by a
+    # cross-rank op (notify counts; wait stays local-only).
+    assert "CommRemoteOffset_f16" in funcs
+    assert "CommRemoteOffset_i32" in funcs
+    # The element-size constant inside each helper matches the dtype.
+    assert "arith.constant 2 : i64" in funcs["CommRemoteOffset_f16"]
+    assert "arith.constant 4 : i64" in funcs["CommRemoteOffset_i32"]
 
 
 def test_remote_load_uses_comm_layout_constants():
-    """Inline peer-offset literal indices equal the comm_layout::k* values."""
+    """CommRemoteOffset helper literal offsets equal the comm_layout::k* values."""
 
     @pl.program
     class P:
@@ -594,47 +621,20 @@ def test_remote_load_uses_comm_layout_constants():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    kernel = funcs["kernel"]
+    helper = funcs["CommRemoteOffset_f16"]
 
     layout = ir.comm_layout
     rank_idx_unit = layout.RANK_ID_OFFSET // layout.WINDOW_SLOT_STRIDE  # 16 / 8 = 2
     win_idx_unit = layout.WINDOWS_IN_OFFSET // layout.WINDOW_SLOT_STRIDE  # 32 / 8 = 4
 
-    # The inline scaffolding references the rank slot and windowsIn base in
-    # u64 units derived from comm_layout constants.
-    rank_slot = re.search(
-        rf"(?P<ssa>%[\w.]+) = arith\.constant {rank_idx_unit} : index",
-        kernel,
-    )
-    assert rank_slot is not None, kernel
-    assert re.search(
-        rf"pto\.load_scalar %arg\d+\[{re.escape(rank_slot.group('ssa'))}\]",
-        kernel,
-    ), kernel
-
-    windows_in_slot = re.search(
-        rf"(?P<ssa>%[\w.]+) = arith\.constant {win_idx_unit} : index",
-        kernel,
-    )
-    assert windows_in_slot is not None, kernel
-    assert (
-        len(
-            re.findall(
-                rf"arith\.addi {re.escape(windows_in_slot.group('ssa'))}, %[\w.]+ : index",
-                kernel,
-            )
-        )
-        >= 2
-    ), kernel
-
+    # The helper scaffolding references the rank-slot offset and the
+    # windowsIn-array base in *u64-units*, derived from comm_layout constants.
+    assert f"arith.constant {rank_idx_unit} : index" in helper
+    assert f"arith.constant {win_idx_unit} : index" in helper
     # Element-size for FP16 is 2 bytes; the byte-delta is divided by 2 to
     # reach a pto.addptr-compatible element offset.
-    element_width = re.search(r"(?P<ssa>%[\w.]+) = arith\.constant 2 : i64", kernel)
-    assert element_width is not None, kernel
-    assert re.search(
-        rf"arith\.divsi %[\w.]+, {re.escape(element_width.group('ssa'))} : i64",
-        kernel,
-    ), kernel
+    assert "arith.constant 2 : i64" in helper, helper
+    assert "arith.divsi" in helper
 
 
 def test_remote_load_peer_view_preserves_explicit_tensor_view_layout_and_strides():
@@ -1121,9 +1121,9 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "addr = " in stage_alloc_line, (
         f"staging tile must have an explicit addr at level3, got: {stage_alloc_line}"
     )
-    # dst is peer-addressed (inline CommContext reads + addptr); src is local.
-    assert "func.call" not in mlir
-    assert "pto.load_scalar" in mlir
+    # dst is peer-addressed (CommRemoteOffset + addptr); src is local (no addptr
+    # needed for its own view).
+    assert "func.call @CommRemoteOffset_f16" in mlir
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
@@ -1347,9 +1347,8 @@ def test_get_emits_comm_tget_with_staging_tile():
     assert "addr = " in stage_alloc_line, (
         f"staging tile must have an explicit addr at level3, got: {stage_alloc_line}"
     )
-    # src is peer-addressed (inline CommContext reads + addptr); dst is local.
-    assert "func.call" not in mlir
-    assert "pto.load_scalar" in mlir
+    # src is peer-addressed (CommRemoteOffset + addptr); dst is local.
+    assert "func.call @CommRemoteOffset_f16" in mlir
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
@@ -1403,8 +1402,7 @@ def test_get_rank1_transfer_uses_full_slice_partition_view():
     mlir = _generate_mlir(P)
     assert "pto.comm.tget(" in mlir
     assert "!pto.partition_tensor_view<128xf32>" in mlir
-    assert "func.call" not in mlir
-    assert "pto.load_scalar" in mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir
 
 
 if __name__ == "__main__":

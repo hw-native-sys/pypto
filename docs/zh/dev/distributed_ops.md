@@ -103,8 +103,8 @@ pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])
 
 把 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域读入本地 tile。
 在 IR 层面镜像 `tile.load`（位置参数 `offsets` / `shape` 元组、`TileType` 结果）,
-但源是*远程*切片 —— 地址转换在 codegen 时由内联的 `CommContext` 加载与
-偏移计算，再接 `addptr + make_tensor_view` 实现。
+但源是*远程*切片 —— 地址转换在 codegen 时由
+`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view` 实现。
 
 `valid_shape` 可选。无论是否传入，类型推导都会将请求窗口与源 tensor 的实际有效
 区域取交集，并检查可证明的物理边界。传入时，`shape` 仍决定 UB tile 的物理分配
@@ -130,8 +130,8 @@ pld.tile.remote_store(src_tile, target, peer, offsets) -> Unknown
 
 把本地 tile 写入 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域。
 在 IR 层面镜像 `tile.store`（位置参数 `offsets` 元组、仅副作用返回值），但目的是
-*远程*切片 —— 地址转换在 codegen 时由内联的 `CommContext` 加载与
-偏移计算，再接 `addptr + make_tensor_view` 实现。
+*远程*切片 —— 地址转换在 codegen 时由
+`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view` 实现。
 
 Verifier：`src_tile` 必须是 `TileType`；`target` 必须是 `DistributedTensorType`；
 `peer` 必须是 `ScalarType` rank 索引；`offsets` 必须是 `MakeTuple`,其 rank 等于
@@ -330,8 +330,8 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 
 | 辅助函数 | 作用 |
 | -------- | ---- |
-| `EmitCommRemoteOffset` | 发出内联 `CommContext` 加载，并把 peer 与本地窗口之间的字节差转换为元素偏移 |
-| `EmitCommRemoteView` | 发出内联偏移计算，再接 `addptr + make_tensor_view`，得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
+| `CommRemoteOffset_<dtype>` | 按 dtype 的 MLIR 辅助函数（由 `PTOCodegen::EmitCommRemoteOffsetHelpers` 一次性发出）,把 `(ctx, peer)` 转为 peer 窗口切片的字节偏移 |
+| `EmitCommRemoteView` | 在调用点发出 `CommRemoteOffset + addptr + make_tensor_view`,得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
 | `EmitPartitionViewPTO` | 用给定 offsets/sizes 把 tensor view 包成全切片 `partition_view`（被每个算子的本地与 peer 操作数使用） |
 | `ResolveDistTensorBinding` | 把 `DistributedTensor` 实参解析为其 codegen 绑定（类型 + 窗口变量） |
 | `AsTensorTypeLike` | kind-trait 向下转换,在统一读取视图 element/shape 信息处同时接受 `TensorType` 与 `DistributedTensorType` |

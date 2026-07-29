@@ -17,8 +17,7 @@
  * window-bound :class:`DistributedTensorType`. Mirrors ``tile.store`` at the
  * IR level (positional ``offsets`` tuple + side-effect-only return), but the
  * destination is a *remote* slice — the address translation is realised at
- * codegen time by inline CommContext offset arithmetic followed by
- * ``addptr + make_tensor_view``.
+ * codegen time by ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view``.
  *
  * IR signature::
  *
@@ -84,7 +83,7 @@ TypePtr DeduceRemoteStoreType(const std::vector<ExprPtr>& args,
 
   // peer must be a scalar (integer rank index). Allow any ScalarType — dtype
   // narrowing to integer is handled at codegen time when emitting the
-  // inline CommContext scalar arithmetic.
+  // CommRemoteOffset scalar arithmetic.
   CHECK(IsA<ScalarType>(args[2]->GetType()))
       << "pld.tile.remote_store peer must be a scalar (rank index), got " << args[2]->GetType()->TypeName();
 
@@ -118,7 +117,7 @@ REGISTER_OP("pld.tile.remote_store")
         "Write a local tile into a region of the peer rank's slice of a window-bound "
         "DistributedTensor. Mirrors tile.store at the IR level but the destination is a "
         "remote slice — address translation is realised at codegen via "
-        "inline CommContext offset arithmetic + addptr + make_tensor_view.")
+        "CommRemoteOffset(ctx, peer) + addptr + make_tensor_view.")
     .set_op_category("DistributedOp")
     .add_argument("src_tile", "Local source tile (TileType, dtype must match target)")
     .add_argument("target", "Window-bound DistributedTensor destination (DistributedTensorType)")
