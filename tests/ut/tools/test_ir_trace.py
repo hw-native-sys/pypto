@@ -60,6 +60,7 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
             this.scrollWidth = 0;
             this.style = {{}};
             this.textContent = "";
+            this.value = "";
           }}
           addEventListener(name, callback) {{ this.listeners[name] = callback; }}
           appendChild(child) {{ this.children.push(child); return child; }}
@@ -72,7 +73,8 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
         const ids = [
           "trace-data", "source-name", "changed-filter", "noop-filter", "pass-list", "summary",
           "pass-title", "before-pane", "after-pane", "before-title", "after-title", "warnings-panel",
-          "copy-before", "copy-after", "expand-all", "collapse-all", "theme-toggle"
+          "copy-before", "copy-after", "expand-all", "collapse-all", "theme-toggle", "diff-grid",
+          "function-select", "layout-side-by-side", "layout-stacked"
         ];
         const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
         elements["trace-data"].textContent = {json.dumps(payload)};
@@ -835,13 +837,25 @@ def test_render_html_is_deterministic_self_contained_and_safe(tmp_path: Path):
 
 
 def test_render_html_payload_has_only_portable_trace_data(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        header = 1
+
+        def first():
+            return "old"
+
+        def second():
+            return "tail"
+        """
+    )
+    after = before.replace('return "old"', 'return "new"')
     dump = _write_dump(
         tmp_path,
         {
-            "00_frontend.py": "header\nold\ntail\n",
-            "01_after_ChangedPass.py": "header\nnew\ntail\n",
+            "00_frontend.py": before,
+            "01_after_ChangedPass.py": after,
             "01_after_ChangedPass.log": "lowering warning\n",
-            "02_after_NoopPass.py": "header\nnew\ntail\n",
+            "02_after_NoopPass.py": after,
         },
     )
     traces = build_trace(discover_snapshots(dump), context=0)
@@ -861,13 +875,26 @@ def test_render_html_payload_has_only_portable_trace_data(tmp_path: Path):
     assert payload["passes"][1]["warning"] is None
     assert payload["passes"][0]["beforeName"] == "00_frontend.py"
     assert payload["passes"][0]["afterName"] == "01_after_ChangedPass.py"
-    assert payload["passes"][0]["beforeText"] == "header\nold\ntail\n"
-    assert payload["passes"][0]["afterText"] == "header\nnew\ntail\n"
-    assert any(hunk["collapsed"] for hunk in payload["passes"][0]["hunks"])
-    assert {row["kind"] for hunk in payload["passes"][0]["hunks"] for row in hunk["rows"]} == {
+    assert payload["passes"][0]["beforeText"] == before
+    assert payload["passes"][0]["afterText"] == after
+    item = payload["passes"][0]
+    assert "hunks" not in item
+    assert [section["functionKey"] for section in item["sections"] if section["functionKey"]] == [
+        "first",
+        "second",
+    ]
+    assert sum(section["inserted"] for section in item["sections"]) == item["inserted"]
+    assert sum(section["deleted"] for section in item["sections"]) == item["deleted"]
+    assert any(hunk["collapsed"] for section in item["sections"] for hunk in section["hunks"])
+    assert {
+        row["kind"] for section in item["sections"] for hunk in section["hunks"] for row in hunk["rows"]
+    } == {
         "equal",
         "replace",
     }
+    serialized_row_count = sum(len(hunk["rows"]) for section in item["sections"] for hunk in section["hunks"])
+    canonical_row_count = sum(len(hunk.rows) for section in traces[0].sections for hunk in section.hunks)
+    assert serialized_row_count == canonical_row_count
     assert "timestamp" not in encoded.lower()
     assert '"path"' not in encoded.lower()
 
@@ -898,11 +925,23 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
         "expand-all",
         "collapse-all",
         "theme-toggle",
+        "diff-grid",
+        "function-select",
+        "layout-side-by-side",
+        "layout-stacked",
     ):
         assert f'id="{element_id}"' in report
 
     assert "grid-template-columns: 18rem minmax(0, 1fr)" in report
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in report
+    assert "height: 100%;" in report
+    assert "height: 100vh;" in report
+    assert "overflow: hidden;" in report
+    assert ".sidebar {" in report and "overflow-y: auto;" in report
+    assert ".main {" in report and "display: flex;" in report
+    assert '.diff-grid[data-layout="stacked"]' in report
+    assert "grid-template-rows: minmax(0, 1fr) minmax(0, 1fr)" in report
+    assert ".code-pane {" in report and "flex: 1;" in report
     assert "@media (max-width: 800px)" in report
     assert ':root[data-theme="light"]' in report
     assert ':root[data-theme="dark"]' in report
@@ -944,6 +983,196 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
     assert 'document.createElement("textarea")' in report
     assert 'trace[side + "Text"]' in report
     assert "trace.warning" in report
+
+
+def test_viewer_filters_by_function_and_remembers_selection_across_passes(tmp_path: Path):
+    first = textwrap.dedent(
+        """\
+        def common():
+            return "before"
+
+        def first_only():
+            return 1
+        """
+    )
+    second = first.replace('return "before"', 'return "middle"')
+    third = textwrap.dedent(
+        """\
+        def common():
+            return "after"
+        """
+    )
+    fourth = third.replace('return "after"', 'return "final"')
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": first,
+            "01_after_First.py": second,
+            "02_after_Second.py": third,
+            "03_after_Third.py": fourth,
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        f"""
+        const selector = elements["function-select"];
+        if (selector.disabled) throw new Error("function selector started disabled");
+        if (selector.children[0].value !== "" || selector.children[0].textContent !== "Whole file") {{
+          throw new Error("Whole file was not the first function option");
+        }}
+        if (selector.children.map((option) => option.value).join(",") !== ",common,first_only") {{
+          throw new Error("function options did not preserve source order");
+        }}
+
+        selector.value = "first_only";
+        selector.listeners.change();
+        if (selectedFunctionKey !== "first_only") throw new Error("function selection was not recorded");
+        const selectedRows = elements["before-pane"].children[0].children.filter(
+          (child) => child.className.includes("code-line")
+        );
+        if (selectedRows.length !== 2) throw new Error("function view rendered unrelated sections");
+
+        let copied = null;
+        navigator.clipboard = {{ writeText(text) {{ copied = text; return Promise.resolve(); }} }};
+        copySnapshot("before");
+        if (copied !== {json.dumps(first)}) throw new Error("function view did not copy the full snapshot");
+
+        selectPass(2);
+        if (selectedFunctionKey !== "first_only") {{
+          throw new Error("available function selection was not retained");
+        }}
+        selectPass(3);
+        if (selectedFunctionKey !== null || selector.value !== "") {{
+          throw new Error("missing function did not fall back to Whole file");
+        }}
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_disambiguates_duplicate_short_function_names(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        class First:
+            def run():
+                return 1
+
+        class Second:
+            def run():
+                return 2
+
+        def unique():
+            return 3
+        """
+    )
+    after = before.replace("return 2", "return 4")
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        const labels = elements["function-select"].children.map((option) => option.textContent);
+        if (labels.join(",") !== "Whole file,First.run,Second.run,unique") {
+          throw new Error(`unexpected function labels: ${labels.join(",")}`);
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_switches_layout_without_resetting_pass_or_function(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "def run():\n    return 1\n",
+            "01_after_First.py": "def run():\n    return 2\n",
+            "02_after_Second.py": "def run():\n    return 3\n",
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        if (selectedLayout !== "side-by-side" || elements["diff-grid"].dataset.layout !== "side-by-side") {
+          throw new Error("side-by-side was not the default layout");
+        }
+        elements["function-select"].value = "run";
+        elements["function-select"].listeners.change();
+        elements["layout-stacked"].listeners.click();
+        if (selectedLayout !== "stacked" || elements["diff-grid"].dataset.layout !== "stacked") {
+          throw new Error("stacked layout was not applied");
+        }
+        if (elements["layout-stacked"]["aria-pressed"] !== "true") {
+          throw new Error("stacked pressed state was not applied");
+        }
+        selectPass(2);
+        if (selectedLayout !== "stacked" || selectedFunctionKey !== "run") {
+          throw new Error("pass selection reset layout or function state");
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_expands_hunks_only_for_the_selected_function(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        def first():
+            before = 1
+            return before
+
+        def second():
+            before = 2
+            return before
+        """
+    )
+    after = before.replace("before = 1", "after = 1").replace("before = 2", "after = 2")
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        const trace = currentTrace();
+        const firstIndex = trace.sections.findIndex((section) => section.functionKey === "first");
+        const secondIndex = trace.sections.findIndex((section) => section.functionKey === "second");
+        elements["function-select"].value = "first";
+        elements["function-select"].listeners.change();
+        setAllHunks(true);
+        const firstKeys = Array.from(expandedHunks);
+        if (firstKeys.length === 0 || firstKeys.some((key) => !key.startsWith(`1:${firstIndex}:`))) {
+          throw new Error("Expand all changed hunks outside the selected function");
+        }
+
+        elements["function-select"].value = "second";
+        elements["function-select"].listeners.change();
+        setAllHunks(true);
+        if (!Array.from(expandedHunks).some((key) => key.startsWith(`1:${secondIndex}:`))) {
+          throw new Error("section identity was missing from expanded hunk keys");
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_viewer_clears_details_when_filters_hide_every_pass(tmp_path: Path):
@@ -1025,6 +1254,14 @@ def test_viewer_keyboard_navigation_works_from_focused_pass_button(tmp_path: Pat
         """
         let prevented = false;
         documentListeners.keydown({
+          target: new Element("select"),
+          key: "j",
+          preventDefault() { prevented = true; }
+        });
+        if (selectedIndex !== 1) throw new Error("focused function selector triggered pass navigation");
+        if (prevented) throw new Error("ignored selector key prevented the browser default");
+
+        documentListeners.keydown({
           target: new Element("button"),
           key: "j",
           preventDefault() { prevented = true; }
@@ -1064,6 +1301,21 @@ def test_viewer_synchronizes_both_scroll_axes_in_both_directions(tmp_path: Path)
         after.listeners.scroll();
         if (before.scrollTop !== 300 || before.scrollLeft !== 80) {
           throw new Error("after-to-before scroll synchronization failed");
+        }
+
+        setLayout("stacked");
+        before.scrollTop = 450;
+        before.scrollLeft = 125;
+        before.listeners.scroll();
+        if (after.scrollTop !== 450 || after.scrollLeft !== 125) {
+          throw new Error("stacked before-to-after scroll synchronization failed");
+        }
+
+        after.scrollTop = 600;
+        after.scrollLeft = 160;
+        after.listeners.scroll();
+        if (before.scrollTop !== 600 || before.scrollLeft !== 160) {
+          throw new Error("stacked after-to-before scroll synchronization failed");
         }
         """,
     )
@@ -1118,6 +1370,9 @@ def test_empty_viewer_disables_snapshot_controls():
         """
         for (const id of ["copy-before", "copy-after", "expand-all", "collapse-all"]) {
           if (!elements[id].disabled) throw new Error(`${id} remained enabled`);
+        }
+        if (!elements["function-select"].disabled) {
+          throw new Error("empty function selector remained enabled");
         }
         if (elements["pass-title"].textContent !== "No passes in this report.") {
           throw new Error("empty report detail message was not rendered");

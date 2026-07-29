@@ -12,7 +12,7 @@
 import json
 from pathlib import Path
 
-from .model import PassTrace
+from .model import DiffHunk, PassTrace
 
 _STYLE = """
 :root[data-theme="light"] {
@@ -65,7 +65,10 @@ _STYLE = """
 
 * { box-sizing: border-box; }
 
-html, body { min-height: 100%; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
 
 body {
   margin: 0;
@@ -74,7 +77,7 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 
 button {
   border: 1px solid var(--border);
@@ -86,7 +89,7 @@ button {
 
 button:hover { border-color: var(--accent); }
 
-button:focus-visible, input:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -94,13 +97,16 @@ button:focus-visible, input:focus-visible {
 .app {
   display: grid;
   grid-template-columns: 18rem minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
 }
 
 .sidebar {
   border-right: 1px solid var(--border);
   background: var(--panel);
+  min-height: 0;
   min-width: 0;
+  overflow-y: auto;
 }
 
 .sidebar-header {
@@ -178,7 +184,11 @@ button:focus-visible, input:focus-visible {
 }
 
 .main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   padding: 1rem;
 }
 
@@ -198,6 +208,34 @@ button:focus-visible, input:focus-visible {
 
 .toolbar button, .pane-header button { padding: 0.3rem 0.55rem; }
 
+.toolbar-field {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.toolbar select {
+  max-width: 18rem;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.layout-controls { display: flex; }
+.layout-controls button { border-radius: 0; }
+.layout-controls button:first-child { border-radius: 0.35rem 0 0 0.35rem; }
+.layout-controls button:last-child { border-radius: 0 0.35rem 0.35rem 0; }
+.layout-controls button + button { margin-left: -1px; }
+.layout-controls button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
 #warnings-panel {
   margin-bottom: 0.75rem;
   padding: 0.7rem;
@@ -208,16 +246,28 @@ button:focus-visible, input:focus-visible {
 
 .diff-grid {
   display: grid;
+  flex: 1;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 1px;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 0.4rem;
   background: var(--border);
 }
 
+.diff-grid[data-layout="stacked"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+}
+
 .pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   background: var(--panel);
 }
 
@@ -240,6 +290,8 @@ button:focus-visible, input:focus-visible {
 }
 
 .code-pane {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.78rem;
@@ -299,12 +351,16 @@ button:focus-visible, input:focus-visible {
 .tok-operator { color: var(--operator); }
 
 @media (max-width: 800px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(8rem, 30vh) minmax(0, 1fr);
+  }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
-  .sidebar-header { position: static; }
-  #pass-list { max-height: 14rem; overflow: auto; }
   .main { padding: 0.65rem; }
-  .diff-grid { grid-template-columns: minmax(0, 1fr); }
+  .diff-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
 }
 """
 
@@ -323,11 +379,17 @@ const afterPane = document.getElementById("after-pane");
 const beforeTitle = document.getElementById("before-title");
 const afterTitle = document.getElementById("after-title");
 const warningsPanel = document.getElementById("warnings-panel");
+const functionSelect = document.getElementById("function-select");
+const diffGrid = document.getElementById("diff-grid");
+const sideBySideButton = document.getElementById("layout-side-by-side");
+const stackedButton = document.getElementById("layout-stacked");
 const snapshotControls = ["copy-before", "copy-after", "expand-all", "collapse-all"].map((id) =>
   document.getElementById(id)
 );
 const expandedHunks = new Set();
 let selectedIndex = null;
+let selectedFunctionKey = null;
+let selectedLayout = "side-by-side";
 let synchronizingScroll = false;
 
 function visiblePasses() {
@@ -354,8 +416,52 @@ function setSnapshotControlsEnabled(enabled) {
   for (const control of snapshotControls) control.disabled = !enabled;
 }
 
+function functionOptions(trace) {
+  const seen = new Set();
+  return trace.sections.filter((section) => {
+    if (section.functionKey === null || seen.has(section.functionKey)) return false;
+    seen.add(section.functionKey);
+    return true;
+  });
+}
+
+function createFunctionOption(value, label) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = label;
+  return option;
+}
+
+function updateFunctionSelector(trace) {
+  const functions = functionOptions(trace);
+  const selectionAvailable = functions.some((section) => section.functionKey === selectedFunctionKey);
+  if (selectedFunctionKey !== null && !selectionAvailable) {
+    selectedFunctionKey = null;
+  }
+
+  const nameCounts = new Map();
+  for (const section of functions) {
+    nameCounts.set(section.functionName, (nameCounts.get(section.functionName) || 0) + 1);
+  }
+  const options = [createFunctionOption("", "Whole file")];
+  for (const section of functions) {
+    const label = nameCounts.get(section.functionName) > 1 ? section.functionKey : section.functionName;
+    options.push(createFunctionOption(section.functionKey, label));
+  }
+  functionSelect.replaceChildren(...options);
+  functionSelect.disabled = functions.length === 0;
+  functionSelect.value = selectedFunctionKey || "";
+}
+
+function activeSections(trace) {
+  return trace.sections
+    .map((section, sectionIndex) => ({ section, sectionIndex }))
+    .filter(({ section }) => selectedFunctionKey === null || section.functionKey === selectedFunctionKey);
+}
+
 function clearDetail(message) {
   selectedIndex = null;
+  selectedFunctionKey = null;
   passTitle.textContent = message;
   beforeTitle.textContent = "";
   afterTitle.textContent = "";
@@ -363,6 +469,9 @@ function clearDetail(message) {
   warningsPanel.textContent = "";
   beforePane.replaceChildren();
   afterPane.replaceChildren();
+  functionSelect.replaceChildren(createFunctionOption("", "Whole file"));
+  functionSelect.value = "";
+  functionSelect.disabled = true;
   setSnapshotControlsEnabled(false);
 }
 
@@ -371,6 +480,7 @@ function selectPass(index) {
   if (!trace) return;
   selectedIndex = index;
   setSnapshotControlsEnabled(true);
+  updateFunctionSelector(trace);
   renderSidebar();
   renderDiff(trace);
 }
@@ -438,8 +548,12 @@ function createCodeLine(side, row) {
   return line;
 }
 
-function addFoldButton(pane, trace, hunk, hunkIndex) {
-  const key = `${trace.index}:${hunkIndex}`;
+function hunkKey(trace, sectionIndex, hunkIndex) {
+  return `${trace.index}:${sectionIndex}:${hunkIndex}`;
+}
+
+function addFoldButton(pane, trace, sectionIndex, hunk, hunkIndex) {
+  const key = hunkKey(trace, sectionIndex, hunkIndex);
   const expanded = expandedHunks.has(key);
   const button = document.createElement("button");
   button.type = "button";
@@ -483,18 +597,20 @@ function renderDiff(trace) {
   beforePane.appendChild(beforeCanvas);
   afterPane.appendChild(afterCanvas);
 
-  trace.hunks.forEach((hunk, hunkIndex) => {
-    const key = `${trace.index}:${hunkIndex}`;
-    const expanded = expandedHunks.has(key);
-    if (hunk.collapsed) {
-      addFoldButton(beforeCanvas, trace, hunk, hunkIndex);
-      addFoldButton(afterCanvas, trace, hunk, hunkIndex);
-      if (!expanded) return;
-    }
-    for (const row of hunk.rows) {
-      beforeCanvas.appendChild(createCodeLine("before", row));
-      afterCanvas.appendChild(createCodeLine("after", row));
-    }
+  activeSections(trace).forEach(({ section, sectionIndex }) => {
+    section.hunks.forEach((hunk, hunkIndex) => {
+      const key = hunkKey(trace, sectionIndex, hunkIndex);
+      const expanded = expandedHunks.has(key);
+      if (hunk.collapsed) {
+        addFoldButton(beforeCanvas, trace, sectionIndex, hunk, hunkIndex);
+        addFoldButton(afterCanvas, trace, sectionIndex, hunk, hunkIndex);
+        if (!expanded) return;
+      }
+      for (const row of hunk.rows) {
+        beforeCanvas.appendChild(createCodeLine("before", row));
+        afterCanvas.appendChild(createCodeLine("after", row));
+      }
+    });
   });
   synchronizeCodeCanvasWidths(beforeCanvas, afterCanvas);
 }
@@ -525,13 +641,23 @@ function copySnapshot(side) {
 function setAllHunks(expanded) {
   const trace = currentTrace();
   if (!trace) return;
-  trace.hunks.forEach((hunk, hunkIndex) => {
-    if (!hunk.collapsed) return;
-    const key = `${trace.index}:${hunkIndex}`;
-    if (expanded) expandedHunks.add(key);
-    else expandedHunks.delete(key);
+  activeSections(trace).forEach(({ section, sectionIndex }) => {
+    section.hunks.forEach((hunk, hunkIndex) => {
+      if (!hunk.collapsed) return;
+      const key = hunkKey(trace, sectionIndex, hunkIndex);
+      if (expanded) expandedHunks.add(key);
+      else expandedHunks.delete(key);
+    });
   });
   renderDiff(trace);
+}
+
+function setLayout(layout) {
+  if (layout !== "side-by-side" && layout !== "stacked") return;
+  selectedLayout = layout;
+  diffGrid.dataset.layout = layout;
+  sideBySideButton.setAttribute("aria-pressed", String(layout === "side-by-side"));
+  stackedButton.setAttribute("aria-pressed", String(layout === "stacked"));
 }
 
 function toggleTheme() {
@@ -565,6 +691,13 @@ function applyFilters() {
 
 changedFilter.addEventListener("change", applyFilters);
 noopFilter.addEventListener("change", applyFilters);
+functionSelect.addEventListener("change", () => {
+  selectedFunctionKey = functionSelect.value || null;
+  const trace = currentTrace();
+  if (trace) renderDiff(trace);
+});
+sideBySideButton.addEventListener("click", () => setLayout("side-by-side"));
+stackedButton.addEventListener("click", () => setLayout("stacked"));
 beforePane.addEventListener("scroll", () => synchronizeScroll(beforePane, afterPane), { passive: true });
 afterPane.addEventListener("scroll", () => synchronizeScroll(afterPane, beforePane), { passive: true });
 document.getElementById("copy-before").addEventListener("click", () => copySnapshot("before"));
@@ -575,7 +708,7 @@ document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
-  if (target && target.tagName === "INPUT") return;
+  if (target && (target.tagName === "INPUT" || target.tagName === "SELECT")) return;
   const passes = visiblePasses();
   if (passes.length === 0) return;
   const current = passes.findIndex((trace) => trace.index === selectedIndex);
@@ -590,6 +723,7 @@ document.addEventListener("keydown", (event) => {
 document.documentElement.dataset.theme = window.matchMedia("(prefers-color-scheme: dark)").matches
   ? "dark"
   : "light";
+setLayout("side-by-side");
 const initialTrace = data.passes.find((trace) => trace.changed) || data.passes[0];
 if (initialTrace) selectPass(initialTrace.index);
 else {
@@ -614,12 +748,20 @@ _BODY = """
   <main class="main">
     <div class="toolbar">
       <h2 id="pass-title">No passes</h2>
+      <label class="toolbar-field" for="function-select">
+        Function
+        <select id="function-select" aria-label="Function comparison"></select>
+      </label>
+      <div class="layout-controls" role="group" aria-label="Comparison layout">
+        <button id="layout-side-by-side" type="button" aria-pressed="true">Side by side</button>
+        <button id="layout-stacked" type="button" aria-pressed="false">Stacked</button>
+      </div>
       <button id="expand-all" type="button">Expand all</button>
       <button id="collapse-all" type="button">Collapse all</button>
       <button id="theme-toggle" type="button">Toggle theme</button>
     </div>
     <section id="warnings-panel" aria-label="Pass warnings" hidden></section>
-    <div class="diff-grid">
+    <div id="diff-grid" class="diff-grid" data-layout="side-by-side">
       <section class="pane" aria-label="Before snapshot">
         <header class="pane-header">
           <span id="before-title" class="pane-title"></span>
@@ -640,6 +782,23 @@ _BODY = """
 """
 
 
+def _hunk_payload(hunk: DiffHunk) -> dict[str, object]:
+    """Return one portable hunk dictionary for the embedded report data."""
+    return {
+        "collapsed": hunk.collapsed,
+        "rows": [
+            {
+                "afterHtml": row.after_html,
+                "afterNumber": row.after_number,
+                "beforeHtml": row.before_html,
+                "beforeNumber": row.before_number,
+                "kind": row.kind,
+            }
+            for row in hunk.rows
+        ],
+    }
+
+
 def _trace_payload(traces: tuple[PassTrace, ...], source_name: str) -> dict[str, object]:
     """Build the stable, path-free payload consumed by the report."""
     passes = []
@@ -652,21 +811,15 @@ def _trace_payload(traces: tuple[PassTrace, ...], source_name: str) -> dict[str,
                 "beforeText": trace.before.text,
                 "changed": trace.changed,
                 "deleted": trace.deleted,
-                "hunks": [
+                "sections": [
                     {
-                        "collapsed": hunk.collapsed,
-                        "rows": [
-                            {
-                                "afterHtml": row.after_html,
-                                "afterNumber": row.after_number,
-                                "beforeHtml": row.before_html,
-                                "beforeNumber": row.before_number,
-                                "kind": row.kind,
-                            }
-                            for row in hunk.rows
-                        ],
+                        "deleted": section.deleted,
+                        "functionKey": section.function_key,
+                        "functionName": section.function_name,
+                        "hunks": [_hunk_payload(hunk) for hunk in section.hunks],
+                        "inserted": section.inserted,
                     }
-                    for hunk in trace.hunks
+                    for section in trace.sections
                 ],
                 "index": trace.index,
                 "inserted": trace.inserted,
