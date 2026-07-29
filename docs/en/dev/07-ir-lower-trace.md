@@ -105,13 +105,14 @@ functions are kept inside their containing function rather than listed separatel
 If either snapshot cannot be parsed safely, function selection is disabled for that
 pass and the existing Whole file diff is used.
 
-Within replacement blocks, the viewer aligns single-line Python calls by their
-qualified operation name. This keeps related operations paired when a pass adds
-layout conversions around them, while the surrounding lines remain full-line
-deletions or insertions. Replacement rows use light delete/insert backgrounds,
-with the exact changed characters emphasized in stronger red and green. Both
-panes use the same scrollable canvas width so row backgrounds cover the complete
-code line.
+Within replacement blocks, the viewer first aligns lines whose content matches
+after removing leading whitespace. Indentation-only differences remain replacement
+rows so structural changes stay visible. Remaining changed ranges align single-line
+Python calls by qualified operation name. This keeps control-flow headers and
+related operations paired while preserving one-sided rows for actual insertions
+and deletions. Replacement rows use light delete/insert backgrounds, with the exact
+changed characters emphasized in stronger red and green. Both panes use the same
+scrollable canvas width so row backgrounds cover the complete code line.
 
 ### Copy snapshots
 
