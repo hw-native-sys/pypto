@@ -177,8 +177,19 @@ offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
 Acc 结果使用 16 个物理行，物理列数沿用 RHS tile（并须满足目标平台通常的
 C0 对齐要求），bias 使用相同的物理列数；
 各自的 `valid_shape` 仍保留逻辑 `[K, N]`、`[1, N]` 和 `[1, N]` 区域。
+lhs 的物理行数和逻辑行数都必须恰好为 1。
 单行 Mat load 使用 `blayout=row_major` 和 `slayout=none_box`，从而选择
 PTO-ISA 的行向量提取路径。
+
+lhs 与 rhs 的逻辑 K 必须完全相等。支持的 dtype 三元组为
+`INT8 x INT8 -> INT32`，以及同类型 `FP16`、`BF16` 或 `FP32` 输入到
+`FP32`；`gemv_acc` 的 `acc` 使用对应输出 dtype，`gemv_bias` 的 `bias`
+也必须使用相同的输出 dtype，且 bias 的 valid shape 必须与逻辑输出形状
+`[1, N]` 完全一致。
+
+`tile.gemv`、`tile.gemv_acc` 和 `tile.gemv_bias` 的 `acc_phase` 可设为
+`"unspecified"`（默认值）、`"partial"` 或 `"final"`。后续仍有 K 分块时
+使用 `"partial"`，最后一个分块使用 `"final"`。
 
 ## Python 用法
 

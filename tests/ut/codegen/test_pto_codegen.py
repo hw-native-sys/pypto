@@ -408,43 +408,48 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
         def base(
             self,
             a: pl.Tensor[[1, 128], pl.FP32],
-            b: pl.Tensor[[128, 128], pl.FP32],
+            b: pl.Tensor[[128, 64], pl.FP32],
             out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
         ) -> pl.Tensor[[1, 64], pl.FP32]:
             lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
-            rhs = pl.load(b, [0, 0], [128, 128], valid_shapes=[128, 64], target_memory=pl.MemorySpace.Mat)
-            out = pl.store(pl.tile.gemv(lhs, rhs), [0, 0], out)
+            rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            partial = pl.tile.gemv(lhs, rhs, acc_phase="partial")
+            out = pl.store(partial, [0, 0], out)
+            final = pl.tile.gemv(lhs, rhs, acc_phase="final")
+            out = pl.store(final, [0, 0], out)
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
         def bias(
             self,
             a: pl.Tensor[[1, 128], pl.FP32],
-            b: pl.Tensor[[128, 128], pl.FP32],
-            bias: pl.Tensor[[1, 128], pl.FP32],
+            b: pl.Tensor[[128, 64], pl.FP32],
+            bias: pl.Tensor[[1, 64], pl.FP32],
             out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
         ) -> pl.Tensor[[1, 64], pl.FP32]:
             lhs = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
-            rhs = pl.load(b, [0, 0], [128, 128], valid_shapes=[128, 64], target_memory=pl.MemorySpace.Mat)
-            bias_tile = pl.load(
-                bias, [0, 0], [1, 128], valid_shapes=[1, 64], target_memory=pl.MemorySpace.Mat
-            )
-            out = pl.store(pl.tile.gemv_bias(lhs, rhs, bias_tile), [0, 0], out)
+            rhs = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            bias_tile = pl.load(bias, [0, 0], [1, 64], target_memory=pl.MemorySpace.Mat)
+            partial = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="partial")
+            out = pl.store(partial, [0, 0], out)
+            final = pl.tile.gemv_bias(lhs, rhs, bias_tile, acc_phase="final")
+            out = pl.store(final, [0, 0], out)
             return out
 
         @pl.function(type=pl.FunctionType.InCore)
         def acc(
             self,
             a: pl.Tensor[[1, 256], pl.FP32],
-            b: pl.Tensor[[256, 128], pl.FP32],
+            b: pl.Tensor[[256, 64], pl.FP32],
             out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
         ) -> pl.Tensor[[1, 64], pl.FP32]:
             lhs0 = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
-            rhs0 = pl.load(b, [0, 0], [128, 128], valid_shapes=[128, 64], target_memory=pl.MemorySpace.Mat)
+            rhs0 = pl.load(b, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
             result = pl.tile.gemv(lhs0, rhs0)
             lhs1 = pl.load(a, [0, 128], [1, 128], target_memory=pl.MemorySpace.Mat)
-            rhs1 = pl.load(b, [128, 0], [128, 128], valid_shapes=[128, 64], target_memory=pl.MemorySpace.Mat)
-            result = pl.tile.gemv_acc(result, lhs1, rhs1)
+            rhs1 = pl.load(b, [128, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="partial")
+            result = pl.tile.gemv_acc(result, lhs1, rhs1, acc_phase="final")
             out = pl.store(result, [0, 0], out)
             return out
 
@@ -453,6 +458,11 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
     assert "pto.tgemv ins(" in mlir_code
     assert "pto.tgemv.acc ins(" in mlir_code
     assert "pto.tgemv.bias ins(" in mlir_code
+    for pto_op in ("pto.tgemv", "pto.tgemv.acc", "pto.tgemv.bias"):
+        op_lines = [line for line in mlir_code.splitlines() if f"{pto_op} ins(" in line]
+        for phase in ("partial", "final"):
+            attr = f"{{accPhase = #pto<acc_phase {phase}>}}"
+            assert any(attr in line for line in op_lines)
 
     row_mat_allocs = [
         line for line in _get_alloc_tile_lines(mlir_code) if "loc=mat" in line and "rows=1," in line
@@ -461,7 +471,7 @@ def test_pto_codegen_gemv_family_uses_exact_ops_and_single_row_mat_layout():
     assert all("blayout=row_major" in line and "slayout=none_box" in line for line in row_mat_allocs)
 
     gemv_acc_allocs = [
-        line for line in _get_alloc_tile_lines(mlir_code) if "loc=acc" in line and "rows=16, cols=128" in line
+        line for line in _get_alloc_tile_lines(mlir_code) if "loc=acc" in line and "rows=16, cols=64" in line
     ]
     assert gemv_acc_allocs
 
