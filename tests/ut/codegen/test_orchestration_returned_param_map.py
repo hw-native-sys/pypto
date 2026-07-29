@@ -242,6 +242,10 @@ _TASK_RE = re.compile(
 )
 _OP_RE = re.compile(r"\.add_(input|inout|output)\((\w+)\)")
 
+# A loop-tail carry rebind, e.g. "cur__rv_v3 = cur__ssa_v4;". Matches the bare assignment
+# only -- the "Tensor cur__rv_v3 = cur;" declaration above the loop is not a rebind.
+_CARRY_RE = re.compile(r"^\s*(\w+)__rv_v\d+\s*=\s*(\w+);\s*$", re.MULTILINE)
+
 
 def _orch_code(kernel) -> str:
     """Specialize + run the Default pipeline, then emit the orchestration C++ in-process.
@@ -318,13 +322,32 @@ class TestReturnedParamMapBinding:
         _assert_consumer_reads_producer_buffer(code)
 
         # The poisoned map also yields garbage into the loop carry: a k/v cache carry must
-        # never be re-bound from an unrelated scratch buffer.
-        for m in re.finditer(r"^\s*(\w+)__rv_v\d+\s*=\s*(\w+);\s*$", code, re.MULTILINE):
-            carry, src = m.group(1), m.group(2)
-            if carry in ("k_cache", "v_cache"):
-                assert src.startswith(("k_cache", "v_cache")), (
-                    f"GARBAGE LOOP CARRY: {carry!r} is yielded from {src!r} (line: {m.group(0).strip()})"
-                )
+        # never be re-bound from an unrelated scratch buffer. This is an ABSENCE check --
+        # correct codegen rebinds only 'cur', so the k/v branch below is expected not to be
+        # taken; the bug shows up as an EXTRA "v_cache__rv_vN = q_pad_inlineNN;" line.
+        carries = list(_CARRY_RE.finditer(code))
+
+        # Canary: the absence check above is only meaningful while _CARRY_RE still matches the
+        # carry rebinds it is meant to police. Without this, renaming the __rv_vN suffix in
+        # codegen would silently retire the check instead of failing here.
+        assert carries, (
+            "no '<name>__rv_vN = <src>;' loop-carry rebinds found in the generated orchestration "
+            "-- has the carry naming scheme changed? The k/v garbage-carry check below is dead "
+            f"until this scan is repaired.\n{code}"
+        )
+
+        # Stated as a direct absence, not a per-match branch, so the intent reads as one
+        # claim. Prefix-matched on both sides: an SSA- or index-suffixed carry base
+        # (v_cache__ssa_v1, v_cache_0) must not slip past as an exact-match miss.
+        garbage = [
+            m.group(0).strip()
+            for m in carries
+            if m.group(1).startswith(("k_cache", "v_cache"))
+            and not m.group(2).startswith(("k_cache", "v_cache"))
+        ]
+        assert not garbage, (
+            f"GARBAGE LOOP CARRY: a k/v cache carry is re-bound from an unrelated scratch buffer: {garbage}"
+        )
 
     def test_unconditional_param_write_binds_consumer_correctly(self):
         """Control (b) removed: same param writes without the runtime guard bind correctly."""

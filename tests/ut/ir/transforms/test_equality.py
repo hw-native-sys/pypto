@@ -406,11 +406,16 @@ class TestHashEqualityConsistency:
             ),
         ]
 
+        # These are bare fragments, so their vars are free -- there is no def point to
+        # remap them at, hence enable_auto_mapping (matching the rest of this file).
+        # Assert equality rather than branching on it: a structural_equal regression
+        # toward False would otherwise skip the hash check below and silence the very
+        # inconsistency this test exists to catch.
         for expr1, expr2 in test_cases:
-            if ir.structural_equal(expr1, expr2):
-                assert ir.structural_hash(expr1) == ir.structural_hash(expr2), (
-                    f"Equal expressions should have same hash: {expr1} vs {expr2}"
-                )
+            ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
+            assert ir.structural_hash(expr1, enable_auto_mapping=True) == ir.structural_hash(
+                expr2, enable_auto_mapping=True
+            ), f"Equal expressions should have same hash: {expr1} vs {expr2}"
 
     def test_deep_nested_consistency(self):
         """Test hash/equality consistency for deeply nested expressions."""

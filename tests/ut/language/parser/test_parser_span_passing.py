@@ -24,6 +24,87 @@ def get_current_line():
     return -1
 
 
+def top_level_calls(func: ir.Function) -> list[ir.Call]:
+    """Return every ``AssignStmt``-bound ``Call`` in ``func``'s body, in source order.
+
+    Only the top level of the body is scanned -- these tests assert on the span of the
+    call the surface syntax binds directly, not on nested argument expressions.
+
+    Args:
+        func: The parsed function to scan.
+
+    Returns:
+        The bound ``Call`` expressions, in statement order.
+    """
+    body = func.body
+    assert isinstance(body, ir.SeqStmts)
+    return [
+        stmt.value
+        for stmt in body.stmts
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+
+
+def find_unique_call(func: ir.Function, op_name: str) -> ir.Call:
+    """Return the single ``AssignStmt``-bound ``Call`` in ``func`` carrying ``op_name``.
+
+    Routing ``op_name`` through ``ir.get_op`` makes a stale operator name raise
+    instead of silently evaluating to ``False``. Asserting the match was found
+    is what keeps the span checks at the call site from being skipped outright
+    if the parser stops emitting ``op_name`` for the tested surface syntax --
+    without it, a dead search reports PASS while verifying nothing.
+
+    Args:
+        func: The parsed function to search.
+        op_name: Registered operator name the call is expected to carry.
+
+    Returns:
+        The matching ``Call`` expression.
+
+    Raises:
+        ValueError: If ``op_name`` is not a registered operator.
+    """
+    want = ir.get_op(op_name).name
+    calls = top_level_calls(func)
+    hits = [call for call in calls if call.op.name == want]
+
+    assert len(hits) == 1, (
+        f"Expected exactly one {op_name!r} call in {func.name!r}, got {len(hits)}; "
+        f"body contained {[call.op.name for call in calls]}"
+    )
+    return hits[0]
+
+
+def assert_span_at(
+    span: ir.Span, expected_line: int, expected_column: int | None = None, context: str = ""
+) -> None:
+    """Assert ``span`` is a valid, well-ordered range beginning at ``expected_line``.
+
+    Args:
+        span: The span to check.
+        expected_line: Line number the span must begin on.
+        expected_column: Exact begin column, or None to only require it is positive.
+        context: Optional label identifying the span, used in failure messages.
+    """
+    where = f" for {context}" if context else ""
+    assert span.is_valid(), f"Invalid span{where}"
+    assert span.begin_line == expected_line, (
+        f"Invalid begin line{where}: {span.begin_line} != {expected_line}"
+    )
+    if expected_column is None:
+        assert span.begin_column > 0, f"Invalid begin column{where}: {span.begin_column}"
+    else:
+        assert span.begin_column == expected_column, (
+            f"Invalid begin column{where}: {span.begin_column} != {expected_column}"
+        )
+    # Equivalent to "end line is later, or same line with a non-decreasing column",
+    # but stated unconditionally so the ordering check can never be skipped.
+    assert (span.end_line, span.end_column) >= (span.begin_line, span.begin_column), (
+        f"Span end precedes begin{where}: "
+        f"({span.end_line}, {span.end_column}) < ({span.begin_line}, {span.begin_column})"
+    )
+
+
 class TestParserSpanPassing:
     """Test that parser passes accurate span information to operations."""
 
@@ -44,32 +125,11 @@ class TestParserSpanPassing:
         assert isinstance(test_func, ir.Function)
         assert test_func.name == "test_func"
 
-        # Check that the function body contains statements with valid spans
-        body = test_func.body
-        assert isinstance(body, ir.SeqStmts)
-        assert len(body.stmts) > 0
-
-        # Find the assign statement containing the add operation
-        for stmt in body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.add":
-                    # Verify span is valid and not unknown
-                    assert value.span.is_valid()
-                    # Check line number points to the operation call (line current_line + 7)
-                    assert value.span.begin_line == current_line + 7
-                    # Check column points to the operation (after "= ")
-                    assert value.span.begin_column > 0
-                    # Verify end position is set (parser should provide range)
-                    # End line should be same line or later
-                    assert value.span.end_line >= value.span.begin_line
-                    # If same line, end column should be after begin
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
-                    break
+        add_call = find_unique_call(test_func, "tensor.add")
+        assert_span_at(add_call.span, current_line + 7)
 
     def test_parser_passes_span_to_tensor_mul(self):
-        """Parser should pass AST span to tensor.mul operation."""
+        """Parser should pass AST span to the tensor.muls operation a scalar rhs lowers to."""
 
         current_line = get_current_line()
 
@@ -79,19 +139,10 @@ class TestParserSpanPassing:
             return y
 
         assert isinstance(test_mul, ir.Function)
-        assert isinstance(test_mul.body, ir.SeqStmts)
 
-        # Check that operations have valid spans
-        for stmt in test_mul.body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.muls":
-                    assert value.span.is_valid()
-                    assert value.span.begin_line == current_line + 4
-                    assert value.span.begin_column > 0
-                    assert value.span.end_line >= value.span.begin_line
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
+        # A scalar rhs lowers to tensor.muls, not tensor.mul
+        mul_call = find_unique_call(test_mul, "tensor.muls")
+        assert_span_at(mul_call.span, current_line + 4)
 
     def test_parser_passes_span_to_tensor_create(self):
         """Parser should pass AST span to tensor.create operation."""
@@ -104,18 +155,9 @@ class TestParserSpanPassing:
             return x
 
         assert isinstance(test_create, ir.Function)
-        assert isinstance(test_create.body, ir.SeqStmts)
 
-        for stmt in test_create.body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.create":
-                    assert value.span.is_valid()
-                    assert value.span.begin_line == current_line + 4
-                    assert value.span.begin_column == 46
-                    assert value.span.end_line >= value.span.begin_line
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
+        create_call = find_unique_call(test_create, "tensor.create")
+        assert_span_at(create_call.span, current_line + 4, expected_column=46)
 
     def test_parser_span_accuracy_multiple_operations(self):
         """Test that parser assigns different spans to different operations."""
@@ -129,25 +171,14 @@ class TestParserSpanPassing:
             return z
 
         assert isinstance(test_multi, ir.Function)
-        assert isinstance(test_multi.body, ir.SeqStmts)
 
-        # Collect all Call spans
-        call_spans = []
-        for stmt in test_multi.body.stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                call_spans.append((stmt.value.op.name, stmt.value.span))
+        # State the exact contract the zip below enforces, so an extra emitted call
+        # fails as a named length assertion rather than a bare zip ValueError.
+        calls = top_level_calls(test_multi)
+        assert len(calls) == 2, f"expected 2 calls, got {[call.op.name for call in calls]}"
 
-        # Should have at least 2 operations
-        assert len(call_spans) >= 2
-
-        # All spans should be valid with proper line/column info
-        for (op_name, span), offset in zip(call_spans, [4, 5]):
-            assert span.is_valid(), f"Invalid span for {op_name}"
-            assert span.begin_line == current_line + offset, f"Invalid line number for {op_name}"
-            assert span.begin_column == 42, f"Invalid column number for {op_name}"
-            assert span.end_line >= span.begin_line, f"Invalid end line for {op_name}"
-            if span.end_line == span.begin_line:
-                assert span.end_column >= span.begin_column, f"Invalid end column for {op_name}"
+        for call, offset in zip(calls, [4, 5], strict=True):
+            assert_span_at(call.span, current_line + offset, expected_column=42, context=call.op.name)
 
     def test_parser_passes_span_to_matmul(self):
         """Parser should pass AST span to tensor.matmul operation."""
@@ -163,18 +194,9 @@ class TestParserSpanPassing:
             return c
 
         assert isinstance(test_matmul, ir.Function)
-        assert isinstance(test_matmul.body, ir.SeqStmts)
 
-        for stmt in test_matmul.body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.matmul":
-                    assert value.span.is_valid()
-                    assert value.span.begin_line == current_line + 7
-                    assert value.span.begin_column > 0
-                    assert value.span.end_line >= value.span.begin_line
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
+        matmul_call = find_unique_call(test_matmul, "tensor.matmul")
+        assert_span_at(matmul_call.span, current_line + 7)
 
     def test_parser_passes_span_to_cast(self):
         """Parser should pass AST span to tensor.cast operation."""
@@ -187,18 +209,9 @@ class TestParserSpanPassing:
             return y
 
         assert isinstance(test_cast, ir.Function)
-        assert isinstance(test_cast.body, ir.SeqStmts)
 
-        for stmt in test_cast.body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.cast":
-                    assert value.span.is_valid()
-                    assert value.span.begin_line == current_line + 4
-                    assert value.span.begin_column > 0
-                    assert value.span.end_line >= value.span.begin_line
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
+        cast_call = find_unique_call(test_cast, "tensor.cast")
+        assert_span_at(cast_call.span, current_line + 4)
 
     def test_parser_passes_span_to_exp(self):
         """Parser should pass AST span to tensor.exp operation."""
@@ -211,18 +224,9 @@ class TestParserSpanPassing:
             return y
 
         assert isinstance(test_exp, ir.Function)
-        assert isinstance(test_exp.body, ir.SeqStmts)
 
-        for stmt in test_exp.body.stmts:
-            if isinstance(stmt, ir.AssignStmt):
-                value = stmt.value
-                if isinstance(value, ir.Call) and value.op.name == "tensor.exp":
-                    assert value.span.is_valid()
-                    assert value.span.begin_line == current_line + 4
-                    assert value.span.begin_column > 0
-                    assert value.span.end_line >= value.span.begin_line
-                    if value.span.end_line == value.span.begin_line:
-                        assert value.span.end_column >= value.span.begin_column
+        exp_call = find_unique_call(test_exp, "tensor.exp")
+        assert_span_at(exp_call.span, current_line + 4)
 
     def test_all_operations_have_valid_spans(self):
         """Comprehensive test that all operations get valid spans from parser."""
@@ -242,34 +246,12 @@ class TestParserSpanPassing:
             return e
 
         assert isinstance(test_comprehensive, ir.Function)
-        assert isinstance(test_comprehensive.body, ir.SeqStmts)
 
-        # Collect all operations and verify spans
-        operations_checked = 0
-        expected_lines = [7, 8, 9, 10, 11]
-        for stmt in test_comprehensive.body.stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                span = stmt.value.span
-                op_name = stmt.value.op.name
+        calls = top_level_calls(test_comprehensive)
+        assert len(calls) == 5, f"expected 5 calls, got {[call.op.name for call in calls]}"
 
-                # Verify span validity
-                assert span.is_valid(), f"Invalid span for {op_name}"
-
-                # Verify line number
-                assert span.begin_line == current_line + expected_lines[operations_checked]
-
-                # Verify column number
-                assert span.begin_column > 0, f"Invalid column for {op_name}"
-
-                # Verify end position
-                assert span.end_line >= span.begin_line, f"Invalid end line for {op_name}"
-                if span.end_line == span.begin_line:
-                    assert span.end_column >= span.begin_column, f"Invalid end column for {op_name}"
-
-                operations_checked += 1
-
-        # Should have checked exactly 5 operations
-        assert operations_checked == 5
+        for call, offset in zip(calls, [7, 8, 9, 10, 11], strict=True):
+            assert_span_at(call.span, current_line + offset, context=call.op.name)
 
 
 if __name__ == "__main__":
