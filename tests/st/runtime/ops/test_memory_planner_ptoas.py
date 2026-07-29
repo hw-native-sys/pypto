@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end runtime tests for ``compile(memory_planner=MemoryPlanner.PTOAS)``.
+"""End-to-end runtime tests for PyPTO's selectable memory planners.
 
 Under ``PTOAS`` the pipeline skips PyPTO's opportunistic ``MemoryReuse`` and
 ``AllocateMemoryAddr`` and lets the ptoas ``PlanMemory`` pass own lifetime reuse
@@ -15,8 +15,9 @@ and address assignment at ``--pto-level=level2``. ``MaterializeSemanticAliases``
 still runs, so semantics-required aliasing (loop-carried accumulators, in-place
 ops) is preserved as a shared ``tile_buf`` handle.
 
-Each kernel is run under **both** planners against the same golden — a PTOAS
-result that matches the PYPTO result proves the must-alias handoff is correct.
+Each kernel is run under PYPTO, DSA-RP, and PTOAS against the same golden.
+Matching results prove that each planner preserves the required semantic
+aliases while assigning physical storage.
 The loop-carried accumulator is the regression case: without
 ``MaterializeSemanticAliases`` the addr-less allocs would be planned into
 distinct ptoas buffers and the accumulation would be silently lost.
@@ -51,8 +52,12 @@ from pypto.backend.pto_backend import PartialCodegenError
 from pypto.pypto_core.passes import MemoryPlanner
 
 
-def _planner_tag(mp: MemoryPlanner | None) -> str:
-    return "ptoas" if mp == MemoryPlanner.PTOAS else "pypto"
+def _planner_tag(mp: MemoryPlanner) -> str:
+    return {
+        MemoryPlanner.PYPTO: "pypto",
+        MemoryPlanner.DSA_RP: "dsa_rp",
+        MemoryPlanner.PTOAS: "ptoas",
+    }[mp]
 
 
 # ---------------------------------------------------------------------------
@@ -577,11 +582,11 @@ class MultiBufferAccCase(PTOTestCase):
 # ---------------------------------------------------------------------------
 
 
-_PLANNERS = [MemoryPlanner.PYPTO, MemoryPlanner.PTOAS]
+_PLANNERS = [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS]
 
 
 class TestMemoryPlannerPtoas:
-    """PTOAS memory planner produces correct on-device results (matches PYPTO)."""
+    """Selectable memory planners produce matching on-device results."""
 
     @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
     def test_elementwise_add(self, test_runner, planner):

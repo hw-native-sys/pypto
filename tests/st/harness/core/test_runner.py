@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.pypto_core import LogLevel, _set_thread_log_level
+from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
@@ -142,8 +143,12 @@ _BACKEND_TO_ARCH: dict[BackendType, str] = {
 }
 
 
-def _cache_key(tc: PTOTestCase, resolved_platform: str | None = None) -> str:
-    """Return a unique cache key combining test name and target platform.
+def _cache_key(
+    tc: PTOTestCase,
+    resolved_platform: str | None = None,
+    session_memory_planner: MemoryPlanner | None = None,
+) -> str:
+    """Return a unique cache key combining test name, platform, and planner.
 
     The cache key is anchored to the *resolved* platform so that the
     pre-compilation cache, the binary cache and the executor all agree on
@@ -165,7 +170,9 @@ def _cache_key(tc: PTOTestCase, resolved_platform: str | None = None) -> str:
             resolved_platform = None
     if not resolved_platform:
         resolved_platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
-    return f"{tc.get_name()}@{resolved_platform}"
+    planner = _resolve_case_memory_planner(tc, session_memory_planner)
+    planner_tag = planner.name.lower() if planner is not None else "default"
+    return f"{tc.get_name()}@{resolved_platform}@{planner_tag}"
 
 
 def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None) -> str:
@@ -185,6 +192,27 @@ def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None
         if tc_platform:
             return tc_platform
     return config_platform
+
+
+def _resolve_case_memory_planner(
+    test_case: PTOTestCase,
+    session_memory_planner: MemoryPlanner | None,
+) -> MemoryPlanner | None:
+    """Resolve planner precedence for a system-test compilation.
+
+    A test case that deliberately selects a planner remains authoritative.
+    Otherwise a planner carried by the case's own ``RunConfig`` wins, followed
+    by the session-wide ``--memory-planner`` override. Returning ``None`` keeps
+    the normal compiler default.
+    """
+    planner = test_case.get_memory_planner()
+    if planner is not None:
+        return planner
+    case_config = getattr(test_case, "config", None)
+    planner = getattr(case_config, "memory_planner", None)
+    if planner is not None:
+        return planner
+    return session_memory_planner
 
 
 def _default_work_dir(test_name: str) -> Path:
@@ -288,6 +316,7 @@ def _compile_for_cache(
     work_dir: Path,
     dump_passes: bool,
     analyze_auto_scopes_for_deps: bool,
+    session_memory_planner: MemoryPlanner | None = None,
 ) -> None:
     """Compile one test case into *work_dir* (called from thread pool).
 
@@ -311,7 +340,7 @@ def _compile_for_cache(
         backend_type=backend_type,
         dump_passes=dump_passes,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
-        memory_planner=test_case.get_memory_planner(),
+        memory_planner=_resolve_case_memory_planner(test_case, session_memory_planner),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
     )
     # External kernels are referenced in the manifest at their original path
@@ -352,6 +381,7 @@ def _fused_compile_task(
     session_platform: str,
     dump_passes: bool,
     analyze_auto_scopes_for_deps: bool,
+    session_memory_planner: MemoryPlanner | None = None,
 ) -> CompileArtifact:
     """Compile IR → kernels/orch C++ → golden.py → .so for one test case.
 
@@ -361,10 +391,16 @@ def _fused_compile_task(
     already be set on the main thread before this task is submitted.
     """
     resolved = _resolve_platform(session_platform, tc)
-    work_dir = cache_dir / _cache_key(tc, resolved)
+    work_dir = cache_dir / _cache_key(tc, resolved, session_memory_planner)
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        _compile_for_cache(tc, work_dir, dump_passes, analyze_auto_scopes_for_deps)
+        _compile_for_cache(
+            tc,
+            work_dir,
+            dump_passes,
+            analyze_auto_scopes_for_deps,
+            session_memory_planner,
+        )
         # Codegen-only runs skip assembly: the .so is never loaded by the
         # execute task (see _fused_execute_task) and assembling here would
         # both waste work and race on PTO_ISA_ROOT (start_pipeline skips
@@ -964,6 +1000,7 @@ def start_pipeline(  # noqa: PLR0913
     task_queue_timeout: int = 1800,
     task_submit_device: str = "auto",
     execute_batch_size: int = 64,
+    memory_planner: MemoryPlanner | None = None,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
@@ -1001,6 +1038,7 @@ def start_pipeline(  # noqa: PLR0913
         "dump_passes": dump_passes,
         "codegen_only": codegen_only,
         "analyze_auto_scopes_for_deps": analyze_auto_scopes_for_deps,
+        "memory_planner": memory_planner,
         "dfx": _DfxOpts(
             enable_l2_swimlane=enable_l2_swimlane,
             enable_dump_args=enable_dump_args,
@@ -1053,7 +1091,7 @@ def start_pipeline(  # noqa: PLR0913
         _compile_pools.append(compile_pool)
         group_futs: list[Future] = []
         for tc in group:
-            key = _cache_key(tc, _resolve_platform(session_platform, tc))
+            key = _cache_key(tc, _resolve_platform(session_platform, tc), memory_planner)
             cfut = compile_pool.submit(
                 _fused_compile_task,
                 tc,
@@ -1061,6 +1099,7 @@ def start_pipeline(  # noqa: PLR0913
                 session_platform,
                 dump_passes,
                 analyze_auto_scopes_for_deps,
+                memory_planner,
             )
             _compile_futures[key] = cfut
             group_futs.append(cfut)
@@ -1199,7 +1238,7 @@ class TestRunner:
             RunResult with pass/fail status and details.
         """
         resolved_platform = _resolve_platform(self.config.platform, test_case)
-        cache_k = _cache_key(test_case, resolved_platform)
+        cache_k = _cache_key(test_case, resolved_platform, self.config.memory_planner)
         cfut = _compile_futures.get(cache_k)
         if cfut is not None:
             try:
@@ -1325,7 +1364,7 @@ class TestRunner:
                 backend_type=backend_type,
                 dump_passes=self.config.dump_passes,
                 analyze_auto_scopes_for_deps=self.config.analyze_auto_scopes_for_deps,
-                memory_planner=test_case.get_memory_planner(),
+                memory_planner=_resolve_case_memory_planner(test_case, self.config.memory_planner),
                 enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
             )
 

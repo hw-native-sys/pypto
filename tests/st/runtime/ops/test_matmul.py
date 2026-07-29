@@ -31,12 +31,17 @@ from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig
 
 
-def _planner_tag(planner: MemoryPlanner | None) -> str:
-    return "ptoas" if planner == MemoryPlanner.PTOAS else "pypto"
+def _planner_tag(planner: MemoryPlanner) -> str:
+    return {
+        MemoryPlanner.PYPTO: "pypto",
+        MemoryPlanner.DSA_RP: "dsa_rp",
+        MemoryPlanner.PTOAS: "ptoas",
+    }[planner]
 
 
 _AUTOL0_PLANNERS = [
     pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+    pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
     pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
 ]
 
@@ -341,7 +346,7 @@ class TestMatmulAutoL0(PTOTestCase):
     Unlike ``TestMatmul`` (which moves to Left/Right explicitly and gives the
     pass nothing to do), this case calls ``pl.matmul`` on L1 tiles, mirroring
     the pattern used in models such as qwen3_decode. The parametrized shapes
-    are chooser-pinned to a K-only split under both memory planners.
+    are chooser-pinned to a K-only split under every memory planner.
     """
 
     __test__ = False
@@ -1523,7 +1528,7 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
     @pytest.mark.parametrize("m,k,n,l0_k", _AUTOL0_K_SPLIT_SHAPES)
     def test_matmul_autol0(self, test_runner, platform, planner, m, k, n, l0_k):
-        """910B FP32 operands — genuine K-only AutoTile split under both planners."""
+        """910B FP32 operands — genuine K-only AutoTile split under every planner."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=4, bytes_b=4)
         assert (choice.m, choice.n, choice.k) == (m, n, l0_k), (
             f"expected K-only tile {(m, n, l0_k)} under {planner}, got {(choice.m, choice.n, choice.k)}"
@@ -1586,6 +1591,7 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 256, 128, 544, (256, 128, 128), id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, 256, 128, 544, (256, 128, 128), id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, 384, 256, 128, (128, 64, 256), id="ptoas"),
         ],
     )
@@ -1632,6 +1638,7 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 192, 64, 512, (64, 512, 64), id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, 192, 64, 512, (64, 512, 64), id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, 64, 80, 288, (32, 256, 80), id="ptoas"),
         ],
     )
@@ -1688,7 +1695,7 @@ class TestMatmulOperations:
     def test_matmul_outer_pipelined_bf16(self, test_runner, platform, planner):
         """qwen3 kv_proj-shaped pattern: outer pl.pipeline(stage=2) wrapping
         if/else matmul/matmul_acc with AutoTileMatmulL0 K-tiling inside. This was
-        previously skipped for a device hang; run it under both planners to guard
+        previously skipped for a device hang; run it under every planner to guard
         the loop-carried accumulator and nested-pipeline fixes."""
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         case = TestMatmulOuterPipelinedBF16(

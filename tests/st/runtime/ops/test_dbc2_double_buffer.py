@@ -10,19 +10,21 @@
 """On-device validation of AutoTileMatmulL0's dbC=2 (double-buffered L0C) emit.
 
 dbC=2 keeps two co-live L0C accumulators so tile i's FIXPIPE drain overlaps tile
-i+1's MAD.  It is opt-in and reachable under **both** memory planners:
+i+1's MAD.  It is opt-in and reachable under all three memory planners:
   - ``memory_planner=MemoryPlanner.PTOAS`` (always on): PTOAS skips MemoryReuse, so
     InitMemRef keeps the two buffers distinct and ptoas places them.
   - ``memory_planner=MemoryPlanner.PYPTO`` + ``enable_pypto_l0c_double_buffer=True``
     (experimental opt-in): MemoryReuse runs, but its capacity gate (#1475) keeps the
     two co-live accumulators in distinct buffers via their flat depth-2
     ``pipeline_membership``, then AllocateMemoryAddr places them.
+  - ``memory_planner=MemoryPlanner.DSA_RP`` with the same opt-in: DSA-RP skips
+    legacy MemoryReuse and assigns the two co-live accumulators itself.
 Under the default PyPTO planner (flag off) these shapes get one accumulator and
 would not exercise the feature.
 
 Coverage:
   - direct-store (Acc->GM) sweep over chooser-pinned 4 / 6 / 8 / 16-tile grids,
-    under BOTH planners —
+    under all three planners —
     the WAR reuse boundary (tile i+2's matmul into a buffer must wait for tile i's
     drain out of it) is enforced by ptoas sync (PTOAS) or PyPTO codegen sync (PyPTO),
     so a value check on a >=4-tile grid is the primary correctness gate for each
@@ -108,7 +110,7 @@ class _DbcDirectStore(PTOTestCase):
             config,
             platform=platform,
             memory_planner=planner,
-            enable_pypto_l0c_double_buffer=planner == MemoryPlanner.PYPTO,
+            enable_pypto_l0c_double_buffer=planner != MemoryPlanner.PTOAS,
         )
         self.M, self.K, self.N = m, 64, n
         self._planner = planner
@@ -119,7 +121,11 @@ class _DbcDirectStore(PTOTestCase):
             self.config.atol = 1e-3
 
     def get_name(self) -> str:
-        tag = "pypto" if self._planner == MemoryPlanner.PYPTO else "ptoas"
+        tag = {
+            MemoryPlanner.PYPTO: "pypto",
+            MemoryPlanner.DSA_RP: "dsa_rp",
+            MemoryPlanner.PTOAS: "ptoas",
+        }[self._planner]
         return f"dbc2_ddr_{tag}_{self.M}x{self.K}x{self.N}"
 
     def define_tensors(self) -> list[TensorSpec]:
@@ -186,7 +192,7 @@ class _DbcMatScratch(PTOTestCase):
             config,
             platform=platform,
             memory_planner=planner,
-            enable_pypto_l0c_double_buffer=planner == MemoryPlanner.PYPTO,
+            enable_pypto_l0c_double_buffer=planner != MemoryPlanner.PTOAS,
         )
         self.M, self.K, self.N, self.P = 256, 64, 256, 64
         self._planner = planner
@@ -196,7 +202,11 @@ class _DbcMatScratch(PTOTestCase):
             self.config.atol = 2e-2
 
     def get_name(self) -> str:
-        tag = "pypto" if self._planner == MemoryPlanner.PYPTO else "ptoas"
+        tag = {
+            MemoryPlanner.PYPTO: "pypto",
+            MemoryPlanner.DSA_RP: "dsa_rp",
+            MemoryPlanner.PTOAS: "ptoas",
+        }[self._planner]
         return f"dbc2_mat_scratch_{tag}_{self.M}x{self.K}x{self.N}"
 
     def define_tensors(self) -> list[TensorSpec]:
@@ -261,7 +271,7 @@ class _DbcMatScratch(PTOTestCase):
 
 
 class TestDbc2DoubleBuffer:
-    """dbC=2 L0C double-buffer under the PyPTO and PTOAS memory planners."""
+    """dbC=2 L0C double-buffer under PYPTO, DSA-RP, and PTOAS."""
 
     # Exact calibrated chooser contracts: (M, N, tile_m, tile_n, tile_count).
     # The 144x144 case is the real odd 3x2 grid. The sweep gives the device agent
@@ -272,6 +282,7 @@ class TestDbc2DoubleBuffer:
         "planner",
         [
             pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
         ],
     )
@@ -311,6 +322,7 @@ class TestDbc2DoubleBuffer:
         "planner",
         [
             pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
         ],
     )
@@ -330,6 +342,7 @@ class TestDbc2DoubleBuffer:
         "planner",
         [
             pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
             pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
         ],
     )

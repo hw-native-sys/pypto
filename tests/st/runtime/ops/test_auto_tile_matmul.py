@@ -46,9 +46,13 @@ from examples.kernels.auto_tile_matmul import (
 from pypto.pypto_core.passes import MemoryPlanner
 
 # AutoTileMatmulL0 predates memory_planner=PTOAS and was initially validated under
-# the PyPTO planner. Run every basic case below under both planners to catch
+# the PyPTO planner. Run every basic case below under all planners to catch
 # planner-specific regressions in oversized tiles, GM/L1 drains, and split-K.
-_PLANNERS = [pytest.param(None, id="pypto"), pytest.param(MemoryPlanner.PTOAS, id="ptoas")]
+_PLANNERS = [
+    pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+    pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
+    pytest.param(MemoryPlanner.PTOAS, id="ptoas"),
+]
 
 _ACC_M = 16
 _ACC_N = 1152
@@ -130,8 +134,8 @@ def matmul_acc_n_boundary_retiles_k(
 
 
 def _cfg(test_config, planner):
-    """Base session config, overridden to a specific memory planner (None = PyPTO default)."""
-    return test_config if planner is None else dataclasses.replace(test_config, memory_planner=planner)
+    """Return the session config with the requested planner selected explicitly."""
+    return dataclasses.replace(test_config, memory_planner=planner)
 
 
 @pytest.mark.platforms("a2a3", "a2a3sim")
@@ -142,7 +146,7 @@ class TestAutoTileMatmulL0:
     @pytest.mark.parametrize("kernel, K", [(ddr_split_k, 128), (ddr_full_k, 32)])
     def test_ddr_direct_store(self, test_config, kernel, K, planner):
         """``a @ b`` -> ``[256, 256]`` stored to DDR (direct-store); split-K (K=128) and
-        full-K (K=32).  Run under both planners: the oversized grid reuses the L0C
+        full-K (K=32).  Run under all three planners: the oversized grid reuses the L0C
         accumulator across output tiles, but the Acc->GM ``tile.store`` drain WAR is synced
         correctly by ptoas, so oversized direct-store works under PTOAS too."""
         kernel._cache.clear()
@@ -218,11 +222,11 @@ class TestAutoTileMatmulL0:
         """``(a @ b) @ e`` with a bf16 ``[256, 256]`` intermediate kept on-chip in an
         L1/Mat scratch (Acc->Mat ``pto.tinsert``); split-K K=192 and full-K K=32.
 
-        Run under both planners.  The PTOAS variants provide regression coverage
+        Run under all three planners.  The PTOAS variants provide regression coverage
         for #1995: the chained consumer's K-reduction accumulator if-phi must reuse
         the dominating accumulator handle so all partial sums land in one L0C buffer.
 
-        K=192 is the common cross-planner split point: both planners choose an
+        K=192 is the common cross-planner split point: all planners choose an
         output-stationary producer with k=64, so its L0 buffers pack against the
         consumer's. K=128 is planner-dependent (PyPTO splits while PTOAS can keep full K)
         and can select a monolithic A/B-stationary buffer that the consumer's two
@@ -258,7 +262,7 @@ class TestAutoTileMatmulL0:
         ``pto.tinsert`` (cube downcast) rather than a Vector ``pto.tcvt``. full-K (K=64,
         no K-loop) and split-K (K=512, K-loop). Same bf16 FIXPIPE golden as Mat-scratch.
 
-        Run under both planners: because the intermediate fits L0c there is exactly ONE
+        Run under all three planners: because the intermediate fits L0c there is exactly ONE
         Acc->Mat assemble (no cross-tile L0C reuse and no drain/MAD WAR fence).
 
         On-device proof that the fold is numerically correct (the FIXPIPE bf16 rounding

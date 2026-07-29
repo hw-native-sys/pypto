@@ -53,6 +53,7 @@ from harness.core.test_runner import (  # noqa: E402
 )
 from pypto import LogLevel  # noqa: E402
 from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level  # noqa: E402
+from pypto.pypto_core.passes import MemoryPlanner  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
@@ -112,6 +113,17 @@ def pytest_addoption(parser):
         default="Default",
         choices=["Default"],
         help="Optimization strategy for PyPTO pass pipeline (default: Default)",
+    )
+    parser.addoption(
+        "--memory-planner",
+        action="store",
+        default="default",
+        choices=["default", "pypto", "dsa-rp", "ptoas"],
+        help=(
+            "Session-wide memory planner for test cases that do not select one explicitly: "
+            "default (defer to PyPTO), pypto, dsa-rp, or ptoas. An explicit planner on a "
+            "PTOTestCase takes precedence (default: default)."
+        ),
     )
     parser.addoption(
         "--kernels-dir",
@@ -327,6 +339,16 @@ def _parse_platform_filter(raw: str) -> tuple[str, ...]:
     return valid
 
 
+def _parse_memory_planner(raw: str) -> MemoryPlanner | None:
+    """Translate the system-test CLI spelling into the public planner enum."""
+    return {
+        "default": None,
+        "pypto": MemoryPlanner.PYPTO,
+        "dsa-rp": MemoryPlanner.DSA_RP,
+        "ptoas": MemoryPlanner.PTOAS,
+    }[raw]
+
+
 @pytest.fixture(autouse=True)
 def _report_device(request) -> None:
     """Report which device executed each test at the end of the test body.
@@ -436,6 +458,7 @@ def test_config(request) -> RunConfig:
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
         enable_scope_stats=request.config.getoption("--enable-scope-stats"),
         analyze_auto_scopes_for_deps=request.config.getoption("--analyze-auto-scopes-for-deps"),
+        memory_planner=_parse_memory_planner(request.config.getoption("--memory-planner")),
     )
 
 
@@ -648,7 +671,11 @@ def _eval_arg_node(
     raise _Unresolvable(ast.dump(node))
 
 
-def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]) -> None:
+def _collect_test_case_from_item(
+    item: pytest.Item,
+    seen: dict[str, PTOTestCase],
+    session_memory_planner: MemoryPlanner | None,
+) -> None:
     """Inspect *item* and add any discovered PTOTestCase instances to *seen*.
 
     Parses the test body and resolves every ``SomeCase(...)`` constructor call
@@ -720,7 +747,7 @@ def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]
         except Exception:
             # _Unresolvable arg, or a constructor mismatch — leave for inline.
             continue
-        seen.setdefault(_cache_key(instance), instance)
+        seen.setdefault(_cache_key(instance, session_memory_planner=session_memory_planner), instance)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -742,10 +769,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         return
 
     # ── discover PTOTestCase instances ───────────────────────────────────────
-    seen: dict[str, PTOTestCase] = {}  # cache_key → instance (deduped)
+    session_memory_planner = _parse_memory_planner(session.config.getoption("--memory-planner"))
+    seen: dict[str, PTOTestCase] = {}  # effective cache_key → instance (deduped)
 
     for item in session.items:
-        _collect_test_case_from_item(item, seen)
+        _collect_test_case_from_item(item, seen, session_memory_planner)
 
     # Read the task-submit / pipeline options *before* the empty-discovery guard:
     # a suite that only creates PTOTestCases dynamically leaves ``seen`` empty yet
@@ -883,6 +911,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             task_queue_timeout=task_queue_timeout,
             task_submit_device=task_submit_device,
             execute_batch_size=execute_batch_size,
+            memory_planner=session_memory_planner,
         )
     finally:
         _clear_thread_log_level()

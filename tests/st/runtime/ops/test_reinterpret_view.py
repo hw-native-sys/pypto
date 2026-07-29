@@ -25,11 +25,15 @@ from pypto.pypto_core.passes import MemoryPlanner
 
 ROWS = 8
 COLS = 16
-_PLANNERS = [MemoryPlanner.PYPTO, MemoryPlanner.PTOAS]
+_PLANNERS = [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS]
 
 
 def _planner_tag(planner: MemoryPlanner) -> str:
-    return "ptoas" if planner == MemoryPlanner.PTOAS else "pypto"
+    return {
+        MemoryPlanner.PYPTO: "pypto",
+        MemoryPlanner.DSA_RP: "dsa_rp",
+        MemoryPlanner.PTOAS: "ptoas",
+    }[planner]
 
 
 def _make_source() -> torch.Tensor:

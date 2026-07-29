@@ -27,7 +27,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-from pypto.runtime.runner import _DfxOpts
+from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime.runner import RunConfig, _DfxOpts
 
 _ST_DIR = Path(__file__).resolve().parents[2] / "st"
 if str(_ST_DIR) not in sys.path:
@@ -53,6 +54,106 @@ def _reset_pipeline_ctx():
 
 def _proc(returncode, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _planner_case():
+    return SimpleNamespace(
+        get_name=lambda: "planner_case",
+        get_program=lambda: object(),
+        get_strategy=lambda: None,
+        get_backend_type=lambda: test_runner.BackendType.Ascend910B,
+        get_memory_planner=lambda: None,
+        get_enable_pypto_l0c_double_buffer=lambda: None,
+        config=RunConfig(memory_planner=None),
+    )
+
+
+def _write_minimal_compile_output(_program, output_dir, **_kwargs):
+    (output_dir / "kernels").mkdir(parents=True)
+    (output_dir / "kernels" / "kernel.cpp").touch()
+    (output_dir / "orchestration").mkdir()
+    (output_dir / "orchestration" / "orch.cpp").touch()
+
+
+# ---------------------------------------------------------------------------
+# System-test memory-planner precedence
+# ---------------------------------------------------------------------------
+
+
+def test_case_memory_planner_is_authoritative():
+    case = SimpleNamespace(
+        get_memory_planner=lambda: MemoryPlanner.PTOAS,
+        config=RunConfig(memory_planner=MemoryPlanner.PYPTO),
+    )
+    assert test_runner._resolve_case_memory_planner(case, MemoryPlanner.DSA_RP) == MemoryPlanner.PTOAS
+
+
+def test_case_run_config_precedes_session_memory_planner():
+    case = SimpleNamespace(
+        get_memory_planner=lambda: None,
+        config=RunConfig(memory_planner=MemoryPlanner.PYPTO),
+    )
+    assert test_runner._resolve_case_memory_planner(case, MemoryPlanner.DSA_RP) == MemoryPlanner.PYPTO
+
+
+def test_session_memory_planner_is_fallback():
+    case = SimpleNamespace(
+        get_memory_planner=lambda: None,
+        config=RunConfig(memory_planner=None),
+    )
+    assert test_runner._resolve_case_memory_planner(case, MemoryPlanner.DSA_RP) == MemoryPlanner.DSA_RP
+
+
+def test_system_test_cache_key_separates_memory_planners():
+    case = SimpleNamespace(
+        get_name=lambda: "case",
+        get_platform=lambda: "a2a3",
+        get_backend_type=lambda: None,
+        get_memory_planner=lambda: None,
+        config=RunConfig(memory_planner=None),
+    )
+    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.PYPTO).endswith("@pypto")
+    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.DSA_RP).endswith("@dsa_rp")
+
+
+def test_precompile_forwards_session_memory_planner(tmp_path):
+    case = _planner_case()
+    with (
+        patch.object(
+            test_runner,
+            "compile_program",
+            side_effect=_write_minimal_compile_output,
+        ) as compile_program,
+        patch.object(test_runner, "_write_golden_for_test_case"),
+    ):
+        test_runner._compile_for_cache(
+            case,
+            tmp_path,
+            dump_passes=False,
+            analyze_auto_scopes_for_deps=False,
+            session_memory_planner=MemoryPlanner.DSA_RP,
+        )
+    assert compile_program.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
+
+
+def test_inline_compile_forwards_session_memory_planner():
+    case = _planner_case()
+    config = RunConfig(
+        platform="a2a3sim",
+        memory_planner=MemoryPlanner.DSA_RP,
+        codegen_only=True,
+    )
+    with (
+        patch.object(
+            test_runner,
+            "compile_program",
+            side_effect=_write_minimal_compile_output,
+        ) as compile_program,
+        patch.object(test_runner, "_write_golden_for_test_case"),
+    ):
+        result = test_runner.TestRunner(config)._run_inline(case, "a2a3sim")
+    assert result.passed, result.error
+    assert compile_program.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
 
 
 # ---------------------------------------------------------------------------
