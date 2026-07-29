@@ -233,7 +233,7 @@ def test_execute_batch_mixed_sdma_capability_is_order_independent(
     stub_compile_and_assemble,
     runtime_configs,
 ):
-    """Any SDMA artifact enables the shared worker, independent of manifest order."""
+    """Any same-binding SDMA artifact enables the shared worker, independent of manifest order."""
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
     manifest = _manifest(tmp_path, wd1, wd2)
     configs_by_work_dir = dict(zip((wd1, wd2), runtime_configs, strict=True))
