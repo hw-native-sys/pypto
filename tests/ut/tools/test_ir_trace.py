@@ -40,6 +40,7 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to exercise the embedded viewer behavior")
+    assert node is not None
 
     payload = report.split('<script id="trace-data" type="application/json">', 1)[1].split("</script>", 1)[0]
     viewer_script = report.rsplit("<script>", 1)[1].split("</script>", 1)[0]
