@@ -12,7 +12,7 @@
 Three handle classes back the ``pl.prefetch.*`` surface, each serving the two
 roles :class:`pld.CommCtx` does:
 
-* **Type annotation** — ``ctx: pl.PrefetchAsyncContext = pl.prefetch.make_context(ws)``
+* **Type annotation** — ``ctx: pl.PrefetchAsyncContext = pl.prefetch.make_context()``
   declares an :class:`ir.PrefetchAsyncContextType`-valued ``Var`` in printed IR.
 * **Value wrapper** — the ``pl.prefetch.*`` wrappers return these classes so
   handles flow through the DSL as typed values instead of raw ``ir.Call``

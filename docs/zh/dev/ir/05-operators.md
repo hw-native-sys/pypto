@@ -470,13 +470,14 @@ class CrossCoreExample:
 
 | DSL | 操作数 | 结果 | PTOAS op |
 | --- | ------ | ---- | -------- |
-| `pl.prefetch.make_context(ws)` | GM `INT8` 暂存 Tensor | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
+| `pl.prefetch.make_context()` | 无 | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
 | `pl.prefetch.async_prefetch(src, ctx)` | GM Tensor、context | `AsyncEventType` | `pto.tprefetch_async` |
 | `pl.prefetch.session(ctx)` | context | `AsyncSessionType` | `pto.get_prefetch_async_session` |
 | `pl.prefetch.wait(evt, session)` | event、session | `BOOL` 标量 | `pto.comm.wait_async_event` |
 
 这三个结果类型都是不透明的单例标记类型 (opaque singleton marker，无 shape、无 buffer)，
-与 `CommCtxType` 属于同一族。
+与 `CommCtxType` 属于同一族。SDMA workspace 不是程序操作数：runtime 持有它，
+codegen 会向 prefetch kernel 注入隐藏指针。
 
 ### 约束
 
@@ -484,12 +485,6 @@ class CrossCoreExample:
   所有维度都为 `1`（`[N]`、`[1, N]`、`[1, 1, N]`）。该检查与 PTOAS 的
   `TPrefetchAsyncOp::verify()` 保持一致，因此 shape 写错会在 PyPTO IR 构造阶段就报错，
   而不是拖到 PTOAS 校验阶段。
-- `workspace` 必须是 `INT8` 张量——SDMA 路径需要的是原始字节暂存区。
-- `workspace` 必须**足够容纳 SDMA context**。pto-isa 的布局为
-  `BatchWriteFlagInfo` (64B) + `kSdmaMaxChannel` (48) x `BatchWriteChannelInfo`
-  (64B) + `kSdmaSendWorkspaceBytes` (48 x 64)，约 **6.1KB 下限**。该要求位于
-  pto-isa 而非 IR 中，PyPTO 无法校验——workspace 开小了仍能通过编译，只会在真机上
-  出问题。请留足余量；ST 中使用 64KB。
 
 ### 使用示例
 
@@ -498,10 +493,10 @@ class CrossCoreExample:
 class PrefetchExample:
     @pl.function(type=pl.FunctionType.InCore)
     def main(
-        self, x: pl.Tensor[[1, 4096], pl.FP32], ws: pl.Tensor[[1024], pl.INT8],
+        self, x: pl.Tensor[[1, 4096], pl.FP32],
         out: pl.Tensor[[1, 128], pl.FP32],
     ) -> pl.Tensor[[1, 128], pl.FP32]:
-        ctx = pl.prefetch.make_context(ws)
+        ctx = pl.prefetch.make_context()
         evt = pl.prefetch.async_prefetch(x, ctx)     # 预热 L2，不阻塞
         session = pl.prefetch.session(ctx)
         # ... 此处的无关计算与预取重叠执行 ...
@@ -516,28 +511,22 @@ class PrefetchExample:
 声明了 `CoreAffinity::VECTOR`，因此在混合 kernel 中 `ExpandMixedKernel` 会把它们留在
 向量侧——既不会放到 cube 侧，也不会被复制到 cube 侧。
 
-**硬件支持**：SDMA CMO 路径仅在 A3/A5 上生效。在其他平台上 PTOAS 会把预取退化为
-功能性 no-op，因此使用这些 op 的 kernel 仍然是可移植的——PyPTO 自身不做任何平台门控。
-
-**但 workspace 非法不会退化，而是挂死。** 上述退化只覆盖*不支持的平台*，不覆盖畸形的
-workspace。设备侧的 session 初始化只拒绝空指针，因此一个仅仅清零的 buffer 会给出垃圾
-SQ 基址：doorbell 写入无效地址，`prefetch.wait` 永久自旋，kernel 最终以 AICore
-`507018`（`S1:running-stalled`）失败。
-
-因此 workspace 必须是**主机侧初始化过的 SDMA context**，绝不能是普通分配。从 runtime
-获取并以 `DeviceTensor` 绑定：
+**Runtime 所有权与支持范围**：普通的单次执行 (one-shot execution) 会读取
+生成 artifact 中的 SDMA 需求，并自动创建已启用 SDMA 的 worker。user、
+orchestration 和 runtime tensor signature 中都不会出现 workspace。显式复用
+L2 worker 时，需在构造时启用该能力：
 
 ```python
-with ChipWorker(config=RunConfig(platform="a2a3", device_id=0)) as w:
-    ws_addr = w.sdma_prefetch_workspace_addr()   # 不可用时返回 0
-    ws = DeviceTensor(ws_addr, (65536,), torch.int8)
-    compiled(a, ws, out, config=cfg)
+with ChipWorker(
+    config=RunConfig(platform="a2a3", device_id=0), enable_sdma=True
+):
+    compiled(a, out, config=cfg)
 ```
 
-`sdma_prefetch_workspace_addr()` 每进程通过 pto-isa 的 `SdmaWorkspaceManager::Init`
-初始化一次；不可用时（CANN 缺少可用的 `aclnnShmemSdmaStarsQuery`，或模拟器）返回 0。
-绑定 0 是安全的——那正是预取降级所走的 null 路径。返回的地址由 runtime 持有，不要
-free。参见 `tests/st/runtime/ops/test_prefetch_async.py`。
+当前由 runtime 提供 workspace 的执行路径仅在 onboard a2a3 上覆盖。在模拟器、
+a5 或不提供 SDMA provider 的 runtime 上，启用该能力的 worker 会在 runtime
+初始化时失败。PyPTO 不会分配后备 workspace，也不会把请求的 prefetch
+静默降级为 no-op。onboard a2a3 ST 参见 `tests/st/runtime/ops/test_prefetch_async.py`。
 
 ## 文件组织
 

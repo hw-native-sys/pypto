@@ -479,13 +479,14 @@ synchronization, so completion is explicit via an event/session pair.
 
 | DSL | Operands | Result | PTOAS op |
 | --- | -------- | ------ | -------- |
-| `pl.prefetch.make_context(ws)` | GM `INT8` workspace Tensor | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
+| `pl.prefetch.make_context()` | None | `PrefetchAsyncContextType` | `pto.make_prefetch_async_context` |
 | `pl.prefetch.async_prefetch(src, ctx)` | GM Tensor, context | `AsyncEventType` | `pto.tprefetch_async` |
 | `pl.prefetch.session(ctx)` | context | `AsyncSessionType` | `pto.get_prefetch_async_session` |
 | `pl.prefetch.wait(evt, session)` | event, session | `BOOL` scalar | `pto.comm.wait_async_event` |
 
 The three result types are opaque singleton markers (no shape, no buffer), in
-the same family as `CommCtxType`.
+the same family as `CommCtxType`. The SDMA workspace is not a program operand:
+the runtime owns it, and codegen injects a hidden pointer into prefetch kernels.
 
 ### Constraints
 
@@ -493,13 +494,6 @@ the same family as `CommCtxType`.
   whose dimensions are all `1` except the last (`[N]`, `[1, N]`, `[1, 1, N]`).
   This mirrors the PTOAS `TPrefetchAsyncOp::verify()` check, so a shape mistake
   fails at PyPTO IR construction rather than at PTOAS verification.
-- `workspace` must be an `INT8` tensor — the SDMA path needs raw byte scratch.
-- `workspace` must be **large enough for the SDMA context**. pto-isa lays it out as
-  `BatchWriteFlagInfo` (64B) + `kSdmaMaxChannel` (48) x `BatchWriteChannelInfo`
-  (64B) + `kSdmaSendWorkspaceBytes` (48 x 64) — about **6.1KB minimum**. PyPTO
-  cannot check this (the requirement lives in pto-isa, not in the IR), so an
-  undersized workspace passes compilation and only misbehaves on device. Round
-  up generously; the ST uses 64KB.
 
 ### Example Usage
 
@@ -508,10 +502,10 @@ the same family as `CommCtxType`.
 class PrefetchExample:
     @pl.function(type=pl.FunctionType.InCore)
     def main(
-        self, x: pl.Tensor[[1, 4096], pl.FP32], ws: pl.Tensor[[1024], pl.INT8],
+        self, x: pl.Tensor[[1, 4096], pl.FP32],
         out: pl.Tensor[[1, 128], pl.FP32],
     ) -> pl.Tensor[[1, 128], pl.FP32]:
-        ctx = pl.prefetch.make_context(ws)
+        ctx = pl.prefetch.make_context()
         evt = pl.prefetch.async_prefetch(x, ctx)     # warms L2, does not block
         session = pl.prefetch.session(ctx)
         # ... unrelated compute overlaps the prefetch ...
@@ -527,32 +521,23 @@ the vector core. The ops declare `CoreAffinity::VECTOR`, so in a mixed kernel
 `ExpandMixedKernel` keeps them on the vector lane — they are neither placed on
 nor duplicated onto the cube lane.
 
-**Hardware support**: the SDMA CMO path is only effective on A3/A5. On other
-targets PTOAS degrades the prefetch to a functional no-op, so kernels using
-these ops stay portable — PyPTO does no target gating of its own.
-
-**An invalid workspace does not degrade — it hangs.** That fallback covers
-unsupported *targets*, not a malformed workspace. The device-side session init
-only rejects a null pointer, so a buffer that is merely zero-filled yields
-garbage SQ base addresses: the doorbell rings into nowhere, `prefetch.wait`
-spins forever, and the kernel dies with AICore `507018` (`S1:running-stalled`).
-
-So the workspace must be a **host-initialized SDMA context**, never a plain
-allocation. Obtain it from the runtime and bind it as a `DeviceTensor`:
+**Runtime ownership and support**: normal one-shot execution reads the generated
+artifact's SDMA requirement and automatically constructs an enabled worker. No
+workspace appears in the user, orchestration, or runtime tensor signature. For
+an explicitly reused L2 worker, opt in when constructing it:
 
 ```python
-with ChipWorker(config=RunConfig(platform="a2a3", device_id=0)) as w:
-    ws_addr = w.sdma_prefetch_workspace_addr()   # 0 when unavailable
-    ws = DeviceTensor(ws_addr, (65536,), torch.int8)
-    compiled(a, ws, out, config=cfg)
+with ChipWorker(
+    config=RunConfig(platform="a2a3", device_id=0), enable_sdma=True
+):
+    compiled(a, out, config=cfg)
 ```
 
-`sdma_prefetch_workspace_addr()` provisions the context once per process via
-pto-isa's `SdmaWorkspaceManager::Init` and returns 0 when it is unavailable (a
-CANN without a working `aclnnShmemSdmaStarsQuery`, or the simulator). Binding 0
-is safe — that is exactly the null path the prefetch degrades on. Do not free
-the returned address; the runtime owns it. See
-`tests/st/runtime/ops/test_prefetch_async.py`.
+The current runtime-provisioned execution path is covered only on onboard a2a3.
+An enabled worker on simulator, a5, or another runtime without an SDMA provider
+fails during runtime initialization. PyPTO does not allocate a fallback
+workspace or silently turn a requested prefetch into a no-op. See
+`tests/st/runtime/ops/test_prefetch_async.py` for the a2a3 system test.
 
 ## File Organization
 

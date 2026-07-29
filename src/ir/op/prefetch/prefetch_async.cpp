@@ -29,9 +29,11 @@
  *
  * Codegen lowers the family to PTOAS ``pto.make_prefetch_async_context`` /
  * ``pto.tprefetch_async`` / ``pto.get_prefetch_async_session`` /
- * ``pto.comm.wait_async_event``. The underlying SDMA CMO path is only effective
- * on A3/A5; on other targets PTOAS degrades the prefetch to a functional no-op,
- * so no PyPTO-side target gating is needed.
+ * ``pto.comm.wait_async_event``. Codegen supplies the context through a hidden
+ * pointer to a runtime-owned SDMA workspace. The user-visible IR has no
+ * workspace operand. An SDMA-enabled worker must provision the resource;
+ * unsupported runtime providers fail during initialization instead of using a
+ * fallback workspace or silently turning the request into a no-op.
  */
 
 #include <any>
@@ -118,8 +120,9 @@ void CheckFlatContiguous1DSource(const std::string& op_name, const ExprPtr& src)
 REGISTER_OP("prefetch.make_context")
     .set_description(
         "Materialize an asynchronous-prefetch context (PrefetchAsyncContextType). The runtime "
-        "injects the workspace backing the SDMA path used by "
-        "prefetch.async_prefetch; the resulting handle also carries the async session "
+        "owns and injects the workspace backing the SDMA path used by "
+        "prefetch.async_prefetch through a hidden codegen parameter; this operation has no "
+        "user operand. The resulting handle also carries the async session "
         "projected by prefetch.session.")
     .set_op_category("PrefetchOp")
     // AIV-only: TPREFETCH_ASYNC drives its SDMA tmpBuf from a Vec(UB) scratch

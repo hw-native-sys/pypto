@@ -51,7 +51,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | **DMA 数据搬运（10）** |  |  |  |  |  |  |  |  |
 | pto.tload | TLOAD | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tprefetch | TPREFETCH | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ✅ | — | 由 `pl.prefetch.*`（`make_context` / `async_prefetch` / `session` / `wait`）发射；非 tile/tensor 前端。仅 A3/A5 生效，其他平台 PTOAS 退化为 no-op |
+| pto.tprefetch_async | TPREFETCH_ASYNC | tile | ✅ | ❌ | ❌ | ✅ | — | 由 `pl.prefetch.*`（`make_context` / `async_prefetch` / `session` / `wait`）发射；非 tile/tensor 前端。PTOAS op 可用性不等于 runtime 提供 SDMA workspace；当前由 artifact 自动启用，仅 onboard a2a3 ST 覆盖，无 provider 的平台初始化失败而非 no-op |
 | pto.make_prefetch_async_context | pto::PrefetchAsyncContext | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.get_prefetch_async_session | .session | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.tstore | TSTORE | tile | ✅ | ✅ | ❌ | ✅ | — |  |

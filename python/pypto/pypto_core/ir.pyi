@@ -1049,9 +1049,10 @@ class CommCtxType(Type):
 class PrefetchAsyncContextType(Type):
     """Singleton marker type for ``prefetch.make_context`` outputs.
 
-    Opaque handle to an asynchronous GM->L2 prefetch context, built from a GM
-    ``INT8`` scratch workspace. Consumed by ``prefetch.async_prefetch`` and
-    ``prefetch.session``; lowers to PTOAS ``!pto.prefetch_async_context``.
+    Opaque handle to an asynchronous GM->L2 prefetch context backed by the
+    runtime-injected SDMA workspace. Consumed by ``prefetch.async_prefetch``
+    and ``prefetch.session``; lowers to PTOAS
+    ``!pto.prefetch_async_context``.
     """
 
     def __init__(self) -> None: ...

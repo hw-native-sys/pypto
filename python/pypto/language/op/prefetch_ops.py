@@ -22,8 +22,11 @@ Typical usage::
     ...                                            # unrelated compute overlaps
     pl.prefetch.wait(evt, session)                 # x is now resident in L2
 
-The runtime injects the SDMA scratch workspace. Executing kernels that use these
-operations requires an SDMA-capable runtime provider.
+The runtime owns and injects the SDMA scratch workspace. One-shot execution
+enables SDMA automatically from generated artifact metadata; an explicitly
+reused worker must be created with ``ChipWorker(enable_sdma=True)``. The current
+runtime-provisioned path is covered on onboard a2a3. A runtime without an SDMA
+provider fails during worker initialization; there is no fallback or no-op path.
 """
 
 from typing import Any
@@ -48,6 +51,9 @@ def _unwrap(value: Any) -> Any:
 
 def make_context() -> PrefetchAsyncContext:
     """Build an asynchronous-prefetch context with a runtime-injected workspace.
+
+    The caller supplies no workspace. Codegen and the runtime bind the returned
+    context to a hidden runtime-owned SDMA allocation.
 
     Returns:
         A :class:`PrefetchAsyncContext` handle to pass to :func:`async_prefetch`

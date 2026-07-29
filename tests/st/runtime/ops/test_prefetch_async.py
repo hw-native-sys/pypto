@@ -16,31 +16,20 @@ prefetch is a pure cache hint that changes no tensor value, so the property
 under test is **non-interference** — plus the fact that the event/session wait
 actually completes rather than hanging.
 
-The workspace follows the same contract as that ST::
-
-    SdmaWorkspaceManager mgr; bool ok = mgr.Init();
-    uint8_t *ws = ok ? (uint8_t *)mgr.GetWorkspaceAddr() : nullptr;
-
-i.e. a *host-initialized* SDMA context, obtained here via
-:meth:`Worker.sdma_prefetch_workspace_addr`. It must never be a plain
-allocation: the device-side session init only rejects a null workspace, so an
-uninitialized non-null buffer yields garbage SQ base addresses and hangs the
-kernel (AICore 507018).
+The generated artifact records that it requires SDMA. Normal compiled-program
+execution uses that metadata to create an SDMA-enabled worker; the runtime owns
+and injects the workspace consumed by the generated kernel wrapper. Runtime
+provisioning is currently covered only on onboard a2a3, so this test deliberately
+excludes simulator and a5 targets instead of treating either as a no-op path.
 """
 
 import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.runtime import ChipWorker, DeviceTensor, RunConfig
 
 ROWS = 1
 COLS = 128
-
-# pto-isa allocates the SDMA context itself (`kSdmaWorkspaceBytes` = 16KB); this
-# shape only has to cover it so the IR-level byte extent is not smaller than
-# what the device side addresses.
-WORKSPACE_BYTES = 65536
 
 
 @pl.program
@@ -51,10 +40,9 @@ class PrefetchAsyncProgram:
     def kernel(
         self,
         a: pl.Tensor[[ROWS, COLS], pl.FP32],
-        ws: pl.Tensor[[WORKSPACE_BYTES], pl.INT8],
         out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
     ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
-        ctx = pl.prefetch.make_context(ws)
+        ctx = pl.prefetch.make_context()
         evt = pl.prefetch.async_prefetch(a, ctx)
         session = pl.prefetch.session(ctx)
         # Blocks until the prefetch lands, so `a` is resident in L2 below.
@@ -68,13 +56,13 @@ class PrefetchAsyncProgram:
     def orchestrator(
         self,
         a: pl.Tensor[[ROWS, COLS], pl.FP32],
-        ws: pl.Tensor[[WORKSPACE_BYTES], pl.INT8],
         out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
     ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
-        out = self.kernel(a, ws, out)
+        out = self.kernel(a, out)
         return out
 
 
+@pytest.mark.platforms("a2a3")
 class TestPrefetchAsync:
     """End-to-end async GM->L2 prefetch on device."""
 
@@ -85,20 +73,7 @@ class TestPrefetchAsync:
         a = torch.randn(ROWS, COLS, dtype=torch.float32)
         out = torch.zeros(ROWS, COLS, dtype=torch.float32)
 
-        worker_cfg = RunConfig(platform=test_config.platform, device_id=test_config.device_id)
-        with ChipWorker(config=worker_cfg) as w:
-            ws_addr = w.sdma_prefetch_workspace_addr()
-            if ws_addr == 0:
-                pytest.skip(
-                    "SDMA prefetch workspace unavailable on this platform "
-                    "(needs a CANN exposing aclnnShmemSdmaStarsQuery)"
-                )
-            # Runtime-owned, host-initialized SDMA context. Bound as a
-            # DeviceTensor so the runtime passes the pointer straight through
-            # (child_memory: no H2D, no copy-back). Deliberately NOT freed here
-            # and NOT a plain alloc_tensor -- see the module docstring.
-            ws = DeviceTensor(ws_addr, (WORKSPACE_BYTES,), torch.int8)
-            compiled(a, ws, out, config=test_config)
+        compiled(a, out, config=test_config)
 
         # The prefetch must not perturb the data -- a plain copy is the golden.
         assert torch.equal(out, a), f"max|err| = {(out - a).abs().max().item()}"

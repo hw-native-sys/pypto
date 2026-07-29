@@ -19,6 +19,9 @@ region while unrelated compute proceeds, and change no tensor values.
 
 Unlike most PTO intrinsics the underlying ``TPREFETCH_ASYNC`` carries no implicit
 wait-event synchronization, so completion is explicit via the event/session pair.
+The runtime owns the SDMA workspace and injects it through a hidden codegen
+parameter; it is never an IR operand. A runtime without an SDMA provider fails
+during worker initialization rather than supplying a fallback workspace.
 """
 
 from pypto.pypto_core import ir as _ir_core
@@ -29,6 +32,9 @@ from ..utils import _get_span_or_capture
 
 def make_context(span: Span | None = None) -> Call:
     """Build an asynchronous-prefetch context with a runtime-injected workspace.
+
+    The operation has no user operands. Codegen binds the context to the hidden
+    workspace pointer provisioned by an SDMA-enabled runtime worker.
 
     Args:
         span: Optional source span for debugging (auto-captured if not provided)
