@@ -44,6 +44,8 @@
  * three ops which take a parenthesised operand list.
  */
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <utility>

@@ -17,6 +17,8 @@ from pypto import backend, codegen, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
+_ROWS = pl.dynamic("ROWS")
+
 
 def _generate_mlir(program_cls) -> str:
     """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -48,6 +50,34 @@ class PrefetchProgram:
         return pl.store(tile, [0, 0], out)
 
 
+@pl.program
+class ZeroParamPrefetchProgram:
+    """Create a prefetch context in a kernel with no user parameters."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self):
+        pl.prefetch.make_context()
+
+
+@pl.program
+class OrderedSyntheticArgsProgram:
+    """Combine dynamic shape, SDMA workspace, and SPMD synthetic arguments."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def ordered(
+        self,
+        prefetch_src: pl.Tensor[[1, 4096], pl.FP32],
+        x: pl.Tensor[[_ROWS, 128], pl.FP32],
+        out: pl.Tensor[[_ROWS, 128], pl.FP32],
+    ) -> pl.Tensor[[_ROWS, 128], pl.FP32]:
+        ctx = pl.prefetch.make_context()
+        evt = pl.prefetch.async_prefetch(prefetch_src, ctx)
+        session = pl.prefetch.session(ctx)
+        pl.prefetch.wait(evt, session)
+        row = pl.tile.get_block_idx()
+        return pl.store(pl.load(x, [row, 0], [1, 128]), [row, 0], out)
+
+
 class TestPrefetchPTOCodegen:
     """Each prefetch op lowers to its PTOAS counterpart with the right operand types."""
 
@@ -59,6 +89,41 @@ class TestPrefetchPTOCodegen:
             r"pto\.make_prefetch_async_context\(%\w+ : !pto\.ptr<i8>\)",
             mlir,
         ), mlir
+
+    def test_hidden_sdma_pointer_is_first_parameter_without_user_args(self):
+        """A hidden-only signature starts directly with ``%arg0``, not a comma."""
+        mlir = _generate_mlir(ZeroParamPrefetchProgram)
+        assert "func.func @main(%arg0: !pto.ptr<i8>)" in mlir, mlir
+
+    def test_synthetic_argument_order_matches_wrapper(self):
+        """Dynamic dims precede SDMA, which precedes SPMD in both call layers."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            OrderedSyntheticArgsProgram
+        )
+        func = optimized.get_function("ordered")
+        assert func is not None
+
+        mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
+        signature_line = next(line.strip() for line in mlir.splitlines() if "func.func @ordered(" in line)
+        assert re.search(
+            r"func\.func @ordered\("
+            r"%arg0: !pto\.ptr<f32>, %arg1: !pto\.ptr<f32>, %arg2: !pto\.ptr<f32>, "
+            r"%arg3: index, %arg4: !pto\.ptr<i8>, "
+            r"%__pypto_spmd_block_idx: i32, %__pypto_spmd_block_num: i32\)",
+            signature_line,
+        ), signature_line
+
+        wrapper = pto_backend._generate_kernel_wrapper(
+            func, 'extern "C" __global__ AICORE void test_func() {}\n'
+        )
+        call_line = next(line.strip() for line in wrapper.splitlines() if line.strip().startswith("ordered("))
+        assert re.search(
+            r"ordered\(prefetch_src\w*, x\w*, out\w*, ROWS, "
+            r"__pypto_sdma_workspace, __pypto_spmd_block_idx, __pypto_spmd_block_num\);",
+            call_line,
+        ), call_line
 
     def test_async_prefetch_lowers_with_partition_view(self):
         """``tprefetch_async`` takes a whole-tensor partition view plus the context."""
