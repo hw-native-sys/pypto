@@ -1,0 +1,161 @@
+# Installation
+
+Install PyPTO from source, verify the install, and find your way around the examples.
+
+## Concept
+
+PyPTO is a Python package with a compiled C++ core. Installing it builds that core, so
+an install is a build: you need a C++17 toolchain and CMake in addition to Python.
+[scikit-build-core](https://scikit-build-core.readthedocs.io/) drives CMake from `pip`,
+so a plain `pip install` does the whole thing.
+
+What you get from an install is the **compiler** — enough to write kernels, inspect IR,
+and generate device code. Actually *running* a compiled kernel additionally needs the
+runtime and an NPU (or a simulator platform); the examples on this page stop at
+compilation, which is the part that works anywhere.
+
+## Quickstart
+
+```bash
+git clone https://github.com/hw-native-sys/pypto.git
+cd pypto
+
+# CPU-only torch first — the default wheel pulls ~2 GB of CUDA dependencies
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e .
+```
+
+Verify:
+
+```bash
+python -c "import pypto.language as pl; from pypto import ir; print(len(pl.__all__), 'exports')"
+```
+
+Expected output — the count moves as operators are added, so treat a different number as
+fine and a traceback as the real signal:
+
+```text
+226 exports
+```
+
+Then compile something end to end:
+
+```bash
+python examples/hello_world.py
+```
+
+## Mechanics
+
+### Prerequisites
+
+| Requirement | Version | Notes |
+| ----------- | ------- | ----- |
+| Python | ≥ 3.10 | `requires-python` in `pyproject.toml`; the DSL uses 3.10+ syntax |
+| CMake | ≥ 3.15 | Invoked by scikit-build-core, not by you |
+| C++ compiler | C++17 | GCC or Clang. `CMAKE_CXX_STANDARD 17` is required, not merely preferred |
+| numpy | ≥ 2.0 | Installed automatically |
+| torch | ≥ 2.0 | Installed automatically, but install the CPU wheel first (see below) |
+| nanobind | ≥ 2.0 | Build-time only; fetched automatically |
+| scikit-build-core | ≥ 0.10 | Build backend; fetched automatically |
+
+**Install the CPU torch wheel before PyPTO.** `pip install -e .` resolves `torch>=2.0.0`
+to the default wheel, which carries the full CUDA stack — around 2 GB that a PyPTO
+workflow never uses. Installing `torch` from the CPU index first makes the later resolve
+a no-op.
+
+### Install modes
+
+```bash
+pip install -e .            # editable — Python edits take effect without reinstalling
+pip install .               # regular install
+pip install -e ".[dev]"     # editable + pytest, ruff, pyright, clang-tidy
+```
+
+Editable mode is the right default while working on PyPTO itself. Note that it is
+editable for *Python* only: changing C++ under `src/` or `include/` still requires a
+rebuild.
+
+### Build options
+
+The default build type is `RelWithDebInfo` — optimized, with debug symbols. Override it
+through the environment:
+
+```bash
+CMAKE_BUILD_TYPE=Release pip install .
+```
+
+`ccache` is detected and used automatically when present, which makes repeated builds
+substantially cheaper:
+
+```bash
+sudo apt-get install ccache   # Debian / Ubuntu
+brew install ccache           # macOS
+```
+
+### Where compile output goes
+
+Compiling a program writes generated code, reports, and pass dumps to a timestamped
+directory under `build_output/` in the current working directory. `PYPTO_PROG_BUILD_DIR`
+relocates that base — it is a **runtime environment variable**, read per process:
+
+```bash
+PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
+```
+
+### A tour of the examples
+
+`examples/` is ordered by difficulty, and is the fastest way to see idiomatic PyPTO.
+
+| Path | What is in it |
+| ---- | ------------- |
+| `examples/hello_world.py` | The simplest complete program — start here |
+| `examples/kernels/` | Single-kernel operators, numbered by difficulty: elementwise, fused ops, matmul, softmax, assemble |
+| `examples/models/` | Multi-kernel models, numbered by difficulty: FFN, paged attention, LLaMA |
+| `examples/utils/` | Parsing, cross-function calls, error handling |
+| `examples/runtime/` | Dispatch, explicit workers, distributed callbacks, multi-program KV cache |
+
+```bash
+python examples/hello_world.py
+python examples/kernels/06_softmax.py
+python examples/models/01_ffn.py
+```
+
+### Running the test suite
+
+```bash
+pip install -e ".[dev]"
+
+python -m pytest tests/ut -n auto --maxprocesses 8 -v      # unit tests
+python -m pytest tests/ut/core/test_error.py -v            # one file
+```
+
+System tests live under `tests/st/` and need a device or simulator; see
+`tests/st/README.md`.
+
+## Edge Cases
+
+> **Fatal pitfall:** installing PyPTO before the CPU torch wheel silently pulls the full
+> CUDA torch distribution — roughly 2 GB of packages that nothing in a PyPTO workflow
+> loads. There is no error and no warning; the only symptom is a very long install and a
+> very large environment. Install `torch` from the CPU index *first*.
+
+| Symptom | Likely cause | Fix |
+| ------- | ------------ | --- |
+| **C++ compile errors during `pip install`** | Toolchain older than the C++17 features the sources use | Point CMake at a newer compiler: `CMAKE_CXX_COMPILER=/path/to/g++ pip install -e .` |
+| **`ImportError` on `pypto_core` after editing C++** | Editable installs track Python only | Rebuild: `pip install -e . --no-build-isolation` |
+| **Import succeeds but a new binding is missing** | Stale `.so` copied next to the Python sources | Rebuild, and confirm the `.so` under `python/pypto/` is newer than your C++ edit |
+| **Install pulls gigabytes of nvidia packages** | torch resolved from the default index | `pip install torch --index-url https://download.pytorch.org/whl/cpu` first |
+| **Compile output appears in an unexpected directory** | `PYPTO_PROG_BUILD_DIR` set in the environment | Unset it, or pass `output_dir=` to `ir.compile` |
+
+**Environment variables vs. compile-time macros.** `PYPTO_PROG_BUILD_DIR` and
+`PYPTO_VERIFY_LEVEL` are read from the process environment at runtime, so
+`VAR=value python kernel.py` works. `SIMPLER_HOST_STRACE` and `SIMPLER_DFX` are
+**compile-time macros of the runtime**, set with `-DXXX=1` when the runtime is built —
+exporting them in a shell does nothing.
+
+## See Also
+
+- [Quickstart](02-quickstart.md) — your first kernels, once the import works.
+- [Programming Model](03-programming-model.md) — the abstractions those kernels are built from.
+- [PTO Project Ecosystem](../dev/00-ecosystem.md) — how PyPTO, PTOAS, pto-isa, and the runtime relate.
+- [Runtime documentation](https://hw-native-sys.github.io/simpler/) — installing and operating the runtime that executes compiled programs.

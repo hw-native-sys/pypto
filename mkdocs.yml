@@ -163,9 +163,12 @@ nav:
   - Home: en/index.md
   - User Manual:
       - en/user/index.md
-      - en/user/00-getting_started.md
+      - en/user/01-installation.md
+      - en/user/02-quickstart.md
+      - en/user/03-programming-model.md
       - en/user/01-language_guide.md
       - en/user/02-operation_reference.md
+      - en/user/00-getting_started.md
       - en/user/03-torch_codegen_debug.md
   - Reference:
       - en/reference/index.md
