@@ -190,7 +190,7 @@ REGISTER_OP("pld.tensor.get")
         "(window-bound DistributedTensor or plain Tensor). "
         "Semantically equivalent to remote_load + store. Supports full-slice and explicit "
         "subregion forms. ConvertTensorToTileOps lowers this to tile.create + pld.tile.get; "
-        "PTO emission then produces inline CommContext offset arithmetic + addptr + make_tensor_view + "
+        "PTO emission then produces CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + "
         "partition_view (src) + partition_view (dst) + explicit VEC staging tile + TGET. "
         "Optional `chunk_rows` / `chunk_cols` (0 = full) size that staging tile to a sub-tile "
         "of the flattened transfer [rows, cols] extent; pto-isa TGET then auto-chunks the full "

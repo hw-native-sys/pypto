@@ -113,8 +113,8 @@ pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])
 Reads a region of the `peer` rank's slice of a window-bound `DistributedTensor`
 into a local tile. Mirrors `tile.load` at the IR level (positional `offsets` /
 `shape` tuples, `TileType` result) but the source is a *remote* slice — the
-address translation is realised at codegen by inline `CommContext` loads and
-offset arithmetic followed by `addptr + make_tensor_view`.
+address translation is realised at codegen by
+`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view`.
 
 `valid_shape` is optional. With or without it, type inference intersects the
 requested window with the source tensor's effective valid region and checks
@@ -144,8 +144,8 @@ pld.tile.remote_store(src_tile, target, peer, offsets) -> Unknown
 Writes a local tile into a region of the `peer` rank's slice of a window-bound
 `DistributedTensor`. Mirrors `tile.store` at the IR level (positional `offsets`
 tuple + side-effect-only return) but the destination is a *remote* slice —
-address translation happens at codegen via inline `CommContext` loads and
-offset arithmetic followed by `addptr + make_tensor_view`.
+address translation happens at codegen via `CommRemoteOffset(ctx, peer) +
+addptr + make_tensor_view`.
 
 Verifier: `src_tile` must be `TileType`; `target` must be
 `DistributedTensorType`; `peer` must be a `ScalarType` rank index; `offsets`
@@ -380,8 +380,8 @@ arithmetic — are:
 
 | Helper | Role |
 | ------ | ---- |
-| `EmitCommRemoteOffset` | emits inline `CommContext` loads and converts the peer-vs-local byte delta to an element offset |
-| `EmitCommRemoteView` | emits the inline offset calculation followed by `addptr + make_tensor_view`, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
+| `CommRemoteOffset_<dtype>` | per-dtype MLIR helper (emitted once by `PTOCodegen::EmitCommRemoteOffsetHelpers`) that turns `(ctx, peer)` into the byte offset of the peer's window slice |
+| `EmitCommRemoteView` | emits `CommRemoteOffset + addptr + make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
 | `EmitPartitionViewPTO` | wraps a tensor view in a full-slice `partition_view` with given offsets/sizes (used by every op for both local and peer operands) |
 | `ResolveDistTensorBinding` | resolves a `DistributedTensor` arg to its codegen binding (type + window var) |
 | `AsTensorTypeLike` | kind-trait downcast accepting both `TensorType` and `DistributedTensorType` where a view's element/shape info is read uniformly |

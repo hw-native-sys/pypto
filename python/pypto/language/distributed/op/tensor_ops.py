@@ -307,9 +307,8 @@ def put(
     ``ConvertTensorToTileOps`` to a ``tile.create``-allocated VEC staging tile plus
     a ``pld.tile.put`` call so the staging tile flows through PyPTO's memory
     allocator (required at ``--pto-level=level3``); backend codegen then emits
-    inline ``CommContext`` loads and offset arithmetic followed by ``addptr +
-    make_tensor_view + partition_view + TPUT`` against that pre-allocated tile.
-    Both operands are GM/tensor-level
+    ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view +
+    TPUT`` against that pre-allocated tile. Both operands are GM/tensor-level
     window views (the staging tile is internal), so this is a ``pld.tensor`` op,
     paired with the GM-to-GM TGET rather than the tile-producing
     ``pld.tile.remote_load``.
@@ -411,9 +410,8 @@ def get(
 
     Side-effect-only (the returned Call carries ``UnknownType``). Semantically
     equivalent to ``remote_load + store`` but represented as one tensor-level
-    bulk communication op. Lowers to inline ``CommContext`` loads and offset
-    arithmetic followed by ``addptr + make_tensor_view + partition_view + a
-    synthesised VEC staging tile + TGET``
+    bulk communication op. Lowers to ``CommRemoteOffset(ctx, peer) + addptr +
+    make_tensor_view + partition_view + a synthesised VEC staging tile + TGET``
     at codegen.
 
     With no offsets/shape this reads the full peer ``src`` slice into the full
