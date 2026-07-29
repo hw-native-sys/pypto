@@ -18,9 +18,11 @@ These tests catch silent drift if either side evolves.
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 from pypto.backend import pto_backend
+from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.debug import pto_rebuild
 
 
@@ -88,6 +90,20 @@ def test_base_ptoas_flags_subset_of_backend_flags() -> None:
     assert not missing, (
         f"pto_rebuild base flag tokens {missing!r} no longer found in pto_backend._get_ptoas_flags source."
     )
+
+
+@pytest.mark.parametrize(
+    ("planner", "expected_level"),
+    [
+        (MemoryPlanner.PYPTO, "--pto-level=level3"),
+        (MemoryPlanner.DSA_RP, "--pto-level=level3"),
+        (MemoryPlanner.PTOAS, "--pto-level=level2"),
+    ],
+)
+def test_memory_planner_selects_ptoas_level(monkeypatch, planner, expected_level) -> None:
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    assert expected_level in pto_backend._get_ptoas_flags(planner)
 
 
 if __name__ == "__main__":

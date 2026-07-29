@@ -153,8 +153,8 @@ Pass InitMemRef();
  * chain so accumulator producers (and other loop-carry chains) write directly
  * into the carried buffer. This is a semantics-required aliasing (the loop
  * accumulator must live in one buffer), split out of MemoryReuse so it can run
- * without the opportunistic lifetime-reuse phase (e.g. when ptoas owns reuse via
- * memory_planner=PTOAS). Runs after InitMemRef, before MemoryReuse.
+ * without the opportunistic lifetime-reuse phase (when DSA-RP or ptoas owns
+ * reuse). Runs after InitMemRef, before MemoryReuse/DSA placement.
  */
 Pass MaterializeSemanticAliases();
 
@@ -836,16 +836,16 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
 /**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
  *
- * After MemoryReuse, two TileType variables can share the same
- * MemRef and the same TileBufSignature — in that case the `tile.reshape`
- * connecting them is a no-op at the PTO level. This pass rewrites such
+ * After the selected memory planner has finalized MemRefs, two TileType
+ * variables can share the same MemRef and the same TileBufSignature — in that
+ * case the `tile.reshape` connecting them is a no-op at the PTO level. This pass rewrites such
  * `lhs = tile.reshape(rhs, shape)` AssignStmts into plain `lhs = rhs`,
  * removing the reshape Call. PTO codegen previously dropped the emission
  * via a peephole; folding into the IR makes codegen 1:1.
  *
  * Requirements:
  * - InCore-type functions only (Opaque/Orchestration are unaffected)
- * - Must run after MemoryReuse so MemRef merging is finalized
+ * - Must run after AllocateMemoryAddr so planner-specific MemRef decisions are finalized
  */
 Pass FoldNoOpReshape();
 

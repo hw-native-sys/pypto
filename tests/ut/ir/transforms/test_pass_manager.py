@@ -271,6 +271,20 @@ class TestPassManagerPlannerGate:
         with pytest.raises(RuntimeError, match="memory_planner"):
             pm.run_passes(self._trivial_program())
 
+    def test_construct_pypto_run_dsa_rp_raises(self):
+        """A pipeline built for legacy PyPTO cannot silently switch to DSA-RP."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            with pytest.raises(RuntimeError, match="memory_planner"):
+                pm.run_passes(self._trivial_program())
+
+    def test_construct_dsa_rp_run_pypto_raises(self):
+        """A pipeline built for DSA-RP cannot silently switch to legacy PyPTO."""
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        with pytest.raises(RuntimeError, match="memory_planner"):
+            pm.run_passes(self._trivial_program())
+
     def test_construct_and_run_same_planner_ok(self):
         """Matched planner at construction and run -> the guard does not fire (both the
         default PYPTO and an explicit PTOAS context)."""
@@ -279,6 +293,9 @@ class TestPassManagerPlannerGate:
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             pm_ptoas = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
             pm_ptoas._check_planner_consistency()  # PTOAS == PTOAS, no raise
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            pm_dsa_rp = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+            pm_dsa_rp._check_planner_consistency()  # DSA_RP == DSA_RP, no raise
 
 
 class TestPassManagerDumpIR:

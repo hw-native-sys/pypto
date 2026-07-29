@@ -195,7 +195,11 @@ print(pto_code)
 - `system.tfree_*` 的 `split` 来自其 tile 参数，因此前端必须释放由 `tile.tpop_*` 产生的那个确切 SSA 值，即使 PTO 指令本身并不显式接收该 tile 作为操作数
 - `ExpandMixedKernel` 现在会在 split 生成的消费侧 `tile.tpop_*` 之后自动补 `system.tfree_*`，保持 `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值
-- `memory_planner=PYPTO` 时，`AllocateMemoryAddr` 会在 PTO 输出前解析 `reserve_buffer(base=AUTO)`，因此 PTO 输出 `auto = false, base = <value>`；`memory_planner=PTOAS` 跳过该 pass，PTO 输出 `auto = true` 且省略 `base`（ptoas 不接受两者同时出现），由 ptoas `PlanMemory` 放置该预留区
+- `memory_planner=PYPTO` 或 `DSA_RP` 时，`AllocateMemoryAddr` 会在 PTO 输出前
+  解析 `reserve_buffer(base=AUTO)`，因此 PTO 输出
+  `auto = false, base = <value>`；`memory_planner=PTOAS` 跳过该 pass，PTO 输出
+  `auto = true` 且省略 `base`（ptoas 不接受两者同时出现），由 ptoas
+  `PlanMemory` 放置该预留区
 - `reserve_buffer` location 对于 AIC 函数为 `mat`，对于 AIV/InCore 函数为 `vec`
 - `import_reserved_buffer` 使用 MLIR 符号语法（`@func_name`）表示 `peer_func`
 - 缓冲区名称和 peer_func 字符串由 `CheckSafeIdentifier` 验证（仅允许字母数字和下划线）
@@ -279,20 +283,22 @@ print(pto_code)
 #### 由谁规划内存：`compile(memory_planner=...)`
 
 物理 `addr` 由谁分配，通过 `memory_planner` 选项选择
-（`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`，默认
-`PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
+（`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | DSA_RP | PTOAS)`，
+默认 `PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
 
 | 模式 | 流水线 | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | ------ | ---------------- | -------------------- | ----- |
 | `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `DSA_RP` | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
 | `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
 内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
 （循环累加器、原地算子）归一到同一 MemRef；**`MemoryReuse`** 只做**机会性**的、
-基于生命周期的独立 buffer 合并。`InitMemRef` + `MaterializeSemanticAliases`
-两种模式都跑,所以强制别名得以保留;`PTOAS` 模式下 codegen 把这些共享 MemRef
-渲染成单个 `tile_buf` handle、原地 `outs(%acc)`,由 ptoas `PlanMemory`
-(level2 强制要求、拒绝任何 `addr` 操作数)完成生命周期复用与地址分配。
+基于生命周期的独立 buffer 合并，仅供 `PYPTO` 使用。`DSA_RP` 跳过该合并，
+在 `AllocateMemoryAddr` 中按容量与复用惩罚放置独立身份。
+`InitMemRef` + `MaterializeSemanticAliases` 三种模式都运行，因此强制别名得以
+保留；`PTOAS` 模式由 ptoas `PlanMemory`（level2 强制要求、拒绝任何 `addr`
+操作数）完成生命周期复用与地址分配。
 
 > **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910B `load + tpop_from_aic`
 > 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由

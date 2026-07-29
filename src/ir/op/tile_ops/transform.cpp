@@ -511,6 +511,7 @@ REGISTER_OP("tile.slice")
                   "Optional axes (MakeTuple of ConstInt) erased from the result type; the result is "
                   "clamped to 2D if reduction would take it below 2D")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -523,6 +524,7 @@ REGISTER_OP("tile.reshape")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReshapeType(args, kwargs);
@@ -535,6 +537,7 @@ REGISTER_OP("tile.reinterpret_view")
     .add_argument("shape", "Optional target shape; omitted to scale the physically contiguous dimension")
     .set_attr<DataType>("dtype")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileReinterpretViewType(args, kwargs);
@@ -570,6 +573,7 @@ REGISTER_OP("tile.transpose_view")
     // layout, so it inherits the input's memory space and InitMemRef shares the
     // input MemRef (same base_ -> same address). Codegen emits no data movement.
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileTransposeViewType(args, kwargs);
@@ -910,6 +914,7 @@ TypePtr DeduceTileConcatType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.concat")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description("Concatenate two tiles along column dimension")
     .add_argument("src0", "First source tile (TileType)")
     .add_argument("src1", "Second source tile (TileType)")
@@ -985,6 +990,7 @@ REGISTER_OP("tile.set_validshape")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
     .set_output_memory_inherit_input()
+    .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSetValidShapeType(args, kwargs);

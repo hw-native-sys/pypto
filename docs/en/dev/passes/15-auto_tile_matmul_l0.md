@@ -85,7 +85,47 @@ The search ranges over the **design space** `P = (m, n, k, stationarity, dbC)`:
 - **stationarity** `{output, A, B}` — which operand is pinned across the L0 grid. This *derives* the per-operand double-buffer depths (`dbA`/`dbB`): the moving operand(s) double-buffer (depth 2), the stationary one single-buffers (depth 1). They are not searched independently.
 - **dbC** `{1, 2}` — whether the L0C accumulator is double-buffered to overlap the FIXPIPE drain with the next tile's compute.
 
-A **realizable mask** (the `allow_a_stationary` / `allow_b_stationary` / `allow_double_buffer_c` config gates) restricts which design points are *enumerated and emitted* to those whose lowering exists — a gated-off axis is **not** explored (not scored); opening a gate adds those points to the search. The pass opens the **A/B-stationary** gates: the held operand is pinned **single-buffered** in the full L0 buffer across the moving grid (`k == K`), realized by a `ForKind::Sequential` outer loop in `BuildFullKPipelined` (a `Pipeline` outer would double-buffer the held operand → 2× its full-L0 budget → overflow). So the pass emits **output-stationary or operand-stationary**. **dbC=2** (the two-accumulator L0C ping-pong: tile *i*'s FIXPIPE drain overlaps tile *i+1*'s MAD) is opened unconditionally under `memory_planner=PTOAS`, and under the PyPTO planner as an **experimental opt-in** (`PassContext(enable_pypto_l0c_double_buffer=True)`, default off pending device validation of the numerics + drain-hidden win): `cfg.allow_double_buffer_c = ptoas_planner || (pypto_planner && flag)`. In both planners `BuildFullKPipelined` tags the moving loop with `kPipelineDoubleBufferCAttr` and `CanonicalizeIOOrder` floats **both** stores below **both** matmuls (`matmul, matmul, store, store` — co-live lifetimes rather than the default `matmul, store, …` disjoint ones). The two co-live accumulators then survive allocation differently per planner: under **PTOAS** because it skips `MemoryReuse` (`InitMemRef` gives the two stages distinct L0C bases and ptoas places them at distinct offsets); under **PyPTO** because [`LowerPipelineLoops`](28-lower_pipeline_loops.md) gives the dbC accumulator a **flat depth-2** `pipeline_membership` — only the moving (dbC) loop tags it; enclosing loops skip it since the cube serializes MADs — so `MemoryReuse`'s capacity gate (#1475) allocates exactly the two co-live L0C buffers instead of coalescing them (its former behaviour there, which shrank the tile to L0C/2 with no second buffer). For chooser-emitted M/N tiling, dbC=2 requires full-K and a ≥2×2 grid. The separate existing-pipeline recognizer does not alter the chooser's design space: under PyPTO it applies the same two-Acc mechanism to the canonical stationary-panel pattern after the conservative function-level Acc fit described above. The Mat-scratch (`Acc→Mat`, `tile.assemble`) drain is floated the same way. A `PassManager` built under one planner and run under another **fails loud** (the pass list's `MemoryReuse`-skip and the chooser's dbC gate must agree). The cost-model formulas themselves are gate-independent. See [`29-canonicalize_io_order.md`](29-canonicalize_io_order.md) for the co-live float and the runtime device validation for numerics + the distinct `{0, L0C/2}` offsets.
+A **realizable mask** (the `allow_a_stationary` /
+`allow_b_stationary` / `allow_double_buffer_c` config gates) restricts which
+design points are *enumerated and emitted* to those whose lowering exists. A
+gated-off axis is not scored. The pass opens the **A/B-stationary** gates: the
+held operand is pinned **single-buffered** across the moving grid (`k == K`) by
+a `ForKind::Sequential` outer loop in `BuildFullKPipelined`; a pipelined outer
+loop would require twice its full-L0 budget.
+
+**dbC=2** is the two-accumulator L0C ping-pong in which tile *i*'s FIXPIPE
+drain overlaps tile *i+1*'s MAD. It is enabled unconditionally for
+`memory_planner=PTOAS` and is an experimental opt-in for both PyPTO-owned
+planners, `PYPTO` and `DSA_RP`
+(`PassContext(enable_pypto_l0c_double_buffer=True)`, default off).
+`BuildFullKPipelined` tags the moving loop with
+`kPipelineDoubleBufferCAttr`, and `CanonicalizeIOOrder` floats both stores
+below both matmuls (`matmul, matmul, store, store`) to make the two accumulator
+lifetimes co-live.
+
+The planners preserve that intent differently. For eligible PTOAS pipelines,
+[`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) expresses the stages as
+slots in one allocation; declined loops flow to
+[`LowerPipelineLoops`](28-lower_pipeline_loops.md), and PTOAS assigns the
+resulting stage buffers distinct offsets itself. `PYPTO` uses the flat depth-2
+`pipeline_membership` emitted by `LowerPipelineLoops`, and `MemoryReuse`'s
+capacity gate (#1475) keeps the buffers distinct to the affordable depth.
+`DSA_RP` also skips `MemoryReuse`; it represents pipeline-stage separations as
+hard constraints, runs its bounded strict search first, and relaxes only
+pipeline-intent separations to soft penalties if that search finds no
+capacity-fitting placement. dbC=2 requires full-K and a ≥2×2 grid; the
+Mat-scratch (`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
+`PassManager` built under one planner and run under another fails loudly
+because its pass list and chooser gates must agree. The cost-model formulas
+are gate-independent. See
+[`29-canonicalize_io_order.md`](29-canonicalize_io_order.md) for the co-live
+float and runtime validation of the distinct `{0, L0C/2}` offsets.
+
+The full-K and ≥2×2 restrictions above apply only to chooser-emitted M/N
+tiling. The separate existing-pipeline recognizer does not alter the chooser's
+design space: for PyPTO-managed planners, it applies the same two-Acc mechanism
+to the canonical stationary-panel pattern after the conservative
+function-level Acc fit described above.
 
 > **This is a model-driven tile change, not a behavior-neutral refactor.** The roofline objective replaced an earlier traffic-minimizing closed-form chooser, so the selected `(m, n, k)` differs from before for MAD-bound shapes. The pre/post tiles for representative shapes are pinned in `test_l0_tile_chooser.py::TestL0TilingRooflineMigration`.
 

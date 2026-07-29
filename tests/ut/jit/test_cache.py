@@ -368,8 +368,8 @@ class TestMakeCacheKey:
         assert k_off != k_on
 
     def test_memory_planner_splits_key(self):
-        """The planner decides whether physical addresses are baked into the
-        artifact (ptoas level3 vs level2), so it must split the cache."""
+        """The planner changes both placement and address ownership, so it must
+        split the cache even when two modes both use ptoas level3."""
         keys = [
             self._make_key(
                 param_names=["a"],
@@ -377,7 +377,12 @@ class TestMakeCacheKey:
                 tensor_dtypes={"a": DataType.FP32},
                 memory_planner=planner,
             )
-            for planner in (None, MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+            for planner in (
+                None,
+                MemoryPlanner.PYPTO,
+                MemoryPlanner.DSA_RP,
+                MemoryPlanner.PTOAS,
+            )
         ]
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
@@ -406,12 +411,13 @@ class TestResolveMemoryPlanner:
     def test_defaults_to_pypto(self):
         assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
 
-    def test_reads_the_active_pass_context(self):
+    @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
+    def test_reads_the_active_pass_context(self, planner):
         """The planner is usually selected by wrapping the call in a PassContext,
         which never reaches RunConfig. Keying only on RunConfig would let such a
         call reuse a PYPTO-compiled artifact."""
-        with passes.PassContext([], memory_planner=MemoryPlanner.PTOAS):
-            assert _resolve_memory_planner(None) == MemoryPlanner.PTOAS
+        with passes.PassContext([], memory_planner=planner):
+            assert _resolve_memory_planner(None) == planner
         assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
 
 

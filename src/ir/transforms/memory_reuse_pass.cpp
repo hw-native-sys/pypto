@@ -15,12 +15,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -46,6 +48,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -57,17 +60,6 @@
 
 namespace pypto {
 namespace ir {
-
-/**
- * @brief Lifetime interval for a TileType variable (based on topological order)
- */
-struct LifetimeInterval {
-  VarPtr variable;           ///< The variable
-  int def_point;             ///< Definition point (topological order)
-  int last_use_point;        ///< Last use point (topological order)
-  MemorySpace memory_space;  ///< Memory space
-  uint64_t size;             ///< Size in bytes
-};
 
 namespace {
 
@@ -1366,8 +1358,6 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
       continue;
     }
 
-    const auto& memref = tile_type->memref_.value();
-
     std::vector<VarPtr> sharing_group;
     if (var_sharing_groups.count(var)) {
       sharing_group = var_sharing_groups[var];
@@ -1400,7 +1390,7 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     INTERNAL_CHECK_SPAN(memory_space.has_value(), sharing_group[0]->span_)
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
-    interval.size = memref->size_;
+    interval.size = GetDefinedMemRef(representative_tile_type)->size_;
 
     lifetimes.push_back(interval);
 
@@ -1469,16 +1459,18 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
 // cross-shape / cross-dtype L0 reuse (#1595 / #1788).
 static bool IsNzLikeBlayout(TileLayout blayout) { return blayout == TileLayout::col_major; }
 
+static std::optional<bool> GetVecNzLayoutClass(const VarPtr& var) {
+  auto tile = As<TileType>(var->GetType());
+  if (!tile) return std::nullopt;
+  const auto space = tile->GetMemorySpace();
+  if (!space || *space != MemorySpace::Vec) return std::nullopt;
+  return IsNzLikeBlayout(tile_view_semantics::GetEffectiveTileView(*tile).blayout);
+}
+
 static bool AreVecNdNzCompatible(const VarPtr& var1, const VarPtr& var2) {
-  auto t1 = As<TileType>(var1->GetType());
-  auto t2 = As<TileType>(var2->GetType());
-  if (!t1 || !t2) return true;
-  const auto s1 = t1->GetMemorySpace();
-  const auto s2 = t2->GetMemorySpace();
-  if (!s1 || !s2 || *s1 != MemorySpace::Vec || *s2 != MemorySpace::Vec) return true;
-  const TileView v1 = tile_view_semantics::GetEffectiveTileView(*t1);
-  const TileView v2 = tile_view_semantics::GetEffectiveTileView(*t2);
-  return IsNzLikeBlayout(v1.blayout) == IsNzLikeBlayout(v2.blayout);
+  const auto class1 = GetVecNzLayoutClass(var1);
+  const auto class2 = GetVecNzLayoutClass(var2);
+  return !class1.has_value() || !class2.has_value() || class1 == class2;
 }
 
 /**
@@ -3071,25 +3063,38 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     new_body = applier.VisitStmt(new_body);
   }
 
-  // Under memory_planner=PtoAS the whole MemoryReuse pass is skipped, and with it
-  // YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
+  // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
+  // DsaRP must therefore run the correctness normalizations from MemoryReuse
+  // Steps 3.75 through 4.5 in the same order. They are not optimizations: when a
+  // peeled accumulator if-phi or
   // loop yields a value living in a different buffer than its iter_arg/return_var,
   // it inserts the `tile.move` that writes the result back into the carry. Without
   // it the carry is never updated and the loop silently becomes a no-op — the
   // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
   // because its branch producer runs on a `[1, N]` view in its own buffer.
   //
-  // Run it here so both planners reconcile carries by the same mechanism. Under
-  // PyPTO it stays where it is: Step 4 must run *after* the reuse decisions, which
-  // can themselves create fresh mismatches.
+  // Run it here so both alternative planners reconcile carries. Under the
+  // legacy PyPTO planner it stays where it is: Step 4 must run *after* reuse
+  // decisions, which can themselves create fresh mismatches.
   //
-  // Only the ForStmt half: PTO codegen already re-points a branch-local producer
-  // at the if-phi handle, and copies in whatever it declines to re-point
-  // (#1956/#1985). An IR-level `tile.move` there would displace that copy-free
-  // path with an extra buffer plus a `pto.tmov`. Loop carries have no such
-  // codegen path, so they still need the move.
+  // PTOAS needs only the ForStmt YieldFixup half: addr-less codegen already
+  // re-points a branch-local producer at the if-phi handle. DSA-RP emits
+  // explicit addresses, so it must first coalesce peeled accumulator if-phis,
+  // then materialize both IfStmt and ForStmt fixups, and finally repair bare-Var
+  // identity copies before lifetime analysis and placement.
   const auto* ctx = PassContext::Current();
-  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
+    TopDownRetargeter acc_coalescer;
+    auto acc_rewrites = acc_coalescer.CoalesceAccumulatorIfPhis(new_body);
+    if (!acc_rewrites.empty()) {
+      RetypeApplier applier(std::move(acc_rewrites));
+      new_body = applier.VisitStmt(new_body);
+    }
+
+    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
+    new_body = yield_fixup.VisitStmt(new_body);
+    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
   }
@@ -3125,8 +3130,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
+  const bool needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   HazardInputs hazard;
-  if (NeedsLoadTpopHazardGuard(func)) {
+  if (needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
     collector.VisitStmt(new_body);
     hazard = collector.Take();
@@ -3229,6 +3235,178 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 }
 
 }  // namespace
+
+AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
+  auto analysis = ComputeLifetimes(func->body_);
+  AllocationPlan plan;
+  plan.intervals = std::move(analysis.lifetimes);
+  // DSA places the physical allocation identity, whose extent must cover every
+  // mandatory alias/view in the sharing group. Keep this correction local to
+  // DSA-RP so the legacy MemoryReuse heuristic retains its established sizing.
+  for (LifetimeInterval& interval : plan.intervals) {
+    uint64_t allocation_size = interval.size;
+    const auto sharing = analysis.var_sharing_groups.find(interval.variable);
+    if (sharing != analysis.var_sharing_groups.end()) {
+      for (const VarPtr& member : sharing->second) {
+        const auto tile_type = As<TileType>(member->GetType());
+        INTERNAL_CHECK_SPAN(tile_type != nullptr && tile_type->memref_.has_value(), member->span_)
+            << "Expected every allocation sharing-group member to carry a MemRef";
+        allocation_size = std::max(allocation_size, GetDefinedMemRef(tile_type)->size_);
+      }
+    }
+    interval.size = allocation_size;
+  }
+  const auto& intervals = plan.intervals;
+
+  // Pair-producing analyses below are indexed by pipeline group, statement
+  // point, or MemRef base. Their cost is O(N log N + E log E), where E is the
+  // number of hard relations materialized in the DSA problem.
+  std::map<std::pair<size_t, size_t>, std::set<AllocationSeparationReason>> separation_reasons;
+  auto add_separation = [&separation_reasons](size_t first, size_t second,
+                                              AllocationSeparationReason reason) {
+    if (first == second) return;
+    if (second < first) std::swap(first, second);
+    separation_reasons[{first, second}].insert(reason);
+  };
+
+  std::unordered_map<const Var*, size_t> base_to_index;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    auto memref = GetTypeMemRef(intervals[index].variable->GetType());
+    if (memref.has_value() && memref.value()) {
+      base_to_index[memref.value()->base_.get()] = index;
+    }
+  }
+
+  // Vec ND and NZ layouts cannot occupy the same physical bytes even when
+  // their ordinary lifetimes are disjoint: the resulting in-place layout adapt
+  // silently mis-transfers on A5. Emit the same correctness relation enforced
+  // by legacy MemoryReuse as an unrelaxable DSA hard separation.
+  //
+  // Enumerate only lifetime-compatible cross-class pairs. Each directional
+  // sweep sorts one class by end and the other by start, then performs work
+  // only for relations it emits: O(N log N + E), where E is the number of
+  // StorageLayout separations.
+  std::vector<size_t> vec_nd_intervals;
+  std::vector<size_t> vec_nz_intervals;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    const auto layout_class = GetVecNzLayoutClass(intervals[index].variable);
+    if (!layout_class.has_value()) continue;
+    (*layout_class ? vec_nz_intervals : vec_nd_intervals).push_back(index);
+  }
+  auto add_disjoint_layout_pairs = [&intervals, &add_separation](std::vector<size_t> earlier,
+                                                                 std::vector<size_t> later) {
+    std::sort(earlier.begin(), earlier.end(), [&intervals](size_t lhs, size_t rhs) {
+      const auto lhs_key = std::pair{intervals[lhs].last_use_point, lhs};
+      const auto rhs_key = std::pair{intervals[rhs].last_use_point, rhs};
+      return lhs_key < rhs_key;
+    });
+    std::sort(later.begin(), later.end(), [&intervals](size_t lhs, size_t rhs) {
+      const auto lhs_key = std::pair{intervals[lhs].def_point, lhs};
+      const auto rhs_key = std::pair{intervals[rhs].def_point, rhs};
+      return lhs_key < rhs_key;
+    });
+
+    size_t eligible = 0;
+    for (size_t later_index : later) {
+      while (eligible < earlier.size() &&
+             intervals[earlier[eligible]].last_use_point <= intervals[later_index].def_point) {
+        ++eligible;
+      }
+      for (size_t prior = 0; prior < eligible; ++prior) {
+        add_separation(earlier[prior], later_index, AllocationSeparationReason::StorageLayout);
+      }
+    }
+  };
+  add_disjoint_layout_pairs(vec_nd_intervals, vec_nz_intervals);
+  add_disjoint_layout_pairs(vec_nz_intervals, vec_nd_intervals);
+
+  const bool needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
+  HazardInputs hazard;
+  if (needs_load_tpop_hazard_guard) {
+    HazardInputCollector collector;
+    collector.VisitStmt(func->body_);
+    hazard = collector.Take();
+  }
+  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  const ForbidAliasMap forbid_alias = forbid_collector.Take();
+
+  // Preserve the requested software-pipeline depth as hard separations first.
+  // The DSA-RP driver alone may later relax these typed relations under
+  // capacity pressure.
+  using GroupKey = std::pair<MemorySpace, int32_t>;
+  std::map<GroupKey, std::map<int32_t, std::vector<size_t>>> group_members;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    const LifetimeInterval& interval = intervals[index];
+    const auto membership = analysis.pipeline_membership.find(interval.variable.get());
+    if (membership == analysis.pipeline_membership.end()) continue;
+    for (const auto& [group, stage] : membership->second) {
+      const GroupKey key{interval.memory_space, group};
+      group_members[key][stage].push_back(index);
+    }
+  }
+  for (const auto& group_entry : group_members) {
+    const auto& members_by_stage = group_entry.second;
+    for (auto first_bucket = members_by_stage.begin(); first_bucket != members_by_stage.end();
+         ++first_bucket) {
+      auto second_bucket = std::next(first_bucket);
+      for (; second_bucket != members_by_stage.end(); ++second_bucket) {
+        for (size_t first : first_bucket->second) {
+          for (size_t second : second_bucket->second) {
+            add_separation(first, second, AllocationSeparationReason::PipelineStage);
+          }
+        }
+      }
+    }
+  }
+
+  // Backend-specific split-AIV load + tpop hazard. The indices are bucketed by
+  // the one statement point at which the illegal in-place touch can occur.
+  if (needs_load_tpop_hazard_guard) {
+    std::map<int, std::vector<size_t>> writers_by_def;
+    std::map<int, std::vector<size_t>> inputs_by_last_use;
+    for (size_t index = 0; index < intervals.size(); ++index) {
+      const LifetimeInterval& interval = intervals[index];
+      if (hazard.reads_tpop.count(interval.variable.get()) != 0) {
+        writers_by_def[interval.def_point].push_back(index);
+      }
+      if (hazard.load_derived.count(interval.variable.get()) != 0) {
+        inputs_by_last_use[interval.last_use_point].push_back(index);
+      }
+    }
+    for (const auto& [point, writers] : writers_by_def) {
+      const auto inputs = inputs_by_last_use.find(point);
+      if (inputs == inputs_by_last_use.end()) continue;
+      for (size_t writer : writers) {
+        for (size_t input : inputs->second) {
+          add_separation(writer, input, AllocationSeparationReason::TargetHazard);
+        }
+      }
+    }
+  }
+
+  // Op-semantic no-alias constraints resolve operands through allocation-base
+  // identity. No opportunistic reuse chain exists before DSA-RP runs.
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    const auto forbidden = forbid_alias.find(intervals[index].variable.get());
+    if (forbidden == forbid_alias.end()) continue;
+    for (const VarPtr& operand : forbidden->second) {
+      auto memref = GetTypeMemRef(operand->GetType());
+      if (!memref.has_value() || !memref.value()) continue;
+      const auto found = base_to_index.find(memref.value()->base_.get());
+      if (found != base_to_index.end()) {
+        add_separation(index, found->second, AllocationSeparationReason::SemanticNoAlias);
+      }
+    }
+  }
+
+  plan.separations.reserve(separation_reasons.size());
+  for (const auto& [indices, reasons] : separation_reasons) {
+    plan.separations.push_back({indices.first, indices.second,
+                                std::vector<AllocationSeparationReason>(reasons.begin(), reasons.end())});
+  }
+  return plan;
+}
 
 namespace pass {
 Pass MaterializeSemanticAliases() {

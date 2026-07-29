@@ -232,6 +232,9 @@ def compile(  # noqa: PLR0913
         memory_planner: Who plans on-chip buffer memory. ``None`` uses the
             default (``MemoryPlanner.PYPTO`` — PyPTO's AllocateMemoryAddr bakes
             physical addresses and ptoas runs at ``--pto-level=level3``).
+            ``MemoryPlanner.DSA_RP`` keeps memory planning in PyPTO but replaces
+            opportunistic coalescing with capacity-constrained DSA and
+            automatically recognized reuse penalties.
             ``MemoryPlanner.PTOAS`` skips the opportunistic lifetime reuse
             (MemoryReuse) and address assignment (AllocateMemoryAddr), emits no
             ``pto.alloc_tile addr``, and lets the ptoas PlanMemory pass do both at
@@ -240,10 +243,10 @@ def compile(  # noqa: PLR0913
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
-            under the PyPTO memory planner (experimental, default off). ``None``
-            inherits the setting from an active outer ``PassContext`` (else
-            ``False``); has no effect under ``PTOAS``, which already emits dbC=2
-            unconditionally.
+            under the PyPTO-owned ``PYPTO`` and ``DSA_RP`` planners
+            (experimental, default off). ``None`` inherits the setting from an
+            active outer ``PassContext`` (else ``False``); has no effect under
+            ``PTOAS``, which already emits dbC=2 unconditionally.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,

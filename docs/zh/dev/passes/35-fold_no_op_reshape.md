@@ -5,8 +5,8 @@
 
 ## 概述
 
-`MemoryReuse` 运行之后，`tile.reshape` 的 LHS 与 RHS 可能已经指向同一
-个 `MemRef` 根，并且具有相同的 `TileBufSignature`。在这种情况下，该 reshape 在
+所选内存规划器完成 MemRef 决策之后，`tile.reshape` 的 LHS 与 RHS 可能已经指向
+同一个 `MemRef` 根，并且具有相同的 `TileBufSignature`。在这种情况下，该 reshape 在
 PTO 层面是 no-op —— 按 var 分配的模型已经为 LHS 预声明了与 RHS 相同的 shape、layout、
 fractal、valid-shape 与 pad，并共享同一块内存地址。`pto.treshape` 在此无事可做。
 
@@ -33,13 +33,13 @@ PTO codegen 之后对所有幸存的 `tile.reshape` 都做 1:1 翻译，因为 n
 - `IRProperty::IncoreTileOps` —— InCore 函数使用 tile 类型
 - `IRProperty::HasMemRefs` —— `MemRef` 槽已由 `InitMemRef` 填充
 - `IRProperty::TileOps2D` —— tile op 至多 2D
-- 该 Pass 必须在 `MemoryReuse` 之后运行，让 view 合并的决策反映在
+- 该 Pass 必须在 `AllocateMemoryAddr` 之后运行，让规划器特定的 view 合并决策反映在
   规范 alloc 上 —— 否则即便逻辑上应共享，LHS 与 RHS 也可能尚未指向同一个 `MemRef`。
 - 仅扫描 InCore 类型函数（`InCore`、`AIC`、`AIV`）；Opaque 与 Orchestration
   函数原样返回。
 
-**使用时机**：在 `Default` 策略中作为第 29 个 Pass 运行，紧随 `AllocateMemoryAddr`
-之后（保证 `MemRef` 合并已经定型），先于 `FuseCreateAssembleToSlice`。
+**使用时机**：紧随 `AllocateMemoryAddr` 之后（保证规划器特定的 `MemRef`
+决策已经定型），先于 `FuseCreateAssembleToSlice`。
 
 ## API
 
@@ -86,7 +86,7 @@ program_folded = fold_pass(program)
 ### MemRef 合并后的 trivial reshape
 
 ```python
-# Pass 之前（双方 TileBufSignature 相同；MemoryReuse 之后双方共享 MemRef R）
+# Pass 之前（双方 TileBufSignature 相同；所选内存规划器完成后双方共享 MemRef R）
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(x, out):
     a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec, MemRef(R)] = pl.tile.load(x, ...)

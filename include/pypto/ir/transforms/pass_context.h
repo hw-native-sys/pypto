@@ -222,14 +222,16 @@ class DiagnosticInstrument : public PassInstrument {
 /**
  * @brief Selects who plans on-chip buffer memory.
  *
- * PyPTO runs its own allocator (AllocateMemoryAddr) and bakes physical
- * addresses into `pto.alloc_tile addr = ...`; PtoAS skips the pypto
- * allocation passes (MemoryReuse + AllocateMemoryAddr), emits no addresses,
- * and lets the ptoas PlanMemory pass allocate at `--pto-level=level2`.
+ * PyPTO runs its legacy coalescing allocator and bakes physical addresses into
+ * `pto.alloc_tile addr = ...`. DsaRP keeps semantic aliases but replaces
+ * opportunistic coalescing with capacity-constrained DSA with reuse penalties.
+ * PtoAS skips the PyPTO allocation passes, emits no addresses, and lets the
+ * ptoas PlanMemory pass allocate at `--pto-level=level2`.
  */
 enum class MemoryPlanner {
-  PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
-  PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+  PyPTO = 0,  ///< Legacy PyPTO coalescing + address allocation (ptoas level 3).
+  PtoAS = 1,  ///< ptoas PlanMemory allocates (ptoas level 2).
+  DsaRP = 2,  ///< In-tree DSA with automatically recognized reuse penalties.
 };
 
 class PassContext {
@@ -246,13 +248,13 @@ class PassContext {
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
    * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
-   *        PtoAS makes the pipeline skip the pypto allocation passes so the
-   *        ptoas PlanMemory pass owns allocation instead.
+   *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
+   *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
    * @param enable_pypto_l0c_double_buffer Opt in to L0C double-buffering (dbC=2)
-   *        under the PyPTO memory planner (default: false; experimental, pending
-   *        device validation). No effect under PtoAS, which already emits dbC=2
-   *        unconditionally. When true, AutoTileMatmulL0 emits two co-live L0C
-   *        accumulators and MemoryReuse's capacity gate allocates the ping-pong.
+   *        under PyPTO-owned planners (PyPTO or DsaRP; default: false,
+   *        experimental). No effect under PtoAS, which already emits dbC=2.
+   *        When true, AutoTileMatmulL0 emits two co-live L0C accumulators;
+   *        the selected PyPTO allocator preserves the ping-pong.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,

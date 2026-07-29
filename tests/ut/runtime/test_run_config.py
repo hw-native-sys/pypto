@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pypto.backend import BackendType
+from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig, _DfxOpts, compile_program, execute_compiled, run
 
 
@@ -538,6 +539,25 @@ class TestRunConfigCompileForwarding:
         run(object(), config=RunConfig(platform="a2a3sim", analyze_auto_scopes_for_deps=True))
 
         assert captured["analyze_auto_scopes_for_deps"] is True
+
+    def test_run_forwards_memory_planner(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeCompiled:
+            def __call__(self, *_args, **_kwargs):
+                return None
+
+        def fake_compile(_program, **kwargs):
+            captured.update(kwargs)
+            return FakeCompiled()
+
+        import pypto.ir as ir_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(ir_mod, "compile", fake_compile)
+
+        run(object(), config=RunConfig(platform="a2a3sim", memory_planner=MemoryPlanner.DSA_RP))
+
+        assert captured["memory_planner"] == MemoryPlanner.DSA_RP
 
     def test_execute_compiled_accepts_auto_scope_deps_switch(self, tmp_path, monkeypatch):
         captured: dict = {}

@@ -200,7 +200,11 @@ sub-window carved out by `pto.subview`.
 - `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
 - `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands
-- Under `memory_planner=PYPTO`, `AllocateMemoryAddr` resolves `reserve_buffer(base=AUTO)` before PTO emission, so PTO emits `auto = false, base = <value>`. Under `memory_planner=PTOAS` that pass is skipped, so PTO emits `auto = true` with `base` omitted (ptoas rejects both attributes together) and ptoas `PlanMemory` places the reserved region
+- Under `memory_planner=PYPTO` or `DSA_RP`, `AllocateMemoryAddr` resolves
+  `reserve_buffer(base=AUTO)` before PTO emission, so PTO emits
+  `auto = false, base = <value>`. Under `memory_planner=PTOAS` that pass is
+  skipped, so PTO emits `auto = true` with `base` omitted (ptoas rejects both
+  attributes together) and ptoas `PlanMemory` places the reserved region
 - `reserve_buffer` location is `mat` for AIC functions, `vec` for AIV/InCore functions
 - `import_reserved_buffer` uses MLIR symbol syntax (`@func_name`) for `peer_func`
 - Buffer name and peer_func strings are validated by `CheckSafeIdentifier` (alphanumeric + underscore only)
@@ -287,22 +291,25 @@ Based on TileType variables collected from the function body. Each tile variable
 #### Who plans memory: `compile(memory_planner=...)`
 
 Who assigns the physical `addr` is selected by the `memory_planner` option
-(`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | PTOAS)`, default
-`PYPTO`). It threads to both the pass pipeline (via `PassContext`) and codegen:
+(`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | DSA_RP | PTOAS)`,
+default `PYPTO`). It threads to both the pass pipeline (via `PassContext`) and
+codegen:
 
 | Mode | Pipeline | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | -------- | ---------------- | -------------------- | ----- |
 | `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
+| `DSA_RP` | runs `MaterializeSemanticAliases` + `AllocateMemoryAddr`; skips `MemoryReuse` | emits the in-process canonical-greedy DSA-RP `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
 | `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
 Memory planning is split into two passes: **`MaterializeSemanticAliases`**
 forces *semantics-required* aliasing (loop-carried accumulators, in-place ops)
 to share one MemRef, while **`MemoryReuse`** does *opportunistic* lifetime-based
-coalescing of independent buffers. `InitMemRef` + `MaterializeSemanticAliases`
-run in both modes, so the must-alias buffers survive; in `PTOAS` mode codegen
-renders those shared MemRefs as a single `tile_buf` handle with an in-place
-`outs(%acc)`, and ptoas `PlanMemory` (which `level2` requires, rejecting any
-`addr` operand) does the lifetime reuse and address assignment.
+coalescing of independent buffers for `PYPTO`. `DSA_RP` skips that coalescing
+and places the independent identities under capacity and reuse penalties in
+`AllocateMemoryAddr`. `InitMemRef` + `MaterializeSemanticAliases` run in all
+three modes, so must-alias buffers survive. In `PTOAS` mode, ptoas `PlanMemory`
+(which `level2` requires, rejecting any `addr` operand) performs lifetime reuse
+and address assignment.
 
 > **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
 > hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution

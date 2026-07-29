@@ -775,7 +775,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // planners. Tracked as a follow-up.
   const bool ptoas_planner = ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS;
   const bool pypto_dbc =
-      ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PyPTO && ctx->GetEnablePyptoL0cDoubleBuffer();
+      ctx && ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS && ctx->GetEnablePyptoL0cDoubleBuffer();
   cfg.allow_double_buffer_c = ptoas_planner || pypto_dbc;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at

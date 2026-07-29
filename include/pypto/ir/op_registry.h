@@ -23,6 +23,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -74,6 +75,21 @@ struct OpMemorySpaceSpec {
   /// InferTileMemorySpace uses this for forward inheritance and backward-demand
   /// propagation through view-like ops; memory reuse uses it to skip retargeting.
   bool output_inherits_input = false;
+};
+
+/**
+ * @brief Evidence available to analyses of an operation's physical accesses.
+ *
+ * Unknown is deliberately the default. Functional means every tile operand is
+ * read and every tile-typed SSA result is written, with no hidden tile
+ * workspace or mutation; range-sensitive analyses must still prove that an
+ * access covers the whole allocation. NoAccess marks declarations and
+ * zero-copy metadata operations that execute no memory access.
+ */
+enum class ExecutionMemoryAccessEvidence : uint8_t {
+  Unknown,
+  Functional,
+  NoAccess,
 };
 
 /**
@@ -436,6 +452,27 @@ class OpRegistryEntry {
   /// explicitly call not_inplace_safe() during registration.
   [[nodiscard]] bool IsInplaceSafe() const { return is_inplace_safe_; }
 
+  /// Mark an IR-only declaration or zero-copy view that emits no execution-time
+  /// memory access. This is distinct from output-memory inheritance: mutating
+  /// operations such as tile.assemble also inherit an input memory space.
+  inline OpRegistryEntry& no_execution_memory_access() {
+    execution_memory_access_evidence_ = ExecutionMemoryAccessEvidence::NoAccess;
+    return *this;
+  }
+
+  /// Mark an operation whose complete tile access contract is functional:
+  /// every tile operand is read and every tile-typed SSA result is written.
+  /// This annotation does not by itself prove a whole-allocation access.
+  inline OpRegistryEntry& functional_execution_memory_access() {
+    execution_memory_access_evidence_ = ExecutionMemoryAccessEvidence::Functional;
+    return *this;
+  }
+
+  /// Access evidence used by conservative physical-hazard analyses.
+  [[nodiscard]] ExecutionMemoryAccessEvidence GetExecutionMemoryAccessEvidence() const {
+    return execution_memory_access_evidence_;
+  }
+
   /// Mark input argument `arg_index` as one whose buffer must NOT be reused as
   /// this op's output buffer. Unlike not_inplace_safe() (which forbids the
   /// output aliasing ANY still-live input), this targets a *specific* operand
@@ -530,6 +567,7 @@ class OpRegistryEntry {
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
+  ExecutionMemoryAccessEvidence execution_memory_access_evidence_{ExecutionMemoryAccessEvidence::Unknown};
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)

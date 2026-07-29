@@ -102,6 +102,7 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.sort32")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description("Sort fixed 32-element blocks (maps to pto.tsort32)")
     .add_argument("src", "Input value tile (TileType, f16 or f32)")
     .add_argument("idx", "Input index tile (TileType)")
@@ -234,6 +235,7 @@ TypePtr DeduceTileMrgSort1Type(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.mrgsort_format1")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description("Single-list merge sort, format1 (maps to pto.tmrgsort format1)")
     .add_argument("src", "Input tile containing pre-sorted runs (FP16 or FP32)")
     .add_argument("block_len", "Run length for merge sort (integer scalar, multiple of 64)")

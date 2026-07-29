@@ -97,6 +97,7 @@ class MemoryPlanner(Enum):
     """Selects who plans on-chip buffer memory."""
 
     PYPTO = ...
+    DSA_RP = ...
     PTOAS = ...
 
 class DiagnosticPhase(Enum):
@@ -267,8 +268,8 @@ class PassContext:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
         ``enable_pypto_l0c_double_buffer`` opts in to L0C double-buffering (dbC=2)
-        under the PyPTO memory planner (experimental, default off; no effect under
-        PtoAS, which already emits dbC=2).
+        under the PyPTO-owned ``PYPTO`` and ``DSA_RP`` planners (experimental,
+        default off; no effect under ``PTOAS``, which already emits dbC=2).
         """
         ...
 
@@ -496,7 +497,7 @@ def auto_tile_matmul_l0() -> Pass:
     f32-to-bf16/f16 ``rint`` casts fold into the FIXPIPE writeback.
 
     Full-K grids support output-, A-, and B-stationary schedules. dbC=2 is
-    enabled under PTOAS and available as a PyPTO planner opt-in. Eligible calls
+    enabled under PTOAS and available as a PyPTO-owned planner opt-in. Eligible calls
     require static 2D operands with B in Mat and A in Mat or Vec. When the
     chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is needed,
     although a chained result may still be remapped to Mat by the compatible

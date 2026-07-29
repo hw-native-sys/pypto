@@ -2825,26 +2825,43 @@ class TestTopDownRetargeter:
                 result: pl.Tensor[[176, 176], pl.FP32] = pl.store(c, [0, 0], out)
                 return result
 
+        def assert_coalesced(after: ir.Program, planner: str) -> None:
+            # The whole accumulator chain must coalesce onto ONE Acc allocation. A
+            # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
+            acc_bases = {b for b in _collect_tile_memref_bases(after).values() if "acc" in b}
+            assert len(acc_bases) == 1, (
+                f"{planner}: expected ONE Acc allocation (accumulator coalesced), "
+                f"got {len(acc_bases)}: {sorted(acc_bases)}\n{ir.python_print(after)}"
+            )
+            # Self-documenting: an in-place accumulator kernel needs no tile.move; a
+            # surviving one here would be the illegal Acc->Acc copy.
+            assert "tile.move" not in ir.python_print(after), (
+                f"{planner}: expected no tile.move in a coalesced accumulator chain:\n"
+                f"{ir.python_print(after)}"
+            )
+
         # BASIC verification: the coalescing fix makes the peeled IR round-trip
         # clean, so this exercises the legality check, not just the buffer count.
         with passes.PassContext([], passes.VerificationLevel.BASIC):
-            After = passes.memory_reuse()(
+            legacy_after = passes.memory_reuse()(
                 passes.materialize_semantic_aliases()(
                     passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
                 )
             )
-        # The whole accumulator chain must coalesce onto ONE Acc allocation. A
-        # phantom acc->acc tile.move (failed coalescing) leaves a 2nd Acc base.
-        acc_bases = {b for b in _collect_tile_memref_bases(After).values() if "acc" in b}
-        assert len(acc_bases) == 1, (
-            f"expected ONE Acc allocation (accumulator coalesced), got {len(acc_bases)}: "
-            f"{sorted(acc_bases)}\n{ir.python_print(After)}"
-        )
-        # Self-documenting: an in-place accumulator kernel needs no tile.move; a
-        # surviving one here would be the illegal Acc->Acc copy.
-        assert "tile.move" not in ir.python_print(After), (
-            f"expected no tile.move in a coalesced accumulator chain:\n{ir.python_print(After)}"
-        )
+        assert_coalesced(legacy_after, "PYPTO")
+
+        # DSA-RP skips MemoryReuse, so MaterializeSemanticAliases itself must run
+        # the same accumulator coalescing -> yield fixup -> identity-copy
+        # normalization sequence before lifetime analysis.
+        with passes.PassContext(
+            [],
+            passes.VerificationLevel.BASIC,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            dsa_after = passes.materialize_semantic_aliases()(
+                passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
+            )
+        assert_coalesced(dsa_after, "DSA_RP")
 
     def test_accumulator_if_phi_seed_retargets_to_accumulator_buffer(self):
         """Structural before/after for CoalesceAccumulatorIfPhis on a minimal
@@ -3660,9 +3677,8 @@ class TestStorageLayoutReuseGate:
     eligible for reuse (#1788).
     """
 
-    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
-        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
-
+    @staticmethod
+    def _build_nd_nz_program() -> ir.Program:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3689,11 +3705,45 @@ class TestStorageLayoutReuseGate:
                 result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nz, [0, 0], out_nz)
                 return result
 
+        return Before
+
+    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
+        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
+
+        Before = self._build_nd_nz_program()
         After = _run_pipeline(Before)
         bases = _collect_tile_memref_bases(After)
         assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
         assert bases["tile_nd"] != bases["tile_nz"], (
             f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
+        )
+
+    def test_dsa_rp_nd_and_nz_vec_tiles_do_not_overlap(self):
+        """DSA-RP exports the ND/NZ restriction as an unrelaxable hard edge."""
+
+        Before = self._build_nd_nz_program()
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            After = passes.allocate_memory_addr()(
+                passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+            )
+
+        ranges: dict[str, tuple[int, int]] = {}
+        function = next(iter(After.functions.values()))
+
+        class _RangeCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+                super().visit_assign_stmt(stmt)
+
+        _RangeCollector().visit_stmt(function.body)
+        nd_offset, nd_size = ranges["tile_nd"]
+        nz_offset, nz_size = ranges["tile_nz"]
+        assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
+            f"DSA-RP must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
         )
 
     def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):
@@ -3822,6 +3872,39 @@ class TestAscend910BLoadTpopHazard:
         assert bases["down_next"] != bases["down_prev"], (
             "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer "
             f"(load+tpop_from_aic hazard), but both bind to {bases['down_prev']}"
+        )
+
+    def test_dsa_rp_ascend910b_split_aiv_physically_separates_load_buffer(self):
+        """DSA-RP exports the load+tpop target hazard as an unrelaxable edge."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+                after = passes.allocate_memory_addr()(
+                    passes.materialize_semantic_aliases()(passes.init_mem_ref()(self._build_program()))
+                )
+        finally:
+            backend.reset_for_testing()
+
+        ranges: dict[str, tuple[int, int]] = {}
+        function = next(iter(after.functions.values()))
+
+        class _RangeCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+                super().visit_assign_stmt(stmt)
+
+        _RangeCollector().visit_stmt(function.body)
+        previous_offset, previous_size = ranges["down_prev"]
+        next_offset, next_size = ranges["down_next"]
+        assert previous_offset + previous_size <= next_offset or next_offset + next_size <= previous_offset, (
+            "Ascend910B split-AIV: DSA-RP must physically separate tile.add output "
+            f"{ranges['down_next']} from load buffer {ranges['down_prev']}"
         )
 
     def test_ascend950_allows_load_buffer_reuse(self):
@@ -4389,6 +4472,35 @@ class TestCapacityGatedReuse:
         return bases
 
     @staticmethod
+    def _collect_offsets(program: ir.Program, names: tuple[str, ...]) -> dict[str, int]:
+        """Concrete byte offsets of named tiles after DSA-RP writeback."""
+        func = program.get_function("kernel")
+        assert func is not None
+        offsets: dict[str, int] = {}
+
+        def visit(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in names:
+                tile = stmt.var.type
+                assert isinstance(tile, ir.TileType) and tile.memref is not None
+                offset = tile.memref.byte_offset_
+                assert isinstance(offset, ir.ConstInt)
+                offsets[stmt.var.name_hint] = offset.value
+            if isinstance(stmt, ir.SeqStmts):
+                for child in stmt.stmts:
+                    visit(child)
+            elif isinstance(stmt, ir.IfStmt):
+                visit(stmt.then_body)
+                if stmt.else_body is not None:
+                    visit(stmt.else_body)
+            elif isinstance(stmt, (ir.ForStmt, ir.WhileStmt)):
+                visit(stmt.body)
+
+        visit(func.body)
+        missing = [name for name in names if name not in offsets]
+        assert not missing, f"operands {missing} not found in After IR: {list(offsets)}"
+        return offsets
+
+    @staticmethod
     def _two_stage_matmuls(
         a_shape: tuple[int, int] = (32, 32), b_shape: tuple[int, int] = (32, 32)
     ) -> ir.Program:
@@ -4493,6 +4605,42 @@ class TestCapacityGatedReuse:
         assert "shrink the per-stage tile" in text, (
             f"an operand-too-large shed must give the byte-threshold fix, got: {text!r}"
         )
+
+    def test_dsa_rp_keeps_affordable_pipeline_stages_separate(self, tmp_path):
+        """The strict DSA-RP solve preserves pipeline intent when it fits."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._two_stage_matmuls()
+
+        with passes.PassContext(
+            [passes.ReportInstrument(str(tmp_path))],
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            After = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
+
+        offsets = self._collect_offsets(After, ("r0", "r1"))
+        assert offsets["r0"] != offsets["r1"]
+        log = tmp_path / "perf_hints.log"
+        assert not log.exists() or "PH-DSA-001" not in log.read_text()
+
+    def test_dsa_rp_relaxes_pipeline_only_after_strict_no_fit(self, tmp_path):
+        """A capacity-forced pipeline reuse emits PH-DSA-001 after actual overlap."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
+
+        with passes.PassContext(
+            [passes.ReportInstrument(str(tmp_path))],
+            memory_planner=passes.MemoryPlanner.DSA_RP,
+        ):
+            After = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
+
+        offsets = self._collect_offsets(After, ("r0", "r1"))
+        assert offsets["r0"] == offsets["r1"]
+        text = (tmp_path / "perf_hints.log").read_text()
+        assert "PH-DSA-001" in text
+        assert "1 of 1 relaxed pair(s) reuse physical storage" in text
+        assert "pipeline_membership" not in ir.python_print(After)
 
     def test_finds_max_affordable_double_buffer_depth(self):
         """Depth-aware: a 3-stage group whose full separation (3 x 32 = 96 KB)

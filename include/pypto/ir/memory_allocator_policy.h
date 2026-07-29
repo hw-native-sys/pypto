@@ -62,8 +62,8 @@ class MemoryAllocatorPolicy {
    * @brief Order MemRefs within a single memory space before allocation
    *
    * The allocation pass calls this to sort the MemRef vector for a space
-   * before assigning sequential addresses.  The default strategy sorts
-   * by MemRef id for deterministic output.
+   * before assigning sequential addresses. The default strategy sorts
+   * by MemRef name for deterministic output.
    *
    * @param refs Mutable vector of MemRefs to sort in-place
    */

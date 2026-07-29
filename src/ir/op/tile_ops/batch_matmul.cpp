@@ -278,6 +278,7 @@ TypePtr DeduceTileBatchMatMulAccType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.batch_matmul")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description("Batch matrix multiplication of two tiles with broadcasting")
     .add_argument("lhs", "Left-hand side tile (TileType, at least 2D)")
     .add_argument("rhs", "Right-hand side tile (TileType, at least 2D)")

@@ -85,7 +85,34 @@ program_tiled = l0_tile_pass(program)
 - **stationarity（常驻方向）** `{output, A, B}` —— 哪个操作数在 L0 网格上被钉住（常驻）。它**推导出**各操作数的双缓冲深度（`dbA`/`dbB`）：移动的操作数双缓冲（深度 2），常驻的单缓冲（深度 1）。它们不被独立搜索。
 - **dbC** `{1, 2}` —— 是否对 L0C 累加器做双缓冲，以便把 FIXPIPE drain 与下一个 tile 的计算重叠。
 
-一个**可实现掩码（realizable mask）**（即 `allow_a_stationary` / `allow_b_stationary` / `allow_double_buffer_c` 这些配置开关）把**被枚举并发射**的设计点限制为已有 lowering 支持的那些——被关闭的轴**不会**被探索（也不打分）；打开某个开关即把对应设计点加入搜索。本 pass 打开 **A/B-stationary** 开关：被钉住的操作数在整个移动网格上以**单缓冲**形式占满 L0 缓冲（`k == K`），由 `BuildFullKPipelined` 中的 `ForKind::Sequential` 外层循环实现（外层若用 `Pipeline` 会把被钉操作数双缓冲 → 2× 满 L0 预算 → 溢出）。因此本 pass 发射 **output-stationary 或 operand-stationary**。**dbC=2**（双累加器 L0C ping-pong：tile *i* 的 FIXPIPE drain 与 tile *i+1* 的 MAD 重叠）在 `memory_planner=PTOAS` 下无条件打开，在 PyPTO planner 下作为**实验性开关**打开（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭，待设备验证数值与 drain 掩盖收益）：`cfg.allow_double_buffer_c = ptoas_planner || (pypto_planner && flag)`。两种 planner 下都由 `BuildFullKPipelined` 给移动循环打上 `kPipelineDoubleBufferCAttr`，`CanonicalizeIOOrder` 把**两个** store 都浮到**两个** matmul 之下（`matmul, matmul, store, store`——共存生命周期，而非默认的 `matmul, store, …` 不相交生命周期）。两个共存累加器随后按 planner 以不同方式在分配阶段存活：**PTOAS** 下因为它跳过 `MemoryReuse`（`InitMemRef` 给两个 stage 分配不同的 L0C 基址，ptoas 再放到不同 offset）；**PyPTO** 下因为 [`LowerPipelineLoops`](28-lower_pipeline_loops.md) 给 dbC 累加器一个**扁平 depth-2** 的 `pipeline_membership`——只有移动（dbC）循环给它打标记，外层循环跳过它（因为 cube 串行化 MAD）——于是 `MemoryReuse` 的容量门控（#1475）恰好分配两块共存 L0C 缓冲，而不再合并它们（后者是其原本行为，会把 tile 缩到 L0C/2 且没有第二块缓冲）。dbC=2 要求 full-K 且 ≥2×2 网格；Mat-scratch（`Acc→Mat`，`tile.assemble`）的 drain 以同样方式浮动。若 `PassManager` 在一个 planner 下构造却在另一个下运行，会**显式报错**（pass 列表的 `MemoryReuse`-跳过与 chooser 的 dbC 门控必须一致）。代价模型的公式本身与这些开关无关。参见 [`29-canonicalize_io_order.md`](29-canonicalize_io_order.md) 的共存浮动，以及运行时设备验证的数值与 `{0, L0C/2}` 两个不同 offset。
+一个**可实现掩码（realizable mask）**（即 `allow_a_stationary` /
+`allow_b_stationary` / `allow_double_buffer_c`）把被枚举和发射的设计点限制为
+已有 lowering 支持的那些；关闭的轴不参与打分。本 pass 打开
+**A/B-stationary**：被钉住的操作数在移动网格上以**单缓冲**形式常驻
+（`k == K`），由 `BuildFullKPipelined` 的 `ForKind::Sequential` 外层循环实现；
+若外层流水化，则需要两倍的满 L0 预算。
+
+**dbC=2** 是双累加器 L0C ping-pong，即 tile *i* 的 FIXPIPE drain 与 tile
+*i+1* 的 MAD 重叠。它在 `memory_planner=PTOAS` 下无条件开启；对 PyPTO 自己
+管理的 `PYPTO` 与 `DSA_RP` 两种 planner，则都是实验性显式开关
+（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭）。
+`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`，
+`CanonicalizeIOOrder` 把两个 store 都浮到两个 matmul 之后
+（`matmul, matmul, store, store`），从而让两个累加器生命周期共存。
+
+三种 planner 以不同方式保留该意图。对符合条件的 PTOAS 流水线，
+[`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) 把各 stage 表示成同一分配的
+slot；被拒绝的循环继续交给 [`LowerPipelineLoops`](28-lower_pipeline_loops.md)，
+PTOAS 自行把对应 stage buffer 放到不同 offset。`PYPTO` 使用
+`LowerPipelineLoops` 发出的扁平 depth-2 `pipeline_membership`，由
+`MemoryReuse` 的容量门控（#1475）在可负担深度内保持 buffer 分离。`DSA_RP`
+也跳过 `MemoryReuse`；它把流水线 stage 分离表示为硬约束，
+先运行有界严格搜索，仅当该搜索未找到满足容量的放置时才把流水线意图分离放宽为软
+惩罚。dbC=2 要求 full-K 且 ≥2×2 网格；Mat-scratch（`Acc→Mat`，
+`tile.assemble`）的 drain 也以相同方式浮动。若 `PassManager` 在一个 planner
+下构造却在另一个下运行，会显式报错，因为 pass 列表与 chooser gate 必须一致。
+代价模型公式本身与 gate 无关。共存浮动与 `{0, L0C/2}` 不同 offset 的运行时验证
+见 [`29-canonicalize_io_order.md`](29-canonicalize_io_order.md)。
 
 上段的 full-K 与 ≥2×2 限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
 

@@ -40,7 +40,7 @@ def _run_passes(program, planner: passes.MemoryPlanner):
 def _emit_pto(program, planner: passes.MemoryPlanner) -> str:
     """Run the default pipeline under `planner` and return the emitted PTO MLIR."""
     optimized = _run_passes(program, planner)
-    emit_tile_addr = planner == passes.MemoryPlanner.PYPTO
+    emit_tile_addr = planner != passes.MemoryPlanner.PTOAS
     result = codegen.PTOCodegen().generate(optimized, emit_tile_addr=emit_tile_addr)
     return result if isinstance(result, str) else "".join(result.values())
 
@@ -55,7 +55,7 @@ def _emit_incore_pto(program, planner: passes.MemoryPlanner) -> str:
     incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
     assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
     single = _ir.Program([incore[0]], incore[0].name, optimized.span)
-    return codegen.PTOCodegen().generate(single, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
+    return codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
 
 
 def _sole_line(mlir: str, needle: str) -> str:
@@ -118,9 +118,10 @@ def test_reserve_buffer_defers_base_to_ptoas():
         assert "base" not in line, line
 
 
-def test_reserve_buffer_bakes_resolved_base_under_pypto_planner():
-    """Default planner: AllocateMemoryAddr resolves `base`, emitted as manual mode."""
-    mlir = _emit_pto(AutoReserveBufferProgram, passes.MemoryPlanner.PYPTO)
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_reserve_buffer_bakes_resolved_base_under_pypto_planner(planner):
+    """PyPTO-owned planners resolve `base` and emit manual mode."""
+    mlir = _emit_pto(AutoReserveBufferProgram, planner)
     for name in ("c2v_slot_buffer", "v2c_slot_buffer"):
         line = _sole_line(mlir, f'pto.reserve_buffer {{name = "{name}"')
         assert "auto = false" in line, line
@@ -146,6 +147,21 @@ class SubviewReshapeProgram:
         v: pl.Tile[[VALID, D], pl.FP32] = pl.tile.slice(t, [VALID, D], [0, 0])
         r: pl.Tile[[1, VALID * D], pl.FP32] = pl.reshape(v, [1, VALID * D])
         return pl.store(r, [0, 0], out)
+
+
+@pl.program
+class NonzeroSubviewProgram:
+    """A nonzero row slice whose MemRef keeps a relative byte offset."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[8, 8], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 8], pl.FP32]],
+    ) -> pl.Tensor[[2, 8], pl.FP32]:
+        src: pl.Tile[[8, 8], pl.FP32] = pl.load(x, [0, 0], [8, 8])
+        sub: pl.Tile[[2, 8], pl.FP32] = pl.tile.slice(src, [2, 8], [3, 0])
+        return pl.store(sub, [0, 0], out)
 
 
 def _result_type(op_line: str) -> str:
@@ -176,11 +192,37 @@ def test_reshape_of_subview_annotates_the_subview_def_type():
     assert _operand_type(treshape) == _result_type(subview), f"{subview}\n{treshape}"
 
 
-def test_reshape_of_subview_folds_away_under_pypto_planner():
-    """Default planner: the reshape result is pre-declared at the shared baked
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_reshape_of_subview_folds_away_under_pypto_planner(planner):
+    """PyPTO-owned planners pre-declare the result at the shared baked
     address, so it is a re-view and no `pto.treshape` is emitted at all."""
-    mlir = _emit_pto(SubviewReshapeProgram, passes.MemoryPlanner.PYPTO)
+    mlir = _emit_pto(SubviewReshapeProgram, planner)
     assert "pto.treshape" not in mlir, mlir
+
+
+def test_dsa_rp_writeback_preserves_nonzero_view_offset():
+    """Physical placement shifts a view by its original relative byte offset."""
+
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+        optimized = passes.allocate_memory_addr()(
+            passes.materialize_semantic_aliases()(passes.init_mem_ref()(NonzeroSubviewProgram))
+        )
+    function = next(f for f in optimized.functions.values() if f.name == "kernel")
+    offsets: dict[str, int] = {}
+
+    class _Collector(_ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            tile_type = stmt.var.type
+            if isinstance(tile_type, _ir.TileType) and tile_type.memref is not None:
+                offset = tile_type.memref.byte_offset_
+                assert isinstance(offset, _ir.ConstInt)
+                offsets[stmt.var.name_hint] = offset.value
+            super().visit_assign_stmt(stmt)
+
+    _Collector().visit_stmt(function.body)
+    assert offsets["sub"] - offsets["src"] == 3 * 8 * 4
 
 
 # ── reinterpret_view: byte-preserving treshape ──────────────────────────────

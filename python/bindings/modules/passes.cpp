@@ -12,15 +12,17 @@
 #include "pypto/ir/transforms/passes.h"
 
 #include <nanobind/nanobind.h>
-#include <nanobind/stl/function.h>
-#include <nanobind/stl/shared_ptr.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/vector.h>
+#include <nanobind/stl/function.h>    // NOLINT(misc-include-cleaner) -- registers std::function casters
+#include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
+#include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
+#include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers std::vector casters
 
 #include <string>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
@@ -28,6 +30,7 @@
 #include "pypto/ir/verifier/diagnostic_check_registry.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace nb = nanobind;
 
@@ -156,6 +159,8 @@ void BindPass(nb::module_& m) {
   nb::enum_<MemoryPlanner>(passes, "MemoryPlanner", "Selects who plans on-chip buffer memory")
       .value("PYPTO", MemoryPlanner::PyPTO,
              "PyPTO's AllocateMemoryAddr bakes physical addresses (ptoas --pto-level=level3)")
+      .value("DSA_RP", MemoryPlanner::DsaRP,
+             "PyPTO's in-tree DSA planner minimizes recognized reuse penalties within capacity")
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
 
@@ -321,7 +326,7 @@ void BindPass(nb::module_& m) {
              "Create the semantic must-alias materialization pass\n\n"
              "Propagates loop-carried iter_arg/initValue MemRefs down the yield/producer chain so\n"
              "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
-             "so it can run without the opportunistic lifetime-reuse phase (memory_planner=PTOAS).");
+             "so it can run without legacy opportunistic reuse (memory_planner=DSA_RP or PTOAS).");
 
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"

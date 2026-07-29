@@ -152,6 +152,9 @@ set(PYPTO_SOURCES
     src/ir/arith/int_set.cpp
 
     # IR - Transforms
+    src/ir/transforms/dsa/dsa_reuse_penalty_solver.cpp
+    src/ir/transforms/dsa/memref_dsa_adapter.cpp
+    src/ir/transforms/dsa/reuse_penalty_recognizer.cpp
     src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/canonicalize_tile_slice_pass.cpp
     src/ir/transforms/fold_no_op_reshape_pass.cpp
@@ -313,3 +316,10 @@ set(PYPTO_SOURCES
 
 # Include Python bindings
 add_subdirectory(python/bindings)
+
+# The IR-free DSA-RP solver has a small native test that does not require the
+# Python extension or a device runtime. Skip it when building a wheel.
+include(CTest)
+if(BUILD_TESTING AND NOT SKBUILD_MODE)
+    add_subdirectory(tests/ut/cpp)
+endif()

@@ -4,17 +4,30 @@ Assigns real memory addresses to existing alloc operations.
 
 ## Overview
 
-This pass allocates concrete memory addresses for non-DDR MemRefs and updates the existing `tile.alloc` statements in place. It also resolves `system.reserve_buffer(base=AUTO)` to explicit base addresses before PTO code generation. Unlike creating new alloc operations, this pass only modifies the address field of alloc statements that were created by InitMemRef (with `addr=-1`).
+This pass allocates concrete memory addresses for non-DDR MemRefs and updates
+the existing `tile.alloc` statements in place. It also resolves
+`system.reserve_buffer(base=AUTO)` before PTO code generation. Address
+placement is selected by `MemoryPlanner`:
+
+- `PYPTO` uses the deterministic sequential allocator after `MemoryReuse`.
+- `DSA_RP` constructs and solves capacity-constrained dynamic storage
+  allocation with reuse penalties in process.
+- `PTOAS` skips this pass and leaves address assignment to ptoas.
 
 **Key responsibilities**:
 
 - Collect unique MemRef objects from TileType variables
 - Resolve `system.reserve_buffer` bases to explicit addresses per function
-- Allocate sequential, 32-byte aligned addresses within each memory space
+- Allocate aligned addresses within each independent memory space
+- Under `DSA_RP`, preserve correctness constraints and minimize recognized
+  costly reuse among capacity-fitting placements
 - Update MemRef addresses in all variable types
 - Update `tile.alloc` statement arguments with the allocated addresses
 
-**When to use**: Run after MemoryReuse (to respect shared MemRefs) and before code generation. Final pass in memory management pipeline.
+**When to use**: Final memory-management pass before code generation. Under
+`PYPTO` it runs after `MemoryReuse`; under `DSA_RP`, `MemoryReuse` is skipped
+and this pass consumes the allocation identities from
+`MaterializeSemanticAliases`.
 
 ## API
 
@@ -37,22 +50,87 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
+Select the opt-in DSA-RP mode at compilation:
+
+```python
+from pypto.ir import compile
+from pypto.pypto_core import passes
+
+compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
+```
+
 ## Algorithm
 
-1. **Collect MemRefs**: Traverse function body to find all unique MemRef objects from TileType variables
-2. **Group by memory space**: Organize MemRefs by memory space (Vec, Mat, Left, Right, Acc)
-3. **Resolve reserve buffers**: For each function, scan `system.reserve_buffer` calls, assign explicit bases to AUTO buffers, and compute the reserved end address per memory space
-4. **Allocate addresses**: For each memory space, delegate to a `MemoryAllocatorPolicy` to filter spaces, order MemRefs, and align addresses. The default policy sorts by ID, uses 32-byte alignment, and starts from the reserved end (or `0`)
-5. **Update in place**: Use `MemRefUpdateMutator` to:
+1. **Collect MemRefs**: Traverse the function and collect unique allocation
+   identities and their views.
+2. **Resolve reserve buffers**: Assign explicit bases to AUTO reservations and
+   exclude their ranges from ordinary placement.
+3. **Select placement**:
+   - `PYPTO`: sort MemRefs by name and allocate sequential aligned addresses.
+   - `DSA_RP`: build the in-memory problem described below and run canonical
+     greedy.
+4. **Update in place**: Use `MemRefUpdateMutator` to:
    - Replace old MemRef references in variable types (TileType/TensorType) with new MemRefs containing real addresses
    - Update existing `tile.alloc` `AssignStmt`s: replace LHS MemRef and update addr argument in the Call expression
    - Rewrite `system.reserve_buffer` kwargs with the resolved explicit `base`
 
-**Address allocation (default policy)**:
+### DSA-RP policy
+
+Each on-chip memory space is an independent fixed-capacity arena. One
+post-alias allocation identity becomes one buffer with byte size, alignment,
+and a conservative half-open lifetime. The problem has:
+
+- **hard constraints** for lifetime interference, reserved ranges, semantic
+  no-alias rules, target hazards, incompatible Vec ND/NZ storage layouts, and
+  requested pipeline-stage separation;
+- **soft unit-weight pairs** for lifetime-compatible physical reuse that the
+  built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
+- a hard arena-capacity bound. Capacity and correctness are never traded for a
+  lower reuse cost.
+
+Recognition is conservative. It requires complete access information,
+full-allocation handoff endpoints, and a verified initial write. Same-resource,
+partial-view, or uncertain cases receive no penalty. Source/destination memory
+classes identify abstract execution resources; the recognizer does not invoke
+or simulate ptoas.
+
+Canonical greedy tries offset zero, reserved-range ends, and aligned tops of
+already placed hard or soft neighbors. For each buffer it chooses the candidate
+with the lowest incremental penalty, then the lowest address. It evaluates
+several deterministic orders and retains a feasible penalty-blind first-fit
+placement as an incumbent. Every selected placement is checked by an
+independent validator before writeback.
+
+Pipeline intent uses a strict-then-soft policy:
+
+1. Run the bounded canonical-greedy search with every requested cross-stage
+   pipeline separation hard.
+2. If that search finds no fitting placement—this is not a proof that the
+   strict mathematical problem is infeasible—relax only pairs whose sole hard
+   reason is pipeline intent, add unit reuse penalties for them, and search
+   again.
+3. If the selected placement overlaps a relaxed pair, emit the
+   `PH-DSA-001` performance diagnostic. All semantic and target-hazard
+   separations remain hard. If the relaxed bounded search also finds no fit,
+   report a compile-time OOM/no-fit error; this remains a search failure, not
+   an infeasibility certificate.
+
+> **Toolchain requirement:** `DSA_RP` relies on ptoas InsertSync recognizing
+> physical range overlap across distinct allocation roots. That support is
+> provided by [PTOAS PR #948](https://github.com/hw-native-sys/PTOAS/pull/948)
+> or its merged/released equivalent. The currently pinned ptoas v0.48 lacks it,
+> so this PyPTO branch is stacked on that change and is blocked from production
+> rollout until the toolchain pin is updated.
+
+The model, recognizer, solver, validation, and writeback are all in-process.
+`DSA_RP` exposes no problem export, placement replay, reference-placement, or
+profiling interface.
+
+### Sequential `PYPTO` policy
 
 - Each memory space has its own address space starting from 0 unless `system.reserve_buffer` already reserved a leading window in that space
 - Addresses are 32-byte aligned: `next_addr = align32(current_addr + size)`
-- MemRefs are sorted by ID for deterministic allocation order
+- MemRefs are sorted by name for deterministic allocation order
 - DDR MemRefs are skipped (addresses managed externally)
 
 **View MemRefs (slices) share one slot**:
@@ -63,7 +141,7 @@ Backends can override these defaults by supplying a custom `MemoryAllocatorPolic
 
 ## Example
 
-### Before (after InitMemRef + MemoryReuse)
+### Before (after the selected reuse analysis)
 
 ```python
 # SeqStmts [
@@ -113,6 +191,9 @@ Pass AllocateMemoryAddr();
 
 - `MemRefCollectorVisitor` collects unique MemRefs from TileType variables
 - `AllocateMemoryAddresses` assigns sequential aligned addresses per memory space using a `MemoryAllocatorPolicy`
+- `dsa_adapter::BuildProblem` derives the narrow in-memory DSA-RP model
+- `dsa::CanonicalGreedySolver` searches capacity-fitting placements and
+  `dsa::ValidateSolution` independently checks the result
 - `MemRefUpdateMutator` updates both variable types and `tile.alloc` statement arguments in a single traversal
 
 **Python binding**: `python/bindings/modules/passes.cpp`
@@ -122,7 +203,10 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
            "Allocates real memory addresses for existing alloc operations.");
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_allocate_memory_addr_pass.py`
+**Tests**:
+`tests/ut/ir/transforms/test_allocate_memory_addr_pass.py`,
+`tests/ut/ir/transforms/test_dsa_reuse_penalty_recognizer.py`, and
+`tests/ut/cpp/dsa_reuse_penalty_solver_test.cpp`
 
 - Tests address allocation with 32-byte alignment
 - Tests multiple MemRef allocations
@@ -131,6 +215,9 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
+- Tests DSA-RP geometry, capacity, hard constraints, penalty activation,
+  deterministic canonical-greedy placement, and independent validation
+- Tests promoted and filtered cross-resource reuse hazards
 
 ## Allocation Policy
 
@@ -152,11 +239,11 @@ class MemoryAllocatorPolicy {
 | ------ | ------- | ---------------- |
 | `ShouldAllocate` | Filter which memory spaces receive addresses | Skip DDR; allocate all on-chip spaces |
 | `AlignAddress` | Align a raw address for a given space | 32-byte alignment |
-| `OrderMemRefs` | Sort MemRefs within a space before allocation | Ascending by `MemRef::id_` |
+| `OrderMemRefs` | Sort MemRefs within a space before allocation | Ascending by `MemRef::name_hint_` |
 
 ### Default policy
 
-`DefaultMemoryAllocatorPolicy` preserves the original hard-coded behavior (skip DDR, 32-byte alignment, sort by ID).
+`DefaultMemoryAllocatorPolicy` preserves the original hard-coded behavior (skip DDR, 32-byte alignment, sort by name).
 
 ### Backend override
 

@@ -217,9 +217,11 @@ class RunConfig:
         memory_planner: Who plans on-chip buffer memory —
             :attr:`~pypto.pypto_core.passes.MemoryPlanner.PYPTO` (PyPTO runs
             ``MemoryReuse`` + ``AllocateMemoryAddr`` and bakes physical
-            addresses) or ``PTOAS`` (those passes are skipped and ptoas
-            ``PlanMemory`` owns reuse and addressing). ``None`` (default) defers
-            to the active ``PassContext``, or to ``PYPTO`` when none is active.
+            addresses), ``DSA_RP`` (PyPTO runs its in-tree
+            capacity-constrained DSA-RP planner), or ``PTOAS`` (the PyPTO
+            allocation passes are skipped and ptoas ``PlanMemory`` owns reuse
+            and addressing). ``None`` (default) defers to the active
+            ``PassContext``, or to ``PYPTO`` when none is active.
             Forwarded to ``ir.compile()``, which rejects it when a
             ``PassContext`` is already active — set it on that context instead.
     """
@@ -497,6 +499,7 @@ def run(
         platform=config.platform,
         profiling=config.compile_profiling,
         analyze_auto_scopes_for_deps=config.analyze_auto_scopes_for_deps,
+        memory_planner=config.memory_planner,
     )
 
     if tensors and not config.codegen_only:

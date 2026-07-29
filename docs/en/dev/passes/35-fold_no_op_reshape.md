@@ -6,8 +6,8 @@ IR before PTO codegen.
 
 ## Overview
 
-After `MemoryReuse` runs, the LHS and RHS of a `tile.reshape` may
-already point at the same `MemRef` root *and* carry identical
+After the selected memory planner finalizes MemRefs, the LHS and RHS of a
+`tile.reshape` may already point at the same `MemRef` root *and* carry identical
 `TileBufSignature`s. In that case the reshape is a no-op at the PTO level —
 the per-var alloc model has pre-declared LHS with the same shape, layout,
 fractal, valid-shape and pad as RHS, and they share a memory address. There
@@ -37,14 +37,15 @@ cases, knowing the no-op cases were already removed upstream.
 - `IRProperty::IncoreTileOps` — InCore functions use tile types
 - `IRProperty::HasMemRefs` — `MemRef` slots populated by `InitMemRef`
 - `IRProperty::TileOps2D` — tile ops are at most 2D
-- The pass requires `MemoryReuse` to have run so that
-  view-merging decisions are reflected on the canonical alloc — otherwise
-  LHS and RHS may not yet share a `MemRef` even though they should.
+- The pass requires `AllocateMemoryAddr` to have run so planner-specific
+  view-merging decisions are reflected on the canonical alloc — otherwise LHS
+  and RHS may not yet share a `MemRef` even though they should.
 - Only InCore-type functions (`InCore`, `AIC`, `AIV`) are scanned; Opaque
   and Orchestration functions are returned unchanged.
 
 **When to use**: 35th pass in the `Default` strategy, immediately after
-`AllocateMemoryAddr` (so `MemRef` merging is finalized) and before
+`AllocateMemoryAddr` (so planner-specific
+`MemRef` decisions are finalized) and before
 `FuseCreateAssembleToSlice`.
 
 ## API
@@ -98,7 +99,7 @@ whose LHS/RHS differ in any of those four ways — those cases require real
 
 ```python
 # Before pass (TileBufSignature equal on both sides; same MemRef R after
-# MemoryReuse)
+# the selected memory planner)
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(x, out):
     a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec, MemRef(R)] = pl.tile.load(x, ...)

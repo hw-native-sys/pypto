@@ -7,14 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the ``memory_planner`` switch (PyPTO vs ptoas PlanMemory).
+"""Unit tests for the ``memory_planner`` switch.
 
-Two coupled behaviours are exercised:
+The three product modes exercise different ownership boundaries:
 
-1. ``MemoryPlanner.PTOAS`` makes ``PassManager`` skip the PyPTO on-chip
+1. ``MemoryPlanner.DSA_RP`` keeps planning in PyPTO, skips legacy
+   ``MemoryReuse``, and runs the in-tree DSA-RP allocator.
+2. ``MemoryPlanner.PTOAS`` makes ``PassManager`` skip the PyPTO on-chip
    allocation passes (``MemoryReuse`` + ``AllocateMemoryAddr``) so the ptoas
    ``PlanMemory`` pass owns allocation instead.
-2. ``PTOCodegen.generate(..., emit_tile_addr=False)`` omits the physical
+3. ``PTOCodegen.generate(..., emit_tile_addr=False)`` omits the physical
    ``addr`` operand on ``pto.alloc_tile`` (required at ptoas
    ``--pto-level=level2``, which rejects any ``addr`` operand).
 
@@ -162,9 +164,10 @@ def test_pass_context_default_planner_is_pypto():
     assert ctx.get_memory_planner() == passes.MemoryPlanner.PYPTO
 
 
-def test_pass_context_planner_round_trip():
-    ctx = passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS)
-    assert ctx.get_memory_planner() == passes.MemoryPlanner.PTOAS
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
+def test_pass_context_planner_round_trip(planner):
+    ctx = passes.PassContext([], memory_planner=planner)
+    assert ctx.get_memory_planner() == planner
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +181,14 @@ def test_pypto_pipeline_runs_allocation_passes():
     assert "AllocateMemoryAddr" in pass_names
     assert "InitMemRef" in pass_names
     assert "MaterializeSemanticAliases" in pass_names
+
+
+def test_dsa_rp_pipeline_replaces_legacy_reuse_but_assigns_addresses():
+    _, pass_names = _run_pipeline(passes.MemoryPlanner.DSA_RP)
+    assert "InitMemRef" in pass_names
+    assert "MaterializeSemanticAliases" in pass_names
+    assert "MemoryReuse" not in pass_names
+    assert "AllocateMemoryAddr" in pass_names
 
 
 def test_ptoas_pipeline_skips_reuse_keeps_semantic_aliases():
@@ -203,6 +214,16 @@ def test_pypto_codegen_emits_alloc_tile_addr():
     assert alloc_lines, f"expected at least one pto.alloc_tile:\n{mlir}"
     assert any("addr =" in line for line in alloc_lines), (
         f"PYPTO mode must bake a physical addr on pto.alloc_tile:\n{mlir}"
+    )
+
+
+def test_dsa_rp_codegen_emits_alloc_tile_addr():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA_RP)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    assert alloc_lines, f"expected at least one pto.alloc_tile:\n{mlir}"
+    assert all("addr =" in line for line in alloc_lines), (
+        f"DSA_RP mode must bake every physical address:\n{mlir}"
     )
 
 
@@ -254,9 +275,35 @@ def test_pypto_loop_carry_uses_shared_addr():
     assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
 
 
-@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA_RP, LoopCarriedAdd)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    tadd = next((ln for ln in mlir.splitlines() if "pto.tadd" in ln), None)
+    assert tadd is not None, f"expected a pto.tadd:\n{mlir}"
+    ins = tadd.split("ins(")[1].split(")")[0]
+    out = tadd.split("outs(")[1].split(")")[0]
+    out_handle = out.split(":")[0].strip()
+    in_handles = [tok.strip() for tok in ins.split(":")[0].split(",")]
+    alloc_lines = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln]
+    assert alloc_lines and all("addr =" in ln for ln in alloc_lines)
+    addr_by_handle = {line.split("=")[0].strip(): line.split("addr =")[1].split()[0] for line in alloc_lines}
+    assert out_handle in addr_by_handle
+    assert any(
+        handle in addr_by_handle and addr_by_handle[handle] == addr_by_handle[out_handle]
+        for handle in in_handles
+    ), f"DSA_RP must place the loop-carried input and output at one physical address:\n{mlir}"
+
+
+@pytest.mark.parametrize(
+    "planner",
+    [
+        passes.MemoryPlanner.PYPTO,
+        passes.MemoryPlanner.DSA_RP,
+        passes.MemoryPlanner.PTOAS,
+    ],
+)
 def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner):
-    """Both planners accept the extended Mat/L0A lifetime and emit one LHS load."""
+    """All planners accept the extended Mat/L0A lifetime and emit one LHS load."""
     optimized, _ = _run_pipeline(planner, StationaryMatmulLoop)
     printed = ir.python_print(optimized)
     lines = printed.splitlines()
@@ -276,16 +323,24 @@ def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner):
 
     # Codegen is the end-to-end allocation gate. PyPTO must emit resolved
     # addresses; PTOAS must retain auto-placement allocs for PlanMemory.
-    mlir = _codegen(optimized, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
+    emits_addresses = planner != passes.MemoryPlanner.PTOAS
+    mlir = _codegen(optimized, emit_tile_addr=emits_addresses)
     alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
     assert alloc_lines
-    if planner == passes.MemoryPlanner.PYPTO:
+    if emits_addresses:
         assert all("addr =" in line for line in alloc_lines)
     else:
         assert all("addr =" not in line for line in alloc_lines)
 
 
-@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize(
+    "planner",
+    [
+        passes.MemoryPlanner.PYPTO,
+        passes.MemoryPlanner.DSA_RP,
+        passes.MemoryPlanner.PTOAS,
+    ],
+)
 def test_nested_autotile_pipeline_allocates_safely(planner):
     """Resident Mat panel plus loop-local ping/pong allocates under either planner."""
     optimized, _ = _run_pipeline(planner, StationaryMatmulPipelinedK)
@@ -302,10 +357,11 @@ def test_nested_autotile_pipeline_allocates_safely(planner):
     assert len(lhs_extracts) == 2
     assert all(index > k_loop for index in lhs_extracts)
 
-    mlir = _codegen(optimized, emit_tile_addr=planner == passes.MemoryPlanner.PYPTO)
+    emits_addresses = planner != passes.MemoryPlanner.PTOAS
+    mlir = _codegen(optimized, emit_tile_addr=emits_addresses)
     alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
     assert alloc_lines
-    if planner == passes.MemoryPlanner.PYPTO:
+    if emits_addresses:
         assert all("addr =" in line for line in alloc_lines)
     else:
         assert all("addr =" not in line for line in alloc_lines)

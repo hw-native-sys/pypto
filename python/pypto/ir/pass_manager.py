@@ -216,8 +216,8 @@ class PassManager:
             passes.init_mem_ref,
             # MaterializeSemanticAliases forces loop-carried / in-place buffers to
             # share one MemRef (semantics-required aliasing). It always runs; only
-            # the opportunistic lifetime coalescing (MemoryReuse) is skippable when
-            # ptoas owns reuse (memory_planner=PTOAS).
+            # legacy opportunistic coalescing is skipped when DSA_RP or PTOAS owns
+            # lifetime reuse.
             passes.materialize_semantic_aliases,
             # MemoryReuse coalesces independent tile buffers by lifetime; on
             # Ascend910B split-AIV it also avoids the load + tpop_from_aic in-place
@@ -308,26 +308,32 @@ class PassManager:
         self.strategy = strategy
         self.analyze_auto_scopes_for_deps = analyze_auto_scopes_for_deps
 
-        # When the active PassContext selects ptoas as the memory planner, skip
-        # the opportunistic lifetime reuse (MemoryReuse) and address assignment
-        # (AllocateMemoryAddr) so ptoas PlanMemory owns them (codegen emits no
-        # `pto.alloc_tile addr` and ptoas runs at --pto-level=level2).
+        # DSA_RP consumes the allocation identities produced by
+        # MaterializeSemanticAliases and performs lifetime reuse itself in
+        # AllocateMemoryAddr, so it skips only the legacy MemoryReuse pass.
+        # PTOAS skips both legacy reuse and address assignment.
         # MaterializeSemanticAliases still runs, so semantics-required aliasing
         # (loop-carried accumulators, in-place ops) is preserved as a shared
         # MemRef that codegen renders as one tile_buf handle — ptoas cannot
         # recover that from independent addr-less allocs. Read here because
         # __init__ runs inside the compile() PassContext (see compile.py).
         ctx = passes.PassContext.current()
-        # The construction-time planner fixes the pass LIST (MemoryReuse +
-        # AllocateMemoryAddr are dropped only for PTOAS). PTOAS-gated pass *behaviour*
+        # The construction-time planner fixes the pass list: DSA_RP drops
+        # MemoryReuse, while PTOAS drops MemoryReuse + AllocateMemoryAddr.
+        # Planner-gated pass behaviour
         # (AutoTileMatmulL0's dbC=2) reads the planner again at execution time, so
         # run_passes re-asserts the run-time planner still matches this one — otherwise a
         # PassManager built outside PTOAS but run inside a PTOAS context would keep
         # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
         # into one shrunk single-buffer tile (see _check_planner_consistency).
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
-        skip_mem_planning = self._construction_planner == passes.MemoryPlanner.PTOAS
-        _mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
+        skipped_mem_planning_passes: tuple[str, ...]
+        if self._construction_planner == passes.MemoryPlanner.PTOAS:
+            skipped_mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
+        elif self._construction_planner == passes.MemoryPlanner.DSA_RP:
+            skipped_mem_planning_passes = ("MemoryReuse",)
+        else:
+            skipped_mem_planning_passes = ()
 
         # The C++ pipeline is the single source of truth for both pass objects
         # and names. Strategy recipes contain factories only; names always come
@@ -339,7 +345,7 @@ class PassManager:
         )
         for pass_factory in pass_factories:
             pass_obj = pass_factory()
-            if skip_mem_planning and pass_obj.get_name() in _mem_planning_passes:
+            if pass_obj.get_name() in skipped_mem_planning_passes:
                 continue
             self._pipeline.add_pass(pass_obj)
 
@@ -356,15 +362,13 @@ class PassManager:
     def _check_planner_consistency(self) -> None:
         """Fail loud if the run-time memory planner differs from the construction-time one.
 
-        The pass LIST is fixed at construction: ``MemoryReuse`` / ``AllocateMemoryAddr``
-        are dropped iff the construction-time ``PassContext`` selected PTOAS. But
-        PTOAS-gated pass *behaviour* — ``AutoTileMatmulL0``'s dbC=2 selection — reads
-        ``GetMemoryPlanner()`` at *execution* time. If a PassManager built outside PTOAS
-        is then run inside a PTOAS context, the pipeline still contains ``MemoryReuse``
-        yet the chooser selects dbC=2, so ``MemoryReuse`` coalesces the two co-live L0C
-        accumulators into one — a shrunk single-buffer tile, the exact regression dbC=2
-        exists to avoid. ``compile()`` builds and runs under the same context, so this
-        never fires there; it guards misuse (build under one planner, run under another).
+        The pass list is fixed at construction: DSA_RP drops ``MemoryReuse`` and
+        PTOAS also drops ``AllocateMemoryAddr``. Planner-gated pass behaviour,
+        including ``AutoTileMatmulL0``'s dbC=2 selection, reads
+        ``GetMemoryPlanner()`` at execution time. Constructing under one planner
+        and running under another would therefore combine the wrong pass list
+        with the chosen lowering. ``compile()`` builds and runs under one
+        context, so this guard only catches direct PassManager misuse.
         """
         ctx = passes.PassContext.current()
         run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO

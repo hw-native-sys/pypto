@@ -15,7 +15,23 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 - Lifetime is determined by def-use analysis
 - After sharing, MemRefs that become unreferenced are cleaned up along with their alloc statements
 
-**When to use**: Run after [`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) and before AllocateMemoryAddr. Reduces memory allocation overhead. This pass does the *opportunistic* lifetime coalescing only; the *semantics-required* must-alias retarget (loop-carry / in-place — this pass's former "Step 0") now runs in `MaterializeSemanticAliases`, so `MemoryReuse` can be skipped independently (e.g. `memory_planner=PTOAS`, where ptoas owns lifetime reuse).
+**When to use**: This is the opportunistic reuse stage for
+`MemoryPlanner.PYPTO`. It runs after
+[`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) and before
+[`AllocateMemoryAddr`](34-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
+skips it so independent buffers remain visible to the DSA-RP solver;
+`MemoryPlanner.PTOAS` skips it because ptoas owns lifetime reuse.
+Semantics-required loop-carry and in-place aliases are already materialized by
+`MaterializeSemanticAliases` in all three modes.
+
+## Planner boundary
+
+`MemoryReuse` selects shared MemRef identities before address assignment.
+`DSA_RP` instead keeps those identities separate and jointly chooses their
+addresses under capacity and reuse penalties in `AllocateMemoryAddr`. Running
+both would erase alternatives before DSA-RP can evaluate them. Correctness
+facts collected for this pass—lifetime interference, semantic no-alias rules,
+and target hazards—remain hard constraints in the DSA-RP problem.
 
 ## API
 
@@ -79,6 +95,8 @@ program_optimized = reuse_pass(program)
   | `tile.cast` (widening only) | output ≠ input buffer (conditional, in `ForbidAliasCollector`) | wider output's write cursor outruns the read cursor (see above) |
 
 - **Pipeline-stage guard** (capacity-gated, replication path only): `pl.pipeline(stage=F)` replicates a loop body `F` times for ping-pong, and `LowerPipelineLoops` tags each clone's tile-producing `Call` with a `pipeline_membership` `(group, stage)` (see [28-lower_pipeline_loops.md](28-lower_pipeline_loops.md)). This whole guard is about that replication path. Under `memory_planner=PTOAS` an eligible loop is instead claimed earlier by [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md), which gives each load a `pl.MemRef(..., slots=F)` indexed `iv % F` and leaves one un-replicated body — no clones, no `pipeline_membership`, and MemoryReuse is skipped for that pipeline anyway. Everything that follows describes only the loops that pass declines. The `F` clones run concurrently under the scheduler, so their program-order-disjoint lifetimes are *not* a safe reuse signal — collapsing concurrent clones onto one buffer injects a false write-after-read that serializes the stages (the #1475 cube-matmul-operand collapse). MemoryReuse therefore keeps concurrent clones in **distinct buffers in every memory space** — including the L0 matmul spaces (Left/Right/Acc/Bias), and regardless of whether a tile is a load or a `tile.move` result — up to the **max-affordable double-buffering depth** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`: a clone at stage `k` lands in residue `ordinal(k) mod F_g` (the **dense** stage ordinal, so sparse stage IDs like `{0, 2}` can't collide via raw `2 mod 2 == 0 mod 2`), so concurrent clones never share (full ping-pong when it fits, maximal spread when the space is tight). Whether the separation fits is decided by the **exact per-space allocator footprint** (`SpaceFootprint`, shared with `AllocateMemoryAddr` — parity by construction), not an estimate. When a space still overflows at every group's affordable depth, a **graceful cross-group shed** lowers one group's depth by a residue and re-packs (choosing the group by the `MaxRelief` heuristic — free the most bytes first, ties by lowest group id); if the shed exhausts, the pass re-packs from scratch in a **legacy fallback** (`force_legacy`), so it never overflows where the legacy packing would have fit. A space whose capacity is unknown (no backend configured) uses the legacy predicate, so the capacity-gated path is never worse than legacy. When the gate reduces a group below its requested `stage=` depth (or a space hits the legacy fallback), MemoryReuse emits a diagnostic through the unified channel — a `PH-MR-001` **perf hint** (or a **warning** for the fallback) naming the requested vs achieved depth and the fix (shrink the per-stage tile to `≤ C_s / stage`, or lower `stage=` to what fits) — so a capacity-forced serialization is never silent. Once the reuse decision is made, MemoryReuse strips the now-consumed `pipeline_membership` attr so it does not ride downstream into later passes or codegen.
+- `DSA_RP` skips `MemoryReuse`; it represents requested pipeline depth as hard
+  separations and performs its pipeline-only fallback in `AllocateMemoryAddr`.
 
 **No shape / dtype / TileView compatibility gate**: tiles that share a physical MemRef may carry **different** shapes, dtypes, or `TileView` attributes. PTO codegen binds a per-variable `alloc_tile` to each tile, so each alias declares the shared base with its own static shape / dtype / layout / `valid_shape`. This permits, for example:
 

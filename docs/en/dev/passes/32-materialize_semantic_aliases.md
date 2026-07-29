@@ -17,12 +17,16 @@ Memory planning distinguishes two kinds of buffer sharing:
 
 This pass handles only the **must-alias** case. It was split out of
 [`MemoryReuse`](33-memory_reuse.md) (it is that pass's former "Step 0") so that
-the opportunistic lifetime coalescing can be skipped independently — e.g. when
-ptoas owns lifetime reuse under `compile(memory_planner=MemoryPlanner.PTOAS)`.
+the opportunistic lifetime coalescing can be skipped independently:
+
+- `MemoryPlanner.DSA_RP` keeps independent allocation identities for the
+  in-process DSA-RP solver.
+- `MemoryPlanner.PTOAS` leaves lifetime reuse and address assignment to ptoas.
 
 **When to use**: Run after [`InitMemRef`](31-init_memref.md) (which creates the
-MemRefs) and before [`MemoryReuse`](33-memory_reuse.md). It always runs; only the
-opportunistic reuse is skippable.
+MemRefs) and before the selected memory planner. It always runs. `PYPTO` follows
+it with [`MemoryReuse`](33-memory_reuse.md); `DSA_RP` consumes its allocation
+identities in [`AllocateMemoryAddr`](34-allocate_memory_addr.md).
 
 ## API
 
@@ -59,14 +63,18 @@ PTO codegen renders variables that resolve to the *same* MemRef identity
 (`base` + `byte_offset` + `size`) as a single `tile_buf` handle, so after this
 pass a loop-carried accumulator emits an in-place `pto.tadd ins(%acc, %t)
 outs(%acc)` rather than writing to a distinct `%acc_next` buffer. Under
-`memory_planner=PTOAS` (no physical `addr` baked, `MemoryReuse` skipped) this is
-what lets ptoas `PlanMemory` keep the accumulator in one buffer while still
-doing the lifetime reuse and address assignment itself. See
+`memory_planner=DSA_RP`, each resulting allocation identity becomes one DSA
+buffer; under `memory_planner=PTOAS`, codegen emits that identity without a
+physical address for ptoas `PlanMemory`. See
 [PTO Codegen — Who plans memory](../codegen/00-pto_codegen.md).
 
 ## Notes
 
-- Views/partial-views share a `base` but differ in `byte_offset`/`size`, so they
-  are never merged into a must-alias buffer — only exact same-allocation vars are.
+- Views/partial-views keep their distinct `byte_offset`/`size` metadata. Under
+  `DSA_RP`, all members that share one `base` belong to one physical allocation;
+  placement moves that allocation as a unit and writeback preserves each
+  member's relative offset.
 - In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
-  behavior of the former single `MemoryReuse` pass (byte-identical output).
+  behavior of the former single `MemoryReuse` pass.
+- `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
+  may undo a must-alias relation established by this pass.

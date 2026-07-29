@@ -11,11 +11,13 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -40,10 +42,15 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
+#include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
+#include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -126,6 +133,39 @@ std::string ReservedBytesNote(const ReserveBufferResolution& resolution, MemoryS
         "tile that crosses the cube/vector boundary";
   }
   return note;
+}
+
+class StripPipelineMembershipMutator : public IRMutator {
+ public:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
+                                  StripAttr(call->attrs_, kPipelineMembershipAttr), call->GetType(),
+                                  call->span_);
+  }
+};
+
+bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const Var*>& used_bases) {
+  const auto assign = As<AssignStmt>(stmt);
+  const auto call = assign ? As<Call>(assign->value_) : nullptr;
+  return call && (IsOp(call, "tile.alloc") || IsOp(call, "tensor.alloc")) &&
+         used_bases.count(assign->var_.get()) == 0;
+}
+
+StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body) {
+  const auto used_bases = memref_collectors::CollectUsedBasePtrs(body);
+  const auto sequence = As<SeqStmts>(body);
+  if (!sequence) return body;
+
+  std::vector<StmtPtr> retained;
+  retained.reserve(sequence->stmts_.size());
+  for (const StmtPtr& statement : sequence->stmts_) {
+    if (!IsUnusedAllocStmt(statement, used_bases)) retained.push_back(statement);
+  }
+  return retained.size() == sequence->stmts_.size() ? body
+                                                    : SeqStmts::Flatten(std::move(retained), body->span_);
 }
 
 // Mutator to update MemRef addresses in IR (both variable types and alloc statements)
@@ -454,6 +494,68 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   return memref_pairs;
 }
 
+std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
+    const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
+    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs) {
+  const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
+  if (allocation_plan.intervals.empty()) return {};
+
+  std::unordered_map<MemorySpace, uint64_t> pool_caps;
+  if (backend::BackendConfig::IsConfigured()) {
+    const backend::Backend* active_backend = backend::GetBackend();
+    for (const LifetimeInterval& lifetime : allocation_plan.intervals) {
+      if (pool_caps.count(lifetime.memory_space) != 0) continue;
+      const uint64_t capacity = active_backend->GetMemSize(lifetime.memory_space);
+      if (capacity > 0) pool_caps[lifetime.memory_space] = capacity;
+    }
+  }
+
+  const dsa_adapter::PreparedProblem prepared =
+      dsa_adapter::BuildProblem(func, allocation_plan, policy, reserved_end_by_space, pool_caps);
+  if (prepared.strict_problem.buffers.empty()) return {};
+
+  const dsa::CanonicalGreedySolver solver;
+  dsa::DsaProblem solved_problem = prepared.strict_problem;
+  dsa::DsaResult result = solver.Solve(solved_problem);
+  if (result.status == dsa::SolveStatus::kNoFit && !prepared.pipeline_pairs.empty()) {
+    solved_problem = dsa_adapter::RelaxPipelineIntent(prepared);
+    result = solver.Solve(solved_problem);
+  }
+
+  INTERNAL_CHECK_SPAN(result.status != dsa::SolveStatus::kInvalidProblem, func->span_)
+      << "DSA-RP constructed or produced invalid state for '" << func->name_ << "'"
+      << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
+  CHECK_SPAN(result.status == dsa::SolveStatus::kFeasible, func->span_)
+      << "DSA-RP could not find a placement for '" << func->name_ << "' within the on-chip memory capacities"
+      << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
+  INTERNAL_CHECK_SPAN(result.solution.has_value(), func->span_)
+      << "DSA-RP reported a feasible result without a placement";
+
+  // Revalidate at the compiler boundary even though the in-tree solver
+  // validates its own incumbent. This keeps writeback independent of solver
+  // bookkeeping and catches future solver implementations that violate the
+  // shared solution contract.
+  const std::vector<std::string> validation = dsa::ValidateSolution(solved_problem, *result.solution);
+  INTERNAL_CHECK_SPAN(validation.empty(), func->span_)
+      << "Independent validation rejected DSA-RP placement for '" << func->name_
+      << "': " << validation.front();
+
+  const size_t active_pipeline_pairs =
+      dsa::CountOverlappingPairs(prepared.strict_problem, *result.solution, prepared.pipeline_pairs);
+  if (active_pipeline_pairs != 0) {
+    std::ostringstream message;
+    message << "DSA-RP's bounded strict search did not retain all software-pipeline buffer "
+               "separations for '"
+            << func->name_ << "'; " << active_pipeline_pairs << " of " << prepared.pipeline_pairs.size()
+            << " relaxed pair(s) reuse physical storage. Pipeline overlap may be reduced.";
+    EmitDiagnostics({Diagnostic(DiagnosticSeverity::PerfHint, "AllocateMemoryAddr", 0, "PH-DSA-001",
+                                message.str(), func->span_)},
+                    "AllocateMemoryAddr");
+  }
+
+  return dsa_adapter::BuildMemRefReplacements(prepared, *result.solution, memrefs, policy);
+}
+
 /**
  * @brief Allocate real memory addresses for existing alloc operations
  *
@@ -479,12 +581,21 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
-  // Step 3: Allocate memory addresses using the policy. Declared allocations are
-  // the only ones that may take a dynamic address (a runtime slot index).
-  PinnedAllocCollector pinned_collector;
-  pinned_collector.VisitStmt(func->body_);
-  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy,
-                                              pinned_collector.alloc_sizes, func->name_);
+  const PassContext* context = PassContext::Current();
+  const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
+
+  // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
+  std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
+  if (planner == MemoryPlanner::DsaRP) {
+    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs);
+  } else {
+    // Declared allocations are the only ones that may take a dynamic address
+    // (a runtime slot index).
+    PinnedAllocCollector pinned_collector;
+    pinned_collector.VisitStmt(func->body_);
+    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy,
+                                           pinned_collector.alloc_sizes, func->name_);
+  }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
@@ -502,6 +613,16 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   }
 
   auto new_body = mutator.VisitStmt(func->body_);
+  if (planner == MemoryPlanner::DsaRP) {
+    // DSA-RP consumed the transient stage provenance while constructing its
+    // strict pipeline separations. The legacy planner strips the same
+    // attribute at the end of MemoryReuse.
+    new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+    // MaterializeSemanticAliases can make the producer's original allocation
+    // unreachable. MemoryReuse normally removes those declarations, but
+    // DSA-RP deliberately skips that pass.
+    new_body = RemoveUnusedAllocStatements(new_body);
+  }
 
   auto new_func = MutableCopy(func);
   new_func->params_ = new_params;
