@@ -246,6 +246,15 @@ button:focus-visible, input:focus-visible {
   line-height: 1.5;
 }
 
+.code-canvas {
+  width: max-content;
+  min-width: 100%;
+}
+
+.code-canvas .code-line {
+  width: 100%;
+}
+
 .code-line {
   display: grid;
   grid-template-columns: 3.5rem minmax(max-content, 1fr);
@@ -447,6 +456,20 @@ function addFoldButton(pane, trace, hunk, hunkIndex) {
   pane.appendChild(button);
 }
 
+function createCodeCanvas() {
+  const canvas = document.createElement("div");
+  canvas.className = "code-canvas";
+  return canvas;
+}
+
+function synchronizeCodeCanvasWidths(beforeCanvas, afterCanvas) {
+  beforeCanvas.style.width = "";
+  afterCanvas.style.width = "";
+  const width = Math.max(beforeCanvas.scrollWidth, afterCanvas.scrollWidth);
+  beforeCanvas.style.width = `${width}px`;
+  afterCanvas.style.width = `${width}px`;
+}
+
 function renderDiff(trace) {
   passTitle.textContent = `${trace.index}. ${trace.name} · +${trace.inserted} -${trace.deleted}`;
   beforeTitle.textContent = trace.beforeName;
@@ -455,20 +478,25 @@ function renderDiff(trace) {
   warningsPanel.textContent = trace.warning || "";
   beforePane.replaceChildren();
   afterPane.replaceChildren();
+  const beforeCanvas = createCodeCanvas();
+  const afterCanvas = createCodeCanvas();
+  beforePane.appendChild(beforeCanvas);
+  afterPane.appendChild(afterCanvas);
 
   trace.hunks.forEach((hunk, hunkIndex) => {
     const key = `${trace.index}:${hunkIndex}`;
     const expanded = expandedHunks.has(key);
     if (hunk.collapsed) {
-      addFoldButton(beforePane, trace, hunk, hunkIndex);
-      addFoldButton(afterPane, trace, hunk, hunkIndex);
+      addFoldButton(beforeCanvas, trace, hunk, hunkIndex);
+      addFoldButton(afterCanvas, trace, hunk, hunkIndex);
       if (!expanded) return;
     }
     for (const row of hunk.rows) {
-      beforePane.appendChild(createCodeLine("before", row));
-      afterPane.appendChild(createCodeLine("after", row));
+      beforeCanvas.appendChild(createCodeLine("before", row));
+      afterCanvas.appendChild(createCodeLine("after", row));
     }
   });
+  synchronizeCodeCanvasWidths(beforeCanvas, afterCanvas);
 }
 
 function fallbackCopy(text) {

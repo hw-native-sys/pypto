@@ -57,6 +57,7 @@ def _run_viewer_behavior(report: str, assertions: str) -> subprocess.CompletedPr
             this.listeners = {{}};
             this.scrollLeft = 0;
             this.scrollTop = 0;
+            this.scrollWidth = 0;
             this.style = {{}};
             this.textContent = "";
           }}
@@ -705,6 +706,10 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
     assert "--insert-highlight:" in report and "--delete-highlight:" in report
     assert ".code-line.after.replace { background: var(--insert-bg); }" in report
     assert ".code-line.before.replace { background: var(--delete-bg); }" in report
+    assert ".code-canvas" in report
+    assert "width: max-content" in report
+    assert "min-width: 100%" in report
+    assert ".code-canvas .code-line" in report
     assert ".diff-insert { background: var(--insert-highlight); }" in report
     assert ".diff-delete { background: var(--delete-highlight); }" in report
     assert "line.className = `code-line ${side} ${row.kind}`" in report
@@ -716,6 +721,7 @@ def test_render_html_contains_layout_and_interaction_contract(tmp_path: Path):
         "selectPass",
         "renderSidebar",
         "renderDiff",
+        "synchronizeCodeCanvasWidths",
         "copySnapshot",
         "setAllHunks",
         "toggleTheme",
@@ -854,6 +860,47 @@ def test_viewer_synchronizes_both_scroll_axes_in_both_directions(tmp_path: Path)
         after.listeners.scroll();
         if (before.scrollTop !== 300 || before.scrollLeft !== 80) {
           throw new Error("after-to-before scroll synchronization failed");
+        }
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_viewer_equalizes_code_canvas_widths(tmp_path: Path):
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": "short = pl.tile.sqrt(value)\n",
+            "01_after_ChangedPass.py": (
+                "much_longer_name: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.sqrt(value)\n"
+            ),
+        },
+    )
+    report = render_html(build_trace(discover_snapshots(dump), context=0), source_name=dump.name)
+
+    result = _run_viewer_behavior(
+        report,
+        """
+        const renderedBeforePane = elements["before-pane"];
+        const renderedAfterPane = elements["after-pane"];
+        if (renderedBeforePane.children.length !== 1 || renderedAfterPane.children.length !== 1) {
+          throw new Error("each pane did not render one shared code canvas");
+        }
+
+        const beforeCanvas = renderedBeforePane.children[0];
+        const afterCanvas = renderedAfterPane.children[0];
+        beforeCanvas.scrollWidth = 420;
+        afterCanvas.scrollWidth = 960;
+        synchronizeCodeCanvasWidths(beforeCanvas, afterCanvas);
+        if (beforeCanvas.style.width !== "960px" || afterCanvas.style.width !== "960px") {
+          throw new Error("code canvases did not use the widest content width");
+        }
+        if (!beforeCanvas.children.some((child) => child.className.includes("code-line"))) {
+          throw new Error("before lines were not rendered inside the shared canvas");
+        }
+        if (!afterCanvas.children.some((child) => child.className.includes("code-line"))) {
+          throw new Error("after lines were not rendered inside the shared canvas");
         }
         """,
     )
