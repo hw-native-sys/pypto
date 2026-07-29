@@ -11,7 +11,7 @@
 #
 # The markdown under `docs/` is the single source of truth and must stay readable
 # directly on GitHub; this file only describes how it is rendered. The built site
-# is never committed -- CI publishes it to the `gh-pages` branch.
+# is never committed -- CI publishes it to GitHub Pages (see .github/workflows/docs.yml).
 #
 # Build locally:
 #   pip install -r docs/requirements.txt
@@ -79,7 +79,7 @@ plugins:
         - en
         - zh
   # Folder-structured i18n: `docs/en/**` is the default locale and is served at
-  # the site root, `docs/zh-cn/**` under `/zh-cn/`. The `nav` below is declared
+  # the site root, `docs/zh/**` under `/zh/`. The `nav` below is declared
   # with default-locale (`en/...`) paths; the plugin swaps in the localized file
   # for every other locale, so page titles come from each locale's own H1.
   - i18n:
@@ -92,7 +92,7 @@ plugins:
           name: English
           default: true
           build: true
-        - locale: zh-cn
+        - locale: zh
           name: 简体中文
           build: true
           nav_translations:
@@ -156,7 +156,7 @@ extra:
       name: PyPTO on GitHub
 
 # Every page under `docs/en/` must appear below, and every one of them must have a
-# `docs/zh-cn/` mirror. `tests/lint/check_docs_nav.py` enforces both in CI, so adding a
+# `docs/zh/` mirror. `tests/lint/check_docs_nav.py` enforces both in CI, so adding a
 # doc without a nav entry (which would leave it reachable only by direct URL) fails.
 nav:
   - Home: en/index.md

@@ -128,9 +128,9 @@ python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 | 章节 | 内容 |
 | ---- | ---- |
-| [用户手册](docs/zh-cn/user/index.md) | 入门、语言指南、操作参考、调试 |
-| [参考](docs/zh-cn/reference/index.md) | PTO ISA —— 集群架构、TPUSH/TPOP、缓冲区管理 |
-| [开发者](docs/zh-cn/dev/index.md) | IR、passes、代码生成、后端分派 |
+| [用户手册](docs/zh/user/index.md) | 入门、语言指南、操作参考、调试 |
+| [参考](docs/zh/reference/index.md) | PTO ISA —— 集群架构、TPUSH/TPOP、缓冲区管理 |
+| [开发者](docs/zh/dev/index.md) | IR、passes、代码生成、后端分派 |
 | [运行时](https://hw-native-sys.github.io/simpler/) | 执行已编译程序的 `simpler` 运行时 |
 
 英文文档位于 [`docs/en/`](docs/en/)（以英文为准），可从站点的语言菜单切换。

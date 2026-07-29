@@ -53,7 +53,7 @@ jobs:
 
       # Fast, MkDocs-independent check: no page missing from the nav, no nav entry
       # pointing at a deleted file. Runs first so those failures are reported
-      # without waiting for a full build. (docs/en <-> docs/zh-cn parity is
+      # without waiting for a full build. (docs/en <-> docs/zh parity is
       # enforced separately by the pre-commit job in ci.yml.)
       - name: Check nav coverage
         run: python tests/lint/check_docs_nav.py

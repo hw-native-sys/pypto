@@ -360,7 +360,7 @@ def test_<op_name>_pto_codegen(self):
 ### Operator Docs
 
 - English: `docs/en/dev/ir/05-operators.md`
-- Chinese: `docs/zh-cn/dev/ir/05-operators.md`
+- Chinese: `docs/zh/dev/ir/05-operators.md`
 
 Add to the appropriate category table (TensorOp or TileOp section).
 

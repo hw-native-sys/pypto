@@ -36,7 +36,7 @@ plugins:
 - Keep public API changes synchronized across `include/pypto/`, `src/`,
   `python/bindings/`, and `python/pypto/pypto_core/*.pyi`
 - Update docs when behavior changes. English docs in `docs/en/dev/` are the
-  ground truth; keep `docs/zh-cn/dev/` aligned when English docs change
+  ground truth; keep `docs/zh/dev/` aligned when English docs change
 - Follow `.claude/rules/documentation.md` for markdown file placement; do not
   create markdown files outside `docs/` unless that rule explicitly allows it
 - Do not create temporary test scripts or examples outside `tests/` and
@@ -86,5 +86,5 @@ necessary hardware or environment is available.
 - `tests/ut/`: unit tests
 - `tests/st/`: system and hardware-dependent tests
 - `tests/lint/`: repo-specific lint and validation scripts
-- `docs/en/dev/`, `docs/zh-cn/dev/`: developer documentation
+- `docs/en/dev/`, `docs/zh/dev/`: developer documentation
 - `examples/`: user-facing examples (kernels/, models/, utils/)

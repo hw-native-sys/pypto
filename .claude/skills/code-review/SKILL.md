@@ -64,7 +64,7 @@ You are a specialized code review agent. Review all code changes in the current 
 
 ### 5. Multi-Language Documentation Sync
 
-- [ ] If English docs (`docs/en/dev/`) modified, corresponding `docs/zh-cn/dev/` files updated or follow-up created
+- [ ] If English docs (`docs/en/dev/`) modified, corresponding `docs/zh/dev/` files updated or follow-up created
 - [ ] If `README.md` modified, `README.zh-CN.md` updated or flagged
 - [ ] Chinese translations preserve all code examples untranslated
 - [ ] Cross-references in Chinese docs point to Chinese versions
@@ -143,4 +143,4 @@ Provide your review as:
 5. **Documentation**: Alignment with code changes, examples still work, file lengths (≤500 for docs, ≤200 for rules/skills), pass doc numbering matches pass manager execution order
 6. **Cross-Layer Sync**: C++ headers, Python bindings, and type stubs must all be updated together
 7. **Commit Content**: Only relevant changes, no artifacts, no sensitive data, no AI co-author lines, no hardcoded absolute paths
-8. **Multi-Language Doc Sync**: When English docs (`docs/en/dev/` or `README.md`) are modified, verify corresponding `docs/zh-cn/` and `README.zh-CN.md` are also updated or flagged
+8. **Multi-Language Doc Sync**: When English docs (`docs/en/dev/` or `README.md`) are modified, verify corresponding `docs/zh/` and `README.zh-CN.md` are also updated or flagged

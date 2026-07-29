@@ -37,7 +37,7 @@ here. What is linked out is simpler's *internals*.
 
 ## About this documentation
 
-- **English is authoritative.** `docs/zh-cn/` mirrors it page for page; use the
+- **English is authoritative.** `docs/zh/` mirrors it page for page; use the
   language selector in the header to switch.
 - The markdown under `docs/` is the single source of truth and is readable directly
   on GitHub. This site is a build artifact and is never committed.

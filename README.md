@@ -133,7 +133,7 @@ Its source is the markdown under [`docs/`](docs/), readable directly on GitHub:
 | [Developer](docs/en/dev/index.md) | IR, passes, code generation, backend dispatch |
 | [Runtime](https://hw-native-sys.github.io/simpler/) | The `simpler` runtime that executes compiled programs |
 
-Chinese translations live in [`docs/zh-cn/`](docs/zh-cn/) and are selectable from the
+Chinese translations live in [`docs/zh/`](docs/zh/) and are selectable from the
 site's language menu.
 
 To build the site locally:

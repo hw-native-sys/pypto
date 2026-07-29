@@ -13,7 +13,7 @@ i 个 `Out`/`InOut` 参数，并相应地重映射非 InCore 调用方中的
 中各输出可能与声明的 `Out`/`InOut` 参数顺序不一致。若不规范化，编排代码生
 成就必须沿着每个 `return[i]` 反向追踪赋值与 `tile.store`，才能确定它实际写入
 哪个参数 —— 这种分析应当属于 Pass，而不是代码生成层（参见
-`docs/zh-cn/dev/codegen/00-pto_codegen.md`）。
+`docs/zh/dev/codegen/00-pto_codegen.md`）。
 
 本 Pass 把契约规范化为「按位置 `return[k] ↔ out_indices[k]`」，分两步进行：
 

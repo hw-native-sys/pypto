@@ -25,7 +25,7 @@ repos:
           language: python
           language_version: python3
           pass_filenames: false
-          exclude: ^(3rdparty/|docs/zh-cn/|README\.zh-CN\.md)
+          exclude: ^(3rdparty/|docs/zh/|README\.zh-CN\.md)
 
         - id: check-docs-en-zh-parity
           name: check-docs-en-zh-parity

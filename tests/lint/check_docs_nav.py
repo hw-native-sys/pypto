@@ -15,7 +15,7 @@ Two invariants, each of which breaks the documentation site when violated:
    by guessing its URL — the site never links to it.
 
 The nav is declared with default-locale (`en/...`) paths; mkdocs-static-i18n swaps
-in the docs/zh-cn counterpart for the Chinese build, so only docs/en is checked
+in the docs/zh counterpart for the Chinese build, so only docs/en is checked
 here. That the two trees mirror each other is check_docs_en_zh_parity.py's job.
 
 Runs without MkDocs installed (PyYAML only).

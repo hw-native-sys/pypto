@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Fail if docs/en and docs/zh-cn markdown path sets diverge.
+"""Fail if docs/en and docs/zh markdown path sets diverge.
 
 English docs are ground truth; zh-CN must mirror the same relative file tree.
 This check does not compare file contents or translation freshness.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EN = ROOT / "docs" / "en"
-ZH = ROOT / "docs" / "zh-cn"
+ZH = ROOT / "docs" / "zh"
 
 
 def rel_mds(base: Path) -> set[str]:
@@ -31,10 +31,10 @@ def main() -> int:
     en, zh = rel_mds(EN), rel_mds(ZH)
     only_en, only_zh = sorted(en - zh), sorted(zh - en)
     if not only_en and not only_zh:
-        print(f"OK: {len(en)} paired markdown paths under docs/en ↔ docs/zh-cn")
+        print(f"OK: {len(en)} paired markdown paths under docs/en ↔ docs/zh")
         return 0
     if only_en:
-        print("EN-only (missing zh-cn):")
+        print("EN-only (missing zh):")
         print("\n".join(f"  {p}" for p in only_en))
     if only_zh:
         print("ZH-only (missing en):")

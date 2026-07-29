@@ -84,7 +84,7 @@ find docs/en/dev -name "*.md" | sort   # List all documentation files
 | Language | Docs Path | README |
 | -------- | --------- | ------ |
 | English | `docs/en/dev/` | `README.md` |
-| Chinese (zh-CN) | `docs/zh-cn/dev/` | `README.zh-CN.md` |
+| Chinese (zh-CN) | `docs/zh/dev/` | `README.zh-CN.md` |
 
 **Translation rules:**
 
@@ -95,7 +95,7 @@ find docs/en/dev -name "*.md" | sort   # List all documentation files
 - Copyright headers remain in English
 - English is authoritative — Chinese must match English content
 
-**When updating English docs, also update `docs/zh-cn/` to stay synchronized.**
+**When updating English docs, also update `docs/zh/` to stay synchronized.**
 
 ## Documentation Style Guide
 

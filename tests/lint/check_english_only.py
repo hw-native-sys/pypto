@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 # Default excluded directories (can be overridden via --exclude)
-DEFAULT_EXCLUDED_PATTERNS = ["3rdparty", "reference", "docs/zh-cn", "README.zh-CN.md"]
+DEFAULT_EXCLUDED_PATTERNS = ["3rdparty", "reference", "docs/zh", "README.zh-CN.md"]
 
 
 def get_git_tracked_files(root_dir: Path) -> list[Path]:
@@ -189,7 +189,7 @@ def main() -> int:
             "\n⚠ Please ensure all source files and documentation are written in English "
             "to maintain consistency and accessibility for all contributors."
         )
-        print("\nTip: Use --exclude to exclude specific directories (e.g., --exclude docs/zh-cn)")
+        print("\nTip: Use --exclude to exclude specific directories (e.g., --exclude docs/zh)")
         return 1
 
     print("\n✓ All source files and documentation are in English!")

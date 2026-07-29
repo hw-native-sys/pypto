@@ -165,7 +165,7 @@ Test edge cases: shape mismatches, dtype combinations, dynamic dims.
 ### A5: Documentation
 
 Update `docs/en/dev/ir/05-operators.md` — add the new op to the appropriate table.
-Keep `docs/zh-cn/dev/ir/05-operators.md` in sync.
+Keep `docs/zh/dev/ir/05-operators.md` in sync.
 
 For detailed file paths and code templates, see [reference.md](reference.md).
 
@@ -261,7 +261,7 @@ def test_<op_name>_conversion(self):
 ### B6: Documentation
 
 Update `docs/en/dev/ir/05-operators.md` with the tensor op entry.
-Update `docs/zh-cn/dev/ir/05-operators.md` in sync.
+Update `docs/zh/dev/ir/05-operators.md` in sync.
 
 ---
 
@@ -344,7 +344,7 @@ def test_<op_name>_pto_codegen(self):
 | Codegen UT | `tests/ut/codegen/test_pto_codegen_ops.py` | `tests/ut/codegen/test_orchestration_codegen.py` |
 | ST | `tests/st/codegen/` | `tests/st/codegen/` |
 | Docs (en) | `docs/en/dev/ir/05-operators.md` | `docs/en/dev/ir/05-operators.md` |
-| Docs (zh-cn) | `docs/zh-cn/dev/ir/05-operators.md` | `docs/zh-cn/dev/ir/05-operators.md` |
+| Docs (zh) | `docs/zh/dev/ir/05-operators.md` | `docs/zh/dev/ir/05-operators.md` |
 | Codegen docs | `docs/en/dev/codegen/00-pto_codegen.md` | `docs/en/dev/codegen/02-orchestration_codegen.md` |
 | CMake | `CMakeLists.txt` (line ~98–116) | `CMakeLists.txt` (line ~109–116) |
 
@@ -364,5 +364,5 @@ For complete code templates and detailed examples, see [reference.md](reference.
 - [ ] Conversion tests pass (if Phase B)
 - [ ] Codegen tests pass (if Phase C)
 - [ ] `docs/en/dev/ir/05-operators.md` updated
-- [ ] `docs/zh-cn/dev/ir/05-operators.md` updated in sync
+- [ ] `docs/zh/dev/ir/05-operators.md` updated in sync
 - [ ] `pre-commit run --all-files` passes

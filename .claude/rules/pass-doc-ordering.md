@@ -2,7 +2,7 @@
 
 ## Rule
 
-Pass documentation files in `docs/en/dev/passes/` (and `docs/zh-cn/dev/passes/`) must be numbered to match the pass execution order in the pass manager (`python/pypto/ir/pass_manager.py`).
+Pass documentation files in `docs/en/dev/passes/` (and `docs/zh/dev/passes/`) must be numbered to match the pass execution order in the pass manager (`python/pypto/ir/pass_manager.py`).
 
 ## Why
 
@@ -75,7 +75,7 @@ The `90+` range is reserved for these excluded categories. Pipeline passes alway
 1. Check where the pass appears in `pass_manager.py` default strategy
 2. Assign the doc file number matching that execution position
 3. Renumber subsequent files if needed (use `git mv` with temp names to avoid collisions)
-4. Update both `docs/en/dev/passes/` and `docs/zh-cn/dev/passes/`
+4. Update both `docs/en/dev/passes/` and `docs/zh/dev/passes/`
 5. Update any cross-references in other docs
 
 ## When Reordering Passes
