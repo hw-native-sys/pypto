@@ -21,7 +21,7 @@ import torch
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
-from pypto.runtime import DeviceTensor
+from pypto.runtime import DeviceTensor, RunConfig
 
 
 @contextlib.contextmanager
@@ -260,6 +260,30 @@ class TestCompiledProgramMetadata:
 
 class TestCompiledProgramCall:
     """Verify __call__ argument validation (without device execution)."""
+
+    def test_explicit_config_platform_overrides_compiled_platform(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+        config = RunConfig(platform="a2a3", device_id=3, enable_pmu=2, aicpu_thread_num=7)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(*args, config=config)
+
+        assert mock_exec.call_args.kwargs["platform"] == "a2a3"
+        assert mock_exec.call_args.kwargs["device_id"] == 3
+        assert mock_exec.call_args.kwargs["dfx"].enable_pmu == 2
+        assert mock_exec.call_args.kwargs["aicpu_thread_num"] == 7
+
+    def test_no_config_uses_compiled_platform(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path), platform="a5sim")
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(*args)
+
+        assert mock_exec.call_args.kwargs["platform"] == "a5sim"
 
     def test_wrong_arg_count_raises(self, tmp_path):
         prog = _make_program_with_orchestration(has_return=False)
@@ -853,6 +877,24 @@ class TestSubChipCallableExtraction:
             _ = sub.chip_callable  # cache warmed
             sub.load()
             assert mock.call_count == 1
+
+    def test_explicit_config_platform_overrides_parent_platform(self, tmp_path):
+        sub = self._make_subchip(tmp_path)
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            sub(*args, config=RunConfig(platform="a2a3"))
+
+        assert mock_exec.call_args.kwargs["platform"] == "a2a3"
+
+    def test_no_config_uses_parent_platform(self, tmp_path):
+        sub = self._make_subchip(tmp_path)
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            sub(*args)
+
+        assert mock_exec.call_args.kwargs["platform"] == "a2a3sim"
 
 
 class TestValidateIr:

@@ -410,6 +410,8 @@ def _invoke_compiled(
     :meth:`_SubChipCallable.__call__` (multi-orch case). The two callers
     differ only in *where* the artifacts live and *whose* metadata they
     apply — everything from argument coercion onward is identical.
+    An explicit run config selects its platform; without one, the platform
+    bound to the compiled artifact is preserved.
 
     Returns *outputs*: ``None`` for in-place calls or the packed return
     tensors otherwise. Per-run timing is no longer returned — read it from
@@ -421,13 +423,14 @@ def _invoke_compiled(
 
     from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
 
+    execution_platform = platform if config is None else config.platform
     if config is None:
         config = RunConfig()
 
     execute_compiled(
         output_dir,
         coerced,
-        platform=platform,
+        platform=execution_platform,
         device_id=config.device_id,
         dfx=_DfxOpts.from_run_config(config),
         aicpu_thread_num=config.aicpu_thread_num,
@@ -889,7 +892,8 @@ class CompiledProgram(_RuntimeFacade):
                 params, ``int | float | bool | ctypes._SimpleCData`` for
                 scalar params.
             config: Optional :class:`~pypto.runtime.runner.RunConfig` for
-                device index, profiling, etc.  Defaults to ``RunConfig()``.
+                execution platform, device index, profiling, etc. When omitted,
+                the compiled artifact's platform and other runtime defaults apply.
 
         Returns:
             ``None`` for in-place calls, a single ``torch.Tensor`` or a
