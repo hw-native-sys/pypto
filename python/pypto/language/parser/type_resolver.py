@@ -174,6 +174,8 @@ class TypeResolver:
         "Right": ir.MemorySpace.Right,
         "Acc": ir.MemorySpace.Acc,
         "Bias": ir.MemorySpace.Bias,
+        "LeftScale": ir.MemorySpace.LeftScale,
+        "RightScale": ir.MemorySpace.RightScale,
     }
 
     def __init__(

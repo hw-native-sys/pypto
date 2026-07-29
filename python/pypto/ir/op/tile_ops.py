@@ -166,6 +166,7 @@ def load(
     valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     target_memory: MemorySpace = MemorySpace.Vec,
     clamp: bool = False,
+    mx_layout: str = "none",
     span: Span | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
@@ -192,6 +193,9 @@ def load(
             load asserts that ``offsets + valid_shapes`` stays inside the source
             and is rejected when that provably fails; with ``clamp=True`` the
             request is cut back to the source edge instead.
+        mx_layout: MX scale-load layout (``none`` default, or ``mx_a_zz`` /
+            ``mx_b_nn``; PTOAS v0.48). Non-``none`` requires FP8E8M0 or UINT8
+            source dtype and ``target_memory=Mat`` (Vec is rejected).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -201,6 +205,25 @@ def load(
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
     """
+    # Validate mx_layout value.
+    _VALID_MX_LAYOUTS = frozenset(
+        {
+            "none",
+            "mx_a_zz",
+            "mx_b_nn",
+        }
+    )
+    if mx_layout not in _VALID_MX_LAYOUTS:
+        raise ValueError(f"mx_layout must be one of {sorted(_VALID_MX_LAYOUTS)}, got '{mx_layout}'")
+
+    # MX cube scale loads are Mat-only. load() defaults to Vec; callers must pass
+    # target_memory=Mat explicitly — do not silently rewrite Vec→Mat.
+    if mx_layout != "none" and target_memory == MemorySpace.Vec:
+        raise ValueError(
+            "tile.load with mx_layout requires target_memory=MemorySpace.Mat "
+            "(MX scale loads are L1/Mat only); got MemorySpace.Vec"
+        )
+
     # Validate target_memory: only Vec and Mat are allowed for load
     if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
         raise ValueError(
@@ -216,6 +239,8 @@ def load(
     kwargs: dict[str, Any] = {"target_memory": target_memory}
     if clamp:
         kwargs["clamp"] = True
+    if mx_layout and mx_layout != "none":
+        kwargs["mx_layout"] = mx_layout
 
     valid_shapes_tuple = shapes_tuple
     if valid_shapes is not None:
@@ -472,7 +497,8 @@ def move(
 
     Args:
         tile: Input tile (TileType)
-        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right,
+            .LeftScale, .RightScale)
         blayout: Optional block layout for the destination tile
         slayout: Optional scatter layout for the destination tile
         span: Optional source span for debugging (auto-captured if not provided)
@@ -481,8 +507,6 @@ def move(
         Call expression that returns a TileType in the target memory space
     """
     actual_span = _get_span_or_capture(span)
-    args = [tile]
-
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
     }
@@ -491,7 +515,7 @@ def move(
     if slayout is not None:
         kwargs["slayout"] = slayout
 
-    return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
+    return _ir_core.create_op_call("tile.move", [tile], kwargs, actual_span)
 
 
 def get_block_idx(span: Span | None = None) -> Call:
@@ -1679,6 +1703,24 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
+
+
+def matmul_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+
+
+def tget_scale_addr(dst_scale: Expr, src: Expr, span: Span | None = None) -> Call:
+    """Bind MX scale-tile address from a Left/Right data tile (A5)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tget_scale_addr", [dst_scale, src], {}, actual_span)
 
 
 def batch_matmul(

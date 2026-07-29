@@ -27,6 +27,9 @@
 
 namespace pypto::ir::tile_view_semantics {
 
+/// MX block-scale fractal size: one shared exponent per 32 elements (A5 ISA).
+inline constexpr int kMXScaleFractal = 32;
+
 /// Return whether two shape-like expression lists are statically identical.
 inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
   if (lhs.size() != rhs.size()) {
@@ -71,6 +74,18 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
         break;
       case MemorySpace::Right:
         implicit_view.slayout = TileLayout::col_major;
+        break;
+      case MemorySpace::LeftScale:
+        // ISA TileLeftScale: RowMajor / RowMajor, MX scale fractal size 32.
+        implicit_view.blayout = TileLayout::row_major;
+        implicit_view.slayout = TileLayout::row_major;
+        implicit_view.fractal = kMXScaleFractal;
+        break;
+      case MemorySpace::RightScale:
+        // ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
+        implicit_view.blayout = TileLayout::col_major;
+        implicit_view.slayout = TileLayout::col_major;
+        implicit_view.fractal = kMXScaleFractal;
         break;
       case MemorySpace::Acc:
         implicit_view.blayout = TileLayout::col_major;

@@ -15,7 +15,6 @@
  */
 
 #include <cstddef>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -443,8 +442,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
-    {"tile.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
-    {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
     // tile.matmul_acc and tile.gemv_acc have custom codegen (in-place accumulation)
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     {"tile.gemv",            "pto.tgemv",            2},
@@ -537,7 +534,35 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // RowMajor while AIC TPOP expects Mat ColMajor — silent numerical FAIL.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
-    CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
+    CHECK(op->args_.size() == 1) << "tile.move requires 1 argument (tile), got " << op->args_.size();
+
+    auto emit_tmov = [&](const std::string& src, const std::string& src_ty, const std::string& dst,
+                         const std::string& dst_ty) {
+      std::ostringstream oss;
+      oss << "pto.tmov ins(" << src;
+      if (!src_ty.empty()) {
+        oss << " : " << src_ty;
+      }
+      oss << ") outs(" << dst;
+      if (!dst_ty.empty()) {
+        oss << " : " << dst_ty;
+      }
+      oss << ")";
+      codegen.Emit(oss.str());
+    };
+
+    auto emit_move = [&]() {
+      std::string src = codegen.GetExprAsCode(op->args_[0]);
+      std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+      std::string dst = codegen.GetCurrentResultTarget();
+      std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
+      // Emit the Mat→(LeftScale/RightScale) tmov in source order. PTOAS
+      // PTOA5NormalizeTMovPass reorders tget_scale_addr before this matching
+      // mat→scaling tmov (ISA bind-then-fill). Deferring here would break
+      // MemoryReuse: the Mat source's IR liveness ends at this move, so its
+      // address could be reused before a deferred tmov reads it.
+      emit_tmov(src, src_ty, dst, dst_ty);
+    };
 
     // Under memory_planner=PtoAS there is no baked address: AllocateMemoryAddr is
     // skipped and every `byte_offset_` is still the -1 sentinel, so the offset
@@ -549,7 +574,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       if (!src_ssa.empty() && src_ssa == codegen.GetCurrentResultTarget()) {
         return std::string("");  // no-op: one handle, the op already wrote in place
       }
-      codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+      emit_move();
       return std::string("");
     }
 
@@ -570,20 +595,19 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
             const bool same_layout = src_view.blayout == dst_view.blayout &&
                                      src_view.slayout == dst_view.slayout &&
                                      src_view.fractal == dst_view.fractal;
-            if (same_layout) {
-              // Alias the destination to the source SSA value so downstream
-              // references use the source's defined buffer, not the destination's
-              // alloc_tile (which would be unwritten after eliding the tmov).
+            const bool same_shape =
+                src_tile->shape_.size() == dst_tile->shape_.size() &&
+                ir::tile_view_semantics::ShapeExprListsEquivalent(src_tile->shape_, dst_tile->shape_);
+            if (same_layout && same_shape) {
               codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
               return std::string("");  // no-op: same space, same address, same layout
             }
-            // Different layout at the same address: keep pto.tmov (ND↔NZ adapt).
           }
         }
       }
     }
 
-    codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
+    emit_move();
     return std::string("");
   });
 

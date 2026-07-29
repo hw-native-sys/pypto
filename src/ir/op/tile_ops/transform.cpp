@@ -339,7 +339,6 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
       ComputeReshapeValidShape(GetValidShape(tile_type), tile_type->shape_, new_shape,
                                source_view.blayout == TileLayout::row_major, args[0]->span_, "tile.reshape");
   tile_view.pad = source_view.pad;
-
   tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
@@ -359,8 +358,10 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box, args[0]->span_)
-      << kOpName << " only supports flat tiles with slayout=none_box; boxed/fractal tiles are unsupported";
+  const bool is_flat_none_box = source_view.slayout == TileLayout::none_box;
+  CHECK_SPAN(is_flat_none_box, args[0]->span_)
+      << kOpName << " only supports flat tiles with slayout=none_box; got slayout="
+      << static_cast<int>(source_view.slayout) << " fractal=" << source_view.fractal;
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
              args[0]->span_)
       << kOpName << " requires row_major or col_major blayout";

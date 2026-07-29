@@ -35,10 +35,14 @@ from .utils import _normalize_expr, _normalize_shape
 _native_tensor_type_init = TensorType.__init__
 _native_tile_type_init = TileType.__init__
 
+# Longer prefixes first so mem_leftscale_ does not match mem_left_.
+# Names come from MemorySpaceToString().lower() (e.g. LeftScale -> leftscale).
 _MEMREF_NAME_PREFIX_TO_SPACE = {
     "mem_ddr_": MemorySpace.DDR,
     "mem_vec_": MemorySpace.Vec,
     "mem_mat_": MemorySpace.Mat,
+    "mem_leftscale_": MemorySpace.LeftScale,
+    "mem_rightscale_": MemorySpace.RightScale,
     "mem_left_": MemorySpace.Left,
     "mem_right_": MemorySpace.Right,
     "mem_acc_": MemorySpace.Acc,

@@ -40,7 +40,7 @@ MemRef 的 offset 都还是 0，没有地址轴可画，工具会带着这条说
 
 panel 的缩放基准是内存空间的容量，而 dump 里并不记录它。工具从 backend 自己的 SoC
 描述里读取——沿 `Backend.soc` 一路走到每个 `Core` 的 `Mem` 条目——因此某个 backend
-独有的空间（Ascend950 有 `Bias`）也能拿到真实容量，而不会回退成它自身的 high-water
+独有的空间（Ascend950 有 `Bias` / `LeftScale` / `RightScale`）也能拿到真实容量，而不会回退成它自身的 high-water
 mark、把该 panel 画成永远满的。
 
 用哪个 backend 按以下顺序决定：

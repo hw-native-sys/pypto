@@ -68,7 +68,7 @@ program_inferred = infer_pass(program)
 
 | 生产者类型 | 解析得到的 memory space |
 | ---------- | ----------------------- |
-| 未注册的 cube 算子（`tile.matmul_mx*`） | `Acc` |
+| 已注册 cube 算子（`tile.matmul`、`tile.matmul_mx` 等） | 来自 op memory spec（`Acc`） |
 | 其他未注册算子 | `Vec` |
 | 已注册但无 `MemorySpec` 的算子 | 若 `Call` 返回类型已设置且非 `DDR`，则使用之；否则 `Vec` |
 | `deduce_output_memory` 返回 `Some(s)` 的已注册算子（如 `tile.matmul → Acc`） | `s` |

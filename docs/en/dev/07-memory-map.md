@@ -44,7 +44,7 @@ axis to draw and the tool refuses the dump with that explanation. Later dumps
 Panel scale is a memory space's capacity, which the dump does not record. The
 tool reads it off the backend's own SoC description — walking
 `Backend.soc` down to each `Core`'s `Mem` entries — so a backend that carries a
-space others do not (Ascend950 has `Bias`) still gets a real capacity instead of
+space others do not (Ascend950 has `Bias` / `LeftScale` / `RightScale`) still gets a real capacity instead of
 falling back to its own high-water mark and rendering that panel permanently
 full.
 

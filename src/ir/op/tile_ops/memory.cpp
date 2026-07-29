@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -140,10 +141,39 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // that case — the pass recomputes TileView via GetImplicitTileView once the
   // space is known.
   std::optional<MemorySpace> target_memory_opt;
+  std::string mx_layout = "none";
   for (const auto& [k, v] : kwargs) {
     if (k == "target_memory") {
       target_memory_opt = AnyCast<MemorySpace>(v, "target_memory");
-      break;
+    } else if (k == "mx_layout") {
+      mx_layout = AnyCast<std::string>(v, "mx_layout");
+    }
+  }
+  const bool is_mx_load = mx_layout != "none" && !mx_layout.empty();
+  if (is_mx_load) {
+    static const std::unordered_set<std::string> kValidMxLayouts = {"mx_a_zz", "mx_b_nn"};
+    CHECK(kValidMxLayouts.count(mx_layout) > 0)
+        << "The operator " << op_name << " mx_layout must be one of {mx_a_zz, mx_b_nn}, but got "
+        << mx_layout;
+    CHECK(tensor_type->dtype_ == DataType::FP8E8M0 || tensor_type->dtype_ == DataType::UINT8)
+        << "The operator " << op_name
+        << " with mx_layout requires FP8E8M0 or UINT8 dtype (same 1-byte MX exp payload), but got "
+        << tensor_type->dtype_.ToString();
+    CHECK(tensor_type->shape_.size() == 2)
+        << "The operator " << op_name << " mx_layout requires a 2D tensor, got rank "
+        << tensor_type->shape_.size();
+    // MX cube scale loads are Mat-only (TLoadMxCube*). Explicit Vec/other is
+    // rejected. Omitting target_memory defaults the result type to Mat; OpRegistry
+    // also stamps target_memory=Mat into Call kwargs so InferTileMemorySpace does
+    // not treat the load as retargetable and rebuild via GetImplicitTileView
+    // (ordinary Mat NZ would strip fractal=32).
+    if (!target_memory_opt.has_value()) {
+      target_memory_opt = MemorySpace::Mat;
+    } else {
+      CHECK(*target_memory_opt == MemorySpace::Mat)
+          << "The operator " << op_name
+          << " with mx_layout requires target_memory=Mat (MX scale loads are L1/Mat only); "
+             "got Vec or another space. Pass target_memory=MemorySpace.Mat explicitly.";
     }
   }
   // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
@@ -158,7 +188,18 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   bool source_is_dn =
       tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
   TileView tile_view;
-  if (target_memory_opt.has_value()) {
+  if (is_mx_load) {
+    // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
+    const bool is_mx_b = mx_layout.rfind("mx_b_", 0) == 0;
+    if (is_mx_b) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::col_major;
+    } else {
+      tile_view.blayout = TileLayout::row_major;
+      tile_view.slayout = TileLayout::row_major;
+    }
+    tile_view.fractal = 32;
+  } else if (target_memory_opt.has_value()) {
     if (*target_memory_opt == MemorySpace::Mat) {
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::row_major;
@@ -354,8 +395,8 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  // Validate args: expect exactly 1 argument (tile)
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument, but got " << args.size();
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
+                          << args.size();
 
   // Validate first argument is TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -373,21 +414,26 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.blayout = source_view.blayout;
   tile_view.slayout = source_view.slayout;
 
-  // Hardcoded layout for Left/Right (hardware requirements)
+  // Hardcoded layout for Left/Right/scale (hardware requirements)
   if (space == MemorySpace::Left) {
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  } else if (space == MemorySpace::LeftScale) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = 32;
+  } else if (space == MemorySpace::RightScale) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::col_major;
+    tile_view.fractal = 32;
   }
 
   // Explicit kwargs override everything
   tile_view.blayout = GetKwarg<TileLayout>(kwargs, "blayout", tile_view.blayout);
   tile_view.slayout = GetKwarg<TileLayout>(kwargs, "slayout", tile_view.slayout);
-
-  // Keep original shape
-  std::vector<ExprPtr> output_shape = input_shape;
 
   // Preserve input valid_shape (may be narrower than shape_)
   tile_view.valid_shape = source_view.valid_shape.empty() ? input_shape : source_view.valid_shape;
@@ -397,8 +443,20 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.pad = source_view.pad;
   }
 
-  // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // MX LeftScale/RightScale must be !pto.f8E8M0 so EmitC maps loc=scaling → ScaleLeft
+  // (ui8+scaling wrongly becomes Fixpipe TileType::Scaling). Host-prequant may load UINT8.
+  DataType out_dtype = tile_type->dtype_;
+  if ((space == MemorySpace::LeftScale || space == MemorySpace::RightScale) && out_dtype == DataType::UINT8) {
+    out_dtype = DataType::FP8E8M0;
+  }
+
+  // Stamp memory_space_ only for MX scale destinations. Stamping Mat/Left/Right
+  // here skips InferTileMemorySpace's tile_view refresh to the destination's
+  // implicit layout and regresses existing Vec↔Mat / matmul / rmsnorm paths.
+  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
+    return std::make_shared<TileType>(input_shape, out_dtype, std::nullopt, tile_view, space);
+  }
+  return std::make_shared<TileType>(input_shape, out_dtype, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
@@ -884,6 +942,7 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")
+    .set_attr<std::string>("mx_layout")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")
@@ -987,7 +1046,7 @@ REGISTER_OP("tile.mscatter")
 
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
-    .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
+    .set_description("Move tile between memory levels (Vec/Mat/Left/Right/LeftScale/RightScale)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<TileLayout>("blayout")

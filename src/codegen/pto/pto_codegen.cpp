@@ -223,11 +223,14 @@ int GetGMPipeSlotCount(int dir_mask) {
 //   * `tile.assemble` (`set_output_memory_inherit_input()`): the result is the
 //     target with one window overwritten — written in place so the out-of-window
 //     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
-//     not an unsupported Mat->Mat preservation copy).
+//     not an unsupported Mat->Mat preservation copy);
+//   * `tile.tget_scale_addr` (`set_output_reuses_input(0)`): rebinds the scale
+//     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale.
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
-  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble");
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
+         ir::IsOp(op, "tile.tget_scale_addr");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {

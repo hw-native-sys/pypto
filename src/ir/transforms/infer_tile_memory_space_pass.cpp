@@ -18,7 +18,6 @@
 #include <set>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -54,10 +53,6 @@ namespace ir {
 using transform_utils::GetLastYieldStmt;
 
 namespace {
-
-// Unregistered cube ops (not yet registered via REGISTER_OP but still need Acc output)
-const std::unordered_set<std::string> kUnregisteredCubeOps = {"tile.matmul_mx", "tile.matmul_mx_acc",
-                                                              "tile.matmul_mx_bias"};
 
 // Look up input constraints for an op. Returns nullptr if none.
 const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::string& op_name) {
@@ -289,7 +284,6 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     // Handle unregistered ops (backward compat)
     if (!registry.IsRegistered(op_name)) {
-      if (kUnregisteredCubeOps.count(op_name) > 0) return MemorySpace::Acc;
       return MemorySpace::Vec;
     }
 
@@ -308,6 +302,22 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     auto result = spec_opt->deduce_output_memory(call->kwargs_);
     if (result.has_value()) {
       return *result;
+    }
+
+    // MX scale loads (mx_a_zz / mx_b_nn) are Mat-only. When target_memory is
+    // absent, retargetable demand may fall through to Vec — force Mat so Phase 3
+    // does not rebuild TileView via GetImplicitTileView (ordinary Mat NZ strips
+    // fractal=32; Vec is invalid for TLoadMxCube*).
+    if (op_name == "tile.load") {
+      for (const auto& [key, value] : call->kwargs_) {
+        if (key == "mx_layout") {
+          const auto mx_layout = AnyCast<std::string>(value, "mx_layout");
+          if (mx_layout != "none" && !mx_layout.empty()) {
+            return MemorySpace::Mat;
+          }
+          break;
+        }
+      }
     }
 
     // Resolver returned nullopt — kwarg absent. Two cases:
@@ -613,6 +623,11 @@ class TileMemorySpaceMutator : public IRMutator {
     // different space than the kwarg says (or the kwarg is absent because the
     // converter let the pass decide), we rewrite the call so codegen reads a
     // consistent value and the result type gets a fresh implicit TileView.
+    //
+    // Exception: tile.load with mx_layout (mx_a_zz / mx_b_nn) already carries
+    // fractal=32 MX scale layouts from DeduceTileLoadType. Rebuilding via
+    // GetImplicitTileView(Mat) yields ordinary NZ and strips fractal — preserve
+    // the existing TileView and keep target_memory=Mat.
     if (auto call = As<Call>(new_value); call) {
       auto& registry = OpRegistry::GetInstance();
       const std::string& call_op_name = call->op_->name_;
@@ -623,13 +638,45 @@ class TileMemorySpaceMutator : public IRMutator {
         if (mem_it != var_memory_.end() && old_call_type) {
           MemorySpace promoted = mem_it->second;
           std::optional<MemorySpace> kwarg_target;
+          std::string mx_layout = "none";
           for (const auto& [key, value] : call->kwargs_) {
             if (key == "target_memory") {
               kwarg_target = AnyCast<MemorySpace>(value, "target_memory");
-              break;
+            } else if (key == "mx_layout") {
+              mx_layout = AnyCast<std::string>(value, "mx_layout");
             }
           }
-          if (!kwarg_target.has_value() || *kwarg_target != promoted) {
+          const bool is_mx_load = mx_layout != "none" && !mx_layout.empty();
+          if (is_mx_load) {
+            // Preserve MX fractal=32 TileView from DeduceTileLoadType. Ordinary
+            // GetImplicitTileView(Mat) yields NZ and strips fractal. InferFromOp
+            // already forces Mat for mx_layout; still stamp target_memory if the
+            // Call kwargs omitted it (pre-stamp / hand-built IR).
+            INTERNAL_CHECK_SPAN(promoted == MemorySpace::Mat, call->span_)
+                << "Internal error: tile.load with mx_layout resolved to non-Mat ("
+                << static_cast<int>(promoted) << "); InferFromOp should force Mat";
+            if (!kwarg_target.has_value() || *kwarg_target != MemorySpace::Mat) {
+              std::vector<std::pair<std::string, std::any>> new_kwargs;
+              new_kwargs.reserve(call->kwargs_.size() + 1);
+              bool saw_target_memory = false;
+              for (const auto& [key, value] : call->kwargs_) {
+                if (key == "target_memory") {
+                  saw_target_memory = true;
+                  new_kwargs.emplace_back(key, std::any(MemorySpace::Mat));
+                } else {
+                  new_kwargs.emplace_back(key, value);
+                }
+              }
+              if (!saw_target_memory) {
+                new_kwargs.emplace_back("target_memory", std::any(MemorySpace::Mat));
+              }
+              auto preserved_type = std::make_shared<TileType>(old_call_type->shape_, old_call_type->dtype_,
+                                                               old_call_type->memref_,
+                                                               old_call_type->tile_view_, MemorySpace::Mat);
+              new_value = std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->attrs_,
+                                                 std::move(preserved_type), call->span_);
+            }
+          } else if (!kwarg_target.has_value() || *kwarg_target != promoted) {
             std::vector<std::pair<std::string, std::any>> new_kwargs;
             new_kwargs.reserve(call->kwargs_.size() + 1);
             bool saw_target_memory = false;

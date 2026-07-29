@@ -189,7 +189,8 @@ def test_backend_limits_come_from_the_backend_interface():
 
 def test_backend_limits_cover_every_space_the_soc_describes():
     # Walking the SoC rather than a fixed space list is what keeps a backend
-    # that grew a space mapped: Ascend950 has Bias, Ascend910B does not.
+    # that grew a space mapped: Ascend950 has Bias/LeftScale/RightScale,
+    # Ascend910B does not.
     for name in memory_map.backend_names():
         instance = memory_map.backend_instance(name)
         expected = {
@@ -202,8 +203,11 @@ def test_backend_limits_cover_every_space_the_soc_describes():
         }
         assert memory_map.backend_limits(name) == expected
 
-    assert "Bias" in memory_map.backend_limits("Ascend950")
-    assert "Bias" not in memory_map.backend_limits("Ascend910B")
+    a5 = memory_map.backend_limits("Ascend950")
+    a2 = memory_map.backend_limits("Ascend910B")
+    for space in ("Bias", "LeftScale", "RightScale"):
+        assert space in a5
+        assert space not in a2
     # Every space a backend can report has a panel slot, so none falls back to
     # its own high-water mark and renders permanently full.
     for name in memory_map.backend_names():
