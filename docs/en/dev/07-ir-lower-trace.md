@@ -72,14 +72,38 @@ The sidebar lists passes in execution order with inserted/deleted line counts,
 change status, and warning badges. **Changed** and **No-op** filters independently
 show or hide passes that changed the printed IR or left it unchanged. The first
 changed pass is selected initially, falling back to the first pass when every
-pass is a no-op.
+pass is a no-op. The sidebar scrolls independently from the comparison panel,
+while its title and filters remain visible at the top.
 
 ### Navigate and inspect
 
-Select a pass in the sidebar to compare its input and output side by side. Press
-`j` or `Down Arrow` to move to the next visible pass, and `k` or `Up Arrow` to
-move to the previous visible pass. Keyboard navigation is ignored while a
-text-entry control has focus.
+Select a pass in the sidebar to compare its input and output. Press `j` or `Down
+Arrow` to move to the next visible pass, and `k` or `Up Arrow` to move to the
+previous visible pass. Keyboard navigation is ignored while an input or selection
+control has focus.
+
+Use **Side by side** to place Before and After in columns, or **Stacked** to place
+Before above After. Side by side is the default. The selected layout is retained
+while navigating passes and functions in the open report, and resets when the page
+is reloaded. The toolbar remains visible while the comparison panes use the
+remaining viewport height. Each pane is independently scrollable, and scrolling
+either pane keeps the Before and After vertical and horizontal positions
+synchronized in both layouts.
+
+### Compare by function
+
+Use the **Function** selector to focus the diff on one top-level function or a
+direct method of a top-level class. **Whole file** is the first option and the
+default. Functions are matched by exact qualified key; class methods use keys such
+as `Program.run`. Unambiguous entries display only their short name, while duplicate
+short names display the qualified key. A function that exists only in After is
+shown as added, and one that exists only in Before is shown as deleted.
+
+The selected function is retained when changing passes if it exists on either side
+of the new comparison. Otherwise the viewer falls back to Whole file. Nested
+functions are kept inside their containing function rather than listed separately.
+If either snapshot cannot be parsed safely, function selection is disabled for that
+pass and the existing Whole file diff is used.
 
 Within replacement blocks, the viewer aligns single-line Python calls by their
 qualified operation name. This keeps related operations paired when a pass adds
@@ -87,14 +111,14 @@ layout conversions around them, while the surrounding lines remain full-line
 deletions or insertions. Replacement rows use light delete/insert backgrounds,
 with the exact changed characters emphasized in stronger red and green. Both
 panes use the same scrollable canvas width so row backgrounds cover the complete
-code line. Scrolling either pane keeps the before and after views synchronized
-vertically and horizontally.
+code line.
 
 ### Copy snapshots
 
 Use **Copy full source** above either pane to copy the complete before or after
-snapshot, including unchanged lines hidden by context folding. Copying uses the
-browser clipboard API when available and a local fallback otherwise.
+snapshot, including unchanged lines hidden by context folding. This remains a
+full-snapshot action when one function is selected. Copying uses the browser
+clipboard API when available and a local fallback otherwise.
 
 ### Warnings
 
