@@ -14,6 +14,10 @@
   要求显式插入一条 `pto.cmo.cacheinvalid all #pto.address_space<gm>`，使读方看到 peer
   的最新写。
 
+消费侧里 `ttest` 那一半描述的是硬件契约，而非本 pass 的行为：PyPTO 没有 `ttest` 算子，
+因此 `pld.system.wait` 是本 pass 唯一能识别的消费侧点。将来若新增 `ttest` 算子，
+`StmtEffect` 也必须把它归为 `Effect::kWait`。
+
 两处缓存标记都是**同一个** `system.cacheinvalid` op，按参数个数分两种形态：
 
 | 形态 | IR | 降级为 |
@@ -29,8 +33,9 @@
 在 ptoas 0.50 上实测，该契约可归结为**两条纯局部规则** —— *notify* 本身无需任何标记。
 一趟结构遍历（`InsertCommMarkers`），不带任何控制流状态，插入：
 
-- **每个本地发布写之后** —— window-bound `tile.store`，或写入本地目标的 `get`：一条覆盖
-  整张量的**区域** `system.cacheinvalid`，**紧跟一条 `system.fence`**；
+- **每个本地发布写之后** —— 写入 window-bound 目标的 `tile.store` 或 `tensor.write`，
+  或写入 window-bound 本地目标的 `get`：一条覆盖整张量的**区域** `system.cacheinvalid`，
+  **紧跟一条 `system.fence`**；
 - **每个远端发布写之后** —— `remote_store` / `put`：只插一条 `system.fence`（其 peer 区域
   cacheinvalid 由 codegen 发,见下）；
 - **每个不透明发布写之后** —— 一个 `Submit`，或对未注册用户函数（其函数体不在本 pass 内分析,
@@ -119,11 +124,13 @@ codegen 最终降级的 IR。
 | 情形 | cacheinvalid | fence |
 | ---- | ------------ | ----- |
 | 写入 window-bound `DistributedTensorType` 的 `tile.store`（peer 可 `remote_load`） | pass（本地区域,dst arg 2） | pass |
-| `pld.tile.get` / `pld.tensor.get`（读 peer 到本地目标） | pass（本地区域,dst arg 0） | pass |
+| 写入 window-bound `DistributedTensorType` 的 `tensor.write`（标量写,`ConvertTensorToTileOps` 有意不转换它） | pass（本地区域,dst arg 0） | pass |
+| 目标为 window-bound `DistributedTensorType` 的 `pld.tile.get` / `pld.tensor.get` | pass（本地区域,dst arg 0） | pass |
 | `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put`（peer 偏移写） | **codegen**（peer 区域,IR 规避） | **pass** |
+| `Submit`,或对未注册用户函数的调用（没有单一可寻址区域） | pass（全 GM,无参） | pass |
 
-`remote_load`（结果是 tile、不写 GM）以及写入普通 `Tensor` 的 `tile.store` **不是**发布
-写 —— 完全不插标记。
+`remote_load`（结果是 tile、不写 GM），以及目标是普通 `Tensor` 而非 window-bound
+`DistributedTensor` 的 `tile.store` / `tensor.write` / `get`，**不是**发布写 —— 完全不插标记。
 
 ## 算法 —— 一趟结构遍历，无流状态
 

@@ -252,6 +252,27 @@ class TestSystemOpsParsing:
         with pytest.raises(ValueError, match="offsets must match tensor rank 2"):
             system_ops.cacheinvalid(tensor, [1, 1], [0])
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"shapes": [1]},
+            {"offsets": [0]},
+            {"shapes": [1], "offsets": [0]},
+        ],
+        ids=["shapes-only", "offsets-only", "both"],
+    )
+    def test_cacheinvalid_rejects_region_args_without_tensor(self, kwargs):
+        """A missing tensor must not silently widen a region call to whole-GM.
+
+        Both the DSL wrapper (``pl.system.cacheinvalid``) and the IR wrapper
+        reject it — otherwise the region arguments are dropped and the call
+        invalidates the entire GM address space instead of surfacing the error.
+        """
+        with pytest.raises(ValueError, match="whole-GM form takes no shapes/offsets"):
+            pl.system.cacheinvalid(None, **kwargs)  # type: ignore[arg-type]  # intentionally missing tensor
+        with pytest.raises(ValueError, match="whole-GM form takes no shapes/offsets"):
+            system_ops.cacheinvalid(None, **kwargs)  # type: ignore[arg-type]  # intentionally missing tensor
+
     def test_syncall_round_trip(self):
         """Test round-trip for pl.system.syncall with an explicit core_type."""
 

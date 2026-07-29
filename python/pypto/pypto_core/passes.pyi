@@ -697,10 +697,11 @@ def insert_comm_fence() -> Pass:
 
     The ``pld.system.notify`` itself needs no marker:
 
-    * After each **local** publishing write — a ``tile.store`` into a window-bound
-      ``DistributedTensor`` (a peer can ``remote_load`` it), or a ``get`` into a
-      local destination — a region ``system.cacheinvalid`` of the written region
-      immediately followed by a GM ``system.fence``.
+    * After each **local** publishing write — a ``tile.store`` or ``tensor.write``
+      into a window-bound ``DistributedTensor`` (a peer can ``remote_load`` it), or
+      a ``get`` into a window-bound local destination — a region
+      ``system.cacheinvalid`` of the written region immediately followed by a GM
+      ``system.fence``.
     * After each **remote** publishing write (``remote_store`` / ``put``) — only a
       GM ``system.fence``. Its peer-offset address is not yet expressible in the IR,
       so the peer-region cacheinvalid is emitted by the op's codegen as a workaround;

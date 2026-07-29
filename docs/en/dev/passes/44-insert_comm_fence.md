@@ -17,6 +17,11 @@ The contract is **two-sided**:
   `pto.comm.ttest`) requires an explicit `pto.cmo.cacheinvalid all
   #pto.address_space<gm>` first, so the reader sees the peer's fresh write.
 
+That `ttest` half of the consume side is a statement about the hardware contract,
+not about this pass: PyPTO has no `ttest` operator, so `pld.system.wait` is the
+only consume-side point the pass can recognise. If a `ttest` op is ever added,
+`StmtEffect` must classify it as `Effect::kWait` too.
+
 Both cache markers are the **same** `system.cacheinvalid` op, in two forms
 distinguished by arity:
 
@@ -34,9 +39,10 @@ Verified empirically on ptoas 0.50, the contract reduces to **two purely-local
 rules** — the *notify* itself needs no marker. A single structural traversal
 (`InsertCommMarkers`), with no control-flow state, inserts:
 
-- **after each local publishing write** — a window-bound `tile.store`, or a `get`
-  into a local destination: a whole-tensor **region** `system.cacheinvalid` of the
-  written target, **immediately followed by a `system.fence`**;
+- **after each local publishing write** — a `tile.store` or `tensor.write` into a
+  window-bound destination, or a `get` into a window-bound local destination: a
+  whole-tensor **region** `system.cacheinvalid` of the written target,
+  **immediately followed by a `system.fence`**;
 - **after each remote publishing write** — `remote_store` / `put`: only a
   `system.fence` (see the note below on where its cacheinvalid comes from);
 - **after each opaque publishing write** — a `Submit`, or a call to an
@@ -142,11 +148,14 @@ this pass sees is exactly what codegen lowers.
 | Case | cacheinvalid | fence |
 | ---- | ------------ | ----- |
 | `tile.store` into a window-bound `DistributedTensorType` (a peer can `remote_load` it) | pass (local region, dst arg 2) | pass |
-| `pld.tile.get` / `pld.tensor.get` (peer read into a local destination) | pass (local region, dst arg 0) | pass |
+| `tensor.write` into a window-bound `DistributedTensorType` (scalar write, kept unconverted by `ConvertTensorToTileOps`) | pass (local region, dst arg 0) | pass |
+| `pld.tile.get` / `pld.tensor.get` into a window-bound `DistributedTensorType` destination | pass (local region, dst arg 0) | pass |
 | `pld.tile.remote_store` / `pld.tile.put` / `pld.tensor.put` (peer-offset write) | **codegen** (peer region — IR workaround) | **pass** |
+| `Submit`, or a call to an unregistered user function (no single addressable region) | pass (whole-GM, no args) | pass |
 
-A `remote_load` (result is a tile, no GM write) and a `tile.store` into a plain
-`Tensor` are **not** publishing writes — no marker at all.
+A `remote_load` (result is a tile, no GM write) and a `tile.store` / `tensor.write`
+/ `get` whose destination is a plain `Tensor` rather than a window-bound
+`DistributedTensor` are **not** publishing writes — no marker at all.
 
 ## Algorithm — one structural traversal, no flow state
 

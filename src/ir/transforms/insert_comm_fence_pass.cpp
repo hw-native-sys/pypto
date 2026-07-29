@@ -131,8 +131,9 @@ Effect StmtEffect(const StmtPtr& stmt) {
 
 // The local destination tensor of a publishing write, whose cache lines this pass
 // invalidates after it (a region `system.cacheinvalid(target)` addresses `target`'s
-// local base). Correct for a local-window store (`tile.store`) or a peer-read into
-// a local destination (`get`). The **remote** writes `remote_store` / `put` land at
+// local base). Correct for a local-window store (`tile.store`), a scalar write
+// (`tensor.write`), or a peer-read into a local destination (`get`).
+// The **remote** writes `remote_store` / `put` land at
 // a peer-offset address (`local_ptr + delems(peer)`) that a local-target
 // cacheinvalid cannot address, so they return null here — see `IsRemoteWrite`.
 ExprPtr PublishingWriteTarget(const CallPtr& call) {
@@ -142,6 +143,9 @@ ExprPtr PublishingWriteTarget(const CallPtr& call) {
   }
   if (IsOp(call, "tile.store")) {
     return call->args_.size() > 2 ? call->args_[2] : nullptr;  // (tile, indices, dst)
+  }
+  if (IsOp(call, "tensor.write")) {
+    return call->args_.empty() ? nullptr : call->args_[0];  // (dst, indices, value)
   }
   return nullptr;  // remote_store / put -> remote write, see IsRemoteWrite
 }

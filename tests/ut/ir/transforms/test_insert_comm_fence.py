@@ -10,19 +10,24 @@
 
 """Unit tests for the ``InsertCommFence`` pass, as Before/Expected structural comparisons.
 
-The pass enforces the ptoas data-before-signal contract with two purely-local
-rules (verified on ptoas 0.50); the ``notify`` itself needs no marker:
+The pass enforces the ptoas data-before-signal contract with purely-local rules
+(verified on ptoas 0.50); the ``notify`` itself needs no marker:
 
-* **After every local publishing write** — a window-bound ``pl.store`` (or ``get``
-  into a local destination): a whole-tensor region
-  ``pl.system.cacheinvalid(target, shape, [0, ...])`` immediately followed by
+* **After every local publishing write** — a ``pl.store`` or scalar write into a
+  window-bound destination, or a ``get`` into a window-bound local destination: a
+  whole-tensor region ``pl.system.cacheinvalid(target, shape, [0, ...])``
+  immediately followed by ``pl.system.fence()``.
+* **After every remote publishing write** — ``remote_store`` / ``put``: only
+  ``pl.system.fence()``.
+* **After every opaque publishing write** — a ``Submit``, or a call to an
+  unregistered user function: a whole-GM ``pl.system.cacheinvalid()`` followed by
   ``pl.system.fence()``.
 * **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args).
 
-The **remote** writes ``remote_store`` / ``put`` land at a peer-offset address and
-are left untouched by the pass — their codegen emits a correct peer-region
-cacheinvalid + fence itself (see the codegen tests). So a program whose only
-publishing write is a ``remote_store`` is returned unchanged by this pass.
+The **remote** writes land at a peer-offset address that a local-target
+cacheinvalid cannot address, so the pass inserts only their release fence — the
+peer-region cacheinvalid comes from their own codegen (see the codegen tests).
+That asymmetry is what ``test_remote_store_gets_fence_only`` pins down.
 
 Each test builds a ``Before`` program, runs the pass, and structurally compares
 the result against a hand-written ``Expected``. The pass runs inside
@@ -77,6 +82,59 @@ def test_window_store_then_notify():
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_scalar_write_to_window_then_notify():
+    # ConvertTensorToTileOps deliberately keeps `tensor.write` unconverted when its
+    # destination is a DistributedTensor (codegen lowers it to `pto.store_scalar`),
+    # so the pass must recognise it as a publishing write like `tile.store`.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            val: pl.Scalar[pl.FP32],
+        ):
+            pl.write(win, [0, 0], val)  # publishing: win is window-bound
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            val: pl.Scalar[pl.FP32],
+        ):
+            pl.write(win, [0, 0], val)
+            pl.system.cacheinvalid(win, [1, N], [0, 0])
+            pl.system.fence()
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_scalar_write_to_plain_tensor_is_not_published():
+    # Same op, plain Tensor destination: no peer can remote_load it, so no marker.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            plain: pl.Tensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+            val: pl.Scalar[pl.FP32],
+        ):
+            pl.write(plain, [0, 0], val)
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Before)
 
 
 def test_remote_store_gets_fence_only():

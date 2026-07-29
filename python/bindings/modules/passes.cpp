@@ -553,7 +553,8 @@ void BindPass(nb::module_& m) {
              "it from an alias fixpoint. Runs last, after materialize_runtime_scopes.");
   passes.def("insert_comm_fence", &pass::InsertCommFence,
              "Insert the ptoas data-before-signal markers. Local publishing write\n"
-             "(window-bound tile.store, get into a local dst): a region system.cacheinvalid\n"
+             "(tile.store or tensor.write into a window-bound dst, get into a window-bound\n"
+             "local dst): a region system.cacheinvalid\n"
              "+ GM system.fence. Remote write (remote_store / put): only system.fence — its\n"
              "peer-region cacheinvalid is emitted by codegen (peer offset not yet\n"
              "IR-expressible). Opaque write (Submit / unregistered call): a conservative\n"

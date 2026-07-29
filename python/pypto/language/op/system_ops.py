@@ -251,6 +251,11 @@ def cacheinvalid(
         span: Optional source span for debugging (auto-captured if not provided).
     """
     if tensor is None:
+        if shapes is not None or offsets is not None:
+            raise ValueError(
+                "system.cacheinvalid whole-GM form takes no shapes/offsets; "
+                "pass (tensor, shapes, offsets) for the region form"
+            )
         return _ir_ops.cacheinvalid(span=span)
     if shapes is None or offsets is None:
         raise ValueError(
