@@ -148,9 +148,22 @@ class TraceInvocation:
 
         This is the only per-callable identifier the ``[STRACE]`` markers carry;
         distinct ``hid`` values are distinct kernels/callables. It is an opaque
-        hash, **not** a human-readable kernel name (markers do not carry one).
+        hash — see :attr:`task_name` for the orchestration's readable name.
         """
         return self.hid
+
+    @property
+    def task_name(self) -> str:
+        """This dispatch's orchestration name, or its :attr:`task` hash.
+
+        The markers carry no name, so it is recovered by matching ``hid`` against
+        the ``hid → name`` pairings ``device_runner`` records when it
+        assembles each callable (the hid is the ELF Build-ID of the very
+        orchestration ``.so`` the runtime hashes). Degrades to the raw hash when
+        the callable was not assembled in this process, on ``*sim`` platforms, or
+        when the optional runtime is not installed — see :func:`_task_label`.
+        """
+        return _task_label(self.hid)
 
     @property
     def device_wall_us(self) -> float:
@@ -305,9 +318,84 @@ def _span_names() -> dict[str, str]:
 # Runtime log level that makes the ``LOG_INFO_V9`` ``[STRACE]`` markers visible.
 _STRACE_LOG_LEVEL = "v9"
 
-# Metric name → the per-dispatch :class:`TraceInvocation` attribute it sums over
-# (used by ``BenchmarkStats.per_rank`` / ``per_round``).
+# Metric name → the per-dispatch :class:`TraceInvocation` attribute it reads
+# (used by ``BenchmarkStats.per_dispatch`` / ``per_rank`` / ``per_round``).
 _METRIC_ATTR = {"device": "device_wall_us", "host": "host_wall_us", "effective": "effective_us"}
+
+# Shown when no ``[STRACE]`` span tree was captured at all.
+_NO_TREE_MSG = "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
+
+# Max ``(pid, slot)`` groups listed inline by ``BenchmarkStats.__str__`` before
+# the tail is elided (the full set is always available via ``per_dispatch``).
+_STR_MAX_DISPATCHES = 8
+
+
+def _task_label(hid: str) -> str:
+    """*hid* resolved to its orchestration's name, or *hid* unchanged.
+
+    The ``[STRACE]`` markers identify a callable only by ``hid`` — the ELF
+    Build-ID of its orchestration ``.so``. ``device_runner`` records
+    ``hid → name`` for every callable it assembles, which covers any
+    program compiled in this process, so the lookup normally succeeds.
+
+    Falls back to the raw hash when it cannot: the callable was assembled in a
+    different process, the platform is ``*sim`` (its host seeds the marker hid
+    with the runtime ``callable_id`` instead of a Build-ID), or the optional
+    runtime package is not installed at all (``device_runner`` pulls in the
+    native ``_task_interface``, hence the guarded import).
+    """
+    try:
+        from .device_runner import callable_name  # noqa: PLC0415
+    except ImportError:
+        return hid
+    return callable_name(hid) or hid
+
+
+def _metric_attr(metric: str, *, caller: str) -> str:
+    """The :class:`TraceInvocation` attribute *metric* names, validated."""
+    attr = _METRIC_ATTR.get(metric)
+    if attr is None:
+        raise ValueError(f"{caller}: metric must be one of {sorted(_METRIC_ATTR)}, got {metric!r}")
+    return attr
+
+
+def _mean_of(invocations: Sequence["TraceInvocation"]) -> "TraceInvocation | None":
+    """A synthetic :class:`TraceInvocation` averaging *invocations* span-by-span.
+
+    Spans are matched by name; ``depth`` / ``attrs`` (hence
+    :attr:`TraceSpan.is_device`) come from the first invocation carrying the span.
+    ``inv`` is ``-1`` to mark the aggregate. ``None`` when *invocations* is empty.
+
+    Callers must only pass invocations of the **same** dispatch (same ``(pid,
+    slot)``): averaging distinct dispatches by span name fuses unrelated kernels
+    into one meaningless tree.
+    """
+    if not invocations:
+        return None
+    durs: dict[str, list[int]] = defaultdict(list)
+    tss: dict[str, list[int]] = defaultdict(list)
+    template: dict[str, TraceSpan] = {}
+    for inv in invocations:
+        for s in inv.spans:
+            durs[s.name].append(s.dur)
+            tss[s.name].append(s.ts)
+            template.setdefault(s.name, s)
+    spans = [
+        TraceSpan(
+            pid=t.pid,
+            tid=t.tid,
+            inv=-1,
+            hid=t.hid,
+            depth=t.depth,
+            name=name,
+            ts=round(statistics.fmean(tss[name])),
+            dur=round(statistics.fmean(durs[name])),
+            attrs=t.attrs,
+        )
+        for name, t in template.items()
+    ]
+    first = invocations[0]
+    return TraceInvocation(pid=first.pid, inv=-1, hid=first.hid, spans=spans)
 
 
 @dataclass
@@ -326,11 +414,18 @@ class BenchmarkStats:
     - **Stored headline** (list, length ``rounds``): :attr:`device_wall_us`,
       :attr:`host_wall_us`. Same as ``per_round("device")`` / ``per_round("host")``.
     - **Stored raw detail**: :attr:`rounds_dispatches` (the L3 ``round → rank →
-      [dispatch]`` grid, the single source for per-rank / effective / union
-      derivations) and :attr:`invocations` (the same dispatches flattened, for
-      tree rendering).
-    - **Derived summaries**: :meth:`per_round` / :meth:`per_rank` for the four
-      metrics ``device`` / ``host`` / ``effective`` / ``union``.
+      [dispatch]`` grid, the single source for per-dispatch / per-rank /
+      effective / union derivations) and :attr:`invocations` (the same dispatches
+      flattened, for tree rendering).
+    - **Derived summaries**: :meth:`per_dispatch` (no fusing — one series per
+      ``(pid, slot)`` dispatch), :meth:`per_rank` (that rank's dispatches summed
+      per round) and :meth:`per_round`, for the metrics ``device`` / ``host`` /
+      ``effective`` (plus ``union`` on ``per_round``).
+
+    A rank that dispatches more than once per round is **not** fused by
+    :meth:`per_dispatch` or by the mean-tree views (:meth:`format_mean_tree`
+    groups per dispatch by default); :meth:`per_rank` / :meth:`per_round`
+    deliberately do sum, as a rank's round busy-time.
 
     The min / median / mean / max / stdev helpers operate on
     :attr:`device_wall_us` — the on-NPU metric.
@@ -353,8 +448,10 @@ class BenchmarkStats:
             :class:`TraceInvocation` dispatches in round ``k`` (ordered by
             ``inv``). Each dispatch exposes :attr:`TraceInvocation.task` (the
             ``hid``) and :attr:`TraceInvocation.device_wall_us` / ``host_wall_us``
-            / ``effective_us``. It is the single source :meth:`per_rank` /
-            :meth:`per_round` derive from. Same objects as :attr:`invocations`.
+            / ``effective_us``. It is the single source :meth:`per_dispatch` /
+            :meth:`per_rank` / :meth:`per_round` derive from, and its dispatch
+            position is the ``slot`` those views key on. Same objects as
+            :attr:`invocations`.
             Length is ``rounds``; empty for L2 and the flatten fallback.
         fallback_flattened: L3 only — ``True`` when per-round segmentation was not
             possible (a rank's marker count was not divisible by
@@ -372,19 +469,63 @@ class BenchmarkStats:
     rounds_dispatches: list[dict[int, list[TraceInvocation]]] = field(default_factory=list)
     fallback_flattened: bool = False
 
+    def dispatch_groups(self) -> dict[tuple[int, int], list[TraceInvocation]]:
+        """Per-dispatch invocation series: ``{(pid, slot): [round0, round1, ...]}``.
+
+        *slot* is the dispatch's position within its rank's round (dispatches are
+        ordered by ``inv``, and the round segmentation guarantees a constant
+        dispatch count per rank per round, so slot ``s`` is the same dispatch in
+        every round). Keys are sorted by ``(pid, slot)``.
+
+        This is the un-fused view: a rank issuing several dispatches per round
+        gets one entry per dispatch instead of a single summed number. Derived
+        from :attr:`rounds_dispatches`, so it is **L3 only** — returns ``{}`` for
+        L2 and for the flatten fallback.
+        """
+        out: dict[tuple[int, int], list[TraceInvocation]] = {}
+        for ranks in self.rounds_dispatches:
+            for pid, dispatches in ranks.items():
+                for slot, dispatch in enumerate(dispatches):
+                    out.setdefault((pid, slot), []).append(dispatch)
+        return {key: out[key] for key in sorted(out)}
+
+    def dispatch_tasks(self) -> dict[tuple[int, int], str]:
+        """``{(pid, slot): name}`` — what each dispatch runs, for labelling slots.
+
+        The dispatch's :attr:`TraceInvocation.task_name` (its orchestration
+        name, or the raw ``hid`` hash when that cannot be resolved),
+        taken from its first measured round. ``{}`` for L2 / fallback. For the
+        wire identity itself use ``dispatch_groups()[key][0].task``.
+        """
+        return {key: group[0].task_name for key, group in self.dispatch_groups().items() if group}
+
+    def per_dispatch(self, metric: str = "device") -> dict[tuple[int, int], list[float]]:
+        """Per-dispatch, per-round summary (µs): ``{(pid, slot): [round0, ...]}``.
+
+        *metric* is one of ``"device"`` / ``"host"`` / ``"effective"``. Unlike
+        :meth:`per_rank`, nothing is summed — each entry is one dispatch's own
+        :attr:`TraceInvocation.device_wall_us` / ``host_wall_us`` /
+        ``effective_us``, so a rank's repeated or heterogeneous dispatches stay
+        separate. Pair with :meth:`dispatch_tasks` to label the slots.
+
+        Derived from :attr:`rounds_dispatches`, so it is **L3 only** — returns
+        ``{}`` for L2 and for the flatten fallback.
+        """
+        attr = _metric_attr(metric, caller="per_dispatch()")
+        return {key: [getattr(d, attr) for d in group] for key, group in self.dispatch_groups().items()}
+
     def per_rank(self, metric: str = "device") -> dict[int, list[float]]:
         """Per-rank, per-round summary (µs): ``{pid: [round0, round1, ...]}``.
 
         *metric* is one of ``"device"`` / ``"host"`` / ``"effective"`` — each
         round entry sums that rank's dispatches'
         :attr:`TraceInvocation.device_wall_us` / ``host_wall_us`` / ``effective_us``
-        (a card runs its dispatches serially). Derived from
-        :attr:`rounds_dispatches`, so it is **L3 only** — returns ``{}`` for L2
-        and for the flatten fallback.
+        (a card runs its dispatches serially), i.e. that rank's busy time for the
+        round. Use :meth:`per_dispatch` when you need the individual dispatches
+        rather than their sum. Derived from :attr:`rounds_dispatches`, so it is
+        **L3 only** — returns ``{}`` for L2 and for the flatten fallback.
         """
-        attr = _METRIC_ATTR.get(metric)
-        if attr is None:
-            raise ValueError(f"per_rank(): metric must be one of {sorted(_METRIC_ATTR)}, got {metric!r}")
+        attr = _metric_attr(metric, caller="per_rank()")
         n = len(self.rounds_dispatches)
         out: dict[int, list[float]] = {}
         for k, ranks in enumerate(self.rounds_dispatches):
@@ -444,13 +585,21 @@ class BenchmarkStats:
             us: Show durations in microseconds (default) or nanoseconds.
         """
         if not self.invocations:
-            return "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
+            return _NO_TREE_MSG
         selected = (
             list(enumerate(self.invocations)) if launch is None else [(launch, self.invocations[launch])]
         )
+        # L3: label each launch with the (round, slot) it belongs to, so a rank's
+        # repeated dispatches are told apart in the flat ``invocations`` ordering.
+        where = self._dispatch_coords()
         out: list[str] = []
         for i, inv in selected:
-            out.append(f"launch[{i}] (pid={inv.pid} inv={inv.inv} hid={inv.hid}):")
+            coord = where.get(id(inv))
+            tag = f" round={coord[0]} slot={coord[1]}" if coord is not None else ""
+            name = inv.task_name
+            if name != inv.hid:  # resolved to a readable orchestration name
+                tag += f" task={name}"
+            out.append(f"launch[{i}] (pid={inv.pid} inv={inv.inv} hid={inv.hid}{tag}):")
             out.append(inv.format_tree(us=us))
         return "\n".join(out)
 
@@ -458,86 +607,152 @@ class BenchmarkStats:
         """Print :meth:`format_tree` to *file* (default stdout)."""
         print(self.format_tree(launch, us=us), file=file)
 
-    def mean_invocation(self) -> "TraceInvocation | None":
+    def _dispatch_coords(self) -> dict[int, tuple[int, int]]:
+        """``id(dispatch) -> (round, slot)`` for the L3 grid; ``{}`` otherwise.
+
+        :attr:`rounds_dispatches` holds the very same :class:`TraceInvocation`
+        objects as :attr:`invocations`, so identity is a valid key.
+        """
+        out: dict[int, tuple[int, int]] = {}
+        for k, ranks in enumerate(self.rounds_dispatches):
+            for dispatches in ranks.values():
+                for slot, dispatch in enumerate(dispatches):
+                    out[id(dispatch)] = (k, slot)
+        return out
+
+    def _mean_tree_groups(
+        self, *, pid: int | None = None, slot: int | None = None
+    ) -> list[tuple[str | None, list[TraceInvocation]]]:
+        """The ``(label, invocations)`` groups the mean-tree views average over.
+
+        L3 (:attr:`rounds_dispatches` populated): one group per ``(pid, slot)``
+        dispatch — so a rank's distinct dispatches are never averaged into one
+        tree — narrowed by the optional *pid* / *slot* selectors. L2 and the
+        flatten fallback have no dispatch grid, so they yield a single unlabeled
+        group holding every measured launch.
+        """
+        groups = self.dispatch_groups()
+        if not groups:
+            if pid is not None or slot is not None:
+                return []
+            return [(None, self.invocations)] if self.invocations else []
+        tasks = self.dispatch_tasks()
+        return [
+            (f"pid={key[0]} slot={key[1]} task={tasks[key]}", invs)
+            for key, invs in groups.items()
+            if (pid is None or key[0] == pid) and (slot is None or key[1] == slot)
+        ]
+
+    def mean_invocation(self, *, pid: int | None = None, slot: int | None = None) -> "TraceInvocation | None":
         """A synthetic :class:`TraceInvocation` whose every span's ``dur`` (and
-        ``ts``) is the mean across all measured launches (warmup excluded).
+        ``ts``) is the mean across the measured launches of **one** dispatch
+        (warmup excluded).
 
         Spans are matched by name; ``depth`` / ``attrs`` (hence
         :attr:`TraceSpan.is_device`) come from the first launch that carried the
         span. ``inv`` is ``-1`` to mark the aggregate. Returns ``None`` when no
         span tree was captured. Useful for rendering one noise-smoothed tree.
-        """
-        if not self.invocations:
-            return None
-        durs: dict[str, list[int]] = defaultdict(list)
-        tss: dict[str, list[int]] = defaultdict(list)
-        template: dict[str, TraceSpan] = {}
-        for inv in self.invocations:
-            for s in inv.spans:
-                durs[s.name].append(s.dur)
-                tss[s.name].append(s.ts)
-                template.setdefault(s.name, s)
-        spans = [
-            TraceSpan(
-                pid=t.pid,
-                tid=t.tid,
-                inv=-1,
-                hid=t.hid,
-                depth=t.depth,
-                name=name,
-                ts=round(statistics.fmean(tss[name])),
-                dur=round(statistics.fmean(durs[name])),
-                attrs=t.attrs,
-            )
-            for name, t in template.items()
-        ]
-        first = self.invocations[0]
-        return TraceInvocation(pid=first.pid, inv=-1, hid=first.hid, spans=spans)
 
-    def format_mean_tree(self, *, us: bool = True, spread: str = "stdev") -> str:
-        """Render a span tree whose every node's duration is the mean across all
+        Args:
+            pid: Restrict to this rank (L3). ``None`` means "any".
+            slot: Restrict to this dispatch slot within the round (L3).
+
+        Raises:
+            ValueError: The selectors do not narrow an L3 run down to a single
+                ``(pid, slot)`` dispatch. Averaging distinct dispatches by span
+                name would fuse unrelated kernels into one meaningless tree, so
+                pass ``pid=`` / ``slot=`` (see :meth:`dispatch_tasks` for the
+                available keys) or use :meth:`format_mean_tree`, which renders
+                every dispatch's tree.
+        """
+        groups = self._mean_tree_groups(pid=pid, slot=slot)
+        if not groups:
+            return None
+        if len(groups) > 1:
+            raise ValueError(
+                f"mean_invocation(): {len(groups)} dispatches match pid={pid} slot={slot} "
+                f"({sorted(self.dispatch_groups())}); averaging them by span name would fuse "
+                "distinct dispatches. Pass pid=/slot= to select one, or use format_mean_tree()."
+            )
+        return _mean_of(groups[0][1])
+
+    def format_mean_tree(
+        self,
+        *,
+        us: bool = True,
+        spread: str = "stdev",
+        pid: int | None = None,
+        slot: int | None = None,
+    ) -> str:
+        """Render a span tree whose every node's duration is the mean across the
         measured launches (warmup excluded), annotated with the per-node spread.
+
+        On an L3 run one tree is rendered **per dispatch** (``(pid, slot)``, see
+        :meth:`dispatch_groups`): a rank that dispatches several kernels per round
+        gets one tree each rather than a single tree averaging them together.
 
         Args:
             us: Show values in microseconds (default) or nanoseconds.
             spread: Spread shown after each node's mean — ``"stdev"`` (``±sd``,
                 default), ``"minmax"`` (``[min..max]``), ``"both"``, or
                 ``"none"``. Computed across the measured launches.
+            pid: Render only this rank's dispatches (L3).
+            slot: Render only this dispatch slot within the round (L3).
         """
-        mean_inv = self.mean_invocation()
-        if mean_inv is None:
-            return "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
+        groups = self._mean_tree_groups(pid=pid, slot=slot)
+        if not groups:
+            if self.invocations:
+                return f"BenchmarkStats: no dispatch matches pid={pid} slot={slot}"
+            return _NO_TREE_MSG
 
-        durs: dict[str, list[int]] = defaultdict(list)
-        for inv in self.invocations:
-            for s in inv.spans:
-                durs[s.name].append(s.dur)
         scale = 1000.0 if us else 1.0
         unit = "us" if us else "ns"
-
-        def _value(span: TraceSpan) -> list[str]:
-            ds = durs[span.name]
-            cols = [f"{statistics.fmean(ds) / scale:.1f}{unit}"]
-            if spread in ("stdev", "both"):
-                sd = statistics.stdev(ds) / scale if len(ds) > 1 else 0.0
-                cols.append(f"±{sd:.1f}")
-            if spread in ("minmax", "both"):
-                cols.append(f"[{min(ds) / scale:.1f}..{max(ds) / scale:.1f}]")
-            return cols
-
         legend = "mean"
         if spread in ("stdev", "both"):
             legend += " ±stdev"
         if spread in ("minmax", "both"):
             legend += " [min..max]"
-        header = (
-            f"mean of {len(self.invocations)} launches (warmup {self.warmup} excluded); each node: {legend}:"
-        )
-        return f"{header}\n{mean_inv.format_tree(us=us, value_fn=_value)}"
 
-    def print_mean_tree(self, *, us: bool = True, spread: str = "stdev", file: Any = None) -> None:
+        out: list[str] = []
+        for label, invs in groups:
+            mean_inv = _mean_of(invs)
+            if mean_inv is None:
+                continue
+            durs: dict[str, list[int]] = defaultdict(list)
+            for inv in invs:
+                for s in inv.spans:
+                    durs[s.name].append(s.dur)
+
+            def _value(span: TraceSpan, durs: dict[str, list[int]] = durs) -> list[str]:
+                ds = durs[span.name]
+                cols = [f"{statistics.fmean(ds) / scale:.1f}{unit}"]
+                if spread in ("stdev", "both"):
+                    sd = statistics.stdev(ds) / scale if len(ds) > 1 else 0.0
+                    cols.append(f"±{sd:.1f}")
+                if spread in ("minmax", "both"):
+                    cols.append(f"[{min(ds) / scale:.1f}..{max(ds) / scale:.1f}]")
+                return cols
+
+            prefix = f"dispatch {label} — " if label is not None else ""
+            if out:
+                out.append("")
+            out.append(
+                f"{prefix}mean of {len(invs)} launches (warmup {self.warmup} excluded); each node: {legend}:"
+            )
+            out.append(mean_inv.format_tree(us=us, value_fn=_value))
+        return "\n".join(out)
+
+    def print_mean_tree(
+        self,
+        *,
+        us: bool = True,
+        spread: str = "stdev",
+        pid: int | None = None,
+        slot: int | None = None,
+        file: Any = None,
+    ) -> None:
         """Print :meth:`format_mean_tree` to *file* (default stdout)."""
-        print(self.format_mean_tree(us=us, spread=spread), file=file)
+        print(self.format_mean_tree(us=us, spread=spread, pid=pid, slot=slot), file=file)
 
     @property
     def device_us_min(self) -> float:
@@ -621,7 +836,30 @@ class BenchmarkStats:
             f"device_wall_us min={self.device_us_min:.1f} median={self.device_us_median:.1f} "
             f"mean={self.device_us_mean:.1f} max={self.device_us_max:.1f} "
             f"stdev={self.device_us_stdev:.1f}{suffix}"
+            f"{self._per_dispatch_line()}"
         )
+
+    def _per_dispatch_line(self) -> str:
+        """A trailing ``__str__`` line breaking the headline down per dispatch.
+
+        Only emitted when some rank dispatches more than once per round — the case
+        where the summed per-rank / per-round headline hides the individual
+        dispatches. Long dispatch sets are elided; :meth:`per_dispatch` has all of
+        them.
+        """
+        per_dispatch = self.per_dispatch("device")
+        if len(per_dispatch) <= len(self.per_rank("device")):
+            return ""  # at most one dispatch per rank: nothing is being fused
+        tasks = self.dispatch_tasks()
+        shown = list(per_dispatch.items())[:_STR_MAX_DISPATCHES]
+        cells = [
+            f"(pid={pid},slot={slot},task={tasks[pid, slot]})={statistics.fmean(vals):.1f}"
+            for (pid, slot), vals in shown
+        ]
+        elided = len(per_dispatch) - len(shown)
+        if elided:
+            cells.append(f"... +{elided} more")
+        return "\n  per-dispatch device mean us: " + "  ".join(cells)
 
 
 @contextmanager
@@ -978,10 +1216,12 @@ def benchmark(
     Returns:
         A :class:`BenchmarkStats` with the per-round ``device_wall_us`` /
         ``host_wall_us`` samples and aggregate helpers. For L3 the samples are
-        per-round maxima across ranks; per-rank / effective / union summaries are
-        derived on demand via :meth:`BenchmarkStats.per_rank` (``device`` /
-        ``host`` / ``effective``) and :meth:`BenchmarkStats.per_round` (those plus
-        ``union``), and the ``round → rank → [dispatch]`` grid is in
+        per-round maxima across ranks; summaries are derived on demand via
+        :meth:`BenchmarkStats.per_dispatch` (per ``(pid, slot)`` dispatch — nothing
+        summed), :meth:`BenchmarkStats.per_rank` (``device`` / ``host`` /
+        ``effective``, that rank's dispatches summed per round) and
+        :meth:`BenchmarkStats.per_round` (those plus ``union``), and the
+        ``round → rank → [dispatch]`` grid is in
         :attr:`BenchmarkStats.rounds_dispatches`.
 
     Raises:
@@ -1002,6 +1242,9 @@ def benchmark(
         that round's per-rank **summed** dispatch device walls — a proxy for round
         device time that excludes inter-dispatch idle gaps and cross-rank start
         skew (device clocks are per-invocation, so gaps/skew are unmeasurable).
+        A rank that dispatches more than once per round is therefore summed in the
+        headline; use :meth:`BenchmarkStats.per_dispatch` (and the per-dispatch
+        mean trees) to keep those dispatches apart.
         ``per_round("union")`` complements it with the cross-rank **host-timeline**
         union window (the ``<root>`` host clocks are ``CLOCK_MONOTONIC``,
         cross-process comparable), which *does* capture overlap / start skew but

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""ELF / Mach-O object file parser for extracting .text sections.
+"""ELF / Mach-O object file parser for extracting .text sections and Build-IDs.
 
 Pure Python implementation — no external dependencies.
 """
@@ -24,11 +24,114 @@ ELFMAG1 = ord("E")
 ELFMAG2 = ord("L")
 ELFMAG3 = ord("F")
 
+# ELF class byte (e_ident[EI_CLASS]) for 64-bit objects.
+ELFCLASS64 = 2
+
+# Program-header type / note type for the GNU Build-ID note.
+PT_NOTE = 4
+NT_GNU_BUILD_ID = 3
+
 # Mach-O Magic Numbers
 MH_MAGIC_64 = 0xFEEDFACF
 
 # Mach-O Load Command types
 LC_SEGMENT_64 = 0x19
+
+# ELF64 header / program-header field offsets and sizes.
+_EHDR_SIZE = 64
+_EHDR_PHOFF = 0x20
+_EHDR_PHENTSIZE = 0x36
+_PHDR_SIZE = 56
+_PHDR_OFFSET = 8
+_PHDR_FILESZ = 32
+_NHDR_SIZE = 12
+
+# FNV-1a 64-bit parameters (mirrors runtime ``src/common/utils/fnv1a_64.h``).
+_FNV1A_64_OFFSET = 0xCBF29CE484222325
+_FNV1A_64_PRIME = 0x100000001B3
+_U64_MASK = 0xFFFFFFFFFFFFFFFF
+
+
+def fnv1a_64(data: bytes) -> int:
+    """FNV-1a 64-bit content hash of *data*.
+
+    Mirrors the runtime's ``simpler::common::utils::fnv1a_64``
+    (``src/common/utils/fnv1a_64.h``) so both sides agree bit-for-bit.
+    """
+    h = _FNV1A_64_OFFSET
+    for byte in data:
+        h = ((h ^ byte) * _FNV1A_64_PRIME) & _U64_MASK
+    return h
+
+
+def elf_build_id_64(data: bytes) -> int:
+    """The 64-bit identifier the runtime derives from an ELF64's GNU Build-ID.
+
+    The first 8 bytes of the ``NT_GNU_BUILD_ID`` note descriptor, read as a
+    little-endian ``uint64``; falls back to :func:`fnv1a_64` over the whole
+    buffer when *data* is not a well-formed ELF64 or carries no Build-ID (i.e.
+    was linked without ``--build-id``).
+
+    This mirrors the runtime's ``simpler::common::utils::elf_build_id_64``
+    (``src/common/utils/elf_build_id.h``) exactly, because the value it returns
+    for an orchestration ``.so`` is the ``hid=`` field of that callable's
+    ``[STRACE]`` timing markers. Computing it host-side is what lets pypto map a
+    marker back to the orchestration function name (see
+    ``pypto.runtime.device_runner.register_callable_identity``).
+
+    Args:
+        data: The complete object-file bytes (the same buffer the runtime hashes).
+
+    Returns:
+        The 64-bit callable identity. Never raises — malformed input degrades to
+        the FNV-1a fallback, matching the runtime.
+    """
+    if len(data) < _EHDR_SIZE:
+        return fnv1a_64(data)
+    if data[:4] != bytes((ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3)) or data[4] != ELFCLASS64:
+        return fnv1a_64(data)
+
+    (e_phoff,) = struct.unpack_from("<Q", data, _EHDR_PHOFF)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, _EHDR_PHENTSIZE)
+    if e_phoff == 0 or e_phentsize < _PHDR_SIZE:
+        return fnv1a_64(data)
+    if e_phoff + e_phnum * e_phentsize > len(data):
+        return fnv1a_64(data)
+
+    for i in range(e_phnum):
+        phdr = e_phoff + i * e_phentsize
+        (p_type,) = struct.unpack_from("<I", data, phdr)
+        if p_type != PT_NOTE:
+            continue
+        (p_offset,) = struct.unpack_from("<Q", data, phdr + _PHDR_OFFSET)
+        (p_filesz,) = struct.unpack_from("<Q", data, phdr + _PHDR_FILESZ)
+        if p_offset + p_filesz > len(data):
+            continue  # Notes lie beyond the buffer we were given.
+        build_id = _find_build_id_note(data, p_offset, p_offset + p_filesz)
+        if build_id is not None:
+            return build_id
+
+    # No Build-ID found; the SO was likely linked without --build-id.
+    return fnv1a_64(data)
+
+
+def _find_build_id_note(data: bytes, start: int, end: int) -> int | None:
+    """Scan the ELF note entries in ``data[start:end]`` for a GNU Build-ID."""
+    note = start
+    while note + _NHDR_SIZE <= end:
+        namesz, descsz, ntype = struct.unpack_from("<III", data, note)
+        name = note + _NHDR_SIZE
+        desc = name + ((namesz + 3) & ~3)
+        nxt = desc + ((descsz + 3) & ~3)
+        if nxt > end:
+            return None  # Malformed note entry.
+        is_build_id = (
+            ntype == NT_GNU_BUILD_ID and namesz == 4 and data[name : name + 4] == b"GNU\x00" and descsz >= 8
+        )
+        if is_build_id:
+            return int(struct.unpack_from("<Q", data, desc)[0])
+        note = nxt
+    return None
 
 
 def extract_text_section(obj_input: str | Path | bytes) -> bytes:

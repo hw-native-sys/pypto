@@ -188,12 +188,34 @@ simpler_run                71784.1us  ±6797.5  [66482.4..89832.6]
 ```python
 stats.per_round("device" | "host" | "effective" | "union")  # -> 每轮一个值
 stats.per_rank("device" | "host" | "effective")             # -> {pid: 每轮一个值}
+stats.per_dispatch("device" | "host" | "effective")         # -> {(pid, slot): 每轮一个值}
 ```
 
-这两个视图都是**按 rank 按轮**聚合的：每个值是该 rank 该轮内多次 dispatch 的
-**求和**（一张卡串行执行它的多次 dispatch），因此是"每 rank 每轮"的量，**不是**逐
-dispatch 的量。当某 rank 每轮恰好只有 1 次 dispatch 时，求和即那唯一一次 dispatch 的值；
-无论哪种情况，要看逐次 dispatch 明细都读 `stats.rounds_dispatches[k][pid]`（见下）。
+`per_round` / `per_rank` 是**按 rank 按轮**聚合的：每个值是该 rank 该轮内多次
+dispatch 的**求和**（一张卡串行执行它的多次 dispatch），因此是"每 rank 每轮"的忙时量，
+**不是**逐 dispatch 的量。
+
+`per_dispatch` 是**不做融合**的视图——它不求和。它以 `(pid, slot)` 为键，`slot` 是该次
+dispatch 在本 rank 该轮内的序号；轮次切分保证每 rank 每轮的 dispatch 数恒定，因此
+slot `s` 在每一轮都对应同一次 dispatch。这样一个 rank 每轮的多次 dispatch 会各自保留
+一条序列，而不是被加成一个数。`stats.dispatch_tasks()` 给出每个 slot 实际执行的编排函数
+名，`stats.dispatch_groups()` 返回其每轮的 `TraceInvocation`。
+
+```python
+stats.per_dispatch("device")   # {(4242, 0): [4.1, 3.8, ...], (4242, 1): [6.3, 6.5, ...]}
+stats.dispatch_tasks()         # {(4242, 0): "prefill_orch", (4242, 1): "decode_orch"}
+```
+
+marker 本身不带名字，只带 `hid` —— 该 callable 编排 `.so` 的 ELF Build-ID（仍可通过
+`TraceInvocation.task` 读到）。pypto 对交给 runtime 的同一份 `.so` 字节重算该 Build-ID，
+并在装配时与该编排生成的名字配对，从而还原名字（`TraceInvocation.task_name`）。配对不可得时
+退化为原始哈希：`*sim` 平台（其 host 用 runtime `callable_id` 而非 Build-ID 填充 `hid`），
+或该 callable 是在别的进程里装配的。
+
+均值树视图同样按 dispatch 区分：L3 下 `print_mean_tree()` **按 `(pid, slot)` 各输出一棵
+树**，不再把一个 rank 的不同 kernel 平均进同一棵树；`pid=` / `slot=` 可收窄到某一次
+dispatch。`format_tree()` 的 launch 表头也带上 `round=` / `slot=`。`mean_invocation()`
+只返回一棵树，因此除非用 `pid=` / `slot=` 选定单次 dispatch，否则会抛错。
 
 `effective` 是 orch∪sched 的设备执行窗口（每卡 L2 Effective）；`union` 是跨卡 host
 时间轴并集窗口（能反映起跑错位——host 域，含派发开销）。可导航的

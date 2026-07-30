@@ -198,6 +198,17 @@ def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     assert not stats.all_zero_device, "device_wall_us must be > 0 on the default SIMPLER_HOST_STRACE build"
     assert stats.device_us_min > 0.0
 
+    # Per-dispatch view: this program issues exactly one child per rank per round,
+    # so every rank has slot 0 only and the un-fused series equals the summed
+    # per-rank one. A rank with >1 dispatch/round would differ (per_rank sums).
+    per_dispatch = stats.per_dispatch("device")
+    assert set(per_dispatch) == {(pid, 0) for pid in rank_dev}
+    for (pid, _slot), series in per_dispatch.items():
+        assert series == rank_dev[pid]
+    # Each dispatch renders its own mean tree (never averaged across dispatches).
+    for pid, slot in per_dispatch:
+        assert f"pid={pid} slot={slot}" in stats.format_mean_tree(pid=pid, slot=slot)
+
     # Per-card L2 Effective (orch union sched window): one series per rank, > 0, and
     # bounded by that rank's device wall (Effective ⊆ device_wall).
     assert set(rank_eff) == set(rank_dev)

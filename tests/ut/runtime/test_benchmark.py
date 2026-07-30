@@ -21,6 +21,7 @@ run everywhere without ``simpler``.
 """
 
 import os
+import struct
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,7 @@ from pypto.runtime.bench import (
     _parse_stats_from_strace,
     benchmark,
 )
+from pypto.runtime.elf_parser import elf_build_id_64, fnv1a_64
 
 
 @pytest.fixture
@@ -417,6 +419,140 @@ def test_parse_l3_multi_dispatch_sums_within_round(span_root):
     assert stats.device_wall_us == [10.0, 10.0]
 
 
+def _l3_multi_dispatch_lines(span_root: str) -> list[str]:
+    """Markers for 2 rounds where rank 100 dispatches twice (hids a, b) per round.
+
+    rank 100: round0 = a(4us) + b(6us), round1 = a(3us) + b(7us).
+    rank 101: one dispatch/round (hid c): 5us then 8us.
+    """
+    lines: list[str] = []
+    lines += _launch_lines(0, span_root, host_us=1, device_us=4, pid=100, hid="a")
+    lines += _launch_lines(1, span_root, host_us=1, device_us=6, pid=100, hid="b")
+    lines += _launch_lines(2, span_root, host_us=1, device_us=3, pid=100, hid="a")
+    lines += _launch_lines(3, span_root, host_us=1, device_us=7, pid=100, hid="b")
+    lines += _launch_lines(0, span_root, host_us=1, device_us=5, pid=101, hid="c")
+    lines += _launch_lines(1, span_root, host_us=1, device_us=8, pid=101, hid="c")
+    return lines
+
+
+def test_parse_l3_per_dispatch_keeps_a_ranks_dispatches_separate(span_root):
+    """``per_dispatch`` does not fuse a rank's several dispatches per round.
+
+    ``per_rank`` sums rank 100's two dispatches into one per-round busy figure;
+    ``per_dispatch`` keys on ``(pid, slot)`` so each dispatch keeps its own series.
+    """
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+
+    assert stats.fallback_flattened is False
+    # Un-fused: one series per (pid, slot), ordered by (pid, slot).
+    assert stats.per_dispatch("device") == {
+        (100, 0): [4.0, 3.0],
+        (100, 1): [6.0, 7.0],
+        (101, 0): [5.0, 8.0],
+    }
+    # Slots are identified by their task (callable hash).
+    assert stats.dispatch_tasks() == {(100, 0): "a", (100, 1): "b", (101, 0): "c"}
+    # The summed per-rank view is unchanged (4+6, 3+7).
+    assert stats.per_rank("device")[100] == [10.0, 10.0]
+    # Each (pid, slot) group holds one TraceInvocation per measured round.
+    groups = stats.dispatch_groups()
+    assert [d.device_wall_us for d in groups[100, 1]] == [6.0, 7.0]
+
+
+def test_per_dispatch_host_metric_and_bad_metric(span_root):
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+    assert stats.per_dispatch("host") == {
+        (100, 0): [1.0, 1.0],
+        (100, 1): [1.0, 1.0],
+        (101, 0): [1.0, 1.0],
+    }
+    with pytest.raises(ValueError, match="per_dispatch\\(\\): metric must be one of"):
+        stats.per_dispatch("nope")
+
+
+def test_per_dispatch_empty_without_dispatch_grid():
+    """No L3 grid (L2 / flatten fallback) -> the per-dispatch views are empty."""
+    stats = BenchmarkStats(device_wall_us=[1.0], host_wall_us=[2.0], rounds=1, warmup=0)
+    assert stats.per_dispatch("device") == {}
+    assert stats.dispatch_groups() == {}
+    assert stats.dispatch_tasks() == {}
+
+
+def test_mean_tree_renders_one_tree_per_dispatch(span_root):
+    """The mean tree groups per ``(pid, slot)`` instead of averaging dispatches.
+
+    Rank 100's two dispatches (4/3us and 6/7us device) must show as 3.5us and
+    6.5us trees — a single fused tree would report their 5.0us average.
+    """
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+
+    tree = stats.format_mean_tree(spread="none")
+    assert "dispatch pid=100 slot=0 task=a — mean of 2 launches" in tree
+    assert "dispatch pid=100 slot=1 task=b — mean of 2 launches" in tree
+    assert "dispatch pid=101 slot=0 task=c — mean of 2 launches" in tree
+    assert _row_present(tree, "device_wall [dev] 3.5us")  # (4+3)/2, not fused with slot 1
+    assert _row_present(tree, "device_wall [dev] 6.5us")  # (6+7)/2
+    assert not _row_present(tree, "device_wall [dev] 5.0us")  # the old fused average
+
+    # Selectors narrow the rendering to one dispatch.
+    one = stats.format_mean_tree(spread="none", pid=100, slot=1)
+    assert "slot=1" in one and "slot=0" not in one
+    assert _row_present(one, "device_wall [dev] 6.5us")
+    assert "no dispatch matches" in stats.format_mean_tree(pid=999)
+
+
+def test_mean_invocation_requires_a_single_dispatch(span_root):
+    """``mean_invocation`` refuses to average distinct dispatches together."""
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+
+    with pytest.raises(ValueError, match="dispatches match pid=None slot=None"):
+        stats.mean_invocation()
+    # Narrowed to one dispatch -> the mean of just that dispatch's launches.
+    mean = stats.mean_invocation(pid=100, slot=1)
+    assert mean is not None
+    assert mean.device_wall_us == 6.5
+    assert stats.mean_invocation(pid=999) is None
+
+
+def test_format_tree_labels_round_and_slot(span_root):
+    """L3 launch headers carry the (round, slot) so repeats are distinguishable."""
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+    header_lines = [line for line in stats.format_tree().splitlines() if line.startswith("launch[")]
+    assert any("round=0 slot=0" in line for line in header_lines)
+    assert any("round=0 slot=1" in line for line in header_lines)
+    assert any("round=1 slot=1" in line for line in header_lines)
+
+
+def test_str_breaks_down_fused_dispatches(span_root):
+    """``__str__`` adds a per-dispatch line when a rank dispatches more than once."""
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+    text = str(stats)
+    assert "per-dispatch device mean us:" in text
+    assert "(pid=100,slot=0,task=a)=3.5" in text
+    assert "(pid=100,slot=1,task=b)=6.5" in text
+
+    # One dispatch per rank: nothing is fused, so no extra line.
+    single = _parse_stats_from_strace(
+        "\n".join(_launch_lines(0, span_root, host_us=1, device_us=5, pid=100)),
+        rounds=1,
+        warmup=0,
+        distributed=True,
+    )
+    assert "per-dispatch" not in str(single)
+
+
 def test_parse_l3_non_divisible_falls_back_to_flattened(span_root):
     """A non-deterministic dispatch shape (count not divisible by launches) flattens."""
     lines: list[str] = []
@@ -525,6 +661,135 @@ def test_parse_l3_degenerates_to_l2_for_single_rank(span_root):
     assert stats.fallback_flattened is False
     assert stats.device_wall_us == [10.0, 20.0]
     assert stats.per_rank("device") == {100: [10.0, 20.0]}
+
+
+# ---------------------------------------------------------------------------
+# Callable identity — resolving a marker ``hid`` to an orchestration name
+# ---------------------------------------------------------------------------
+
+# A real aarch64 .so's Build-ID and the 64-bit id the runtime derives from it
+# (the first 8 descriptor bytes read little-endian).
+_REAL_BUILD_ID = bytes.fromhex("ac6a376891802e4aa47c89a076b5e4b48a461a47")
+_REAL_BUILD_ID_64 = 0x4A2E809168376AAC
+
+
+def _elf64_with_build_id(build_id: bytes | None) -> bytes:
+    """A minimal ELF64 carrying one ``PT_NOTE`` segment (Build-ID when given).
+
+    Just enough header for ``elf_build_id_64`` to walk: an ELF64 header pointing
+    at a single program header, which points at the note payload.
+    """
+    if build_id is None:
+        note = b""
+    else:
+        note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
+        note += b"\x00" * (-len(note) % 4)
+    phoff, note_off = 64, 120
+
+    ehdr = bytearray(64)
+    ehdr[0:4] = b"\x7fELF"
+    ehdr[4:7] = bytes((2, 1, 1))  # ELFCLASS64, little endian, version 1
+    struct.pack_into("<Q", ehdr, 0x20, phoff)  # e_phoff
+    struct.pack_into("<HH", ehdr, 0x36, 56, 1)  # e_phentsize, e_phnum
+
+    phdr = bytearray(56)
+    struct.pack_into("<I", phdr, 0, 4)  # p_type = PT_NOTE
+    struct.pack_into("<Q", phdr, 8, note_off)  # p_offset
+    struct.pack_into("<Q", phdr, 32, len(note))  # p_filesz
+
+    body = bytes(ehdr) + bytes(phdr)
+    return body.ljust(note_off, b"\x00") + note
+
+
+def test_elf_build_id_64_reads_the_gnu_build_id():
+    """``hid`` is the Build-ID's first 8 descriptor bytes, little-endian.
+
+    Pinned against a real ``.so``: ``readelf -n`` reports Build-ID
+    ``ac6a3768 91802e4a ...``, which the runtime turns into
+    ``0x4a2e809168376aac`` — the value that reaches the ``[STRACE]`` markers.
+    """
+    assert elf_build_id_64(_elf64_with_build_id(_REAL_BUILD_ID)) == _REAL_BUILD_ID_64
+
+
+def test_elf_build_id_64_falls_back_to_fnv1a():
+    """No Build-ID / not an ELF -> FNV-1a over the whole buffer, as the runtime does."""
+    not_elf = b"definitely not an ELF file"
+    assert elf_build_id_64(not_elf) == fnv1a_64(not_elf)
+    # Truncated input is degenerate, not an error.
+    assert elf_build_id_64(b"") == fnv1a_64(b"")
+    # Well-formed ELF whose note segment carries no Build-ID.
+    no_build_id = _elf64_with_build_id(None)
+    assert elf_build_id_64(no_build_id) == fnv1a_64(no_build_id)
+
+
+def test_callable_display_name_prefers_the_source_stem():
+    """The manifest's ``function_name`` cannot tell two callables apart.
+
+    Every generated ``ORCHESTRATION`` declares the same fixed AICPU entry symbol
+    (verified on a real v4-flash L3 build: both ``prefill_fwd`` and
+    ``lm_head_test`` carry ``function_name="aicpu_orchestration_entry"``), so the
+    per-program name has to come from the generated source file's stem.
+    """
+    dr = pytest.importorskip("pypto.runtime.device_runner")
+
+    entry = "aicpu_orchestration_entry"
+    assert (
+        dr.callable_display_name(
+            {
+                "source": "/b/_jit_l3/next_levels/prefill_fwd/orchestration/prefill_fwd.cpp",
+                "function_name": entry,
+            }
+        )
+        == "prefill_fwd"
+    )
+    assert (
+        dr.callable_display_name(
+            {
+                "source": "/b/_jit_l3/next_levels/lm_head_test/orchestration/lm_head_test.cpp",
+                "function_name": entry,
+            }
+        )
+        == "lm_head_test"
+    )
+    # No source in the manifest: fall back rather than losing the label entirely.
+    assert dr.callable_display_name({"function_name": entry}) == entry
+
+
+def test_register_callable_identity_maps_hid_to_name():
+    """``device_runner`` records hid -> orchestration name at assemble time."""
+    dr = pytest.importorskip("pypto.runtime.device_runner")
+
+    so = _elf64_with_build_id(_REAL_BUILD_ID)
+    hid = dr.register_callable_identity(so, "decode_orch")
+
+    assert hid == f"{_REAL_BUILD_ID_64:x}"  # marker wire format: lowercase hex
+    assert dr.callable_name(hid) == "decode_orch"
+    assert dr.callable_name(hid.upper()) == "decode_orch"  # lookup is case-insensitive
+    assert dr.callable_name("dead" * 4) is None  # never assembled here
+
+
+def test_dispatch_tasks_show_orchestration_names(span_root):
+    """A measured dispatch is labelled with its orchestration name, not the hash."""
+    dr = pytest.importorskip("pypto.runtime.device_runner")
+
+    hid = dr.register_callable_identity(_elf64_with_build_id(_REAL_BUILD_ID), "decode_orch")
+    lines = _launch_lines(0, span_root, host_us=1, device_us=4, pid=100, hid=hid)
+    lines += _launch_lines(1, span_root, host_us=1, device_us=6, pid=100, hid="feedface")
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=1, warmup=0, distributed=True)
+
+    # Slot 0's hash resolves; slot 1 was never assembled here, so it stays raw.
+    assert stats.dispatch_tasks() == {(100, 0): "decode_orch", (100, 1): "feedface"}
+    dispatches = stats.rounds_dispatches[0][100]
+    assert dispatches[0].task == hid  # .task is still the wire identity
+    assert dispatches[0].task_name == "decode_orch"
+    assert dispatches[1].task_name == "feedface"
+
+    # Both the mean-tree group headers and the launch headers carry the name.
+    assert "dispatch pid=100 slot=0 task=decode_orch" in stats.format_mean_tree()
+    assert f"hid={hid} round=0 slot=0 task=decode_orch" in stats.format_tree()
+    # An unresolved hid is not annotated twice.
+    assert "task=feedface" not in stats.format_tree()
 
 
 # ---------------------------------------------------------------------------
