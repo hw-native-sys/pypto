@@ -51,9 +51,22 @@ Define the shared validation and conversion block once in the same session. `con
 validate_report() {
   wt_python - "$1" <<'PY'
 import json
-import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
+
+class ResourceAudit(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.external = []
+    def handle_starttag(self, tag, attrs):
+        normalized = [(name.lower(), value or "") for name, value in attrs]
+        if any(name == "src" and value for name, value in normalized):
+            self.external.append(f"{tag}[src]")
+        rels = [value for name, value in normalized if name == "rel"]
+        has_href = any(name == "href" and value for name, value in normalized)
+        if tag.lower() == "link" and has_href and any("stylesheet" in rel.lower().split() for rel in rels):
+            self.external.append("link[rel=stylesheet]")
 
 path = Path(sys.argv[1])
 if not path.is_file() or path.stat().st_size == 0:
@@ -66,9 +79,10 @@ if not all(checks):
     raise SystemExit("report is missing doctype, closing HTML, CSS, trace data, or JavaScript")
 if not json.loads(text.split(marker, 1)[1].split("</script>", 1)[0]).get("passes"):
     raise SystemExit("report contains no pass trace data")
-external = r'<(?:script|img|iframe)\b[^>]*\bsrc\s*=|<link\b[^>]*\brel\s*=["\x27]?stylesheet'
-if re.search(external, text, re.I):
-    raise SystemExit("report references external resources")
+audit = ResourceAudit()
+audit.feed(text)
+if audit.external:
+    raise SystemExit(f"report references external resources: {audit.external}")
 print(f"validated self-contained report: {path.resolve()} ({path.stat().st_size} bytes)")
 PY
 }
