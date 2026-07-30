@@ -491,6 +491,13 @@ _AT_STASH_KWARGS = {
     "dumps": "dumps_kw",
 }
 
+# Call attrs that never appear inside a printed ``attrs={...}`` dict. On
+# ``system.task_dummy`` they ride bespoke surfaces (``manual_dep_edges`` prints
+# as ``deps=[...]``; ``dummy_task`` is re-derived from the op), and the printer
+# rejects them on every other op. Accepting either from a generic attrs dict
+# would build IR that cannot be printed back.
+_TASK_DUMMY_ONLY_ATTRS = frozenset({"manual_dep_edges", "dummy_task"})
+
 
 def _split_spmd_for_loop_name_hints(name_hint: str) -> tuple[str, str]:
     """Map one ``for i in pl.spmd(..., name_hint=...)`` hint to Spmd vs InCore names.
@@ -7716,7 +7723,20 @@ class ASTParser:
                     "attrs keys must be string literals",
                     span=self.span_tracker.get_span(key_node) if key_node else None,
                 )
-            result[key_node.value] = self._parse_attr_value(method_name, key_node.value, value_node)
+            key = key_node.value
+            if key in _TASK_DUMMY_ONLY_ATTRS:
+                # The printer never emits these into ``attrs={...}``: on
+                # ``system.task_dummy`` they ride the bespoke ``deps=`` surface
+                # (and ``dummy_task`` is re-derived from the op), and on any
+                # other op the printer rejects them outright. Accepting one here
+                # would build IR that cannot be printed back.
+                raise ParserSyntaxError(
+                    f"attrs['{key}'] on call to '{method_name}' is not a writable attr; "
+                    "manual dependency edges are written as deps=[...] on "
+                    "pl.system.task_dummy or pl.submit",
+                    span=self.span_tracker.get_span(value_node),
+                )
+            result[key] = self._parse_attr_value(method_name, key, value_node)
         return result
 
     @staticmethod
@@ -8091,12 +8111,10 @@ class ASTParser:
         if deps:
             attrs.append(("manual_dep_edges", deps))
         # ``deps=`` and the op identity are the bespoke carriers for
-        # ``manual_dep_edges`` / ``dummy_task`` (both skipped by the printer's
-        # denylist and reconstructed above); recover every other key generically.
-        for key, value in (self._parse_op_attrs(call) or {}).items():
-            if key in {"dummy_task", "manual_dep_edges"}:
-                continue
-            attrs.append((key, value))
+        # ``manual_dep_edges`` / ``dummy_task``, reconstructed above; both are
+        # rejected inside a generic attrs dict, so everything left here is an
+        # ordinary attr to recover.
+        attrs.extend((self._parse_op_attrs(call) or {}).items())
         return ir.Call(base.op, base.args, base.kwargs, attrs, base.type, base.span)
 
     def _parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:

@@ -11,12 +11,14 @@
 
 import textwrap
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir import MemorySpace
 from pypto.ir.op import tile
 from pypto.ir.printer import python_print
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
 def test_python_print_basic_expressions():
@@ -1930,6 +1932,62 @@ def test_task_dummy_extra_attr_roundtrips_alongside_deps():
     assert attrs["my_marker"] == 7
     assert attrs["dummy_task"] is True
     assert len(list(attrs["manual_dep_edges"])) == 1
+
+
+def test_dep_edge_attrs_are_rejected_outside_task_dummy():
+    """`manual_dep_edges` / `dummy_task` are skipped ONLY on system.task_dummy.
+
+    Both keys are omitted from the printed ``attrs={...}`` dict because
+    task_dummy carries them on bespoke surfaces (``deps=[...]`` / re-derivation
+    from the op). No other op has those surfaces, so skipping the key there
+    would be exactly the silent drop the denylist exists to remove. The printer
+    must fail loud, and the parser must refuse to build such IR in the first
+    place.
+    """
+    source = textwrap.dedent("""\
+        @pl.program
+        class DepAttrOnPlainOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t = pl.tile.load(a, [0, 0], [128, 128], [128, 128], attrs={"manual_dep_edges": [a]})
+                r = pl.tile.store(t, [0, 0], out)
+                return r
+    """)
+    # Parser side: refuses to attach a dep-edge attr to a plain op call.
+    with pytest.raises(ParserSyntaxError, match="manual_dep_edges"):
+        pl.parse_program(source)
+
+    # Printer side: IR built directly (bypassing the parser) still fails loud
+    # instead of dropping the attr.
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.tile.load(a, [0, 0], [128, 128])
+            r = pl.tile.store(t, [0, 0], out)
+            return r
+
+    class _StampDepEdges(ir.IRMutator):
+        def visit_call(self, op):
+            expr = super().visit_call(op)
+            call = expr if isinstance(expr, ir.Call) else op
+            if call.op.name != ir.get_op("tile.load").name:
+                return expr
+            attrs = dict(call.attrs)
+            attrs["manual_dep_edges"] = [call.args[0]]
+            return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
+
+    stamped = _StampDepEdges().visit_program(Prog)
+    with pytest.raises(pypto.InternalError, match="system.task_dummy"):
+        python_print(stamped, format=False)
 
 
 if __name__ == "__main__":

@@ -1033,13 +1033,23 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // ``ast_parser._parse_op_attrs`` -> ``_parse_attr_value``. Keep this helper
   // available to the special call forms below so an early return cannot skip
   // the dict.
+  const bool is_task_dummy = IsOp(op, "system.task_dummy");
   auto print_serialized_attrs = [&](bool need_comma) {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      // Bespoke surfaces, deliberately skipped here:
-      //  - manual_dep_edges -> printed as ``deps=[...]`` on system.task_dummy
-      //  - dummy_task       -> re-derived by the parser from the op itself
-      if (kv.first == kAttrManualDepEdges || kv.first == kAttrDummyTask) continue;
+      if (kv.first == kAttrManualDepEdges || kv.first == kAttrDummyTask) {
+        // Bespoke surfaces, but ONLY on ``system.task_dummy``: there
+        // ``manual_dep_edges`` prints as ``deps=[...]`` and ``dummy_task`` is
+        // re-derived by the parser from the op itself. On any other op neither
+        // surface exists, so skipping the key would be precisely the silent
+        // drop this denylist removes — fail loud instead. Manual dependency
+        // edges belong on ``Submit::deps_`` (ManualDepsOnSubmitOnly).
+        INTERNAL_CHECK_SPAN(is_task_dummy, op->span_)
+            << "Internal error: call to '" << op->op_->name_ << "' carries attrs[\"" << kv.first
+            << "\"], which has a DSL surface only on system.task_dummy; manual dependency edges "
+               "belong on Submit::deps_";
+        continue;
+      }
       serialized_attrs.push_back(&kv);
     }
     if (serialized_attrs.empty()) return;
