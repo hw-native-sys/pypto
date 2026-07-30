@@ -4914,8 +4914,7 @@ class TestConvertCrossCoreSplitOps:
             attrs={"split": ir.SplitMode.UP_DOWN},
         )
         auto_program = ir.Program([auto_func], "auto", span)
-        with passes.PassContext([]):
-            auto_lowered = passes.lower_auto_vector_split()(auto_program)
+        auto_lowered = passes.lower_auto_vector_split()(auto_program)
         auto_call = _find_first_call_to(
             _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aiv_shard").name
         )
@@ -4996,7 +4995,17 @@ class TestConvertCrossCoreSplitOps:
             attrs={"split": ir.SplitMode.UP_DOWN},
         )
         auto_program = ir.Program([auto_func], "auto", span)
-        with passes.PassContext([]):
+        # Property verification stays ON; only the print->parse roundtrip is dropped.
+        # LowerAutoVectorSplit halves the `tile.add` RESULT to the per-lane [128, 128]
+        # but leaves its operand `vec` at the full [256, 128] param width, so the pass
+        # output is not re-parsable ("annotation for 'vec_h' has shape dimension
+        # 0 = 128 but expression has shape dimension 0 = 256"). That is the same V->C
+        # boundary defect family documented in test_lower_auto_vector_split.py; this
+        # test only compares the resulting `tile.aic_gather` TYPE against the explicit
+        # path, which is unaffected. Tracked by hw-native-sys/pypto#2203 — re-enable
+        # the roundtrip once the pass shards or rejects a full-width source instead
+        # of silently halving only the result.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             auto_lowered = passes.lower_auto_vector_split()(auto_program)
         auto_call = _find_first_call_to(
             _require_function(auto_lowered, "split_auto"), ir.get_op("tile.aic_gather").name

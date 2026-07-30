@@ -1502,10 +1502,9 @@ class TestOutlineNoDepArgs:
                         out = pl.store(t, [offset, 0], out)
                 return out
 
-        with passes.PassContext([]):
-            ssa = passes.convert_to_ssa()(Before)
-            with pytest.raises(ValueError, match="mutually exclusive"):
-                passes.outline_incore_scopes()(ssa)
+        ssa = passes.convert_to_ssa()(Before)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            passes.outline_incore_scopes()(ssa)
 
     def test_function_split_none_with_split_aiv_region_rejected(self):
         """``optimizations=[pl.split(pl.SplitMode.NONE)]`` on a scope holding
@@ -1537,7 +1536,16 @@ class TestOutlineNoDepArgs:
                         out = pl.store(t, [offset, 0], out)
                 return out
 
-        with passes.PassContext([]):
+        # Property verification stays ON; only the print->parse roundtrip is dropped.
+        # `Before` deliberately carries the invalid `split=SplitMode.NONE` on the scope
+        # that this test asserts the pass rejects, and the printer intentionally never
+        # emits a `pl.split(pl.SplitMode.NONE)` (see PrintScopeOptimizations in
+        # src/ir/transforms/python_printer.cpp), so the input cannot round-trip by
+        # design — ConvertToSSA would fail on "SplitMode optional presence mismatch"
+        # before reaching the pass under test. The underlying redundancy (split_ is
+        # optional AND SplitMode has a None member) is tracked by
+        # hw-native-sys/pypto#2205.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             ssa = passes.convert_to_ssa()(Before)
             with pytest.raises(ValueError, match="mutually exclusive"):
                 passes.outline_incore_scopes()(ssa)

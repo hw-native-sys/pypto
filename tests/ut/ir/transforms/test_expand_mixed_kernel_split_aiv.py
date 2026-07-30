@@ -38,9 +38,14 @@ def _tile(shape, view=None, mem=None):
 
 
 def _expand(program):
-    """Run ExpandMixedKernel with verification/roundtrip disabled."""
-    with passes.PassContext([]):
-        return passes.expand_mixed_kernel()(program)
+    """Run ExpandMixedKernel under the ambient ``conftest`` verification context.
+
+    The hand-built post-InferTileMemorySpace programs below satisfy both
+    BEFORE_AND_AFTER property verification and the print->parse roundtrip, so
+    there is nothing to suppress — the instruments back up the structural
+    comparison each test already makes.
+    """
+    return passes.expand_mixed_kernel()(program)
 
 
 def _assert_no_free_var(program):

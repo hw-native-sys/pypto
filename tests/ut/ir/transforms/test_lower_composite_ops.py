@@ -993,8 +993,7 @@ def test_allreduce_dynamic_partial_valid_shape_uses_bounded_physical_rectangle(
 
     # First pin the LowerCompositeOps contract directly: the source rectangle
     # stays statically bounded while only its valid width remains symbolic.
-    with passes.PassContext([]):
-        After = passes.lower_composite_ops()(Before)
+    After = passes.lower_composite_ops()(Before)
 
     class CallCollector(ir.IRVisitor):
         def __init__(self) -> None:

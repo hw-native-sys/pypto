@@ -30,10 +30,14 @@ def _setup_backend():
 
 
 def _stamp(program) -> str:
-    """Run convert_to_ssa then stamp_tfree_split (no verification) and print."""
+    """Run convert_to_ssa then stamp_tfree_split and print the result.
+
+    Runs under the ambient ``conftest`` context (BEFORE_AND_AFTER property
+    verification + the print->parse roundtrip instrument), so the pass output is
+    checked for free, not just the one ``tfree`` line the asserts below grep for.
+    """
     ssa = passes.convert_to_ssa()(program)
-    with passes.PassContext([]):
-        after = passes.stamp_tfree_split()(ssa)
+    after = passes.stamp_tfree_split()(ssa)
     return python_print(after)
 
 
