@@ -1837,6 +1837,7 @@ def test_builtin_op_call_generic_attrs_roundtrip():
                         "my_float_attr": 2.5,
                         "my_bool_attr": True,
                         "my_str_attr": "hello",
+                        "my_dtype_attr": pl.FP16,
                         "pipeline_membership": "0:3",
                         "dump_vars": [a],
                     },
@@ -1849,6 +1850,8 @@ def test_builtin_op_call_generic_attrs_roundtrip():
     printed = python_print(program, format=False)
     for key in ("my_int_attr", "my_float_attr", "my_bool_attr", "my_str_attr", "dump_vars"):
         assert key in printed, printed
+    # DataType attrs print in the ``pl.<DTYPE>`` form the dtype resolver reads back.
+    assert '"my_dtype_attr": pl.FP16' in printed, printed
 
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(program, reparsed)
@@ -1869,6 +1872,7 @@ def test_builtin_op_call_generic_attrs_roundtrip():
     assert attrs["my_float_attr"] == 2.5
     assert attrs["my_bool_attr"] is True
     assert attrs["my_str_attr"] == "hello"
+    assert attrs["my_dtype_attr"] == DataType.FP16
     assert attrs["pipeline_membership"] == "0:3"
     # The Var-list attr resolves back to the very same operand, by identity.
     assert list(attrs["dump_vars"]) == [loads[0].args[0]]

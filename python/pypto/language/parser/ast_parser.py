@@ -7294,6 +7294,14 @@ class ASTParser:
                 "unsupported kind (expected all ints, all pl.adir.<name>, or all names)",
                 span=node_span,
             )
+        # ``pl.<DTYPE>`` -> DataType. The printer emits DataType attrs in this
+        # form (PrintAttrValue's DataType arm), and ``parse_expression`` has no
+        # way to represent a dtype, so resolve it before the generic fallback.
+        if isinstance(value_node, ast.Attribute):
+            try:
+                return self.type_resolver.resolve_dtype(value_node)
+            except ParserTypeError:
+                pass
         # Bare name -> Var; any other expression -> the parsed IR expression.
         return self.parse_expression(value_node)
 

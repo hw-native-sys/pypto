@@ -811,6 +811,11 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     stream_ << std::quoted(std::any_cast<std::string>(value));
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
+  } else if (t == typeid(DataType)) {
+    // ``LowerHostTensorCollectives`` stamps a DataType attr on every
+    // ``builtin.tensor.<collective>`` call. Printed in the ``pl.<DTYPE>`` DSL
+    // form the dtype resolver reads back (ast_parser._parse_attr_value).
+    stream_ << prefix_ << "." << DataTypeToString(std::any_cast<DataType>(value));
   } else if (t == typeid(std::vector<ArgDirection>)) {
     const auto& dirs = std::any_cast<std::vector<ArgDirection>>(value);
     stream_ << "[";
@@ -852,7 +857,7 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     // the source rather than masked by a dropped attr.
     INTERNAL_CHECK_SPAN(false, span)
         << "Internal error: no DSL attr-value codec for type '" << DemangleTypeName(t.name())
-        << "'. The python printer round-trips int/bool/str/double/vector<ArgDirection>/"
+        << "'. The python printer round-trips int/bool/str/double/DataType/vector<ArgDirection>/"
            "vector<int32_t>/vector<VarPtr>/VarPtr/ExprPtr attrs; add a PrintAttrValue arm, a "
            "matching _parse_attr_value case, and ConvertKwargsDict support for this type instead "
            "of dropping it.";

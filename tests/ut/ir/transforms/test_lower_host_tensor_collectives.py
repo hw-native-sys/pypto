@@ -764,3 +764,44 @@ def test_host_all_to_all_lowers_to_namesake_builtin():
         ir.ArgDirection.InOut,
     ]
     assert call.kwargs["dtype"] == DataType.FP32
+
+
+def test_lowered_collective_is_printable_with_dtype_attr():
+    """The lowered ``builtin.tensor.*`` call must survive the python printer.
+
+    ``MakeBuiltinCallWithAttrs`` stamps a ``DataType``-valued ``dtype`` attr on
+    every lowered collective. The pass-dump instrument (``pass_manager.after_pass``)
+    prints the program after each pass, so a value type the printer has no codec
+    arm for aborts the whole compile with an ``InternalError`` — which is how this
+    surfaced in the distributed system tests. Printing here keeps the DataType
+    codec arm wired to the pass that actually produces it.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
+    result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
+
+    printed = ir.python_print(result, format=False)
+    assert "builtin.tensor.allreduce" in printed, printed
+    # The DataType attr renders in the ``pl.<DTYPE>`` DSL form, not dropped.
+    assert '"dtype": pl.FP32' in printed, printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
