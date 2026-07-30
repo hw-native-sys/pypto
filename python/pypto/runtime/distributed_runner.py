@@ -1721,6 +1721,17 @@ class DistributedWorker(Worker):
         self._require_open("free")
         self._w.free(ptr, worker_id)
 
+    def committed_device_memory(self, worker_id: int = 0) -> int:
+        """Total device HBM (bytes) committed by chip *worker_id*'s ``MemoryAllocator``
+        (tensors + pooled arenas + runtime buffers). Routes through the underlying
+        simpler ``Worker(level=3)`` facade, which forwards a
+        ``CTRL_COMMITTED_DEVICE_MEMORY`` query to the forked chip child. Sum across
+        ``worker_id``s for a multi-chip total."""
+        self._require_open("committed_device_memory")
+        if self._w is None:
+            return 0
+        return int(self._w.committed_device_memory(worker_id))
+
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """H2D copy: ``nbytes`` from host *src_host_ptr* to device *dst_dev_ptr*."""
         self._require_open("copy_to")
