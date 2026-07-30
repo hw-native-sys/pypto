@@ -21,6 +21,13 @@
 | `fmod` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | 浮点取余（`torch.fmod`） |
 | `fmods` | `(lhs: T, rhs: int \| float \| Scalar) -> T` | 与标量浮点取余 |
 | `maximum` | `(lhs: T, rhs: T) -> T` | 逐元素最大值 |
+| `and_` / `or_` | `(lhs: T, rhs: T \| int \| Scalar) -> T` | 按位与 / 或（仅整数） |
+| `ands` / `ors` | `(lhs: T, rhs: int \| Scalar) -> T` | 与标量按位与 / 或 |
+| `xor` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` 或 `(lhs: Tile, rhs: Tile \| int \| Scalar, tmp: Tile) -> Tile` | 按位异或。仅 Tile 路径需要 `tmp`；Tensor 路径由编译器分配临时缓冲 |
+| `xors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` 或 `(lhs: Tile, rhs: int \| Scalar, tmp: Tile) -> Tile` | 与标量按位异或；`tmp` 规则同 `xor` |
+| `not_` | `(input: T) -> T` | 按位取反（仅 `int16`/`uint16`） |
+| `shl` / `shr` | `(lhs: T, rhs: T \| int \| Scalar) -> T` | 左移 / 右移（仅整数） |
+| `shls` / `shrs` | `(lhs: T, rhs: int \| Scalar) -> T` | 与标量移位；移位量必须 `>= 0` |
 | `exp` | `(input: T) -> T` | 逐元素指数 |
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | 类型转换（`mode`：none、rint、round、floor、ceil、trunc、odd） |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | 变形为新维度 |
@@ -220,6 +227,38 @@ packed predicate mask；A2/A3 上如需得到数值结果，请配合 `sel` 和�
 | `cmps` | `(lhs: Tile, rhs: int \| float \| Scalar, cmp_type: int = 0) -> Tile` | tile 与标量比较 |
 | `sel` | `(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | 选择：`mask 为真取 lhs，否则取 rhs`；`tmp` 是 TSEL scratch |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | 按标量模式选择 |
+
+## 位运算（`pl.tensor.*`）
+
+仅支持整数类型（`INT8/16/32`、`UINT8/16/32`）；`not_` 仅支持 `int16`/`uint16`，与 `TNOT`
+指令一致。张量-张量形式的两个操作数**形状必须相同**——硬件没有按行/按列展开的位运算指令，
+因此广播在调用点即被拒绝。当 `rhs` 是标量时，张量-张量入口会自动分派到 `*s` 变体，
+即 `pl.tensor.and_(x, 0xFF)` 会下降为 `tensor.ands`。
+
+与 `pl.tile.xor` / `pl.tile.xors` 不同，张量形式**不需要 `tmp` 操作数**：`pto.txor` 所需的
+临时缓冲由 Tensor 到 Tile 的下降过程分配。
+
+**当前硬件支持范围比前端接受的范围更窄。** 这些算子目前可以编译并正常下降，但在 a2a3 上后端
+仍在补齐（见 issue #1846）：ptoas 会拒绝 `pto.tand` / `pto.tor` / `pto.tshl` / `pto.tshr`，
+且 `TXOR`/`TXORS` 要求 `int16`/`uint16` 元素类型 —— 目前只有 `not_` 有通过的硬件验证。前端
+刻意保持与对应 `pl.tile.*` 算子相同的整数类型范围，而不是把当前的后端限制固化下来，这样这些
+kernel 可以在后端修复后自动受益，无需改动前端。
+
+| 名称 | 签名 | 说明 |
+| ---- | ---- | ---- |
+| `and_` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | 按位与 |
+| `ands` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | 与标量按位与 |
+| `or_` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | 按位或 |
+| `ors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | 与标量按位或 |
+| `xor` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | 按位异或（临时缓冲由编译器分配） |
+| `xors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | 与标量按位异或（临时缓冲由编译器分配） |
+| `not_` | `(input: Tensor) -> Tensor` | 按位取反（仅 `int16`/`uint16`） |
+| `shl` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | 左移；结果保持 `lhs` 的元素类型 |
+| `shls` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | 与标量左移；移位量必须 `>= 0` |
+| `shr` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | 右移；有符号为算术右移，无符号为逻辑右移 |
+| `shrs` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | 与标量右移；移位量必须 `>= 0` |
+
+移位量达到或超过元素位宽时行为由硬件定义，PyPTO 不做规范化处理。
 
 ## 位运算（`pl.tile.*`）
 

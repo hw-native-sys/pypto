@@ -908,6 +908,21 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.part_max"] = _torch_fn("maximum", 2)
         m[f"{prefix}.part_min"] = _torch_fn("minimum", 2)
 
+        # bitwise / shift ops (integer-only). xor/xors carry a trailing scratch
+        # operand at the tile level only; _torch_fn slices to its first nargs, so
+        # the same entry serves the 2-arg tensor form and the 3-arg tile form.
+        m[f"{prefix}.and"] = _torch_fn("bitwise_and", 2)
+        m[f"{prefix}.or"] = _torch_fn("bitwise_or", 2)
+        m[f"{prefix}.not"] = _torch_fn("bitwise_not")
+        m[f"{prefix}.xor"] = _torch_fn("bitwise_xor", 2)
+        m[f"{prefix}.shl"] = _binop("<<")
+        m[f"{prefix}.shr"] = _binop(">>")
+        m[f"{prefix}.ands"] = _torch_fn("bitwise_and", 2)
+        m[f"{prefix}.ors"] = _torch_fn("bitwise_or", 2)
+        m[f"{prefix}.xors"] = _torch_fn("bitwise_xor", 2)
+        m[f"{prefix}.shls"] = _binop("<<")
+        m[f"{prefix}.shrs"] = _binop(">>")
+
         # scalar variants: same math, torch broadcasting handles it
         m[f"{prefix}.adds"] = _binop("+")
         m[f"{prefix}.subs"] = _binop("-")
@@ -993,17 +1008,6 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.relu"] = _torch_fn("relu")
     m["tile.rem"] = _binop("%")
 
-    # tile bitwise
-    m["tile.and"] = _torch_fn("bitwise_and", 2)
-    m["tile.or"] = _torch_fn("bitwise_or", 2)
-    m["tile.not"] = _torch_fn("bitwise_not")
-    m["tile.shl"] = _binop("<<")
-    m["tile.shr"] = _binop(">>")
-    m["tile.ands"] = _torch_fn("bitwise_and", 2)
-    m["tile.ors"] = _torch_fn("bitwise_or", 2)
-    m["tile.shls"] = _binop("<<")
-    m["tile.shrs"] = _binop(">>")
-
     # tile cmp
     m["tile.cmp"] = _handle_cmp
     m["tile.cmps"] = _handle_cmp
@@ -1019,8 +1023,6 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile ternary ops (third arg is workspace/tmp, ignore it)
-    m["tile.xor"] = lambda a, _kw: f"torch.bitwise_xor({a[0]}, {a[1]})"
-    m["tile.xors"] = lambda a, _kw: f"torch.bitwise_xor({a[0]}, {a[1]})"
     m["tile.prelu"] = lambda a, _kw: f"torch.where({a[0]} > 0, {a[0]}, {a[0]} * {a[1]})"
 
     # tile selection

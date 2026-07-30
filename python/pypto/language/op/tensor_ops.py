@@ -51,6 +51,17 @@ __all__ = [
     "maximum",
     "minimum",
     "cmp",
+    "and_",
+    "ands",
+    "or_",
+    "ors",
+    "xor",
+    "xors",
+    "not_",
+    "shl",
+    "shls",
+    "shr",
+    "shrs",
     "row_max",
     "row_sum",
     "row_min",
@@ -126,9 +137,20 @@ from ..typing import IntLike, Scalar, Tensor
 # DistributedTensor import is needed here.
 _TensorT = TypeVar("_TensorT", bound=Tensor)
 
+# The scalar half of an rhs operand. Bound (not constrained) so ``_unwrap_rhs`` hands
+# an integer-only caller back ``int | Expr`` rather than widening it to include float.
+_RhsT = TypeVar("_RhsT", bound=int | float | Expr)
 
-def _unwrap_rhs(rhs: int | float | Expr | Tensor | Scalar) -> int | float | Expr:
-    """Unwrap rhs operands into the IR-layer representation."""
+
+def _unwrap_rhs(rhs: "_RhsT | Tensor | Scalar") -> "_RhsT | Expr":
+    """Unwrap rhs operands into the IR-layer representation.
+
+    Generic in the scalar half so integer-only callers keep their narrower type:
+    the bitwise / shift wrappers pass ``int | Tensor | Scalar`` and get back
+    ``int | Expr``, which is what ``pypto.ir.op.tensor_ops`` declares for them, so
+    a float mask or shift count is a type error at the call site rather than a
+    runtime rejection from type deduction.
+    """
     if isinstance(rhs, (Tensor, Scalar)):
         return rhs.unwrap()
     return rhs
@@ -938,6 +960,187 @@ def cmp(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr, cmp_type: int = 
     """
     lhs_expr = lhs.unwrap()
     call_expr = _ir_ops.cmp(lhs_expr, _unwrap_rhs(rhs), cmp_type=cmp_type)
+    return Tensor(expr=call_expr)
+
+
+def and_(lhs: Tensor, rhs: int | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise bitwise AND of tensor and tensor or scalar.
+
+    Automatically selects between tensor.and (tensor & tensor) and
+    tensor.ands (tensor & scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+
+    Returns:
+        Tensor wrapping the and operation
+    """
+    call_expr = _ir_ops.and_(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def ands(lhs: Tensor, rhs: int | Expr | Scalar) -> Tensor:
+    """Element-wise bitwise AND of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar
+
+    Returns:
+        Tensor wrapping the ands operation
+    """
+    call_expr = _ir_ops.ands(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def or_(lhs: Tensor, rhs: int | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise bitwise OR of tensor and tensor or scalar.
+
+    Automatically selects between tensor.or (tensor | tensor) and
+    tensor.ors (tensor | scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+
+    Returns:
+        Tensor wrapping the or operation
+    """
+    call_expr = _ir_ops.or_(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def ors(lhs: Tensor, rhs: int | Expr | Scalar) -> Tensor:
+    """Element-wise bitwise OR of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar
+
+    Returns:
+        Tensor wrapping the ors operation
+    """
+    call_expr = _ir_ops.ors(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def xor(lhs: Tensor, rhs: int | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise bitwise XOR of tensor and tensor or scalar.
+
+    Automatically selects between tensor.xor (tensor ^ tensor) and
+    tensor.xors (tensor ^ scalar) based on the rhs type.
+
+    Unlike ``pl.tile.xor``, there is no ``tmp`` parameter: the scratch buffer
+    that pto.txor needs is allocated during Tensor-to-Tile lowering.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+
+    Returns:
+        Tensor wrapping the xor operation
+    """
+    call_expr = _ir_ops.xor(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def xors(lhs: Tensor, rhs: int | Expr | Scalar) -> Tensor:
+    """Element-wise bitwise XOR of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar
+
+    Returns:
+        Tensor wrapping the xors operation
+    """
+    call_expr = _ir_ops.xors(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def not_(input: Tensor) -> Tensor:
+    """Element-wise bitwise NOT of a tensor.
+
+    Args:
+        input: Input tensor; int16 or uint16, matching the TNOT instruction
+
+    Returns:
+        Tensor wrapping the not operation
+    """
+    call_expr = _ir_ops.not_(input.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def shl(lhs: Tensor, rhs: int | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise bitwise left shift of tensor by tensor or scalar.
+
+    Automatically selects between tensor.shl (tensor << tensor) and
+    tensor.shls (tensor << scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount as a tensor or integer scalar
+
+    Returns:
+        Tensor wrapping the shl operation
+    """
+    call_expr = _ir_ops.shl(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def shls(lhs: Tensor, rhs: int | Expr | Scalar) -> Tensor:
+    """Element-wise bitwise left shift of tensor by scalar.
+
+    Note:
+        The scalar shift amount must be zero or positive; negative values are
+        not supported by the hardware and will be rejected by codegen.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount; must be >= 0
+
+    Returns:
+        Tensor wrapping the shls operation
+    """
+    call_expr = _ir_ops.shls(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def shr(lhs: Tensor, rhs: int | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise bitwise right shift of tensor by tensor or scalar.
+
+    Automatically selects between tensor.shr (tensor >> tensor) and
+    tensor.shrs (tensor >> scalar) based on the rhs type. The shift is
+    arithmetic for signed dtypes and logical for unsigned ones, matching the
+    tile ops and the underlying ISA.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount as a tensor or integer scalar
+
+    Returns:
+        Tensor wrapping the shr operation
+    """
+    call_expr = _ir_ops.shr(lhs.unwrap(), _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def shrs(lhs: Tensor, rhs: int | Expr | Scalar) -> Tensor:
+    """Element-wise bitwise right shift of tensor by scalar.
+
+    Note:
+        The scalar shift amount must be zero or positive; negative values are
+        not supported by the hardware and will be rejected by codegen.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount; must be >= 0
+
+    Returns:
+        Tensor wrapping the shrs operation
+    """
+    call_expr = _ir_ops.shrs(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 

@@ -323,6 +323,30 @@ _UNARY_1D_OPS = [
     ("cos", tensor_ops.cos, tile_ops.cos),
 ]
 
+# Bitwise / shift ops that map 1:1 (issue #2216). xor/xors are excluded: they need
+# a synthesized scratch operand and are covered separately below.
+_BITWISE_1_1_BINARY_OPS = [
+    ("and_", tensor_ops.and_, tile_ops.and_),
+    ("or_", tensor_ops.or_, tile_ops.or_),
+    ("shl", tensor_ops.shl, tile_ops.shl),
+    ("shr", tensor_ops.shr, tile_ops.shr),
+]
+
+_BITWISE_1_1_SCALAR_OPS = [
+    ("ands", tensor_ops.ands, tile_ops.ands),
+    ("ors", tensor_ops.ors, tile_ops.ors),
+    ("shls", tensor_ops.shls, tile_ops.shls),
+    ("shrs", tensor_ops.shrs, tile_ops.shrs),
+]
+
+# The tensor-tensor entry points auto-dispatch a scalar rhs to the same tile `*s` op.
+_BITWISE_SCALAR_DISPATCH_OPS = [
+    ("and_", tensor_ops.and_, tile_ops.ands),
+    ("or_", tensor_ops.or_, tile_ops.ors),
+    ("shl", tensor_ops.shl, tile_ops.shls),
+    ("shr", tensor_ops.shr, tile_ops.shrs),
+]
+
 # 2D row/col-expand-style binary ops with a vector side input.
 _ROW_EXPAND_OPS = [
     ("row_expand_mul", tensor_ops.row_expand_mul, tile_ops.row_expand_mul),
@@ -907,6 +931,99 @@ class TestConvertTensorToTileOps:
             in_specs=in_specs, out_shape=[64], out_dtype=DataType.FP32, body=expected_body
         )
         _assert_convert_equal(before, expected)
+
+    @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _BITWISE_1_1_BINARY_OPS)
+    def test_bitwise_binary_1_1(self, op_name, tensor_op, tile_op):
+        """tensor.and/or/shl/shr lower 1:1 to their tile counterparts."""
+        before, expected = _make_pair(
+            in_specs=[("x", [64], DataType.INT32), ("y", [64], DataType.INT32)],
+            out_shape=[64],
+            out_dtype=DataType.INT32,
+            tensor_op=lambda ins, op=tensor_op: op(ins[0], ins[1]),
+            tile_op=lambda ts, op=tile_op: op(ts[0], ts[1]),
+        )
+        _assert_convert_equal(before, expected)
+
+    @pytest.mark.parametrize(
+        ("op_name", "tensor_op", "tile_op"), _BITWISE_1_1_SCALAR_OPS + _BITWISE_SCALAR_DISPATCH_OPS
+    )
+    def test_bitwise_scalar_reaches_tile_scalar_op(self, op_name, tensor_op, tile_op):
+        """A scalar rhs lands on tile.<op>s, whether spelled `*s` or auto-dispatched."""
+        before, expected = _make_pair(
+            in_specs=[("x", [64], DataType.INT32)],
+            out_shape=[64],
+            out_dtype=DataType.INT32,
+            tensor_op=lambda ins, op=tensor_op: op(ins[0], 0xFF),
+            tile_op=lambda ts, op=tile_op: op(ts[0], 0xFF),
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_not_conversion(self):
+        """tensor.not lowers 1:1 to tile.not (int16, matching TNOT)."""
+        before, expected = _make_pair(
+            in_specs=[("x", [64], DataType.INT16)],
+            out_shape=[64],
+            out_dtype=DataType.INT16,
+            tensor_op=lambda ins: tensor_ops.not_(ins[0]),
+            tile_op=lambda ts: tile_ops.not_(ts[0]),
+        )
+        _assert_convert_equal(before, expected)
+
+    @pytest.mark.parametrize(
+        ("op_name", "extra_in", "tensor_call", "tile_call"),
+        [
+            (
+                "xor",
+                [("y", [64], DataType.INT32)],
+                lambda ins: tensor_ops.xor(ins[0], ins[1]),
+                lambda ts, tmp: tile_ops.xor(ts[0], ts[1], tmp),
+            ),
+            (
+                "xors",
+                [],
+                lambda ins: tensor_ops.xors(ins[0], 5),
+                lambda ts, tmp: tile_ops.xors(ts[0], 5, tmp),
+            ),
+        ],
+    )
+    def test_xor_conversion_synthesizes_scratch_tile(self, op_name, extra_in, tensor_call, tile_call):
+        """tensor.xor/xors allocate the pto.txor scratch and thread it in as operand 3."""
+        in_specs: list[InSpec] = [("x", [64], DataType.INT32), *extra_in]
+
+        def expected_body(ib, tiles):
+            tmp = ib.let("xor_tmp", tile_ops.create([64], DataType.INT32))
+            return ib.let("z_tile", tile_call(tiles, tmp))
+
+        before = _make_before(
+            in_specs=in_specs,
+            out_shape=[64],
+            out_dtype=DataType.INT32,
+            body=lambda ib, ins: ib.let("z", tensor_call(ins)),
+        )
+        expected = _make_expected(
+            in_specs=in_specs, out_shape=[64], out_dtype=DataType.INT32, body=expected_body
+        )
+        _assert_convert_equal(before, expected)
+
+    def test_xor_scratch_matches_lhs_dtype(self):
+        """The synthesized scratch must follow the lhs, not a hardcoded dtype."""
+        before = _make_before(
+            in_specs=[("x", [32], DataType.INT16), ("y", [32], DataType.INT16)],
+            out_shape=[32],
+            out_dtype=DataType.INT16,
+            body=lambda ib, ins: ib.let("z", tensor_ops.xor(ins[0], ins[1])),
+        )
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        kernel = _require_function(after, "main_incore_0")
+        create = _find_first_call_to(kernel, "tile.create")
+        assert create is not None, "tensor.xor did not synthesize a scratch tile"
+        assert isinstance(create.type, ir.TileType)
+        assert create.type.dtype == DataType.INT16
+
+        xor = _find_first_call_to(kernel, "tile.xor")
+        assert xor is not None
+        assert len(xor.args) == 3, "tile.xor must receive the scratch as its third operand"
 
     @pytest.mark.parametrize(
         ("op_name", "in_specs", "body", "tile_op_name"),

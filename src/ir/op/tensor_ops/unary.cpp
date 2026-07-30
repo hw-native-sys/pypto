@@ -238,6 +238,26 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
   return DeduceTensorUnaryResultType(tensor_type, target_dtype);
 }
 
+TypePtr DeduceTensorNotType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.not requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type)
+      << "tensor.not requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
+
+  // Matches tile.not, which this lowers 1:1 onto: pto.tnot / TNOT is defined for
+  // 16-bit integer element types only. Accepting a wider integer here would only
+  // defer the failure into ConvertTensorToTileOps.
+  CHECK(tensor_type->dtype_ == DataType::INT16 || tensor_type->dtype_ == DataType::UINT16)
+      << "tensor.not requires an int16 or uint16 tensor dtype, but got " << tensor_type->dtype_.ToString()
+      << ". Reinterpret or cast the tensor to a 16-bit integer dtype first.";
+
+  // Bitwise complement rewrites each element in place; dtype is unchanged.
+  return DeduceTensorUnaryResultType(tensor_type, tensor_type->dtype_);
+}
+
 // ============================================================================
 // Registration Function for Tensor Unary Operations
 // ============================================================================
@@ -258,6 +278,15 @@ REGISTER_OP("tensor.abs")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAbsType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.not")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise NOT of an int16/uint16 tensor")
+    .add_argument("input", "Input tensor (TensorType) with int16 or uint16 dtype")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorNotType(args, kwargs);
     });
 
 REGISTER_OP("tensor.recip")

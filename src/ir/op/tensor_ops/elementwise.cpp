@@ -18,6 +18,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
@@ -101,6 +102,85 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
                       << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
 
   return std::make_shared<TensorType>(tensor_type1->shape_, *result_dtype);
+}
+
+// Bitwise and shift ops have no row/col-expand tile counterpart (there is no
+// tile.row_expand_and), so a broadcasting operand pair has nothing to lower onto.
+// Require identical shapes here, where the error can name the operands the user
+// wrote, rather than letting ConvertTensorToTileOps fail on IR it did not build.
+static void CheckBitwiseShapesMatch(const std::shared_ptr<const TensorType>& lhs,
+                                    const std::shared_ptr<const TensorType>& rhs,
+                                    const std::string& op_name) {
+  bool same_shape = lhs->shape_.size() == rhs->shape_.size();
+  for (size_t i = 0; same_shape && i < lhs->shape_.size(); ++i) {
+    same_shape = DimensionsEqual(lhs->shape_[i], rhs->shape_[i]);
+  }
+  CHECK(same_shape) << "The operator " << op_name
+                    << " requires both operands to have the same shape, but got " << FormatShape(lhs->shape_)
+                    << " and " << FormatShape(rhs->shape_)
+                    << ". Broadcasting is not supported for bitwise/shift operators because the "
+                       "hardware provides no row/col-expand form; reshape or expand the operand "
+                       "explicitly first.";
+}
+
+// Tensor-tensor bitwise/shift ops: both operands must be integer tensors of the
+// same shape. ``preserve_lhs_dtype`` mirrors the tile layer's split between
+// tile.and/or/xor (promote both dtypes, DeduceTileOpElementwiseBinaryType) and
+// tile.shl/shr (keep the lhs element type, DeduceTileOpShiftBinaryType) — the
+// shift count does not participate in the result type.
+TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
+                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                        const std::string& op_name, bool preserve_lhs_dtype) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  auto tensor_type1 = AsTensorTypeLike(args[0]->GetType());  // accepts a window (issue #1694)
+  auto tensor_type2 = AsTensorTypeLike(args[1]->GetType());
+  CHECK(tensor_type1) << "The operator " << op_name
+                      << " requires first argument to be a TensorType or DistributedTensorType, but got "
+                      << args[0]->GetType()->TypeName();
+  CHECK(tensor_type2) << "The operator " << op_name
+                      << " requires second argument to be a TensorType or DistributedTensorType, but got "
+                      << args[1]->GetType()->TypeName();
+
+  CHECK(tensor_type1->dtype_.IsInt())
+      << "The operator " << op_name << " requires an integer tensor dtype, but got "
+      << tensor_type1->dtype_.ToString();
+  CHECK(tensor_type2->dtype_.IsInt())
+      << "The operator " << op_name << " requires an integer tensor dtype, but got "
+      << tensor_type2->dtype_.ToString();
+
+  CheckBitwiseShapesMatch(tensor_type1, tensor_type2, op_name);
+
+  if (preserve_lhs_dtype) {
+    return std::make_shared<TensorType>(tensor_type1->shape_, tensor_type1->dtype_);
+  }
+  auto result_dtype = PromoteDataTypes(tensor_type1->dtype_, tensor_type2->dtype_);
+  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
+                      << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
+  return std::make_shared<TensorType>(tensor_type1->shape_, *result_dtype);
+}
+
+// Tensor-scalar bitwise/shift ops. Mirrors DeduceTileOpIntScalarBinaryType: the
+// scalar must be an integer of any width (codegen casts it to i32 per the ISA
+// ``%dst = tands/tshls %src, %scalar : !pto.tile<...>, i32`` form), and the
+// result keeps the tensor's element type — a bitwise op never changes it.
+// Layered on the shared scalar deducer exactly as tensor.subs is (below): it already
+// validates arity and both operand kinds and, with preserve_lhs_dtype, returns the lhs
+// element type unchanged.
+TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
+                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                        const std::string& op_name) {
+  auto result_type = DeduceTensorOpElementwiseScalarType(args, kwargs, op_name, true);
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());  // accepts a window (issue #1694)
+  auto scalar_type = As<ScalarType>(args[1]->GetType());
+  CHECK(tensor_type->dtype_.IsInt()) << "The operator " << op_name
+                                     << " requires an integer tensor dtype, but got "
+                                     << tensor_type->dtype_.ToString();
+  CHECK(scalar_type->dtype_.IsInt()) << "The operator " << op_name
+                                     << " requires the shift/bitwise scalar to be an integer type, but got "
+                                     << scalar_type->dtype_.ToString();
+  return result_type;
 }
 
 // ============================================================================
@@ -315,6 +395,140 @@ REGISTER_OP("tensor.cmp")
         return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp");
       }
       return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp");
+    });
+
+// ============================================================================
+// Bitwise and shift ops (integer-only)
+//
+// Tensor-level counterparts of tile.and/or/xor/shl/shr and their `*s` scalar
+// forms. Each lowers 1:1 in ConvertTensorToTileOps, except tensor.xor/xors:
+// pto.txor/txors take a third `tmp` scratch operand, which the conversion
+// allocates so tensor-level callers never see it (same treatment as the
+// high-precision tensor.rsqrt scratch).
+//
+// Dtype strictness deliberately mirrors the *IR contract* of the tile op each one
+// lowers onto, not the current per-backend gaps:
+//   * tensor.not accepts int16/uint16 only, because tile.not's own type deduction
+//     does (src/ir/op/tile_ops/unary.cpp) — TNOT is a 16-bit-element instruction.
+//   * tensor.and/or/xor/shl/shr accept any integer width, because their tile
+//     counterparts do (DeduceTileOpElementwiseBinaryType(require_int) /
+//     DeduceTileOpShiftBinaryType).
+// Narrower *device* limits exist today on a2a3 — ptoas rejects pto.tand/tor/tshl/tshr
+// outright and TXOR/TXORS want int16/uint16 (see tests/st/runtime/ops/test_bitwise.py,
+// tracked in #1846). Encoding those here would make the tensor op stricter than the
+// tile op it lowers to, and would need reverting when the backend catches up; instead
+// these ops inherit the fixes automatically.
+//
+// Shape strictness is the opposite call, for a reason worth stating: a missing
+// row/col-expand *instruction* is permanent, not a backend that is catching up. There is
+// no pto.trowexpandand and none is planned, so a broadcasting operand pair can never
+// lower — rejecting it is describing the ISA, not freezing a temporary gap. (The tile
+// deducers still broadcast here, so pl.tile.and_([M,N],[M,1]) type-checks and fails
+// later; tightening those shared helpers touches shipped ops and is left as follow-up.
+// tensor.fmod and tensor.part_* have the same missing-row-expand shape and are likewise
+// unguarded today.)
+// ============================================================================
+
+REGISTER_OP("tensor.and")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise AND of two integer tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.and", false);
+    });
+
+REGISTER_OP("tensor.ands")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise AND of an integer tensor and an integer scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side scalar (ScalarType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.ands");
+    });
+
+REGISTER_OP("tensor.or")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise OR of two integer tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.or", false);
+    });
+
+REGISTER_OP("tensor.ors")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise OR of an integer tensor and an integer scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side scalar (ScalarType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.ors");
+    });
+
+// Two args only — the pto.txor scratch operand is synthesized during lowering.
+REGISTER_OP("tensor.xor")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise XOR of two integer tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.xor", false);
+    });
+
+REGISTER_OP("tensor.xors")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise XOR of an integer tensor and an integer scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Right-hand side scalar (ScalarType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.xors");
+    });
+
+// Shifts keep the lhs element type: the shift count never widens the result.
+REGISTER_OP("tensor.shl")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise left shift of two integer tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Shift-amount tensor (TensorType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shl", true);
+    });
+
+REGISTER_OP("tensor.shls")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise left shift of an integer tensor by an integer scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shls");
+    });
+
+REGISTER_OP("tensor.shr")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise right shift of two integer tensors")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Shift-amount tensor (TensorType, integer dtype)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shr", true);
+    });
+
+REGISTER_OP("tensor.shrs")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise bitwise right shift of an integer tensor by an integer scalar")
+    .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
+    .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shrs");
     });
 
 }  // namespace ir

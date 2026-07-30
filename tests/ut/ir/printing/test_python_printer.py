@@ -1739,5 +1739,73 @@ def test_full_special_case_preserves_serialized_attrs():
     assert python_print(reparsed, format=False) == printed
 
 
+@pytest.mark.parametrize(
+    ("op_name", "dsl_name"),
+    [("and", "and_"), ("or", "or_"), ("not", "not_")],
+)
+def test_keyword_named_ops_print_with_dsl_underscore(op_name, dsl_name):
+    """``tile.and`` must print as ``pl.tile.and_`` — the bare name is not valid Python.
+
+    ``and``/``or``/``not`` are reserved words, so their DSL wrappers carry a trailing
+    underscore while the IR keeps the bare operator name. Printing the bare name
+    produced ``pl.tile.and(a, b)``, which the round-trip parser could not even
+    compile.
+    """
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([ir.ConstInt(16, DataType.INT32, span)], DataType.INT16)
+    lhs = ir.Var("a", tile_type, span)
+    args = [lhs] if op_name == "not" else [lhs, ir.Var("b", tile_type, span)]
+
+    printed = ir.create_op_call(f"tile.{op_name}", args, {}, span).as_python()
+
+    assert f"tile.{dsl_name}(" in printed
+    assert f"tile.{op_name}(" not in printed
+
+
+@pytest.mark.parametrize("dsl_name", ["and_", "or_"])
+def test_keyword_named_tile_op_round_trips(dsl_name):
+    """A program using tile.and / tile.or survives print -> parse -> structural compare."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[128, 128], pl.INT32],
+            b: pl.Tensor[[128, 128], pl.INT32],
+            output: pl.Tensor[[128, 128], pl.INT32],
+        ) -> pl.Tensor[[128, 128], pl.INT32]:
+            tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(a, [0, 0], [32, 32])
+            tile_b: pl.Tile[[32, 32], pl.INT32] = pl.load(b, [0, 0], [32, 32])
+            tile_c: pl.Tile[[32, 32], pl.INT32] = pl.and_(tile_a, tile_b)
+            tile_d: pl.Tile[[32, 32], pl.INT32] = pl.or_(tile_c, tile_b)
+            return pl.store(tile_d, [0, 0], output)
+
+    printed = python_print(Program, format=False)
+    assert f"pl.tile.{dsl_name}(" in printed
+    ir.assert_structural_equal(Program, pl.parse_program(printed))
+
+
+@pytest.mark.parametrize("dsl_name", ["and_", "or_", "not_"])
+def test_keyword_named_tensor_op_round_trips(dsl_name):
+    """The tensor bitwise ops (issue #2216) round-trip through their underscore names."""
+
+    @pl.program
+    class Program:
+        @pl.function
+        def main(
+            self,
+            x: pl.Tensor[[128, 128], pl.INT16],
+            mask: pl.Tensor[[128, 128], pl.INT16],
+        ) -> pl.Tensor[[128, 128], pl.INT16]:
+            masked: pl.Tensor[[128, 128], pl.INT16] = pl.tensor.and_(x, mask)
+            merged: pl.Tensor[[128, 128], pl.INT16] = pl.tensor.or_(masked, mask)
+            return pl.tensor.not_(merged)
+
+    printed = python_print(Program, format=False)
+    assert f"pl.tensor.{dsl_name}(" in printed
+    ir.assert_structural_equal(Program, pl.parse_program(printed))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

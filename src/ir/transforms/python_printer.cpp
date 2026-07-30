@@ -24,6 +24,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
@@ -127,6 +128,33 @@ std::string CastModeToString(int mode) {
     default:
       throw ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
   }
+}
+
+/// Whether an op's printed DSL spelling needs a trailing underscore.
+///
+/// PyPTO spells wrappers whose name is a Python keyword with a trailing underscore
+/// (``pypto/language/op/{tile,tensor}_ops.py``: ``and_``/``or_``/``not_``) while the IR
+/// keeps the bare operator name. Printing the bare name yields ``pl.tile.and(a, b)``,
+/// which is a syntax error — the round-trip parser cannot even compile it.
+///
+/// Keyed off the full Python keyword set rather than the three leaves that exist
+/// today, so a future ``REGISTER_OP`` with a keyword leaf cannot silently
+/// reintroduce unparseable output.
+///
+/// A predicate over ``string_view``, not a name-rewriting function: this runs on every
+/// printed ``Call``, and roundtrip verification re-prints the whole program after every
+/// pass. Returning a rewritten name would allocate on every call to serve the three ops
+/// that actually need the suffix. The keys are string literals with static storage
+/// duration, so the ``string_view`` set is safe.
+bool NeedsDslUnderscore(std::string_view op_name) {
+  static const std::unordered_set<std::string_view> kPythonKeywords = {
+      "False", "None",     "True",  "and",    "as",   "assert", "async",  "await",    "break",
+      "class", "continue", "def",   "del",    "elif", "else",   "except", "finally",  "for",
+      "from",  "global",   "if",    "import", "in",   "is",     "lambda", "nonlocal", "not",
+      "or",    "pass",     "raise", "return", "try",  "while",  "with",   "yield"};
+  const size_t dot = op_name.rfind('.');
+  if (dot == std::string_view::npos) return false;
+  return kPythonKeywords.count(op_name.substr(dot + 1)) > 0;
 }
 
 }  // namespace
@@ -976,11 +1004,15 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     // to ``pld`` by the parser). Print them bare so the roundtrip parser
     // resolves them correctly via the same ``pld`` import path.
     if (op_name.rfind("pld.", 0) == 0) {
-      stream_ << op_name << "(";
+      stream_ << op_name;
     } else {
       // Print with pl. prefix for the standard pl namespace.
-      stream_ << prefix_ << "." << op_name << "(";
+      stream_ << prefix_ << "." << op_name;
     }
+    // ``tile.and`` / ``tensor.not`` and friends must print as the DSL's
+    // underscore-suffixed spelling to stay valid Python.
+    if (NeedsDslUnderscore(op_name)) stream_ << "_";
+    stream_ << "(";
   } else {
     // Not a registered operation, print as-is
     stream_ << op_name << "(";

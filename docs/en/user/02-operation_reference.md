@@ -21,6 +21,13 @@ Auto-selects between tensor and tile implementation based on input type.
 | `fmod` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Floating-point remainder (`torch.fmod`) |
 | `fmods` | `(lhs: T, rhs: int \| float \| Scalar) -> T` | Floating-point remainder with scalar |
 | `maximum` | `(lhs: T, rhs: T) -> T` | Element-wise maximum |
+| `and_` / `or_` | `(lhs: T, rhs: T \| int \| Scalar) -> T` | Bitwise AND / OR (integer-only) |
+| `ands` / `ors` | `(lhs: T, rhs: int \| Scalar) -> T` | Bitwise AND / OR with scalar |
+| `xor` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` or `(lhs: Tile, rhs: Tile \| int \| Scalar, tmp: Tile) -> Tile` | Bitwise XOR. `tmp` is required on the Tile path only — the tensor path has the compiler allocate it |
+| `xors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` or `(lhs: Tile, rhs: int \| Scalar, tmp: Tile) -> Tile` | XOR with scalar; same `tmp` rule as `xor` |
+| `not_` | `(input: T) -> T` | Bitwise NOT (`int16`/`uint16` only) |
+| `shl` / `shr` | `(lhs: T, rhs: T \| int \| Scalar) -> T` | Left / right shift (integer-only) |
+| `shls` / `shrs` | `(lhs: T, rhs: int \| Scalar) -> T` | Shift by scalar; amount must be `>= 0` |
 | `exp` | `(input: T) -> T` | Element-wise exponential |
 | `cast` | `(input: T, target_type: int \| DataType, mode="round") -> T` | Type cast (`mode`: none, rint, round, floor, ceil, trunc, odd) |
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
@@ -220,6 +227,42 @@ scratch tile to materialize numeric results on A2/A3.
 | `cmps` | `(lhs: Tile, rhs: int \| float \| Scalar, cmp_type: int = 0) -> Tile` | Compare tile with scalar |
 | `sel` | `(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | Select: `lhs if mask else rhs`; `tmp` is TSEL scratch |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | Select by scalar mode |
+
+## Bitwise (`pl.tensor.*`)
+
+Integer-only (`INT8/16/32`, `UINT8/16/32`); `not_` is `int16`/`uint16` only, matching the
+`TNOT` instruction. Both operands of a tensor-tensor form must have the **same shape** —
+there is no row/col-expand bitwise instruction, so broadcasting is rejected at the call
+site. The tensor-tensor entry points auto-dispatch to the `*s` variant when `rhs` is a
+scalar, so `pl.tensor.and_(x, 0xFF)` lowers to `tensor.ands`.
+
+Unlike `pl.tile.xor` / `pl.tile.xors`, the tensor forms take **no `tmp` operand**: the
+scratch buffer `pto.txor` needs is allocated during Tensor-to-Tile lowering.
+
+**Device support is currently narrower than the frontend accepts.** These ops compile and
+lower today, but on a2a3 the backend is still catching up (tracked in issue #1846): ptoas
+rejects `pto.tand` / `pto.tor` / `pto.tshl` / `pto.tshr`, and `TXOR`/`TXORS` require an
+`int16`/`uint16` element type — only `not_` has passing hardware coverage. The frontend
+deliberately accepts the same integer range as the matching `pl.tile.*` ops rather than
+encoding today's backend limits, so these kernels inherit the fixes without a frontend
+change.
+
+| Name | Signature | Description |
+| ---- | --------- | ----------- |
+| `and_` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | Bitwise AND |
+| `ands` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | Bitwise AND with scalar |
+| `or_` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | Bitwise OR |
+| `ors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | Bitwise OR with scalar |
+| `xor` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | Bitwise XOR (scratch allocated by the compiler) |
+| `xors` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | XOR with scalar (scratch allocated by the compiler) |
+| `not_` | `(input: Tensor) -> Tensor` | Bitwise NOT (`int16`/`uint16` only) |
+| `shl` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | Left shift; result keeps the `lhs` dtype |
+| `shls` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | Left shift by scalar; amount must be `>= 0` |
+| `shr` | `(lhs: Tensor, rhs: Tensor \| int \| Scalar) -> Tensor` | Right shift; arithmetic for signed, logical for unsigned |
+| `shrs` | `(lhs: Tensor, rhs: int \| Scalar) -> Tensor` | Right shift by scalar; amount must be `>= 0` |
+
+A shift amount at or beyond the element bit width is hardware-defined; PyPTO does not
+normalize it.
 
 ## Bitwise (`pl.tile.*`)
 

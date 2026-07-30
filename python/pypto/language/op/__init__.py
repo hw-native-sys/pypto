@@ -66,16 +66,14 @@ from .tensor_ops import (
 from .tensor_ops import ci as arange
 from .tensor_ops import create as create_tensor
 
-# Promoted tile-only ops (accessible as pl.load, etc.). ``abs`` and
-# ``create_tile`` are re-exported below from ``unified_ops`` instead so
-# the unified Tensor/Tile dispatch wins.
+# Promoted tile-only ops (accessible as pl.load, etc.). ``abs``,
+# ``create_tile`` and the bitwise family are re-exported below from
+# ``unified_ops`` instead so the unified Tensor/Tile dispatch wins.
 from .tile_ops import (
     addc,
     addsc,
     aic_gather,
     aiv_shard,
-    and_,
-    ands,
     cmps,
     gemv,
     gemv_acc,
@@ -89,24 +87,15 @@ from .tile_ops import (
     minimums,
     move,
     mscatter,
-    not_,
-    or_,
-    ors,
     prelu,
     relu,
     rem,
     rems,
     sel,
     sels,
-    shl,
-    shls,
-    shr,
-    shrs,
     store,
     subc,
     subsc,
-    xor,
-    xors,
 )
 
 # Unified dispatch (overlapping ops). Imported AFTER tile_ops so the
@@ -116,6 +105,8 @@ from .tile_ops import (
 from .unified_ops import (
     abs,  # noqa: A004 (intentionally shadows builtin via DSL surface)
     add,
+    and_,
+    ands,
     batch_matmul,
     cast,
     cmp,
@@ -149,6 +140,9 @@ from .unified_ops import (
     minimum,
     mul,
     neg,
+    not_,
+    or_,
+    ors,
     part_add,
     part_max,
     part_min,
@@ -173,11 +167,17 @@ from .unified_ops import (
     row_sum,
     rsqrt,
     set_validshape,
+    shl,
+    shls,
+    shr,
+    shrs,
     slice,
     sqrt,
     sub,
     transpose,
     write,
+    xor,
+    xors,
 )
 
 __all__ = [

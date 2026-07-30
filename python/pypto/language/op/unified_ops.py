@@ -79,6 +79,17 @@ __all__ = [
     "col_argmin",
     "cast",
     "cmp",
+    "and_",
+    "ands",
+    "or_",
+    "ors",
+    "xor",
+    "xors",
+    "not_",
+    "shl",
+    "shls",
+    "shr",
+    "shrs",
     "set_validshape",
     "create_tile",
     "read",
@@ -1100,6 +1111,196 @@ def cmp(lhs, rhs, cmp_type: int = 0):
     if isinstance(lhs, Tile) and _is_scalar_like(rhs):
         return _tile.cmps(lhs, rhs, cmp_type=cmp_type)
     _raise_type_dispatch_error("cmp", lhs, rhs)
+
+
+# ---------------------------------------------------------------------------
+# Bitwise / shift ops
+#
+# The tile forms of xor/xors take an explicit ``tmp`` scratch tile because buffer
+# lifetimes are user-managed there; the tensor forms do not, since the conversion
+# pass allocates it. That Tile-only trailing operand follows ``row_expand_add`` and
+# the ``row_*`` / ``col_*`` reduction family above, which take the same
+# ``tmp_tile: Tile | None = None`` and reject it on the Tensor path.
+# ---------------------------------------------------------------------------
+
+
+def _reject_tmp_for_tensor(op_name: str, tmp: Any) -> None:
+    """Guard the Tensor path of an op whose Tile form carries a scratch operand."""
+    if tmp is not None:
+        raise TypeError(
+            f"pl.{op_name}: Tensor inputs must not pass tmp — the scratch tile is "
+            f"allocated during Tensor-to-Tile lowering"
+        )
+
+
+@overload
+def and_(lhs: Tensor, rhs: Tensor | int | Scalar) -> Tensor: ...
+@overload
+def and_(lhs: Tile, rhs: Tile | int | Scalar) -> Tile: ...
+def and_(lhs, rhs):
+    """Element-wise bitwise AND, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, Scalar, _ir_core.Expr)):
+        return _tensor.and_(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.and_(lhs, rhs)
+    if isinstance(lhs, Tile) and _is_scalar_like(rhs):
+        return _tile.ands(lhs, rhs)
+    _raise_type_dispatch_error("and_", lhs, rhs)
+
+
+@overload
+def ands(lhs: Tensor, rhs: int | Scalar) -> Tensor: ...
+@overload
+def ands(lhs: Tile, rhs: int | Scalar) -> Tile: ...
+def ands(lhs, rhs):
+    """Element-wise bitwise AND with a scalar, dispatched by input type."""
+    if isinstance(lhs, Tensor):
+        return _tensor.ands(lhs, rhs)
+    if isinstance(lhs, Tile):
+        return _tile.ands(lhs, rhs)
+    _raise_type_dispatch_error("ands", lhs, rhs)
+
+
+@overload
+def or_(lhs: Tensor, rhs: Tensor | int | Scalar) -> Tensor: ...
+@overload
+def or_(lhs: Tile, rhs: Tile | int | Scalar) -> Tile: ...
+def or_(lhs, rhs):
+    """Element-wise bitwise OR, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, Scalar, _ir_core.Expr)):
+        return _tensor.or_(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.or_(lhs, rhs)
+    if isinstance(lhs, Tile) and _is_scalar_like(rhs):
+        return _tile.ors(lhs, rhs)
+    _raise_type_dispatch_error("or_", lhs, rhs)
+
+
+@overload
+def ors(lhs: Tensor, rhs: int | Scalar) -> Tensor: ...
+@overload
+def ors(lhs: Tile, rhs: int | Scalar) -> Tile: ...
+def ors(lhs, rhs):
+    """Element-wise bitwise OR with a scalar, dispatched by input type."""
+    if isinstance(lhs, Tensor):
+        return _tensor.ors(lhs, rhs)
+    if isinstance(lhs, Tile):
+        return _tile.ors(lhs, rhs)
+    _raise_type_dispatch_error("ors", lhs, rhs)
+
+
+@overload
+def xor(lhs: Tensor, rhs: Tensor | int | Scalar) -> Tensor: ...
+@overload
+def xor(lhs: Tile, rhs: Tile | int | Scalar, tmp: Tile) -> Tile: ...
+def xor(lhs, rhs, tmp=None):
+    """Element-wise bitwise XOR, dispatched by input type.
+
+    ``pto.txor`` needs a scratch buffer. Tile buffer lifetimes are user-managed,
+    so the tile path takes it as ``tmp``; the tensor path omits it because
+    ConvertTensorToTileOps allocates it — the same asymmetry ``rsqrt`` carries.
+    """
+    if isinstance(lhs, Tensor):
+        _reject_tmp_for_tensor("xor", tmp)
+        return _tensor.xor(lhs, rhs)
+    if isinstance(lhs, Tile):
+        if tmp is None:
+            raise TypeError(
+                "pl.xor: Tile inputs require an explicit scratch tile — "
+                "call pl.xor(lhs, rhs, tmp) or pl.tile.xor(lhs, rhs, tmp)"
+            )
+        if isinstance(rhs, Tile):
+            return _tile.xor(lhs, rhs, tmp)
+        if _is_scalar_like(rhs):
+            return _tile.xors(lhs, rhs, tmp)
+    _raise_type_dispatch_error("xor", lhs, rhs)
+
+
+@overload
+def xors(lhs: Tensor, rhs: int | Scalar) -> Tensor: ...
+@overload
+def xors(lhs: Tile, rhs: int | Scalar, tmp: Tile) -> Tile: ...
+def xors(lhs, rhs, tmp=None):
+    """Element-wise bitwise XOR with a scalar, dispatched by input type.
+
+    See :func:`xor` for why only the tile path takes ``tmp``.
+    """
+    if isinstance(lhs, Tensor):
+        _reject_tmp_for_tensor("xors", tmp)
+        return _tensor.xors(lhs, rhs)
+    if isinstance(lhs, Tile):
+        if tmp is None:
+            raise TypeError(
+                "pl.xors: Tile inputs require an explicit scratch tile — "
+                "call pl.xors(lhs, rhs, tmp) or pl.tile.xors(lhs, rhs, tmp)"
+            )
+        return _tile.xors(lhs, rhs, tmp)
+    _raise_type_dispatch_error("xors", lhs, rhs)
+
+
+def not_(input: T) -> T:
+    """Element-wise bitwise NOT, dispatched by input type (int16/uint16 only)."""
+    if isinstance(input, Tensor):
+        return _tensor.not_(input)
+    if isinstance(input, Tile):
+        return _tile.not_(input)
+    raise TypeError(f"pl.not_: expected Tensor or Tile, got {type(input).__name__}")
+
+
+@overload
+def shl(lhs: Tensor, rhs: Tensor | int | Scalar) -> Tensor: ...
+@overload
+def shl(lhs: Tile, rhs: Tile | int | Scalar) -> Tile: ...
+def shl(lhs, rhs):
+    """Element-wise bitwise left shift, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, Scalar, _ir_core.Expr)):
+        return _tensor.shl(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.shl(lhs, rhs)
+    if isinstance(lhs, Tile) and _is_scalar_like(rhs):
+        return _tile.shls(lhs, rhs)
+    _raise_type_dispatch_error("shl", lhs, rhs)
+
+
+@overload
+def shls(lhs: Tensor, rhs: int | Scalar) -> Tensor: ...
+@overload
+def shls(lhs: Tile, rhs: int | Scalar) -> Tile: ...
+def shls(lhs, rhs):
+    """Element-wise bitwise left shift by a scalar, dispatched by input type."""
+    if isinstance(lhs, Tensor):
+        return _tensor.shls(lhs, rhs)
+    if isinstance(lhs, Tile):
+        return _tile.shls(lhs, rhs)
+    _raise_type_dispatch_error("shls", lhs, rhs)
+
+
+@overload
+def shr(lhs: Tensor, rhs: Tensor | int | Scalar) -> Tensor: ...
+@overload
+def shr(lhs: Tile, rhs: Tile | int | Scalar) -> Tile: ...
+def shr(lhs, rhs):
+    """Element-wise bitwise right shift, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, Scalar, _ir_core.Expr)):
+        return _tensor.shr(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.shr(lhs, rhs)
+    if isinstance(lhs, Tile) and _is_scalar_like(rhs):
+        return _tile.shrs(lhs, rhs)
+    _raise_type_dispatch_error("shr", lhs, rhs)
+
+
+@overload
+def shrs(lhs: Tensor, rhs: int | Scalar) -> Tensor: ...
+@overload
+def shrs(lhs: Tile, rhs: int | Scalar) -> Tile: ...
+def shrs(lhs, rhs):
+    """Element-wise bitwise right shift by a scalar, dispatched by input type."""
+    if isinstance(lhs, Tensor):
+        return _tensor.shrs(lhs, rhs)
+    if isinstance(lhs, Tile):
+        return _tile.shrs(lhs, rhs)
+    _raise_type_dispatch_error("shrs", lhs, rhs)
 
 
 @overload

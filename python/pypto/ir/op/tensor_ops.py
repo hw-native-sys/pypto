@@ -750,6 +750,225 @@ def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.fmods", [lhs, rhs_expr], {}, actual_span)
 
 
+def _bitwise_dispatch(
+    tensor_op: str,
+    scalar_op: str,
+    lhs: Expr,
+    rhs: int | Expr,
+    span: Span | None,
+) -> Call:
+    """Build a tensor bitwise/shift call, routing a scalar ``rhs`` to ``scalar_op``.
+
+    Bitwise ops are integer-only, so an untyped literal keeps
+    ``_normalize_scalar_operand``'s INT32 default instead of the FP32 fallback the
+    arithmetic wrappers use — a float shift or mask has no meaning here and is
+    rejected by type deduction rather than silently promoted.
+
+    Args:
+        tensor_op: Registered op name for the tensor-tensor form
+        scalar_op: Registered op name for the tensor-scalar form
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or integer scalar
+        span: Optional source span (auto-captured if not provided)
+
+    Returns:
+        Call expression for the selected operator
+    """
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    chosen = scalar_op if isinstance(rhs_expr.type, ScalarType) else tensor_op
+    return _ir_core.create_op_call(chosen, [lhs, rhs_expr], {}, actual_span)
+
+
+def _bitwise_scalar(op_name: str, lhs: Expr, rhs: int | Expr, span: Span | None) -> Call:
+    """Build a tensor-scalar bitwise/shift call (the explicit ``*s`` entry points)."""
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    return _ir_core.create_op_call(op_name, [lhs, rhs_expr], {}, actual_span)
+
+
+def and_(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise AND of tensor and tensor or scalar.
+
+    Automatically selects between tensor.and (tensor & tensor) and
+    tensor.ands (tensor & scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise AND
+    """
+    return _bitwise_dispatch("tensor.and", "tensor.ands", lhs, rhs, span)
+
+
+def ands(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise AND of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise AND with scalar
+    """
+    return _bitwise_scalar("tensor.ands", lhs, rhs, span)
+
+
+def or_(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise OR of tensor and tensor or scalar.
+
+    Automatically selects between tensor.or (tensor | tensor) and
+    tensor.ors (tensor | scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise OR
+    """
+    return _bitwise_dispatch("tensor.or", "tensor.ors", lhs, rhs, span)
+
+
+def ors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise OR of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise OR with scalar
+    """
+    return _bitwise_scalar("tensor.ors", lhs, rhs, span)
+
+
+def xor(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise XOR of tensor and tensor or scalar.
+
+    Automatically selects between tensor.xor (tensor ^ tensor) and
+    tensor.xors (tensor ^ scalar) based on the rhs type.
+
+    Unlike ``tile.xor``, no ``tmp`` operand is required: ConvertTensorToTileOps
+    allocates the scratch tile that pto.txor needs.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side tensor or integer scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise XOR
+    """
+    return _bitwise_dispatch("tensor.xor", "tensor.xors", lhs, rhs, span)
+
+
+def xors(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise XOR of tensor and scalar.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Right-hand side integer scalar (int/Expr with integer ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise XOR with scalar
+    """
+    return _bitwise_scalar("tensor.xors", lhs, rhs, span)
+
+
+def not_(input: Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise NOT of a tensor.
+
+    Args:
+        input: Input tensor (int16 or uint16 dtype, matching the TNOT instruction)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise NOT
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.not", [input], {}, actual_span)
+
+
+def shl(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise left shift of tensor by tensor or scalar.
+
+    Automatically selects between tensor.shl (tensor << tensor) and
+    tensor.shls (tensor << scalar) based on the rhs type.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount as a tensor or integer scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise left shift
+    """
+    return _bitwise_dispatch("tensor.shl", "tensor.shls", lhs, rhs, span)
+
+
+def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise left shift of tensor by scalar.
+
+    Note:
+        The scalar shift amount must be zero or positive; negative values are
+        not supported by the hardware and will be rejected by codegen.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount; must be >= 0
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise left shift with scalar
+    """
+    return _bitwise_scalar("tensor.shls", lhs, rhs, span)
+
+
+def shr(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise right shift of tensor by tensor or scalar.
+
+    Automatically selects between tensor.shr (tensor >> tensor) and
+    tensor.shrs (tensor >> scalar) based on the rhs type. The shift is
+    arithmetic for signed dtypes and logical for unsigned ones, matching the
+    tile ops and the underlying ISA.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount as a tensor or integer scalar
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise right shift
+    """
+    return _bitwise_dispatch("tensor.shr", "tensor.shrs", lhs, rhs, span)
+
+
+def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
+    """Element-wise bitwise right shift of tensor by scalar.
+
+    Note:
+        The scalar shift amount must be zero or positive; negative values are
+        not supported by the hardware and will be rejected by codegen.
+
+    Args:
+        lhs: Left-hand side tensor (integer dtype)
+        rhs: Shift amount; must be >= 0
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise bitwise right shift with scalar
+    """
+    return _bitwise_scalar("tensor.shrs", lhs, rhs, span)
+
+
 def maximum(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of tensor and tensor or scalar.
 
