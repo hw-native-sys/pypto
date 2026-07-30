@@ -18,6 +18,7 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op import prefetch as ir_prefetch
 from pypto.ir.op import tensor as ir_tensor
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import ir as _ir_core
 
 
@@ -138,7 +139,7 @@ class TestPrefetchOpVerification:
 
     def test_non_1d_source_rejected(self):
         """A ``[4, 32]`` source is not a flat contiguous logical-1D region."""
-        with pytest.raises(Exception, match="flat contiguous logical 1D"):
+        with pytest.raises(InvalidOperationError, match="flat contiguous logical 1D"):
 
             @pl.program
             class Program:
@@ -178,7 +179,7 @@ class TestPrefetchOpVerification:
 
     def test_wait_rejects_mismatched_handle(self):
         """``wait`` requires an AsyncSession, not the context it was projected from."""
-        with pytest.raises(Exception, match="session to be an AsyncSession"):
+        with pytest.raises(InvalidOperationError, match="session to be an AsyncSession"):
 
             @pl.program
             class Program:
@@ -196,7 +197,7 @@ class TestPrefetchOpVerification:
 
     def test_async_prefetch_rejects_non_context(self):
         """``async_prefetch`` requires a PrefetchAsyncContext as its second operand."""
-        with pytest.raises(Exception, match="ctx to be a PrefetchAsyncContext"):
+        with pytest.raises(InvalidOperationError, match="ctx to be a PrefetchAsyncContext"):
 
             @pl.program
             class Program:
