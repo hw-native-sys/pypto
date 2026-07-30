@@ -26,6 +26,7 @@ Skills are workflow guides that help the main assistant perform specific tasks:
 - **`fix-pr`** - Fixes PR issues: addresses review comments and resolves CI failures
 - **`clean-branches`** - Removes stale local and remote fork branches that have been merged into main
 - **`compare-codegen`** - Compares codegen output (.pto files, pass dumps) between origin/main and current branch for a given test case
+- **`generate-ir-trace`** - Runs a PyPTO or pypto-lib case, or converts an existing pass dump, into a validated self-contained IR lowering trace HTML report
 - **`weekly-changelog`** - Generates a weekly markdown changelog summarizing external API/feature changes from git commits in a date range, with before/after Python examples and author attribution
 
 **Key advantage:** `code-review` and `testing` use `context: fork` to run in isolated subagent contexts. They can run in parallel during commit workflows without polluting the main context window.

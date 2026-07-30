@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate IR Trace"
+  short_description: "Run cases or turn pass dumps into IR trace HTML"
+  default_prompt: "Use $generate-ir-trace to run a case or convert an existing pass dump into a validated HTML report."
