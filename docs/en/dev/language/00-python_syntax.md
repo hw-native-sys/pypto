@@ -129,6 +129,11 @@ for i, (acc,) in pl.range(N, init_values=(out,)):
     a: pl.Tile[[M, N], pl.FP32, l0c[i % 2], pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
 ```
 
+Under `@pl.jit`, name the declaration inline — `pl.MemRef("l0c", slots=2)[i % 2]` — rather
+than binding it to a Python variable. `@pl.jit` re-parses a generated source in a fresh
+module namespace, so a declaration held in a variable is not in scope there. The named form
+is self-contained (and is what the IR printer emits), so it works in both.
+
 `InitMemRef` sizes one slot to the largest tile bound to *any* slot — the slots are
 uniform, so a per-slot size would make the stride inconsistent — and turns the index into
 the byte offset `index * slot_size`. A constant index folds there and takes the ordinary

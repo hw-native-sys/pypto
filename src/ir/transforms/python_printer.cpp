@@ -350,6 +350,16 @@ class IRPythonPrinter : public IRVisitor {
   // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
   std::string GetVarName(const Var* var) const;
 
+  // Print an expression to a string without disturbing the main stream.
+  //
+  // Nested inside a type annotation (a MemRef byte offset, a slot index), an
+  // expression cannot go through the main stream, so it needs its own printer.
+  // That printer must still inherit the naming state: an offset or slot index may
+  // name a Var whose printed name was disambiguated (two loops both spelled `i`
+  // print as `i` and `i_1`), and a fresh printer would emit the bare name_hint_
+  // and rebind it to the wrong Var on reparse.
+  std::string PrintSubExpr(const ExprPtr& expr) const;
+
   // Build var_rename_map_ from a body stmt (and optional params).
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
   // Called from VisitFunction (with params) and from Print() for bare Stmt roots
@@ -2312,6 +2322,14 @@ std::string IRPythonPrinter::GetVarName(const Var* var) const {
   return var->name_hint_ + suffix;
 }
 
+std::string IRPythonPrinter::PrintSubExpr(const ExprPtr& expr) const {
+  IRPythonPrinter sub_printer(prefix_);
+  sub_printer.var_rename_map_ = var_rename_map_;
+  sub_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
+  sub_printer.free_body_vars_ = free_body_vars_;
+  return sub_printer.Print(expr);
+}
+
 void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body,
                                         bool is_function) {
   // Collect Var/IterArg pointers in DFS pre-order: params, then body defs,
@@ -2844,8 +2862,7 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
     if (memref.slot_index_.has_value() && *memref.slot_index_) {
       // The index may be a runtime expression, so print it through the expression
       // printer rather than assuming a constant.
-      IRPythonPrinter temp_printer(prefix_);
-      oss << "[" << temp_printer.Print(*memref.slot_index_) << "]";
+      oss << "[" << PrintSubExpr(*memref.slot_index_) << "]";
     }
     return oss.str();
   }
@@ -2861,13 +2878,10 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
     oss << "\"" << GetVarName(memref.base_.get()) << "\"";
   }
 
-  // Print byte offset using a temp printer to avoid corrupting the main stream.
-  // The temp printer has its own stream_ but shares no rename maps — that's fine
-  // because byte_offset expressions are ConstInt or arithmetic trees of loop vars
-  // which print by name_hint_ and don't need SSA renaming.
-  oss << ", ";
-  IRPythonPrinter temp_printer(prefix_);
-  oss << temp_printer.Print(memref.byte_offset_);
+  // Print byte offset off the main stream, but with this printer's naming state:
+  // a dynamic offset (a tile.slice view) names loop vars, which may have been
+  // disambiguated.
+  oss << ", " << PrintSubExpr(memref.byte_offset_);
 
   // Print size
   oss << ", " << memref.size_ << ")";

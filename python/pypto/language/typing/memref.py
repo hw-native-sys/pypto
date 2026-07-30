@@ -70,11 +70,16 @@ class MemRef(_IrMemRef):
         ping: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Acc] = pl.tile.matmul(q, b0)
         pong: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Acc] = pl.tile.matmul(q, b1)
 
-    The subscript must be a constant the parser can see: a literal, or a Python
-    name bound to an int. A loop variable does not qualify — the annotation is
-    resolved at parse time — so a rotation is written as an unrolled body with one
-    explicit subscript per slot. A non-constant index is rejected rather than
-    silently addressing slot 0.
+    The subscript is an ordinary index expression, so it may be a **runtime**
+    value — a rotation needs no unrolling::
+
+        for i in pl.range(N):
+            t: pl.Tile[[64, 64], pl.FP32, l0c[i % 2], pl.Mem.Acc] = pl.tile.matmul(q, b)
+
+    A constant index folds into a static address; a runtime one becomes the tile's
+    address at run time. Nothing here is tied to a particular loop form — the
+    index is just an expression, so `pl.range`, a `pl.pipeline` sub-index, or a
+    function parameter all work.
 
     Reference it by variable, so a misspelling is a ``NameError`` rather than a
     second allocation. Since the variable *is* the name, one declaration may not
@@ -83,11 +88,17 @@ class MemRef(_IrMemRef):
     overriding the variable — that is the form the IR printer emits, so a dumped
     program reparses without a surrounding Python scope.
 
-    Tiles sharing one declared allocation must not be live at the same time, and
-    must agree on memory space; both are checked. Declaring an allocation inside a
-    ``pl.pipeline(stage=2)`` body is rejected — the cloned stages would make a
-    tile co-live with itself — so to hand-manage a level, drive it with
-    ``pl.range`` and declare one allocation per slot.
+    Co-liveness is checked **per slot**: two tiles on different slots are meant to
+    be live together (that is the ping-pong), and only two tiles landing on the
+    *same* slot can corrupt each other. A runtime index has no static slot to
+    attribute a tile to, so the check is skipped there — the rotation is yours to
+    get right — while isolation from every other allocation still holds. Tiles
+    sharing one declared allocation must also agree on memory space.
+
+    Declaring an allocation inside a ``pl.pipeline(stage=2)`` body is rejected —
+    the cloned stages would make a tile co-live with itself. Declaring slots and
+    asking the compiler to multi-buffer are alternatives, not layers: to
+    hand-manage a level, drive it with ``pl.range`` and give it its own slots.
 
     Note: ``pl.MemRef(...)`` calls inside a ``@pl.program`` body are resolved
     by the parser (``parser/type_resolver.py``), not dispatched through this

@@ -383,12 +383,16 @@ class TestSlots:
 
         after = passes.init_mem_ref()(Before)
         memrefs = _tile_memrefs(after)
-        # One allocation, sized for both slots; the slots differ only by offset.
+        slot_size = 64 * 64 * 4
+        # One allocation, reserving both slots; the slots differ only by offset.
         assert len(_alloc_lines(after)) == 1
+        assert f"{2 * slot_size}" in _alloc_lines(after)[0]
         assert memrefs["t0"].base_ is memrefs["t1"].base_
-        assert memrefs["t0"].size_ == memrefs["t1"].size_ == 2 * 64 * 64 * 4
         assert _const_offset(memrefs["t0"]) == 0
-        assert _const_offset(memrefs["t1"]) == 64 * 64 * 4
+        assert _const_offset(memrefs["t1"]) == slot_size
+        # Each MemRef spans its OWN slot, so [offset, offset + size_) stays inside
+        # the allocation and the two slots do not overlap for MayAlias.
+        assert memrefs["t0"].size_ == memrefs["t1"].size_ == slot_size
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.
@@ -412,10 +416,13 @@ class TestSlots:
                 r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
                 return r_big, r_small
 
-        memrefs = _tile_memrefs(passes.init_mem_ref()(Before))
+        after = passes.init_mem_ref()(Before)
+        memrefs = _tile_memrefs(after)
         slot_size = 64 * 64 * 4
-        assert memrefs["big"].size_ == memrefs["small"].size_ == 2 * slot_size
-        # The small tile still starts one *full* slot in, not one small tile in.
+        # Slots are uniform: the allocation is 2 x the LARGEST bound tile...
+        assert f"{2 * slot_size}" in _alloc_lines(after)[0]
+        assert memrefs["big"].size_ == memrefs["small"].size_ == slot_size
+        # ...so the small tile still starts one *full* slot in, not one small tile in.
         assert _const_offset(memrefs["small"]) == slot_size
 
     def test_runtime_slot_index_reaches_the_address(self, ascend_backend):
@@ -520,6 +527,45 @@ class TestSlots:
         assert 'pl.MemRef("l0c", slots=2)[1]' in dumped, dumped
         ir.assert_structural_equal(Before, pl.parse_program(dumped))
 
+    def test_runtime_slot_index_round_trips_under_variable_renaming(self):
+        """A slot index must print with the *disambiguated* name of the var it names.
+
+        Two sibling loops both written `i` are distinct Vars, so the printer renames
+        one of them. The slot index lives inside a type annotation and so prints
+        through its own printer — if that printer does not inherit the rename map it
+        emits the bare `i`, which on reparse rebinds the address to the other loop's
+        variable and silently changes which slot is read.
+        """
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i in pl.range(2):
+                    x: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                    )
+                    pl.store(x, [0, 0], out)
+                for i in pl.range(2):
+                    t: pl.Tile[[64, 64], pl.FP32, l0c[i % 2], pl.Mem.Vec] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                    )
+                    pl.store(t, [0, 0], out)
+                return out
+
+        dumped = Before.as_python()
+        # Whatever the second loop variable is renamed to, the slot index must use
+        # that same name — not the first loop's.
+        second_loop = dumped.split("pl.range(2):")[2]
+        loop_var = dumped.split("pl.range(2):")[1].rsplit("for ", 1)[1].split(" in ")[0]
+        assert f'l0c", slots=2)[{loop_var} % 2]' in second_loop, dumped
+        ir.assert_structural_equal(Before, pl.parse_program(dumped))
+
 
 class TestSlotRejects:
     """Slot subscripts the compiler must refuse."""
@@ -540,6 +586,13 @@ class TestSlotRejects:
                 ) -> pl.Tensor[[64, 64], pl.FP32]:
                     t: pl.Tile[[64, 64], pl.FP32, l0c[5], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
                     return pl.store(t, [0, 0], out)
+
+    def test_rejects_zero_slots_at_construction(self):
+        """`slots=0` is refused where it is written, not as a 0-byte allocation later."""
+        with pytest.raises(ValueError, match="at least one slot"):
+            pl.MemRef(slots=0)
+        with pytest.raises(ValueError, match="at least one slot"):
+            pl.MemRef("named", slots=0)
 
     def test_rejects_subscripting_a_single_slot_declaration(self):
         """Subscripting something with one slot is a mistake worth naming."""

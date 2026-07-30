@@ -250,6 +250,16 @@ std::string MaybeFormat(const std::string& code, bool format) {
   return format ? ApplyFormatCallback(code) : code;
 }
 
+/// Reject a slot count of zero at construction.
+///
+/// The parser validates the `slots=` kwarg it parses out of an annotation, but a
+/// declaration built as a plain Python object (`l0c = pl.MemRef(slots=N)`) reaches
+/// the constructor directly. Zero would otherwise survive as `slot_count_ == 0`
+/// and only surface much later as a zero-sized allocation.
+void CheckSlotCount(uint64_t slots) {
+  CHECK(slots >= 1) << "A declared allocation must have at least one slot, got slots=" << slots;
+}
+
 void BindIR(nb::module_& m) {
   nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
 
@@ -792,6 +802,7 @@ void BindIR(nb::module_& m) {
       .def(
           "__init__",
           [](MemRef* self, uint64_t slots, const Span& span) {
+            CheckSlotCount(slots);
             auto base = std::make_shared<Var>("", GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
                               /*is_pinned=*/true, slots);
@@ -803,6 +814,7 @@ void BindIR(nb::module_& m) {
       .def(
           "__init__",
           [](MemRef* self, const std::string& name, uint64_t slots, const Span& span) {
+            CheckSlotCount(slots);
             auto base = std::make_shared<Var>(name, GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
                               /*is_pinned=*/true, slots);

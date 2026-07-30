@@ -264,14 +264,19 @@ inline std::optional<uint64_t> ExtractNameCounter(const std::string& name) {
 /// Create an alloc AssignStmt for a MemRef's base Ptr variable.
 /// DDR → tensor.alloc, on-chip → tile.alloc.
 /// Emits: base_ptr: Ptr = {tile,tensor}.alloc(memory_space, size)
-inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space, bool pinned = false) {
+/// `alloc_size` overrides the reserved bytes when the allocation is larger than
+/// the MemRef that names it. That happens for a multi-slot declared allocation:
+/// each slot MemRef is sized to its own slot (so its byte range stays inside the
+/// slot), while the allocation has to cover every slot.
+inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space, bool pinned = false,
+                                    std::optional<uint64_t> alloc_size = std::nullopt) {
   std::string op_name = (memory_space == MemorySpace::DDR) ? "tensor.alloc" : "tile.alloc";
   auto alloc_op = std::make_shared<Op>(op_name);
 
   auto memspace_expr =
       std::make_shared<ConstInt>(static_cast<int64_t>(memory_space), DataType::INDEX, Span::unknown());
-  auto size_expr =
-      std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
+  auto size_expr = std::make_shared<ConstInt>(static_cast<int64_t>(alloc_size.value_or(memref->size_)),
+                                              DataType::INDEX, Span::unknown());
 
   std::vector<ExprPtr> alloc_args = {memspace_expr, size_expr};
   // Only emit the kwarg when set, so ordinary compiler allocations print and

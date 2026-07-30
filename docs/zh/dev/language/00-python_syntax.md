@@ -121,6 +121,10 @@ for i, (acc,) in pl.range(N, init_values=(out,)):
     a: pl.Tile[[M, N], pl.FP32, l0c[i % 2], pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
 ```
 
+在 `@pl.jit` 下请用内联命名形式 `pl.MemRef("l0c", slots=2)[i % 2]`,而不是把声明绑到一个
+Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析生成的源码,变量里持有的声明在
+那里不可见;命名形式是自包含的(也正是 IR printer 输出的形式),两种场景都可用。
+
 `InitMemRef` 按绑定到**任意**槽位的最大 tile 确定单个槽位的大小——槽位是等大的,按槽位分别
 定尺寸会让步长不一致——并把下标折算成字节偏移 `index * slot_size`。常量下标在这里就折成常量,
 走原有的常量地址路径;运行期下标则留成表达式,在运行时成为 tile 的地址。

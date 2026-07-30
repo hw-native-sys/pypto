@@ -217,7 +217,7 @@ class InitMemRefMutator : public IRMutator {
     return binding && declared_allocs_.count(binding->base_.get()) > 0;
   }
 
-  /// The MemRef a user binding asks for, sized from the whole bound set.
+  /// The MemRef a user binding asks for, sized to the slot it selects.
   /// Returns nullopt when `type` carries no binding.
   std::optional<MemRefPtr> UserBoundMemRef(const TypePtr& type) const {
     if (declared_allocs_.empty()) return std::nullopt;
@@ -226,15 +226,22 @@ class InitMemRefMutator : public IRMutator {
     auto it = declared_allocs_.find(binding->base_.get());
     if (it == declared_allocs_.end()) return std::nullopt;
     // Every bound tile gets the SAME base Ptr — that shared identity is what
-    // makes them share storage — sized to hold the whole slot set.
+    // makes them share storage — and the slot index becomes the byte offset:
+    // `index * slot_size`. A constant index folds here, so a single-slot or
+    // constant-slot declaration keeps the ConstInt offset every downstream pass
+    // already expects. A runtime index survives as an expression that
+    // AllocateMemoryAddr adds the base address to and codegen lowers into the
+    // tile's address assignment.
     //
-    // The slot index becomes the byte offset: `index * slot_size`. A constant
-    // index folds here, so a single-slot or constant-slot declaration keeps the
-    // ConstInt offset every downstream pass already expects. A runtime index
-    // survives as an expression that AllocateMemoryAddr adds the base address to
-    // and codegen lowers into the tile's address assignment.
+    // Size is ONE SLOT, not the whole allocation: `size_` is the extent of the
+    // region this MemRef denotes, and `[offset, offset + size_)` is the range
+    // `MayAlias` intersects and the address verifier bounds-checks. Sizing a slot
+    // to the whole set would make slot 1 of two span `[S, 3S)` — overrunning the
+    // allocation for the verifier, and overlapping slot 0 for MayAlias, which
+    // would report the ping-pong's two halves as aliasing. The allocation itself
+    // is sized to the full set separately, where the alloc statement is built.
     return std::make_shared<MemRef>(binding->base_, SlotByteOffset(*binding, it->second),
-                                    it->second.TotalSize());
+                                    it->second.slot_size);
   }
 
   /// The byte offset a declaration's slot index denotes, folded when constant.
@@ -802,8 +809,12 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   alloc_stmts.reserve(memrefs.size());
   for (const auto& [memref, memory_space] : memrefs) {
     if (seen_bases.insert(memref->base_.get()).second) {
-      const bool pinned = declared_allocs.count(memref->base_.get()) > 0;
-      alloc_stmts.push_back(CreateAllocStatement(memref, memory_space, pinned));
+      // A declared allocation covers all its slots; the MemRef that happens to be
+      // seen first names only one of them, so take the size from the collector.
+      auto declared = declared_allocs.find(memref->base_.get());
+      const bool pinned = declared != declared_allocs.end();
+      auto alloc_size = pinned ? std::make_optional(declared->second.TotalSize()) : std::optional<uint64_t>{};
+      alloc_stmts.push_back(CreateAllocStatement(memref, memory_space, pinned, alloc_size));
     }
   }
 
