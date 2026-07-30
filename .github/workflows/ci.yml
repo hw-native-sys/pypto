@@ -293,11 +293,11 @@ jobs:
       with:
         repository: tonibohnlein/dsa-solver
         ref: 40665f073404fe508be3b8bcdeb57e13efaf9646
-        path: dsa-solver
+        path: clang-tidy-checkout/dsa-solver
         submodules: false
 
     - name: Checkout dsa-solver dependencies
-      working-directory: dsa-solver
+      working-directory: clang-tidy-checkout/dsa-solver
       run: |
         for attempt in 1 2 3 4 5; do
           if git -c http.version=HTTP/1.1 submodule update --init --recursive --depth 1; then
@@ -468,7 +468,7 @@ jobs:
     # The normal wheel intentionally keeps the optional adapter disabled. This
     # job builds the public solver package first, enables the adapter, and runs
     # the exporter/solver/validator/writeback tests with bounded parallelism.
-    needs: changes
+    needs: [changes, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     env:
@@ -517,9 +517,9 @@ jobs:
       run: >-
         pytest tests/ut/codegen/test_memory_planner_switch.py
         tests/ut/ir/transforms/test_allocate_memory_addr_pass.py
-         tests/ut/runtime/test_run_config.py::TestRunConfigCompileForwarding
-         tests/ut/jit/test_decorator.py::TestCompileKwargForwarding
-         -n 2 -v
+        tests/ut/runtime/test_run_config.py::TestRunConfigCompileForwarding
+        tests/ut/jit/test_decorator.py::TestCompileKwargForwarding
+        -n 2 -v
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going

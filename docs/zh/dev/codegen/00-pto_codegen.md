@@ -291,7 +291,7 @@ print(pto_code)
 随后，`PYPTO` 由 `MemoryReuse` 合并独立 buffer；`DSA` 求解未合并 identity；
 `PTOAS` 把共享 MemRef 渲染为单个 `tile_buf` 并交给 `PlanMemory` 完成复用与定址。
 `DSA` 可通过 `dsa_export_dir` 保留已验证的 schema-v1 输入；配置与限制见
-[AllocateMemoryAddr](../passes/31-allocate_memory_addr.md)。
+[AllocateMemoryAddr](../passes/32-allocate_memory_addr.md)。
 
 > **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910B `load + tpop_from_aic`
 > 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由
