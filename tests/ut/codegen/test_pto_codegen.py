@@ -812,6 +812,52 @@ def test_pto_codegen_tile_int_literal_scalar_is_not_index():
     assert ", i32)" in tadds, f"scalar operand is not i32: {tadds}"
 
 
+@pytest.mark.parametrize(
+    "tile_dtype,scalar_type",
+    [
+        (pl.UINT8, "i8"),
+        (pl.UINT16, "i16"),
+        (pl.UINT32, "i32"),
+    ],
+)
+@pytest.mark.parametrize("op_name", ["shls", "shrs"])
+def test_pto_codegen_unsigned_tile_shift_uses_signless_same_width_scalar(tile_dtype, scalar_type, op_name):
+    """Unsigned tile shifts encode a signed same-width PTOAS scalar operand."""
+
+    if op_name == "shls":
+
+        @pl.program
+        class ShiftProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shift_test(
+                self,
+                src: pl.Tensor[[32, 32], tile_dtype],
+                out: pl.Tensor[[32, 32], tile_dtype],
+            ):
+                src_tile = pl.load(src, offsets=[0, 0], shapes=[32, 32])
+                result = pl.tile.shls(src_tile, 1)
+                pl.store(result, offsets=[0, 0], output_tensor=out)
+
+    else:
+
+        @pl.program
+        class ShiftProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shift_test(
+                self,
+                src: pl.Tensor[[32, 32], tile_dtype],
+                out: pl.Tensor[[32, 32], tile_dtype],
+            ):
+                src_tile = pl.load(src, offsets=[0, 0], shapes=[32, 32])
+                result = pl.tile.shrs(src_tile, 1)
+                pl.store(result, offsets=[0, 0], output_tensor=out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(ShiftProgram))
+    shift = _single_line(lines, f"pto.t{op_name}")
+    assert "index" not in shift, f"scalar operand is still index: {shift}"
+    assert f", {scalar_type})" in shift, f"scalar operand is not {scalar_type}: {shift}"
+
+
 def test_pto_codegen_tensor_int_literal_scalar_is_not_index():
     """A tensor-level int literal must lower to an i32-operand tadds, never index.
 

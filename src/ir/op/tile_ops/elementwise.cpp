@@ -73,6 +73,11 @@ static bool IsTSubsDataType(DataType dtype) {
          dtype == DataType::FP16 || dtype == DataType::FP32 || dtype == DataType::BF16;
 }
 
+static bool IsShiftDataType(DataType dtype) {
+  return dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
+         dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
+}
+
 static std::shared_ptr<TileType> MakePackedPredicateTileType(
     const std::vector<ExprPtr>& logical_shape, const std::shared_ptr<const TileType>& source_tile_type) {
   INTERNAL_CHECK(!logical_shape.empty())
@@ -187,35 +192,72 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
-// Tile-tile shift ops (shl, shr): RHS is the shift amount, result type equals LHS tile type,
-// consistent with scalar variants (shls/shrs) which preserve the LHS tile dtype.
 TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
                                     const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
-  auto tile_type1 = As<TileType>(args[0]->GetType());
-  auto tile_type2 = As<TileType>(args[1]->GetType());
-  CHECK(tile_type1) << "The operator " << op_name << " requires first argument to be a TileType, but got "
-                    << args[0]->GetType()->TypeName();
-  CHECK(tile_type2) << "The operator " << op_name << " requires second argument to be a TileType, but got "
-                    << args[1]->GetType()->TypeName();
-  CHECK(tile_type1->dtype_.IsInt()) << "The operator " << op_name << " requires integer tile dtype, but got "
-                                    << tile_type1->dtype_.ToString();
-  CHECK(tile_type2->dtype_.IsInt()) << "The operator " << op_name
-                                    << " requires integer shift tile dtype, but got "
-                                    << tile_type2->dtype_.ToString();
+  auto src = As<TileType>(args[0]->GetType());
+  auto shift = As<TileType>(args[1]->GetType());
+  CHECK(src) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+             << args[0]->GetType()->TypeName();
+  CHECK(shift) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+               << args[1]->GetType()->TypeName();
+  CHECK(IsShiftDataType(src->dtype_))
+      << "The operator " << op_name
+      << " requires dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got " << src->dtype_.ToString();
+  CHECK(shift->dtype_ == src->dtype_)
+      << "The operator " << op_name << " requires src, shift, and dst to have the same dtype, but shift has "
+      << shift->dtype_.ToString() << " and src has " << src->dtype_.ToString();
 
-  auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
-  CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
+  const auto src_valid_shape = GetValidShape(src);
+  const auto shift_valid_shape = GetValidShape(shift);
+  CHECK(shift_valid_shape.size() == src_valid_shape.size())
+      << "The operator " << op_name << " requires src, shift, and dst to have the same valid_shape rank";
+  for (size_t i = 0; i < src_valid_shape.size(); ++i) {
+    CHECK(ProveValidExtentEqual(src_valid_shape[i], shift_valid_shape[i]) == ProofResult::kTrue)
+        << "The operator " << op_name
+        << " requires src, shift, and dst to have the same valid_shape, but shift differs at dimension " << i;
+  }
 
-  // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
-  InheritTileViewLayout(tile_view, tile_type1);
-  return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
+  tile_view.valid_shape = src_valid_shape;
+  InheritTileViewLayout(tile_view, src);
+  return std::make_shared<TileType>(src->shape_, src->dtype_, std::nullopt, tile_view);
+}
+
+TypePtr DeduceTileOpShiftScalarType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
+                          << args.size();
+
+  auto src = As<TileType>(args[0]->GetType());
+  auto shift = As<ScalarType>(args[1]->GetType());
+  CHECK(src) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+             << args[0]->GetType()->TypeName();
+  CHECK(shift) << "The operator " << op_name << " requires second argument to be a ScalarType, but got "
+               << args[1]->GetType()->TypeName();
+  CHECK(IsShiftDataType(src->dtype_))
+      << "The operator " << op_name
+      << " requires tile dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
+      << src->dtype_.ToString();
+  CHECK(shift->dtype_.IsSignedInt() && shift->dtype_.GetBit() == src->dtype_.GetBit())
+      << "The operator " << op_name
+      << " requires a signless scalar shift count with the same bit width as src, but scalar has "
+      << shift->dtype_.ToString() << " and src has " << src->dtype_.ToString();
+  if (auto constant = As<ConstInt>(args[1])) {
+    const int64_t shift_value = constant->value_;
+    CHECK(shift_value >= 0 && static_cast<uint64_t>(shift_value) < src->dtype_.GetBit())
+        << "The operator " << op_name << " requires a constant shift count in [0, "
+        << (src->dtype_.GetBit() - 1) << "], but got " << shift_value;
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(src);
+  InheritTileViewLayout(tile_view, src);
+  return std::make_shared<TileType>(src->shape_, src->dtype_, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
@@ -545,7 +587,7 @@ REGISTER_OP("tile.fmods")
 
 REGISTER_OP("tile.shl")
     .set_op_category("TileOp")
-    .set_description("Element-wise bitwise left shift of two tiles with broadcasting")
+    .set_description("Element-wise bitwise left shift using a same-dtype shift-count tile")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
@@ -565,12 +607,12 @@ REGISTER_OP("tile.shls")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shls");
+      return DeduceTileOpShiftScalarType(args, kwargs, "tile.shls");
     });
 
 REGISTER_OP("tile.shr")
     .set_op_category("TileOp")
-    .set_description("Element-wise bitwise right shift of two tiles with broadcasting")
+    .set_description("Element-wise bitwise right shift using a same-dtype shift-count tile")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
@@ -590,7 +632,7 @@ REGISTER_OP("tile.shrs")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shrs");
+      return DeduceTileOpShiftScalarType(args, kwargs, "tile.shrs");
     });
 
 REGISTER_OP("tile.maximums")

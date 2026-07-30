@@ -170,14 +170,14 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 hardware evidence covers signed/unsigned 16-bit counts; active cases cover all signed/unsigned 8/16/32-bit widths, count boundaries, and full/row/column/combined valid shapes on A2/A3 and A5, with expanded hardware execution pending |
+| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 hardware evidence covers signed arithmetic and unsigned logical 16-bit shifts; active cases cover all signed/unsigned 8/16/32-bit widths, count boundaries, and full/row/column/combined valid shapes on A2/A3 and A5, with expanded hardware execution pending |
 | pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | active A5 cases cover signed/unsigned 8/16/32-bit tiles, scalar boundaries, and all valid-shape modes; A2/A3 supports 16/32-bit tiles but pinned pto-isa `TShiftCheck` compares dst valid rows with src valid columns, so only square-valid cases are executable until upstream is fixed |
+| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | active A5 cases cover signed/unsigned 8/16/32-bit tiles, scalar boundaries, and all valid-shape modes; A2/A3 supports 16/32-bit tiles but pinned pto-isa `TShiftCheck` compares dst valid rows with src valid columns, so only square-valid cases are executable until upstream is fixed |
 | **Data Rearrangement (15)** |  |  |  |  |  |  |  |  |
 | pto.tconcat | TCONCAT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
@@ -274,5 +274,5 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend;
-110 have same-name ST coverage (106 regular STs and 4 distributed STs); 62 lack same-name ST coverage
-(52 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
+112 have same-name ST coverage (108 regular STs and 4 distributed STs); 60 lack same-name ST coverage
+(48 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.

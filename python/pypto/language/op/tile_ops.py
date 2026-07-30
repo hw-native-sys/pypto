@@ -2202,12 +2202,11 @@ def shls(lhs: Tile, rhs: int | Expr | Scalar) -> Tile:
     Computes lhs << rhs element-wise. Maps to the TSHLS hardware intrinsic.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        A constant shift amount must be in ``[0, bit_width - 1]``.
 
     Args:
         lhs: Tile
-        rhs: Scalar shift amount; must be >= 0
+        rhs: Scalar shift amount
 
     Returns:
         Tile wrapping the shls operation
@@ -2239,12 +2238,11 @@ def shrs(lhs: Tile, rhs: int | Expr | Scalar) -> Tile:
     Computes lhs >> rhs element-wise. Maps to the TSHRS hardware intrinsic.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        A constant shift amount must be in ``[0, bit_width - 1]``.
 
     Args:
         lhs: Tile
-        rhs: Scalar shift amount; must be >= 0
+        rhs: Scalar shift amount
 
     Returns:
         Tile wrapping the shrs operation

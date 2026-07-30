@@ -140,7 +140,16 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.shl(src, shift)` / `tile.shls(src, scalar)` | `pto.tshl` / `pto.tshls` |
+| `tile.shr(src, shift)` / `tile.shrs(src, scalar)` | `pto.tshr` / `pto.tshrs` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
+
+移位 tile 使用 row-major 布局及有/无符号 8、16 或 32 位元素。tile-tile
+形式要求元素类型和 valid shape 相同。scalar 形式将 count 编码为与 tile
+等宽的 signless（PyPTO 有符号）整数，常量范围必须为 `[0, width - 1]`。
+A2/A3 的 scalar 移位支持 16 和 32 位元素，8 位 scalar 移位仅 A5 支持。
+当前固定版本的 A2/A3 pto-isa 在 `TShiftCheck` 中存在 row/column 比较笔误，
+因此 `TSHLS` 和 `TSHRS` 的非正方形 valid region 会被阻塞。
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。

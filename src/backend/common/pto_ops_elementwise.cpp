@@ -88,6 +88,8 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.fmods",
       "tile.maximums",
       "tile.lrelu",
+      "tile.shls",
+      "tile.shrs",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",

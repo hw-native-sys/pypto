@@ -156,14 +156,14 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机证据已覆盖有/无符号 16 位 count；现有用例覆盖 A2/A3 与 A5 的全部有/无符号 8/16/32 位类型、count 边界及 full/row/column/combined valid shape，扩展真机执行待完成 |
+| pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 真机证据已覆盖有符号算术右移和无符号逻辑右移的 16 位类型；现有用例覆盖 A2/A3 与 A5 的全部有/无符号 8/16/32 位类型、count 边界及 full/row/column/combined valid shape，扩展真机执行待完成 |
 | pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | A5 用例覆盖有/无符号 8/16/32 位 tile、scalar 边界和全部 valid-shape 模式；A2/A3 支持 16/32 位 tile，但固定版本 pto-isa 的 `TShiftCheck` 错将 dst valid rows 与 src valid columns 比较，上游修复前仅正方形 valid region 可执行 |
+| pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | A5 用例覆盖有/无符号 8/16/32 位 tile、scalar 边界和全部 valid-shape 模式；A2/A3 支持 16/32 位 tile，但固定版本 pto-isa 的 `TShiftCheck` 错将 dst valid rows 与 src valid columns 比较，上游修复前仅正方形 valid region 可执行 |
 | **数据重排（15）** |  |  |  |  |  |  |  |  |
 | pto.tconcat | TCONCAT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
@@ -260,5 +260,5 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
 **统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个；
-同名 ST 覆盖 110 个（普通 ST 106，distributed ST 4）；无同名 ST 62 个
-（普通 52，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。
+同名 ST 覆盖 112 个（普通 ST 108，distributed ST 4）；无同名 ST 60 个
+（普通 48，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。
