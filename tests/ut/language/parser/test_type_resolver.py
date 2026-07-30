@@ -25,7 +25,7 @@ from pypto.language.parser.type_resolver import TypeResolver
 from pypto.language.typing.dynamic import DynVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 
 _DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY = [
@@ -51,6 +51,15 @@ def _make_resolver(
     """Create a TypeResolver with ExprEvaluator from closure_vars."""
     ev = ExprEvaluator(closure_vars=closure_vars or {})
     return TypeResolver(expr_evaluator=ev, scope_lookup=scope_lookup)
+
+
+def _const_ints(exprs: "Sequence[ir.Expr]") -> list[int]:
+    """Extract the compile-time integer values from a list of IR expressions."""
+    values = []
+    for expr in exprs:
+        assert isinstance(expr, ir.ConstInt), f"expected ConstInt, got {type(expr).__name__}"
+        values.append(expr.value)
+    return values
 
 
 class TestTypeResolver:
@@ -1512,6 +1521,23 @@ class TestLayoutResolution:
         with pytest.raises(ParserTypeError, match="must be a TensorLayout"):
             resolver.resolve_type(node)
 
+    def test_resolve_layout_closure_tensorview_accepted(self):
+        """A closure TensorView is a valid slot-3 value, not a rejected layout (issue #2211).
+
+        Sibling of test_resolve_layout_closure_invalid_type: slot 3 takes either a
+        TensorLayout or a TensorView, so only the former's rejection is a real error.
+        """
+        resolver = _make_resolver(
+            closure_vars={"my_view": ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)}
+        )
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, my_view]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert _const_ints(tv.stride) == [128, 1]
+
     def test_resolve_tensor_layout_with_dynamic_shape(self):
         """Layout works with dynamic shapes."""
         resolver = _make_resolver(closure_vars={"M": DynVar("M")})
@@ -1923,6 +1949,85 @@ class TestTensorViewResolution:
         assert isinstance(result, ir.TensorType)
         assert result.tensor_view is None
         assert result.memref is not None
+
+    def test_tensorview_from_closure(self):
+        """A variable holding an ir.TensorView is accepted in slot 3 (issue #2211)."""
+        strided = ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)
+        resolver = _make_resolver(closure_vars={"STRIDED": strided})
+        node = ast.parse("pl.Tensor[[32, 64], pl.FP32, STRIDED]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert tv.layout == ir.TensorLayout.ND
+        assert _const_ints(tv.stride) == [128, 1]
+
+    def test_tensorview_from_closure_matches_inline(self):
+        """The closure form resolves identically to the same view written inline."""
+        strided = ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)
+        inline_src = "pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]"
+
+        from_closure = _make_resolver(closure_vars={"STRIDED": strided}).resolve_type(
+            ast.parse("pl.Tensor[[32, 64], pl.FP32, STRIDED]", mode="eval").body
+        )
+        from_inline = _make_resolver().resolve_type(ast.parse(inline_src, mode="eval").body)
+        assert isinstance(from_closure, ir.TensorType)
+        assert isinstance(from_inline, ir.TensorType)
+
+        span = ir.Span.unknown()
+        assert ir.structural_equal(
+            ir.Var("value", from_closure, span),
+            ir.Var("value", from_inline, span),
+            enable_auto_mapping=True,
+        )
+
+    def test_tensorview_from_closure_not_aliased_between_annotations(self):
+        """One closure view reused by several annotations must not alias between them.
+
+        TensorType stores the view by value, so mutating one resolved type's view
+        must leave the other — and the closure variable itself — untouched.
+        """
+        strided = ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)
+        resolver = _make_resolver(closure_vars={"STRIDED": strided})
+        ann = ast.parse("pl.Tensor[[32, 64], pl.FP32, STRIDED]", mode="eval").body
+
+        first = resolver.resolve_type(ann)
+        second = resolver.resolve_type(ann)
+        assert isinstance(first, ir.TensorType)
+        assert isinstance(second, ir.TensorType)
+        first_view, second_view = first.tensor_view, second.tensor_view
+        assert first_view is not None
+        assert second_view is not None
+
+        first_view.layout = ir.TensorLayout.NZ
+        assert second_view.layout == ir.TensorLayout.ND
+        assert strided.layout == ir.TensorLayout.ND
+
+    def test_tensorview_from_closure_four_args(self):
+        """A closure TensorView also works in the 4-arg [.., view, memref] form."""
+        strided = ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)
+        resolver = _make_resolver(closure_vars={"STRIDED": strided})
+        node = ast.parse("pl.Tensor[[32, 64], pl.FP32, STRIDED, pl.MemRef(0, 256, 1)]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.memref is not None
+        tv = result.tensor_view
+        assert tv is not None
+        assert _const_ints(tv.stride) == [128, 1]
+
+    def test_tensorview_from_closure_distributed_tensor(self):
+        """DistributedTensor shares the slot-3 resolution path."""
+        strided = ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)
+        resolver = _make_resolver(closure_vars={"STRIDED": strided})
+        node = ast.parse("pl.DistributedTensor[[32, 64], pl.FP32, STRIDED]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.DistributedTensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert _const_ints(tv.stride) == [128, 1]
 
 
 class TestTensorViewIntegration:

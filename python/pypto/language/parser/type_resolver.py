@@ -506,22 +506,10 @@ class TypeResolver:
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
                 return tensor_ctor(shape, dtype, memref, None)
-            if self._is_tensorview_node(third):
-                tensor_view = self._resolve_tensorview(third)
-                return tensor_ctor(shape, dtype, None, tensor_view)
-            layout = self.resolve_layout(third)
-            self._warn_on_user_facing_dn_layout(layout, type_name)
-            tensor_view = ir.TensorView([], layout)
-            return tensor_ctor(shape, dtype, None, tensor_view)
+            return tensor_ctor(shape, dtype, None, self._resolve_tensor_view_slot(third, type_name))
 
         # Tensor / DistributedTensor 4 args: [shape, dtype, layout_or_tensorview, memref]
-        third = slice_value.elts[2]
-        if self._is_tensorview_node(third):
-            tensor_view = self._resolve_tensorview(third)
-        else:
-            layout = self.resolve_layout(third)
-            self._warn_on_user_facing_dn_layout(layout, type_name)
-            tensor_view = ir.TensorView([], layout)
+        tensor_view = self._resolve_tensor_view_slot(slice_value.elts[2], type_name)
         memref_node = slice_value.elts[3]
         if not self._is_memref_node(memref_node):
             raise ParserTypeError(
@@ -1427,6 +1415,65 @@ class TypeResolver:
         return (isinstance(func, ast.Attribute) and func.attr == "TensorView") or (
             isinstance(func, ast.Name) and func.id == "TensorView"
         )
+
+    def _resolve_tensor_view_slot(self, node: ast.expr, type_name: str) -> "ir.TensorView":
+        """Resolve slot 3 of a Tensor / DistributedTensor annotation to an ir.TensorView.
+
+        The slot holds either a tensor view or a layout, and either may be
+        written inline or held in a variable::
+
+            pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], ...)]
+            pl.Tensor[[32, 64], pl.FP32, STRIDED]  # STRIDED = pl.TensorView(...)
+            pl.Tensor[[32, 64], pl.FP32, pl.NZ]
+            pl.Tensor[[32, 64], pl.FP32, my_layout]  # my_layout = ir.TensorLayout.NZ
+
+        A layout is widened to a stride-less view carrying it, so every form
+        yields a view.
+
+        Args:
+            node: AST node in slot 3 of the annotation
+            type_name: "Tensor" or "DistributedTensor", for diagnostics
+
+        Returns:
+            ir.TensorView instance
+
+        Raises:
+            ParserTypeError: If the node is neither a tensor view nor a layout
+        """
+        if self._is_tensorview_node(node):
+            return self._resolve_tensorview(node)
+        from_var = self._resolve_tensorview_var_ref(node)
+        if from_var is not None:
+            return from_var
+        layout = self.resolve_layout(node)
+        self._warn_on_user_facing_dn_layout(layout, type_name)
+        return ir.TensorView([], layout)
+
+    def _resolve_tensorview_var_ref(self, node: ast.expr) -> "ir.TensorView | None":
+        """Resolve a TensorView referenced by name in a tensor annotation.
+
+        A view spelled out in full is long, and one shared by several parameters
+        would otherwise have to be repeated verbatim on each. Binding it once in
+        enclosing Python and referencing the name is the natural way to share it::
+
+            STRIDED = pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+            def kernel(self, data: pl.Tensor[[32, 64], pl.FP32, STRIDED], ...)
+
+        This mirrors the closure support ``resolve_layout`` already provides for
+        the layout that may occupy the same slot.
+
+        Args:
+            node: Candidate AST node from slot 3 of a tensor annotation
+
+        Returns:
+            The TensorView, or None if the node is not a TensorView reference
+        """
+        if not isinstance(node, ast.Name):
+            return None
+        success, value = self.expr_evaluator.try_eval_expr(node)
+        if success and isinstance(value, ir.TensorView):
+            return value
+        return None
 
     def _resolve_tensorview(self, node: ast.expr) -> "ir.TensorView":
         """Resolve a pl.TensorView(...) AST call to ir.TensorView.
