@@ -26,6 +26,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import ParserTypeError
 
 
 def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
@@ -650,7 +651,7 @@ class Aliased:
         t1: pl.Tile[[64, 64], pl.FP32, alias, pl.Mem.Vec] = pl.exp(t0)
         return pl.store(t1, [0, 0], out)
 """
-        with pytest.raises(Exception, match="also referenced as"):
+        with pytest.raises(ParserTypeError, match="also referenced as"):
             pl.parse_program(source)
 
     def test_rejects_two_declarations_claiming_one_name(self):
@@ -671,7 +672,7 @@ class Collide:
         t1: pl.Tile[[64, 64], pl.FP32, second, pl.Mem.Vec] = pl.exp(t0)
         return pl.store(t1, [0, 0], out)
 """
-        with pytest.raises(Exception, match="both resolve to the name"):
+        with pytest.raises(ParserTypeError, match="both resolve to the name"):
             pl.parse_program(source)
 
     def test_rejects_binding_a_pipelined_tile(self, ascend_backend):
@@ -783,7 +784,7 @@ class Bad:
         t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("scratch")] = pl.load(a, [0, 0], [64, 64])
         return pl.store(t0, [0, 0], out)
 """
-        with pytest.raises(Exception, match="explicit memory space"):
+        with pytest.raises(ParserTypeError, match="explicit memory space"):
             pl.parse_program(source)
 
     def test_rejects_non_literal_declared_name(self):
@@ -802,7 +803,7 @@ class Bad:
         t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(NAME), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
         return pl.store(t0, [0, 0], out)
 """
-        with pytest.raises(Exception, match="string literal"):
+        with pytest.raises(ParserTypeError, match="string literal"):
             pl.parse_program(source)
 
 
