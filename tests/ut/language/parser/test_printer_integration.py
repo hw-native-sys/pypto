@@ -331,8 +331,6 @@ class TestWhileLoopRoundTrip:
                 x = x + 1
             return x
 
-        # Verify key structural elements
-        assert isinstance(original, ir.Function)
         # Find the while statement
         body = original.body
         while_stmt = None
@@ -346,8 +344,14 @@ class TestWhileLoopRoundTrip:
 
         assert while_stmt is not None
         # Natural syntax has no iter_args initially (ConvertToSSA adds them)
+        assert len(while_stmt.iter_args) == 0
         # Condition should be a comparison
         assert isinstance(while_stmt.condition, ir.Lt)
+
+        # The structure must survive a print -> reparse round trip unchanged
+        reparsed = pl.parse(original.as_python())
+        assert isinstance(reparsed, ir.Function)
+        ir.assert_structural_equal(reparsed, original)
 
     def test_while_with_tensor_operations_round_trip(self):
         """Test while loop with tensor operations."""

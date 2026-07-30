@@ -47,6 +47,21 @@ def assert_same_expr(expr: ir.Expr, expected: ir.Expr) -> None:
     )
 
 
+def assert_expr_equal(expr: ir.Expr, expected: ir.Expr) -> None:
+    """Assert that a rewrite produced exactly `expected`, operands included.
+
+    Prefer this over ``isinstance(expr, ir.Min)``-style checks: the node class
+    alone does not distinguish ``min(x, y + z)`` from ``min(y, x + z)``, so a
+    rule that rewrites to the wrong operands still passes a class check.
+    """
+    ir.assert_structural_equal(expr, expected)
+
+
+def assert_unchanged(expr: ir.Expr, original: ir.Expr) -> None:
+    """Assert that a dormant rule left `original` structurally untouched."""
+    ir.assert_structural_equal(expr, original)
+
+
 # Module-level shared instances
 simplifier = RewriteSimplifier()
 x = make_var("x")
@@ -61,7 +76,9 @@ z = make_var("z")
 
 class TestBasics:
     def test_construction(self):
-        assert simplifier is not None
+        """A freshly constructed simplifier applies rules (not just constructs)."""
+        fresh = RewriteSimplifier()
+        assert_is_const_int(fresh(ir.Add(ci(3), ci(5), INT, S)), 8)
 
     def test_identity_const(self):
         c = ci(42)
@@ -136,7 +153,7 @@ class TestAddRules:
     def test_min_sub_add(self):
         """min(x - z, y) + z => min(x, y + z)"""
         result = simplifier(ir.Add(ir.Min(ir.Sub(x, z, INT, S), y, INT, S), z, INT, S))
-        assert isinstance(result, ir.Min)
+        assert_expr_equal(result, ir.Min(x, ir.Add(y, z, INT, S), INT, S))
 
     def test_max_min_sum(self):
         """max(x, y) + min(x, y) => x + y"""
@@ -187,7 +204,7 @@ class TestSubRules:
     def test_sub_const_cross(self):
         """(c1 - x) - (c2 - y) => (y - x) + (c1 - c2)"""
         result = simplifier(ir.Sub(ir.Sub(ci(10), x, INT, S), ir.Sub(ci(3), y, INT, S), INT, S))
-        assert isinstance(result, ir.Add)
+        assert_expr_equal(result, ir.Add(ir.Sub(y, x, INT, S), ci(7), INT, S))
 
     def test_sub_min_cancel(self):
         """min(x, y) - min(y, x) => 0"""
@@ -202,20 +219,19 @@ class TestSubRules:
     def test_sub_min_add_extract(self):
         """min(x+y, z) - x => min(y, z-x)"""
         result = simplifier(ir.Sub(ir.Min(ir.Add(x, y, INT, S), z, INT, S), x, INT, S))
-        assert isinstance(result, ir.Min)
+        assert_expr_equal(result, ir.Min(y, ir.Sub(z, x, INT, S), INT, S))
 
     def test_sub_floordiv_extended(self):
         """x - floordiv(x+y, c1)*c1 => floormod(x+y, c1) - y"""
         xy = ir.Add(x, y, INT, S)
         fd = ir.FloorDiv(xy, ci(4), INT, S)
         result = simplifier(ir.Sub(x, ir.Mul(fd, ci(4), INT, S), INT, S))
-        # Should contain floormod(x+y, 4)
-        assert isinstance(result, ir.Sub)
+        assert_expr_equal(result, ir.Sub(ir.FloorMod(xy, ci(4), INT, S), y, INT, S))
 
     def test_sub_canonicalize_nested(self):
         """x - (y - z) => (x + z) - y"""
         result = simplifier(ir.Sub(x, ir.Sub(y, z, INT, S), INT, S))
-        assert isinstance(result, ir.Sub)
+        assert_expr_equal(result, ir.Sub(ir.Add(x, z, INT, S), y, INT, S))
 
     def test_sub_structurally_equal_compound_subexprs(self):
         """e - (e - 1) => 1 where e is a compound Call appearing twice as
@@ -314,15 +330,16 @@ class TestFloorDivRules:
 
     def test_floordiv_self(self):
         """floordiv(x, x) => 1 is dormant in standalone mode (requires x != 0 proof)"""
-        result = simplifier(ir.FloorDiv(x, x, INT, S))
         # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
-        assert isinstance(result, ir.FloorDiv)
+        # and the expression must come back untouched.
+        result = simplifier(ir.FloorDiv(x, x, INT, S))
+        assert_unchanged(result, ir.FloorDiv(x, x, INT, S))
 
     def test_floordiv_mul_self(self):
         """floordiv(x * c1, x) => c1 is dormant in standalone mode (requires x != 0 proof)"""
-        result = simplifier(ir.FloorDiv(ir.Mul(x, ci(5), INT, S), x, INT, S))
         # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
-        assert isinstance(result, ir.FloorDiv)
+        result = simplifier(ir.FloorDiv(ir.Mul(x, ci(5), INT, S), x, INT, S))
+        assert_unchanged(result, ir.FloorDiv(ir.Mul(x, ci(5), INT, S), x, INT, S))
 
     def test_floordiv_nested_offset(self):
         """floordiv(floordiv(x, c1) + c2, c3) => floordiv(x + c1*c2, c1*c3)"""
@@ -362,15 +379,15 @@ class TestFloorModRules:
 
     def test_floormod_mul_var(self):
         """floormod(x * y, y) => 0 is dormant in standalone mode (requires y != 0 proof)"""
-        result = simplifier(ir.FloorMod(ir.Mul(x, y, INT, S), y, INT, S))
         # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
-        assert isinstance(result, ir.FloorMod)
+        result = simplifier(ir.FloorMod(ir.Mul(x, y, INT, S), y, INT, S))
+        assert_unchanged(result, ir.FloorMod(ir.Mul(x, y, INT, S), y, INT, S))
 
     def test_floormod_coeff_reduction(self):
         """floormod(x * c1, c2) => floormod(x * floormod(c1, c2), c2)"""
         # floormod(x*7, 3) => floormod(x*1, 3) => floormod(x, 3)
         result = simplifier(ir.FloorMod(ir.Mul(x, ci(7), INT, S), ci(3), INT, S))
-        assert isinstance(result, ir.FloorMod)
+        assert_expr_equal(result, ir.FloorMod(x, ci(3), INT, S))
 
 
 # ============================================================================
@@ -439,25 +456,23 @@ class TestMinMaxRules:
         """min(min(x, y), x) => min(x, y)"""
         inner = ir.Min(x, y, INT, S)
         result = simplifier(ir.Min(inner, x, INT, S))
-        assert isinstance(result, ir.Min)
+        assert_expr_equal(result, ir.Min(x, y, INT, S))
 
     def test_max_nested_collapse(self):
         """max(max(x, y), x) => max(x, y)"""
         inner = ir.Max(x, y, INT, S)
         result = simplifier(ir.Max(inner, x, INT, S))
-        assert isinstance(result, ir.Max)
+        assert_expr_equal(result, ir.Max(x, y, INT, S))
 
     def test_min_cross_distribution(self):
         """min(max(x,y), max(x,z)) => max(min(y,z), x)"""
         result = simplifier(ir.Min(ir.Max(x, y, INT, S), ir.Max(x, z, INT, S), INT, S))
-        assert isinstance(result, ir.Max)
-        assert isinstance(result.left, ir.Min)
+        assert_expr_equal(result, ir.Max(ir.Min(y, z, INT, S), x, INT, S))
 
     def test_max_cross_distribution(self):
         """max(min(x,y), min(x,z)) => min(max(y,z), x)"""
         result = simplifier(ir.Max(ir.Min(x, y, INT, S), ir.Min(x, z, INT, S), INT, S))
-        assert isinstance(result, ir.Min)
-        assert isinstance(result.left, ir.Max)
+        assert_expr_equal(result, ir.Min(ir.Max(y, z, INT, S), x, INT, S))
 
     def test_min_scaling(self):
         """min(x * 3, y * 3) => min(x, y) * 3"""
@@ -530,12 +545,12 @@ class TestComparisonRules:
         """x > y delegates to y < x (Gt -> Lt delegation)"""
         # x + y > x + z should simplify to z < y (via Lt delegation)
         result = simplifier(ir.Gt(ir.Add(x, y, INT, S), ir.Add(x, z, INT, S), DataType.BOOL, S))
-        assert isinstance(result, ir.Lt)
+        assert_expr_equal(result, ir.Lt(z, y, DataType.BOOL, S))
 
     def test_ge_delegation(self):
         """x >= y delegates to y <= x (Ge -> Le delegation)"""
         result = simplifier(ir.Ge(ir.Add(x, y, INT, S), ir.Add(x, z, INT, S), DataType.BOOL, S))
-        assert isinstance(result, ir.Le)
+        assert_expr_equal(result, ir.Le(z, y, DataType.BOOL, S))
 
     def test_lt_self_offset(self):
         """x < x + z => 0 < z"""
@@ -555,12 +570,18 @@ class TestComparisonRules:
     def test_lt_min_decompose(self):
         """min(x, y) < z => x < z || y < z"""
         result = simplifier(ir.Lt(ir.Min(x, y, INT, S), z, DataType.BOOL, S))
-        assert isinstance(result, ir.Or)
+        assert_expr_equal(
+            result,
+            ir.Or(ir.Lt(x, z, DataType.BOOL, S), ir.Lt(y, z, DataType.BOOL, S), DataType.BOOL, S),
+        )
 
     def test_lt_max_decompose(self):
         """max(x, y) < z => x < z && y < z"""
         result = simplifier(ir.Lt(ir.Max(x, y, INT, S), z, DataType.BOOL, S))
-        assert isinstance(result, ir.And)
+        assert_expr_equal(
+            result,
+            ir.And(ir.Lt(x, z, DataType.BOOL, S), ir.Lt(y, z, DataType.BOOL, S), DataType.BOOL, S),
+        )
 
     def test_le_sub_cancel(self):
         """x - y <= x - z => z <= y"""
@@ -605,7 +626,7 @@ class TestBooleanRules:
     def test_not_eq(self):
         """!(x == y) => x != y"""
         result = simplifier(ir.Not(ir.Eq(x, y, DataType.BOOL, S), DataType.BOOL, S))
-        assert isinstance(result, ir.Ne)
+        assert_expr_equal(result, ir.Ne(x, y, DataType.BOOL, S))
 
     def test_and_contradiction(self):
         """x && !x => false"""
@@ -678,7 +699,7 @@ class TestBooleanRules:
         lt1 = ir.Lt(x, y, DataType.BOOL, S)
         lt2 = ir.Lt(y, x, DataType.BOOL, S)
         result = simplifier(ir.Or(lt1, lt2, DataType.BOOL, S))
-        assert isinstance(result, ir.Ne)
+        assert_expr_equal(result, ir.Ne(x, y, DataType.BOOL, S))
 
 
 # ============================================================================
@@ -712,10 +733,23 @@ class TestConstraintAndSubstitution:
         simplifier.update(x, None)
 
     def test_enter_constraint(self):
+        """enter_constraint returns a recovery callable that restores prior state.
+
+        Standalone RewriteSimplifier has no bound analysis behind it, so the
+        constraint itself is inert — what must hold is that entering and
+        exiting leaves simplification behaviour byte-for-byte unchanged
+        (i.e. the constraint stack does not leak).
+        """
+        probe = ir.Add(ir.Sub(x, y, INT, S), y, INT, S)  # (x - y) + y => x
+        assert_same_expr(simplifier(probe), x)
+
         constraint = ir.Eq(x, y, DataType.BOOL, S)
         exit_fn = simplifier.enter_constraint(constraint)
         assert callable(exit_fn)
+        assert_same_expr(simplifier(probe), x)
+
         exit_fn()
+        assert_same_expr(simplifier(probe), x)
 
 
 # ============================================================================

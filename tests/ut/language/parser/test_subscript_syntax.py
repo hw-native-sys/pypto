@@ -425,7 +425,26 @@ class TestTupleSubscript:
                 acc_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_acc)
             return acc_out
 
-        assert isinstance(tuple_access, ir.Function)
+        # The `for i, (acc,)` unpacking still yields one loop var plus one carry,
+        # and the slice offset is the loop var itself.
+        body = tuple_access.body
+        assert isinstance(body, ir.SeqStmts)
+        for_stmt = next(s for s in body.stmts if isinstance(s, ir.ForStmt))
+        assert len(for_stmt.iter_args) == 1
+        assert len(for_stmt.return_vars) == 1
+
+        loop_body = for_stmt.body
+        assert isinstance(loop_body, ir.SeqStmts)
+        slice_call = next(
+            s.value for s in loop_body.stmts if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call)
+        )
+        assert slice_call.op.name == ir.get_op("tensor.slice").name
+        offsets = slice_call.args[2]
+        assert isinstance(offsets, ir.MakeTuple)
+        # Compare by identity: ``Expr.__eq__`` builds an IR ``Eq`` node, so ``==``
+        # on Expr lists reports equality even for distinct nodes.
+        assert len(offsets.elements) == 1
+        assert offsets.elements[0] is for_stmt.loop_var
 
 
 class TestTensorSubscriptWrite:

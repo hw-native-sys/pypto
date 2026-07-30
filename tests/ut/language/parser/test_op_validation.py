@@ -123,6 +123,11 @@ class TestDirectWrapperCallsStillWork:
         s2 = Scalar(expr=_ir.ConstInt(4, DataType.INT32, _ir.Span.unknown()))
         result = pl.add(s1, s2)
         assert isinstance(result, Scalar)
+        # Lowered through Scalar.__add__ to an IR Add over the two constants
+        expr = result.expr
+        assert isinstance(expr, _ir.Add)
+        assert isinstance(expr.left, _ir.ConstInt) and expr.left.value == 3
+        assert isinstance(expr.right, _ir.ConstInt) and expr.right.value == 4
 
 
 class TestFullPythonCallingConvention:

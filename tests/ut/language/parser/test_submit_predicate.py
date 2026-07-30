@@ -257,7 +257,12 @@ def test_predicate_operand_without_tracked_producer_allowed():
     # ``rc_in`` is a function parameter, not a submit result — nothing to prove,
     # so the deps= contract check stays out of the way.
     prog = _program("rc_in[0, 0] > 0", deps_src="[]")
-    assert isinstance(_main_submits(prog)[1].predicate, ir.Gt)
+    predicate = _main_submits(prog)[1].predicate
+    assert isinstance(predicate, ir.Gt)
+    # The predicate still reads rc_in[0, 0] and compares against 0
+    assert _pred_read(predicate).op.name == ir.get_op("tensor.read").name
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+    assert _pred_const(predicate).value == 0
 
 
 def test_non_literal_target_rejected():
@@ -280,8 +285,10 @@ def test_predicate_must_be_a_comparison():
 
 def test_no_predicate_leaves_fields_default():
     prog = _program("rc[0, 0] > 0")
-    gate_sub = _main_submits(prog)[0]
+    gate_sub, expert_sub = _main_submits(prog)
+    # Only the submit that was given predicate= carries one
     assert gate_sub.predicate is None
+    assert isinstance(expert_sub.predicate, ir.Gt)
 
 
 def test_print_parse_round_trip():
@@ -315,7 +322,11 @@ def test_unsigned_and_subbyte_operand_rejected(dtype):
 @pytest.mark.parametrize("dtype", ["pl.INT8", "pl.INT16", "pl.INT32", "pl.INT64"])
 def test_signed_integer_operands_accepted(dtype):
     prog = _program("rc[0, 0] > 0", rc_dtype=dtype)
-    assert isinstance(_main_submits(prog)[1].predicate, ir.Gt)
+    predicate = _main_submits(prog)[1].predicate
+    assert isinstance(predicate, ir.Gt)
+    # Accepted for every signed width, with operand and target intact
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+    assert _pred_const(predicate).value == 0
 
 
 def test_negative_constant_index_rejected():
@@ -487,7 +498,10 @@ def test_scope_predicate_plain_with_form():
 """
     )
     (scope,) = _spmd_scopes(prog)
-    assert isinstance(dict(scope.attrs.items())["predicate"], ir.Gt)
+    predicate = dict(scope.attrs.items())["predicate"]
+    assert isinstance(predicate, ir.Gt)
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+    assert _pred_const(predicate).value == 0
 
 
 def test_scope_predicate_for_form():
@@ -506,7 +520,10 @@ def test_scope_predicate_for_form():
 """
     )
     (scope,) = _spmd_scopes(prog)
-    assert isinstance(dict(scope.attrs.items())["predicate"], ir.Gt)
+    predicate = dict(scope.attrs.items())["predicate"]
+    assert isinstance(predicate, ir.Gt)
+    assert [c.value for c in _pred_indices(predicate)] == [0, 0]
+    assert _pred_const(predicate).value == 0
 
 
 def test_scope_predicate_operand_producer_must_be_in_deps():

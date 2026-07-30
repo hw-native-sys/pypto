@@ -45,6 +45,22 @@ _NON_DEFAULT_TILEVIEW_ANNOTATION = (
 )
 
 
+def _static_shape(type_: "ir.TensorType | ir.TileType") -> list[int]:
+    """Return a Tensor/Tile type's static shape as plain ints."""
+    dims = []
+    for dim in type_.shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static dim, got {type(dim).__name__}"
+        dims.append(dim.value)
+    return dims
+
+
+def _body_assigns(func: ir.Function) -> list[ir.AssignStmt]:
+    """Return the function body's top-level AssignStmts, in source order."""
+    body = func.body
+    stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+    return [s for s in stmts if isinstance(s, ir.AssignStmt)]
+
+
 def _make_resolver(
     closure_vars: dict | None = None, scope_lookup: "Callable[[str], Any | None] | None" = None
 ) -> TypeResolver:
@@ -584,7 +600,12 @@ class TestDynamicShapeResolution:
         node = ast.parse("pl.Tile[[N, 64], pl.FP32]", mode="eval").body
         result = resolver.resolve_type(node)
         assert isinstance(result, ir.TileType)
+        # Dim 0 is the dynamic N; dim 1 stays the static 64
         assert isinstance(result.shape[0], ir.Var)
+        assert result.shape[0].name_hint == "N"
+        assert isinstance(result.shape[1], ir.ConstInt)
+        assert result.shape[1].value == 64
+        assert result.dtype == DataType.FP32
 
     # --- Error cases ---
 
@@ -1162,7 +1183,18 @@ class TestClosureVarsInFunctionBody:
             result: pl.Tensor[tensor_shape, dtype] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
-        assert isinstance(func, ir.Function)
+        # Closure shape/dtype flow into both the params and the in-body annotations
+        for param in func.params:
+            assert isinstance(param.type, ir.TensorType)
+            assert _static_shape(param.type) == [128, 128]
+            assert param.type.dtype == DataType.FP32
+
+        tile_stmt, store_stmt = _body_assigns(func)
+        assert isinstance(tile_stmt.var.type, ir.TileType)
+        assert _static_shape(tile_stmt.var.type) == [64, 64]
+        assert tile_stmt.var.type.dtype == DataType.FP32
+        assert isinstance(store_stmt.var.type, ir.TensorType)
+        assert _static_shape(store_stmt.var.type) == [128, 128]
 
     def test_shapes_kwarg_from_variable(self):
         """User passes shapes= kwarg as a closure variable (t.py pattern)."""
@@ -1176,7 +1208,10 @@ class TestClosureVarsInFunctionBody:
             result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
-        assert isinstance(func, ir.Function)
+        # The shapes= kwarg resolved to the closure's [32, 32], sizing the loaded tile
+        tile_stmt = _body_assigns(func)[0]
+        assert isinstance(tile_stmt.var.type, ir.TileType)
+        assert _static_shape(tile_stmt.var.type) == [32, 32]
 
     def test_int_kwarg_from_closure(self):
         """User passes an int kwarg (like axis) from closure."""
@@ -1189,7 +1224,12 @@ class TestClosureVarsInFunctionBody:
             result: pl.Tensor[[128, 64], pl.FP32] = pl.transpose(x, axis1=0, axis2=swap_axis)
             return result
 
-        assert isinstance(func, ir.Function)
+        # axis2 picked up the closure's 1, not a default or axis1's 0
+        call = _body_assigns(func)[0].value
+        assert isinstance(call, ir.Call)
+        axis2 = call.args[2]
+        assert isinstance(axis2, ir.ConstInt)
+        assert axis2.value == 1
 
     def test_dtype_kwarg_from_closure(self):
         """User passes dtype= kwarg from closure variable."""
@@ -1200,7 +1240,13 @@ class TestClosureVarsInFunctionBody:
             result: pl.Tensor[[64, 64], pl.FP16] = pl.cast(x, target_type=out_dtype)
             return result
 
-        assert isinstance(func, ir.Function)
+        # The dtype= closure var drove the cast's result type to FP16
+        cast_stmt = _body_assigns(func)[0]
+        assert isinstance(cast_stmt.var.type, ir.TensorType)
+        assert cast_stmt.var.type.dtype == DataType.FP16
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.dtype == DataType.FP32
 
     def test_full_parametrized_kernel(self):
         """Realistic pattern: fully parametrized kernel (the t.py use case)."""
@@ -1238,7 +1284,19 @@ class TestClosureVarsInFunctionBody:
                 result: pl.Tensor[shape, dtype] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
                 return result
 
-        assert isinstance(Prog, ir.Program)
+        # Closure shapes resolve the same way inside @pl.program methods
+        compute = Prog.get_function("compute")
+        assert compute is not None
+
+        tensor_types = [p.type for p in compute.params if isinstance(p.type, ir.TensorType)]
+        assert len(tensor_types) == 2
+        for tensor_type in tensor_types:
+            assert _static_shape(tensor_type) == [128, 128]
+            assert tensor_type.dtype == DataType.FP32
+
+        tile_stmt = _body_assigns(compute)[0]
+        assert isinstance(tile_stmt.var.type, ir.TileType)
+        assert _static_shape(tile_stmt.var.type) == [64, 64]
 
 
 class TestDynamicShapeEdgeCases:
@@ -1327,7 +1385,11 @@ class TestDynamicShapeEdgeCases:
             result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(a, offsets=[0, 0], output_tensor=out)
             return result
 
-        assert isinstance(func, ir.Function)
+        # The variable-as-shape annotation sized the tile to [32, 32]
+        tile_stmt = _body_assigns(func)[0]
+        assert isinstance(tile_stmt.var.type, ir.TileType)
+        assert _static_shape(tile_stmt.var.type) == [32, 32]
+        assert tile_stmt.var.type.dtype == DataType.FP32
 
     def test_shape_variable_not_defined_raises_error(self):
         """User typos variable name — should get a clear error."""
@@ -1457,6 +1519,9 @@ class TestLayoutResolution:
 
         assert isinstance(result, ir.TensorType)
         assert result.tensor_view is None
+        # Omitting the layout must not disturb the shape or dtype
+        assert _static_shape(result) == [64, 128]
+        assert result.dtype == DataType.FP16
 
     def test_resolve_tensor_layout_invalid(self):
         """Invalid layout raises ParserTypeError."""
@@ -1752,7 +1817,10 @@ class TestTensorViewResolution:
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
+        # An all-default TensorView canonicalizes away entirely
         assert result.tensor_view is None
+        assert _static_shape(result) == [64, 128]
+        assert result.dtype == DataType.FP32
 
     def test_resolve_tensor_with_tensorview_valid_shape(self):
         """TensorView with valid_shape creates correct tensor_view."""
@@ -1921,8 +1989,16 @@ class TestTensorViewResolution:
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
+        # The all-default TensorView canonicalizes away, but the MemRef survives
         assert result.tensor_view is None
         assert result.memref is not None
+        # byte_offset_ is a ConstInt Expr, so `== 0` would build a truthy Eq node
+        # rather than compare -- read through .value.
+        assert isinstance(result.memref.byte_offset_, ir.ConstInt)
+        assert result.memref.byte_offset_.value == 0
+        assert result.memref.size_ == 256  # a plain int, so `==` is a real compare
+        assert _static_shape(result) == [64, 128]
+        assert result.dtype == DataType.FP32
 
 
 class TestTensorViewIntegration:

@@ -15,6 +15,29 @@ import pytest
 from pypto import ir
 
 
+def _top_level_stmts(body: ir.Stmt) -> list[ir.Stmt]:
+    """Return a body's statement list, treating a bare Stmt as a 1-element body."""
+    return list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+
+
+def _op_names(func: ir.Function) -> list[str]:
+    """Return the operator name of every top-level Call binding, in order."""
+    names = []
+    for stmt in _top_level_stmts(func.body):
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            names.append(stmt.value.op.name)
+    return names
+
+
+def _static_shape(type_: "ir.TensorType | ir.TileType") -> list[int]:
+    """Return a Tensor/Tile type's static shape as plain ints."""
+    dims = []
+    for dim in type_.shape:
+        assert isinstance(dim, ir.ConstInt), f"expected a static dim, got {type(dim).__name__}"
+        dims.append(dim.value)
+    return dims
+
+
 @pl.function
 def flash_attn(
     q_13: pl.Tensor[[64, 128], pl.FP16],
@@ -182,7 +205,15 @@ class TestFlashAttention:
 
             return attn_out
 
-        assert isinstance(multi_iter_attn, ir.Function)
+        # Both accumulators survive as separate carries with their own shapes
+        for_stmt = next(s for s in _top_level_stmts(multi_iter_attn.body) if isinstance(s, ir.ForStmt))
+        assert len(for_stmt.iter_args) == 2
+        assert len(for_stmt.return_vars) == 2
+        attn_arg, scale_arg = for_stmt.iter_args
+        assert isinstance(attn_arg.type, ir.TensorType)
+        assert _static_shape(attn_arg.type) == [64, 128]
+        assert isinstance(scale_arg.type, ir.TensorType)
+        assert _static_shape(scale_arg.type) == [64, 1]
 
     def test_flash_attention_ops(self):
         """Test individual operations used in flash attention."""
@@ -214,7 +245,19 @@ class TestFlashAttention:
 
             return result
 
-        assert isinstance(test_ops, ir.Function)
+        # Every op in the flash-attention chain lowered, in source order
+        assert _op_names(test_ops) == [
+            ir.get_op(name).name
+            for name in (
+                "tensor.cast",
+                "tensor.muls",
+                "tensor.row_max",
+                "tensor.sub",
+                "tensor.exp",
+                "tensor.row_sum",
+                "tensor.div",
+            )
+        ]
 
 
 class TestParserRobustness:
@@ -229,7 +272,9 @@ class TestParserRobustness:
         ) -> pl.Tensor[[1024, 2048, 512], pl.FP32]:
             return x
 
-        assert isinstance(large_shapes, ir.Function)
+        param_type = large_shapes.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert _static_shape(param_type) == [1024, 2048, 512]
 
     def test_many_parameters(self):
         """Test function with many parameters."""
@@ -275,7 +320,13 @@ class TestParserRobustness:
 
             return ir_out
 
-        assert isinstance(deep_nesting, ir.Function)
+        # The four nesting levels (for > for > if > if) all survive parsing
+        outer_for = next(s for s in _top_level_stmts(deep_nesting.body) if isinstance(s, ir.ForStmt))
+        inner_for = next(s for s in _top_level_stmts(outer_for.body) if isinstance(s, ir.ForStmt))
+        outer_if = next(s for s in _top_level_stmts(inner_for.body) if isinstance(s, ir.IfStmt))
+        inner_if = next(s for s in _top_level_stmts(outer_if.then_body) if isinstance(s, ir.IfStmt))
+        assert outer_if.else_body is not None
+        assert inner_if.else_body is not None
 
     def test_long_function(self):
         """Test function with many statements."""
@@ -294,7 +345,8 @@ class TestParserRobustness:
             v10: pl.Tensor[[64], pl.FP32] = pl.add(v9, 1.0)
             return v10
 
-        assert isinstance(long_function, ir.Function)
+        # All ten statements survive — none merged or dropped
+        assert _op_names(long_function) == [ir.get_op("tensor.adds").name] * 10
 
 
 if __name__ == "__main__":

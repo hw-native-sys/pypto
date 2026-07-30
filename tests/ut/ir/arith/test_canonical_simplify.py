@@ -47,6 +47,16 @@ def assert_same_expr(expr: ir.Expr, expected: ir.Expr) -> None:
     )
 
 
+def assert_expr_equal(expr: ir.Expr, expected: ir.Expr) -> None:
+    """Assert that canonicalization produced exactly `expected`, operands included.
+
+    Prefer this over ``isinstance(expr, ir.Add)``-style checks: the node class
+    alone does not distinguish ``x * 2 + 2`` from ``x * 2 + 6``, so a rule that
+    canonicalizes to the wrong coefficients still passes a class check.
+    """
+    ir.assert_structural_equal(expr, expected)
+
+
 # Module-level shared instances
 simplifier = CanonicalSimplifier()
 x = make_var("x")
@@ -60,7 +70,9 @@ y = make_var("y")
 
 class TestBasics:
     def test_construction(self):
-        assert simplifier is not None
+        """A freshly constructed simplifier canonicalizes (not just constructs)."""
+        fresh = CanonicalSimplifier()
+        assert_is_const_int(fresh(ir.Add(ci(3), ci(5), INT, S)), 8)
 
     def test_identity_const(self):
         c = ci(42)
@@ -150,7 +162,7 @@ class TestCoefficientCollection:
     def test_zero_minus_x(self):
         """0 - x => -x"""
         result = simplifier(ir.Sub(ci(0), x, INT, S))
-        assert isinstance(result, ir.Neg), f"Expected Neg, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Neg(x, INT, S))
 
 
 # ============================================================================
@@ -164,7 +176,7 @@ class TestMulDistribution:
     def test_mul_distribute(self):
         """(x + 1) * 2 => x * 2 + 2"""
         result = simplifier(ir.Mul(ir.Add(x, ci(1), INT, S), ci(2), INT, S))
-        assert isinstance(result, ir.Add), f"Expected Add, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Add(ir.Mul(x, ci(2), INT, S), ci(2), INT, S))
 
     def test_mul_zero(self):
         """x * 0 => 0"""
@@ -179,12 +191,12 @@ class TestMulDistribution:
     def test_mul_neg_one(self):
         """x * (-1) => -x"""
         result = simplifier(ir.Mul(x, ci(-1), INT, S))
-        assert isinstance(result, ir.Neg), f"Expected Neg, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Neg(x, INT, S))
 
     def test_distribute_left(self):
         """2 * (x + 3) => x * 2 + 6"""
         result = simplifier(ir.Mul(ci(2), ir.Add(x, ci(3), INT, S), INT, S))
-        assert isinstance(result, ir.Add), f"Expected Add, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Add(ir.Mul(x, ci(2), INT, S), ci(6), INT, S))
 
 
 # ============================================================================
@@ -211,13 +223,20 @@ class TestFloorDiv:
         """(4*x + 6*y + 8) // 2 => 2*x + 3*y + 4"""
         inner = ir.Add(ir.Add(ir.Mul(x, ci(4), INT, S), ir.Mul(y, ci(6), INT, S), INT, S), ci(8), INT, S)
         result = simplifier(ir.FloorDiv(inner, ci(2), INT, S))
-        # Result should not contain FloorDiv
-        assert not isinstance(result, ir.FloorDiv), "Expected simplified, got FloorDiv"
+        assert_expr_equal(
+            result,
+            ir.Add(
+                ir.Add(ir.Mul(x, ci(2), INT, S), ir.Mul(y, ci(3), INT, S), INT, S),
+                ci(4),
+                INT,
+                S,
+            ),
+        )
 
     def test_div_by_scale_factor(self):
         """(x * 6) // 3 => x * 2"""
         result = simplifier(ir.FloorDiv(ir.Mul(x, ci(6), INT, S), ci(3), INT, S))
-        assert isinstance(result, ir.Mul), f"Expected Mul, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Mul(x, ci(2), INT, S))
 
     def test_nested_div(self):
         """(x * 12) // 4 // 3 => x"""
@@ -317,7 +336,7 @@ class TestNeg:
     def test_neg_var(self):
         """-(x) stays as Neg(x)"""
         result = simplifier(ir.Neg(x, INT, S))
-        assert isinstance(result, ir.Neg), f"Expected Neg, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Neg(x, INT, S))
 
     def test_neg_neg(self):
         """-(-(x)) => x"""
@@ -327,8 +346,7 @@ class TestNeg:
     def test_neg_sum(self):
         """-(x + 3) => -x - 3 (canonical: Neg(x) + (-3))"""
         result = simplifier(ir.Neg(ir.Add(x, ci(3), INT, S), INT, S))
-        # Should not still be a Neg of Add
-        assert not (isinstance(result, ir.Neg) and isinstance(result.operand, ir.Add))
+        assert_expr_equal(result, ir.Add(ir.Neg(x, INT, S), ci(-3), INT, S))
 
 
 # ============================================================================
@@ -384,7 +402,7 @@ class TestEdgeCases:
         lhs = ir.Mul(x, ci(1000000), INT, S)
         rhs = ir.Mul(x, ci(2000000), INT, S)
         result = simplifier(ir.Add(lhs, rhs, INT, S))
-        assert isinstance(result, ir.Mul), f"Expected Mul, got {type(result).__name__}"
+        assert_expr_equal(result, ir.Mul(x, ci(3000000), INT, S))
 
     def test_zero_const(self):
         """0 + 0 => 0"""

@@ -54,8 +54,11 @@ class TestSpanTracker:
 
         span = tracker.get_span(None)
 
-        # Should return unknown span
+        # Should return the unknown span, not a span into "test.py"
         assert isinstance(span, ir.Span)
+        assert not span.is_valid()
+        assert span.filename == ""
+        assert span.begin_line == -1
 
     def test_get_multiline_span(self):
         """Test getting span covering multiple lines."""

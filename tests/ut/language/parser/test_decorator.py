@@ -25,6 +25,33 @@ from pypto.language.parser.diagnostics.exceptions import (
 )
 
 
+def _top_level_stmts(body: ir.Stmt) -> list[ir.Stmt]:
+    """Return a body's statement list, treating a bare Stmt as a 1-element body."""
+    return list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+
+
+def _body_assigns(func: ir.Function) -> list[ir.AssignStmt]:
+    """Return the function body's top-level AssignStmts, in source order."""
+    return [s for s in _top_level_stmts(func.body) if isinstance(s, ir.AssignStmt)]
+
+
+def _int_elements(expr: ir.Expr) -> list[int]:
+    """Flatten a MakeTuple of integer constants into plain ints."""
+    assert isinstance(expr, ir.MakeTuple), f"expected MakeTuple, got {type(expr).__name__}"
+    values = []
+    for element in expr.elements:
+        assert isinstance(element, ir.ConstInt), f"expected ConstInt element, got {type(element).__name__}"
+        values.append(element.value)
+    return values
+
+
+def _call_of(stmt: ir.AssignStmt) -> ir.Call:
+    """Assert a binding's RHS is a Call and return it."""
+    value = stmt.value
+    assert isinstance(value, ir.Call), f"{stmt.var.name_hint} is {type(value).__name__}, expected Call"
+    return value
+
+
 class TestFunctionDecorator:
     """Tests for @pl.function decorator."""
 
@@ -80,7 +107,11 @@ class TestFunctionDecorator:
             result: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
             return result
 
-        assert isinstance(create_tensor, ir.Function)
+        create_stmt = _body_assigns(create_tensor)[0]
+        assert _call_of(create_stmt).op.name == ir.get_op("tensor.create").name
+        result_type = create_stmt.var.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.dtype == pypto.DataType.FP32
 
     def test_function_with_binary_ops(self):
         """Test function with binary operations."""
@@ -91,7 +122,12 @@ class TestFunctionDecorator:
             result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), pl.create_tensor([64], dtype=pl.FP32))
             return result
 
-        assert isinstance(binary_ops, ir.Function)
+        # The nested calls stay nested as Call operands of the outer add
+        add_call = _call_of(_body_assigns(binary_ops)[0])
+        assert add_call.op.name == ir.get_op("tensor.add").name
+        lhs, rhs = add_call.args
+        assert isinstance(lhs, ir.Call) and lhs.op.name == ir.get_op("tensor.muls").name
+        assert isinstance(rhs, ir.Call) and rhs.op.name == ir.get_op("tensor.create").name
 
     def test_function_with_list_arguments(self):
         """Test function that uses list arguments."""
@@ -102,7 +138,11 @@ class TestFunctionDecorator:
             result: pl.Tensor[[32, 64], pl.FP32] = pl.slice(x, [32, 64], [0, 0])
             return result
 
-        assert isinstance(with_lists, ir.Function)
+        # Both list literals reach the op as MakeTuple args, in the order written
+        slice_call = _call_of(_body_assigns(with_lists)[0])
+        assert slice_call.op.name == ir.get_op("tensor.slice").name
+        assert _int_elements(slice_call.args[1]) == [32, 64]
+        assert _int_elements(slice_call.args[2]) == [0, 0]
 
     def test_function_with_eval_stmt(self):
         """Test parsing evaluation statements into EvalStmt."""
@@ -179,7 +219,10 @@ class TestFunctionDecorator:
             result: pl.Tensor[[64], pl.FP32] = pl.add(x, -1.5)
             return result
 
-        assert isinstance(with_negatives, ir.Function)
+        # The unary minus is folded into the literal, not left as a Neg node
+        scalar_arg = _call_of(_body_assigns(with_negatives)[0]).args[1]
+        assert isinstance(scalar_arg, ir.ConstFloat)
+        assert scalar_arg.value == -1.5
 
 
 class TestScalarParameters:
@@ -332,7 +375,17 @@ class TestTensorReadParsing:
                 _ = pl.tensor.read(t, [i])
             return out
 
-        assert isinstance(read_in_loop, ir.Function)
+        # The read's index is the enclosing loop variable, not a copy or a constant
+        for_stmt = next(s for s in _top_level_stmts(read_in_loop.body) if isinstance(s, ir.ForStmt))
+        read_stmt = next(s for s in _top_level_stmts(for_stmt.body) if isinstance(s, ir.AssignStmt))
+        read_call = _call_of(read_stmt)
+        assert read_call.op.name == ir.get_op("tensor.read").name
+        indices = read_call.args[1]
+        assert isinstance(indices, ir.MakeTuple)
+        # Compare by identity: ``Expr.__eq__`` builds an IR ``Eq`` node, so ``==``
+        # on Expr lists reports equality even for distinct nodes.
+        assert len(indices.elements) == 1
+        assert indices.elements[0] is for_stmt.loop_var
 
 
 class TestTupleReturnType:
@@ -484,7 +537,11 @@ class TestProgramDecorator:
                 result: pl.Tensor[[1], pl.INT32] = pl.add(n, one)
                 return result
 
-        assert isinstance(RecursiveTest, ir.Program)
+        # A single-method program keeps exactly that one function, `self` stripped
+        assert [f.name for f in RecursiveTest.functions] == ["factorial"]
+        factorial = RecursiveTest.get_function("factorial")
+        assert factorial is not None
+        assert [p.name_hint for p in factorial.params] == ["n"]
 
     def test_transitive_calls(self):
         """Test transitive calls where A calls B calls C."""

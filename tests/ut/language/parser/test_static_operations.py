@@ -20,6 +20,13 @@ from pypto.language.parser.diagnostics import (
 )
 
 
+def _stmt_kinds(func: ir.Function) -> list[type]:
+    """Return the statement classes making up a function body, in order."""
+    body = func.body
+    stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+    return [type(s) for s in stmts]
+
+
 class TestStaticPrint:
     """Tests for pl.static_print() parse-time printing."""
 
@@ -185,7 +192,8 @@ class TestStaticAssert:
             pl.static_assert(True)
             return x
 
-        assert isinstance(func, ir.Function)
+        # The assertion is consumed at parse time — it leaves no runtime statement
+        assert _stmt_kinds(func) == [ir.ReturnStmt]
 
     def test_static_assert_false_fails(self):
         """Test that static_assert(False) raises ParserError."""
@@ -215,7 +223,7 @@ class TestStaticAssert:
             pl.static_assert(1)
             return x
 
-        assert isinstance(func, ir.Function)
+        assert _stmt_kinds(func) == [ir.ReturnStmt]
 
     def test_static_assert_zero_int_fails(self):
         """Test that static_assert(0) fails."""
@@ -236,7 +244,8 @@ class TestStaticAssert:
             pl.static_assert(N > 32)
             return x
 
-        assert isinstance(func, ir.Function)
+        # `N > 32` was evaluated against the closure at parse time and dropped
+        assert _stmt_kinds(func) == [ir.ReturnStmt]
 
     def test_static_assert_closure_var_fails(self):
         """Test static_assert fails when closure variable condition is false."""
@@ -304,6 +313,8 @@ def func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 """
         func = pl.parse(code)
         assert isinstance(func, ir.Function)
+        # Same as the decorator path: evaluated at parse time, absent from the IR
+        assert _stmt_kinds(func) == [ir.ReturnStmt]
 
     def test_static_assert_via_text_parser_fails(self):
         """Test that static_assert failure works with pl.parse()."""

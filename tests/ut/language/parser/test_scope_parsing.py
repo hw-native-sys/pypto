@@ -1606,6 +1606,9 @@ class TestSpmdInlineWithForm:
             if isinstance(s.value, ir.Call) and s.value.op.name == "system.task_invalid"
         ]
         assert not placeholders, "plain inline form must not emit a task_invalid placeholder"
+        # ...but the scope itself must still be there — an empty body would also
+        # trivially have no placeholders.
+        assert _descendants(main_func.body, ir.SpmdScopeStmt)
 
     def test_inline_with_spmd_split_wraps_incore_with_split(self):
         """``optimizations=[pl.split(...)]`` on the inline plain form sets split_ on the

@@ -23,6 +23,45 @@ from pypto.language.parser.diagnostics import (
 from pypto.language.parser.diagnostics.renderer import ErrorRenderer
 
 
+def _top_level_stmts(body: pypto.ir.Stmt) -> list[pypto.ir.Stmt]:
+    """Return a body's statement list, treating a bare Stmt as a 1-element body."""
+    return list(body.stmts) if isinstance(body, pypto.ir.SeqStmts) else [body]
+
+
+def _stmt_kinds(body: pypto.ir.Stmt) -> list[type]:
+    """Return the statement classes making up a function/loop body, in order."""
+    return [type(s) for s in _top_level_stmts(body)]
+
+
+def _shape_of(param: pypto.ir.Var) -> list[int]:
+    """Return a tensor parameter's static shape as plain ints."""
+    param_type = param.type
+    assert isinstance(param_type, pypto.ir.TensorType), (
+        f"expected a tensor parameter, got {type(param_type).__name__}"
+    )
+    dims = []
+    for dim in param_type.shape:
+        assert isinstance(dim, pypto.ir.ConstInt), f"dynamic dim: {type(dim).__name__}"
+        dims.append(dim.value)
+    return dims
+
+
+def _find_for_stmt(func: pypto.ir.Function) -> pypto.ir.ForStmt:
+    """Extract the first top-level ForStmt from a function body."""
+    for stmt in _top_level_stmts(func.body):
+        if isinstance(stmt, pypto.ir.ForStmt):
+            return stmt
+    raise AssertionError("No ForStmt found in function body")
+
+
+def _find_if_stmt(body: pypto.ir.Stmt) -> pypto.ir.IfStmt:
+    """Extract the first top-level IfStmt from a body."""
+    for stmt in _top_level_stmts(body):
+        if isinstance(stmt, pypto.ir.IfStmt):
+            return stmt
+    raise AssertionError("No IfStmt found in body")
+
+
 class TestErrorCases:
     """Tests for parser error handling and validation."""
 
@@ -43,8 +82,10 @@ class TestErrorCases:
             result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
             return result
 
-        # Should still parse successfully
-        assert isinstance(no_return_type, pypto.ir.Function)
+        # Parses successfully, and the body is preserved
+        assert _stmt_kinds(no_return_type.body) == [pypto.ir.AssignStmt, pypto.ir.ReturnStmt]
+        # With no annotation the function declares no return type
+        assert no_return_type.return_types == []
 
     def test_undefined_variable_reference(self):
         """Test error when referencing undefined variable."""
@@ -168,7 +209,16 @@ class TestSSAValidation:
             # Can return result because it was yielded from loop
             return result
 
-        assert isinstance(scope_test, pypto.ir.Function)
+        # The yielded value escapes the loop as its return var, and that is
+        # exactly what the function returns.
+        for_stmt = _find_for_stmt(scope_test)
+        assert len(for_stmt.return_vars) == 1
+        return_stmt = _top_level_stmts(scope_test.body)[-1]
+        assert isinstance(return_stmt, pypto.ir.ReturnStmt)
+        # Compare by identity: ``Expr.__eq__`` builds an IR ``Eq`` node, so ``==``
+        # on Expr lists reports equality even for distinct nodes.
+        assert len(return_stmt.value) == 1
+        assert return_stmt.value[0] is for_stmt.return_vars[0]
 
 
 class TestEdgeCases:
@@ -181,7 +231,12 @@ class TestEdgeCases:
         def minimal(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             return x
 
-        assert isinstance(minimal, pypto.ir.Function)
+        # A bare `return x` body is a single ReturnStmt handing back the parameter
+        assert _stmt_kinds(minimal.body) == [pypto.ir.ReturnStmt]
+        return_stmt = minimal.body
+        assert isinstance(return_stmt, pypto.ir.ReturnStmt)
+        assert len(return_stmt.value) == 1
+        assert return_stmt.value[0] is minimal.params[0]
 
     def test_single_dimension_tensor(self):
         """Test tensor with single dimension."""
@@ -191,7 +246,8 @@ class TestEdgeCases:
             result: pl.Tensor[[128], pl.FP32] = pl.mul(x, 2.0)
             return result
 
-        assert isinstance(single_dim, pypto.ir.Function)
+        assert _shape_of(single_dim.params[0]) == [128]
+        assert _stmt_kinds(single_dim.body) == [pypto.ir.AssignStmt, pypto.ir.ReturnStmt]
 
     def test_three_dimension_tensor(self):
         """Test tensor with three dimensions."""
@@ -202,7 +258,8 @@ class TestEdgeCases:
         ) -> pl.Tensor[[64, 128, 256], pl.FP32]:
             return x
 
-        assert isinstance(three_dim, pypto.ir.Function)
+        assert _shape_of(three_dim.params[0]) == [64, 128, 256]
+        assert _stmt_kinds(three_dim.body) == [pypto.ir.ReturnStmt]
 
     def test_loop_with_range_one(self):
         """Test loop that executes only once."""
@@ -214,7 +271,11 @@ class TestEdgeCases:
 
             return result
 
-        assert isinstance(one_iteration, pypto.ir.Function)
+        # pl.range(1) means start=0, stop=1, step=1 — a single iteration
+        for_stmt = _find_for_stmt(one_iteration)
+        assert isinstance(for_stmt.start, pypto.ir.ConstInt) and for_stmt.start.value == 0
+        assert isinstance(for_stmt.stop, pypto.ir.ConstInt) and for_stmt.stop.value == 1
+        assert isinstance(for_stmt.step, pypto.ir.ConstInt) and for_stmt.step.value == 1
 
     def test_loop_with_start_stop_step(self):
         """Test loop with start, stop, and step parameters."""
@@ -227,7 +288,11 @@ class TestEdgeCases:
 
             return result
 
-        assert isinstance(custom_range, pypto.ir.Function)
+        # pl.range(2, 10, 2) must keep all three bounds distinct
+        for_stmt = _find_for_stmt(custom_range)
+        assert isinstance(for_stmt.start, pypto.ir.ConstInt) and for_stmt.start.value == 2
+        assert isinstance(for_stmt.stop, pypto.ir.ConstInt) and for_stmt.stop.value == 10
+        assert isinstance(for_stmt.step, pypto.ir.ConstInt) and for_stmt.step.value == 2
 
     def test_function_with_many_variables(self):
         """Test function with many local variables."""
@@ -246,7 +311,8 @@ class TestEdgeCases:
             v10: pl.Tensor[[64], pl.FP32] = pl.add(v9, 10.0)
             return v10
 
-        assert isinstance(many_vars, pypto.ir.Function)
+        # All ten bindings survive as distinct statements — none collapsed or dropped
+        assert _stmt_kinds(many_vars.body) == [pypto.ir.AssignStmt] * 10 + [pypto.ir.ReturnStmt]
 
     def test_different_shape_tensors(self):
         """Test function with tensors of different shapes."""
@@ -293,7 +359,16 @@ class TestAnnotationConsistency:
             result: pl.Tensor[[64], pl.FP32] = pl.tile.store(x_tile, [0], output_tensor=x)
             return result
 
-        assert isinstance(correct, pypto.ir.Function)
+        # The matching annotations are adopted as the bound variables' types:
+        # tile.load yields a Tile, tile.store yields a Tensor.
+        load_stmt, store_stmt = _top_level_stmts(correct.body)[:2]
+        assert isinstance(load_stmt, pypto.ir.AssignStmt)
+        assert isinstance(load_stmt.var.type, pypto.ir.TileType)
+        assert load_stmt.var.type.dtype == pl.FP32
+
+        assert isinstance(store_stmt, pypto.ir.AssignStmt)
+        assert isinstance(store_stmt.var.type, pypto.ir.TensorType)
+        assert store_stmt.var.type.dtype == pl.FP32
 
 
 class TestScalarTypeErrors:
@@ -344,7 +419,11 @@ class TestConditionMustBeBool:
                 result: pl.Tensor[[64], pl.FP32] = x
             return result
 
-        assert isinstance(ok_if, pypto.ir.Function)
+        # `True` is accepted and preserved as a BOOL constant condition
+        if_stmt = _find_if_stmt(ok_if.body)
+        assert isinstance(if_stmt.condition, pypto.ir.ConstBool)
+        assert if_stmt.condition.value is True
+        assert if_stmt.else_body is not None
 
     def test_if_with_comparison_accepted(self):
         """Test that comparison condition (BOOL-typed) is accepted."""
@@ -361,7 +440,12 @@ class TestConditionMustBeBool:
                 result = pl.yield_(val)
             return result
 
-        assert isinstance(ok_cmp, pypto.ir.Function)
+        # `i > 0` is BOOL-typed and reaches the IR as a Gt comparison
+        for_stmt = _find_for_stmt(ok_cmp)
+        if_stmt = _find_if_stmt(for_stmt.body)
+        assert isinstance(if_stmt.condition, pypto.ir.Gt)
+        assert if_stmt.condition.left is for_stmt.loop_var
+        assert if_stmt.else_body is not None
 
     def test_pl_cond_with_int_literal_rejected(self):
         """Test that `pl.cond(1)` inside `pl.while_()` is rejected (same check as natural while)."""

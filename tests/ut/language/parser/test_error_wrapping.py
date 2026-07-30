@@ -17,6 +17,7 @@ tracebacks.
 
 import pypto.language as pl
 import pytest
+from pypto import ir
 from pypto.language.parser.diagnostics import (
     InvalidOperationError,
     ParserError,
@@ -159,7 +160,12 @@ class TestTypeMismatchReassignment:
             t = pl.mul(t, 2.0)  # same type, should succeed
             return t
 
-        assert func is not None
+        # Both bindings survive, and the rebinding keeps the original type
+        body = func.body
+        assert isinstance(body, ir.SeqStmts)
+        create_stmt, mul_stmt = (s for s in body.stmts if isinstance(s, ir.AssignStmt))
+        assert isinstance(create_stmt.var.type, ir.TensorType)
+        assert ir.structural_equal(mul_stmt.var.type, create_stmt.var.type)
 
     def test_reassign_different_shape_raises(self):
         """Reassigning with a different tensor shape raises ParserTypeError."""

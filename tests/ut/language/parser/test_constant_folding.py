@@ -201,16 +201,23 @@ class TestMixedExpressionFallback:
             result = pl.mul(x, shifted)
             return result
 
-        assert isinstance(func, ir.Function)
         # The `idx + OFFSET` must remain an Add node, not folded
         body = func.body
         assert isinstance(body, ir.SeqStmts)
-        found_add = False
-        for stmt in body.stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Add):
-                found_add = True
-                break
-        assert found_add, "Expected an ir.Add node for dsl_var + closure_const"
+        assigns = [s for s in body.stmts if isinstance(s, ir.AssignStmt)]
+        by_name = {s.var.name_hint: s for s in assigns}
+
+        shifted = by_name["shifted"].value
+        assert isinstance(shifted, ir.Add), f"dsl_var + closure_const folded to {type(shifted).__name__}"
+        # ...and its operands are the DSL read on the left, the closure const on
+        # the right. The parser may wrap the read in a dtype-promoting Cast --
+        # that is literal-typing detail, not the folding behaviour under test.
+        lhs = shifted.left
+        if isinstance(lhs, ir.Cast):
+            lhs = lhs.operand
+        assert lhs is by_name["idx"].var
+        assert isinstance(shifted.right, ir.ConstInt)
+        assert shifted.right.value == 10
 
     def test_pure_dsl_binop_not_folded(self):
         """Operations on DSL-defined variables should not attempt folding."""
@@ -283,7 +290,8 @@ class TestDimensionEqualityAfterFolding:
             out = pl.assemble(out, result, [0, 0])
             return out
 
-        assert isinstance(func, ir.Function)
+        # `A // 2` and `B * 1` both fold to the literal 8, so both slices agree
+        _assert_all_slice_extents_are_constint(func, [1, 8])
 
 
 class TestScopeShadowingSafety:
@@ -410,7 +418,8 @@ class TestSymbolicShapeEquality:
                 chunk = a[:, k : k + C]
             return chunk
 
-        assert isinstance(func, ir.Function)
+        # `k + C - k` simplifies to the literal C, so both slices keep shape [8, 64]
+        _assert_all_slice_extents_are_constint(func, [8, C])
 
     def test_symbolic_cancellation_in_broadcast_sub(self):
         """``pl.sub`` of two slices whose extents simplify to the same constant
@@ -429,7 +438,8 @@ class TestSymbolicShapeEquality:
                 out = pl.sub(lo, hi)
             return out
 
-        assert isinstance(func, ir.Function)
+        # Both extents cancel to the literal HALF, so the operands broadcast
+        _assert_all_slice_extents_are_constint(func, [1, HALF])
 
 
 if __name__ == "__main__":
