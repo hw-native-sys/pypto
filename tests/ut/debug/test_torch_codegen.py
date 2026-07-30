@@ -336,6 +336,30 @@ def test_tile_compute_ops():
     assert "torch.add(a, b)" in code
 
 
+@pytest.mark.parametrize(
+    ("op_name", "args", "expected"),
+    [
+        ("tile.axpy", ("a", "scalar", "b"), "(b + a * scalar)"),
+        ("tile.add_relu", ("a", "b"), "torch.relu(a + b)"),
+        ("tile.pow", ("a", "b", "tmp"), "torch.pow(a, b)"),
+        ("tile.pows", ("a", "scalar", "tmp"), "torch.pow(a, scalar)"),
+    ],
+)
+def test_math_fused_tile_ops(op_name, args, expected):
+    values = {
+        "a": _tile_var("a", [64, 64]),
+        "b": _tile_var("b", [64, 64]),
+        "tmp": _tile_var("tmp", [64, 64]),
+        "scalar": _scalar("scalar", DataType.FP32),
+    }
+    out = _tile_var("out", [64, 64])
+    call = _op_call(op_name, [values[name] for name in args])
+    assign = ir.AssignStmt(out, call, _span())
+    func = _simple_function("f", [values[name] for name in args], assign)
+
+    assert expected in torch_codegen(func)
+
+
 def test_tile_matmul_acc():
     """tile.matmul_acc should emit (acc + torch.matmul(lhs, rhs))."""
     acc = _tile_var("acc", [64, 64])

@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -447,6 +448,166 @@ REGISTER_OP("tile.part_min")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min");
+    });
+
+static std::shared_ptr<const TileType> RequireSameMathTileType(const std::vector<ExprPtr>& args,
+                                                               const std::vector<size_t>& operands,
+                                                               const std::string& op_name) {
+  CHECK(!operands.empty());
+  auto reference = As<TileType>(args[operands[0]]->GetType());
+  CHECK(reference) << "The operator " << op_name << " requires tile operands";
+  const auto reference_valid = GetValidShape(reference);
+  for (size_t operand : operands) {
+    auto type = As<TileType>(args[operand]->GetType());
+    CHECK(type) << "The operator " << op_name << " requires argument " << operand << " to be a TileType";
+    CHECK(type->dtype_ == reference->dtype_)
+        << "The operator " << op_name << " requires tile operands to have the same dtype";
+    CHECK(type->shape_.size() == reference->shape_.size())
+        << "The operator " << op_name << " requires tile operands to have the same physical shape";
+    for (size_t dim = 0; dim < reference->shape_.size(); ++dim) {
+      CHECK(DimensionsEqual(type->shape_[dim], reference->shape_[dim]))
+          << "The operator " << op_name << " requires tile operands to have the same physical shape";
+    }
+    const auto valid = GetValidShape(type);
+    for (size_t dim = 0; dim < reference_valid.size(); ++dim) {
+      CHECK(ProveValidExtentEqual(valid[dim], reference_valid[dim]) == ProofResult::kTrue)
+          << "The operator " << op_name << " requires tile operands to have the same valid_shape";
+    }
+  }
+  return reference;
+}
+
+static TileTypePtr CopyMathTileType(const std::shared_ptr<const TileType>& type) {
+  TileView view;
+  view.valid_shape = GetValidShape(type);
+  InheritTileViewLayout(view, type);
+  return std::make_shared<TileType>(type->shape_, type->dtype_, std::nullopt, view);
+}
+
+static TypePtr DeduceTileAxpyType(const std::vector<ExprPtr>& args) {
+  CHECK(args.size() == 3) << "The operator tile.axpy requires 3 arguments (src, scalar, dst)";
+  auto src = As<TileType>(args[0]->GetType());
+  auto scalar = As<ScalarType>(args[1]->GetType());
+  auto dst = As<TileType>(args[2]->GetType());
+  CHECK(src && scalar && dst) << "The operator tile.axpy requires (TileType, ScalarType, TileType)";
+  CHECK(src->dtype_ == DataType::FP16 || src->dtype_ == DataType::FP32)
+      << "The operator tile.axpy requires FP16 or FP32 src";
+  CHECK(scalar->dtype_ == src->dtype_) << "The operator tile.axpy requires scalar dtype to match src dtype";
+  CHECK(dst->dtype_ == src->dtype_ || (src->dtype_ == DataType::FP16 && dst->dtype_ == DataType::FP32))
+      << "The operator tile.axpy only supports matching dtype or FP16 src with FP32 dst";
+  CHECK(src->shape_.size() == dst->shape_.size())
+      << "The operator tile.axpy requires src and dst to have the same shape";
+  const auto src_valid = GetValidShape(src);
+  const auto dst_valid = GetValidShape(dst);
+  for (size_t dim = 0; dim < src->shape_.size(); ++dim) {
+    CHECK(DimensionsEqual(src->shape_[dim], dst->shape_[dim]))
+        << "The operator tile.axpy requires src and dst to have the same shape";
+    CHECK(ProveValidExtentEqual(src_valid[dim], dst_valid[dim]) == ProofResult::kTrue)
+        << "The operator tile.axpy requires src and dst to have the same valid_shape";
+  }
+  return CopyMathTileType(dst);
+}
+
+static bool IsTilePowDType(DataType dtype) {
+  return dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
+         dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32 ||
+         dtype == DataType::FP16 || dtype == DataType::FP32 || dtype == DataType::BF16;
+}
+
+static TypePtr DeduceTilePowType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                 const std::string& op_name, bool scalar_exp) {
+  CHECK(args.size() == 2 || args.size() == 3)
+      << "The operator " << op_name << " requires base/exponent and an optional tmp tile";
+  const std::vector<size_t> operands =
+      args.size() == 3 ? (scalar_exp ? std::vector<size_t>{0, 2} : std::vector<size_t>{0, 1, 2})
+                       : (scalar_exp ? std::vector<size_t>{0} : std::vector<size_t>{0, 1});
+  auto base = RequireSameMathTileType(args, operands, op_name);
+  CHECK(IsTilePowDType(base->dtype_))
+      << "The operator " << op_name << " requires integer or floating-point PTO power dtype";
+  if (scalar_exp) {
+    auto scalar = As<ScalarType>(args[1]->GetType());
+    CHECK(scalar && scalar->dtype_ == base->dtype_)
+        << "The operator " << op_name << " requires exponent scalar dtype to match the base";
+  }
+  const bool is_float = base->dtype_.IsFloat();
+  CHECK((is_float && args.size() == 3) || (!is_float && args.size() == 2))
+      << "The operator " << op_name
+      << " requires tmp for floating-point dtype and forbids tmp for integer dtype";
+  bool high_precision = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "high_precision") high_precision = AnyCast<bool>(value, "kwarg key: high_precision");
+  }
+  CHECK(!high_precision || is_float) << "The operator " << op_name
+                                     << " only supports high_precision for floating-point dtype";
+  return CopyMathTileType(base);
+}
+
+REGISTER_OP("tile.axpy")
+    .set_op_category("TileOp")
+    .set_description("In-place dst += src * scalar")
+    .add_argument("src", "FP16/FP32 source tile")
+    .add_argument("scalar", "Scalar matching src dtype")
+    .add_argument("dst", "Destination accumulator")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_output_reuses_input(2)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/) {
+      return DeduceTileAxpyType(args);
+    });
+
+REGISTER_OP("tile.add_relu")
+    .set_op_category("TileOp")
+    .set_description("Fused element-wise add followed by ReLU")
+    .add_argument("src0", "First source tile")
+    .add_argument("src1", "Second source tile")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/) {
+      CHECK(args.size() == 2) << "The operator tile.add_relu requires exactly 2 arguments";
+      auto type = RequireSameMathTileType(args, {0, 1}, "tile.add_relu");
+      CHECK(type->dtype_ == DataType::INT16 || type->dtype_ == DataType::FP16 ||
+            type->dtype_ == DataType::FP32)
+          << "The operator tile.add_relu requires INT16, FP16, or FP32 dtype";
+      return CopyMathTileType(type);
+    });
+
+REGISTER_OP("tile.pow")
+    .set_op_category("TileOp")
+    .set_description("Element-wise tile power")
+    .add_argument("base", "Base tile")
+    .add_argument("exp", "Exponent tile")
+    .add_argument("tmp", "Floating-point scratch tile")
+    .set_attr<bool>("high_precision")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTilePowType(args, kwargs, "tile.pow", false);
+    });
+
+REGISTER_OP("tile.pows")
+    .set_op_category("TileOp")
+    .set_description("Element-wise tile/scalar power")
+    .add_argument("base", "Base tile")
+    .add_argument("exp", "Exponent scalar")
+    .add_argument("tmp", "Floating-point scratch tile")
+    .set_attr<bool>("high_precision")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTilePowType(args, kwargs, "tile.pows", true);
     });
 
 REGISTER_OP("tile.fmod")

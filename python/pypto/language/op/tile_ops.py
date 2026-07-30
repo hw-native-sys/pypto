@@ -120,6 +120,10 @@ __all__ = [
     "part_mul",
     "part_max",
     "part_min",
+    "axpy",
+    "add_relu",
+    "pow",
+    "pows",
     "fmod",
     "fmods",
     "and_",
@@ -2042,6 +2046,36 @@ def part_min(src0: Tile, src1: Tile) -> Tile:
     """
     call_expr = _ir_ops.part_min(src0.unwrap(), src1.unwrap())
     return Tile(expr=call_expr)
+
+
+def axpy(src: Tile, scalar: int | float | Expr | Scalar, dst: Tile) -> Tile:
+    """Accumulate ``dst += src * scalar`` in the destination tile."""
+    scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
+    return Tile(expr=_ir_ops.axpy(src.unwrap(), scalar_expr, dst.unwrap()))
+
+
+def add_relu(src0: Tile, src1: Tile) -> Tile:
+    """Fused element-wise add followed by ReLU."""
+    return Tile(expr=_ir_ops.add_relu(src0.unwrap(), src1.unwrap()))
+
+
+def pow(base: Tile, exp: Tile, tmp: Tile | None = None, *, high_precision: bool = False) -> Tile:
+    """Element-wise tile power; floating-point inputs require ``tmp``."""
+    tmp_expr = None if tmp is None else tmp.unwrap()
+    return Tile(expr=_ir_ops.pow(base.unwrap(), exp.unwrap(), tmp_expr, high_precision=high_precision))
+
+
+def pows(
+    base: Tile,
+    exp: int | float | Expr | Scalar,
+    tmp: Tile | None = None,
+    *,
+    high_precision: bool = False,
+) -> Tile:
+    """Element-wise tile/scalar power; floating-point inputs require ``tmp``."""
+    exp_expr = exp.unwrap() if isinstance(exp, Scalar) else exp
+    tmp_expr = None if tmp is None else tmp.unwrap()
+    return Tile(expr=_ir_ops.pows(base.unwrap(), exp_expr, tmp_expr, high_precision=high_precision))
 
 
 def fmod(lhs: Tile, rhs: Tile) -> Tile:

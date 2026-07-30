@@ -935,6 +935,50 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
 
 
+def axpy(src: Expr, scalar: int | float | Expr, dst: Expr, span: Span | None = None) -> Call:
+    """Accumulate ``dst += src * scalar`` and reuse the destination tile."""
+    actual_span = _get_span_or_capture(span)
+    scalar_expr = _normalize_scalar_operand(src, scalar, actual_span)
+    return _ir_core.create_op_call("tile.axpy", [src, scalar_expr, dst], {}, actual_span)
+
+
+def add_relu(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
+    """Fused element-wise ``max(src0 + src1, 0)``."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.add_relu", [src0, src1], {}, actual_span)
+
+
+def pow(
+    base: Expr,
+    exp: Expr,
+    tmp: Expr | None = None,
+    span: Span | None = None,
+    *,
+    high_precision: bool = False,
+) -> Call:
+    """Element-wise tile power; floating-point inputs require ``tmp``."""
+    actual_span = _get_span_or_capture(span)
+    args = [base, exp] if tmp is None else [base, exp, tmp]
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.pow", args, kwargs, actual_span)
+
+
+def pows(
+    base: Expr,
+    exp: int | float | Expr,
+    tmp: Expr | None = None,
+    span: Span | None = None,
+    *,
+    high_precision: bool = False,
+) -> Call:
+    """Element-wise tile/scalar power; floating-point inputs require ``tmp``."""
+    actual_span = _get_span_or_capture(span)
+    scalar_expr = _normalize_scalar_operand(base, exp, actual_span)
+    args = [base, scalar_expr] if tmp is None else [base, scalar_expr, tmp]
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.pows", args, kwargs, actual_span)
+
+
 def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of two tiles.
 

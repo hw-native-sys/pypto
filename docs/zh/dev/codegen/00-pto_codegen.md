@@ -140,6 +140,10 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.axpy(src, scalar, dst)` | `pto.taxpy`（复用 `dst`） |
+| `tile.add_relu(src0, src1)` | `pto.taddrelu` |
+| `tile.pow(base, exp, tmp, high_precision=...)` | `pto.tpow` |
+| `tile.pows(base, exp, tmp, high_precision=...)` | `pto.tpows` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`

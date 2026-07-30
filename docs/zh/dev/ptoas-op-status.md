@@ -90,7 +90,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsubs | TSUBS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机已验证；A5 真机待验证 |
 | pto.tmuls | TMULS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.taxpy | TAXPY | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.taxpy | TAXPY | tile | ✅ | ✅ | ❌ | ✅ | — | 目标复用路径已通过 A2/A3 真机验证 |
 | pto.tdivs | TDIVS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmaxs | TMAXS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tmins | TMINS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
@@ -109,11 +109,11 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.trecip | TRECIP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trelu | TRELU | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tlrelu | TLRELU | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.taddrelu | VADDRELU | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.taddrelu | VADDRELU | tile | ✅ | ✅ | ❌ | ❌ | — | 已覆盖精确发射；PTOAS v0.53 A2/A3 legalization 仍将该 op 标记为非法 |
 | pto.tfmod | TFMOD | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tfmods | TFMODS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tpow | TPOW | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tpows | TPOWS | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tpow | TPOW | tile | ✅ | ✅ | ❌ | ✅ | — | 浮点/tmp 路径已通过 A2/A3 真机验证；整数与 A5 high-precision 契约由 UT 覆盖 |
+| pto.tpows | TPOWS | tile | ✅ | ✅ | ❌ | ✅ | — | 浮点/tmp 路径已通过 A2/A3 真机验证；整数与 A5 high-precision 契约由 UT 覆盖 |
 | pto.trandom | TRANDOM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | PTOAS source-only 兼容接口 |
 | **归约（13）** |  |  |  |  |  |  |  |  |
 | pto.trowsum | TROWSUM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

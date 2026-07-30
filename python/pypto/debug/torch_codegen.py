@@ -992,6 +992,10 @@ def _register_ops() -> None:  # noqa: PLR0915
     # Tile-only ops not covered by the shared tensor/tile loop above.
     m["tile.relu"] = _torch_fn("relu")
     m["tile.rem"] = _binop("%")
+    m["tile.axpy"] = lambda a, _kw: f"({a[2]} + {a[0]} * {a[1]})"
+    m["tile.add_relu"] = lambda a, _kw: f"torch.relu({a[0]} + {a[1]})"
+    m["tile.pow"] = lambda a, _kw: f"torch.pow({a[0]}, {a[1]})"
+    m["tile.pows"] = lambda a, _kw: f"torch.pow({a[0]}, {a[1]})"
 
     # tile bitwise
     m["tile.and"] = _torch_fn("bitwise_and", 2)

@@ -142,6 +142,10 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
+| `tile.axpy(src, scalar, dst)` | `pto.taxpy` (reuses `dst`) |
+| `tile.add_relu(src0, src1)` | `pto.taddrelu` |
+| `tile.pow(base, exp, tmp, high_precision=...)` | `pto.tpow` |
+| `tile.pows(base, exp, tmp, high_precision=...)` | `pto.tpows` |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered

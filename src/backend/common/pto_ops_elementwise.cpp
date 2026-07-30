@@ -237,6 +237,24 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   return "";
 }
 
+static std::string MakeAxpyCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, "pto.taxpy", 3);
+  const auto& src = op->args_[0];
+  const auto& scalar = op->args_[1];
+  EmitInsOuts(codegen, "pto.taxpy",
+              {{codegen.GetExprAsCode(src), codegen.GetExprTypeAnnotation(src)},
+               {codegen.GetExprAsCode(scalar), codegen.GetExprTypeAnnotation(scalar)}});
+  return "";
+}
+
+static std::string MakePowCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                     codegen::CodegenBase& codegen_base) {
+  CHECK(op->args_.size() == 2 || op->args_.size() == 3)
+      << pto_op_name << " requires base/exponent and optional tmp";
+  return MakePrecisionCodegenPTO(pto_op_name, op->args_.size(), "pow_precision", op, codegen_base);
+}
+
 // Helper function for full op
 static std::string MakeFullCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base) {
@@ -510,6 +528,23 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     }
     reg_entry.set_output_layout(ir::TileLayout::row_major);
   };
+  reg("tile.axpy",
+      [](const CallPtr& op, codegen::CodegenBase& codegen) { return MakeAxpyCodegenPTO(op, codegen); });
+  if (exclude_ops.count("tile.add_relu") == 0) {
+    auto entry = backend.RegisterOp("tile.add_relu");
+    entry.f_codegen([](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeNaryCodegenPTO("pto.taddrelu", 2, op, codegen);
+    });
+    entry.set_input_layout(0, ir::TileLayout::row_major);
+    entry.set_input_layout(1, ir::TileLayout::row_major);
+    entry.set_output_layout(ir::TileLayout::row_major);
+  }
+  reg("tile.pow", [](const CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePowCodegenPTO("pto.tpow", op, codegen);
+  });
+  reg("tile.pows", [](const CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakePowCodegenPTO("pto.tpows", op, codegen);
+  });
   register_precision_op("tile.div", "pto.tdiv", 2, "div_precision");
   register_precision_op("tile.log", "pto.tlog", 1, "log_precision");
 
