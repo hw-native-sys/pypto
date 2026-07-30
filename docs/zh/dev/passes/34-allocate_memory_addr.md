@@ -74,7 +74,8 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
 buffer，带有字节大小、对齐和保守的半开生命周期。问题包含：
 
 - 生命周期干涉、预留范围、语义 no-alias、目标 hazard、不兼容的 Vec ND/NZ
-  存储布局和请求的流水线 stage 分离等**硬约束**；
+  存储布局和请求的流水线 stage 分离等**硬约束**；作者声明的 `pl.MemRef`
+  分配还会与同一内存空间中的其他所有分配建立硬分离；
 - 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨资源 WAR 或 WAW
   handoff，则加入**单位权重软边**；
 - 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。

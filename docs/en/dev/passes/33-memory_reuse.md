@@ -154,6 +154,10 @@ Because the isolation guarantee lives here, and ptoas replaces this pass wholesa
 A declared allocation under `memory_planner=PTOAS` is **rejected** at InitMemRef rather than
 silently honored-but-unenforced: allocating them without isolating them would
 hand back exactly the coalescing the author wrote the binding to prevent.
+`memory_planner=DSA_RP` also skips this pass, but preserves the contract in its
+allocation problem: every declared allocation is hard-separated from every
+other allocation in its memory space, and independently bound co-live members
+of one declaration are rejected before solving.
 
 ## Ascend910B load + tpop_from_aic hazard
 

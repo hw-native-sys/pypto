@@ -82,7 +82,8 @@ and a conservative half-open lifetime. The problem has:
 
 - **hard constraints** for lifetime interference, reserved ranges, semantic
   no-alias rules, target hazards, incompatible Vec ND/NZ storage layouts, and
-  requested pipeline-stage separation;
+  requested pipeline-stage separation. Author-declared `pl.MemRef` allocations
+  are also hard-separated from every other allocation in their memory space;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
   built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a

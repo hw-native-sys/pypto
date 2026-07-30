@@ -43,6 +43,7 @@ enum class AllocationSeparationReason : uint8_t {
   TargetHazard,
   SemanticNoAlias,
   StorageLayout,
+  DeclaredAllocation,
 };
 
 struct AllocationSeparation {

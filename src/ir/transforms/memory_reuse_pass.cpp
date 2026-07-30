@@ -1845,6 +1845,27 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
   }
 }
 
+/// Collect the allocation bases declared by the author through one-argument
+/// `pl.MemRef(...)` annotations.
+///
+/// InitMemRef hoists every alloc to the function body's top-level SeqStmts.
+/// Both MemoryReuse and DSA-RP consume this helper: the former protects pinned
+/// slots in its packer, while the latter turns the same contract into hard DSA
+/// separations.
+std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
+                                             const std::string& consumer) {
+  auto top_level = As<SeqStmts>(body);
+  INTERNAL_CHECK_SPAN(top_level, span)
+      << consumer << " expects a top-level SeqStmts body (InitMemRef normalizes it), got "
+      << (body ? body->TypeName() : "null");
+
+  std::set<const Var*> pinned_bases;
+  for (const auto& stmt : top_level->stmts_) {
+    if (auto base = GetPinnedAllocBase(stmt)) pinned_bases.insert(base.get());
+  }
+  return pinned_bases;
+}
+
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const std::vector<LifetimeInterval>& lifetimes, const HazardInputs& hazard,
     const ForbidAliasMap& forbid_alias, const std::map<const Var*, std::set<int>>& phi_family_ids,
@@ -3162,14 +3183,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  auto top_level = As<SeqStmts>(new_body);
-  INTERNAL_CHECK_SPAN(top_level, func->span_)
-      << "MemoryReuse expects a top-level SeqStmts body (InitMemRef normalizes it), got "
-      << (new_body ? new_body->TypeName() : "null");
-  std::set<const Var*> pinned_bases;
-  for (const auto& stmt : top_level->stmts_) {
-    if (auto base = GetPinnedAllocBase(stmt)) pinned_bases.insert(base.get());
-  }
+  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(new_body, func->span_, "MemoryReuse");
 
   ValidateDeclaredAllocs(new_body, pinned_bases, analysis_result.var_liveness);
 
@@ -3238,6 +3252,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
 AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   auto analysis = ComputeLifetimes(func->body_);
+  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(func->body_, func->span_, "DSA-RP");
+  ValidateDeclaredAllocs(func->body_, pinned_bases, analysis.var_liveness);
+
   AllocationPlan plan;
   plan.intervals = std::move(analysis.lifetimes);
   // DSA places the physical allocation identity, whose extent must cover every
@@ -3270,13 +3287,30 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   };
 
   std::unordered_map<const Var*, size_t> base_to_index;
+  std::vector<size_t> pinned_intervals;
   for (size_t index = 0; index < intervals.size(); ++index) {
     auto memref = GetTypeMemRef(intervals[index].variable->GetType());
     if (memref.has_value() && memref.value()) {
       base_to_index[memref.value()->base_.get()] = index;
+      if (pinned_bases.count(memref.value()->base_.get()) != 0) {
+        pinned_intervals.push_back(index);
+      }
     }
   }
-
+  // A declared allocation is closed: it may contain only the values the
+  // author explicitly bound to its base. DSA-RP skips MemoryReuse, so encode
+  // that same isolation contract directly as hard separations from every
+  // other allocation identity in the memory space. Members explicitly bound
+  // to one base already form one interval and were validated for co-liveness
+  // above. The nested scan is output-sensitive O(N + E): this explicit-pair
+  // model must materialize every emitted declared-allocation relation.
+  for (size_t pinned : pinned_intervals) {
+    for (size_t other = 0; other < intervals.size(); ++other) {
+      if (other != pinned && intervals[other].memory_space == intervals[pinned].memory_space) {
+        add_separation(pinned, other, AllocationSeparationReason::DeclaredAllocation);
+      }
+    }
+  }
   // Vec ND and NZ layouts cannot occupy the same physical bytes even when
   // their ordinary lifetimes are disjoint: the resulting in-place layout adapt
   // silently mis-transfers on A5. Emit the same correctness relation enforced

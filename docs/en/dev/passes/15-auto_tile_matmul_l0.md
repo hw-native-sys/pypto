@@ -123,7 +123,7 @@ float and runtime validation of the distinct `{0, L0C/2}` offsets.
 
 The full-K and ≥2×2 restrictions above apply only to chooser-emitted M/N
 tiling. The separate existing-pipeline recognizer does not alter the chooser's
-design space: for PyPTO-managed planners, it applies the same two-Acc mechanism
+design space: for the legacy PyPTO planner, it applies the same two-Acc mechanism
 to the canonical stationary-panel pattern after the conservative
 function-level Acc fit described above.
 

@@ -141,6 +141,9 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 由于隔离保证由本 pass 提供，而 ptoas 会整体替换本 pass，因此 `memory_planner=PTOAS` 下的
 单参数 `pl.MemRef(...)` 会在 InitMemRef 处**直接报错**，而不是"分配了但不隔离"地静默生效——只分配不
 隔离，恰好会把作者写这条绑定所要避免的合并原样还回去。
+`memory_planner=DSA_RP` 同样会跳过本 pass，但会在分配问题中保留该契约：
+每个声明式分配都会与同一内存空间中的其他所有分配建立硬分离；若同一声明中独立绑定的
+成员同时存活，则在求解前直接报错。
 
 ## Ascend910B load + tpop_from_aic 危害
 

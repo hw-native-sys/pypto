@@ -104,6 +104,18 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
     return program
 
 
+def _run_dsa_rp_pipeline(program: ir.Program) -> ir.Program:
+    """Run the allocation passes with DSA-RP owning placement."""
+    with passes.PassContext(
+        [],
+        passes.VerificationLevel.NONE,
+        memory_planner=passes.MemoryPlanner.DSA_RP,
+    ):
+        return passes.allocate_memory_addr()(
+            passes.materialize_semantic_aliases()(passes.init_mem_ref()(program))
+        )
+
+
 class TestBinding:
     """InitMemRef honors the binding and derives what the author did not write."""
 
@@ -999,6 +1011,31 @@ class TestReuseControl:
         assert bases["t0"] == bases["t2"] == "ping"
         assert bases["t1"] == "pong"
 
+    def test_dsa_rp_preserves_legal_explicit_sharing(self, ascend_backend):
+        """DSA-RP accepts non-co-live values explicitly sharing one allocation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        memrefs = _tile_memrefs(_run_dsa_rp_pipeline(Before))
+        assert memrefs["t0"].base_.name_hint == memrefs["t2"].base_.name_hint == "ping"
+        assert memrefs["t1"].base_.name_hint == "pong"
+        assert isinstance(memrefs["t0"].byte_offset_, ir.ConstInt)
+        assert isinstance(memrefs["t1"].byte_offset_, ir.ConstInt)
+        assert isinstance(memrefs["t2"].byte_offset_, ir.ConstInt)
+        assert memrefs["t0"].byte_offset_.value == memrefs["t2"].byte_offset_.value
+        assert memrefs["t0"].byte_offset_.value != memrefs["t1"].byte_offset_.value
+
     def test_unbound_tiles_never_join_a_declared_alloc(self, ascend_backend):
         """An unbound tile packs with other unbound tiles, never into a declared one."""
 
@@ -1019,6 +1056,58 @@ class TestReuseControl:
         assert bases["mine"] == "mine"
         assert bases["free0"] != "mine"
         assert bases["free1"] != "mine"
+
+    def test_dsa_rp_keeps_declared_ranges_isolated(self, ascend_backend):
+        """DSA-RP preserves declarations although it skips MemoryReuse.
+
+        Every value in this chain has a lifetime-compatible handoff to the next
+        and would ordinarily fit at one address. The two declared allocations
+        must remain disjoint from each other and from the unbound allocation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mid_buf"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        after = _run_dsa_rp_pipeline(Before)
+        memrefs = _tile_memrefs(after)
+
+        def allocation_range(base_name: str) -> tuple[int, int]:
+            matches = [memref for memref in memrefs.values() if memref.base_.name_hint == base_name]
+            assert matches, f"missing allocation {base_name}: {memrefs}"
+            memref = matches[0]
+            assert isinstance(memref.byte_offset_, ir.ConstInt)
+            begin = memref.byte_offset_.value
+            return begin, begin + memref.size_
+
+        in_range = allocation_range("in_buf")
+        mid_range = allocation_range("mid_buf")
+        unbound = next(
+            memref for memref in memrefs.values() if memref.base_.name_hint not in {"in_buf", "mid_buf"}
+        )
+        assert isinstance(unbound.byte_offset_, ir.ConstInt)
+        unbound_range = (
+            unbound.byte_offset_.value,
+            unbound.byte_offset_.value + unbound.size_,
+        )
+
+        for first, second in (
+            (in_range, mid_range),
+            (in_range, unbound_range),
+            (mid_range, unbound_range),
+        ):
+            assert first[1] <= second[0] or second[1] <= first[0], (
+                f"declared allocation ranges must be disjoint: {first} vs {second}"
+            )
 
 
 class TestPipeline:
@@ -1292,7 +1381,7 @@ class Collide:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -1307,6 +1396,8 @@ class Collide:
 
         with pytest.raises(ValueError, match="live at the same time"):
             _run_memory_pipeline(Before)
+        with pytest.raises(ValueError, match="live at the same time"):
+            _run_dsa_rp_pipeline(Before)
 
     def test_rejects_mixed_memory_space(self):
         """One allocation lives in one memory space; bound tiles must agree."""
