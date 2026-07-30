@@ -102,6 +102,33 @@ t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 推断，也不靠"当前跑到哪个 pass"。`InitMemRef` 会消费掉这个声明：此后分配点带上 `pinned=True`，
 MemRef 变回普通 MemRef，所以重新解析一份分配后的 dump 不会把编译器分配误当成声明式分配。
 
+#### 槽位
+
+传 `slots=N` 可以把一块分配切成 N 个等大槽位,再用下标选择其中一个。槽位连续且大小一致,
+因此在它们之间轮转形成的 ping-pong 是 packer 无法合并的:
+
+```python
+l0c = pl.MemRef(slots=2)
+
+ping: pl.Tile[[M, N], pl.FP32, l0c[0], pl.Mem.Acc] = pl.tile.matmul(q, b0)
+pong: pl.Tile[[M, N], pl.FP32, l0c[1], pl.Mem.Acc] = pl.tile.matmul(q, b1)
+```
+
+**下标可以是运行期的值**,所以轮转不需要展开循环:
+
+```python
+for i, (acc,) in pl.range(N, init_values=(out,)):
+    a: pl.Tile[[M, N], pl.FP32, l0c[i % 2], pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
+```
+
+`InitMemRef` 按绑定到**任意**槽位的最大 tile 确定单个槽位的大小——槽位是等大的,按槽位分别
+定尺寸会让步长不一致——并把下标折算成字节偏移 `index * slot_size`。常量下标在这里就折成常量,
+走原有的常量地址路径;运行期下标则留成表达式,在运行时成为 tile 的地址。
+
+共存检查**按槽位**进行,而不是按分配:不同槽位上的两个 tile 本来就应该同时存活,只有落在
+**同一**槽位的两个 tile 才会互相破坏。下标是运行期表达式时,没有静态的槽位归属可比,该检查
+被跳过——轮转的正确性由作者负责——而与其他分配之间的隔离依然成立。
+
 声明的名字自成命名空间——不会解析到恰好同名的 Python 变量。内存空间**必须**写（`TileType`
 始终要求 MemRef 与空间成对出现），且绑定到同一块分配的 tile 必须一致。未加注解的 tile 保持
 默认的自动复用。

@@ -1061,10 +1061,37 @@ class MemRef(Var):
     is_pinned_: bool
     """True for an author-declared allocation, false for a compiler allocation."""
 
+    slot_count_: int
+    """How many equally-sized slots the declared allocation holds (1 when unsubscripted)."""
+
+    slot_index_: Expr | None
+    """Which slot of the declared allocation this MemRef denotes, as an index expression
+    (None when the declaration is unsubscripted). An expression rather than an int so the
+    index may be a runtime value; `InitMemRef` scales it into ``byte_offset_``."""
+
+    def __getitem__(self, slot: int) -> MemRef:
+        """Select one slot of a multi-slot declared allocation by constant index.
+
+        Only constant indices go through here. A runtime index (``l0c[i % 2]``) appears
+        inside a Tile annotation, which the parser resolves from the AST without
+        evaluating the subscript.
+
+        Args:
+            slot: Slot index, in ``[0, slot_count_)``
+
+        Returns:
+            The same declaration bound to ``slot`` — same base Ptr, so all slots
+            share one allocation
+
+        Raises:
+            ValueError: If this MemRef is not a declaration, or the index is out of range
+        """
+        ...
+
     @overload
-    def __init__(self, span: Span = ...) -> None: ...
+    def __init__(self, slots: int = ..., span: Span = ...) -> None: ...
     @overload
-    def __init__(self, name: str, span: Span = ...) -> None: ...
+    def __init__(self, name: str, slots: int = ..., span: Span = ...) -> None: ...
     @overload
     def __init__(self, base: Var, byte_offset: int, size: int, span: Span = ...) -> None: ...
     @overload

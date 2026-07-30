@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 
@@ -53,25 +54,48 @@ class MemRef : public Var {
   /// without being inferred from `size_`.
   bool is_pinned_;
 
+  /// How many equally-sized slots the declared allocation holds
+  /// (`pl.MemRef("name", slots=N)`); 1 for an unsubscripted declaration.
+  /// Meaningful only while `is_pinned_`.
+  uint64_t slot_count_;
+
+  /// Which slot of the declared allocation this MemRef denotes (`l0c[k]`), as an
+  /// expression so the index may be a runtime value (`l0c[i & 1]`). Null when the
+  /// declaration is unsubscripted. Meaningful only while `is_pinned_`.
+  ///
+  /// `InitMemRef` consumes both fields: it sizes one slot to the largest tile
+  /// bound to any slot, sizes the allocation to `slot_count_ * slot`, and turns
+  /// this index into `byte_offset_ = slot_index_ * slot` (folded to a `ConstInt`
+  /// when the index is constant). The resolved MemRef is an ordinary one — flag
+  /// cleared, count back to 1, index dropped — so slots exist only in the window
+  /// where they still need resolving.
+  ///
+  /// Because the index may name SSA values, it is the one MemRef field that
+  /// substitution must rewrite; `CloneTypeWithMemRefAndRemapExprs` does so, and
+  /// only for a pinned MemRef. That restriction is what keeps rebuilds out of the
+  /// passes that key on MemRef pointer identity (`AllocateMemoryAddr`), all of
+  /// which run after InitMemRef has cleared the flag.
+  std::optional<ExprPtr> slot_index_;
+
   /**
    * @brief Construct MemRef from base pointer, expression offset, and size.
    * Name is derived from the base Ptr's name.
    */
-  MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown(),
-         bool is_pinned = false);
+  MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown(), bool is_pinned = false,
+         uint64_t slot_count = 1, std::optional<ExprPtr> slot_index = std::nullopt);
 
   /**
    * @brief Convenience: construct with integer byte_offset (auto-wrapped in ConstInt).
    */
-  MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span = Span::unknown(),
-         bool is_pinned = false);
+  MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span = Span::unknown(), bool is_pinned = false,
+         uint64_t slot_count = 1, std::optional<ExprPtr> slot_index = std::nullopt);
 
   /**
    * @brief Construct with explicit variable name. Used by deserialization and
    * address allocation where the name must be preserved exactly.
    */
   MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown(),
-         bool is_pinned = false);
+         bool is_pinned = false, uint64_t slot_count = 1, std::optional<ExprPtr> slot_index = std::nullopt);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::MemRef; }
   [[nodiscard]] std::string TypeName() const override { return "MemRef"; }
@@ -89,7 +113,9 @@ class MemRef : public Var {
                           std::make_tuple(reflection::UsualField(&MemRef::base_, "base"),
                                           reflection::UsualField(&MemRef::byte_offset_, "byte_offset"),
                                           reflection::UsualField(&MemRef::size_, "size"),
-                                          reflection::UsualField(&MemRef::is_pinned_, "is_pinned")));
+                                          reflection::UsualField(&MemRef::is_pinned_, "is_pinned"),
+                                          reflection::UsualField(&MemRef::slot_count_, "slot_count"),
+                                          reflection::UsualField(&MemRef::slot_index_, "slot_index")));
   }
 };
 

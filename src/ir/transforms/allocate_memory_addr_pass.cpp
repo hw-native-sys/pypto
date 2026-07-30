@@ -243,30 +243,39 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // derives the offset from the slice op's own operands off the root base.
       for (const auto& old_memref : group) {
         // Fold a const relative offset into a single ConstInt: base + offset.
-        // The AllocatedMemoryAddr property requires byte_offset_ to be a
-        // ConstInt >= 0, and PTO codegen reads `pto.alloc_tile` addr 1:1 from it.
+        // A reshape-of-slice chain inherits the slice's offset but does NOT go
+        // through `pto.subview`, so its address must come from this MemRef
+        // (issue #1510).
         //
-        // A non-const (dynamic) offset cannot be encoded as a ConstInt address,
-        // so it falls back to the bare base. This is safe: a dynamic-offset view
-        // only ever reaches codegen through `tile.slice`, which re-derives the
-        // offset from the slice op's own operands (`pto.subview`) rather than the
-        // result MemRef addr. The fix only matters for const offsets, where a
-        // reshape-of-slice chain inherits the offset but does NOT go through
-        // `pto.subview`, so its address must come from this MemRef (issue #1510).
-        int64_t relative_offset = 0;
-        if (auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
-          relative_offset = old_offset->value_;
-        }
+        // A *dynamic* offset cannot fold, so the address becomes the expression
+        // `base_addr + offset` and codegen lowers it into the tile's runtime
+        // address assignment. That is how a declared allocation's runtime slot
+        // index (`l0c[i % 2]`, scaled to a byte offset by InitMemRef) reaches the
+        // hardware. Dropping the offset here — the old behaviour — would silently
+        // address slot 0 on every iteration.
+        //
+        // A dynamic-offset `tile.slice` view is unaffected either way: codegen
+        // re-derives its offset from the slice op's own operands (`pto.subview`)
+        // rather than from this address.
+        //
         // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
         // operand; PTO codegen reads this dtype from the ConstInt 1:1.
-        auto member_addr_expr = std::make_shared<ConstInt>(static_cast<int64_t>(base_addr) + relative_offset,
-                                                           DataType::INT64, Span::unknown());
+        ExprPtr member_addr_expr;
+        if (auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
+          member_addr_expr = std::make_shared<ConstInt>(static_cast<int64_t>(base_addr) + old_offset->value_,
+                                                        DataType::INT64, Span::unknown());
+        } else {
+          auto base_expr =
+              std::make_shared<ConstInt>(static_cast<int64_t>(base_addr), DataType::INDEX, Span::unknown());
+          member_addr_expr =
+              std::make_shared<Add>(base_expr, old_memref->byte_offset_, DataType::INDEX, Span::unknown());
+        }
         // NOTE: MemRef is identity-bearing — each result must get a fresh
         // unique_id_, so build it via the explicit constructor (MutableCopy is
         // static_assert-forbidden for Var/MemRef).
-        auto new_memref =
-            std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, member_addr_expr,
-                                     old_memref->size_, old_memref->span_, old_memref->is_pinned_);
+        auto new_memref = std::make_shared<MemRef>(
+            old_memref->name_hint_, old_memref->base_, member_addr_expr, old_memref->size_, old_memref->span_,
+            old_memref->is_pinned_, old_memref->slot_count_, old_memref->slot_index_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
     }
@@ -389,14 +398,30 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     if (memory_space == MemorySpace::DDR) return;
     if (!seen_.insert(memref.get()).second) return;
 
-    auto const_offset = std::dynamic_pointer_cast<const ConstInt>(memref->byte_offset_);
-    if (!const_offset || const_offset->value_ < 0) {
+    // An address may legitimately be an expression: a declared allocation's runtime
+    // slot index becomes `base_addr + index * slot_size`, which codegen lowers into
+    // the tile's address assignment. What the property requires is that an address
+    // was *assigned* — a null offset, or a negative constant, means it was not.
+    if (!memref->byte_offset_) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 0,
                                 "MemRef for variable '" + var_name + "' in " +
-                                    MemorySpaceToString(memory_space) + " has no valid address allocated",
+                                    MemorySpaceToString(memory_space) + " has no address allocated",
                                 span);
       return;
     }
+    auto const_offset = std::dynamic_pointer_cast<const ConstInt>(memref->byte_offset_);
+    if (const_offset && const_offset->value_ < 0) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 0,
+                                "MemRef for variable '" + var_name + "' in " +
+                                    MemorySpaceToString(memory_space) + " has a negative address (" +
+                                    std::to_string(const_offset->value_) + ")",
+                                span);
+      return;
+    }
+    // High-water tracking needs a concrete address. A dynamic one is bounded by
+    // the whole declared allocation, which its own root MemRef already accounts
+    // for, so skipping it here cannot under-report the space's footprint.
+    if (!const_offset) return;
 
     uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;
     auto& hw = high_water_[memory_space];

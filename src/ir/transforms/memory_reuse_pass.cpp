@@ -1699,8 +1699,28 @@ class IndependentlyBoundCollector : public IRVisitor {
                               const std::map<const Var*, std::pair<int, int>>& var_liveness)
       : pinned_bases_(pinned_bases), var_liveness_(var_liveness) {}
 
-  /// Pinned base -> the tiles bound to it, with their lifetimes.
-  std::map<const Var*, std::vector<BoundMember>> by_base;
+  /// One slot of a declared allocation: its base, and the byte offset that tells
+  /// slots of the same allocation apart. `InitMemRef` has already consumed the
+  /// slot index into that offset, so a null offset (a dynamic index) collapses to
+  /// "some slot" — see the note on `by_slot`.
+  struct SlotKey {
+    const Var* base;
+    int64_t byte_offset;
+
+    bool operator<(const SlotKey& other) const {
+      if (base != other.base) return base < other.base;
+      return byte_offset < other.byte_offset;
+    }
+  };
+
+  /// Slot -> the tiles bound to it, with their lifetimes.
+  ///
+  /// Keyed per *slot*, not per allocation: two tiles on different slots of one
+  /// declared allocation are supposed to be live together — that is what a
+  /// ping-pong is — and only tiles landing on the *same* slot can corrupt each
+  /// other. Tiles whose offset is a runtime expression are skipped entirely,
+  /// since which slot they occupy is not a static fact.
+  std::map<SlotKey, std::vector<BoundMember>> by_slot;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (op && op->var_) Record(op);
@@ -1720,7 +1740,13 @@ class IndependentlyBoundCollector : public IRVisitor {
     }
     auto liveness = var_liveness_.find(op->var_.get());
     if (liveness == var_liveness_.end()) return;
-    by_base[base].push_back({op->var_, liveness->second.first, liveness->second.second});
+    // A runtime slot index leaves no static slot to attribute the tile to, so
+    // there is nothing to compare it against. The author owns the rotation in
+    // that case; isolation from other allocations still holds.
+    auto const_offset = As<ConstInt>((*memref)->byte_offset_);
+    if (!const_offset) return;
+    by_slot[{base, const_offset->value_}].push_back(
+        {op->var_, liveness->second.first, liveness->second.second});
   }
 
   const std::set<const Var*>& pinned_bases_;
@@ -1745,7 +1771,8 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
   IndependentlyBoundCollector collector(pinned_bases, var_liveness);
   collector.VisitStmt(body);
 
-  for (auto& [base, members] : collector.by_base) {
+  for (auto& [slot, members] : collector.by_slot) {
+    const Var* base = slot.base;
     std::sort(members.begin(), members.end(),
               [](const BoundMember& a, const BoundMember& b) { return a.def_point < b.def_point; });
     for (size_t i = 1; i < members.size(); ++i) {
@@ -1753,12 +1780,12 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
       const BoundMember& cur = members[i];
       CHECK_SPAN(prev.last_use_point <= cur.def_point, cur.var->span_)
           << "Tiles '" << prev.var->name_hint_ << "' and '" << cur.var->name_hint_
-          << "' are both bound to the declared allocation '" << base->name_hint_
+          << "' are both bound to the same slot of the declared allocation '" << base->name_hint_
           << "' but are live at the same time (" << prev.var->name_hint_ << ": [" << prev.def_point << ", "
           << prev.last_use_point << "], " << cur.var->name_hint_ << ": [" << cur.def_point << ", "
           << cur.last_use_point
-          << "]). Sharing one allocation would overwrite data that is still needed — declare separate "
-             "allocations, or bind only tiles whose lifetimes do not overlap.";
+          << "]). Sharing one slot would overwrite data that is still needed — put them on different "
+             "slots, declare separate allocations, or bind only tiles whose lifetimes do not overlap.";
     }
   }
 }

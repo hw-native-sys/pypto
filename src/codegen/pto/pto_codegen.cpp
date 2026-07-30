@@ -1108,6 +1108,21 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     return idx;
   };
 
+  // Widen an address expression to the `i64` the alloc_tile addr operand takes.
+  // Mirrors cast_to_index above, in the other direction.
+  auto cast_to_i64 = [&](const std::string& ssa, const ir::ExprPtr& expr) -> std::string {
+    auto scalar_type = As<ScalarType>(expr->GetType());
+    CHECK(scalar_type && (scalar_type->dtype_.IsInt() || scalar_type->dtype_ == DataType::INDEX))
+        << "alloc_tile addr operand must be integer or index typed, got "
+        << (scalar_type ? GetTypeString(scalar_type->dtype_) : std::string("non-scalar"));
+    if (scalar_type->dtype_ == DataType::INT64) return ssa;
+    std::string wide = NewTemp();
+    const std::string from =
+        scalar_type->dtype_ == DataType::INDEX ? "index" : GetTypeString(scalar_type->dtype_);
+    Emit(wide + " = arith.index_cast " + ssa + " : " + from + " to i64");
+    return wide;
+  };
+
   // Lower a single valid_shape dim expression to an `index` SSA value.
   auto lower_dim = [&](const ir::ExprPtr& expr) -> std::string {
     if (!expr) return "";
@@ -1144,6 +1159,12 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   if (memref && emit_tile_addr_) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
       fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+    } else if (memref->byte_offset_) {
+      // A runtime address: a declared allocation's slot index scaled to a byte
+      // offset (`l0c[i % 2]`) and added to the base by AllocateMemoryAddr. The
+      // `alloc_tile` addr operand is i64, and PTOAS lowers it to a runtime
+      // `TASSIGN(tile, addr)`, so an SSA value is as valid here as a constant.
+      fields.addr_ssa = cast_to_i64(GetExprAsCode(memref->byte_offset_), memref->byte_offset_);
     }
   }
   return fields;

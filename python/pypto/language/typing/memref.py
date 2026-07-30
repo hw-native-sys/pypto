@@ -61,6 +61,21 @@ class MemRef(_IrMemRef):
         t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(x, [0, 0], [64, 64])
         t1: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.exp(t0)
 
+    Pass ``slots=N`` for N equally-sized slots of one allocation, then pick one by
+    subscript. The slots are contiguous and identically sized, so rotating through
+    them is a ping-pong the packer cannot collapse::
+
+        l0c = pl.MemRef(slots=2)
+
+        ping: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Acc] = pl.tile.matmul(q, b0)
+        pong: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Acc] = pl.tile.matmul(q, b1)
+
+    The subscript must be a constant the parser can see: a literal, or a Python
+    name bound to an int. A loop variable does not qualify — the annotation is
+    resolved at parse time — so a rotation is written as an unrolled body with one
+    explicit subscript per slot. A non-constant index is rejected rather than
+    silently addressing slot 0.
+
     Reference it by variable, so a misspelling is a ``NameError`` rather than a
     second allocation. Since the variable *is* the name, one declaration may not
     be reached through two names (``b = a``) and two declarations may not claim
@@ -80,10 +95,26 @@ class MemRef(_IrMemRef):
     pyright; it never reaches the underlying ``ir.MemRef`` constructor.
     """
 
+    def __getitem__(self, slot: "int | Scalar") -> "MemRef":  # type: ignore[override]
+        """Select one slot of a multi-slot declared allocation.
+
+        Widened over ``ir.MemRef.__getitem__`` for the same reason as
+        ``_ByteOffset``: inside a ``@pl.program`` body the subscript is resolved
+        from the AST by the parser and may be a runtime index expression, which
+        pyright sees as a ``Scalar``. It never reaches the runtime binding.
+
+        Args:
+            slot: Slot index — a constant, or an index expression in a program body
+
+        Returns:
+            The same declaration bound to that slot
+        """
+        return super().__getitem__(slot)  # type: ignore[arg-type]
+
     @overload
-    def __init__(self, span: Span = ...) -> None: ...
+    def __init__(self, slots: int = ..., span: Span = ...) -> None: ...
     @overload
-    def __init__(self, name: str, span: Span = ...) -> None: ...
+    def __init__(self, name: str, slots: int = ..., span: Span = ...) -> None: ...
     @overload
     def __init__(self, base: Var, byte_offset: _ByteOffset, size: int, span: Span = ...) -> None: ...
     @overload

@@ -116,8 +116,18 @@ std::optional<uint64_t> ShapedTypeSizeBytes(const ShapedTypePtr& type) {
 // Author-declared allocations (`pl.Tile[..., pl.MemRef("name"), ...]`)
 // ============================================================================
 
-/// Base Ptr of a declared allocation -> the size it must hold (largest bound tile).
-using DeclaredAllocMap = std::map<const Var*, uint64_t>;
+/// Slot geometry derived for one declared allocation.
+struct DeclaredAlloc {
+  uint64_t slot_size = 0;   ///< Bytes per slot — the largest tile bound to any slot
+  uint64_t slot_count = 1;  ///< How many slots the author declared
+
+  /// Total bytes to allocate: every slot is the same size and they sit contiguously,
+  /// which is what makes `slot_index * slot_size` a valid offset.
+  [[nodiscard]] uint64_t TotalSize() const { return slot_size * slot_count; }
+};
+
+/// Base Ptr of a declared allocation -> its slot geometry.
+using DeclaredAllocMap = std::map<const Var*, DeclaredAlloc>;
 
 /// The declared-allocation MemRef `type` carries, or null when it carries none.
 ///
@@ -166,8 +176,21 @@ class DeclaredAllocCollector : public IRVisitor {
         << "Tile '" << var->name_hint_ << "' is bound to the declared allocation '" << base->name_hint_
         << "' but has a dynamic shape; a declared allocation must be sized at compile time";
 
-    auto& buffer_size = buffers[base.get()];
-    buffer_size = std::max(buffer_size, *size);
+    auto& alloc = buffers[base.get()];
+    // One slot must hold the largest tile bound to ANY slot: the slots are
+    // uniform, so a per-slot size would make the stride inconsistent.
+    alloc.slot_size = std::max(alloc.slot_size, *size);
+
+    CHECK_SPAN(binding->slot_count_ >= 1, var->span_)
+        << "Declared allocation '" << base->name_hint_ << "' must have at least one slot, got "
+        << binding->slot_count_;
+    if (alloc.slot_count == 1) {
+      alloc.slot_count = binding->slot_count_;
+    }
+    CHECK_SPAN(alloc.slot_count == binding->slot_count_, var->span_)
+        << "References to the declared allocation '" << base->name_hint_
+        << "' disagree on how many slots it has (" << alloc.slot_count << " vs " << binding->slot_count_
+        << "); one declaration has one slot count";
 
     if (tile_type->memory_space_.has_value()) {
       auto [it, inserted] = spaces_.emplace(base.get(), *tile_type->memory_space_);
@@ -203,9 +226,37 @@ class InitMemRefMutator : public IRMutator {
     auto it = declared_allocs_.find(binding->base_.get());
     if (it == declared_allocs_.end()) return std::nullopt;
     // Every bound tile gets the SAME base Ptr — that shared identity is what
-    // makes them share storage — sized to the largest member so the buffer
-    // holds any of them.
-    return std::make_shared<MemRef>(binding->base_, binding->byte_offset_, it->second);
+    // makes them share storage — sized to hold the whole slot set.
+    //
+    // The slot index becomes the byte offset: `index * slot_size`. A constant
+    // index folds here, so a single-slot or constant-slot declaration keeps the
+    // ConstInt offset every downstream pass already expects. A runtime index
+    // survives as an expression that AllocateMemoryAddr adds the base address to
+    // and codegen lowers into the tile's address assignment.
+    return std::make_shared<MemRef>(binding->base_, SlotByteOffset(*binding, it->second),
+                                    it->second.TotalSize());
+  }
+
+  /// The byte offset a declaration's slot index denotes, folded when constant.
+  ///
+  /// Returns `binding`'s own offset untouched for an unsubscripted declaration —
+  /// there is no slot arithmetic to do, and slot 0 of a 1-slot allocation is the
+  /// allocation itself.
+  static ExprPtr SlotByteOffset(const MemRef& binding, const DeclaredAlloc& alloc) {
+    if (!binding.slot_index_.has_value() || !*binding.slot_index_) return binding.byte_offset_;
+    const ExprPtr& slot_index = *binding.slot_index_;
+    const auto& span = binding.span_;
+    if (auto const_index = As<ConstInt>(slot_index)) {
+      return std::make_shared<ConstInt>(
+          static_cast<int64_t>(static_cast<uint64_t>(const_index->value_) * alloc.slot_size), DataType::INT64,
+          span);
+    }
+    // INDEX for the runtime product: the index comes from loop variables, which are
+    // INDEX-typed, and the existing dynamic-offset expressions (tile.slice views)
+    // are built the same way. Codegen widens to the i64 the PTOAS `alloc_tile` addr
+    // operand wants when it lowers the address.
+    auto stride = std::make_shared<ConstInt>(static_cast<int64_t>(alloc.slot_size), DataType::INDEX, span);
+    return std::make_shared<Mul>(slot_index, stride, DataType::INDEX, span);
   }
 
   // Resolve memory space from TileType::memory_space_ field (set by InferTileMemorySpace),

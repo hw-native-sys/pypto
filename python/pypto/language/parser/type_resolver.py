@@ -513,7 +513,11 @@ class TypeResolver:
         memory_space_node: ast.expr | None = None
 
         for node in extra_nodes:
-            if self._is_memref_node(node) or (self._resolve_memref_var_ref(node) is not None):
+            if (
+                self._is_memref_node(node)
+                or (self._resolve_memref_var_ref(node) is not None)
+                or (self._resolve_memref_slot_ref(node) is not None)
+            ):
                 if memref_node is not None:
                     raise ParserTypeError(
                         "Tile annotation can contain at most one memref argument",
@@ -570,7 +574,7 @@ class TypeResolver:
         elif self._is_memref_node(memref_node):
             memref = self.resolve_memref(memref_node)
         else:
-            memref = self._resolve_memref_var_ref(memref_node)
+            memref = self._resolve_memref_var_ref(memref_node) or self._resolve_memref_slot_ref(memref_node)
         # Resolve memory_space first so it can be passed to _resolve_tileview for
         # memory-space-aware implicit blayout/slayout/fractal defaults.
         #
@@ -624,7 +628,78 @@ class TypeResolver:
         if not declared.is_pinned_:
             # A fully specified MemRef object: it already carries its own base.
             return declared
-        return self._make_declared_memref(self._declared_alloc_name(declared, node), self._get_span(node))
+        return self._make_declared_memref(
+            self._declared_alloc_name(declared, node),
+            self._get_span(node),
+            slots=declared.slot_count_,
+            slot=declared.slot_index_,
+        )
+
+    def _resolve_memref_slot_ref(self, node: ast.expr) -> "ir.MemRef | None":
+        """Resolve ``decl[k]`` — one slot of a multi-slot declared allocation.
+
+        The index is an ordinary index expression, so it may be a runtime value::
+
+            l0c = pl.MemRef(slots=2)
+            for sub, (acc,) in pl.pipeline(...):
+                a: pl.Tile[[M, N], pl.FP32, l0c[sub & 1], pl.Mem.Acc] = pl.tile.matmul(...)
+
+        `InitMemRef` scales it by the derived slot size into the MemRef's byte
+        offset. A constant index folds there and takes the ordinary constant-address
+        path; a runtime one survives as an expression that codegen lowers into the
+        tile's address assignment.
+
+        Args:
+            node: Candidate AST node from a Tile annotation's trailing arguments
+
+        Returns:
+            The MemRef for the selected slot, or None if the node is not a
+            subscript over a declared allocation
+
+        Raises:
+            ParserTypeError: If the declaration holds a single slot, or a constant
+                index is out of range
+        """
+        if not isinstance(node, ast.Subscript):
+            return None
+        span = self._get_span(node)
+
+        # Two spellings reach here: a reference to a declared variable, and the
+        # inline `pl.MemRef("name", slots=N)[k]` the printer emits for a dump.
+        if isinstance(node.value, ast.Name):
+            declared = self.expr_evaluator.closure_vars.get(node.value.id)
+            if not isinstance(declared, ir.MemRef) or not declared.is_pinned_:
+                return None
+            decl_name = self._declared_alloc_name(declared, node.value)
+            slot_count = declared.slot_count_
+        elif self._is_memref_node(node.value):
+            inline = self.resolve_memref(node.value)
+            if not inline.is_pinned_:
+                return None
+            decl_name = inline.base_.name_hint
+            slot_count = inline.slot_count_
+        else:
+            return None
+        if slot_count <= 1:
+            raise ParserTypeError(
+                f"'{decl_name}' was declared with a single slot, so it cannot be subscripted",
+                span=span,
+                hint=f"Declare it as pl.MemRef(slots=N) to subscript it, or reference "
+                f"'{decl_name}' without a subscript",
+            )
+
+        # Same pure-index-expression contract as a TileView field: constants, vars
+        # and arithmetic over them, with no parsing side effects.
+        index = self._parse_tileview_expr(node.slice)
+        const_index = index.value if isinstance(index, ir.ConstInt) else None
+        if const_index is not None and not 0 <= const_index < slot_count:
+            raise ParserTypeError(
+                f"Slot index {const_index} is out of range for '{decl_name}', "
+                f"declared with {slot_count} slot(s)",
+                span=span,
+                hint=f"Subscript within [0, {slot_count}), or declare more slots",
+            )
+        return self._make_declared_memref(decl_name, span, slots=slot_count, slot=index)
 
     def _declared_alloc_name(self, declared: "ir.MemRef", node: ast.Name) -> str:
         """The name a declared allocation goes by, and the checks that keep it one.
@@ -679,7 +754,40 @@ class TypeResolver:
             )
         return name
 
-    def _make_declared_memref(self, name: str, span: "ir.Span") -> "ir.MemRef":
+    def _resolve_slots_kwarg(self, node: ast.Call, span: "ir.Span") -> int:
+        """Read `slots=N` off a declaration, defaulting to a single slot.
+
+        Args:
+            node: The `pl.MemRef(...)` call node
+            span: Source location
+
+        Returns:
+            The declared slot count
+
+        Raises:
+            ParserTypeError: If `slots` is not a positive integer literal
+        """
+        for keyword in node.keywords:
+            if keyword.arg != "slots":
+                continue
+            value = keyword.value
+            if not (
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, int)
+                and not isinstance(value.value, bool)
+                and value.value >= 1
+            ):
+                raise ParserTypeError(
+                    f"slots must be a positive integer literal, got {ast.unparse(value)}",
+                    span=span,
+                    hint='Use pl.MemRef("scratch", slots=2)',
+                )
+            return value.value
+        return 1
+
+    def _make_declared_memref(
+        self, name: str, span: "ir.Span", slots: int = 1, slot: "ir.Expr | None" = None
+    ) -> "ir.MemRef":
         """Build the unresolved MemRef for a declared allocation's name.
 
         A declared allocation's name is its own namespace, unrelated to Python
@@ -693,12 +801,14 @@ class TypeResolver:
         Args:
             name: Allocation name, shared by every annotation naming it
             span: Source location
+            slots: How many slots the declaration holds
+            slot: Index expression selecting the slot, or None when unsubscripted
 
         Returns:
             A MemRef with ``is_pinned_`` set, on the interned base Ptr
         """
         base_var = self._intern_base_ptr(name, span, skip_scope_lookup=True)
-        return ir.MemRef(base_var, 0, 0, span, is_pinned=True)
+        return ir.MemRef(base_var, 0, 0, span, is_pinned=True, slots=slots, slot=slot)
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.
@@ -1741,7 +1851,9 @@ class TypeResolver:
         # One argument: a declared allocation. The author names it and nothing
         # else — InitMemRef derives the size from the tiles bound to it and the
         # allocator assigns the address — so there is no offset/size to give.
-        if len(node.args) == 1 and not node.keywords:
+        # `slots=N` is the only keyword, and it is what the printer emits for a
+        # multi-slot declaration so the dump reparses.
+        if len(node.args) == 1 and all(kw.arg == "slots" for kw in node.keywords):
             name_node = node.args[0]
             if not (
                 isinstance(name_node, ast.Constant) and isinstance(name_node.value, str) and name_node.value
@@ -1752,7 +1864,9 @@ class TypeResolver:
                     span=span,
                     hint='Use pl.MemRef("scratch")',
                 )
-            return self._make_declared_memref(name_node.value, span)
+            return self._make_declared_memref(
+                name_node.value, span, slots=self._resolve_slots_kwarg(node, span)
+            )
 
         if len(node.args) == 3:
             first_arg = node.args[0]

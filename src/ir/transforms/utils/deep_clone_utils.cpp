@@ -133,10 +133,11 @@ class DeepCloneMutator : public IRMutator {
     }
     auto new_offset = op->byte_offset_ ? IRMutator::VisitExpr(op->byte_offset_) : op->byte_offset_;
     // A clone denotes the same storage as its source, so it keeps
-    // is_pinned_: dropping it would silently un-bind every tile in a cloned
+    // is_pinned_ and its slot fields: dropping them would silently un-bind every tile in a cloned
     // region — e.g. the per-stage bodies LowerPipelineLoops produces.
-    auto fresh = std::make_shared<MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset),
-                                          op->size_, op->span_, op->is_pinned_);
+    auto fresh =
+        std::make_shared<MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset), op->size_,
+                                 op->span_, op->is_pinned_, op->slot_count_, op->slot_index_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }

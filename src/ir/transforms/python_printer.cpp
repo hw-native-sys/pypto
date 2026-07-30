@@ -2836,7 +2836,17 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   // invented pair would make it indistinguishable from a compiler allocation on
   // reparse.
   if (memref.is_pinned_) {
-    oss << prefix_ << ".MemRef(\"" << GetVarName(memref.base_.get()) << "\")";
+    oss << prefix_ << ".MemRef(\"" << GetVarName(memref.base_.get()) << "\"";
+    // `slots=` is what makes the subscript below legal on reparse, so it has to
+    // ride along; omitted at 1 so an unsubscripted declaration prints as before.
+    if (memref.slot_count_ > 1) oss << ", slots=" << memref.slot_count_;
+    oss << ")";
+    if (memref.slot_index_.has_value() && *memref.slot_index_) {
+      // The index may be a runtime expression, so print it through the expression
+      // printer rather than assuming a constant.
+      IRPythonPrinter temp_printer(prefix_);
+      oss << "[" << temp_printer.Print(*memref.slot_index_) << "]";
+    }
     return oss.str();
   }
 

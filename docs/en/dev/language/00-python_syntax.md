@@ -109,6 +109,38 @@ Whether a MemRef is a declaration is recorded explicitly on the IR node
 `pinned=True` and the MemRef is an ordinary one, so re-parsing a post-allocation dump
 cannot turn compiler allocations into declared ones.
 
+#### Slots
+
+Pass `slots=N` for N equally-sized slots of one allocation, then pick one by subscript.
+The slots are contiguous and uniformly sized, so rotating through them is a ping-pong the
+packer cannot collapse:
+
+```python
+l0c = pl.MemRef(slots=2)
+
+ping: pl.Tile[[M, N], pl.FP32, l0c[0], pl.Mem.Acc] = pl.tile.matmul(q, b0)
+pong: pl.Tile[[M, N], pl.FP32, l0c[1], pl.Mem.Acc] = pl.tile.matmul(q, b1)
+```
+
+**The index may be a runtime value**, so a rotation needs no unrolling:
+
+```python
+for i, (acc,) in pl.range(N, init_values=(out,)):
+    a: pl.Tile[[M, N], pl.FP32, l0c[i % 2], pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
+```
+
+`InitMemRef` sizes one slot to the largest tile bound to *any* slot — the slots are
+uniform, so a per-slot size would make the stride inconsistent — and turns the index into
+the byte offset `index * slot_size`. A constant index folds there and takes the ordinary
+constant-address path; a runtime one survives as an expression that becomes the tile's
+address at run time.
+
+Co-liveness is checked **per slot**, not per allocation: two tiles on different slots are
+meant to be live together, and only two tiles landing on the *same* slot can corrupt each
+other. When the index is a runtime expression there is no static slot to attribute a tile
+to, so the check is skipped — the rotation is yours to get right — while isolation from
+every other allocation still holds.
+
 A declared name lives in its own namespace — it never resolves to a Python variable that
 happens to share it. The memory space **is** required (a `TileType` always pairs a
 MemRef with a space), and all tiles bound to one allocation must agree on it. Tiles left

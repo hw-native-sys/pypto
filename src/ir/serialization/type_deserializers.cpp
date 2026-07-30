@@ -351,7 +351,19 @@ static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::z
   // Absent in blobs written before declared allocations existed; those hold only
   // compiler allocations, which is exactly what `false` means.
   bool is_pinned = ctx.HasField(fields_obj, "is_pinned") && GET_FIELD(bool, "is_pinned");
-  return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span, is_pinned);
+  uint64_t slot_count =
+      ctx.HasField(fields_obj, "slot_count") ? GET_FIELD(uint64_t, "slot_count") : uint64_t{1};
+  // slot_index_ is an Expr (a runtime slot index is legal), so it deserializes as
+  // a node; absent means an unsubscripted declaration.
+  std::optional<ExprPtr> slot_index = std::nullopt;
+  if (ctx.HasField(fields_obj, "slot_index")) {
+    const auto& slot_obj = GET_FIELD_OBJ("slot_index");
+    if (!slot_obj.is_nil()) {
+      slot_index = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(slot_obj, zone));
+    }
+  }
+  return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span, is_pinned, slot_count,
+                                  std::move(slot_index));
 }
 
 // Deserialize ConstInt

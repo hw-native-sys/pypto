@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // clang-format off
@@ -158,6 +159,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     // Absent in blobs written before declared allocations existed; those hold only
     // compiler allocations, which is exactly what `false` means.
     bool is_pinned = false;
+    // Slot fields default to "one slot, index 0" — what an unsubscripted
+    // declaration and every compiler allocation mean.
+    uint64_t slot_count = 1;
+    std::optional<ExprPtr> slot_index = std::nullopt;
     bool has_base = false;
     bool has_byte_offset = false;
     bool has_size = false;
@@ -178,6 +183,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         has_size = true;
       } else if (key == "is_pinned") {
         p->val.convert(is_pinned);
+      } else if (key == "slot_count") {
+        p->val.convert(slot_count);
+      } else if (key == "slot_index") {
+        if (!p->val.is_nil()) {
+          slot_index = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        }
       }
     }
 
@@ -186,7 +197,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     // Create a base Ptr variable from the name
     auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
-    return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_pinned);
+    return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_pinned, slot_count,
+                                    std::move(slot_index));
   }
 
   std::optional<TileView> DeserializeTileView(const msgpack::object& obj, msgpack::zone& zone) {

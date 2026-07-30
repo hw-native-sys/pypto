@@ -57,6 +57,13 @@ def _base_names(program: ir.Program) -> dict[str, str]:
     return {name: memref.base_.name_hint for name, memref in _tile_memrefs(program).items()}
 
 
+def _const_offset(memref: ir.MemRef) -> int:
+    """The MemRef's byte offset as an int, asserting it really is constant."""
+    offset = memref.byte_offset_
+    assert isinstance(offset, ir.ConstInt), f"expected a constant offset, got {type(offset).__name__}"
+    return offset.value
+
+
 def _alloc_lines(program: ir.Program) -> list[str]:
     """The on-chip allocation lines of the printed program."""
     return [line.strip() for line in program.as_python().splitlines() if ".alloc(pl.Mem." in line]
@@ -348,6 +355,228 @@ class Zero:
         after = passes.init_mem_ref()(Before)
         reparsed = pl.parse_program(after.as_python())
         ir.assert_structural_equal(after, reparsed)
+
+
+class TestSlots:
+    """A declaration may hold N equally-sized slots, selected by subscript.
+
+    The point is a ping-pong the packer cannot collapse: the slots are one
+    allocation, so they are contiguous and uniformly sized, and the index may be
+    a runtime value so a rotation needs no unrolling.
+    """
+
+    def test_slots_are_one_allocation_at_distinct_offsets(self):
+        """N slots become one allocation of N x slot, addressed by offset."""
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        after = passes.init_mem_ref()(Before)
+        memrefs = _tile_memrefs(after)
+        # One allocation, sized for both slots; the slots differ only by offset.
+        assert len(_alloc_lines(after)) == 1
+        assert memrefs["t0"].base_ is memrefs["t1"].base_
+        assert memrefs["t0"].size_ == memrefs["t1"].size_ == 2 * 64 * 64 * 4
+        assert _const_offset(memrefs["t0"]) == 0
+        assert _const_offset(memrefs["t1"]) == 64 * 64 * 4
+
+    def test_slot_size_is_the_largest_tile_on_any_slot(self):
+        """Slots are uniform, so one slot must hold the biggest bound tile.
+
+        A per-slot size would make `index * slot_size` an inconsistent stride.
+        """
+        buf = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                big_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                small_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
+                big: pl.Tile[[64, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
+                small: pl.Tile[[32, 32], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+                r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
+                return r_big, r_small
+
+        memrefs = _tile_memrefs(passes.init_mem_ref()(Before))
+        slot_size = 64 * 64 * 4
+        assert memrefs["big"].size_ == memrefs["small"].size_ == 2 * slot_size
+        # The small tile still starts one *full* slot in, not one small tile in.
+        assert _const_offset(memrefs["small"]) == slot_size
+
+    def test_runtime_slot_index_reaches_the_address(self, ascend_backend):
+        """`l0c[i % 2]` rotates at runtime — the whole point of slots.
+
+        The index survives as an expression through SSA renaming and pass
+        rebuilds, and InitMemRef scales it into the byte offset, so the address
+        is computed per iteration rather than baked to slot 0.
+        """
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                seed: pl.Tile[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc_i,) in pl.range(4, init_values=(seed,)):
+                    t: pl.Tile[[64, 64], pl.FP32, l0c[i % 2], pl.Mem.Vec] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                    )
+                    acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+                    r = pl.yield_(acc_next)
+                out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+                return out
+
+        # Through AllocateMemoryAddr: a dynamic address must survive, not collapse
+        # to a constant (which would silently address slot 0 every iteration).
+        after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        rotated = [
+            mr for name, mr in _tile_memrefs(after).items() if not isinstance(mr.byte_offset_, ir.ConstInt)
+        ]
+        assert rotated, "the runtime slot address folded to a constant"
+
+    def test_unsubscripted_declaration_is_unchanged(self):
+        """A declaration with one slot behaves exactly as before slots existed."""
+        scratch = pl.MemRef()
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                return pl.store(t0, [0, 0], out)
+
+        memrefs = _tile_memrefs(passes.init_mem_ref()(Before))
+        assert memrefs["t0"].size_ == 64 * 64 * 4
+        assert _const_offset(memrefs["t0"]) == 0
+
+    def test_different_slots_may_be_live_together(self, ascend_backend):
+        """Two slots co-live is the ping-pong, not a conflict.
+
+        The co-liveness check keys on the slot, not the allocation; keying on the
+        allocation would reject exactly the pattern slots exist for.
+        """
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.add(t0, t1)
+                return pl.store(t2, [0, 0], out)
+
+        bases = set(_base_names(_run_memory_pipeline(Before)).values())
+        assert "l0c" in bases
+
+    def test_slots_round_trip(self):
+        """The printed form carries both `slots=` and the subscript.
+
+        Without `slots=` the reparsed subscript would be out of range; without the
+        subscript every slot would collapse onto slot 0.
+        """
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, l0c[1], pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
+
+        dumped = Before.as_python()
+        assert 'pl.MemRef("l0c", slots=2)[1]' in dumped, dumped
+        ir.assert_structural_equal(Before, pl.parse_program(dumped))
+
+
+class TestSlotRejects:
+    """Slot subscripts the compiler must refuse."""
+
+    def test_rejects_out_of_range_constant_slot(self):
+        """A constant index outside the declared count is a compile-time error."""
+        l0c = pl.MemRef(slots=2)
+
+        with pytest.raises(ParserTypeError, match="out of range"):
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(
+                    self,
+                    a: pl.Tensor[[64, 64], pl.FP32],
+                    out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                ) -> pl.Tensor[[64, 64], pl.FP32]:
+                    t: pl.Tile[[64, 64], pl.FP32, l0c[5], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    return pl.store(t, [0, 0], out)
+
+    def test_rejects_subscripting_a_single_slot_declaration(self):
+        """Subscripting something with one slot is a mistake worth naming."""
+        scratch = pl.MemRef()
+
+        with pytest.raises(ParserTypeError, match="single slot"):
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(
+                    self,
+                    a: pl.Tensor[[64, 64], pl.FP32],
+                    out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                ) -> pl.Tensor[[64, 64], pl.FP32]:
+                    t: pl.Tile[[64, 64], pl.FP32, scratch[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    return pl.store(t, [0, 0], out)
+
+    def test_rejects_two_tiles_co_live_on_one_slot(self, ascend_backend):
+        """Same slot, overlapping lifetimes — still data corruption."""
+        l0c = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, l0c[0], pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.add(t0, t1)
+                return pl.store(t2, [0, 0], out)
+
+        with pytest.raises(ValueError, match="same slot"):
+            _run_memory_pipeline(Before)
 
 
 class TestReuseControl:

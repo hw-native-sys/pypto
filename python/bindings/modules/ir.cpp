@@ -764,16 +764,24 @@ void BindIR(nb::module_& m) {
       .def(
           "__init__",
           [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span,
-             bool is_pinned) { new (self) MemRef(base, byte_offset, size, span, is_pinned); },
+             bool is_pinned, uint64_t slots, const ExprPtr& slot) {
+            new (self) MemRef(base, byte_offset, size, span, is_pinned, slots, slot);
+          },
           nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
-          nb::arg("is_pinned") = false,
+          nb::arg("is_pinned") = false, nb::arg("slots") = 1, nb::arg("slot") = nb::none(),
           "Create a memory reference with base Ptr, integer byte_offset, and size. Set is_pinned for an "
-          "author-declared allocation whose size the parser leaves for InitMemRef to derive")
+          "author-declared allocation whose size the parser leaves for InitMemRef to derive; slots/slot "
+          "select one slot of a multi-slot declaration")
       .def(nb::init<VarPtr, ExprPtr, uint64_t, Span>(), nb::arg("base"), nb::arg("byte_offset"),
            nb::arg("size"), nb::arg("span") = Span::unknown(),
            "Create a memory reference with base Ptr, byte_offset expression, and size")
       .def_ro("is_pinned_", &MemRef::is_pinned_,
               "True for an author-declared allocation, false for a compiler allocation")
+      .def_ro("slot_count_", &MemRef::slot_count_,
+              "How many equally-sized slots the declared allocation holds (1 when unsubscripted)")
+      .def_ro("slot_index_", &MemRef::slot_index_,
+              "Which slot of the declared allocation this MemRef denotes, as an Expr (None when "
+              "unsubscripted); may be a runtime value")
       // Declaration forms. Both leave size and address for InitMemRef to derive
       // and are distinguished from the three-argument form purely by arity.
       //
@@ -783,23 +791,40 @@ void BindIR(nb::module_& m) {
       // named forms can produce, since the parser rejects an empty literal.
       .def(
           "__init__",
-          [](MemRef* self, const Span& span) {
+          [](MemRef* self, uint64_t slots, const Span& span) {
             auto base = std::make_shared<Var>("", GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
-                              /*is_pinned=*/true);
+                              /*is_pinned=*/true, slots);
           },
-          nb::arg("span") = Span::unknown(),
+          nb::arg("slots") = 1, nb::arg("span") = Span::unknown(),
           "Declare an allocation of your own, named after the variable it is bound to. Size and "
-          "address are left for InitMemRef to derive, and nothing else is ever packed into it")
+          "address are left for InitMemRef to derive, and nothing else is ever packed into it. Pass "
+          "slots=N for N equally-sized slots, selected by subscript in the tile annotation")
       .def(
           "__init__",
-          [](MemRef* self, const std::string& name, const Span& span) {
+          [](MemRef* self, const std::string& name, uint64_t slots, const Span& span) {
             auto base = std::make_shared<Var>(name, GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
-                              /*is_pinned=*/true);
+                              /*is_pinned=*/true, slots);
           },
-          nb::arg("name"), nb::arg("span") = Span::unknown(),
+          nb::arg("name"), nb::arg("slots") = 1, nb::arg("span") = Span::unknown(),
           "Declare an allocation of your own under an explicit name, overriding the variable name")
+      // `decl[k]` selects one slot. The result is the same declaration — same base
+      // Ptr, so the slots share one allocation — differing only in slot_index_.
+      .def(
+          "__getitem__",
+          [](const MemRef& self, uint64_t slot) {
+            CHECK(self.is_pinned_) << "Only a declared allocation can be subscripted; a MemRef that "
+                                      "already describes an existing allocation has no slots";
+            CHECK(slot < self.slot_count_)
+                << "Slot index " << slot << " is out of range for a declaration with " << self.slot_count_
+                << " slot(s); declare it with pl.MemRef(slots=" << (slot + 1) << ") or higher";
+            auto index =
+                std::make_shared<ConstInt>(static_cast<int64_t>(slot), DataType::INDEX, Span::unknown());
+            return std::make_shared<MemRef>(self.base_, self.byte_offset_, self.size_, self.span_,
+                                            self.is_pinned_, self.slot_count_, std::move(index));
+          },
+          nb::arg("slot"), "Select one slot of a multi-slot declared allocation by constant index")
       // String base constructor: MemRef("base_name", byte_offset, size) — for forward references
       // in printed IR where the base Ptr variable appears in annotations before its alloc statement
       .def(
