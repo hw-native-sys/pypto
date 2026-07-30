@@ -142,6 +142,9 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
+| `tile.part_argmax(src0, src1, src0_idx, src1_idx)` | `pto.tpartargmax` (selected value and paired index outputs) |
+| `tile.part_argmin(src0, src1, src0_idx, src1_idx)` | `pto.tpartargmin` (selected value and paired index outputs) |
+| `tile.histogram(src, idx, byte=...)` | `pto.thistogram` (A5 cumulative 256-bin histogram) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered

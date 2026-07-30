@@ -1565,37 +1565,12 @@ class ForbidAliasCollector : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (auto call = As<Call>(op->value_); call && call->op_) {
-      const auto& reg = OpRegistry::GetInstance();
-      if (reg.IsRegistered(call->op_->name_)) {
-        const auto& entry = reg.GetEntry(call->op_->name_);
-        auto rep_it = member_to_rep_.find(op->var_.get());
-        const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : op->var_.get();
-        auto forbid_arg = [&](size_t i) {
-          if (i < call->args_.size()) {
-            if (auto v = AsVarLike(call->args_[i])) forbidden_[out_key].push_back(v);
-          }
-        };
-        if (!entry.IsInplaceSafe()) {
-          // src != dst required: the output must not alias any input operand.
-          for (size_t i = 0; i < call->args_.size(); ++i) forbid_arg(i);
-        } else {
-          for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
-        }
-        // A dtype-widening cast (output element wider than its input) cannot run
-        // in place: element i is read at i*in_bytes but written at i*out_bytes,
-        // so with out_bytes > in_bytes the write cursor outruns the read cursor
-        // and clobbers input elements not yet converted -> corrupt results.
-        // Narrowing / same-width casts are in-place-safe and keep the cross-dtype
-        // reuse the removed gate enables, so forbid only the widening direction.
-        if (IsOp(call, "tile.cast") && !call->args_.empty()) {
-          auto out_t = As<TileType>(op->var_->GetType());
-          auto in_t = As<TileType>(call->args_[0]->GetType());
-          if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
-        }
-        // tile.transpose is registered not_inplace_safe(), so its output is
-        // already forbidden from aliasing any input above (pto.ttrans writes
-        // dst directly from src on the scalar path — dst == src corrupts).
-      }
+      if (As<TupleType>(op->var_->GetType())) tuple_calls_[op->var_.get()] = call;
+      RecordForCall(op->var_, call);
+    } else if (auto tuple_get = As<TupleGetItemExpr>(op->value_)) {
+      auto tuple_var = AsVarLike(tuple_get->tuple_);
+      auto call_it = tuple_var ? tuple_calls_.find(tuple_var.get()) : tuple_calls_.end();
+      if (call_it != tuple_calls_.end()) RecordForCall(op->var_, call_it->second);
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -1603,8 +1578,46 @@ class ForbidAliasCollector : public IRVisitor {
   ForbidAliasMap Take() { return std::move(forbidden_); }
 
  private:
+  void RecordForCall(const VarPtr& output, const CallPtr& call) {
+    if (!output || !call || !call->op_) return;
+    if (!As<TileType>(output->GetType())) return;
+    const auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(call->op_->name_)) return;
+
+    const auto& entry = reg.GetEntry(call->op_->name_);
+    auto rep_it = member_to_rep_.find(output.get());
+    const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
+    auto forbid_arg = [&](size_t i) {
+      if (i < call->args_.size()) {
+        if (auto v = AsVarLike(call->args_[i])) forbidden_[out_key].push_back(v);
+      }
+    };
+    if (!entry.IsInplaceSafe()) {
+      // src != dst required: every scalar or tuple-element output must not alias
+      // any input operand read by the call.
+      for (size_t i = 0; i < call->args_.size(); ++i) forbid_arg(i);
+    } else {
+      for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
+    }
+    // A dtype-widening cast (output element wider than its input) cannot run
+    // in place: element i is read at i*in_bytes but written at i*out_bytes,
+    // so with out_bytes > in_bytes the write cursor outruns the read cursor
+    // and clobbers input elements not yet converted -> corrupt results.
+    // Narrowing / same-width casts are in-place-safe and keep the cross-dtype
+    // reuse the removed gate enables, so forbid only the widening direction.
+    if (IsOp(call, "tile.cast") && !call->args_.empty()) {
+      auto out_t = As<TileType>(output->GetType());
+      auto in_t = As<TileType>(call->args_[0]->GetType());
+      if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
+    }
+    // tile.transpose is registered not_inplace_safe(), so its output is
+    // already forbidden from aliasing any input above (pto.ttrans writes
+    // dst directly from src on the scalar path — dst == src corrupts).
+  }
+
   ForbidAliasMap forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
+  std::map<const Var*, CallPtr> tuple_calls_;       ///< tuple result Var -> defining call
 };
 
 /// True only for Ascend910B AIV split-mode functions, which need the load +

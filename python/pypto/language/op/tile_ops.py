@@ -120,6 +120,9 @@ __all__ = [
     "part_mul",
     "part_max",
     "part_min",
+    "part_argmax",
+    "part_argmin",
+    "histogram",
     "fmod",
     "fmods",
     "and_",
@@ -2042,6 +2045,31 @@ def part_min(src0: Tile, src1: Tile) -> Tile:
     """
     call_expr = _ir_ops.part_min(src0.unwrap(), src1.unwrap())
     return Tile(expr=call_expr)
+
+
+def part_argmax(src0: Tile, src1: Tile, src0_idx: Tile, src1_idx: Tile) -> tuple[Tile, Tile]:
+    """Partial element-wise maximum returning ``(value, index)`` tiles."""
+    call_expr = _ir_ops.part_argmax(src0.unwrap(), src1.unwrap(), src0_idx.unwrap(), src1_idx.unwrap())
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def part_argmin(src0: Tile, src1: Tile, src0_idx: Tile, src1_idx: Tile) -> tuple[Tile, Tile]:
+    """Partial element-wise minimum returning ``(value, index)`` tiles."""
+    call_expr = _ir_ops.part_argmin(src0.unwrap(), src1.unwrap(), src0_idx.unwrap(), src1_idx.unwrap())
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def histogram(src: Tile, idx: Tile, byte: int = 1) -> Tile:
+    """A5 per-row cumulative histogram for a selected source byte."""
+    return Tile(expr=_ir_ops.histogram(src.unwrap(), idx.unwrap(), byte=byte))
 
 
 def fmod(lhs: Tile, rhs: Tile) -> Tile:

@@ -935,6 +935,38 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
 
 
+def part_argmax(
+    src0: Expr,
+    src1: Expr,
+    src0_idx: Expr,
+    src1_idx: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Partial element-wise maximum returning selected values and indices."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_argmax", [src0, src1, src0_idx, src1_idx], {}, actual_span)
+
+
+def part_argmin(
+    src0: Expr,
+    src1: Expr,
+    src0_idx: Expr,
+    src1_idx: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Partial element-wise minimum returning selected values and indices."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.part_argmin", [src0, src1, src0_idx, src1_idx], {}, actual_span)
+
+
+def histogram(src: Expr, idx: Expr, byte: int = 1, span: Span | None = None) -> Call:
+    """A5 per-row cumulative histogram for one byte of a UINT16/UINT32 tile."""
+    if not isinstance(byte, int) or isinstance(byte, bool) or not 0 <= byte <= 3:
+        raise ValueError(f"histogram byte must be an integer in [0, 3], got {byte!r}")
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.histogram", [src, idx], {"byte": byte}, actual_span)
+
+
 def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise floating-point remainder of two tiles.
 

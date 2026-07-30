@@ -347,8 +347,24 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
 
 /// Predicate for the default `EliminateDeadCode`: any AssignStmt that is not
 /// a known side-effect op is a removal candidate.
+bool IsMultiTileTupleElement(const AssignStmtPtr& assign) {
+  auto tuple_get = As<TupleGetItemExpr>(assign ? assign->value_ : ExprPtr{});
+  if (!tuple_get) return false;
+  auto tuple_var = AsVarLike(tuple_get->tuple_);
+  auto tuple_type = As<TupleType>(tuple_var ? tuple_var->GetType() : TypePtr{});
+  if (!tuple_type || tuple_type->types_.size() < 2) return false;
+  for (const auto& element_type : tuple_type->types_) {
+    if (!As<TileType>(element_type)) return false;
+  }
+  return true;
+}
+
 bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
-  return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+  if (!assign || IsSideEffectOp(stmt)) return false;
+  // PTO instructions with multiple tile outputs must materialize every `outs`
+  // operand even when a later pass only consumes one result.
+  return !IsMultiTileTupleElement(assign);
 }
 
 /// Walk an expression tree and report whether any Call or Submit appears.

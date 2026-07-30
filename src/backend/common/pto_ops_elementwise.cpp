@@ -14,7 +14,10 @@
  * @brief PTO codegen registration for elementwise / compute tile ops.
  */
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -31,6 +34,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -348,6 +352,88 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   return "";
 }
 
+static std::string MakePartArgCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                         codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 4) << op->op_->name_
+                               << " requires 4 arguments (src0, src1, src0_idx, src1_idx), but got "
+                               << op->args_.size();
+
+  auto tuple_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+      << "Internal error: " << op->op_->name_ << " codegen requires current_result_var";
+  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, 2);
+  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+      << "Internal error: " << op->op_->name_ << " requires two TupleGetItemExpr consumers";
+
+  std::array<std::shared_ptr<const ir::TileType>, 2> result_types;
+  for (size_t i = 0; i < result_types.size(); ++i) {
+    result_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(result_types[i], element_vars[i]->span_)
+        << "Internal error: " << op->op_->name_ << " result " << i
+        << " must have TileType with MemRef set by InitMemRef";
+    codegen.EmitAllocTileForVar(element_vars[i], result_types[i]);
+  }
+
+  std::array<std::string, 4> inputs;
+  std::array<std::string, 4> input_types;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    inputs[i] = codegen.GetExprAsCode(op->args_[i]);
+    input_types[i] = codegen.GetExprTypeAnnotation(op->args_[i]);
+    INTERNAL_CHECK_SPAN(!inputs[i].empty(), op->args_[i]->span_)
+        << "Internal error: " << op->op_->name_ << " input " << i << " requires an SSA value";
+  }
+  const std::string dst = codegen.GetVarName(element_vars[0]);
+  const std::string dst_idx = codegen.GetVarName(element_vars[1]);
+  const std::string dst_type = codegen.GetTileBufTypeStringFromTileType(result_types[0]);
+  const std::string dst_idx_type = codegen.GetTileBufTypeStringFromTileType(result_types[1]);
+  INTERNAL_CHECK_SPAN(!dst.empty() && !dst_idx.empty(), op->span_)
+      << "Internal error: " << op->op_->name_ << " requires value and index outputs";
+
+  std::ostringstream oss;
+  oss << pto_op_name << " ins(" << inputs[0] << ", " << inputs[1] << ", " << inputs[2] << ", " << inputs[3];
+  if (std::all_of(input_types.begin(), input_types.end(),
+                  [](const std::string& type) { return !type.empty(); })) {
+    oss << " : " << input_types[0] << ", " << input_types[1] << ", " << input_types[2] << ", "
+        << input_types[3];
+  }
+  oss << ") outs(" << dst << ", " << dst_idx;
+  if (!dst_type.empty() && !dst_idx_type.empty()) {
+    oss << " : " << dst_type << ", " << dst_idx_type;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+static std::string MakeHistogramCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.histogram requires 2 arguments (src, idx), but got "
+                               << op->args_.size();
+  const int byte = op->GetKwarg<int>("byte", 1);
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string idx = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  INTERNAL_CHECK_SPAN(!src.empty() && !idx.empty() && !dst.empty(), op->span_)
+      << "Internal error: tile.histogram requires input and output SSA values";
+
+  std::ostringstream oss;
+  oss << "pto.thistogram ins(" << src << ", " << idx;
+  if (!src_type.empty() && !idx_type.empty()) {
+    oss << " : " << src_type << ", " << idx_type;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ") {byte = " << byte << " : i32}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 struct SimpleOpEntry {
   const char* op_name;
   const char* pto_op_name;
@@ -496,6 +582,22 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(op_name) > 0) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+
+  auto register_part_arg = [&](const char* op_name, const char* pto_op_name) {
+    if (exclude_ops.count(op_name) > 0) return;
+    auto entry = backend.RegisterOp(op_name);
+    entry.f_codegen([pto_op = std::string(pto_op_name)](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakePartArgCodegenPTO(pto_op, op, codegen);
+    });
+    for (size_t i = 0; i < 4; ++i) {
+      entry.set_input_layout(i, ir::TileLayout::row_major);
+    }
+    entry.set_output_layout(ir::TileLayout::row_major);
+  };
+  register_part_arg("tile.part_argmax", "pto.tpartargmax");
+  register_part_arg("tile.part_argmin", "pto.tpartargmin");
+  reg("tile.histogram",
+      [](const CallPtr& op, codegen::CodegenBase& codegen) { return MakeHistogramCodegenPTO(op, codegen); });
 
   auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
                                    const char* attr_kind) {

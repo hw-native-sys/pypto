@@ -3851,6 +3851,38 @@ class TestForbidOutputAlias:
             f"row_sum output must not alias its tmp buffer, but both bind to {bases['s']}"
         )
 
+    def test_tuple_outputs_do_not_alias_inputs_of_inplace_unsafe_op(self):
+        """Each part-arg tuple output must stay off all four input buffers."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                value_a: pl.Tensor[[8, 8], pl.FP32],
+                value_b: pl.Tensor[[8, 8], pl.FP32],
+                index_a: pl.Tensor[[8, 8], pl.INT32],
+                index_b: pl.Tensor[[8, 8], pl.INT32],
+                value_out: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+                index_out: pl.Out[pl.Tensor[[8, 8], pl.INT32]],
+            ) -> tuple[pl.Tensor[[8, 8], pl.FP32], pl.Tensor[[8, 8], pl.INT32]]:
+                va = pl.load(value_a, [0, 0], [8, 8])
+                vb = pl.load(value_b, [0, 0], [8, 8])
+                ia = pl.load(index_a, [0, 0], [8, 8])
+                ib = pl.load(index_b, [0, 0], [8, 8])
+                value, index = pl.tile.part_argmax(va, vb, ia, ib)
+                value_result = pl.store(value, [0, 0], value_out)
+                index_result = pl.store(index, [0, 0], index_out)
+                return value_result, index_result
+
+        After = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(After)
+        inputs = {bases[name] for name in ("va", "vb", "ia", "ib")}
+
+        assert bases["value"] not in inputs
+        assert bases["index"] not in inputs
+        assert bases["value"] != bases["index"]
+
     def test_forbidden_input_reached_through_view_is_honored(self):
         """A not_inplace_safe op reading a VIEW of its input must still not alias it.
 

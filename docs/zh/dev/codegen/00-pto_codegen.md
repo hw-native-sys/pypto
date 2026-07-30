@@ -140,6 +140,9 @@ print(pto_code)
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+| `tile.part_argmax(src0, src1, src0_idx, src1_idx)` | `pto.tpartargmax`（输出选中的值及配对索引） |
+| `tile.part_argmin(src0, src1, src0_idx, src1_idx)` | `pto.tpartargmin`（输出选中的值及配对索引） |
+| `tile.histogram(src, idx, byte=...)` | `pto.thistogram`（A5 累计 256-bin 直方图） |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)`（`shape` 元组仅用于类型推导；更大的 `dst` 及其 pad 来自结果类型） |
 
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`

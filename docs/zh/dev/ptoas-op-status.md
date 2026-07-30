@@ -83,8 +83,8 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmax | TPARTMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tpartargmax | TPARTARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tpartargmin | TPARTARGMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tpartargmax | TPARTARGMAX | tile | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机已验证 |
+| pto.tpartargmin | TPARTARGMIN | tile | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机已验证 |
 | pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tprelu | TPRELU | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -122,7 +122,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.trowmin | TROWMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机已验证；A5 真机待验证 |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowprod | TROWPROD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.thistogram | THISTOGRAM | tile | ✅ | ✅ | ✅ | ❌ | — | 仅 A5；已增加同名 A5sim PTOAS 编译覆盖，A5 执行待验证 |
 | pto.tcolsum | TCOLSUM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolmax | TCOLMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolargmax | TCOLARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -259,6 +259,6 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | **源码兼容 / 手动模式（1）** |  |  |  |  |  |  |  |  |
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
-**统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个；
-同名 ST 覆盖 110 个（普通 ST 106，distributed ST 4）；无同名 ST 62 个
-（普通 52，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。
+**统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 116 个，tensor 前端 75 个；
+同名 ST 覆盖 112 个（普通 ST 108，distributed ST 4）；无同名 ST 60 个
+（普通 50，distributed 10）；这 204 个中另有 32 个 op 不适合独立 ST。

@@ -97,8 +97,8 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tpartadd | TPARTADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmax | TPARTMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tpartmin | TPARTMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tpartargmax | TPARTARGMAX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tpartargmin | TPARTARGMIN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tpartargmax | TPARTARGMAX | tile | ✅ | ✅ | ✅ | ✅ | — | verified on A2/A3 hardware |
+| pto.tpartargmin | TPARTARGMIN | tile | ✅ | ✅ | ✅ | ✅ | — | verified on A2/A3 hardware |
 | pto.tpartmul | TPARTMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tprelu | TPRELU | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tadds | TADDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -136,7 +136,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.trowmin | TROWMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | verified on A2/A3 hardware; A5 hardware verification pending |
 | pto.trowargmin | TROWARGMIN | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.trowprod | TROWPROD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.thistogram | THISTOGRAM | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.thistogram | THISTOGRAM | tile | ✅ | ✅ | ✅ | ❌ | — | A5-only; same-name A5sim PTOAS compilation coverage added, A5 execution pending |
 | pto.tcolsum | TCOLSUM | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolmax | TCOLMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcolargmax | TCOLARGMAX | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -273,6 +273,6 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | **Source Compatibility / Manual Mode (1)** |  |  |  |  |  |  |  |  |
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
-**Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend;
-110 have same-name ST coverage (106 regular STs and 4 distributed STs); 62 lack same-name ST coverage
-(52 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
+**Stats**: 204 public/compatibility PTOAS ops; 116 have a pypto tile frontend and 75 have a tensor frontend;
+112 have same-name ST coverage (108 regular STs and 4 distributed STs); 60 lack same-name ST coverage
+(50 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.

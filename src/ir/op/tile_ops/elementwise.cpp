@@ -21,6 +21,7 @@
  */
 
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,6 +38,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -447,6 +449,179 @@ REGISTER_OP("tile.part_min")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.part_min");
+    });
+
+static TypePtr DeduceTilePartArgType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+  CHECK(args.size() == 4) << "The operator " << op_name
+                          << " requires 4 arguments (src0, src1, src0_idx, src1_idx), but got "
+                          << args.size();
+
+  std::array<std::shared_ptr<const TileType>, 4> types;
+  for (size_t i = 0; i < args.size(); ++i) {
+    types[i] = As<TileType>(args[i]->GetType());
+    CHECK(types[i]) << "The operator " << op_name << " requires argument " << i
+                    << " to be a TileType, but got " << args[i]->GetType()->TypeName();
+    CHECK(types[i]->shape_.size() == 2) << "The operator " << op_name << " requires rank-2 tile operands";
+  }
+
+  CHECK(types[0]->dtype_ == DataType::FP16 || types[0]->dtype_ == DataType::FP32)
+      << "The operator " << op_name << " requires value dtype in {FP16, FP32}, but got "
+      << types[0]->dtype_.ToString();
+  CHECK(types[1]->dtype_ == types[0]->dtype_)
+      << "The operator " << op_name << " requires src0 and src1 to have the same value dtype";
+  CHECK(types[2]->dtype_ == DataType::INT32 || types[2]->dtype_ == DataType::UINT32)
+      << "The operator " << op_name << " requires index dtype in {INT32, UINT32}, but got "
+      << types[2]->dtype_.ToString();
+  CHECK(types[3]->dtype_ == types[2]->dtype_)
+      << "The operator " << op_name << " requires src0_idx and src1_idx to have the same index dtype";
+
+  for (size_t operand = 1; operand < types.size(); ++operand) {
+    for (size_t dim = 0; dim < types[0]->shape_.size(); ++dim) {
+      CHECK(ProveValidExtentEqual(types[0]->shape_[dim], types[operand]->shape_[dim]) == ProofResult::kTrue)
+          << "The operator " << op_name << " requires all value and index operands to have the same shape";
+    }
+  }
+
+  const auto src0_valid = GetValidShape(types[0]);
+  const auto src1_valid = GetValidShape(types[1]);
+  const auto src0_idx_valid = GetValidShape(types[2]);
+  const auto src1_idx_valid = GetValidShape(types[3]);
+  for (size_t dim = 0; dim < src0_valid.size(); ++dim) {
+    CHECK(ProveValidExtentEqual(src0_valid[dim], src0_idx_valid[dim]) == ProofResult::kTrue)
+        << "The operator " << op_name << " requires src0 and src0_idx to have the same valid_shape";
+    CHECK(ProveValidExtentEqual(src1_valid[dim], src1_idx_valid[dim]) == ProofResult::kTrue)
+        << "The operator " << op_name << " requires src1 and src1_idx to have the same valid_shape";
+  }
+
+  bool src0_dominates = true;
+  bool src1_dominates = true;
+  for (size_t dim = 0; dim < src0_valid.size(); ++dim) {
+    src0_dominates &= ProveValidExtentLessEqual(src1_valid[dim], src0_valid[dim]) == ProofResult::kTrue;
+    src1_dominates &= ProveValidExtentLessEqual(src0_valid[dim], src1_valid[dim]) == ProofResult::kTrue;
+  }
+  CHECK(src0_dominates || src1_dominates)
+      << "The operator " << op_name
+      << " requires one source valid_shape to contain the other source valid_shape";
+  const bool use_src0 = src0_dominates;
+  const auto& result_valid = use_src0 ? src0_valid : src1_valid;
+
+  TileView value_view;
+  value_view.valid_shape = result_valid;
+  InheritTileViewLayout(value_view, use_src0 ? types[0] : types[1]);
+  auto value_type = std::make_shared<TileType>(types[0]->shape_, types[0]->dtype_, std::nullopt, value_view);
+
+  TileView index_view;
+  index_view.valid_shape = result_valid;
+  InheritTileViewLayout(index_view, use_src0 ? types[2] : types[3]);
+  auto index_type = std::make_shared<TileType>(types[2]->shape_, types[2]->dtype_, std::nullopt, index_view);
+  return std::make_shared<TupleType>(std::vector<TypePtr>{value_type, index_type});
+}
+
+REGISTER_OP("tile.part_argmax")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise maximum returning selected values and indices")
+    .add_argument("src0", "First value tile (FP16/FP32)")
+    .add_argument("src1", "Second value tile (same dtype/shape as src0)")
+    .add_argument("src0_idx", "Indices paired with src0 (INT32/UINT32)")
+    .add_argument("src1_idx", "Indices paired with src1 (same dtype/shape as src0_idx)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_input_memory(3, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/) {
+      return DeduceTilePartArgType(args, "tile.part_argmax");
+    });
+
+REGISTER_OP("tile.part_argmin")
+    .set_op_category("TileOp")
+    .set_description("Partial element-wise minimum returning selected values and indices")
+    .add_argument("src0", "First value tile (FP16/FP32)")
+    .add_argument("src1", "Second value tile (same dtype/shape as src0)")
+    .add_argument("src0_idx", "Indices paired with src0 (INT32/UINT32)")
+    .add_argument("src1_idx", "Indices paired with src1 (same dtype/shape as src0_idx)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_input_memory(3, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/) {
+      return DeduceTilePartArgType(args, "tile.part_argmin");
+    });
+
+static TypePtr DeduceTileHistogramType(const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 2) << "The operator tile.histogram requires 2 arguments (src, idx), but got "
+                          << args.size();
+  auto src = As<TileType>(args[0]->GetType());
+  auto idx = As<TileType>(args[1]->GetType());
+  CHECK(src && idx) << "The operator tile.histogram requires src and idx to be TileType operands";
+  CHECK(src->shape_.size() == 2 && idx->shape_.size() == 2)
+      << "The operator tile.histogram requires rank-2 src and idx tiles";
+  CHECK(src->dtype_ == DataType::UINT16 || src->dtype_ == DataType::UINT32)
+      << "The operator tile.histogram requires src dtype in {UINT16, UINT32}, but got "
+      << src->dtype_.ToString();
+  CHECK(idx->dtype_ == DataType::UINT8)
+      << "The operator tile.histogram requires UINT8 idx, but got " << idx->dtype_.ToString();
+
+  const int byte = GetKwargOr<int>(kwargs, "byte", 1);
+  CHECK(byte >= 0 && byte <= 3) << "The operator tile.histogram requires byte in [0, 3], but got " << byte;
+
+  const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src);
+  const TileView idx_view = tile_view_semantics::GetEffectiveTileView(*idx);
+  CHECK(src_view.blayout == TileLayout::row_major && src_view.slayout == TileLayout::none_box)
+      << "The operator tile.histogram requires row_major + none_box src layout";
+
+  const auto src_valid = GetValidShape(src);
+  const auto idx_valid = GetValidShape(idx);
+  if (src->dtype_ == DataType::UINT16) {
+    CHECK(byte <= 1) << "The operator tile.histogram only supports byte 0 or 1 for UINT16 src";
+    CHECK(idx_view.blayout == TileLayout::col_major && idx_view.slayout == TileLayout::none_box)
+        << "The operator tile.histogram requires col_major + none_box idx layout for UINT16 src";
+    CHECK(ProveValidExtentEqual(src->shape_[0], idx->shape_[0]) == ProofResult::kTrue &&
+          ProveValidExtentEqual(src_valid[0], idx_valid[0]) == ProofResult::kTrue)
+        << "The operator tile.histogram requires idx rows/valid rows to match UINT16 src";
+    const auto idx_cols = GetConstantDimension(idx->shape_[1]);
+    CHECK(idx_cols && *idx_cols == 1)
+        << "The operator tile.histogram requires UINT16 idx to have exactly one column";
+  } else {
+    CHECK(idx_view.blayout == TileLayout::row_major && idx_view.slayout == TileLayout::none_box)
+        << "The operator tile.histogram requires row_major + none_box idx layout for UINT32 src";
+    const int expected_rows = byte == 0 ? 3 : byte == 1 ? 2 : 1;
+    const auto idx_rows = GetConstantDimension(idx->shape_[0]);
+    CHECK(idx_rows && *idx_rows == expected_rows)
+        << "The operator tile.histogram requires UINT32 idx rows to equal " << expected_rows << " for byte "
+        << byte;
+    CHECK(ProveValidExtentEqual(src->shape_[1], idx->shape_[1]) == ProofResult::kTrue)
+        << "The operator tile.histogram requires UINT32 idx columns to match src columns";
+  }
+
+  auto bins = std::make_shared<ConstInt>(256, DataType::INDEX, Span::unknown());
+  TileView result_view;
+  result_view.blayout = TileLayout::row_major;
+  result_view.slayout = TileLayout::none_box;
+  result_view.valid_shape = {src_valid[0], bins};
+  return std::make_shared<TileType>(std::vector<ExprPtr>{src->shape_[0], bins}, DataType::UINT32,
+                                    std::nullopt, result_view);
+}
+
+REGISTER_OP("tile.histogram")
+    .set_op_category("TileOp")
+    .set_description("A5 per-row cumulative 256-bin histogram for one selected source byte")
+    .add_argument("src", "UINT16/UINT32 source tile")
+    .add_argument("idx", "UINT8 byte-filter index tile")
+    .set_attr<int>("byte")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileHistogramType(args, kwargs);
     });
 
 REGISTER_OP("tile.fmod")
