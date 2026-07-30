@@ -3,8 +3,9 @@
 The abstractions behind a PyPTO program: three levels of description, a compilation
 pipeline that lowers between them, and the memory hierarchy they are all describing.
 
-> **Prerequisites:** you have run the examples in [Quickstart](02-quickstart.md). This
-> page explains what those examples were doing.
+> **Prerequisites:** you have compiled the tensor-level examples in
+> [Quickstart](02-quickstart.md). This page explains what they were doing, and introduces
+> the tile level the quickstart deliberately left out.
 
 ## Concept
 
@@ -58,10 +59,12 @@ def levels(
 `pl.at` is the Block-level knob you meet first. `@pl.jit.incore` above already places the
 compute on a core, so this example does not need it; a single-function kernel says
 `with pl.at(level=pl.Level.CORE_GROUP):` instead — see
-[Quickstart](02-quickstart.md#quickstart-element-wise-add).
+[Quickstart](02-quickstart.md).
 
-Most programs stop at the first two. Block level is for when you need to say which core
-does what — multi-block dispatch, cluster scopes, mixed AIC/AIV kernels.
+The quickstart stays entirely at tensor level: `out = pl.add(a, b)` with no `pl.load` in
+sight. You drop to tile level when you need to control what sits on chip and when — the
+`scale` function above is that step. Block level is for saying which core does what:
+multi-block dispatch, cluster scopes, mixed AIC/AIV kernels.
 
 ## Mechanics
 
@@ -106,7 +109,7 @@ Python DSL          @pl.jit / @pl.program parse source into IR
 IR                  immutable tree, shared across the whole compilation
      │
      ▼
-Pass pipeline       44 passes in the default strategy: inline, SSA, outline scopes, tensor->tile,
+Pass pipeline       the default strategy, in order: inline, SSA, outline scopes, tensor->tile,
      │              layout, memory planning, task dependencies, ...
      ▼
 CodeGen             device kernels (.pto -> C++) + host orchestration C++

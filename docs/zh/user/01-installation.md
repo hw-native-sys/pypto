@@ -13,8 +13,8 @@ CMake，所以一条普通的 `pip install` 就能完成全部工作。
 
 | 要做这件事 | 还需要 |
 | ---------- | ------ |
-| 编写 kernel、跑 pass 流水线（`compile_for_test()`）、读 IR | 除安装外无需其他 |
-| 编译出设备 kernel | **ptoas**，单独分发（版本固定在 `toolchain/versions.env`）。没有它就用 `ir.compile(..., skip_ptoas=True)` 停在 `.pto` |
+| 编写 kernel、跑 pass 流水线、读 IR | 除安装外无需其他 |
+| 把 kernel 编译成生成的 C++ | 除安装外无需其他。**ptoas**（单独分发，版本固定在 `toolchain/versions.env`）负责其中的汇编步骤；`@pl.jit` 会检测它是否存在，不存在时自动跳过该步骤 |
 | 运行已编译的 kernel | 运行时，加一块 NPU 或模拟器平台 |
 
 下面的验证步骤刻意只停留在第一行。
@@ -52,14 +52,13 @@ import pypto.language as pl
 import torch
 
 @pl.jit
-def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+def add(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
     with pl.at(level=pl.Level.CORE_GROUP):
-        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
-                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
-    return c
+        out = pl.add(a, b)
+    return out
 
 x = torch.zeros((128, 128), dtype=torch.float32)
-program = tile_add.compile_for_test(x, x, x)
+program = add.compile_for_test(x, x, x)
 print("pipeline OK:", type(program).__name__)
 PY
 
@@ -70,7 +69,7 @@ python /tmp/pypto_check.py
 pipeline OK: Program
 ```
 
-只要这行打印出来，就说明 C++ 核心导入成功、parser 构建出了 IR、全部 44 个 pass 都跑过了。
+只要这行打印出来，就说明 C++ 核心导入成功、parser 构建出了 IR、整条 pass 流水线都跑过了。
 这里出现 traceback 才是真正的信号 —— 那行字的具体措辞不是。
 
 ## Mechanics

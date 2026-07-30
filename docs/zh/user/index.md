@@ -36,7 +36,7 @@
 | 页面 | 内容 |
 | ---- | ---- |
 | [安装](01-installation.md) | 前置条件、源码安装、构建选项、验证、`examples/` 导览 |
-| [快速上手](02-quickstart.md) | 用 `@pl.jit` 写 kernel、片上作用域、循环、把工作拆到多个函数、编译与读 IR |
+| [快速上手](02-quickstart.md) | 用 `@pl.jit` 写张量级 kernel（无手工数据搬运）、循环、把工作拆到多个函数、编译与读 IR |
 | [编程模型](03-programming-model.md) | 张量 / Tile / Block 三层、控制面与执行面、pass 流水线、内存层次、执行模型 |
 | [语言指南](01-language_guide.md) | 完整语言：类型系统、操作、SSA 与控制流、内存与数据搬运、InCore 作用域、编译 |
 | [操作参考](02-operation_reference.md) | `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌 |

@@ -41,7 +41,7 @@ see the table below for where its material currently lives.
 | Page | What it covers |
 | ---- | -------------- |
 | [Installation](01-installation.md) | Prerequisites, install from source, build options, verification, a tour of `examples/` |
-| [Quickstart](02-quickstart.md) | Writing kernels with `@pl.jit`, on-chip scopes, loops, splitting work across functions, compiling and reading the IR |
+| [Quickstart](02-quickstart.md) | Tensor-level kernels with `@pl.jit` — no manual data movement — plus loops, splitting work across functions, compiling and reading the IR |
 | [Programming Model](03-programming-model.md) | Tensor / Tile / Block levels, control vs. execution plane, the pass pipeline, memory hierarchy, execution model |
 | [Language Guide](01-language_guide.md) | The full language: type system, operations, SSA and control flow, memory and data movement, InCore scopes, compilation |
 | [Operation Reference](02-operation_reference.md) | The operator surface across the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces |

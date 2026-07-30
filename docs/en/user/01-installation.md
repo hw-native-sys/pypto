@@ -15,8 +15,8 @@ knowing about before you follow a command that needs them:
 
 | To do this | You also need |
 | ---------- | ------------- |
-| Write kernels, run the pass pipeline (`compile_for_test()`), read the IR | Nothing beyond the install |
-| Compile to device kernels | **ptoas**, distributed separately (versions pinned in `toolchain/versions.env`). Without it, use `ir.compile(..., skip_ptoas=True)` to stop at `.pto` |
+| Write kernels, run the pass pipeline, read the IR | Nothing beyond the install |
+| Compile a kernel to generated C++ | Nothing beyond the install. **ptoas** (distributed separately, versions pinned in `toolchain/versions.env`) adds the assembly step; `@pl.jit` detects whether it is present and skips that step when it is not |
 | Run a compiled kernel | The runtime plus an NPU or a simulator platform |
 
 The verification below deliberately stays in the first row.
@@ -56,14 +56,13 @@ import pypto.language as pl
 import torch
 
 @pl.jit
-def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+def add(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
     with pl.at(level=pl.Level.CORE_GROUP):
-        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
-                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
-    return c
+        out = pl.add(a, b)
+    return out
 
 x = torch.zeros((128, 128), dtype=torch.float32)
-program = tile_add.compile_for_test(x, x, x)
+program = add.compile_for_test(x, x, x)
 print("pipeline OK:", type(program).__name__)
 PY
 
@@ -74,8 +73,8 @@ python /tmp/pypto_check.py
 pipeline OK: Program
 ```
 
-If that prints, the C++ core imported, the parser built IR, and all 44 passes ran. A
-traceback here is the real signal — the exact wording of the line is not.
+If that prints, the C++ core imported, the parser built IR, and the whole pass pipeline
+ran. A traceback here is the real signal — the exact wording of the line is not.
 
 ## Mechanics
 

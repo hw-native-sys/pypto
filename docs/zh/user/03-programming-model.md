@@ -2,7 +2,8 @@
 
 一个 PyPTO 程序背后的抽象：三个描述层次、在它们之间下降的编译流水，以及它们共同描述的内存层次。
 
-> **前置**：你已经跑过[快速上手](02-quickstart.md)里的例子。本页解释那些例子到底在做什么。
+> **前置**：你已经编译过[快速上手](02-quickstart.md)里那些张量级示例。本页解释它们到底在做
+> 什么，并引入快速上手刻意留白的 tile 级。
 
 ## Concept
 
@@ -52,8 +53,9 @@ def levels(
 不需要它；单函数 kernel 则改写成 `with pl.at(level=pl.Level.CORE_GROUP):` —— 见
 [快速上手](02-quickstart.md)。
 
-多数程序停在前两层。Block 级用于你需要指明"哪个核做什么"的场合 —— 多 block 派发、cluster
-作用域、AIC/AIV 混合 kernel。
+快速上手完全停留在张量级：`out = pl.add(a, b)`，一个 `pl.load` 都不出现。当你需要控制片上放置
+什么、何时放置时，才下到 tile 级 —— 上面的 `scale` 函数就是这一步。Block 级用于指明哪个核做
+什么：多 block 派发、cluster 作用域、AIC/AIV 混合 kernel。
 
 ## Mechanics
 
@@ -96,7 +98,7 @@ Python DSL          @pl.jit / @pl.program 把源码解析成 IR
 IR                  不可变树，贯穿整个编译过程共享
      │
      ▼
-Pass 流水线         默认策略下 44 个 pass：内联、SSA、外提作用域、tensor->tile、
+Pass 流水线         默认策略，按序：内联、SSA、外提作用域、tensor->tile、
      │              layout、内存规划、任务依赖、……
      ▼
 CodeGen             设备 kernel（.pto -> C++）+ 主机编排 C++
