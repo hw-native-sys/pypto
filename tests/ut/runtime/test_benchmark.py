@@ -763,7 +763,8 @@ def test_benchmark_l3_ignores_prepare_setup_groups(span_root):
     """Setup-only groups captured around ``prepare()`` are not dispatches."""
 
     class _CompiledEmittingPrewarmAtPrepare(_FakeDistributedCompiled):
-        def prepare(self, config: Any = None) -> _FakeDistributedWorker:
+        def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
+            del config, kwargs
             for pid in (100, 101):
                 line = _strace_line(0, "simpler_prewarm.build", 800_000, pid=pid, hid="0")
                 os.write(2, (line + "\n").encode())
