@@ -774,9 +774,23 @@ void BindIR(nb::module_& m) {
            "Create a memory reference with base Ptr, byte_offset expression, and size")
       .def_ro("is_pinned_", &MemRef::is_pinned_,
               "True for an author-declared allocation, false for a compiler allocation")
-      // One-argument form: MemRef("name") declares an allocation and leaves its
-      // size and address for InitMemRef to derive. Distinguished from the
-      // three-argument string-base form purely by arity.
+      // Declaration forms. Both leave size and address for InitMemRef to derive
+      // and are distinguished from the three-argument form purely by arity.
+      //
+      // `MemRef()` leaves the base Ptr unnamed: the parser then takes the name
+      // from the variable the declaration is bound to, so it is written once. An
+      // empty base name means exactly "no name given" — it is not a value the
+      // named forms can produce, since the parser rejects an empty literal.
+      .def(
+          "__init__",
+          [](MemRef* self, const Span& span) {
+            auto base = std::make_shared<Var>("", GetPtrType(), Span::unknown());
+            new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
+                              /*is_pinned=*/true);
+          },
+          nb::arg("span") = Span::unknown(),
+          "Declare an allocation of your own, named after the variable it is bound to. Size and "
+          "address are left for InitMemRef to derive, and nothing else is ever packed into it")
       .def(
           "__init__",
           [](MemRef* self, const std::string& name, const Span& span) {
@@ -785,8 +799,7 @@ void BindIR(nb::module_& m) {
                               /*is_pinned=*/true);
           },
           nb::arg("name"), nb::arg("span") = Span::unknown(),
-          "Declare an allocation of your own, named `name`. Size and address are left for InitMemRef "
-          "to derive, and nothing else is ever packed into it")
+          "Declare an allocation of your own under an explicit name, overriding the variable name")
       // String base constructor: MemRef("base_name", byte_offset, size) — for forward references
       // in printed IR where the base Ptr variable appears in annotations before its alloc statement
       .def(

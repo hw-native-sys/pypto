@@ -80,11 +80,12 @@ It is the same IR node as the three-argument form; the arity says whether you ar
 describing an existing allocation or declaring one. Declaring gives only a name: the
 size comes from the largest tile bound to it and the address from the allocator.
 
-Declare it once, then reference it by variable:
+Declare it once, then reference it by variable. An unnamed declaration takes the name
+of the variable it is bound to, so the name is written once:
 
 ```python
-ping = pl.MemRef("ping")
-pong = pl.MemRef("pong")
+ping = pl.MemRef()
+pong = pl.MemRef()
 
 # Two tiles explicitly share one allocation; a third is kept private.
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
@@ -95,7 +96,12 @@ t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 Prefer that form: a misspelled reference is a Python `NameError`, whereas a misspelled
 string in the inline `pl.MemRef("pign")` form silently declares a second allocation. The
 inline form stays valid — it is what the IR printer emits, so a dumped program reparses
-without a surrounding Python scope.
+without a surrounding Python scope, and `pl.MemRef("other")` also names a declaration
+explicitly when the variable name is not the one you want in the IR.
+
+Since the variable supplies the name, variable and allocation must correspond one to one.
+Reaching one declaration through two names (`alias = ping`) and two declarations claiming
+one name are both **rejected** — either would silently merge or split an allocation.
 
 Whether a MemRef is a declaration is recorded explicitly on the IR node
 (`MemRef.is_pinned_`), not inferred from its size or from which pass is running.
@@ -115,7 +121,7 @@ not layers. To manage a level yourself, drive it with `pl.range` and declare one
 allocation per slot; leave the levels you want the compiler to manage unannotated.
 
 ```python
-l0b_ping, l0b_pong = pl.MemRef("l0b_ping"), pl.MemRef("l0b_pong")
+l0b_ping, l0b_pong = pl.MemRef(), pl.MemRef()
 
 # Outer level compiler-managed, inner level author-managed ping-pong.
 for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):

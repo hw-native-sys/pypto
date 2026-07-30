@@ -100,7 +100,7 @@ and the hardware must serialize work the scheduler could otherwise overlap.
 
 Referencing a declared `pl.MemRef("name")` in a tile annotation lets the author take an
 allocation out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
-(see [InitMemRef](29-init_memref.md#user-buffers)), and this pass then treats it as
+(see [InitMemRef](29-init_memref.md#declared-allocations)), and this pass then treats it as
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is
 skipped when placing every later candidate. (Isolation is a per-slot flag inside the
 packing loop rather than another `can_share` gate — `can_share` is the innermost step
@@ -117,18 +117,18 @@ The cost is the author's to manage: pinning trades capacity for parallelism, and
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.
 
-**Overlap check.** Two tiles independently bound to one buffer must not be live at the
+**Overlap check.** Two tiles independently bound to one allocation must not be live at the
 same time — that is not reuse, it is the later write destroying data the earlier tile
 still needs. This pass owns the check because it is where lifetimes are computed
 (`ComputeLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
 allowed (one tile's last read may be the statement that produces the next member).
-Tiles that land on the buffer by inheritance rather than by binding — views, in-place
+Tiles that land on the allocation by inheritance rather than by binding — views, in-place
 results, bare SSA aliases — are excluded: they are the same data as their source, so
 overlapping with it is expected.
 
 Because the isolation guarantee lives here, and ptoas replaces this pass wholesale,
 A declared allocation under `memory_planner=PTOAS` is **rejected** at InitMemRef rather than
-silently honored-but-unenforced: allocating the buffers without isolating them would
+silently honored-but-unenforced: allocating them without isolating them would
 hand back exactly the coalescing the author wrote the binding to prevent.
 
 ## Ascend910B load + tpop_from_aic hazard

@@ -93,10 +93,10 @@ program_with_memrefs = init_pass(program)
   其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
 
 第四条规则——绑定到同一 buffer 的 tile 生命周期不得重叠——需要生命周期信息，因此在
-[MemoryReuse](31-memory_reuse.md#用户-buffer) 中检查。
+[MemoryReuse](31-memory_reuse.md#声明式分配) 中检查。
 
 ```python
-ping, pong = pl.MemRef("ping"), pl.MemRef("pong")
+ping, pong = pl.MemRef(), pl.MemRef()
 
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)

@@ -596,10 +596,10 @@ class TypeResolver:
         """Resolve a MemRef referenced by name in a Tile annotation.
 
         Two sources, in order: a MemRef bound earlier in the parsed program (a
-        printed dump names its alloc-defined Ptr that way), then a MemRef the
+        printed dump names its alloc-defined Ptr that way), then an allocation the
         author declared in enclosing Python::
 
-            scratch = pl.MemRef("scratch")
+            scratch = pl.MemRef()
             t: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = ...
 
         The declared form is the one to prefer: a misspelled reference is a
@@ -619,7 +619,65 @@ class TypeResolver:
             if isinstance(var, ir.MemRef):
                 return var
         declared = self.expr_evaluator.closure_vars.get(node.id)
-        return declared if isinstance(declared, ir.MemRef) else None
+        if not isinstance(declared, ir.MemRef):
+            return None
+        if not declared.is_pinned_:
+            # A fully specified MemRef object: it already carries its own base.
+            return declared
+        return self._make_declared_memref(self._declared_alloc_name(declared, node), self._get_span(node))
+
+    def _declared_alloc_name(self, declared: "ir.MemRef", node: ast.Name) -> str:
+        """The name a declared allocation goes by, and the checks that keep it one.
+
+        An unnamed ``pl.MemRef()`` is named after the variable it is bound to, so
+        the name is written once. That only holds up while variable and allocation
+        correspond one-to-one, which is what the two checks below enforce:
+
+        * one declaration reached through two names (``b = a``) would silently
+          become two allocations;
+        * two declarations claiming one name would silently become one.
+
+        A declaration with an explicit name is exempt from the first check — the
+        name is its own, not the variable's — but still may not collide with
+        another declaration.
+
+        Args:
+            declared: The declared allocation's MemRef marker
+            node: The AST Name node referencing it
+
+        Returns:
+            The allocation's name
+
+        Raises:
+            ParserTypeError: If the variable-to-allocation correspondence breaks
+        """
+        explicit = declared.base_.name_hint
+        name = explicit or node.id
+        span = self._get_span(node)
+
+        if not hasattr(self, "_declared_alloc_names"):
+            self._declared_alloc_names: dict[int, str] = {}
+            self._declared_alloc_owners: dict[str, int] = {}
+
+        seen = self._declared_alloc_names.setdefault(id(declared), name)
+        if seen != name:
+            raise ParserTypeError(
+                f"Declared allocation '{seen}' is also referenced as '{name}'",
+                span=span,
+                hint=f"An unnamed pl.MemRef() is named after its variable, so aliasing it "
+                f"('{name} = {seen}') is ambiguous. Reference it as '{seen}', declare a "
+                f'separate pl.MemRef(), or name it explicitly with pl.MemRef("...")',
+            )
+
+        owner = self._declared_alloc_owners.setdefault(name, id(declared))
+        if owner != id(declared):
+            raise ParserTypeError(
+                f"Two separate pl.MemRef() declarations both resolve to the name '{name}'",
+                span=span,
+                hint="Declared allocations are identified by name within a function. Give one of "
+                'them an explicit name with pl.MemRef("...")',
+            )
+        return name
 
     def _make_declared_memref(self, name: str, span: "ir.Span") -> "ir.MemRef":
         """Build the unresolved MemRef for a declared allocation's name.

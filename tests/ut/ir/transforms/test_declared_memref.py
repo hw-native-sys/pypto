@@ -159,12 +159,12 @@ class Collide:
         """The preferred form: declare once, reference by variable.
 
         A misspelled reference is a Python ``NameError`` rather than a silently
-        distinct allocation, which is what the inline string form cannot give.
-        A declaration binds one ``ir.MemRef`` object, so every reference to it
-        resolves to the same allocation.
+        distinct allocation, which is what the inline string form cannot give. An
+        unnamed declaration takes the name of the variable it is bound to, so the
+        name is written once.
         """
-        ping = pl.MemRef("ping")
-        pong = pl.MemRef("pong")
+        ping = pl.MemRef()
+        pong = pl.MemRef()
 
         @pl.program
         class Before:
@@ -186,7 +186,7 @@ class Collide:
         assert len(_alloc_lines(after)) == 2
 
     def test_declared_allocation_keeps_its_declared_name(self):
-        """The allocation is named by the declaration, not by the variable."""
+        """An explicit name overrides the variable the declaration is bound to."""
         slot = pl.MemRef("l0c_ping")
 
         @pl.program
@@ -625,7 +625,54 @@ class TestPipeline:
 
 
 class TestRejects:
-    """Bindings the compiler must refuse, each with a message that says why."""
+    """Declarations the compiler must refuse, each with a message that says why."""
+
+    def test_rejects_reaching_one_declaration_through_two_names(self):
+        """`b = a` is ambiguous once the variable supplies the name.
+
+        An unnamed declaration is named after its variable, so two names for one
+        object would silently become two allocations. Rejecting says which name
+        it already goes by.
+        """
+        source = """
+import pypto.language as pl
+
+ping = pl.MemRef()
+alias = ping
+
+
+@pl.program
+class Aliased:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        t1: pl.Tile[[64, 64], pl.FP32, alias, pl.Mem.Vec] = pl.exp(t0)
+        return pl.store(t1, [0, 0], out)
+"""
+        with pytest.raises(Exception, match="also referenced as"):
+            pl.parse_program(source)
+
+    def test_rejects_two_declarations_claiming_one_name(self):
+        """The reverse ambiguity: two objects, one name, would become one alloc."""
+        source = """
+import pypto.language as pl
+
+first = pl.MemRef("shared")
+second = pl.MemRef("shared")
+
+
+@pl.program
+class Collide:
+    @pl.function
+    def main(self, a: pl.Tensor[[64, 64], pl.FP32],
+             out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, first, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        t1: pl.Tile[[64, 64], pl.FP32, second, pl.Mem.Vec] = pl.exp(t0)
+        return pl.store(t1, [0, 0], out)
+"""
+        with pytest.raises(Exception, match="both resolve to the name"):
+            pl.parse_program(source)
 
     def test_rejects_binding_a_pipelined_tile(self, ascend_backend):
         """One declared allocation cannot back two in-flight pipeline stages.

@@ -99,7 +99,7 @@ MemRef 共享完成后，部分 MemRef 对象变为无引用状态（其变量�
 
 在 tile 注解中引用一个声明好的 `pl.MemRef("name")`，作者即可把某块分配从 packer 手里收回。
 InitMemRef 将其物化为 `tile.alloc(..., pinned=True)`（见
-[InitMemRef](29-init_memref.md#用户-buffer)），本 pass 随后视其为封闭的：pinned 区间在
+[InitMemRef](29-init_memref.md#声明式分配)），本 pass 随后视其为封闭的：pinned 区间在
 first-fit 打包中自开一个槽位，之后每个候选在扫描槽位时都会跳过它。（隔离是打包循环内的
 per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) 打包的最内层，且每次 shed
 都会重跑，所以该判定按区间解析一次，而不是按配对解析。）具体而言：
