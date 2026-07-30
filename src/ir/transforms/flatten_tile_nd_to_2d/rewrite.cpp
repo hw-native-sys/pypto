@@ -72,7 +72,7 @@ bool HasKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const
 /// is strictly additional information, not a stale override, and the re-created
 /// op denotes the same storage. Dropping it would silently un-bind the two
 /// things that legitimately put a MemRef on a tile before InitMemRef: a user
-/// buffer binding (`pl.Tile[..., pl.Buffer("ping")]`) and a re-parsed
+/// allocation (`pl.Tile[..., pl.MemRef("ping"), ...]`) and a re-parsed
 /// post-allocation dump. Same merge ConvertToSSA applies to an LHS MemRef.
 ///
 /// The MemRef is read from the *assigned Var*, not from the RHS Call: ConvertToSSA
@@ -670,7 +670,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           flat_tile_view = tile_view_semantics::GetImplicitTileView(flat_shape_exprs, flat_memory_space);
         }
         // Carry the MemRef through: the flattened tile is the same storage, and a
-        // parse-time `pl.Buffer(...)` binding rides this field to InitMemRef.
+        // parse-time declared allocation rides this field to InitMemRef.
         // Dropping it would silently un-bind every ND user-bound tile. The binding
         // sits on the assigned Var; `result_tile` is the RHS Call's deduced type,
         // which never carries a MemRef — see WithCarriedMemRef.

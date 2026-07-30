@@ -50,12 +50,31 @@ class MemRef(_IrMemRef):
     base variables and ``Scalar`` arithmetic byte offsets — type-checks
     cleanly when re-loaded as a ``@pl.program``.
 
+    The **one-argument** form declares an allocation of your own rather than
+    describing an existing one: size and address are left for ``InitMemRef`` to
+    derive, and the compiler's opportunistic reuse never packs anything else into
+    it. Declare it once and reference it, so a misspelling is a ``NameError``
+    rather than a second allocation::
+
+        scratch = pl.MemRef("scratch")
+
+        t0: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.load(x, [0, 0], [64, 64])
+        t1: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = pl.exp(t0)
+
+    Tiles sharing one declared allocation must not be live at the same time, and
+    must agree on memory space; both are checked. Declaring an allocation inside a
+    ``pl.pipeline(stage=2)`` body is rejected — the cloned stages would make a
+    tile co-live with itself — so to hand-manage a level, drive it with
+    ``pl.range`` and declare one allocation per slot.
+
     Note: ``pl.MemRef(...)`` calls inside a ``@pl.program`` body are resolved
     by the parser (``parser/type_resolver.py``), not dispatched through this
     ``__init__``. A ``Scalar`` byte offset is therefore only ever seen by
     pyright; it never reaches the underlying ``ir.MemRef`` constructor.
     """
 
+    @overload
+    def __init__(self, name: str, span: Span = ...) -> None: ...
     @overload
     def __init__(self, base: Var, byte_offset: _ByteOffset, size: int, span: Span = ...) -> None: ...
     @overload

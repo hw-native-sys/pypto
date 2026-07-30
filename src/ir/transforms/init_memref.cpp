@@ -113,42 +113,42 @@ std::optional<uint64_t> ShapedTypeSizeBytes(const ShapedTypePtr& type) {
 }
 
 // ============================================================================
-// User buffers (`pl.Tile[..., pl.Buffer("name")]`)
+// Author-declared allocations (`pl.Tile[..., pl.MemRef("name"), ...]`)
 // ============================================================================
 
-/// Base Ptr of a user buffer -> the size it must hold (the largest bound tile).
-using UserBufferMap = std::map<const Var*, uint64_t>;
+/// Base Ptr of a declared allocation -> the size it must hold (largest bound tile).
+using DeclaredAllocMap = std::map<const Var*, uint64_t>;
 
-/// The binding MemRef `type` carries, or null when it carries none.
+/// The declared-allocation MemRef `type` carries, or null when it carries none.
 ///
-/// `MemRef::is_user_buffer_` is what distinguishes a *binding* from an ordinary
-/// MemRef: re-parsing a post-allocation dump also puts MemRefs on TileTypes, and
-/// those are compiler allocations. Keying on an explicit field rather than on
-/// "we are standing before InitMemRef" keeps the classification a property of
-/// the data, so a dump can be reparsed and re-run without its allocations
-/// turning into user-owned buffers.
+/// `MemRef::is_pinned_` is what tells an author's declaration apart from a
+/// compiler allocation: re-parsing a post-allocation dump also puts MemRefs on
+/// TileTypes, and those are the compiler's. Keying on an explicit field rather
+/// than on "we are standing before InitMemRef" keeps the classification a
+/// property of the data, so a dump can be reparsed and re-run without its
+/// allocations turning into declared ones.
 ///
 /// Returning the MemRef (not just its base) spares every caller a second,
 /// unchecked unwrap of the same optional.
-MemRefPtr GetUserBufferBinding(const TypePtr& type) {
+MemRefPtr GetDeclaredAlloc(const TypePtr& type) {
   auto tile_type = As<TileType>(type);
   if (!tile_type || !tile_type->memref_.has_value()) return nullptr;
   const auto& memref = *tile_type->memref_;
-  if (!memref->base_ || !memref->is_user_buffer_) return nullptr;
+  if (!memref->base_ || !memref->is_pinned_) return nullptr;
   return memref;
 }
 
-/// Collect every user buffer binding in a function, deriving each buffer's size
+/// Collect every declared allocation in a function, deriving each one's size
 /// (the largest bound tile) and checking the bound tiles agree on memory space.
-class UserBufferCollector : public IRVisitor {
+class DeclaredAllocCollector : public IRVisitor {
  public:
-  UserBufferMap buffers;
+  DeclaredAllocMap buffers;
 
   // Every binding reaches this pass on a Var's type, so one VarLike override
   // covers assignment LHSs and iter_args alike. Parameters are NOT visited —
   // the traversal starts at the body — which is sound because the parser refuses
-  // `pl.Buffer(...)` in a parameter annotation ("Tile trailing arguments must be
-  // MemRef, MemorySpace, or TileView"), so no binding can arrive on a param.
+  // a one-argument `pl.MemRef(...)` in a parameter annotation, so no declaration
+  // can arrive on a param.
   void VisitVarLike_(const VarPtr& op) override {
     if (op) Record(op);
     IRVisitor::VisitVarLike_(op);
@@ -156,15 +156,15 @@ class UserBufferCollector : public IRVisitor {
 
  private:
   void Record(const VarPtr& var) {
-    auto binding = GetUserBufferBinding(var->GetType());
+    auto binding = GetDeclaredAlloc(var->GetType());
     if (!binding) return;
     const VarPtr& base = binding->base_;
     auto tile_type = As<TileType>(var->GetType());
 
     auto size = ShapedTypeSizeBytes(tile_type);
     CHECK_SPAN(size.has_value(), var->span_)
-        << "Tile '" << var->name_hint_ << "' is bound to buffer '" << base->name_hint_
-        << "' but has a dynamic shape; a user buffer must be sized at compile time";
+        << "Tile '" << var->name_hint_ << "' is bound to the declared allocation '" << base->name_hint_
+        << "' but has a dynamic shape; a declared allocation must be sized at compile time";
 
     auto& buffer_size = buffers[base.get()];
     buffer_size = std::max(buffer_size, *size);
@@ -172,9 +172,9 @@ class UserBufferCollector : public IRVisitor {
     if (tile_type->memory_space_.has_value()) {
       auto [it, inserted] = spaces_.emplace(base.get(), *tile_type->memory_space_);
       CHECK_SPAN(inserted || it->second == *tile_type->memory_space_, var->span_)
-          << "Tiles bound to buffer '" << base->name_hint_
+          << "Tiles bound to the declared allocation '" << base->name_hint_
           << "' must all live in the same memory space, but '" << var->name_hint_ << "' is "
-          << MemorySpaceToString(*tile_type->memory_space_) << " while the buffer is already "
+          << MemorySpaceToString(*tile_type->memory_space_) << " while the allocation is already "
           << MemorySpaceToString(it->second);
     }
   }
@@ -185,23 +185,23 @@ class UserBufferCollector : public IRVisitor {
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const UserBufferMap& user_buffers) : user_buffers_(user_buffers) {}
+  explicit InitMemRefMutator(const DeclaredAllocMap& declared_allocs) : declared_allocs_(declared_allocs) {}
 
-  /// Whether `type` is bound to one of this function's user buffers.
+  /// Whether `type` is bound to one of this function's declared allocations.
   [[nodiscard]] bool HasUserBinding(const TypePtr& type) const {
-    if (user_buffers_.empty()) return false;
-    auto binding = GetUserBufferBinding(type);
-    return binding && user_buffers_.count(binding->base_.get()) > 0;
+    if (declared_allocs_.empty()) return false;
+    auto binding = GetDeclaredAlloc(type);
+    return binding && declared_allocs_.count(binding->base_.get()) > 0;
   }
 
   /// The MemRef a user binding asks for, sized from the whole bound set.
   /// Returns nullopt when `type` carries no binding.
   std::optional<MemRefPtr> UserBoundMemRef(const TypePtr& type) const {
-    if (user_buffers_.empty()) return std::nullopt;
-    auto binding = GetUserBufferBinding(type);
+    if (declared_allocs_.empty()) return std::nullopt;
+    auto binding = GetDeclaredAlloc(type);
     if (!binding) return std::nullopt;
-    auto it = user_buffers_.find(binding->base_.get());
-    if (it == user_buffers_.end()) return std::nullopt;
+    auto it = declared_allocs_.find(binding->base_.get());
+    if (it == declared_allocs_.end()) return std::nullopt;
     // Every bound tile gets the SAME base Ptr — that shared identity is what
     // makes them share storage — sized to the largest member so the buffer
     // holds any of them.
@@ -310,7 +310,7 @@ class InitMemRefMutator : public IRMutator {
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
       // Resolve memory space once, pass to both CreateMemRef and CloneType
       auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);
-      // A user buffer binding wins over a fresh allocation: the whole point is
+      // A declared allocation wins over a fresh one: the whole point is
       // that this tile lands in the buffer the kernel author named.
       auto memref = UserBoundMemRef(var_expr->GetType());
       if (!memref.has_value()) memref = CreateMemRef(shaped_type, var, memory_space);
@@ -469,7 +469,7 @@ class InitMemRefMutator : public IRMutator {
                      !HasUserBinding(op->var_->GetType()),
                  op->var_->span_)
           << "Tile '" << op->var_->name_hint_ << "' is produced by '" << call->op_->name_
-          << "', which reuses its source tile's buffer, so it cannot be bound to a buffer of its own. "
+          << "', which lands in its source tile's allocation, so it cannot be given one of its own. "
              "Bind the source tile instead.";
 
       // Handle view operations: output should share MemRef with input tile.
@@ -660,7 +660,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
-  const UserBufferMap& user_buffers_;
+  const DeclaredAllocMap& declared_allocs_;
   uint64_t next_id_ = 0;
 };
 
@@ -698,27 +698,28 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
-  // Step 2: Resolve user buffer bindings (`pl.Tile[..., pl.Buffer("name")]`),
-  // then mutate variables to initialize their MemRef. The bindings must be
-  // collected up front: a buffer's size is the max over ALL tiles bound to it,
-  // which is only known after the whole function has been seen.
-  UserBufferCollector user_buffer_collector;
-  user_buffer_collector.VisitStmt(normalized_func->body_);
-  const UserBufferMap& user_buffers = user_buffer_collector.buffers;
+  // Step 2: Resolve author-declared allocations (`pl.Tile[..., pl.MemRef("name"),
+  // ...]`), then mutate variables to initialize their MemRef. They must be
+  // collected up front: a declared allocation's size is the max over ALL tiles
+  // bound to it, which is only known after the whole function has been seen.
+  DeclaredAllocCollector declared_alloc_collector;
+  declared_alloc_collector.VisitStmt(normalized_func->body_);
+  const DeclaredAllocMap& declared_allocs = declared_alloc_collector.buffers;
 
   // The isolation guarantee is enforced by MemoryReuse, which ptoas replaces
-  // wholesale under memory_planner=PTOAS. Honoring the bindings' allocation but
-  // not their isolation would hand back exactly the coalescing the author wrote
-  // pl.Buffer to prevent, so reject the combination instead of degrading quietly.
-  if (!user_buffers.empty()) {
+  // wholesale under memory_planner=PTOAS. Honoring the declaration's allocation
+  // but not its isolation would hand back exactly the coalescing the author
+  // declared it to prevent, so reject the combination rather than degrade quietly.
+  if (!declared_allocs.empty()) {
     const auto* ctx = PassContext::Current();
     CHECK(ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS)
-        << "pl.Buffer(...) is not supported under memory_planner=PTOAS: ptoas owns memory planning "
-           "and would be free to coalesce the buffers you separated. Drop the bindings, or compile "
-           "with the default PyPTO memory planner.";
+        << "A declared allocation (one-argument pl.MemRef(...)) is not supported under "
+           "memory_planner=PTOAS: ptoas owns memory planning and would be free to coalesce the "
+           "allocations you separated. Drop the declarations, or compile with the default PyPTO "
+           "memory planner.";
   }
 
-  InitMemRefMutator mutator(user_buffers);
+  InitMemRefMutator mutator(declared_allocs);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -750,7 +751,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   alloc_stmts.reserve(memrefs.size());
   for (const auto& [memref, memory_space] : memrefs) {
     if (seen_bases.insert(memref->base_.get()).second) {
-      const bool pinned = user_buffers.count(memref->base_.get()) > 0;
+      const bool pinned = declared_allocs.count(memref->base_.get()) > 0;
       alloc_stmts.push_back(CreateAllocStatement(memref, memory_space, pinned));
     }
   }

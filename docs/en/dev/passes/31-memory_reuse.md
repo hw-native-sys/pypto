@@ -91,15 +91,15 @@ program_optimized = reuse_pass(program)
 
 After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses the surrounding `SeqStmts` and removes any `tile.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs.
 
-## User buffers
+## Declared allocations
 
 Reuse is opportunistic: any two tiles whose lifetimes do not overlap are candidates
 for one buffer. That is the right default for capacity, but it is not free — two
 tiles sharing a buffer are ordered by a WAR dependency the source never asked for,
 and the hardware must serialize work the scheduler could otherwise overlap.
 
-Referencing a declared `pl.Buffer()` in a tile annotation lets the author take a buffer
-out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
+Referencing a declared `pl.MemRef("name")` in a tile annotation lets the author take an
+allocation out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
 (see [InitMemRef](29-init_memref.md#user-buffers)), and this pass then treats it as
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is
 skipped when placing every later candidate. (Isolation is a per-slot flag inside the
@@ -111,7 +111,7 @@ instead of once per pair.) Concretely:
   disjoint their lifetimes — the point is to keep them independent.
 - Tiles the author bound to the **same** buffer already share one base from InitMemRef
   and stay that way.
-- Unbound tiles are packed exactly as before, and never pulled into a user buffer.
+- Unbound tiles are packed as before, and never pulled into a declared allocation.
 
 The cost is the author's to manage: pinning trades capacity for parallelism, and an
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
@@ -127,7 +127,7 @@ results, bare SSA aliases — are excluded: they are the same data as their sour
 overlapping with it is expected.
 
 Because the isolation guarantee lives here, and ptoas replaces this pass wholesale,
-`pl.Buffer(...)` under `memory_planner=PTOAS` is **rejected** at InitMemRef rather than
+A declared allocation under `memory_planner=PTOAS` is **rejected** at InitMemRef rather than
 silently honored-but-unenforced: allocating the buffers without isolating them would
 hand back exactly the coalescing the author wrote the binding to prevent.
 

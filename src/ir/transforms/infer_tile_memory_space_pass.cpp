@@ -666,7 +666,7 @@ class TileMemorySpaceMutator : public IRMutator {
       if (new_tile_type && new_tile_type.get() != old_tile_type.get()) {
         // Preserve the Var's memory_space (set by VisitExpr_(VarPtr) based on var_memory_)
         // and, for the same reason, its MemRef: a re-deduced Call type carries neither,
-        // and the MemRef is what a `pl.Buffer(...)` binding rides on to InitMemRef.
+        // and the MemRef is what a declared allocation rides on to InitMemRef.
         auto synced_memref =
             new_tile_type->memref_.has_value() ? new_tile_type->memref_ : old_tile_type->memref_;
         auto synced_type =

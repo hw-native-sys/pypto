@@ -228,7 +228,6 @@ from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
 from .typing import (
     Array,
-    Buffer,
     DynVar,
     InOut,
     IntLike,
@@ -474,7 +473,6 @@ __all__ = [
     "MemRef",
     "Role",
     "SplitMode",
-    "Buffer",
     "Mem",
     "MemRefType",
     "MemorySpace",

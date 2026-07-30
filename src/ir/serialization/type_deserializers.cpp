@@ -348,10 +348,10 @@ static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::z
   // base_ is a VarPtr, serialized as a full IRNode
   auto base = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("base"), zone));
   INTERNAL_CHECK_SPAN(base, span) << "MemRef base deserialized to null";
-  // Absent in blobs written before user buffers existed; those hold only
+  // Absent in blobs written before declared allocations existed; those hold only
   // compiler allocations, which is exactly what `false` means.
-  bool is_user_buffer = ctx.HasField(fields_obj, "is_user_buffer") && GET_FIELD(bool, "is_user_buffer");
-  return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span, is_user_buffer);
+  bool is_pinned = ctx.HasField(fields_obj, "is_pinned") && GET_FIELD(bool, "is_pinned");
+  return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span, is_pinned);
 }
 
 // Deserialize ConstInt

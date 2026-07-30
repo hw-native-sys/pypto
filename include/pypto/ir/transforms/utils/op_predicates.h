@@ -55,7 +55,7 @@ bool IsBufferAliasingViewOp(const std::string& op_name);
 /// permutes into a fresh buffer, so it does own its storage.
 ///
 /// Use this to answer "does this output get to choose its own buffer" —
-/// InitMemRef rejects a user buffer binding on such an output, and MemoryReuse
+/// InitMemRef rejects a declared allocation on such an output, and MemoryReuse
 /// excludes those tiles from the co-live check because they occupy storage the
 /// source already accounts for.
 bool OutputInheritsSourceBuffer(const std::string& op_name);

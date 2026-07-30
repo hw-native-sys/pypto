@@ -763,28 +763,30 @@ void BindIR(nb::module_& m) {
   memref_class
       .def(
           "__init__",
-          [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span) {
-            new (self) MemRef(base, byte_offset, size, span);
-          },
+          [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span,
+             bool is_pinned) { new (self) MemRef(base, byte_offset, size, span, is_pinned); },
           nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
-          "Create a memory reference with base Ptr, integer byte_offset, and size")
+          nb::arg("is_pinned") = false,
+          "Create a memory reference with base Ptr, integer byte_offset, and size. Set is_pinned for an "
+          "author-declared allocation whose size the parser leaves for InitMemRef to derive")
       .def(nb::init<VarPtr, ExprPtr, uint64_t, Span>(), nb::arg("base"), nb::arg("byte_offset"),
            nb::arg("size"), nb::arg("span") = Span::unknown(),
            "Create a memory reference with base Ptr, byte_offset expression, and size")
-      .def_ro("is_user_buffer_", &MemRef::is_user_buffer_,
-              "True for an unresolved pl.Buffer(...) binding, false for a compiler allocation")
-      // Unresolved `pl.Buffer(name)` binding. Takes the base Ptr rather than a
-      // name so callers can share one interned Var across every annotation
-      // naming the buffer — that shared identity is what makes them one buffer.
-      .def_static(
-          "user_buffer",
-          [](const VarPtr& base, const Span& span) {
-            return std::make_shared<MemRef>(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
-                                            /*is_user_buffer=*/true);
+      .def_ro("is_pinned_", &MemRef::is_pinned_,
+              "True for an author-declared allocation, false for a compiler allocation")
+      // One-argument form: MemRef("name") declares an allocation and leaves its
+      // size and address for InitMemRef to derive. Distinguished from the
+      // three-argument string-base form purely by arity.
+      .def(
+          "__init__",
+          [](MemRef* self, const std::string& name, const Span& span) {
+            auto base = std::make_shared<Var>(name, GetPtrType(), Span::unknown());
+            new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
+                              /*is_pinned=*/true);
           },
-          nb::arg("base"), nb::arg("span") = Span::unknown(),
-          "Create an unresolved pl.Buffer(...) binding on an interned base Ptr. Size and address are "
-          "left for InitMemRef to derive")
+          nb::arg("name"), nb::arg("span") = Span::unknown(),
+          "Declare an allocation of your own, named `name`. Size and address are left for InitMemRef "
+          "to derive, and nothing else is ever packed into it")
       // String base constructor: MemRef("base_name", byte_offset, size) — for forward references
       // in printed IR where the base Ptr variable appears in annotations before its alloc statement
       .def(

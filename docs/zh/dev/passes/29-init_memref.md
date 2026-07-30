@@ -44,7 +44,7 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **解析用户 buffer**：收集所有 `pl.Buffer(...)` 绑定，并从绑定的 tile 推导出每个 buffer 的大小与内存空间（见[用户 buffer](#用户-buffer)）
+2. **解析声明式分配**：收集所有单参数 `pl.MemRef(...)` 声明，并从绑定的 tile 推导出每块分配的大小与内存空间（见[声明式分配](#声明式分配)）
 3. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
    - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
@@ -52,29 +52,28 @@ program_with_memrefs = init_pass(program)
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
    - **用户绑定的 tile**：保留作者指定的 buffer，而不是新建一块分配
 4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于用户 buffer 时带上 `pinned=True`
+5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`；base 属于声明式分配时带上 `pinned=True`
 6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
 
-## 用户 buffer
+## 声明式分配
 
-`pl.Tile[[...], dtype, <buffer>, pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者拥有的
-buffer 上，其中 `<buffer>` 是一个声明后按变量引用的 `pl.Buffer()`（或打印器输出的内联
-`pl.Buffer("name")` 形式）。引用同一个 buffer 的 tile 共享一块分配，且 `MemoryReuse` 绝不会
-把其他 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#用户-buffer)。
+`pl.Tile[[...], dtype, <alloc>, pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者声明的分配
+上，其中 `<alloc>` 是一个按变量引用的 `pl.MemRef("name")`（或同样的单参数内联形式，也就是
+打印器输出的形式）。引用同一块分配的 tile 共享它，且 `MemoryReuse` 绝不会把其他 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](31-memory_reuse.md#声明式分配)。
 
-**绑定如何抵达本 pass。** 解析器把 buffer 引用解析为一个 `MemRef`，其 `base_` Ptr 按名字
-intern（因此命名同一 buffer 的两处注解共享同一个 base），`byte_offset = 0`、不带大小，并且
-**置上 `is_user_buffer_`**。这个标志位正是绑定的识别依据——重新解析 post-allocation dump 时
-同样会在 `TileType` 上出现 MemRef，而那些是编译器分配。把它显式记录下来（而不是从哨兵大小、或
-"pass 站在流水线哪个位置"去推断），使该分类成为数据自身的属性，也让打印器可以把绑定输出为
-`pl.Buffer("name")`——无需编造大小与地址即可完成往返。
+**声明如何抵达本 pass。** 解析器把单参数 `pl.MemRef` 解析为一个 `MemRef`，其 `base_` Ptr 按
+名字 intern（因此命名同一块分配的两处注解共享同一个 base），`byte_offset = 0`、不带大小，并且
+**置上 `is_pinned_`**。这个标志位正是声明的识别依据——重新解析 post-allocation dump 时
+同样会在 `TileType` 上出现 MemRef，而那些是编译器的分配。把它显式记录下来（而不是从哨兵大小、或
+"pass 站在流水线哪个位置"去推断），使该分类成为数据自身的属性，也让打印器可以把声明输出为
+单参数形式——无需编造大小与地址即可完成往返。
 
-本 pass 会**消费**掉这个绑定：它产出的 MemRef 是一个携带推导大小的普通 MemRef，标志位已清除。
-此后由分配点的 `pinned=True` kwarg 标记该 buffer 归用户所有。
+本 pass 会**消费**掉这个声明：它产出的 MemRef 是一个携带推导大小的普通 MemRef，标志位已清除。
+此后由分配点的 `pinned=True` kwarg 标记该分配归作者所有。
 
-绑定位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
+声明位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
 推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
-合并；`FlattenTileNdTo2D` 在三处重建中都携带（ND 展平、≤2D `tile.load`、通用 tile 算子）；
+合并；`FlattenTileNdTo2D` 在四处重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；
 `InferTileMemorySpace` 在把 Var 类型同步到重建后的 Call 时保留它。只克隆而不重建的 pass（包括
 `LowerPipelineLoops` 产出的各流水级 body）经由 `MemRef` 的克隆路径保留它。
 
@@ -88,7 +87,7 @@ intern（因此命名同一 buffer 的两处注解共享同一个 base），`byt
 
 **被拒绝的绑定**（均为 `pypto::ValueError`，且携带出错 tile 的 span）：
 
-- 绑定的 tile 是动态 shape——用户 buffer 必须在编译期定型。
+- 绑定的 tile 是动态 shape——声明式分配必须在编译期定型。
 - 同一 buffer 上的 tile 内存空间不一致。
 - 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
   其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
@@ -97,7 +96,7 @@ intern（因此命名同一 buffer 的两处注解共享同一个 base），`byt
 [MemoryReuse](31-memory_reuse.md#用户-buffer) 中检查。
 
 ```python
-ping, pong = pl.Buffer(), pl.Buffer()
+ping, pong = pl.MemRef("ping"), pl.MemRef("pong")
 
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)

@@ -63,27 +63,26 @@ MemorySpace StringToMemorySpace(const std::string& str) {
 }
 
 // MemRef implementation
-MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span, bool is_user_buffer)
+MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span, bool is_pinned)
     : Var(base->name_hint_, GetMemRefType(), std::move(span)),
       base_(std::move(base)),
       byte_offset_(std::move(byte_offset)),
       size_(size),
-      is_user_buffer_(is_user_buffer) {}
+      is_pinned_(is_pinned) {}
 
-MemRef::MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span, bool is_user_buffer)
+MemRef::MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span, bool is_pinned)
     // INT64 dtype matches AllocateMemoryAddrPass (which materializes the final
     // concrete address) and the PTOAS dialect's `i64` requirement on the
     // alloc_tile addr operand. Codegen reads dtype from the ConstInt 1:1.
     : MemRef(std::move(base), std::make_shared<ConstInt>(byte_offset, DataType::INT64, Span::unknown()), size,
-             std::move(span), is_user_buffer) {}
+             std::move(span), is_pinned) {}
 
-MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span,
-               bool is_user_buffer)
+MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span, bool is_pinned)
     : Var(std::move(name), GetMemRefType(), std::move(span)),
       base_(std::move(base)),
       byte_offset_(std::move(byte_offset)),
       size_(size),
-      is_user_buffer_(is_user_buffer) {}
+      is_pinned_(is_pinned) {}
 
 bool MemRef::MayAlias(const MemRefPtr& a, const MemRefPtr& b) {
   if (a->base_.get() != b->base_.get()) return false;

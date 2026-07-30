@@ -19,7 +19,6 @@ This module provides type annotation and runtime wrapper classes for PyPTO's lan
 from typing import TypeAlias
 
 from pypto.language.typing.array import Array
-from pypto.language.typing.buffer import Buffer
 from pypto.language.typing.direction import InOut, Out
 from pypto.language.typing.dynamic import DynVar, dynamic
 from pypto.language.typing.memref import MemRef
@@ -35,7 +34,6 @@ IntLike: TypeAlias = int | Scalar | Expr
 
 __all__ = [
     "Array",
-    "Buffer",
     "DynVar",
     "InOut",
     "IntLike",

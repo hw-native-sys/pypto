@@ -7912,9 +7912,9 @@ class ASTParser:
         namespace = func.value.attr  # "tile" or "tensor"
         op_name = f"{namespace}.alloc"
 
-        # `pinned=True` is the only keyword an alloc carries — it marks a buffer
-        # the kernel author declared via `pl.Buffer(...)`, which MemoryReuse must
-        # leave alone. Everything else stays positional-only.
+        # `pinned=True` is the only keyword an alloc carries — it marks an
+        # allocation the author declared via a one-argument `pl.MemRef(...)`,
+        # which MemoryReuse must leave alone. Everything else stays positional.
         kwargs: dict[str, Any] = {}
         for keyword in call.keywords:
             if keyword.arg != "pinned":

@@ -1679,7 +1679,7 @@ struct ShedCandidate {
 /// MaxRelief: shed the group that frees the most bytes per level ⇒ fewest levels lost to fit the space.
 inline double ScoreMaxRelief(const ShedCandidate& c) { return -static_cast<double>(c.bytes_freed); }
 
-/// One tile independently bound to a user buffer, with its lifetime.
+/// One tile independently bound to a declared allocation, with its lifetime.
 struct BoundMember {
   VarPtr var;
   int def_point;
@@ -1727,7 +1727,7 @@ class IndependentlyBoundCollector : public IRVisitor {
   const std::map<const Var*, std::pair<int, int>>& var_liveness_;
 };
 
-/// Reject a user buffer whose independently bound tiles are live at the same time.
+/// Reject a declared allocation whose independently bound tiles are co-live.
 ///
 /// Binding two co-live tiles to one buffer is not a reuse decision, it is data
 /// corruption: the later write lands on bytes the earlier tile still needs. The
@@ -1739,8 +1739,8 @@ class IndependentlyBoundCollector : public IRVisitor {
 /// where every pair is disjoint, so a pairwise check never exits early and would
 /// be quadratic in the member count — which grows with the IR once a binding
 /// inside a loop body is unrolled.
-void ValidateUserBuffers(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
-                         const std::map<const Var*, std::pair<int, int>>& var_liveness) {
+void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
+                            const std::map<const Var*, std::pair<int, int>>& var_liveness) {
   if (pinned_bases.empty()) return;
   IndependentlyBoundCollector collector(pinned_bases, var_liveness);
   collector.VisitStmt(body);
@@ -1753,11 +1753,12 @@ void ValidateUserBuffers(const StmtPtr& body, const std::set<const Var*>& pinned
       const BoundMember& cur = members[i];
       CHECK_SPAN(prev.last_use_point <= cur.def_point, cur.var->span_)
           << "Tiles '" << prev.var->name_hint_ << "' and '" << cur.var->name_hint_
-          << "' are both bound to buffer '" << base->name_hint_ << "' but are live at the same time ("
-          << prev.var->name_hint_ << ": [" << prev.def_point << ", " << prev.last_use_point << "], "
-          << cur.var->name_hint_ << ": [" << cur.def_point << ", " << cur.last_use_point
-          << "]). Sharing one buffer would overwrite data that is still needed — give them separate "
-             "buffers, or bind only tiles whose lifetimes do not overlap.";
+          << "' are both bound to the declared allocation '" << base->name_hint_
+          << "' but are live at the same time (" << prev.var->name_hint_ << ": [" << prev.def_point << ", "
+          << prev.last_use_point << "], " << cur.var->name_hint_ << ": [" << cur.def_point << ", "
+          << cur.last_use_point
+          << "]). Sharing one allocation would overwrite data that is still needed — declare separate "
+             "allocations, or bind only tiles whose lifetimes do not overlap.";
     }
   }
 }
@@ -1773,7 +1774,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     const FunctionPtr& func, std::vector<Diagnostic>* out_hints) {
   std::map<VarPtr, VarPtr> reuse_map;
 
-  // A user buffer (`pl.Tile[..., pl.Buffer("name")]`) has exactly the membership
+  // A declared allocation (`pl.Tile[..., pl.MemRef("name"), ...]`) has exactly the membership
   // the kernel author wrote. The packer neither adds tiles to it nor moves its
   // tiles into someone else's buffer — that is the whole point of naming it:
   // coalescing tiles whose lifetimes merely happen not to overlap introduces a
@@ -1782,7 +1783,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
   // Resolved once per interval rather than inside `can_share`: that predicate is
   // the innermost step of the O(M^2) pack, which itself re-runs per shed step, so
   // a type cast + set lookup there would be paid M^2 times — and by every kernel,
-  // including the vast majority that declare no user buffer at all. Same reason
+  // including the vast majority that declare no allocation at all. Same reason
   // `pipeline_membership` is pre-parsed (see LifetimeAnalysisResult).
   std::vector<bool> is_pinned(lifetimes.size(), false);
   if (!pinned_bases.empty()) {
@@ -2089,7 +2090,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
     // earliest on ties). Pure — it does NOT touch reuse_map, since the shed loop below may re-pack.
     auto pack = [&]() {
       std::vector<std::vector<size_t>> buffers;
-      // Parallel to `buffers`: a user buffer's membership is fixed by the author,
+      // Parallel to `buffers`: a declared allocation's membership is fixed by the author,
       // so it opens its own slot and never takes another tile. Handling it here
       // rather than as a `can_share` gate keeps the check out of the O(M^2) inner
       // loop, and skips the whole buffer scan for a pinned candidate.
@@ -3049,7 +3050,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       for (const auto& [space, end] : resolution.reserved_end_by_space) reserved_end_by_space[space] = end;
     }
   }
-  // Bases declared by the author via `pl.Buffer(...)` and materialized by
+  // Bases the author declared via a one-argument `pl.MemRef(...)`, materialized by
   // InitMemRef as a pinned alloc. Their membership is off-limits to the packer.
   // InitMemRef hoists every alloc to the body's top-level SeqStmts, so this scans
   // that list in place rather than flattening a copy of the whole body. Missing
@@ -3065,7 +3066,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     if (auto base = GetPinnedAllocBase(stmt)) pinned_bases.insert(base.get());
   }
 
-  ValidateUserBuffers(new_body, pinned_bases, analysis_result.var_liveness);
+  ValidateDeclaredAllocs(new_body, pinned_bases, analysis_result.var_liveness);
 
   std::vector<Diagnostic> hints;
   auto reuse_map = IdentifyReuseOpportunities(

@@ -2831,11 +2831,12 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   std::ostringstream oss;
 
-  // An unresolved user binding prints in the form the author wrote. It carries
-  // no size or address to print — InitMemRef derives both — and printing it as
-  // `pl.MemRef(...)` would lose the distinction on reparse.
-  if (memref.is_user_buffer_) {
-    oss << prefix_ << ".Buffer(\"" << GetVarName(memref.base_.get()) << "\")";
+  // An author-declared allocation prints in the one-argument form: it carries no
+  // size or address to print, since InitMemRef derives both. Printing it with the
+  // invented pair would make it indistinguishable from a compiler allocation on
+  // reparse.
+  if (memref.is_pinned_) {
+    oss << prefix_ << ".MemRef(\"" << GetVarName(memref.base_.get()) << "\")";
     return oss.str();
   }
 

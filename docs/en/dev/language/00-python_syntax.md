@@ -69,51 +69,53 @@ tensor: pl.Tensor[[64, 128], pl.FP32, pl.MemRef(addr_expr, 8192, 0)]
 tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 ```
 
-### User Buffers (Buffer)
+### Declared Allocations (one-argument MemRef)
 
-`pl.Buffer()` takes a buffer out of the compiler's opportunistic reuse. Tiles
-referencing the same buffer share one allocation; nothing else is ever packed into it.
-Use it when the packer coalesces tiles you want to stay independent — sharing a
-buffer adds a WAR dependency that serializes them.
+A one-argument `pl.MemRef("name")` declares an allocation of your own, taking it out of
+the compiler's opportunistic reuse. Tiles referencing it share it; nothing else is ever
+packed in. Use it when the packer coalesces tiles you want to stay independent —
+sharing storage adds a WAR dependency that serializes them.
 
-Declare a buffer, then reference it by variable. An unnamed `pl.Buffer()` takes the
-name of the variable it is bound to, so the buffer is named once rather than twice.
+It is the same IR node as the three-argument form; the arity says whether you are
+describing an existing allocation or declaring one. Declaring gives only a name: the
+size comes from the largest tile bound to it and the address from the allocator.
+
+Declare it once, then reference it by variable:
 
 ```python
-ping = pl.Buffer()
-pong = pl.Buffer()
+ping = pl.MemRef("ping")
+pong = pl.MemRef("pong")
 
-# Two tiles explicitly share one buffer; a third is kept private.
+# Two tiles explicitly share one allocation; a third is kept private.
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
 t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 ```
 
-Prefer this form: a misspelled reference is a Python `NameError`, whereas a misspelled
-string in the inline `pl.Buffer("ping")` form silently declares a second buffer. The
+Prefer that form: a misspelled reference is a Python `NameError`, whereas a misspelled
+string in the inline `pl.MemRef("pign")` form silently declares a second allocation. The
 inline form stays valid — it is what the IR printer emits, so a dumped program reparses
 without a surrounding Python scope.
 
-Whether a MemRef is a user binding is recorded explicitly on the IR node
-(`MemRef.is_user_buffer_`), not inferred from its size or from which pass is running.
-`InitMemRef` consumes the binding: from there on the allocation carries `pinned=True`
-and the MemRef is an ordinary one, so re-parsing a post-allocation dump cannot turn
-compiler allocations into user-owned buffers.
+Whether a MemRef is a declaration is recorded explicitly on the IR node
+(`MemRef.is_pinned_`), not inferred from its size or from which pass is running.
+`InitMemRef` consumes the declaration: from there on the allocation carries
+`pinned=True` and the MemRef is an ordinary one, so re-parsing a post-allocation dump
+cannot turn compiler allocations into declared ones.
 
-Buffer names live in their own namespace — a buffer name never resolves to a Python
-variable that happens to share it. Neither a size nor an address is written: the
-compiler sizes the buffer to its largest member. The memory space **is** required (a
-`TileType` always pairs a MemRef with a space). Tiles left unannotated keep the default
-automatic reuse.
+A declared name lives in its own namespace — it never resolves to a Python variable that
+happens to share it. The memory space **is** required (a `TileType` always pairs a
+MemRef with a space), and all tiles bound to one allocation must agree on it. Tiles left
+unannotated keep the default automatic reuse.
 
-Buffers do not clone per pipeline stage, so a binding inside a `pl.pipeline(stage=2)`
+Declarations do not clone per pipeline stage, so one inside a `pl.pipeline(stage=2)`
 body is **rejected**: the cloned stages would make the tile co-live with itself on one
-allocation. Naming slots and asking the compiler to multi-buffer are alternatives, not
-layers. To manage a level yourself, drive it with `pl.range` and name one buffer per
-slot; leave the levels you want the compiler to manage unannotated.
+allocation. Declaring slots and asking the compiler to multi-buffer are alternatives,
+not layers. To manage a level yourself, drive it with `pl.range` and declare one
+allocation per slot; leave the levels you want the compiler to manage unannotated.
 
 ```python
-l0b_ping, l0b_pong = pl.Buffer(), pl.Buffer()
+l0b_ping, l0b_pong = pl.MemRef("l0b_ping"), pl.MemRef("l0b_pong")
 
 # Outer level compiler-managed, inner level author-managed ping-pong.
 for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
@@ -123,8 +125,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-See [InitMemRef](../passes/29-init_memref.md#user-buffers) and
-[MemoryReuse](../passes/31-memory_reuse.md#user-buffers).
+See [InitMemRef](../passes/29-init_memref.md#declared-allocations) and
+[MemoryReuse](../passes/31-memory_reuse.md#declared-allocations).
 
 ### Tile Views (TileView)
 

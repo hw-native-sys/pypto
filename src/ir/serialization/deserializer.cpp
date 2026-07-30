@@ -155,9 +155,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     std::string base_name;
     ExprPtr byte_offset = nullptr;
     uint64_t size = 0;
-    // Absent in blobs written before user buffers existed; those hold only
+    // Absent in blobs written before declared allocations existed; those hold only
     // compiler allocations, which is exactly what `false` means.
-    bool is_user_buffer = false;
+    bool is_pinned = false;
     bool has_base = false;
     bool has_byte_offset = false;
     bool has_size = false;
@@ -176,8 +176,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       } else if (key == "size") {
         p->val.convert(size);
         has_size = true;
-      } else if (key == "is_user_buffer") {
-        p->val.convert(is_user_buffer);
+      } else if (key == "is_pinned") {
+        p->val.convert(is_pinned);
       }
     }
 
@@ -186,7 +186,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     // Create a base Ptr variable from the name
     auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
-    return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_user_buffer);
+    return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_pinned);
   }
 
   std::optional<TileView> DeserializeTileView(const msgpack::object& obj, msgpack::zone& zone) {

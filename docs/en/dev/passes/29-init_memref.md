@@ -44,7 +44,7 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Resolve user buffers**: Collect every `pl.Buffer(...)` binding and derive each buffer's size and memory space from the tiles bound to it (see [User buffers](#user-buffers))
+2. **Resolve declared allocations**: Collect every one-argument `pl.MemRef(...)` declaration and derive each one's size and memory space from the tiles bound to it (see [Declared allocations](#declared-allocations))
 3. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
    - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
@@ -52,31 +52,32 @@ program_with_memrefs = init_pass(program)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
    - **User-bound tiles**: keep the buffer the author named instead of getting a fresh allocation
 4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base is a user buffer
+5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)` — with `pinned=True` when the base was declared by the author
 6. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
 
-## User buffers
+## Declared allocations
 
-`pl.Tile[[...], dtype, <buffer>, pl.Mem.Vec]` binds a tile to a buffer the kernel
-author owns, where `<buffer>` is a declared `pl.Buffer()` referenced by variable (or
-the inline `pl.Buffer("name")` form the printer emits). Tiles referencing the same
-buffer share one allocation; `MemoryReuse` never packs anything else into it. This is manual reuse control — see
+`pl.Tile[[...], dtype, <alloc>, pl.Mem.Vec]` binds a tile to an allocation the kernel
+author declared, where `<alloc>` is a `pl.MemRef("name")` referenced by variable (or the
+same one-argument form inline, which is what the printer emits). Tiles referencing the
+same allocation share it; `MemoryReuse` never packs anything else into it. This is manual reuse control — see
 [MemoryReuse](31-memory_reuse.md#user-buffers) for why an author would want it.
 
-**How the binding reaches this pass.** The parser resolves a buffer reference to a
-`MemRef` whose `base_` Ptr is interned by name (so two annotations naming one buffer
-share one base), with `byte_offset = 0`, no size, and **`is_user_buffer_` set**. That
-flag is what identifies a binding — re-parsing a post-allocation dump also puts MemRefs
-on `TileType`s, and those are compiler allocations. Recording it explicitly rather than
-inferring it (from a sentinel size, or from where in the pipeline the pass sits) keeps
-the classification a property of the data, and lets the printer emit the binding as
-`pl.Buffer("name")` so a dump round-trips without inventing a size or address.
+**How the declaration reaches this pass.** The parser resolves a one-argument
+`pl.MemRef` to a `MemRef` whose `base_` Ptr is interned by name (so two annotations
+naming one allocation share one base), with `byte_offset = 0`, no size, and
+**`is_pinned_` set**. That flag is what identifies a declaration — re-parsing a
+post-allocation dump also puts MemRefs on `TileType`s, and those are the compiler's.
+Recording it explicitly rather than inferring it (from a sentinel size, or from where in
+the pipeline the pass sits) keeps the classification a property of the data, and lets
+the printer emit the one-argument form so a dump round-trips without inventing a size or
+address.
 
-This pass **consumes** the binding: the MemRef it produces is an ordinary one carrying
-the derived size, with the flag cleared. From there on the allocation's `pinned=True`
-kwarg is what marks the buffer as user-owned.
+This pass **consumes** the declaration: the MemRef it produces is an ordinary one
+carrying the derived size, with the flag cleared. From there on the allocation's
+`pinned=True` kwarg is what marks it as the author's.
 
-The binding lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
+The declaration lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
 it into the Var's type and op type deduction never produces a MemRef — so any pass that
 rebuilds a type from the Call must carry it over explicitly. `ConvertToSSA` does the
 merge; `FlattenTileNdTo2D` carries it through all three of its rebuilds (ND flatten,
@@ -94,7 +95,7 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 **Rejected bindings** (all `pypto::ValueError`, all with the offending tile's span):
 
-- A bound tile with a dynamic shape — a user buffer must be sized at compile time.
+- A bound tile with a dynamic shape — a declared allocation must be sized at compile time.
 - Tiles on one buffer disagreeing on memory space.
 - Binding the output of a view / in-place op (`tile.reshape`, `tile.matmul_acc`, …).
   Such a result physically *is* its source's buffer, so it cannot be placed elsewhere;
@@ -105,7 +106,7 @@ lifetime information and is therefore checked in
 [MemoryReuse](31-memory_reuse.md#user-buffers).
 
 ```python
-ping, pong = pl.Buffer(), pl.Buffer()
+ping, pong = pl.MemRef("ping"), pl.MemRef("pong")
 
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)

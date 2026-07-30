@@ -65,7 +65,7 @@ bool OutputInheritsSourceBuffer(const std::string& op_name) {
   // (pto.ttrans, registered not_inplace_safe()). IsBufferAliasingViewOp already
   // draws that line, so reuse it rather than testing OutputMemoryInheritsInput()
   // directly — otherwise a transpose output, which does own its buffer, could
-  // not be bound to a user buffer.
+  // not be bound to a declared allocation.
   return IsBufferAliasingViewOp(op_name) || entry.GetOutputReusesInputArg().has_value();
 }
 

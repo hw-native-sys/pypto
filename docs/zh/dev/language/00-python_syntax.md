@@ -69,45 +69,46 @@ tensor: pl.Tensor[[64, 128], pl.FP32, pl.MemRef(addr_expr, 8192, 0)]
 tile: pl.Tile[[16, 16], pl.FP16, pl.MemRef(addr_expr, 512, 0), pl.Mem.Left]
 ```
 
-### 用户 buffer (Buffer)
+### 声明式分配（单参数 MemRef）
 
-`pl.Buffer()` 把一块 buffer 从编译器的机会主义复用中收回。引用同一 buffer 的 tile
-共享一块分配，其他 tile 绝不会被塞进去。当 packer 合并了你希望保持独立的 tile 时使用它——
-共用 buffer 会引入一条 WAR 依赖，使二者串行。
+单参数形式 `pl.MemRef("name")` 声明一块属于你自己的分配，把它从编译器的机会主义复用中收回。
+引用它的 tile 共享这块分配，其他 tile 绝不会被塞进去。当 packer 合并了你希望保持独立的 tile
+时使用它——共用存储会引入一条 WAR 依赖，使二者串行。
 
-先声明一块 buffer，再用变量引用它。不带名字的 `pl.Buffer()` 会取所绑定变量的名字，这样
-buffer 只需命名一次而不是两次。
+它与三参数形式是同一个 IR 节点；参数个数区分"描述一块已有分配"还是"声明一块新的"。声明时只
+给名字：大小取自绑定到它的最大 tile，地址由分配器决定。
+
+先声明一次，再用变量引用：
 
 ```python
-ping = pl.Buffer()
-pong = pl.Buffer()
+ping = pl.MemRef("ping")
+pong = pl.MemRef("pong")
 
-# 两个 tile 显式共用一块 buffer；第三个保持独占。
+# 两个 tile 显式共用一块分配；第三个保持独占。
 t0: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
 t1: pl.Tile[[64, 64], pl.FP32, pong, pl.Mem.Vec] = pl.exp(t0)
 t2: pl.Tile[[64, 64], pl.FP32, ping, pl.Mem.Vec] = pl.exp(t1)
 ```
 
-推荐这种写法：引用拼错会直接得到 Python 的 `NameError`，而内联的 `pl.Buffer("ping")` 形式
-里字符串拼错只会静默地多声明一块 buffer。内联形式仍然有效——IR 打印器输出的就是它，这样
-dump 出来的程序不依赖外层 Python 作用域即可重新解析。
+推荐这种写法：引用拼错会直接得到 Python 的 `NameError`，而内联的 `pl.MemRef("pign")` 形式
+里字符串拼错只会静默地多声明一块分配。内联形式仍然有效——IR 打印器输出的就是它，这样 dump
+出来的程序不依赖外层 Python 作用域即可重新解析。
 
-一个 MemRef 是否为用户绑定，由 IR 节点上的显式字段（`MemRef.is_user_buffer_`）记录，既不靠
-大小推断，也不靠"当前跑到哪个 pass"。`InitMemRef` 会消费掉这个绑定：此后分配点带上
-`pinned=True`，MemRef 变回普通 MemRef，所以重新解析一份分配后的 dump 不会把编译器分配误当成
-用户 buffer。
+一个 MemRef 是否为声明式分配，由 IR 节点上的显式字段（`MemRef.is_pinned_`）记录，既不靠大小
+推断，也不靠"当前跑到哪个 pass"。`InitMemRef` 会消费掉这个声明：此后分配点带上 `pinned=True`，
+MemRef 变回普通 MemRef，所以重新解析一份分配后的 dump 不会把编译器分配误当成声明式分配。
 
-buffer 名自成命名空间——不会解析到恰好同名的 Python 变量。既不写大小也不写地址：编译器按最大
-成员定型。内存空间**必须**写（`TileType` 始终要求 MemRef 与空间成对出现）。未加注解的 tile
-保持默认的自动复用。
+声明的名字自成命名空间——不会解析到恰好同名的 Python 变量。内存空间**必须**写（`TileType`
+始终要求 MemRef 与空间成对出现），且绑定到同一块分配的 tile 必须一致。未加注解的 tile 保持
+默认的自动复用。
 
-buffer 不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内绑定会被**拒绝**：复制出的各级
-会让同一个 tile 在同一块分配上与自身同时存活。具名槽位与"交给编译器做多缓冲"是二选一，不能
-叠加。要自己管理某一层，就用 `pl.range` 驱动它并为每个槽位命名一块 buffer；希望编译器管理的
-层次则不加注解。
+声明式分配不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内声明会被**拒绝**：复制出的各级
+会让同一个 tile 在同一块分配上与自身同时存活。声明槽位与"交给编译器做多缓冲"是二选一，不能
+叠加。要自己管理某一层，就用 `pl.range` 驱动它并为每个槽位声明一块分配；希望编译器管理的层次
+则不加注解。
 
 ```python
-l0b_ping, l0b_pong = pl.Buffer(), pl.Buffer()
+l0b_ping, l0b_pong = pl.MemRef("l0b_ping"), pl.MemRef("l0b_pong")
 
 # 外层交给编译器，内层由作者自己做 ping-pong。
 for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
@@ -117,8 +118,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/29-init_memref.md#用户-buffer) 与
-[MemoryReuse](../passes/31-memory_reuse.md#用户-buffer)。
+参见 [InitMemRef](../passes/29-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/31-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 

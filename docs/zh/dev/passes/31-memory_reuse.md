@@ -91,13 +91,13 @@ program_optimized = reuse_pass(program)
 
 MemRef 共享完成后，部分 MemRef 对象变为无引用状态（其变量现在指向不同的共享 MemRef）。该 Pass 遍历周围的 `SeqStmts`，移除所有左值 MemRef 指针不在仍使用集合中的 `tile.alloc` `AssignStmt`。
 
-## 用户 buffer
+## 声明式分配
 
 复用是机会主义的：任意两个生命周期不重叠的 tile 都是合并到同一块 buffer 的候选。就容量而言
 这是正确的默认策略，但它并非没有代价——共用一块 buffer 的两个 tile 之间被强加了一条源码从未
 要求的 WAR 依赖，硬件因此必须串行执行本可由调度器重叠的工作。
 
-在 tile 注解中引用一个声明好的 `pl.Buffer()`，作者即可把某块 buffer 从 packer 手里收回。
+在 tile 注解中引用一个声明好的 `pl.MemRef("name")`，作者即可把某块分配从 packer 手里收回。
 InitMemRef 将其物化为 `tile.alloc(..., pinned=True)`（见
 [InitMemRef](29-init_memref.md#用户-buffer)），本 pass 随后视其为封闭的：pinned 区间在
 first-fit 打包中自开一个槽位，之后每个候选在扫描槽位时都会跳过它。（隔离是打包循环内的
@@ -107,7 +107,7 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 - 作者绑定到**不同** buffer 的 tile 永远不会被合并，无论其生命周期多么不相交——保持彼此独立
   正是绑定的目的。
 - 作者绑定到**同一** buffer 的 tile 在 InitMemRef 阶段已共享同一 base，并保持如此。
-- 未绑定的 tile 照旧参与打包，且绝不会被塞进用户 buffer。
+- 未绑定的 tile 照旧参与打包，且绝不会被塞进声明式分配。
 
 代价由作者承担：pin 是用容量换并行度，pin 过头的 kernel 会在 `AllocateMemoryAddr` 处硬报错，
 而不是被静默合并回去。
@@ -120,7 +120,7 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 行为。
 
 由于隔离保证由本 pass 提供，而 ptoas 会整体替换本 pass，因此 `memory_planner=PTOAS` 下的
-`pl.Buffer(...)` 会在 InitMemRef 处**直接报错**，而不是"分配了但不隔离"地静默生效——只分配不
+单参数 `pl.MemRef(...)` 会在 InitMemRef 处**直接报错**，而不是"分配了但不隔离"地静默生效——只分配不
 隔离，恰好会把作者写这条绑定所要避免的合并原样还回去。
 
 ## Ascend910B load + tpop_from_aic 危害

@@ -14,7 +14,6 @@ import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from pypto.language.typing.buffer import Buffer
 from pypto.language.typing.dynamic import DynVar
 from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import DataType, ir
@@ -514,17 +513,12 @@ class TypeResolver:
         memory_space_node: ast.expr | None = None
 
         for node in extra_nodes:
-            if (
-                self._is_buffer_node(node)
-                or self._is_memref_node(node)
-                or (self._resolve_memref_var_ref(node) is not None)
-                or (self._resolve_buffer_var_ref(node) is not None)
-            ):
+            if self._is_memref_node(node) or (self._resolve_memref_var_ref(node) is not None):
                 if memref_node is not None:
                     raise ParserTypeError(
                         "Tile annotation can contain at most one memref argument",
                         span=self._get_span(node),
-                        hint="Remove the duplicate pl.Buffer(...) / pl.MemRef(...) / MemRefType argument",
+                        hint="Remove the duplicate pl.MemRef(...) / MemRefType argument",
                     )
                 memref_node = node
                 continue
@@ -567,19 +561,16 @@ class TypeResolver:
                 "Tile annotation with a memref argument must also specify explicit memory space",
                 span=self._get_span(memref_node),
                 hint="Use pl.Tile[[shape], dtype, pl.MemRef(base, offset, size), pl.Mem.Vec], "
-                'pl.Tile[[shape], dtype, pl.Buffer("scratch"), pl.Mem.Vec], or '
+                'pl.Tile[[shape], dtype, pl.MemRef("scratch"), pl.Mem.Vec], or '
                 "pl.Tile[[shape], dtype, memref_var, pl.Mem.Vec]",
             )
 
         if memref_node is None:
             memref = None
-        elif self._is_buffer_node(memref_node):
-            memref = self._resolve_buffer(memref_node)
         elif self._is_memref_node(memref_node):
             memref = self.resolve_memref(memref_node)
         else:
-            # A bare Name is either a bound MemRef var or a pl.Buffer object.
-            memref = self._resolve_memref_var_ref(memref_node) or self._resolve_buffer_var_ref(memref_node)
+            memref = self._resolve_memref_var_ref(memref_node)
         # Resolve memory_space first so it can be passed to _resolve_tileview for
         # memory-space-aware implicit blayout/slayout/fractal defaults.
         #
@@ -602,61 +593,54 @@ class TypeResolver:
         return ir.TileType(shape, dtype, memref, tile_view, memory_space)
 
     def _resolve_memref_var_ref(self, node: ast.expr) -> "ir.MemRef | None":
-        """Resolve a previously bound MemRef variable used in a Tile annotation."""
-        if not isinstance(node, ast.Name) or self.scope_lookup is None:
-            return None
-        var = self.scope_lookup(node.id)
-        if isinstance(var, ir.MemRef):
-            return var
-        return None
+        """Resolve a MemRef referenced by name in a Tile annotation.
 
-    def _resolve_buffer_var_ref(self, node: ast.expr) -> "ir.MemRef | None":
-        """Resolve a ``pl.Buffer`` object referenced by name in a Tile annotation.
+        Two sources, in order: a MemRef bound earlier in the parsed program (a
+        printed dump names its alloc-defined Ptr that way), then a MemRef the
+        author declared in enclosing Python::
 
-        The declare-then-reference form::
-
-            scratch = pl.Buffer()
+            scratch = pl.MemRef("scratch")
             t: pl.Tile[[64, 64], pl.FP32, scratch, pl.Mem.Vec] = ...
 
-        A misspelled reference is a ``NameError`` from Python itself rather than
-        a silently distinct buffer, which is the whole reason to prefer it over
-        the inline ``pl.Buffer("scratch")`` string form.
+        The declared form is the one to prefer: a misspelled reference is a
+        ``NameError`` from Python itself, whereas a misspelled string in the
+        inline ``pl.MemRef("scartch")`` form quietly declares a second allocation.
 
         Args:
             node: Candidate AST node from a Tile annotation's trailing arguments
 
         Returns:
-            The binding MemRef, or None if the node is not a Buffer reference
+            The MemRef, or None if the node is not a MemRef reference
         """
         if not isinstance(node, ast.Name):
             return None
-        buffer_obj = self.expr_evaluator.closure_vars.get(node.id)
-        if not isinstance(buffer_obj, Buffer):
-            return None
-        # An unnamed pl.Buffer() takes the name of the variable it is bound to,
-        # so the buffer is named once, in Python, instead of twice.
-        return self._make_buffer_memref(buffer_obj.name or node.id, self._get_span(node))
+        if self.scope_lookup is not None:
+            var = self.scope_lookup(node.id)
+            if isinstance(var, ir.MemRef):
+                return var
+        declared = self.expr_evaluator.closure_vars.get(node.id)
+        return declared if isinstance(declared, ir.MemRef) else None
 
-    def _make_buffer_memref(self, name: str, span: "ir.Span") -> "ir.MemRef":
-        """Build the unresolved binding MemRef for a buffer name.
+    def _make_declared_memref(self, name: str, span: "ir.Span") -> "ir.MemRef":
+        """Build the unresolved MemRef for a declared allocation's name.
 
-        Buffer names are their own namespace, unrelated to Python variable names,
-        so this must not reach ``scope_lookup``. That fallback exists for
-        ``pl.MemRef(base, ...)`` naming an alloc-defined Ptr; a buffer never has
-        one (it is resolved before InitMemRef creates any). Left in, a buffer
-        whose name merely collided with an in-scope variable — a tensor parameter
-        ``a`` and ``pl.Buffer("a")`` — would silently take that variable, of
-        arbitrary type, as its allocation base.
+        A declared allocation's name is its own namespace, unrelated to Python
+        variable names, so this must not reach ``scope_lookup``. That fallback
+        exists for ``pl.MemRef(base, offset, size)`` naming an alloc-defined Ptr;
+        a declaration never has one (it is resolved before InitMemRef creates
+        any). Left in, a name that merely collided with an in-scope variable — a
+        tensor parameter ``a`` and ``pl.MemRef("a")`` — would silently take that
+        variable, of arbitrary type, as the allocation base.
 
         Args:
-            name: Buffer name, shared by every annotation naming this buffer
+            name: Allocation name, shared by every annotation naming it
             span: Source location
 
         Returns:
-            A MemRef with ``is_user_buffer_`` set, on the interned base Ptr
+            A MemRef with ``is_pinned_`` set, on the interned base Ptr
         """
         base_var = self._intern_base_ptr(name, span, skip_scope_lookup=True)
-        return ir.MemRef.user_buffer(base_var, span)
+        return ir.MemRef(base_var, 0, 0, span, is_pinned=True)
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.
@@ -1651,45 +1635,6 @@ class TypeResolver:
         """Check if an AST node is a pl.MemRef(...) call."""
         return self._is_call_to(node, "MemRef")
 
-    def _is_buffer_node(self, node: ast.expr) -> bool:
-        """Check if an AST node is a pl.Buffer("name") call."""
-        return self._is_call_to(node, "Buffer")
-
-    def _resolve_buffer(self, node: ast.expr) -> "ir.MemRef":
-        """Resolve pl.Buffer("name") to a size-less MemRef on the named base Ptr.
-
-        A user buffer carries only its identity: the base Ptr interned from the
-        name. Offset is 0 (a bound tile occupies the whole buffer) and size is 0 —
-        the "derive me" marker ``InitMemRef`` matches on to tell a binding apart
-        from an ordinary MemRef, then replaces with the size of the largest tile
-        bound to this buffer.
-
-        Args:
-            node: AST Call node for pl.Buffer(...)
-
-        Returns:
-            ir.MemRef whose base_ is shared by every annotation naming this buffer
-
-        Raises:
-            ParserTypeError: If the call is not pl.Buffer(<non-empty string literal>)
-        """
-        assert isinstance(node, ast.Call)
-        span = self._get_span(node)
-        if len(node.args) != 1 or node.keywords:
-            raise ParserTypeError(
-                f"pl.Buffer requires exactly one name argument, got {ast.unparse(node)}",
-                span=span,
-                hint='Use pl.Buffer("scratch")',
-            )
-        name_node = node.args[0]
-        if not (isinstance(name_node, ast.Constant) and isinstance(name_node.value, str) and name_node.value):
-            raise ParserTypeError(
-                f"pl.Buffer name must be a non-empty string literal, got {ast.unparse(name_node)}",
-                span=span,
-                hint='Use pl.Buffer("scratch")',
-            )
-        return self._make_buffer_memref(name_node.value, span)
-
     def _is_memory_space_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.Mem.<space> or pl.MemorySpace.<space> reference."""
         if not isinstance(node, ast.Attribute):
@@ -1712,6 +1657,8 @@ class TypeResolver:
         """Resolve a pl.MemRef(base, byte_offset, size) AST call to ir.MemRef.
 
         Supports:
+        - Declaration: pl.MemRef(name) — an allocation of the author's own, size
+          and address left for InitMemRef and the allocator to derive
         - New format: pl.MemRef(base_name, byte_offset, size) — bare name or string ref
         - Legacy format: pl.MemRef(addr, size, id) — integer addr
 
@@ -1732,6 +1679,22 @@ class TypeResolver:
             )
 
         span = self._get_span(node)
+
+        # One argument: a declared allocation. The author names it and nothing
+        # else — InitMemRef derives the size from the tiles bound to it and the
+        # allocator assigns the address — so there is no offset/size to give.
+        if len(node.args) == 1 and not node.keywords:
+            name_node = node.args[0]
+            if not (
+                isinstance(name_node, ast.Constant) and isinstance(name_node.value, str) and name_node.value
+            ):
+                raise ParserTypeError(
+                    f"A declared allocation's name must be a non-empty string literal, "
+                    f"got {ast.unparse(name_node)}",
+                    span=span,
+                    hint='Use pl.MemRef("scratch")',
+                )
+            return self._make_declared_memref(name_node.value, span)
 
         if len(node.args) == 3:
             first_arg = node.args[0]
@@ -1777,8 +1740,8 @@ class TypeResolver:
             name: Base Ptr name to intern
             span: Source location, used when a fresh Var is created
             skip_scope_lookup: Resolve only through the resolver-local cache.
-                Set for ``pl.Buffer(...)`` names, which live in their own
-                namespace — see ``_resolve_buffer``.
+                Set for a declared allocation's name, which lives in its own
+                namespace — see ``_make_declared_memref``.
 
         Returns:
             The shared Var for this base name
