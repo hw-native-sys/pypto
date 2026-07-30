@@ -3,8 +3,9 @@
 Write, inspect, and compile your first PyPTO kernels — from a one-line tensor add to a multi-function program.
 
 > **Prerequisites:** PyPTO installed and importable — see [Installation](01-installation.md).
-> Every example on this page runs as-is on a machine with PyPTO installed; none of
-> them needs an NPU, because nothing here dispatches to a device.
+> Nothing on this page dispatches to a device, so no NPU is needed. The kernel-authoring
+> examples need only the install; the [compiling](#compiling) example additionally needs
+> **ptoas**, which `pip` does not install — pass `skip_ptoas=True` if you do not have it.
 
 ## Concept
 
@@ -214,9 +215,14 @@ compiled = ir.compile(
     VectorAddProgram,
     strategy=ir.OptimizationStrategy.Default,
     backend_type=BackendType.Ascend910B,
+    skip_ptoas=True,   # drop this once ptoas is on the machine
 )
 print(f"Generated code in: {compiled.output_dir}")
 ```
+
+`skip_ptoas=True` stops after emitting `.pto` (MLIR), which is what makes this example
+runnable on a plain `pip install`. Drop it to get compiled C++ kernel wrappers — that
+step invokes **ptoas**, which is distributed separately from the Python package.
 
 `ir.compile()` returns a **`CompiledProgram`**, not a path — the directory is
 `compiled.output_dir`. The `CompiledProgram` is also callable, which is how you dispatch

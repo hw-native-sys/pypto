@@ -3,8 +3,8 @@
 编写、查看并编译你的第一批 PyPTO kernel —— 从一行张量加法到多函数 program。
 
 > **前置**：PyPTO 已安装且可导入 —— 见[安装](01-installation.md)。
-> 本页的每个例子在装好 PyPTO 的机器上都能直接跑；它们都不需要 NPU，因为这里没有任何代码
-> 会派发到设备。
+> 本页没有任何代码会派发到设备，所以不需要 NPU。写 kernel 的例子只需要安装本体；
+> 下面「编译」那一节的例子还需要 **ptoas**，而 `pip` 不会安装它 —— 没有的话传 `skip_ptoas=True`。
 
 ## Concept
 
@@ -203,9 +203,14 @@ compiled = ir.compile(
     VectorAddProgram,
     strategy=ir.OptimizationStrategy.Default,
     backend_type=BackendType.Ascend910B,
+    skip_ptoas=True,   # 机器上有 ptoas 之后可以去掉这一行
 )
 print(f"Generated code in: {compiled.output_dir}")
 ```
+
+`skip_ptoas=True` 会在发射 `.pto`（MLIR）之后停下，这正是让本例在一台仅 `pip install` 过的
+机器上也能跑通的原因。去掉它才会得到编译好的 C++ kernel wrapper —— 那一步要调用 **ptoas**，
+它与 Python 包是分开分发的。
 
 `ir.compile()` 返回的是 **`CompiledProgram`**，不是路径 —— 目录在 `compiled.output_dir`。
 `CompiledProgram` 同时也是可调用的，这就是拿到 worker 后把它派发到设备的方式。

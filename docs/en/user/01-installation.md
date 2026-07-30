@@ -9,10 +9,17 @@ an install is a build: you need a C++17 toolchain and CMake in addition to Pytho
 [scikit-build-core](https://scikit-build-core.readthedocs.io/) drives CMake from `pip`,
 so a plain `pip install` does the whole thing.
 
-What you get from an install is the **compiler** — enough to write kernels, inspect IR,
-and generate device code. Actually *running* a compiled kernel additionally needs the
-runtime and an NPU (or a simulator platform); the examples on this page stop at
-compilation, which is the part that works anywhere.
+What you get from an install is the **compiler front end** — enough to write kernels and
+inspect the IR they parse into. Two things are *not* installed by `pip` and are worth
+knowing about before you follow a command that needs them:
+
+| To do this | You also need |
+| ---------- | ------------- |
+| Write kernels, inspect IR (`as_python()`) | Nothing beyond the install |
+| Compile to device kernels | **ptoas**, distributed separately (versions pinned in `toolchain/versions.env`). Without it, use `ir.compile(..., skip_ptoas=True)` to stop at `.pto` |
+| Run a compiled kernel | The runtime plus an NPU or a simulator platform |
+
+The verification below deliberately stays in the first row.
 
 ## Quickstart
 
@@ -38,11 +45,34 @@ fine and a traceback as the real signal:
 226 exports
 ```
 
-Then compile something end to end:
+Then check that the parser works — this only builds and prints IR, so it needs neither
+ptoas nor a device. Write it to a file rather than piping it to `python -`:
+`@pl.function` reads the decorated function's source, which is unavailable on stdin.
 
 ```bash
-python examples/hello_world.py
+cat > /tmp/pypto_check.py <<'PY'
+import pypto.language as pl
+
+@pl.function
+def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+    r: pl.Tensor[[8], pl.FP32] = pl.add(a, b)
+    return r
+
+print(add.as_python())
+PY
+
+python /tmp/pypto_check.py
 ```
+
+```text
+@pl.function
+def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+    r: pl.Tensor[[8], pl.FP32] = pl.tensor.add(a, b)
+    return r
+```
+
+`pl.add` resolving to `pl.tensor.add` is the parser doing operator dispatch — if you see
+that, the install is sound.
 
 ## Mechanics
 
@@ -114,11 +144,19 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 | `examples/utils/` | Parsing, cross-function calls, error handling |
 | `examples/runtime/` | Dispatch, explicit workers, distributed callbacks, multi-program KV cache |
 
+**Most of these dispatch to hardware, not just compile.** `hello_world.py`,
+`kernels/06_softmax.py`, and `models/01_ffn.py` all end by calling their kernel with
+`config=RunConfig()`, which assembles through ptoas and runs it — so they need the
+runtime and a device or simulator platform, not only the `pip install` above:
+
 ```bash
-python examples/hello_world.py
-python examples/kernels/06_softmax.py
-python examples/models/01_ffn.py
+python examples/hello_world.py          # needs runtime + device/simulator
+python examples/kernels/06_softmax.py   # needs runtime + device/simulator
+python examples/models/01_ffn.py        # needs runtime + device/simulator
 ```
+
+If you only have the compiler front end, read them rather than running them —
+`examples/utils/` is the subset that stays closest to parse-and-inspect.
 
 ### Running the test suite
 

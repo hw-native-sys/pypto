@@ -8,9 +8,16 @@ PyPTO 是一个带 C++ 编译核心的 Python 包。安装即构建：除 Python
 CMake。[scikit-build-core](https://scikit-build-core.readthedocs.io/) 会从 `pip` 驱动
 CMake，所以一条普通的 `pip install` 就能完成全部工作。
 
-安装得到的是**编译器** —— 足以编写 kernel、查看 IR、生成设备代码。真正**运行**已编译的
-kernel 还需要运行时和一块 NPU（或模拟器平台）；本页的例子都止步于编译，这部分在任何机器上
-都能跑通。
+安装得到的是**编译器前端** —— 足以编写 kernel 并查看它们解析成的 IR。有两样东西 `pip`
+**不会**安装，在执行需要它们的命令之前值得先知道：
+
+| 要做这件事 | 还需要 |
+| ---------- | ------ |
+| 编写 kernel、查看 IR（`as_python()`） | 除安装外无需其他 |
+| 编译出设备 kernel | **ptoas**，单独分发（版本固定在 `toolchain/versions.env`）。没有它就用 `ir.compile(..., skip_ptoas=True)` 停在 `.pto` |
+| 运行已编译的 kernel | 运行时，加一块 NPU 或模拟器平台 |
+
+下面的验证步骤刻意只停留在第一行。
 
 ## Quickstart
 
@@ -35,11 +42,32 @@ python -c "import pypto.language as pl; from pypto import ir; print(len(pl.__all
 226 exports
 ```
 
-然后端到端编译一个程序：
+然后确认 parser 正常 —— 这一步只构建并打印 IR，既不需要 ptoas 也不需要设备。请写成文件再运行，
+不要管道给 `python -`：`@pl.function` 需要读取被装饰函数的源码，而 stdin 上取不到。
 
 ```bash
-python examples/hello_world.py
+cat > /tmp/pypto_check.py <<'PY'
+import pypto.language as pl
+
+@pl.function
+def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+    r: pl.Tensor[[8], pl.FP32] = pl.add(a, b)
+    return r
+
+print(add.as_python())
+PY
+
+python /tmp/pypto_check.py
 ```
+
+```text
+@pl.function
+def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+    r: pl.Tensor[[8], pl.FP32] = pl.tensor.add(a, b)
+    return r
+```
+
+`pl.add` 解析成了 `pl.tensor.add`，这是 parser 在做算子分派 —— 看到这个就说明安装是好的。
 
 ## Mechanics
 
@@ -107,11 +135,17 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 | `examples/utils/` | 解析、跨函数调用、错误处理 |
 | `examples/runtime/` | 派发、显式 worker、分布式回调、多程序 KV cache |
 
+**这些例子多数会派发到硬件，而不只是编译。** `hello_world.py`、`kernels/06_softmax.py`、
+`models/01_ffn.py` 最后都以 `config=RunConfig()` 调用各自的 kernel，也就是经 ptoas 汇编后
+真正运行 —— 因此它们需要运行时和一块设备或模拟器平台，仅有上面的 `pip install` 是不够的：
+
 ```bash
-python examples/hello_world.py
-python examples/kernels/06_softmax.py
-python examples/models/01_ffn.py
+python examples/hello_world.py          # 需要运行时 + 设备/模拟器
+python examples/kernels/06_softmax.py   # 需要运行时 + 设备/模拟器
+python examples/models/01_ffn.py        # 需要运行时 + 设备/模拟器
 ```
+
+如果你只有编译器前端，读它们而不要运行 —— `examples/utils/` 是最接近“仅解析与查看”的那部分。
 
 ### 运行测试
 

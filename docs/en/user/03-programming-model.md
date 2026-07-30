@@ -62,7 +62,9 @@ does what — multi-block dispatch, cluster scopes, mixed AIC/AIV kernels.
 
 ### Control plane and execution plane
 
-A program is split across two planes, and every function belongs to exactly one:
+Execution is split across two planes. `Orchestration` sits on the control plane, and the
+InCore family (`InCore`, and the `AIC` / `AIV` / `Group` / `Spmd` forms the compiler
+derives from it) sits on the execution plane:
 
 ```text
 HOST / Orchestration          control plane
@@ -74,15 +76,17 @@ InCore (AIC / AIV)            execution plane
      never allocates tensors or dispatches work
 ```
 
-`FunctionType` records which plane a function is on:
+`Opaque` and `Inline` are the two values that carry **no** plane, and for opposite
+reasons: `Opaque` has not committed to one yet, and `Inline` never reaches code
+generation as a function at all.
 
 | Value | Plane | Meaning |
 | ----- | ----- | ------- |
-| `Opaque` | — | Default. No specific execution context; usable as a building block |
 | `Orchestration` | Control | Host-side coordinator — allocates tensors, dispatches kernels |
 | `InCore` | Execution | Compute kernel on an AICore |
-| `Inline` | — | Spliced into every call site by the first pass; leaves no function behind |
 | `AIC` / `AIV` / `Group` / `Spmd` | Execution | Produced by the compiler when it splits and outlines your code — you rarely write these by hand |
+| `Opaque` | none (yet) | Default. No specific execution context; a building block that takes its plane from where it is used |
+| `Inline` | none | Spliced into every call site by the first pass; leaves no function behind, so it never has a plane of its own |
 
 A function's `level` and `role` refine this further — `pl.Level.HOST` with
 `pl.Role.Orchestrator` marks the host orchestrator of a distributed program. (There is
@@ -174,11 +178,11 @@ compiled program
                     AICore execution
 ```
 
-The consequence for how you write code: **the order of statements in an orchestration
-function is not the order of execution.** The compiler derives dependencies from buffer
-overlap, and the runtime runs anything unordered concurrently. Two dispatches that touch
-disjoint buffers may overlap even though one is written after the other. Where you need
-a specific order, you say so — with dependencies rather than statement placement.
+The consequence for how you write code: **source order is not an ordering guarantee.**
+The runtime orders two tasks only when something in the program establishes that they are
+ordered — a dependency the compiler derived from an overlapping buffer, or one you stated
+explicitly. Writing one dispatch after another expresses nothing on its own. Where a
+sequence is required, express it; do not infer it from statement placement.
 
 The hardware those tasks land on is organized in clusters: **1 Cube core and 2 buddy
 Vector cores** sharing a flag-based synchronization mechanism. That shape is why mixed
@@ -188,13 +192,14 @@ kernels and cross-core pipelines exist as concepts; see
 ## Edge Cases
 
 > **Fatal pitfall:** statement order in an Orchestration function does not constrain
-> execution order. If two dispatches must be ordered but touch different buffers,
-> nothing in the source expresses that — the runtime is free to overlap them, and the
+> execution order. If two dispatches must run in sequence, that sequence has to be
+> expressed — through a dependency, or through a buffer relationship the compiler can
+> see. Relying on source order alone leaves the runtime free to overlap them, and the
 > result is a race that reproduces intermittently and disappears under a debugger.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **Results change between runs** | Two tasks race because no dependency links them | Make the dependency explicit rather than relying on statement order |
+| **Results change between runs** | Two tasks that must be ordered have nothing expressing that order | State the dependency explicitly; source order alone does not order them |
 | **`pl.load` inside an Orchestration function fails** | Tile operations used on the control plane | Move the tile code into an `InCore` function and dispatch it |
 | **`pl.create_tensor` inside an InCore function fails** | Tensor allocation used on the execution plane | Allocate in the Orchestration function; pass the buffer in as `pl.Out[...]` |
 | **A value written in a loop is empty afterwards** | Loop-carried value not yielded | Carry it with `init_values=` + `pl.yield_` |
