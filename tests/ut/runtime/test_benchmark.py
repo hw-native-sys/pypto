@@ -461,6 +461,50 @@ def test_parse_l3_per_dispatch_keeps_a_ranks_dispatches_separate(span_root):
     assert [d.device_wall_us for d in groups[100, 1]] == [6.0, 7.0]
 
 
+def test_parse_l3_reordered_dispatches_disable_the_per_dispatch_views(span_root):
+    """A rank that swaps its dispatch order between rounds must not be grouped.
+
+    The dispatch *count* is constant (so the round boundaries hold), but rank 100
+    issues ``a, b`` in round 0 and ``b, a`` in round 1. Keying on the ordinal slot
+    would average two different callables together under round 0's label — the
+    fusing these views exist to remove — so the per-dispatch views report empty
+    while the order-independent per-rank sums stay valid.
+    """
+    lines: list[str] = []
+    # round 0: a(4us) then b(6us);  round 1: b(7us) then a(3us).
+    lines += _launch_lines(0, span_root, host_us=1, device_us=4, pid=100, hid="a")
+    lines += _launch_lines(1, span_root, host_us=1, device_us=6, pid=100, hid="b")
+    lines += _launch_lines(2, span_root, host_us=1, device_us=7, pid=100, hid="b")
+    lines += _launch_lines(3, span_root, host_us=1, device_us=3, pid=100, hid="a")
+
+    stats = _parse_stats_from_strace("\n".join(lines), rounds=2, warmup=0, distributed=True)
+
+    assert stats.fallback_flattened is False  # round segmentation is still sound
+    assert stats.unstable_dispatch_slots is True
+    assert stats.per_dispatch("device") == {}
+    assert stats.dispatch_groups() == {}
+    assert stats.dispatch_tasks() == {}
+    # Per-rank sums are order-independent, so they remain correct and populated.
+    assert stats.per_rank("device") == {100: [10.0, 10.0]}
+    assert stats.device_wall_us == [10.0, 10.0]
+    # The mean tree says why rather than blending the two callables into one tree.
+    tree = stats.format_mean_tree()
+    assert "per-dispatch view unavailable" in tree
+    assert "dispatch pid=" not in tree
+    assert stats.mean_invocation() is None
+    # __str__ drops its per-dispatch line rather than mislabelling the slots.
+    assert "per-dispatch" not in str(stats)
+
+
+def test_parse_l3_stable_slots_are_not_flagged(span_root):
+    """The same callables in the same order every round group as before."""
+    stats = _parse_stats_from_strace(
+        "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True
+    )
+    assert stats.unstable_dispatch_slots is False
+    assert set(stats.per_dispatch("device")) == {(100, 0), (100, 1), (101, 0)}
+
+
 def test_per_dispatch_host_metric_and_bad_metric(span_root):
     stats = _parse_stats_from_strace(
         "\n".join(_l3_multi_dispatch_lines(span_root)), rounds=2, warmup=0, distributed=True

@@ -218,10 +218,16 @@ rank's dispatches within the round (a card runs its dispatches serially), so the
 are per-round-per-rank busy figures, **not** per-dispatch.
 
 `per_dispatch` is the un-fused view — it sums nothing. It keys on `(pid, slot)`,
-where `slot` is the dispatch's position within its rank's round; the round
-segmentation guarantees a constant dispatch count per rank per round, so slot `s`
-is the same dispatch in every round. A rank that issues several dispatches per
-round therefore keeps one series per dispatch instead of a single summed number.
+where `slot` is the dispatch's position within its rank's round. A rank that
+issues several dispatches per round therefore keeps one series per dispatch
+instead of a single summed number.
+
+A slot only identifies a dispatch if the rank issues the same callables in the
+same order every round. A constant dispatch count does not guarantee that, so
+the parse checks it: if any slot carried more than one task across the rounds,
+`stats.unstable_dispatch_slots` is set and the per-dispatch views report empty
+rather than averaging distinct kernels under the first round's label. Round
+boundaries are unaffected, so `per_rank` / `per_round` stay valid.
 `stats.dispatch_tasks()` labels each slot with the orchestration function it
 runs, and `stats.dispatch_groups()` returns the underlying `TraceInvocation` per
 round.

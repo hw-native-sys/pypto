@@ -196,9 +196,13 @@ dispatch 的**求和**（一张卡串行执行它的多次 dispatch），因此�
 **不是**逐 dispatch 的量。
 
 `per_dispatch` 是**不做融合**的视图——它不求和。它以 `(pid, slot)` 为键，`slot` 是该次
-dispatch 在本 rank 该轮内的序号；轮次切分保证每 rank 每轮的 dispatch 数恒定，因此
-slot `s` 在每一轮都对应同一次 dispatch。这样一个 rank 每轮的多次 dispatch 会各自保留
-一条序列，而不是被加成一个数。`stats.dispatch_tasks()` 给出每个 slot 实际执行的编排函数
+dispatch 在本 rank 该轮内的序号。这样一个 rank 每轮的多次 dispatch 会各自保留一条序列，
+而不是被加成一个数。
+
+slot 要能代表某次 dispatch，前提是该 rank 每轮发出的 callable **顺序也相同**。dispatch
+数恒定并不保证这一点，因此解析时会校验：若某个 slot 在各轮中出现过不同的 task，则置位
+`stats.unstable_dispatch_slots`，逐 dispatch 视图返回空，而不是把不同 kernel 平均到
+第一轮的标签下。轮次边界不受影响，`per_rank` / `per_round` 仍然有效。`stats.dispatch_tasks()` 给出每个 slot 实际执行的编排函数
 名，`stats.dispatch_groups()` 返回其每轮的 `TraceInvocation`。
 
 ```python

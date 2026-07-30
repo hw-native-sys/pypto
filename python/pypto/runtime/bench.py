@@ -325,6 +325,14 @@ _METRIC_ATTR = {"device": "device_wall_us", "host": "host_wall_us", "effective":
 # Shown when no ``[STRACE]`` span tree was captured at all.
 _NO_TREE_MSG = "BenchmarkStats: no span tree captured (non-SIMPLER_HOST_STRACE build or *sim platform)"
 
+# Shown when the dispatch slots are not stable enough to group by (see
+# ``BenchmarkStats.unstable_dispatch_slots``).
+_UNSTABLE_SLOTS_MSG = (
+    "BenchmarkStats: per-dispatch view unavailable — a rank's dispatch order "
+    "varies between rounds, so a slot does not identify one callable. The "
+    "per-rank / per-round sums are unaffected."
+)
+
 # Max ``(pid, slot)`` groups listed inline by ``BenchmarkStats.__str__`` before
 # the tail is elided (the full set is always available via ``per_dispatch``).
 _STR_MAX_DISPATCHES = 8
@@ -459,6 +467,17 @@ class BenchmarkStats:
             :attr:`device_wall_us` / :attr:`host_wall_us` hold the pooled
             per-dispatch samples (warmup dropped per rank), :attr:`rounds_dispatches`
             is empty, and ``per_rank`` / ``per_round("union")`` return empty.
+        unstable_dispatch_slots: L3 only — ``True`` when some ``(pid, slot)``
+            carried more than one :attr:`TraceInvocation.task` across the measured
+            rounds, i.e. a rank issued a *constant number* of dispatches but not
+            always in the same order (round 0 ``A, B`` then round 1 ``B, A``).
+            The ordinal slot then does not identify a callable, so grouping by it
+            would average distinct kernels under the first round's label — the
+            very fusing the per-dispatch views exist to remove. They therefore
+            report empty (:meth:`dispatch_groups`, :meth:`per_dispatch`,
+            :meth:`dispatch_tasks`) and :meth:`format_mean_tree` explains why.
+            Round boundaries are unaffected, so :attr:`rounds_dispatches`,
+            :meth:`per_rank` and :meth:`per_round` stay valid and populated.
     """
 
     device_wall_us: list[float] = field(default_factory=list)
@@ -468,20 +487,23 @@ class BenchmarkStats:
     invocations: list[TraceInvocation] = field(default_factory=list)
     rounds_dispatches: list[dict[int, list[TraceInvocation]]] = field(default_factory=list)
     fallback_flattened: bool = False
+    unstable_dispatch_slots: bool = False
 
     def dispatch_groups(self) -> dict[tuple[int, int], list[TraceInvocation]]:
         """Per-dispatch invocation series: ``{(pid, slot): [round0, round1, ...]}``.
 
         *slot* is the dispatch's position within its rank's round (dispatches are
-        ordered by ``inv``, and the round segmentation guarantees a constant
-        dispatch count per rank per round, so slot ``s`` is the same dispatch in
-        every round). Keys are sorted by ``(pid, slot)``.
+        ordered by ``inv``). Keys are sorted by ``(pid, slot)``.
 
         This is the un-fused view: a rank issuing several dispatches per round
         gets one entry per dispatch instead of a single summed number. Derived
         from :attr:`rounds_dispatches`, so it is **L3 only** — returns ``{}`` for
-        L2 and for the flatten fallback.
+        L2 and for the flatten fallback, and also when
+        :attr:`unstable_dispatch_slots` says a slot does not identify one
+        callable across rounds.
         """
+        if self.unstable_dispatch_slots:
+            return {}
         out: dict[tuple[int, int], list[TraceInvocation]] = {}
         for ranks in self.rounds_dispatches:
             for pid, dispatches in ranks.items():
@@ -630,7 +652,14 @@ class BenchmarkStats:
         tree — narrowed by the optional *pid* / *slot* selectors. L2 and the
         flatten fallback have no dispatch grid, so they yield a single unlabeled
         group holding every measured launch.
+
+        Yields nothing when :attr:`unstable_dispatch_slots` is set: falling back
+        to the single unlabeled group there would blend a rank's distinct
+        callables into one tree, which is exactly what the flag exists to
+        prevent.
         """
+        if self.unstable_dispatch_slots:
+            return []
         groups = self.dispatch_groups()
         if not groups:
             if pid is not None or slot is not None:
@@ -701,6 +730,8 @@ class BenchmarkStats:
         """
         groups = self._mean_tree_groups(pid=pid, slot=slot)
         if not groups:
+            if self.unstable_dispatch_slots:
+                return _UNSTABLE_SLOTS_MSG
             if self.invocations:
                 return f"BenchmarkStats: no dispatch matches pid={pid} slot={slot}"
             return _NO_TREE_MSG
@@ -932,6 +963,21 @@ def _is_dispatch_invocation(inv: Any, host_name: str) -> bool:
     return any(span.depth == 0 and span.name == host_name for span in inv.spans)
 
 
+def _has_unstable_slots(rounds_dispatches: list[dict[int, list[TraceInvocation]]]) -> bool:
+    """Whether any ``(pid, slot)`` carried more than one task across the rounds.
+
+    See :attr:`BenchmarkStats.unstable_dispatch_slots`. First mismatch wins, so
+    this is O(total dispatches).
+    """
+    seen: dict[tuple[int, int], str] = {}
+    for ranks in rounds_dispatches:
+        for pid, dispatches in ranks.items():
+            for slot, dispatch in enumerate(dispatches):
+                if seen.setdefault((pid, slot), dispatch.task) != dispatch.task:
+                    return True
+    return False
+
+
 def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, warmup: int) -> BenchmarkStats:
     """Aggregate L3 (distributed) ``[STRACE]`` markers into per-round stats.
 
@@ -1015,6 +1061,14 @@ def _parse_l3_stats(invocations: Any, stats: BenchmarkStats, *, rounds: int, war
             dispatches = [_mirror_invocation(inv) for inv in chunk]
             stats.invocations.extend(dispatches)
             stats.rounds_dispatches[k][pid] = dispatches
+
+    # A constant dispatch count per round fixes the round boundaries, but it does
+    # not make the ordinal slot a callable identity: a rank could issue A, B one
+    # round and B, A the next. Grouping those by slot would average distinct
+    # kernels under the first round's label, so flag it and let the per-dispatch
+    # views report empty instead. The per-rank sums are order-independent and
+    # stay valid.
+    stats.unstable_dispatch_slots = _has_unstable_slots(stats.rounds_dispatches)
 
     # Headline per round: max across ranks (slowest rank bounds the round).
     pr_dev = stats.per_rank("device")
