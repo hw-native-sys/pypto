@@ -12,6 +12,105 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # DOCS-ONLY GATE — classifies a pull request's changed paths and, when every
+  # one of them is documentation, skips the whole build/test pipeline below:
+  # `clang-tidy`, `unit-tests`, `codegen-tests`, the four device jobs and
+  # `system-tests-a5sim`. A prose-only change cannot break a build or a test, so
+  # spending a macOS runner and four in-house arm64 CPU / NPU slots (a scarce
+  # shared pool) on it only delays every other PR in the queue.
+  #
+  # What still runs on a docs-only PR — the checks that actually validate docs:
+  #  - `pre-commit`: markdownlint, `check-docs-en-zh-parity`, `check-docs-nav`,
+  #    `check-english-only`, trailing whitespace / EOF. Free ubuntu runner.
+  #  - the separate `Docs` workflow (docs.yml): `mkdocs build --strict`, which
+  #    fails on a dead intra-docs link, a bad anchor, or a page missing from nav.
+  #  - `toolchain`: seconds-long metadata read on a free GitHub-hosted runner,
+  #    deliberately ungated here for the same reason it is ungated behind the
+  #    lint gate — gating it would protect no scarce capacity.
+  #
+  # This cannot weaken the merge rule. The skipped jobs are required status
+  # checks (repo ruleset "default"), and a job skipped via a false `if:` reports
+  # `skipped`, which rulesets count as satisfied — the same mechanism the lint
+  # gate below already relies on. Nothing becomes un-runnable either: pushing a
+  # single non-documentation file to the PR flips the classification and the full
+  # pipeline runs on the next event.
+  #
+  # Deliberately conservative — `docs_only` is true only for a `pull_request`
+  # whose every changed path matches the allowlist in the step below. A `push` to
+  # main, a `workflow_dispatch`, or an empty file list all fall through to the
+  # full pipeline, so a mis-detection costs CI time rather than coverage.
+  # ---------------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      # `pull-requests: read` is what the PR files API below needs; nothing is
+      # checked out or written.
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Classify changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Only a pull request has a well-defined "files this change touches"
+          # list; everything else runs the full pipeline.
+          if [ "$EVENT_NAME" != 'pull_request' ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "event '$EVENT_NAME' is not a pull request -> full pipeline"
+            exit 0
+          fi
+
+          # The PR files API instead of a `git diff`: it needs no checkout at all
+          # (let alone the fetch-depth: 0 clone a base..head diff would need) and
+          # already reports the merge-base diff GitHub shows in the PR.
+          files="$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" \
+                     --paginate --jq '.[].filename')"
+
+          # Empty list (or a truncated API response) -> assume code changed.
+          if [ -z "$files" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "no changed files reported -> full pipeline"
+            exit 0
+          fi
+
+          # Allowlist. Every entry must be incapable of affecting a build or a
+          # test result:
+          #   docs/**    the documentation tree, including docs/requirements.txt
+          #              (only the docs.yml toolchain reads it)
+          #   **/*.md    prose anywhere -- README, .claude/ rules, docs pages. No
+          #              test reads a markdown file; the lint scripts that do
+          #              (check_docs_nav / check_docs_en_zh_parity) run in
+          #              `pre-commit`, which stays ungated.
+          #   mkdocs.yml site config, consumed only by docs.yml
+          # `case` globs are not path-aware, so `*.md` matches at any depth.
+          docs_only=true
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              docs/*|*.md|mkdocs.yml) ;;
+              *)
+                echo "non-documentation change: $f -> full pipeline"
+                docs_only=false
+                break
+                ;;
+            esac
+          done <<< "$files"
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          if [ "$docs_only" = 'true' ]; then
+            echo "every changed path is documentation -> build/test jobs skipped"
+            echo "$files" | sed 's/^/  /'
+          fi
+
   toolchain:
     # Single source of truth for the toolchain versions every device job uses.
     # ptoas is declared in toolchain/versions.env (pypto-owned); pto-isa is
@@ -120,6 +219,11 @@ jobs:
     #
     # Checks out under ./clang-tidy-checkout so its `git clean` never wipes the
     # sibling codegen-checkout tree (both jobs share the arm64 cpu runner pool).
+    #
+    # Docs-only gate (see the `changes` job) — a prose-only PR touches no C++, and
+    # skipping the gate here keeps the scarce arm64 cpu pool free.
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, arm64, cpu]
     defaults:
       run:
@@ -196,7 +300,9 @@ jobs:
   unit-tests:
     # Lint gate (see the pre-commit job) — don't spend a macOS runner on a tree
     # that doesn't lint.
-    needs: [pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -257,7 +363,9 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — shares the arm64 cpu pool with
     # clang-tidy, so it must not start until that pool's lint job is green.
-    needs: [pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, linux, arm64, cpu]
     defaults:
       run:
@@ -337,7 +445,9 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
-    needs: [toolchain, pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -451,7 +561,9 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
-    needs: [toolchain, pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -594,7 +706,9 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — never claim NPU slots for a tree that
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
-    needs: [toolchain, pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -671,7 +785,9 @@ jobs:
     #
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
-    needs: [toolchain, pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -826,7 +942,9 @@ jobs:
   system-tests-a5sim:
     # Lint gate (see the pre-commit job); `toolchain` is ungated and runs
     # alongside it.
-    needs: [toolchain, pre-commit, clang-tidy]
+    # Docs-only gate (see the `changes` job) — prose cannot break a build.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
