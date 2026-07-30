@@ -20,12 +20,15 @@ from typing import Protocol, cast
 
 import pypto.language as pl
 import pytest
+from pypto import passes
+from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.language.parser.diagnostics import ParserSyntaxError
+from pypto.language.parser.text_parser import parse_program
 from pypto.pypto_core import ir
 
 
 class _HasSplit(Protocol):
-    split: ir.SplitMode | None
+    split: ir.SplitMode
 
 
 def _find_scope_stmt(stmt: ir.Stmt) -> ir.ScopeStmt | None:
@@ -85,7 +88,7 @@ def test_parse_optimizations_empty_list_is_plain_incore():
     scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, scope).split is None
+    assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
 
 
 # ─── No DeprecationWarning for the optimizations= API ─────────────────────────
@@ -145,8 +148,13 @@ def test_unsupported_entry_errors():
             return y
 
 
-def test_split_none_in_list_is_explicit_nosplit():
-    """pl.split(SplitMode.NONE) is accepted and preserved explicitly."""
+def test_split_none_in_list_is_accepted_as_nosplit():
+    """pl.split(SplitMode.NONE) is accepted and lands on the scope as NONE.
+
+    ``SplitMode.NONE`` is the *only* encoding of "no split" on
+    ``InCoreScopeStmt.split_`` (issue #2205), so this is indistinguishable from
+    the scope in ``test_no_optimizations_leaves_split_unset`` — deliberately so.
+    """
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -158,6 +166,44 @@ def test_split_none_in_list_is_explicit_nosplit():
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
+
+
+def test_split_none_scope_survives_print_reparse():
+    """A ``pl.split(pl.SplitMode.NONE)`` scope round-trips (issue #2205).
+
+    The printer emits no ``optimizations=`` entry for a NONE split, so a reparse
+    rebuilds a scope with no ``pl.split`` at all. That used to be a *different*
+    IR state — ``split_`` had two encodings of "no split", ``nullopt`` and
+    ``Some(None)`` — and structural equality rejected the pair, so the roundtrip
+    instrument failed the program after ``ConvertToSSA``. With one encoding the
+    two converge.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                name_hint="k",
+                optimizations=[pl.split(pl.SplitMode.NONE)],
+            ):
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+                out = pl.store(t, [0, 0], out)
+            return out
+
+    printed = Prog.as_python()
+    assert "pl.split" not in printed
+    ir.assert_structural_equal(parse_program(printed), Prog)
+
+    # The instrument is what surfaced this in the wild: it prints and reparses
+    # after every pass and compares structurally.
+    with passes.PassContext([make_roundtrip_instrument()]):
+        passes.convert_to_ssa()(Prog)
 
 
 def test_split_factory_accepts_none_at_runtime():
@@ -236,7 +282,7 @@ def test_parse_optimizations_cross_core_slot_only():
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.attrs.get("slot_num") == 4
-    assert cast(_HasSplit, scope).split is None
+    assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
 
 
 def test_parse_optimizations_split_and_cross_core_slot():

@@ -175,7 +175,7 @@ class TestSplitAivBuildsNode:
         region = _unique_descendant(incore.body, ir.SplitAivScopeStmt)
         assert region.split == ir.SplitMode.LEFT_RIGHT
         # The synthesized InCore wrapper itself carries no split / split_aiv attr.
-        assert incore.split is None
+        assert incore.split == ir.SplitMode.NONE
         assert "split_aiv" not in incore.attrs
 
     def test_builds_node_none_mode(self):

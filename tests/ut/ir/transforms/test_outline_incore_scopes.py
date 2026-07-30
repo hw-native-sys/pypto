@@ -13,6 +13,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 
 
 class TestOutlineIncoreScopes:
@@ -1478,44 +1479,75 @@ class TestOutlineNoDepArgs:
         mechanisms are mutually exclusive, and the function-level split would
         otherwise be silently dropped (the per-region split governs the lanes).
 
-        Detected at outline, where the scope's user split and the region are both
-        visible — post-outline they merge indistinguishably into the function's
-        split/split_aiv attrs (a single region legitimately derives a func split,
-        see test_outline_propagates_split_aiv_attr)."""
+        Detected by the *parser*, the only layer that sees the literal
+        ``pl.split(...)`` the user wrote — see
+        test_function_split_none_with_split_aiv_region_rejected for why that
+        matters, and ..._rejected_at_outline for the pass-level backstop."""
+        with pytest.raises(ParserSyntaxError, match="mutually exclusive"):
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                a: pl.Tensor[[512, 128], pl.FP32],
-                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
-            ) -> pl.Tensor[[512, 128], pl.FP32]:
-                with pl.at(
-                    level=pl.Level.CORE_GROUP,
-                    name_hint="k",
-                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
-                ):
-                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
-                        offset = aiv_id * 128
-                        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
-                        out = pl.store(t, [offset, 0], out)
-                return out
-
-        ssa = passes.convert_to_ssa()(Before)
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            passes.outline_incore_scopes()(ssa)
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.at(
+                        level=pl.Level.CORE_GROUP,
+                        name_hint="k",
+                        optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                    ):
+                        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                            offset = aiv_id * 128
+                            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                            out = pl.store(t, [offset, 0], out)
+                    return out
 
     def test_function_split_none_with_split_aiv_region_rejected(self):
         """``optimizations=[pl.split(pl.SplitMode.NONE)]`` on a scope holding
         pl.split_aiv region(s) is rejected too (RFC #1820).
 
-        NONE carries no split of its own, so this combination used to be
-        exempted — but writing it still reads as "auto and manual split mixed on
-        one scope". The exemption existed only because the cross-core slot count
-        had no carrier other than ``pl.split(..., slot_num=N)``; it now has one
-        (see test_cross_core_slot_with_split_aiv_region_accepted), so the
-        exemption is gone."""
+        NONE carries no split of its own, but writing it still reads as "auto and
+        manual split mixed on one scope". The exemption that once existed was
+        only because the cross-core slot count had no carrier other than
+        ``pl.split(..., slot_num=N)``; it now has one (see
+        test_cross_core_slot_with_split_aiv_region_accepted).
+
+        This spelling is why the check lives in the parser. Since issue #2205
+        ``InCoreScopeStmt.split_`` has a single encoding of "no split"
+        (``SplitMode.NONE``), so by the time ``OutlineIncoreScopes`` runs a literal
+        ``pl.split(pl.SplitMode.NONE)`` is indistinguishable from no ``pl.split``
+        at all — the two encodings that used to distinguish them also broke
+        print -> parse round-tripping."""
+        with pytest.raises(ParserSyntaxError, match="mutually exclusive"):
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.at(
+                        level=pl.Level.CORE_GROUP,
+                        name_hint="k",
+                        optimizations=[pl.split(pl.SplitMode.NONE)],
+                    ):
+                        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                            offset = aiv_id * 128
+                            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                            out = pl.store(t, [offset, 0], out)
+                    return out
+
+    def test_function_split_with_split_aiv_region_rejected_at_outline(self):
+        """OutlineIncoreScopes is the backstop for IR that bypassed the parser.
+
+        Deserialized ``.pto`` and programmatically built scopes never hit the
+        parse-time check, so the pass still rejects any scope whose ``split_`` is
+        set (i.e. not ``SplitMode.NONE``) while its body holds a region. Stamping
+        the mode on with a mutator reproduces exactly that shape."""
 
         @pl.program
         class Before:
@@ -1525,30 +1557,31 @@ class TestOutlineNoDepArgs:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                with pl.at(
-                    level=pl.Level.CORE_GROUP,
-                    name_hint="k",
-                    optimizations=[pl.split(pl.SplitMode.NONE)],
-                ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="k"):
                     for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
                         offset = aiv_id * 128
                         t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                         out = pl.store(t, [offset, 0], out)
                 return out
 
-        # Property verification stays ON; only the print->parse roundtrip is dropped.
-        # `Before` deliberately carries the invalid `split=SplitMode.NONE` on the scope
-        # that this test asserts the pass rejects, and the printer intentionally never
-        # emits a `pl.split(pl.SplitMode.NONE)` (see PrintScopeOptimizations in
-        # src/ir/transforms/python_printer.cpp), so the input cannot round-trip by
-        # design — ConvertToSSA would fail on "SplitMode optional presence mismatch"
-        # before reaching the pass under test. The underlying redundancy (split_ is
-        # optional AND SplitMode has a None member) is tracked by
-        # hw-native-sys/pypto#2205.
+        class _StampIncoreSplit(ir.IRMutator):
+            def visit_in_core_scope_stmt(self, op):
+                rewritten = super().visit_in_core_scope_stmt(op)
+                assert isinstance(rewritten, ir.InCoreScopeStmt)
+                return ir.InCoreScopeStmt(
+                    ir.SplitMode.UP_DOWN,
+                    rewritten.name_hint,
+                    body=rewritten.body,
+                    span=rewritten.span,
+                )
+
+        # `Before` is valid and round-trippable — the invalid combination is
+        # introduced only by the mutator below, after ConvertToSSA has run.
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
             ssa = passes.convert_to_ssa()(Before)
+            stamped = _StampIncoreSplit().visit_program(ssa)
             with pytest.raises(ValueError, match="mutually exclusive"):
-                passes.outline_incore_scopes()(ssa)
+                passes.outline_incore_scopes()(stamped)
 
     def test_cross_core_slot_with_split_aiv_region_accepted(self):
         """``optimizations=[pl.cross_core_slot(slot_num=N)]`` coexists with

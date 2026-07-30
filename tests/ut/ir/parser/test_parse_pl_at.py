@@ -18,7 +18,7 @@ from pypto.pypto_core import ir
 
 
 class _HasSplit(Protocol):
-    split: ir.SplitMode | None
+    split: ir.SplitMode
 
 
 class _HasLevelRole(Protocol):

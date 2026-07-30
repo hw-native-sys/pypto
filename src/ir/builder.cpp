@@ -338,7 +338,10 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   ScopeStmtPtr scope_stmt;
   switch (scope_kind) {
     case ScopeKind::InCore:
-      scope_stmt = std::make_shared<const InCoreScopeStmt>(split, std::move(name_hint), body, combined_span,
+      // The builder's ``split`` is optional only in the "caller did not pass one"
+      // sense; the node itself has a single encoding of "no split" (issue #2205).
+      scope_stmt = std::make_shared<const InCoreScopeStmt>(split.value_or(SplitMode::None),
+                                                           std::move(name_hint), body, combined_span,
                                                            std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Cluster:

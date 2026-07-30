@@ -743,7 +743,7 @@ class TestSpmdOptimizations:
         main_func = list(Prog.functions.values())[0]
         spmd = _unique_descendant(main_func.body, ir.SpmdScopeStmt)
         incore = _unique_descendant(spmd.body, ir.InCoreScopeStmt)
-        assert incore.split is None
+        assert incore.split == ir.SplitMode.NONE
 
     def test_for_spmd_cross_core_slot_sets_scope_attr(self):
         """``pl.cross_core_slot(slot_num=N)`` records ``slot_num`` on the inner
@@ -810,8 +810,8 @@ class TestSpmdOptimizations:
         """A bare slot count needs no split mode at all on the for-spmd form.
 
         The printer emits only the ``pl.cross_core_slot`` entry — it must not
-        fabricate a ``pl.split(pl.SplitMode.NONE)``, which ``OutlineIncoreScopes``
-        rejects on a scope holding ``pl.split_aiv`` regions.
+        fabricate a ``pl.split(pl.SplitMode.NONE)``, which the parser rejects on a
+        scope holding ``pl.split_aiv`` regions.
         """
 
         @pl.program
@@ -831,7 +831,7 @@ class TestSpmdOptimizations:
         main_func = list(Prog.functions.values())[0]
         spmd = _unique_descendant(main_func.body, ir.SpmdScopeStmt)
         incore = _unique_descendant(spmd.body, ir.InCoreScopeStmt)
-        assert incore.split is None
+        assert incore.split == ir.SplitMode.NONE
         assert incore.attrs.get("slot_num") == 8
         printed = Prog.as_python()
         assert "optimizations=[pl.cross_core_slot(slot_num=8)]" in printed
@@ -918,7 +918,7 @@ class TestSpmdOptimizations:
 
         main_func = list(Prog.functions.values())[0]
         incore = _unique_descendant(main_func.body, ir.InCoreScopeStmt)
-        assert incore.split is None
+        assert incore.split == ir.SplitMode.NONE
         assert incore.attrs.get("slot_num") == 8
         printed = Prog.as_python()
         assert "optimizations=[pl.cross_core_slot(slot_num=8)]" in printed
@@ -1042,7 +1042,7 @@ class TestSpmdOptimizations:
         main_func = list(Prog.functions.values())[-1]
         spmd = _unique_descendant(main_func.body, ir.SpmdScopeStmt)
         incore = _unique_descendant(spmd.body, ir.InCoreScopeStmt)
-        assert incore.split is None
+        assert incore.split == ir.SplitMode.NONE
         assert incore.attrs.get("slot_num") == 4
         # No round-trip assertion here: the plain with-form's printer emits the
         # wrapper as a nested `with pl.at(...)`, which no longer reparses as a

@@ -194,7 +194,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 
 **互斥的 AIV 拆分机制**：函数级 AUTO split（`optimizations=[pl.split(mode)]`，
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
-作用域共存。本 Pass 会拒绝该组合（它会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
+作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
 [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md)。
 
@@ -202,7 +202,15 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
 拆分"。此前之所以对它豁免，只是因为跨核槽位数除了 `pl.split(..., slot_num=N)` 之外没有
 别的承载方式；现在它有了自己的条目——`optimizations=[pl.cross_core_slot(slot_num=N)]`，
-与拆分正交，可自由地与区域共存。三种标注由此语义分明：
+与拆分正交，可自由地与区域共存。
+
+**拒绝发生在哪一层**：`InCoreScopeStmt::split_` 对"不切分"只有一种编码
+（`SplitMode::None`），因此字面写出的 `pl.split(pl.SplitMode.NONE)` 对本 Pass 不可见
+——它与完全不写 `pl.split` 无法区分。于是该拒绝由 **parser** 负责：只有它能看到用户写下的
+字面量，且它会拒绝所有模式（含 NONE）。本 Pass 保留 `split_ != SplitMode::None` 的检查，
+作为未经 parser 的 IR（反序列化的 `.pto`、以编程方式构造的作用域）的兜底。
+
+三种标注由此语义分明：
 
 | 标注 | 含义 |
 | ---- | ---- |

@@ -595,7 +595,7 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *
  * **Class hierarchy** (issue #1047):
  * - `ScopeStmt` (abstract): common fields `name_hint_`, `body_`
- *   - `InCoreScopeStmt`: optional `split_`
+ *   - `InCoreScopeStmt`: required `split_` (`SplitMode::None` = no split)
  *   - `ClusterScopeStmt`: no extra fields
  *   - `HierarchyScopeStmt`: required `level_`, optional `role_`
  *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
@@ -678,11 +678,21 @@ using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
 /**
  * @brief InCore scope: AICore sub-graph region.
  *
- * Carries an optional `split` for cross-core transfer mode.
+ * Carries the cross-core transfer `split` mode. `SplitMode::None` — the default —
+ * is the single encoding of "no split"; there is no second, `nullopt` spelling
+ * (issue #2205). Two encodings of one semantic state broke print -> parse:
+ * the printer collapsed them (both emit no `optimizations=` entry) while
+ * structural equality kept them apart.
+ *
+ * Whether the user *literally wrote* `optimizations=[pl.split(pl.SplitMode.NONE)]`
+ * is a property of the source text, not of the IR, so it is checked where it is
+ * visible — the parser, which rejects it on a scope that also holds
+ * `pl.split_aiv` region(s). `OutlineIncoreScopes` keeps the same rejection for
+ * the modes that survive into the IR (`split_ != SplitMode::None`).
  */
 class InCoreScopeStmt : public ScopeStmt {
  public:
-  InCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
+  InCoreScopeStmt(SplitMode split, std::string name_hint, StmtPtr body, Span span,
                   std::vector<std::string> leading_comments = {},
                   std::vector<std::pair<std::string, std::any>> attrs = {})
       : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
@@ -699,7 +709,7 @@ class InCoreScopeStmt : public ScopeStmt {
   }
 
  public:
-  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
+  SplitMode split_;  ///< Cross-core transfer split mode; None = no split
 };
 
 using InCoreScopeStmtPtr = std::shared_ptr<const InCoreScopeStmt>;

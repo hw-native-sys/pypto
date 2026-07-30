@@ -1391,10 +1391,12 @@ void BindIR(nb::module_& m) {
       scope_attrs_doc);
 
   // InCoreScopeStmt
-  auto in_core_scope_stmt_class =
-      nb::class_<InCoreScopeStmt, ScopeStmt>(ir, "InCoreScopeStmt", "InCore scope: AICore sub-graph region");
-  in_core_scope_stmt_class.def(nb::init<std::optional<SplitMode>, std::string, const StmtPtr&, const Span&>(),
-                               nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"),
+  auto in_core_scope_stmt_class = nb::class_<InCoreScopeStmt, ScopeStmt>(
+      ir, "InCoreScopeStmt",
+      "InCore scope: AICore sub-graph region. split=SplitMode.NONE (the default) is "
+      "the single encoding of 'no split'.");
+  in_core_scope_stmt_class.def(nb::init<SplitMode, std::string, const StmtPtr&, const Span&>(),
+                               nb::arg("split") = SplitMode::None, nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create an InCore scope statement");
   BindFields<InCoreScopeStmt>(in_core_scope_stmt_class);
   in_core_scope_stmt_class.def_prop_ro(

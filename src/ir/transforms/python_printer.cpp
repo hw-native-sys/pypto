@@ -99,7 +99,7 @@ class BlockIdxReadDetector : public IRVisitor {
 /// drops it.
 bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
   if (!incore) return false;
-  const bool has_mode = incore->split_.has_value() && incore->split_.value() != SplitMode::None;
+  const bool has_mode = incore->split_ != SplitMode::None;
   if (has_mode || incore->HasAttr("slot_num")) return true;
   BlockIdxReadDetector detector;
   detector.VisitStmt(incore->body_);
@@ -422,7 +422,7 @@ class IRPythonPrinter : public IRVisitor {
   // holding pl.split_aiv regions). Emits nothing when the scope carries
   // neither. Used by the flattened spmd with-tid / for-loop forms; the
   // nested-scope forms round-trip via the InCoreScopeStmt printer.
-  void PrintScopeOptimizations(const std::optional<SplitMode>& split, const ScopeStmtPtr& slot_num_holder);
+  void PrintScopeOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder);
 
   // Emit `` as <tid>`` if the scope carries ``kAttrTaskIdVar``. The caller is
   // responsible for placing the ``)`` before and the ``:\n`` after this call.
@@ -1833,15 +1833,13 @@ bool IRPythonPrinter::PrintScopeDepsAttr(const ScopeStmtPtr& op) {
   return PrintScopeVarListKwarg(op, kAttrManualDepEdges, "deps");
 }
 
-void IRPythonPrinter::PrintScopeOptimizations(const std::optional<SplitMode>& split,
-                                              const ScopeStmtPtr& slot_num_holder) {
-  const bool has_mode = split.has_value() && split.value() != SplitMode::None;
+void IRPythonPrinter::PrintScopeOptimizations(SplitMode split, const ScopeStmtPtr& slot_num_holder) {
+  const bool has_mode = split != SplitMode::None;
   const bool has_slot_num = slot_num_holder && slot_num_holder->HasAttr("slot_num");
   if (!has_mode && !has_slot_num) return;
   stream_ << ", optimizations=[";
   if (has_mode) {
-    stream_ << prefix_ << ".split(" << prefix_ << ".SplitMode." << SplitModeToPythonString(split.value())
-            << ")";
+    stream_ << prefix_ << ".split(" << prefix_ << ".SplitMode." << SplitModeToPythonString(split) << ")";
   }
   if (has_slot_num) {
     if (has_mode) stream_ << ", ";

@@ -203,7 +203,7 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | While loop with condition and iteration args |
-| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | InCore region; outlined to `Function(InCore)` |
+| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_` (`SplitMode`, `None` = no split) | InCore region; outlined to `Function(InCore)` |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_` (integer-typed `Expr`), `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |

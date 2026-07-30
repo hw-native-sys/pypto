@@ -585,6 +585,15 @@ class ASTParser:
         # Track loop kinds for break/continue validation
         self._loop_kind_stack: list[str] = []
         self._scope_kind_stack: list[ir.ScopeKind] = []
+        # Set while parsing the body of an InCore scope the user declared with an
+        # explicit ``optimizations=[pl.split(MODE)]`` — MODE included when it is
+        # ``NONE``. ``InCoreScopeStmt.split_`` cannot answer this: it has a single
+        # encoding of "no split" (``SplitMode.NONE``), so a literal
+        # ``pl.split(pl.SplitMode.NONE)`` is indistinguishable there from writing
+        # no ``pl.split`` at all (issue #2205). The literal is only visible here,
+        # which is where the RFC #1820 mutual-exclusion rejection now lives.
+        # InCore scopes never nest (NoNestedInCore), so one slot suffices.
+        self._incore_user_split: ir.SplitMode | None = None
         # Active ``pl.split_aiv(mode=...)`` modes (innermost last). ``pl.aiv_shard`` /
         # ``pl.aic_gather`` inherit the split mode from this stack rather than
         # taking it as an argument.
@@ -712,6 +721,61 @@ class ASTParser:
     def _is_inside_scope(self, scope_kind: ir.ScopeKind) -> bool:
         """Return whether parsing is currently nested inside the given scope kind."""
         return scope_kind in self._scope_kind_stack
+
+    @contextmanager
+    def _incore_user_split_context(
+        self, scope_kind: "ir.ScopeKind", split_mode: "ir.SplitMode | None"
+    ) -> Iterator[None]:
+        """Record the enclosing InCore scope's *literal* ``pl.split(MODE)`` entry.
+
+        ``split_mode`` is the parsed ``optimizations=[pl.split(MODE)]`` entry, or
+        ``None`` when the user wrote no ``pl.split`` at all. Only the parser can
+        tell the two apart once ``MODE`` is ``NONE`` — see
+        :meth:`_reject_user_split_with_split_aiv_region`.
+
+        A no-op for every other scope kind: ``optimizations=[pl.split(...)]`` only
+        lowers onto an InCore scope, so another kind must neither set nor clear the
+        record of an enclosing one.
+        """
+        if scope_kind != ir.ScopeKind.InCore:
+            yield
+            return
+        previous = self._incore_user_split
+        self._incore_user_split = split_mode
+        try:
+            yield
+        finally:
+            self._incore_user_split = previous
+
+    def _reject_user_split_with_split_aiv_region(self, stmt: ast.For, hint: str) -> None:
+        """Reject ``pl.split_aiv`` inside an InCore scope declaring ``pl.split(...)``.
+
+        A function-level AUTO split (``optimizations=[pl.split(MODE)]``) and
+        explicit ``pl.split_aiv`` regions are mutually exclusive AIV-split
+        mechanisms: downstream lowering takes the per-region path and would
+        silently drop the function-level split. **Any** ``pl.split(...)`` is
+        rejected, ``pl.SplitMode.NONE`` included (RFC #1820) — NONE carries no
+        split of its own, but writing it still reads as "auto and manual split
+        mixed on one scope", and the cross-core slot count that once forced the
+        NONE spelling now has its own orthogonal ``pl.cross_core_slot(slot_num=N)``
+        entry.
+
+        ``OutlineIncoreScopes`` keeps the same rejection for the modes that reach
+        the IR, and remains the backstop for scopes that never went through this
+        parser. It cannot see a literal ``NONE``, so that spelling is caught here.
+        """
+        if self._incore_user_split is None:
+            return
+        raise ParserSyntaxError(
+            f"scope combines a function-level pl.split(pl.SplitMode.{self._incore_user_split.name}) "
+            "(optimizations=[pl.split(...)]) with a pl.split_aiv region; these are mutually "
+            "exclusive AIV-split mechanisms — the function-level split would be silently "
+            "dropped (the per-region split governs the lanes)",
+            span=self.span_tracker.get_span(stmt),
+            hint="Remove optimizations=[pl.split(...)] or the pl.split_aiv region. To pin a "
+            "custom cross-core slot count, use optimizations=[pl.cross_core_slot(slot_num=N)], "
+            f"which is orthogonal to splitting. {hint}",
+        )
 
     @contextmanager
     def _split_aiv_mode_context(self, mode: ir.SplitMode) -> Iterator[None]:
@@ -4169,7 +4233,10 @@ class ASTParser:
                     name_hint=incore_name_hint,
                     attrs=incore_attrs,
                 ):
-                    with self._scope_kind_context(ir.ScopeKind.InCore):
+                    with (
+                        self._scope_kind_context(ir.ScopeKind.InCore),
+                        self._incore_user_split_context(ir.ScopeKind.InCore, split_mode),
+                    ):
                         self.scope_manager.enter_scope("spmd_with_incore")
                         self._parse_body_siblings(stmt.body)
                         self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
@@ -4502,7 +4569,10 @@ class ASTParser:
                     name_hint=incore_name_hint,
                     attrs=incore_attrs,
                 ):
-                    with self._scope_kind_context(ir.ScopeKind.InCore):
+                    with (
+                        self._scope_kind_context(ir.ScopeKind.InCore),
+                        self._incore_user_split_context(ir.ScopeKind.InCore, split_mode),
+                    ):
                         # Bind `i = pl.tile.get_block_idx()` as the first
                         # statement of the outlined InCore body.
                         loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX), span=span)
@@ -4548,6 +4618,10 @@ class ASTParser:
                 span=self.span_tracker.get_span(stmt),
                 hint=split_aiv_hint,
             )
+        # Placement check, like the nested-region one above: an enclosing InCore
+        # scope that declares its own optimizations=[pl.split(...)] already picked
+        # the AUTO split mechanism, which this region would silently override.
+        self._reject_user_split_with_split_aiv_region(stmt, split_aiv_hint)
         if not isinstance(stmt.target, ast.Name):
             raise ParserSyntaxError(
                 "for ... in pl.split_aiv(...) must use a single loop variable",
@@ -4751,7 +4825,10 @@ class ASTParser:
             manual=manual,
             attrs=attrs,
         ):
-            with self._scope_kind_context(scope_kind):
+            with (
+                self._scope_kind_context(scope_kind),
+                self._incore_user_split_context(scope_kind, split),
+            ):
                 self.scope_manager.enter_scope("scope")
                 self._parse_body_siblings(stmt.body)
                 self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)

@@ -200,11 +200,10 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 **Mutually exclusive AIV-split mechanisms**: a function-level AUTO split
 (`optimizations=[pl.split(mode)]`, carried as the scope's own `split_`) and
 explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
-scope. This pass rejects the combination (it bridges a single region's mode into
-a function-level representative `split`, which would silently collide with the
-user's `pl.split`). See
-[`LowerAutoVectorSplit`](19-lower_auto_vector_split.md) for how the surviving
-mechanism is lowered.
+scope (the outliner bridges a single region's mode into a function-level
+representative `split`, which would silently collide with the user's
+`pl.split`). See [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md) for how
+the surviving mechanism is lowered.
 
 **Any** `pl.split(...)` is rejected, `SplitMode.NONE` included (RFC #1820). NONE
 carries no split of its own, but writing it on a scope that also holds regions
@@ -212,7 +211,17 @@ still reads as "auto and manual split mixed on one scope". The exemption that
 used to allow it existed only because the cross-core slot count had no carrier
 other than `pl.split(..., slot_num=N)`; it now has one —
 `optimizations=[pl.cross_core_slot(slot_num=N)]`, which is orthogonal to
-splitting and coexists with regions freely. The three states read distinctly:
+splitting and coexists with regions freely.
+
+**Where the rejection fires.** `InCoreScopeStmt::split_` has a single encoding of
+"no split" (`SplitMode::None`), so a literal `pl.split(pl.SplitMode.NONE)` is
+invisible to this pass — it looks identical to writing no `pl.split` at all. The
+**parser** therefore owns the rejection: it is the only layer that sees the
+literal the user wrote, and it rejects every mode, NONE included. This pass keeps
+the check for `split_ != SplitMode::None` as the backstop for IR that never went
+through the parser (deserialized `.pto`, programmatically built scopes).
+
+The three states read distinctly:
 
 | Annotation | Meaning |
 | ---------- | ------- |

@@ -259,7 +259,10 @@ class IRBuilder:
             span: Optional explicit span. If None, automatically captured.
             level: Hierarchy level (for ScopeKind.Hierarchy)
             role: Function role (for ScopeKind.Hierarchy)
-            split: Split mode for cross-core transfer (for InCore scopes)
+            split: Split mode. Required for ScopeKind.SplitAiv. For ScopeKind.InCore
+                it is the cross-core transfer mode, and omitting it is equivalent to
+                passing ``ir.SplitMode.NONE`` — the node has a single encoding of
+                "no split".
             name_hint: User-provided scope name hint (empty = auto-generate)
             core_num: SPMD block count for ScopeKind.Spmd scopes. Accepts a
                 Python ``int`` (auto-wrapped as ``ir.ConstInt``) or any

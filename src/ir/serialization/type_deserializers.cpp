@@ -789,7 +789,9 @@ static std::vector<std::pair<std::string, std::any>> DeserializeScopeAttrs(const
 static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                             DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  auto split = DeserializeScopeSplit(fields_obj, ctx);
+  // A ``.pto`` written before issue #2205 may carry ``split: nil`` for "no split";
+  // it maps onto the single surviving encoding, ``SplitMode::None``.
+  auto split = DeserializeScopeSplit(fields_obj, ctx).value_or(SplitMode::None);
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<InCoreScopeStmt>(split, std::move(name_hint), body, span,

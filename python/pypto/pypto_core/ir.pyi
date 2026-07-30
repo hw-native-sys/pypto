@@ -2294,12 +2294,12 @@ class ScopeStmt(Stmt):
 class InCoreScopeStmt(ScopeStmt):
     """InCore scope: AICore sub-graph region."""
 
-    split: Final[SplitMode | None]
-    """Split mode for cross-core transfer (None or SplitMode.None for no split)."""
+    split: Final[SplitMode]
+    """Split mode for cross-core transfer (SplitMode.NONE = no split)."""
 
     def __init__(
         self,
-        split: SplitMode | None = None,
+        split: SplitMode = SplitMode.NONE,
         name_hint: str = "",
         *,
         body: Stmt,
