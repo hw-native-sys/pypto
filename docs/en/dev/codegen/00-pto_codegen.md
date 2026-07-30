@@ -304,7 +304,7 @@ in every mode. `PYPTO` then coalesces independent buffers in `MemoryReuse`; `DSA
 solves the unmerged identities; `PTOAS` renders shared MemRefs as one `tile_buf`
 and delegates reuse and addresses to `PlanMemory`. In `DSA` mode,
 `dsa_export_dir` retains the validated schema-v1 input. See
-[AllocateMemoryAddr](../passes/31-allocate_memory_addr.md) for setup and limits.
+[AllocateMemoryAddr](../passes/32-allocate_memory_addr.md) for setup and limits.
 
 > **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
 > hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution

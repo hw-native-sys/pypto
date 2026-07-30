@@ -1017,6 +1017,29 @@ def _dsa_chain_program():
     return passes.init_mem_ref()(Before)
 
 
+def _dsa_declared_allocation_program():
+    """Two sequential values where only the first owns a declared allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def declared_allocation_isolation(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            prior: pl.Tile[[64, 64], pl.FP32, pl.MemRef("declared_scratch"), pl.Mem.Vec] = pl.load(
+                input_a, [0, 0], [64, 64]
+            )
+            _stored_a = pl.store(prior, [0, 0], output_a)
+            next_value = pl.load(input_b, [0, 0], [64, 64])
+            return pl.store(next_value, [0, 0], output_b)
+
+    return passes.init_mem_ref()(Before)
+
+
 def _allocate_with_dsa(
     base,
     export_dir: str | None = None,
@@ -1051,6 +1074,41 @@ def test_dsa_planner_reuses_at_read_before_write_boundary():
     # Every producer's last read precedes its consumer's write at the same
     # statement point, so all three buffers may use one physical slot.
     assert plan_peak == 16384
+
+
+@requires_dsa
+def test_dsa_preserves_declared_allocation_isolation(tmp_path):
+    """DSA must not place an unrelated lifetime-disjoint value in a declared slot."""
+    planned = _allocate_with_dsa(_dsa_declared_allocation_program(), str(tmp_path))
+    assert _vec_peak(planned) == 2 * 16384
+
+    document = json.loads((tmp_path / "pypto_declared_allocation_isolation.dsa.json").read_text())
+    assert document["problem"]["constraints"]["separations"] == [
+        {"first": 0, "second": 1, "reasons": ["generic"]}
+    ]
+
+
+@requires_dsa
+def test_dsa_rejects_colive_values_bound_to_one_declared_allocation():
+    """A declared slot cannot contain two simultaneously live values under DSA."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def colive_declared_allocation(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            first: pl.Tile[[64, 64], pl.FP32, pl.MemRef("shared_scratch"), pl.Mem.Vec] = pl.load(
+                input_a, [0, 0], [64, 64]
+            )
+            second: pl.Tile[[64, 64], pl.FP32, pl.MemRef("shared_scratch"), pl.Mem.Vec] = pl.exp(first)
+            combined = pl.add(first, second)
+            return pl.store(combined, [0, 0], output)
+
+    with pytest.raises(ValueError, match="live at the same time"):
+        _allocate_with_dsa(passes.init_mem_ref()(Before))
 
 
 @requires_dsa

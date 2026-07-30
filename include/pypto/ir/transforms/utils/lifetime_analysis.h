@@ -88,10 +88,11 @@ struct PipelineAllocationGroup {
  * collapsed via ``base_`` identity; opportunistic reuse is the solver's job).
  *
  * ``separations``: typed index pairs into ``intervals`` that must NOT share an
- * address even when lifetime-disjoint. Three sources, the same constraints MemoryReuse
- * honors: (1) pipeline double-buffer clones (same group, different stage) — so
- * stages ping-pong instead of serializing; (2) the Ascend910B load+tpop_from_aic
- * in-place hazard (backend-gated); (3) op-semantic forbid-alias (e.g. tile.sel's
+ * address even when lifetime-disjoint. Four sources, the same constraints MemoryReuse
+ * honors: (1) author-declared allocations, which remain closed to unrelated
+ * values; (2) pipeline double-buffer clones (same group, different stage) — so
+ * stages ping-pong instead of serializing; (3) the Ascend910B load+tpop_from_aic
+ * in-place hazard (backend-gated); (4) op-semantic forbid-alias (e.g. tile.sel's
  * mask/tmp must not share the output's buffer). Pipeline intent is exported at
  * its full requested depth. ``pipeline_groups`` retains the normalized
  * depth/stage/residue relation used to derive those pairs and any later,

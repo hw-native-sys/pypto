@@ -135,6 +135,11 @@ instead of once per pair.) Concretely:
   and stay that way.
 - Unbound tiles are packed as before, and never pulled into a declared allocation.
 
+`MemoryPlanner.DSA` skips this pass, but preserves the same contract when it
+constructs the solver problem: every declared allocation receives hard
+separations from unrelated allocations in its memory space. Pipeline-intent
+relaxation never removes those separations.
+
 The cost is the author's to manage: pinning trades capacity for parallelism, and an
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.

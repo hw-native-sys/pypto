@@ -105,6 +105,7 @@ plugins:
             PTO ISA: PTO ISA
             IR: IR
             Passes: Passes
+            Proposals: 提案
             Language: 语言
             Code Generation: 代码生成
             Backend: 后端
@@ -211,6 +212,9 @@ nav:
       - en/dev/07-ir-lower-trace.md
       - en/dev/distributed_ops.md
       - en/dev/ptoas-op-status.md
+      - Proposals:
+          - en/dev/proposals/dsa_reuse_penalty_modeling.md
+          - en/dev/proposals/joint_schedule_memory_cooptimization.md
       - IR:
           - en/dev/ir/index.md
           - en/dev/ir/00-overview.md
