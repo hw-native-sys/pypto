@@ -59,19 +59,21 @@ class _PassPipelineResult(NamedTuple):
     backend_type: BackendType
 
 
-def _preflight_pass_pipeline(
+def _select_backend(*, backend_type: BackendType, platform: str | None) -> BackendType:
+    """Select and configure the backend before compilation creates artifacts."""
+    effective_backend_type = _backend_type_for_platform(platform, backend_type)
+    _backend_core.set_backend_type(effective_backend_type)
+    return effective_backend_type
+
+
+def _validate_pass_context_conflicts(
     *,
     operation: str,
-    backend_type: BackendType,
-    platform: str | None,
     verification_level: _passes.VerificationLevel | None,
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
-) -> tuple[BackendType, _passes.PassContext | None]:
-    """Configure the backend and reject conflicts before artifact creation."""
-    effective_backend_type = _backend_type_for_platform(platform, backend_type)
-    _backend_core.set_backend_type(effective_backend_type)
-
+) -> _passes.PassContext | None:
+    """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
     if verification_level is not None and outer is not None:
         raise RuntimeError(
@@ -88,7 +90,7 @@ def _preflight_pass_pipeline(
             f"{operation}() was called with memory_planner while a PassContext is already active. "
             "Set the memory planner on the existing PassContext instead."
         )
-    return effective_backend_type, outer
+    return outer
 
 
 def _run_pass_pipeline(  # noqa: PLR0913
@@ -109,10 +111,9 @@ def _run_pass_pipeline(  # noqa: PLR0913
     passes_dump_dir: str | None = None,
 ) -> _PassPipelineResult:
     """Resolve pass settings and run the configured pass pipeline."""
-    effective_backend_type, outer = _preflight_pass_pipeline(
+    effective_backend_type = _select_backend(backend_type=backend_type, platform=platform)
+    outer = _validate_pass_context_conflicts(
         operation=operation,
-        backend_type=backend_type,
-        platform=platform,
         verification_level=verification_level,
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
@@ -265,14 +266,7 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
-    _preflight_pass_pipeline(
-        operation="compile",
-        backend_type=backend_type,
-        platform=platform,
-        verification_level=verification_level,
-        diagnostic_phase=diagnostic_phase,
-        memory_planner=memory_planner,
-    )
+    _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -283,6 +277,13 @@ def compile(  # noqa: PLR0913
         output_dir = os.path.join(base, f"{program.name}_{timestamp}")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    _validate_pass_context_conflicts(
+        operation="compile",
+        verification_level=verification_level,
+        diagnostic_phase=diagnostic_phase,
+        memory_planner=memory_planner,
+    )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
