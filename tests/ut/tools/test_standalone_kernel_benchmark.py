@@ -197,6 +197,111 @@ for (int64_t i = 0; i < 10; i += 1) {
     assert result.pointers["v0"].required_elements == 101
 
 
+@pytest.mark.parametrize(
+    ("offset", "required_elements"),
+    [
+        (-5, 8),
+        (12, 20),
+    ],
+)
+@pytest.mark.parametrize(
+    "clamp",
+    [
+        "offset < zero ? zero : offset",
+        "offset > zero ? offset : zero",
+    ],
+)
+def test_physical_extent_analysis_bounds_codegen_max_clamp(
+    generator: ModuleType,
+    offset: int,
+    required_elements: int,
+    clamp: str,
+):
+    cpp = f"""\
+const int64_t zero = 0;
+int64_t clamped = {clamp};
+GlobalTensor<
+    float,
+    pto::Shape<8>,
+    pto::Stride<1>,
+    pto::Layout::ND> view = GlobalTensor<
+        float,
+        pto::Shape<8>,
+        pto::Stride<1>,
+        pto::Layout::ND>(v0 + clamped, shape, stride);
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {"offset": offset})
+
+    assert result.unresolved == ()
+    assert result.pointers["v0"].required_elements == required_elements
+
+
+def test_physical_extent_analysis_bounds_inline_max_clamp_over_loop(generator: ModuleType):
+    cpp = """\
+const int64_t zero = 0;
+const int64_t stride = 16;
+for (int64_t i = -2; i < 4; i += 1) {
+  GlobalTensor<
+      float,
+      pto::Shape<8>,
+      pto::Stride<1>,
+      pto::Layout::ND> view = GlobalTensor<
+          float,
+          pto::Shape<8>,
+          pto::Stride<1>,
+          pto::Layout::ND>(v0 + (i < zero ? zero : i) * stride, shape, stride);
+}
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {})
+
+    assert result.unresolved == ()
+    assert result.pointers["v0"].max_base_offset == 48
+    assert result.pointers["v0"].required_elements == 56
+
+
+def test_physical_extent_analysis_rejects_non_max_ternary(generator: ModuleType):
+    cpp = """\
+const int64_t zero = 0;
+int64_t selected = offset < zero ? offset : zero;
+GlobalTensor<
+    float,
+    pto::Shape<8>,
+    pto::Stride<1>,
+    pto::Layout::ND> view = GlobalTensor<
+        float,
+        pto::Shape<8>,
+        pto::Stride<1>,
+        pto::Layout::ND>(v0 + selected, shape, stride);
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {"offset": 12})
+
+    assert result.unresolved == ("v0: selected ('selected')",)
+
+
+def test_physical_extent_analysis_rejects_composite_max_lookalike(generator: ModuleType):
+    cpp = """\
+const int64_t zero = 0;
+const int64_t one = 1;
+int64_t selected = offset + one < zero ? zero : one;
+GlobalTensor<
+    float,
+    pto::Shape<8>,
+    pto::Stride<1>,
+    pto::Layout::ND> view = GlobalTensor<
+        float,
+        pto::Shape<8>,
+        pto::Stride<1>,
+        pto::Layout::ND>(v0 + selected, shape, stride);
+"""
+
+    result = generator.analyze_pointer_extents(cpp, {"v0"}, {"offset": 12})
+
+    assert result.unresolved == ("v0: selected ('selected')",)
+
+
 def test_physical_extent_analysis_reports_unsupported_pointer_bases(generator: ModuleType):
     cpp = """\
 GlobalTensor<

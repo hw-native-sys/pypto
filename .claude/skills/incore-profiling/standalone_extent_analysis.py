@@ -25,6 +25,23 @@ _VIEW_RE = re.compile(
     r"GlobalTensor<[^(]*\(\s*(?P<base>.*?)\s*,",
     re.S,
 )
+_CPP_INTEGER_ATOM = r"(?:[A-Za-z_]\w*|-?\d+)"
+_CPP_MAX_LESS_RE = re.compile(
+    rf"(?P<left>{_CPP_INTEGER_ATOM})\s*<\s*(?P<right>{_CPP_INTEGER_ATOM})"
+    rf"\s*\?\s*(?P=right)\s*:\s*(?P=left)"
+)
+_CPP_MAX_GREATER_RE = re.compile(
+    rf"(?P<left>{_CPP_INTEGER_ATOM})\s*>\s*(?P<right>{_CPP_INTEGER_ATOM})"
+    rf"\s*\?\s*(?P=left)\s*:\s*(?P=right)"
+)
+_CPP_PAREN_MAX_LESS_RE = re.compile(
+    rf"\(\s*(?P<left>{_CPP_INTEGER_ATOM})\s*<\s*(?P<right>{_CPP_INTEGER_ATOM})"
+    rf"\s*\?\s*(?P=right)\s*:\s*(?P=left)\s*\)"
+)
+_CPP_PAREN_MAX_GREATER_RE = re.compile(
+    rf"\(\s*(?P<left>{_CPP_INTEGER_ATOM})\s*>\s*(?P<right>{_CPP_INTEGER_ATOM})"
+    rf"\s*\?\s*(?P=left)\s*:\s*(?P=right)\s*\)"
+)
 
 
 @dataclass(frozen=True)
@@ -53,8 +70,35 @@ class ExtentAnalysis:
         }
 
 
+def _normalize_codegen_max(expression: str) -> str:
+    """Translate PTOAS's C++ spelling of ``arith.maxsi`` into Python syntax.
+
+    PyPTO clamps dynamic ``pto.partition_view`` offsets with ``arith.maxsi``.
+    PTOAS lowers a max of two SSA values to one of these equivalent forms:
+
+    ``left < right ? right : left``
+    ``left > right ? left : right``
+
+    Recognize only those exact max patterns. Arbitrary conditional expressions
+    remain unsupported so physical-span analysis continues to fail closed.
+    """
+    normalized = expression
+    while True:
+        updated = _CPP_PAREN_MAX_LESS_RE.sub(r"max(\g<left>, \g<right>)", normalized)
+        updated = _CPP_PAREN_MAX_GREATER_RE.sub(r"max(\g<left>, \g<right>)", updated)
+        stripped = updated.strip()
+        for pattern in (_CPP_MAX_LESS_RE, _CPP_MAX_GREATER_RE):
+            match = pattern.fullmatch(stripped)
+            if match is not None:
+                updated = f"max({match.group('left')}, {match.group('right')})"
+                break
+        if updated == normalized:
+            return normalized
+        normalized = updated
+
+
 def _clean_expression(expression: str) -> str:
-    return _CAST_RE.sub("", expression).strip()
+    return _normalize_codegen_max(_CAST_RE.sub("", expression)).strip()
 
 
 Bound = tuple[int, int]
@@ -112,6 +156,16 @@ def _bounds(expression: str, values: dict[str, Bound]) -> Bound:
                 )
                 return min(shifted), max(shifted)
             raise ValueError(f"unsupported operator in {expression!r}")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "max"
+            and len(node.args) == 2
+            and not node.keywords
+        ):
+            left = visit(node.args[0])
+            right = visit(node.args[1])
+            return max(left[0], right[0]), max(left[1], right[1])
         raise ValueError(f"unsupported expression in {expression!r}")
 
     return visit(tree)
