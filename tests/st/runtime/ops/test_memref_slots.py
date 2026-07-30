@@ -75,9 +75,9 @@ def matmul_slot_pingpong(
             cur: pl.Tile[[M, TN], pl.FP32, pl.MemRef("l0c", slots=2)[i % 2], pl.Mem.Acc] = pl.tile.matmul(
                 la, lb
             )
-            other: pl.Tile[
-                [M, TN], pl.FP32, pl.MemRef("l0c", slots=2)[(i + 1) % 2], pl.Mem.Acc
-            ] = pl.tile.matmul(la2, lb)
+            other: pl.Tile[[M, TN], pl.FP32, pl.MemRef("l0c", slots=2)[(i + 1) % 2], pl.Mem.Acc] = (
+                pl.tile.matmul(la2, lb)
+            )
             # Both accumulators are still live here -- collapse the two addresses
             # and one result overwrites the other.
             pl.store(cur, [0, i * TN], out1)
