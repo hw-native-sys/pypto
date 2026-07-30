@@ -257,8 +257,10 @@ class TestComplexControlFlow:
         assert len(loops) == 2, "the two loops must stay siblings, not nest"
         _assert_range(loops[0], start=0, stop=5, step=1)
         _assert_range(loops[1], start=0, stop=3, step=1)
-        # Second loop consumes the first loop's result as its init value.
-        assert loops[1].iter_args[0].name_hint == "acc2"
+        # Second loop consumes the first loop's result as its init value -- check the
+        # data-flow edge itself, since the iter-arg's name alone would also accept
+        # `init` or any other same-typed value.
+        assert loops[1].iter_args[0].initValue is loops[0].return_vars[0]
 
     def test_loop_without_iter_args(self):
         """Test loop without iter_args."""
@@ -494,10 +496,22 @@ def _assert_range(for_stmt: ir.ForStmt, start: int, stop: int, step: int) -> Non
         assert bound.value == expected, f"{name} is {bound.value}, expected {expected}"
 
 
-def _assert_var_named(expr: ir.Expr, name: str) -> None:
-    """Assert `expr` is a Var reference bound to `name`."""
-    assert isinstance(expr, ir.Var), f"expected Var {name!r}, got {type(expr).__name__}"
-    assert expr.name_hint == name, f"expected Var {name!r}, got {expr.name_hint!r}"
+def _find_binding(body: ir.Stmt, name: str) -> ir.AssignStmt:
+    """Return the AssignStmt in `body` that binds `name`."""
+    for stmt in _top_level_stmts(body):
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == name:
+            return stmt
+    raise AssertionError(f"No binding for {name!r} found in body")
+
+
+def _assert_var_is(expr: ir.Expr, definition: ir.AssignStmt) -> None:
+    """Assert `expr` is the very Var bound by `definition`.
+
+    Matching on ``name_hint`` alone would also accept a fresh, unbound Var that
+    merely shares the name -- i.e. a use that no longer refers to its definition.
+    """
+    assert isinstance(expr, ir.Var), f"expected Var, got {type(expr).__name__}"
+    assert expr is definition.var, f"operand {expr.name_hint!r} is not the Var bound at its definition"
 
 
 def _assert_body_kinds(body: ir.Stmt, *kinds: type) -> None:
@@ -745,7 +759,7 @@ class TestWhileLoops:
 
         # Condition is `i < n`, with `n` the Scalar parameter
         assert isinstance(while_stmt.condition, ir.Lt)
-        _assert_var_named(while_stmt.condition.left, "i")
+        _assert_var_is(while_stmt.condition.left, _find_binding(while_tensors.body, "i"))
         assert while_stmt.condition.right is while_tensors.params[0]
 
         # Body holds both assignments: the counter bump and the tensor accumulate
@@ -768,7 +782,7 @@ class TestWhileLoops:
 
         # Outer condition is `x < n`, with `n` the Scalar parameter
         assert isinstance(outer_while.condition, ir.Lt)
-        _assert_var_named(outer_while.condition.left, "x")
+        _assert_var_is(outer_while.condition.left, _find_binding(nested_while.body, "x"))
         assert outer_while.condition.right is nested_while.params[0]
 
         # Outer body: `y = 0`, the nested loop, then `x = x + 1`
@@ -779,7 +793,7 @@ class TestWhileLoops:
 
         # Inner condition is exactly `y < 3`
         assert isinstance(inner_while.condition, ir.Lt)
-        _assert_var_named(inner_while.condition.left, "y")
+        _assert_var_is(inner_while.condition.left, _find_binding(outer_while.body, "y"))
         assert isinstance(inner_while.condition.right, ir.ConstInt)
         assert inner_while.condition.right.value == 3
         _assert_body_kinds(inner_while.body, ir.AssignStmt)
@@ -812,7 +826,7 @@ class TestWhileLoops:
 
         # The while condition closes over the enclosing loop variable: `x < i`
         assert isinstance(while_stmt.condition, ir.Lt)
-        _assert_var_named(while_stmt.condition.left, "x")
+        _assert_var_is(while_stmt.condition.left, _find_binding(for_stmt.body, "x"))
         assert while_stmt.condition.right is for_stmt.loop_var
         _assert_body_kinds(while_stmt.body, ir.AssignStmt)
 
