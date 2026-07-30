@@ -1,251 +1,205 @@
 # Quickstart
 
-Write, inspect, and compile your first PyPTO kernels — from a one-line tensor add to a multi-function program.
+Write, compile, and inspect your first PyPTO kernels with `@pl.jit`.
 
 > **Prerequisites:** PyPTO installed and importable — see [Installation](01-installation.md).
-> Nothing on this page dispatches to a device, so no NPU is needed. The kernel-authoring
-> examples need only the install; the [compiling](#compiling) example additionally needs
-> **ptoas**, which `pip` does not install — pass `skip_ptoas=True` if you do not have it.
+> The compile-and-inspect examples need only the install. The one example that *runs* a
+> kernel on hardware is marked as such and needs the runtime plus a device or simulator.
 
 ## Concept
 
-A PyPTO kernel is Python source that is *parsed*, not executed. `@pl.function`
-reads the decorated body and builds PyPTO IR from it; the resulting object is an
-`ir.Function`, not a callable. Nothing runs until you compile the IR and dispatch it.
+A PyPTO kernel is Python source that is *parsed*, not executed. `@pl.jit` reads the
+decorated function's body and specializes it into PyPTO IR; nothing runs until you
+compile that IR and dispatch it.
 
-That is why the examples below use type annotations everywhere. The annotations are
-not documentation — they are the shape and dtype contract the parser reads to build
-the IR. A missing annotation is a missing piece of the program.
+`@pl.jit` marks a **chip-level entry point** — an Orchestration function, which is
+control-plane code. Control-plane code cannot touch on-chip memory, so a jit body reaches
+the execution plane in one of two ways:
 
-Two abstraction levels appear on this page. At **tensor level** you name whole arrays
-in DDR and let the compiler place data and insert movement. At **tile level** you name
-on-chip buffers and move data yourself. Tensor level is where you start; tile level is
-where you go when you need control over what sits on chip and when.
+- `with pl.at(level=pl.Level.CORE_GROUP):` — open an on-chip scope inline. This is the
+  short form, and what most single-kernel examples use.
+- Call a `@pl.jit.incore` sub-function — the compiler discovers it from the entry's body
+  and outlines it into its own device kernel.
+
+Putting `pl.load` directly in a jit body, with neither of those, fails at compile time.
+That is not a quirk: it is the control-plane / execution-plane split showing up as an
+error message, and it is the single most important structural idea in PyPTO.
 
 ```python
 import pypto.language as pl
-from pypto import ir
+import torch
 ```
 
-`pl` is the language surface — types, operators, control flow. `ir` is compilation and
-IR utilities. Every example below assumes these two imports.
+## Quickstart: element-wise add
 
-## Quickstart: vector add at tensor level
-
-The smallest complete kernel. It names two input tensors, adds them, and returns the
-result; where the data lives and how it moves is the compiler's problem.
+The smallest complete kernel — the same one as `examples/hello_world.py`.
 
 ```python
 import pypto.language as pl
+import torch
 
-@pl.function
-def vector_add(
-    a: pl.Tensor[[64], pl.FP32],
-    b: pl.Tensor[[64], pl.FP32],
-) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-    return result
+@pl.jit
+def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
+        tile_c = pl.add(tile_a, tile_b)
+        pl.store(tile_c, [0, 0], c)
+    return c
 
-print(vector_add.as_python())
+a = torch.full((128, 128), 2.0, dtype=torch.float32)
+b = torch.full((128, 128), 3.0, dtype=torch.float32)
+c = torch.zeros((128, 128), dtype=torch.float32)
+
+# Runs the full pass pipeline. No device, no ptoas.
+tile_add.compile_for_test(a, b, c)
+print("compiles")
 ```
 
 | Line | What it does |
 | ---- | ------------ |
-| `@pl.function` | Parses the body into PyPTO IR. `vector_add` is now an `ir.Function` |
-| `a: pl.Tensor[[64], pl.FP32]` | Input: 1-D tensor, 64 elements, 32-bit float. `In` is the default direction |
-| `result: pl.Tensor[...] = pl.add(a, b)` | Element-wise add. The annotation on the assignment target is required — it types the IR binding |
-| `return result` | The function's return value, and the source of its return type |
+| `@pl.jit` | Specializes the body into an Orchestration entry point on first compile |
+| `a: pl.Tensor` | A DDR tensor. No shape given — it is read from the torch tensor you pass |
+| `c: pl.Out[pl.Tensor]` | **Direction**: this parameter is written, not read |
+| `with pl.at(level=pl.Level.CORE_GROUP)` | Opens an on-chip scope; tile operations are only legal inside one |
+| `pl.load(a, [0, 0], [128, 128])` | DDR → on-chip tile. `[0, 0]` is the offset, `[128, 128]` the shape |
+| `pl.store(tile_c, [0, 0], c)` | On-chip tile → DDR, into the `Out` parameter |
+| `return c` | Returns the written tensor |
 
-Expected output — note that `pl.add` has resolved to its tensor-namespace form:
+`pl.Out[...]` is load-bearing rather than decorative: it tells the compiler this buffer is
+written, which decides whether the runtime uploads it before the call and downloads it
+after. Every tensor parameter carries a direction — `In` by default, or an explicit
+`pl.Out[...]` / `pl.InOut[...]`.
+
+`compile_for_test(...)` runs the whole pass pipeline and stops before code generation, so
+it is the cheapest way to check that a kernel is well-formed. It needs neither ptoas nor a
+device, which is why the examples on this page use it.
+
+### Running it on hardware
+
+> **Needs the runtime and a device or simulator platform.** Everything above this point
+> does not.
 
 ```python
-@pl.function
-def vector_add(a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.tensor.add(a, b)
-    return result
+from pypto.runtime import RunConfig
+
+tile_add(a, b, c, config=RunConfig())          # compiles, caches, dispatches
+assert torch.allclose(c, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-`as_python()` re-prints the IR as DSL source. It is the fastest way to check what the
-parser actually built, and it is worth reading whenever a kernel behaves unexpectedly —
-what you get back is the program the compiler sees, not the one you think you wrote.
+Calling a `@pl.jit` function directly does the whole thing: specialize on the argument
+shapes and dtypes, compile, cache the result, dispatch. Later calls with the same shapes
+reuse the cached compilation.
 
 ## Mechanics
 
-### Tile level: load, compute, store
+### Shapes: from the arguments, or from the signature
 
-At tile level you allocate on-chip buffers explicitly and move data in and out yourself.
-
-```python
-@pl.function
-def vector_add_tile(
-    a: pl.Tensor[[64], pl.FP32],
-    b: pl.Tensor[[64], pl.FP32],
-    output: pl.Out[pl.Tensor[[64], pl.FP32]],
-) -> pl.Tensor[[64], pl.FP32]:
-    # DDR -> on-chip
-    a_tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
-    b_tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
-
-    # compute on-chip
-    result: pl.Tile[[64], pl.FP32] = pl.add(a_tile, b_tile)
-
-    # on-chip -> DDR
-    out: pl.Tensor[[64], pl.FP32] = pl.store(result, [0], output)
-    return out
-```
-
-| Concept | Tensor level | Tile level |
-| ------- | ------------ | ---------- |
-| Where data lives | DDR; compiler places it | You name the on-chip buffer |
-| Type | `pl.Tensor` | `pl.Tile` |
-| Data movement | Compiler inserts it | Explicit `pl.load` / `pl.store` |
-| Result delivery | Return value | `pl.Out[...]` parameter, written through `pl.store` |
-
-- **`pl.load(tensor, offsets, shapes)`** copies a region out of a DDR tensor into a new
-  on-chip tile. `offsets` is where the region starts, `shapes` is how big it is — both
-  per dimension.
-- **`pl.store(tile, offsets, output_tensor)`** copies a tile back into a DDR tensor at
-  `offsets`, and returns the written tensor.
-
-The `pl.Out[...]` wrapper is a **direction**, and it is load-bearing rather than
-decorative: it tells the compiler this parameter is written, not read, which decides
-whether the runtime uploads the buffer before the call and downloads it after. Every
-tensor parameter carries a direction — `In` by default, or an explicit `pl.Out[...]` /
-`pl.InOut[...]`.
-
-### Loops and loop-carried values
-
-`pl.range()` builds a loop in the IR. With `init_values`, the loop carries values from
-one iteration to the next — the PyPTO spelling of an accumulator.
+`a: pl.Tensor` leaves the shape to the call site. Annotate it fully instead, and the
+contract lives in the signature — which lets you compile with no sample tensors at all:
 
 ```python
-@pl.function
-def sum_elements(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
-    zero: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+@pl.jit
+def tile_add_128(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
+                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
+    return c
 
-    for i, (acc,) in pl.range(64, init_values=(zero,)):
-        elem: pl.Tensor[[1], pl.FP32] = pl.slice(a, [1], [i])
-        new_acc: pl.Tensor[[1], pl.FP32] = pl.add(acc, elem)
-        acc_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_acc)
-
-    return acc_out
+compiled = tile_add_128.compile(skip_ptoas=True)   # no torch.empty(...) needed
 ```
 
-1. `init_values=(zero,)` — the carried value going into iteration 0.
-2. `for i, (acc,)` — `i` is the loop index; `acc` is the carried value for this iteration.
-3. `pl.yield_(new_acc)` — hands `new_acc` to the next iteration as `acc`.
-4. `acc_out` — after the loop, holds the value yielded by the last iteration.
+Use the bare form while exploring; use the annotated form for kernels with large
+signatures, where a list of throwaway `torch.empty(...)` buffers is worse than a
+signature that states the contract once.
 
-`pl.yield_` is what makes this SSA-clean: `acc` is never mutated, each iteration binds a
-new value and yields it. Reading `acc_out` outside the loop is how the final value
-escapes.
+### Loops inside the on-chip scope
 
-Loops without carried values need neither `init_values` nor `pl.yield_`:
+`pl.range()` builds a loop in the IR. It goes **inside** `pl.at` — it is a loop the device
+kernel runs, not something the host iterates:
+
+```python
+@pl.jit
+def double_thrice(x: pl.Tensor, y: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        acc = pl.load(x, [0, 0], [128, 128])
+        for i in pl.range(3):
+            acc = pl.add(acc, acc)      # rebinding is fine — the parser renames
+        pl.store(acc, [0, 0], y)
+    return y
+```
+
+Rebinding `acc` looks like mutation but is not: the IR is SSA, and the parser gives each
+iteration's value its own name while threading it through the loop as a carried value.
+Reading `acc` after the loop reads the last iteration's result.
+
+Loop forms:
 
 ```python
 for i in pl.range(10):        # 0 .. 9
-    ...
-
 for i in pl.range(0, 100, 2): # 0, 2, 4, ... 98
-    ...
 ```
 
-### Multi-function programs
+### Splitting work across functions
 
-`@pl.program` groups functions that call each other into one compilation unit.
+For anything beyond one kernel, put the compute in a `@pl.jit.incore` sub-function and let
+the `@pl.jit` entry dispatch it. The entry does not need `pl.at` — the sub-function *is*
+the execution plane.
 
 ```python
-@pl.program
-class VectorAddProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        a_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
-        b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
-        result: pl.Tile[[128, 128], pl.FP32] = pl.add(a_tile, b_tile)
-        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], output)
-        return out
+@pl.jit.incore
+def add_kernel(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    ta = pl.load(a, [0, 0], [128, 128])
+    tb = pl.load(b, [0, 0], [128, 128])
+    pl.store(pl.add(ta, tb), [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
-        c = self.kernel_add(a, b, c)
-        return c
+@pl.jit
+def add_program(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    return add_kernel(a, b, out)      # discovered automatically — no registration
 ```
-
-| Element | Meaning |
-| ------- | ------- |
-| `@pl.program` | Decorates a class into an `ir.Program` |
-| `self` | Required first parameter of every method; stripped from the IR |
-| `self.kernel_add(...)` | A cross-function call inside the program |
-| `type=pl.FunctionType.InCore` | Compute kernel; runs on an AICore |
-| `type=pl.FunctionType.Orchestration` | Host-side coordinator; creates tensors and dispatches kernels |
-
-This is the **control plane / execution plane** split, and it is the single most
-important structural idea in PyPTO:
 
 ```text
-main            (Orchestration)  — host: allocates c, dispatches kernel_add
-  └── kernel_add (InCore)        — device: loads tiles, computes, stores
+add_program   (@pl.jit, Orchestration)  — control plane: dispatches
+  └── add_kernel (@pl.jit.incore)       — execution plane: loads, computes, stores
 ```
 
-The orchestration function never touches tile memory; the InCore function never
-allocates tensors or dispatches work. Mixing the two is the most common structural
-mistake in a first program.
+The `@pl.jit` family, one decorator per IR function kind:
 
-`FunctionType` values you will meet early: `Opaque` (the default — no specific execution
-context), `InCore`, `Orchestration`, and `Inline`. The rest (`AIC`, `AIV`, `Group`,
-`Spmd`) are produced by the compiler or belong to later chapters.
+| Decorator | Becomes | Use for |
+| --------- | ------- | ------- |
+| `@pl.jit` | Orchestration | The chip-level entry point |
+| `@pl.jit.incore` | InCore | A device kernel, outlined into its own file |
+| `@pl.jit.inline` | Inline | A helper spliced into every call site |
+| `@pl.jit.opaque` | Opaque | A separate IR function that may wrap loops and `pl.at` scopes |
+| `@pl.jit.host` | `level=HOST, role=Orchestrator` | The HOST entry of a distributed (multi-card) program |
 
-### Compiling
+Sub-functions are discovered from the entry's body, so you just call them by name. One
+deliberate exception: a plain `@pl.jit` entry does **not** discover other `@pl.jit`
+entries — only `.host` reaches across the chip boundary, which keeps two unrelated
+top-level kernels from silently folding into one program.
+
+### Compiling, and reading what came out
 
 ```python
-from pypto import ir
-from pypto.backend import BackendType
-
-compiled = ir.compile(
-    VectorAddProgram,
-    strategy=ir.OptimizationStrategy.Default,
-    backend_type=BackendType.Ascend910B,
-    skip_ptoas=True,   # drop this once ptoas is on the machine
-)
+compiled = add_program.compile(skip_ptoas=True)
 print(f"Generated code in: {compiled.output_dir}")
 ```
 
-`skip_ptoas=True` stops after emitting `.pto` (MLIR), which is what makes this example
-runnable on a plain `pip install`. Drop it to get compiled C++ kernel wrappers — that
-step invokes **ptoas**, which is distributed separately from the Python package.
-
-`ir.compile()` returns a **`CompiledProgram`**, not a path — the directory is
-`compiled.output_dir`. The `CompiledProgram` is also callable, which is how you dispatch
-it to a device once you have a worker.
-
-The most useful parameters when starting out (`ir.compile` takes 15 in total):
-
-| Parameter | Default | What it does |
-| --------- | ------- | ------------ |
-| `program` | (required) | The `ir.Program` to compile |
-| `output_dir` | `None` → `<base>/<name>_<timestamp>` | Where codegen, reports, and pass dumps land. `<base>` is `$PYPTO_PROG_BUILD_DIR`, or `build_output` when unset |
-| `strategy` | `OptimizationStrategy.Default` | Pass pipeline preset. `DebugTileOptimization` exists but is a debugging shortcut — prefer `Default` |
-| `dump_passes` | `True` | `bool`, or a `PassDumpLevel` (`NONE` / `CONCISE` / `EXPLICIT`) for finer control. Writes IR snapshots under `output_dir/passes_dump/` |
-| `backend_type` | `BackendType.Ascend910B` | Target architecture — `Ascend910B` or `Ascend950` |
-| `skip_ptoas` | `False` | Stop after emitting `.pto` (MLIR) instead of invoking ptoas. Useful when the ptoas toolchain is unavailable |
-
-The remaining nine parameters (`verification_level`, `diagnostic_phase`,
-`disabled_diagnostics`, `memory_planner`, `enable_pypto_l0c_double_buffer`, `profiling`,
-`platform`, `distributed_config`, `analyze_auto_scopes_for_deps`) control verification,
-diagnostics, memory planning, and distributed compilation; they are covered where those
-topics are.
-
-What lands in `output_dir`:
+`compile()` returns a **`CompiledProgram`** — not a path. `compiled.output_dir` is a
+`pathlib.Path` holding:
 
 ```text
 kernels/       generated device kernels, one per InCore function
@@ -255,38 +209,69 @@ debug/         a runnable `run.py` harness
 passes_dump/   per-pass IR snapshots (only when dump_passes is on)
 ```
 
-### Inspecting IR without compiling
+`skip_ptoas=True` stops after emitting `.pto` (MLIR). Drop it to get compiled C++ kernel
+wrappers — that step invokes **ptoas**, which is distributed separately from the Python
+package. `compile()` accepts the same options as `ir.compile()`, which takes 15
+parameters in total; the ones you will reach for first:
+
+| Parameter | Default | What it does |
+| --------- | ------- | ------------ |
+| `output_dir` | `None` → `<base>/<name>_<timestamp>` | Where output lands. `<base>` is `$PYPTO_PROG_BUILD_DIR`, or `build_output` |
+| `strategy` | `OptimizationStrategy.Default` | Pass pipeline preset. `DebugTileOptimization` is a debugging shortcut — prefer `Default` |
+| `dump_passes` | `True` | `bool`, or a `PassDumpLevel` (`NONE` / `CONCISE` / `EXPLICIT`) |
+| `backend_type` | `BackendType.Ascend910B` | Target architecture — `Ascend910B` or `Ascend950` |
+| `skip_ptoas` | `False` | Stop at `.pto` instead of invoking ptoas |
+
+**To read the IR, go through the compiled program.** A `JITFunction` has no
+`as_python()` — only `compile` and `compile_for_test` — so the IR becomes readable once
+one of those has produced it:
 
 ```python
-print(vector_add.as_python())                 # one function
-print(VectorAddProgram.as_python())           # a whole program
-print(vector_add.as_python(concise=True))     # drop intermediate type annotations
+print(compiled.program.as_python())
 ```
+
+What comes back is the specialized `@pl.program` class your jit functions turned into,
+which is also the clearest way to see what `@pl.jit` actually does:
+
+```python
+@pl.program
+class _jit_add_program:
+    @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+    def add_kernel(a: pl.Tensor[[128, 128], pl.FP32], ...):
+        ta: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(a, [0, 0], [128, 128], ...)
+        ...
+```
+
+Note what the parser filled in: `pl.load` resolved to `pl.tile.load`, tiles picked up
+`pl.Mem.Vec`, and the sub-function was assigned a level and role. Reading this is the
+fastest way to check what the compiler actually built when a kernel misbehaves.
 
 ## Edge Cases
 
-> **Fatal pitfall:** `@pl.function` **parses** the body — it does not run it. Calling
-> `vector_add(a, b)` from ordinary Python does not compute anything, and a `print()` or
-> `assert` inside the body never executes at runtime. Debug by reading `as_python()`, not
-> by adding print statements.
+> **Fatal pitfall:** `@pl.jit` **parses** the body — it does not run it. A `print()` or
+> `assert` inside the body never executes at runtime, and stepping through it in a
+> debugger shows you the parse, not the computation. Debug by reading
+> `compiled.program.as_python()`.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **`AttributeError` on the decorated function** | Treating `ir.Function` as a Python callable | Compile the program and dispatch the `CompiledProgram`, or use `@pl.jit` |
-| **Parse error pointing at an assignment** | Assignment target has no type annotation | Annotate every binding: `x: pl.Tile[[64], pl.FP32] = ...` |
-| **Output tensor comes back unchanged** | Result written to a parameter not declared `pl.Out[...]` | Wrap the parameter direction, and write through `pl.store` |
-| **`compiled.output_dir` is `None` / path errors** | Reading the return of `ir.compile` as a string | `ir.compile` returns a `CompiledProgram`; read `.output_dir` |
-| **ptoas failures on a machine without the toolchain** | Codegen ran the assembler | Pass `skip_ptoas=True` to stop at `.pto` |
+| **Compile fails with an orchestration codegen error** | Tile operations directly in a `@pl.jit` body | Wrap them in `with pl.at(level=pl.Level.CORE_GROUP):`, or move them into a `@pl.jit.incore` sub-function |
+| **`missing a required argument`** | `compile()` / `compile_for_test()` called without samples on bare `pl.Tensor` parameters | Pass sample tensors, or annotate the parameters fully |
+| **Output tensor comes back unchanged** | Result written to a parameter not declared `pl.Out[...]` | Add the direction, and write through `pl.store` |
+| **ptoas failures on a machine without the toolchain** | Codegen ran the assembler | Pass `skip_ptoas=True`, or use `compile_for_test()` |
+| **`AttributeError: as_python`** | `as_python()` called on the jit function | It lives on the IR: `compiled.program.as_python()` |
 
-`PYPTO_PROG_BUILD_DIR` is a **runtime environment variable** — `PYPTO_PROG_BUILD_DIR=/tmp/out python kernel.py`
-relocates every compile output. Distinguish it from `SIMPLER_HOST_STRACE` and
-`SIMPLER_DFX`, which are **compile-time macros** of the runtime (`-DXXX=1` at build
-time); setting those in the shell has no effect.
+`PYPTO_PROG_BUILD_DIR` is a **runtime environment variable** —
+`PYPTO_PROG_BUILD_DIR=/tmp/out python kernel.py` relocates every compile output.
+Distinguish it from `SIMPLER_HOST_STRACE` and `SIMPLER_DFX`, which are **compile-time
+macros** of the runtime (`-DXXX=1` at build time); setting those in the shell has no
+effect.
 
 ## See Also
 
 - [Installation](01-installation.md) — getting to the point where these examples import.
-- [Language Guide](01-language_guide.md) — the full type system, control flow, memory model, and scopes.
+- [Programming Model](03-programming-model.md) — the abstractions behind `pl.at`, the two planes, and the memory hierarchy.
+- [Language Guide](01-language_guide.md) — the full surface, including the `@pl.function` / `@pl.program` class form that `@pl.jit` specializes into.
 - [Operation Reference](02-operation_reference.md) — the operator surface across `pl.*`, `pl.tensor.*`, and `pl.tile.*`.
-- [Running on Device](00-getting_started.md) — resident device tensors, explicit dispatch, benchmarking, and distributed execution.
-- [Python IR Syntax Specification](../dev/language/00-python_syntax.md) — the exact syntax the parser accepts.
+- [Running on Device](00-getting_started.md) — resident device tensors, explicit dispatch, benchmarking, distributed execution.
+- `examples/kernels/` — every kernel there is written in this idiom.

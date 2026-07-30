@@ -15,7 +15,7 @@ knowing about before you follow a command that needs them:
 
 | To do this | You also need |
 | ---------- | ------------- |
-| Write kernels, inspect IR (`as_python()`) | Nothing beyond the install |
+| Write kernels, run the pass pipeline (`compile_for_test()`), read the IR | Nothing beyond the install |
 | Compile to device kernels | **ptoas**, distributed separately (versions pinned in `toolchain/versions.env`). Without it, use `ir.compile(..., skip_ptoas=True)` to stop at `.pto` |
 | Run a compiled kernel | The runtime plus an NPU or a simulator platform |
 
@@ -45,34 +45,37 @@ fine and a traceback as the real signal:
 226 exports
 ```
 
-Then check that the parser works — this only builds and prints IR, so it needs neither
-ptoas nor a device. Write it to a file rather than piping it to `python -`:
-`@pl.function` reads the decorated function's source, which is unavailable on stdin.
+Then check that a real kernel makes it through the pass pipeline. `compile_for_test()`
+runs every pass and stops before code generation, so this needs neither ptoas nor a
+device. Write it to a file rather than piping it to `python -`: `@pl.jit` reads the
+decorated function's source, which is unavailable on stdin.
 
 ```bash
 cat > /tmp/pypto_check.py <<'PY'
 import pypto.language as pl
+import torch
 
-@pl.function
-def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
-    r: pl.Tensor[[8], pl.FP32] = pl.add(a, b)
-    return r
+@pl.jit
+def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
+                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
+    return c
 
-print(add.as_python())
+x = torch.zeros((128, 128), dtype=torch.float32)
+program = tile_add.compile_for_test(x, x, x)
+print("pipeline OK:", type(program).__name__)
 PY
 
 python /tmp/pypto_check.py
 ```
 
 ```text
-@pl.function
-def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
-    r: pl.Tensor[[8], pl.FP32] = pl.tensor.add(a, b)
-    return r
+pipeline OK: Program
 ```
 
-`pl.add` resolving to `pl.tensor.add` is the parser doing operator dispatch — if you see
-that, the install is sound.
+If that prints, the C++ core imported, the parser built IR, and all 44 passes ran. A
+traceback here is the real signal — the exact wording of the line is not.
 
 ## Mechanics
 

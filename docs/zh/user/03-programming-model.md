@@ -22,31 +22,35 @@ PyPTO 程序里没有任何东西是在 Python 运行它时执行的。装饰器
 ```python
 import pypto.language as pl
 
-@pl.program
-class Levels:
-    @pl.function(type=pl.FunctionType.InCore)
-    def scale(
-        self,
-        x: pl.Tensor[[128, 128], pl.FP32],
-        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        # Tile 级：显式搬运的片上缓冲区
-        t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
-        y: pl.Tile[[128, 128], pl.FP32] = pl.mul(t, t)
-        return pl.store(y, [0, 0], out)
+@pl.jit.incore
+def scale(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # Tile 级：显式搬运的片上缓冲区
+    t = pl.load(x, [0, 0], [128, 128])
+    y = pl.mul(t, t)
+    pl.store(y, [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-        # 张量级：整个数组；放置是编译器的事
-        buf: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
-        return self.scale(x, buf)
+@pl.jit
+def levels(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # 张量级：整个数组；放置是编译器的事
+    return scale(x, out)
 ```
 
 | 层次 | 你命名的东西 | 在上面出现在哪 | 谁决定放置 |
 | ---- | ------------ | -------------- | ---------- |
-| **张量（Tensor）** | DDR 中的整个数组 | `main` —— `pl.create_tensor`、传递 `x` | 编译器 |
+| **张量（Tensor）** | DDR 中的整个数组 | `levels` —— 传递 `x` 与 `out` | 编译器 |
 | **Tile** | 片上缓冲区 | `scale` —— `pl.load`、`pl.mul`、`pl.store` | 你 |
-| **Block** | 核以及它们之间的协同 | 本例未用；`pl.spmd`、`pl.cluster`、`pl.at` | 你，显式地 |
+| **Block** | 核以及它们之间的协同 | `pl.at(level=...)` 指定其一；`pl.spmd`、`pl.cluster` 走得更远 | 你，显式地 |
+
+`pl.at` 是你最先遇到的 Block 级旋钮。上面的 `@pl.jit.incore` 已经把计算放到了核上，所以本例
+不需要它；单函数 kernel 则改写成 `with pl.at(level=pl.Level.CORE_GROUP):` —— 见
+[快速上手](02-quickstart.md)。
 
 多数程序停在前两层。Block 级用于你需要指明"哪个核做什么"的场合 —— 多 block 派发、cluster
 作用域、AIC/AIV 混合 kernel。
@@ -86,7 +90,7 @@ InCore (AIC / AIV)            执行面
 ### 编译流水
 
 ```text
-Python DSL          @pl.program / @pl.function 把源码解析成 IR
+Python DSL          @pl.jit / @pl.program 把源码解析成 IR
      │
      ▼
 IR                  不可变树，贯穿整个编译过程共享
@@ -98,13 +102,16 @@ Pass 流水线         默认策略下 44 个 pass：内联、SSA、外提作用
 CodeGen             设备 kernel（.pto -> C++）+ 主机编排 C++
 ```
 
-每个阶段都可观测。`as_python()` 可以在任意时刻打印 IR；`dump_passes=` 会在每个 pass 之后写一份
-快照；pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序编号。
+每个阶段都可观测。`compiled.program.as_python()` 打印流水线出来的 IR；`dump_passes=` 会在每个
+pass 之后写一份快照；pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序
+编号。（`@pl.jit` 函数自身没有 `as_python()` —— IR 要等 `compile()` 或 `compile_for_test()`
+把它产出来之后才存在。）
 
 作为用户，IR 的两个性质与你直接相关：
 
 - **它是 SSA 的。** 每个绑定只写一次。在 Python 源码里重复绑定同一个名字是允许的 —— parser
-  会重命名 —— 但跨越循环边界的值必须用 `pl.yield_` 显式携带，这正是累加器写法的由来。
+  会重命名，并把循环内被重复绑定的值作为携带值穿过该循环。这就是为什么 `pl.range` 里的
+  `acc = pl.add(acc, ...)` 能work，尽管 IR 里并不存在就地修改。
 - **它是不可变的。** pass 构建新 IR 而不是就地修改，这也是逐 pass 快照对调试有意义的原因。
 
 ### 内存层次
@@ -137,12 +144,19 @@ DDR（片外）
 matmul 通路正是这套层次被暴露而非隐藏的原因：操作数必须经 L1 到达 L0A/L0B，结果在 L0C 累加。
 
 ```python
-a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
-c_acc = pl.matmul(a_l0a, b_l0b)          # 落在 Acc
-out = pl.store(c_acc, [0, 0], output)    # Acc -> DDR
+@pl.jit.incore
+def mm(
+    a: pl.Tensor[[32, 32], pl.FP16],
+    b: pl.Tensor[[32, 32], pl.FP16],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+):
+    a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+    b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+    a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+    b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
+    c_acc = pl.matmul(a_l0a, b_l0b)      # 落在 Acc
+    pl.store(c_acc, [0, 0], out)         # Acc -> DDR
+    return out
 ```
 
 你并不总需要手写这条链 —— 张量级的 `pl.matmul` 会被 lower 成它。手写换来的是对分块与常驻的控制。
@@ -181,9 +195,9 @@ out = pl.store(c_acc, [0, 0], output)    # Acc -> DDR
 | Symptom | Likely Cause | Fix |
 | ------- | ------------ | --- |
 | **多次运行结果不一致** | 两个必须有先后的任务，没有任何东西表达了这个先后 | 显式声明依赖；仅有源码顺序不构成先后 |
-| **Orchestration 函数里的 `pl.load` 失败** | 在控制面上使用了 tile 操作 | 把 tile 代码移进 `InCore` 函数并派发它 |
-| **InCore 函数里的 `pl.create_tensor` 失败** | 在执行面上分配张量 | 在 Orchestration 函数里分配，以 `pl.Out[...]` 传入 |
-| **循环里写的值在循环后是空的** | 循环携带值没有 yield | 用 `init_values=` + `pl.yield_` 携带它 |
+| **`pl.load` 直接写在 `@pl.jit` 体里失败** | 在控制面上使用了 tile 操作 | 用 `with pl.at(level=...)` 包起来，或移进 `@pl.jit.incore` 子函数 |
+| **`@pl.jit.incore` 函数里的 `pl.create_tensor` 失败** | 在执行面上分配张量 | 在控制面分配，或把缓冲区作为 `pl.Out[...]` 参数接收 |
+| **循环里写的值在循环后是空的** | 携带值从未离开循环 | 每次迭代重新绑定它（`acc = pl.add(acc, ...)`），循环后再读 |
 | **`pl.matmul` 拒绝其操作数** | 操作数不在 `Left` / `Right` | 先 `pl.load` 到 `Mat`，再 `pl.move` 到 `Left` / `Right` |
 
 ## See Also

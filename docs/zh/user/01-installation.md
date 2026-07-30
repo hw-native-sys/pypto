@@ -13,7 +13,7 @@ CMake，所以一条普通的 `pip install` 就能完成全部工作。
 
 | 要做这件事 | 还需要 |
 | ---------- | ------ |
-| 编写 kernel、查看 IR（`as_python()`） | 除安装外无需其他 |
+| 编写 kernel、跑 pass 流水线（`compile_for_test()`）、读 IR | 除安装外无需其他 |
 | 编译出设备 kernel | **ptoas**，单独分发（版本固定在 `toolchain/versions.env`）。没有它就用 `ir.compile(..., skip_ptoas=True)` 停在 `.pto` |
 | 运行已编译的 kernel | 运行时，加一块 NPU 或模拟器平台 |
 
@@ -42,32 +42,36 @@ python -c "import pypto.language as pl; from pypto import ir; print(len(pl.__all
 226 exports
 ```
 
-然后确认 parser 正常 —— 这一步只构建并打印 IR，既不需要 ptoas 也不需要设备。请写成文件再运行，
-不要管道给 `python -`：`@pl.function` 需要读取被装饰函数的源码，而 stdin 上取不到。
+然后确认一个真实 kernel 能走通整条 pass 流水线。`compile_for_test()` 会跑完所有 pass 并在代码
+生成之前停下，因此既不需要 ptoas 也不需要设备。请写成文件再运行，不要管道给 `python -`：
+`@pl.jit` 需要读取被装饰函数的源码，而 stdin 上取不到。
 
 ```bash
 cat > /tmp/pypto_check.py <<'PY'
 import pypto.language as pl
+import torch
 
-@pl.function
-def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
-    r: pl.Tensor[[8], pl.FP32] = pl.add(a, b)
-    return r
+@pl.jit
+def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
+                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
+    return c
 
-print(add.as_python())
+x = torch.zeros((128, 128), dtype=torch.float32)
+program = tile_add.compile_for_test(x, x, x)
+print("pipeline OK:", type(program).__name__)
 PY
 
 python /tmp/pypto_check.py
 ```
 
 ```text
-@pl.function
-def add(a: pl.Tensor[[8], pl.FP32], b: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
-    r: pl.Tensor[[8], pl.FP32] = pl.tensor.add(a, b)
-    return r
+pipeline OK: Program
 ```
 
-`pl.add` 解析成了 `pl.tensor.add`，这是 parser 在做算子分派 —— 看到这个就说明安装是好的。
+只要这行打印出来，就说明 C++ 核心导入成功、parser 构建出了 IR、全部 44 个 pass 都跑过了。
+这里出现 traceback 才是真正的信号 —— 那行字的具体措辞不是。
 
 ## Mechanics
 

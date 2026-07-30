@@ -1,237 +1,193 @@
 # 快速上手
 
-编写、查看并编译你的第一批 PyPTO kernel —— 从一行张量加法到多函数 program。
+用 `@pl.jit` 编写、编译并查看你的第一批 PyPTO kernel。
 
 > **前置**：PyPTO 已安装且可导入 —— 见[安装](01-installation.md)。
-> 本页没有任何代码会派发到设备，所以不需要 NPU。写 kernel 的例子只需要安装本体；
-> 下面「编译」那一节的例子还需要 **ptoas**，而 `pip` 不会安装它 —— 没有的话传 `skip_ptoas=True`。
+> 编译与查看类的例子只需要安装本体。唯一真正**运行** kernel 的例子已单独标注，它需要运行时
+> 加一块设备或模拟器平台。
 
 ## Concept
 
-PyPTO 的 kernel 是被**解析**而非被执行的 Python 源码。`@pl.function` 读取被装饰的函数体
-并据此构建 PyPTO IR；得到的对象是 `ir.Function`，不是可调用对象。在你编译 IR 并派发它之前，
-什么都不会运行。
+PyPTO 的 kernel 是被**解析**而非被执行的 Python 源码。`@pl.jit` 读取被装饰函数的函数体，把它
+特化成 PyPTO IR；在你编译这份 IR 并派发它之前，什么都不会运行。
 
-这也是下面的例子处处都写类型标注的原因。标注不是文档 —— 它们是 parser 用来构建 IR 的形状与
-dtype 契约。少一个标注就是少一块程序。
+`@pl.jit` 标记的是一个**芯片级入口** —— 一个 Orchestration 函数，属于控制面代码。控制面代码
+不能碰片上内存，所以 jit 函数体要走到执行面只有两条路：
 
-本页出现两个抽象层次。**张量级**下你命名 DDR 中的整个数组，由编译器决定数据放在哪、何时搬运；
-**tile 级**下你命名片上缓冲区，自己搬运数据。张量级是起点；当你需要控制"什么东西在片上、
-什么时候在"时，就下到 tile 级。
+- `with pl.at(level=pl.Level.CORE_GROUP):` —— 就地开一个片上作用域。这是简短形态，多数单
+  kernel 例子都这么写。
+- 调用一个 `@pl.jit.incore` 子函数 —— 编译器会从入口体内自动发现它，并把它外提成独立的设备
+  kernel。
+
+在 jit 函数体里直接写 `pl.load`、两条路都不走，编译期会失败。这不是怪癖：它就是控制面 / 执行面
+的划分以报错形式呈现出来，也是 PyPTO 中最重要的一条结构性理念。
 
 ```python
 import pypto.language as pl
-from pypto import ir
+import torch
 ```
 
-`pl` 是语言层 —— 类型、算子、控制流。`ir` 是编译与 IR 工具。下面每个例子都默认有这两行导入。
+## Quickstart：逐元素加法
 
-## Quickstart：张量级向量加法
-
-最小的完整 kernel。它命名两个输入张量、相加、返回结果；数据在哪、怎么搬是编译器的事。
+最小的完整 kernel —— 与 `examples/hello_world.py` 是同一个。
 
 ```python
 import pypto.language as pl
+import torch
 
-@pl.function
-def vector_add(
-    a: pl.Tensor[[64], pl.FP32],
-    b: pl.Tensor[[64], pl.FP32],
-) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-    return result
+@pl.jit
+def tile_add(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
+        tile_c = pl.add(tile_a, tile_b)
+        pl.store(tile_c, [0, 0], c)
+    return c
 
-print(vector_add.as_python())
+a = torch.full((128, 128), 2.0, dtype=torch.float32)
+b = torch.full((128, 128), 3.0, dtype=torch.float32)
+c = torch.zeros((128, 128), dtype=torch.float32)
+
+# 跑完整条 pass 流水线。不需要设备，也不需要 ptoas。
+tile_add.compile_for_test(a, b, c)
+print("compiles")
 ```
 
 | 行 | 作用 |
 | -- | ---- |
-| `@pl.function` | 把函数体解析成 PyPTO IR。此后 `vector_add` 是一个 `ir.Function` |
-| `a: pl.Tensor[[64], pl.FP32]` | 输入：1 维张量、64 个元素、32 位浮点。方向默认为 `In` |
-| `result: pl.Tensor[...] = pl.add(a, b)` | 逐元素加。赋值目标上的标注是必需的 —— 它给 IR 绑定定型 |
-| `return result` | 函数的返回值，也是返回类型的来源 |
+| `@pl.jit` | 首次编译时把函数体特化成一个 Orchestration 入口 |
+| `a: pl.Tensor` | 一个 DDR 张量。没给形状 —— 形状从你传入的 torch 张量读取 |
+| `c: pl.Out[pl.Tensor]` | **方向**：这个参数是被写的，不是被读的 |
+| `with pl.at(level=pl.Level.CORE_GROUP)` | 开一个片上作用域；tile 操作只在这里面合法 |
+| `pl.load(a, [0, 0], [128, 128])` | DDR → 片上 tile。`[0, 0]` 是偏移，`[128, 128]` 是形状 |
+| `pl.store(tile_c, [0, 0], c)` | 片上 tile → DDR，写进 `Out` 参数 |
+| `return c` | 返回被写入的张量 |
 
-预期输出 —— 注意 `pl.add` 已经解析到了它的张量命名空间形式：
+`pl.Out[...]` 是承重的而非装饰性的：它告诉编译器这块缓冲区会被写，进而决定运行时在调用前是否
+上传、调用后是否下载。每个张量参数都带方向 —— 默认 `In`，或显式的 `pl.Out[...]` /
+`pl.InOut[...]`。
+
+`compile_for_test(...)` 跑完整条 pass 流水线、在代码生成之前停下，因此是检查一个 kernel 是否
+形态正确最便宜的手段。它既不需要 ptoas 也不需要设备，这就是本页例子都用它的原因。
+
+### 在硬件上运行
+
+> **需要运行时和一块设备或模拟器平台。** 本行以上的所有内容都不需要。
 
 ```python
-@pl.function
-def vector_add(a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.tensor.add(a, b)
-    return result
+from pypto.runtime import RunConfig
+
+tile_add(a, b, c, config=RunConfig())          # 编译、缓存、派发
+assert torch.allclose(c, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-`as_python()` 把 IR 重新打印成 DSL 源码。它是确认"parser 到底构建了什么"最快的手段，任何时候
-kernel 表现异常都值得先读一遍 —— 你拿到的是编译器看到的那个程序，而不是你以为自己写的那个。
+直接调用一个 `@pl.jit` 函数会一次做完全部事情：按实参的形状与 dtype 特化、编译、缓存结果、派发。
+后续用相同形状调用会复用缓存的编译产物。
 
 ## Mechanics
 
-### Tile 级：load、compute、store
+### 形状：来自实参，还是来自签名
 
-在 tile 级你显式分配片上缓冲区，并自己把数据搬进搬出。
-
-```python
-@pl.function
-def vector_add_tile(
-    a: pl.Tensor[[64], pl.FP32],
-    b: pl.Tensor[[64], pl.FP32],
-    output: pl.Out[pl.Tensor[[64], pl.FP32]],
-) -> pl.Tensor[[64], pl.FP32]:
-    # DDR -> 片上
-    a_tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
-    b_tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
-
-    # 片上计算
-    result: pl.Tile[[64], pl.FP32] = pl.add(a_tile, b_tile)
-
-    # 片上 -> DDR
-    out: pl.Tensor[[64], pl.FP32] = pl.store(result, [0], output)
-    return out
-```
-
-| 概念 | 张量级 | Tile 级 |
-| ---- | ------ | ------- |
-| 数据在哪 | DDR；编译器决定放置 | 你命名片上缓冲区 |
-| 类型 | `pl.Tensor` | `pl.Tile` |
-| 数据搬运 | 编译器插入 | 显式 `pl.load` / `pl.store` |
-| 结果交付 | 返回值 | `pl.Out[...]` 参数，经 `pl.store` 写入 |
-
-- **`pl.load(tensor, offsets, shapes)`** 从 DDR 张量中拷出一块区域，放进一个新的片上 tile。
-  `offsets` 是区域起点，`shapes` 是区域大小 —— 都是逐维给出。
-- **`pl.store(tile, offsets, output_tensor)`** 把 tile 拷回 DDR 张量的 `offsets` 处，并返回
-  被写入的张量。
-
-`pl.Out[...]` 包装表示**参数方向**，它是承重的而非装饰性的：它告诉编译器这个参数是被写的而不是
-被读的，进而决定运行时在调用前是否上传该缓冲区、调用后是否下载。每个张量参数都带方向 ——
-默认 `In`，或显式的 `pl.Out[...]` / `pl.InOut[...]`。
-
-### 循环与循环携带值
-
-`pl.range()` 在 IR 里构建循环。配合 `init_values`，循环会把值从一次迭代带到下一次 —— 这就是
-PyPTO 里累加器的写法。
+`a: pl.Tensor` 把形状交给调用点。改成完整标注，契约就落在签名里 —— 这样连样例张量都不需要：
 
 ```python
-@pl.function
-def sum_elements(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
-    zero: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+@pl.jit
+def tile_add_128(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(a, [0, 0], [128, 128]),
+                        pl.load(b, [0, 0], [128, 128])), [0, 0], c)
+    return c
 
-    for i, (acc,) in pl.range(64, init_values=(zero,)):
-        elem: pl.Tensor[[1], pl.FP32] = pl.slice(a, [1], [i])
-        new_acc: pl.Tensor[[1], pl.FP32] = pl.add(acc, elem)
-        acc_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_acc)
-
-    return acc_out
+compiled = tile_add_128.compile(skip_ptoas=True)   # 不需要 torch.empty(...)
 ```
 
-1. `init_values=(zero,)` —— 进入第 0 次迭代时的携带值。
-2. `for i, (acc,)` —— `i` 是循环下标，`acc` 是本次迭代的携带值。
-3. `pl.yield_(new_acc)` —— 把 `new_acc` 作为下一次迭代的 `acc` 交出去。
-4. `acc_out` —— 循环结束后，持有最后一次迭代 yield 的值。
+探索阶段用裸形态；签名很大的 kernel 用完整标注形态 —— 与其罗列一串用完就丢的
+`torch.empty(...)`，不如让签名把契约说清楚一次。
 
-`pl.yield_` 正是让这段代码保持 SSA 干净的原因：`acc` 从不被就地修改，每次迭代绑定一个新值
-并把它 yield 出去。在循环外读 `acc_out`，就是最终值逃逸出来的方式。
+### 片上作用域内的循环
 
-不带携带值的循环既不需要 `init_values` 也不需要 `pl.yield_`：
+`pl.range()` 在 IR 里构建循环。它放在 `pl.at` **内部** —— 这是设备 kernel 自己跑的循环，不是
+主机在迭代：
+
+```python
+@pl.jit
+def double_thrice(x: pl.Tensor, y: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        acc = pl.load(x, [0, 0], [128, 128])
+        for i in pl.range(3):
+            acc = pl.add(acc, acc)      # 重复绑定没问题 —— parser 会重命名
+        pl.store(acc, [0, 0], y)
+    return y
+```
+
+重复绑定 `acc` 看起来像就地修改，其实不是：IR 是 SSA 的，parser 给每次迭代的值起独立的名字，
+并把它作为携带值穿过循环。循环之后读 `acc`，读到的是最后一次迭代的结果。
+
+循环形态：
 
 ```python
 for i in pl.range(10):        # 0 .. 9
-    ...
-
 for i in pl.range(0, 100, 2): # 0, 2, 4, ... 98
-    ...
 ```
 
-### 多函数 program
+### 把工作拆到多个函数
 
-`@pl.program` 把互相调用的函数组织成一个编译单元。
+只要超出单个 kernel，就把计算放进 `@pl.jit.incore` 子函数，由 `@pl.jit` 入口派发它。入口
+不需要 `pl.at` —— 子函数**本身**就是执行面。
 
 ```python
-@pl.program
-class VectorAddProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        a_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
-        b_tile: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [0, 0], [128, 128])
-        result: pl.Tile[[128, 128], pl.FP32] = pl.add(a_tile, b_tile)
-        out: pl.Tensor[[128, 128], pl.FP32] = pl.store(result, [0, 0], output)
-        return out
+@pl.jit.incore
+def add_kernel(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    ta = pl.load(a, [0, 0], [128, 128])
+    tb = pl.load(b, [0, 0], [128, 128])
+    pl.store(pl.add(ta, tb), [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
-        c = self.kernel_add(a, b, c)
-        return c
+@pl.jit
+def add_program(
+    a: pl.Tensor[[128, 128], pl.FP32],
+    b: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    return add_kernel(a, b, out)      # 自动发现 —— 无需注册
 ```
-
-| 元素 | 含义 |
-| ---- | ---- |
-| `@pl.program` | 把一个类装饰成 `ir.Program` |
-| `self` | 每个方法必需的首参；在 IR 中被剥除 |
-| `self.kernel_add(...)` | program 内部的跨函数调用 |
-| `type=pl.FunctionType.InCore` | 计算 kernel；运行在 AICore 上 |
-| `type=pl.FunctionType.Orchestration` | 主机侧编排者；创建张量并派发 kernel |
-
-这就是**控制面 / 执行面**的划分，也是 PyPTO 中最重要的一条结构性理念：
 
 ```text
-main            (Orchestration)  —— 主机侧：分配 c，派发 kernel_add
-  └── kernel_add (InCore)        —— 设备侧：load tile、计算、store
+add_program   (@pl.jit, Orchestration)  —— 控制面：派发
+  └── add_kernel (@pl.jit.incore)       —— 执行面：load、计算、store
 ```
 
-编排函数从不碰 tile 内存；InCore 函数从不分配张量、也不派发任务。把两者混在一起，是初次写
-PyPTO 程序时最常见的结构性错误。
+`@pl.jit` 家族，每种 IR 函数类型对应一个装饰器：
 
-早期会遇到的 `FunctionType` 取值：`Opaque`（默认 —— 无特定执行上下文）、`InCore`、
-`Orchestration` 和 `Inline`。其余的（`AIC`、`AIV`、`Group`、`Spmd`）由编译器生成，或属于
-后续章节。
+| 装饰器 | 特化成 | 用于 |
+| ------ | ------ | ---- |
+| `@pl.jit` | Orchestration | 芯片级入口 |
+| `@pl.jit.incore` | InCore | 设备 kernel，外提成独立文件 |
+| `@pl.jit.inline` | Inline | 在每个调用点展开的辅助函数 |
+| `@pl.jit.opaque` | Opaque | 独立 IR 函数，可包裹循环与 `pl.at` 作用域 |
+| `@pl.jit.host` | `level=HOST, role=Orchestrator` | 分布式（多卡）程序的 HOST 入口 |
 
-### 编译
+子函数从入口体内自动发现，所以你按名字调用即可。有一个刻意的例外：普通 `@pl.jit` 入口**不会**
+发现其他 `@pl.jit` 入口 —— 只有 `.host` 会跨越芯片边界，这样可以避免两个不相关的顶层 kernel
+被静默折叠进同一个 program。
+
+### 编译，以及读懂产出
 
 ```python
-from pypto import ir
-from pypto.backend import BackendType
-
-compiled = ir.compile(
-    VectorAddProgram,
-    strategy=ir.OptimizationStrategy.Default,
-    backend_type=BackendType.Ascend910B,
-    skip_ptoas=True,   # 机器上有 ptoas 之后可以去掉这一行
-)
+compiled = add_program.compile(skip_ptoas=True)
 print(f"Generated code in: {compiled.output_dir}")
 ```
 
-`skip_ptoas=True` 会在发射 `.pto`（MLIR）之后停下，这正是让本例在一台仅 `pip install` 过的
-机器上也能跑通的原因。去掉它才会得到编译好的 C++ kernel wrapper —— 那一步要调用 **ptoas**，
-它与 Python 包是分开分发的。
-
-`ir.compile()` 返回的是 **`CompiledProgram`**，不是路径 —— 目录在 `compiled.output_dir`。
-`CompiledProgram` 同时也是可调用的，这就是拿到 worker 后把它派发到设备的方式。
-
-入门阶段最常用的参数（`ir.compile` 共有 15 个）：
-
-| 参数 | 默认值 | 作用 |
-| ---- | ------ | ---- |
-| `program` | （必需） | 要编译的 `ir.Program` |
-| `output_dir` | `None` → `<base>/<name>_<timestamp>` | codegen、报告与 pass dump 的落盘位置。`<base>` 取 `$PYPTO_PROG_BUILD_DIR`，未设置时为 `build_output` |
-| `strategy` | `OptimizationStrategy.Default` | pass 流水线预设。`DebugTileOptimization` 存在但只是调试捷径 —— 优先用 `Default` |
-| `dump_passes` | `True` | `bool`，或用 `PassDumpLevel`（`NONE` / `CONCISE` / `EXPLICIT`）做更细的控制。IR 快照写到 `output_dir/passes_dump/` |
-| `backend_type` | `BackendType.Ascend910B` | 目标架构 —— `Ascend910B` 或 `Ascend950` |
-| `skip_ptoas` | `False` | 只发射 `.pto`（MLIR）后停止，不调用 ptoas。ptoas 工具链不可用时很有用 |
-
-其余九个参数（`verification_level`、`diagnostic_phase`、`disabled_diagnostics`、
-`memory_planner`、`enable_pypto_l0c_double_buffer`、`profiling`、`platform`、
-`distributed_config`、`analyze_auto_scopes_for_deps`）分别控制校验、诊断、内存规划和分布式
-编译，会在对应主题处介绍。
-
-`output_dir` 里会有什么：
+`compile()` 返回的是 **`CompiledProgram`**，不是路径。`compiled.output_dir` 是一个
+`pathlib.Path`，里面有：
 
 ```text
 kernels/       生成的设备 kernel，每个 InCore 函数一个
@@ -241,27 +197,54 @@ debug/         一个可直接运行的 `run.py`
 passes_dump/   逐 pass 的 IR 快照（仅在开启 dump_passes 时）
 ```
 
-### 不编译也能查看 IR
+`skip_ptoas=True` 会在发射 `.pto`（MLIR）之后停下。去掉它才会得到编译好的 C++ kernel
+wrapper —— 那一步要调用 **ptoas**，它与 Python 包是分开分发的。`compile()` 接受与
+`ir.compile()` 相同的选项（后者共 15 个参数），入门阶段最常用的几个：
+
+| 参数 | 默认值 | 作用 |
+| ---- | ------ | ---- |
+| `output_dir` | `None` → `<base>/<name>_<timestamp>` | 产物落盘位置。`<base>` 取 `$PYPTO_PROG_BUILD_DIR`，未设置时为 `build_output` |
+| `strategy` | `OptimizationStrategy.Default` | pass 流水线预设。`DebugTileOptimization` 只是调试捷径 —— 优先用 `Default` |
+| `dump_passes` | `True` | `bool`，或 `PassDumpLevel`（`NONE` / `CONCISE` / `EXPLICIT`） |
+| `backend_type` | `BackendType.Ascend910B` | 目标架构 —— `Ascend910B` 或 `Ascend950` |
+| `skip_ptoas` | `False` | 停在 `.pto`，不调用 ptoas |
+
+**要看 IR，得经过已编译的 program。** `JITFunction` 没有 `as_python()` —— 它只有 `compile`
+与 `compile_for_test` —— 所以 IR 要等其中之一把它产出来之后才可读：
 
 ```python
-print(vector_add.as_python())                 # 单个函数
-print(VectorAddProgram.as_python())           # 整个 program
-print(vector_add.as_python(concise=True))     # 去掉中间类型标注
+print(compiled.program.as_python())
 ```
+
+回来的是你那些 jit 函数被特化成的 `@pl.program` 类，这也是看清 `@pl.jit` 到底做了什么最直接的
+方式：
+
+```python
+@pl.program
+class _jit_add_program:
+    @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+    def add_kernel(a: pl.Tensor[[128, 128], pl.FP32], ...):
+        ta: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(a, [0, 0], [128, 128], ...)
+        ...
+```
+
+注意 parser 替你补齐了什么：`pl.load` 解析成了 `pl.tile.load`，tile 带上了 `pl.Mem.Vec`，
+子函数被指派了 level 与 role。kernel 行为异常时，读这份输出是确认"编译器究竟构建了什么"最快的
+办法。
 
 ## Edge Cases
 
-> **致命陷阱：** `@pl.function` 是**解析**函数体，不是执行它。从普通 Python 里调用
-> `vector_add(a, b)` 不会算出任何东西，函数体里的 `print()` 或 `assert` 在运行期也永远不会
-> 执行。调试请读 `as_python()`，不要加打印语句。
+> **致命陷阱：** `@pl.jit` 是**解析**函数体，不是执行它。函数体里的 `print()` 或 `assert`
+> 在运行期永远不会执行，用调试器单步进去看到的是解析过程而不是计算过程。调试请读
+> `compiled.program.as_python()`。
 
 | Symptom | Likely Cause | Fix |
 | ------- | ------------ | --- |
-| **被装饰的函数报 `AttributeError`** | 把 `ir.Function` 当成 Python 可调用对象 | 编译 program 后派发 `CompiledProgram`，或改用 `@pl.jit` |
-| **解析错误指向某个赋值语句** | 赋值目标缺少类型标注 | 给每个绑定加标注：`x: pl.Tile[[64], pl.FP32] = ...` |
-| **输出张量回来时没有变化** | 结果写进了未声明 `pl.Out[...]` 的参数 | 给参数加上方向包装，并通过 `pl.store` 写入 |
-| **`compiled.output_dir` 为 `None` 或路径报错** | 把 `ir.compile` 的返回值当作字符串 | `ir.compile` 返回 `CompiledProgram`，读它的 `.output_dir` |
-| **没有工具链的机器上 ptoas 失败** | codegen 调用了汇编器 | 传 `skip_ptoas=True`，在 `.pto` 处停下 |
+| **编译在编排层 codegen 处报错** | tile 操作直接写在 `@pl.jit` 函数体里 | 用 `with pl.at(level=pl.Level.CORE_GROUP):` 包起来，或移进 `@pl.jit.incore` 子函数 |
+| **`missing a required argument`** | 参数是裸 `pl.Tensor`，但 `compile()` / `compile_for_test()` 没给样例 | 传样例张量，或把参数完整标注 |
+| **输出张量回来时没有变化** | 结果写进了未声明 `pl.Out[...]` 的参数 | 加上方向，并通过 `pl.store` 写入 |
+| **没有工具链的机器上 ptoas 失败** | codegen 调用了汇编器 | 传 `skip_ptoas=True`，或改用 `compile_for_test()` |
+| **`AttributeError: as_python`** | 在 jit 函数上调用了 `as_python()` | 它在 IR 上：`compiled.program.as_python()` |
 
 `PYPTO_PROG_BUILD_DIR` 是**运行时环境变量** —— `PYPTO_PROG_BUILD_DIR=/tmp/out python kernel.py`
 可以整体改变编译产物位置。请与 `SIMPLER_HOST_STRACE`、`SIMPLER_DFX` 区分开：后两者是运行时的
@@ -270,7 +253,8 @@ print(vector_add.as_python(concise=True))     # 去掉中间类型标注
 ## See Also
 
 - [安装](01-installation.md) —— 让这些例子能 import 起来。
-- [语言指南](01-language_guide.md) —— 完整的类型系统、控制流、内存模型与作用域。
+- [编程模型](03-programming-model.md) —— `pl.at`、两个面、内存层次背后的抽象。
+- [语言指南](01-language_guide.md) —— 完整表面，包括 `@pl.jit` 所特化成的 `@pl.function` / `@pl.program` 类形态。
 - [操作参考](02-operation_reference.md) —— `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌。
-- [在设备上运行](00-getting_started.md) —— 常驻设备张量、显式派发、性能基准与分布式执行。
-- [Python IR 语法规范](../dev/language/00-python_syntax.md) —— parser 接受的精确语法。
+- [在设备上运行](00-getting_started.md) —— 常驻设备张量、显式派发、性能基准、分布式执行。
+- `examples/kernels/` —— 那里的每个 kernel 都是这套写法。

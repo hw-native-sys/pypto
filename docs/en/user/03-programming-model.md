@@ -29,31 +29,36 @@ the runtime schedules them. Python is the authoring language, not the execution 
 ```python
 import pypto.language as pl
 
-@pl.program
-class Levels:
-    @pl.function(type=pl.FunctionType.InCore)
-    def scale(
-        self,
-        x: pl.Tensor[[128, 128], pl.FP32],
-        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        # Tile level: an on-chip buffer, moved explicitly
-        t: pl.Tile[[128, 128], pl.FP32] = pl.load(x, [0, 0], [128, 128])
-        y: pl.Tile[[128, 128], pl.FP32] = pl.mul(t, t)
-        return pl.store(y, [0, 0], out)
+@pl.jit.incore
+def scale(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # Tile level: on-chip buffers, moved explicitly
+    t = pl.load(x, [0, 0], [128, 128])
+    y = pl.mul(t, t)
+    pl.store(y, [0, 0], out)
+    return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-        # Tensor level: whole arrays; placement is the compiler's problem
-        buf: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
-        return self.scale(x, buf)
+@pl.jit
+def levels(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # Tensor level: whole arrays; placement is the compiler's problem
+    return scale(x, out)
 ```
 
 | Level | What you name | Where it appears above | Who decides placement |
 | ----- | ------------- | ---------------------- | --------------------- |
-| **Tensor** | Whole arrays in DDR | `main` — `pl.create_tensor`, passing `x` around | The compiler |
+| **Tensor** | Whole arrays in DDR | `levels` — passing `x` and `out` around | The compiler |
 | **Tile** | On-chip buffers | `scale` — `pl.load`, `pl.mul`, `pl.store` | You |
-| **Block** | Cores and their coordination | Not used here; `pl.spmd`, `pl.cluster`, `pl.at` | You, explicitly |
+| **Block** | Cores and their coordination | `pl.at(level=...)` names one; `pl.spmd` and `pl.cluster` go further | You, explicitly |
+
+`pl.at` is the Block-level knob you meet first. `@pl.jit.incore` above already places the
+compute on a core, so this example does not need it; a single-function kernel says
+`with pl.at(level=pl.Level.CORE_GROUP):` instead — see
+[Quickstart](02-quickstart.md#quickstart-element-wise-add).
 
 Most programs stop at the first two. Block level is for when you need to say which core
 does what — multi-block dispatch, cluster scopes, mixed AIC/AIV kernels.
@@ -95,7 +100,7 @@ no `FunctionType.Host`; the level/role pair is how host-ness is expressed.)
 ### The compilation pipeline
 
 ```text
-Python DSL          @pl.program / @pl.function parse source into IR
+Python DSL          @pl.jit / @pl.program parse source into IR
      │
      ▼
 IR                  immutable tree, shared across the whole compilation
@@ -107,15 +112,18 @@ Pass pipeline       44 passes in the default strategy: inline, SSA, outline scop
 CodeGen             device kernels (.pto -> C++) + host orchestration C++
 ```
 
-Each stage is observable. `as_python()` prints the IR at any point;
-`dump_passes=` writes a snapshot after every pass; the passes themselves are documented
-individually in [Passes](../dev/passes/index.md), numbered in execution order.
+Each stage is observable. `compiled.program.as_python()` prints the IR that came out of
+the pipeline; `dump_passes=` writes a snapshot after every pass; the passes themselves are
+documented individually in [Passes](../dev/passes/index.md), numbered in execution order.
+(`@pl.jit` functions have no `as_python()` of their own — the IR exists once `compile()` or
+`compile_for_test()` has produced it.)
 
 Two properties of the IR matter to you as a user:
 
 - **It is SSA.** Every binding is written once. Rebinding a name in Python source is
-  fine — the parser renames — but values that cross a loop boundary must be carried
-  explicitly with `pl.yield_`, which is why accumulators look the way they do.
+  fine — the parser renames, and threads a value rebound inside a loop through that loop
+  as a carried value. That is why `acc = pl.add(acc, ...)` inside `pl.range` works despite
+  the IR having no mutation.
 - **It is immutable.** Passes build new IR rather than mutating it, which is what makes
   per-pass snapshots meaningful for debugging.
 
@@ -150,12 +158,19 @@ The matmul path is the reason this hierarchy is exposed rather than hidden: oper
 have to reach L0A/L0B through L1, and the result accumulates in L0C.
 
 ```python
-a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
-c_acc = pl.matmul(a_l0a, b_l0b)          # lands in Acc
-out = pl.store(c_acc, [0, 0], output)    # Acc -> DDR
+@pl.jit.incore
+def mm(
+    a: pl.Tensor[[32, 32], pl.FP16],
+    b: pl.Tensor[[32, 32], pl.FP16],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+):
+    a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+    b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+    a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+    b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
+    c_acc = pl.matmul(a_l0a, b_l0b)      # lands in Acc
+    pl.store(c_acc, [0, 0], out)         # Acc -> DDR
+    return out
 ```
 
 You do not always have to write this out — a tensor-level `pl.matmul` is lowered into
@@ -200,9 +215,9 @@ kernels and cross-core pipelines exist as concepts; see
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
 | **Results change between runs** | Two tasks that must be ordered have nothing expressing that order | State the dependency explicitly; source order alone does not order them |
-| **`pl.load` inside an Orchestration function fails** | Tile operations used on the control plane | Move the tile code into an `InCore` function and dispatch it |
-| **`pl.create_tensor` inside an InCore function fails** | Tensor allocation used on the execution plane | Allocate in the Orchestration function; pass the buffer in as `pl.Out[...]` |
-| **A value written in a loop is empty afterwards** | Loop-carried value not yielded | Carry it with `init_values=` + `pl.yield_` |
+| **`pl.load` directly in a `@pl.jit` body fails** | Tile operations used on the control plane | Wrap them in `with pl.at(level=...)`, or move them into a `@pl.jit.incore` sub-function |
+| **`pl.create_tensor` inside a `@pl.jit.incore` function fails** | Tensor allocation used on the execution plane | Allocate on the control plane, or take the buffer as a `pl.Out[...]` parameter |
+| **A value written in a loop is empty afterwards** | The carried value never leaves the loop | Rebind it each iteration (`acc = pl.add(acc, ...)`) and read it after the loop |
 | **`pl.matmul` rejects its operands** | Operands not in `Left` / `Right` | `pl.load` to `Mat`, then `pl.move` to `Left` / `Right` |
 
 ## See Also

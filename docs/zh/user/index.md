@@ -36,7 +36,7 @@
 | 页面 | 内容 |
 | ---- | ---- |
 | [安装](01-installation.md) | 前置条件、源码安装、构建选项、验证、`examples/` 导览 |
-| [快速上手](02-quickstart.md) | 张量级与 tile 级 kernel、循环与携带值、多函数 program、编译 |
+| [快速上手](02-quickstart.md) | 用 `@pl.jit` 写 kernel、片上作用域、循环、把工作拆到多个函数、编译与读 IR |
 | [编程模型](03-programming-model.md) | 张量 / Tile / Block 三层、控制面与执行面、pass 流水线、内存层次、执行模型 |
 | [语言指南](01-language_guide.md) | 完整语言：类型系统、操作、SSA 与控制流、内存与数据搬运、InCore 作用域、编译 |
 | [操作参考](02-operation_reference.md) | `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌 |
@@ -47,11 +47,11 @@
 
 | 能力 | 文档位置 |
 | ---- | -------- |
-| 张量级与 tile 级 kernel 编写 | [快速上手](02-quickstart.md)、[语言指南](01-language_guide.md) |
+| 用 `@pl.jit` 写 kernel（及其所特化成的 `@pl.function` / `@pl.program` 形态） | [快速上手](02-quickstart.md)、[语言指南](01-language_guide.md) |
 | 显式片上内存放置（Vec / Mat / L0A / L0B / L0C） | [编程模型](03-programming-model.md) |
 | 控制流：循环、携带值、条件、while | [语言指南](01-language_guide.md) |
 | 多函数 program 与跨函数调用 | [快速上手](02-quickstart.md) |
-| 从 Python 可调用对象 JIT 编译（`@pl.jit`） | [语言指南](01-language_guide.md) |
+| `@pl.jit` 全家族（`.incore`、`.inline`、`.opaque`、`.host`） | [快速上手](02-quickstart.md)、[语言指南](01-language_guide.md) |
 | 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/01-external-kernels.md) |
 | 设备常驻张量、显式派发、性能基准 | [在设备上运行](00-getting_started.md) |
 | 分布式（多卡）程序与集合通信 | [分布式算子](../dev/distributed_ops.md) |
