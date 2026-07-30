@@ -54,24 +54,17 @@ t: pl.Tile[[16, 16], pl.FP16]
 
 ### Tensor Layout and View
 
-A third subscript element describes how the tensor is laid out — either a layout
-constant or a full `pl.TensorView`. Either may be written inline or bound to a
-variable in enclosing Python, which is how one view is shared across several
-parameters without repeating it:
+The third subscript element is a layout or a `pl.TensorView`, each written inline or
+held in a variable — bind it once to share one view across several parameters. A
+layout is shorthand for a stride-less view, so every form yields a `TensorView`.
+Same slot and spellings for `pl.DistributedTensor`.
 
 ```python
-MY_LAYOUT = pl.TensorLayout.NZ
 STRIDED = pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
 
-a: pl.Tensor[[32, 64], pl.FP32, pl.NZ]        # layout, inline
-b: pl.Tensor[[32, 64], pl.FP32, MY_LAYOUT]    # layout, by variable
-c: pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]
-d: pl.Tensor[[32, 64], pl.FP32, STRIDED]      # view, by variable — same as c
+x: pl.Tensor[[32, 64], pl.FP32, pl.NZ]      # layout, inline
+y: pl.Tensor[[32, 64], pl.FP32, STRIDED]    # view, by variable
 ```
-
-A layout constant is shorthand for a stride-less view carrying that layout, so
-all four forms resolve to a `TensorView` on the resulting `TensorType`. The same
-slot and the same four spellings apply to `pl.DistributedTensor`.
 
 ### Memory References (MemRef)
 
