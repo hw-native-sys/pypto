@@ -1503,6 +1503,24 @@ class TestLayoutResolution:
         assert result.tensor_view is not None
         assert result.tensor_view.layout == ir.TensorLayout.NZ
 
+    def test_bare_layout_name_wins_over_shadowing_closure_view(self):
+        """`NZ` is the layout even when a closure variable of that name holds a view.
+
+        Layout names took precedence over closure variables before views were
+        reachable by name; resolving views by name must not change that.
+        """
+        resolver = _make_resolver(
+            closure_vars={"NZ": ir.TensorView(stride=[128, 1], layout=ir.TensorLayout.ND)}
+        )
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, NZ]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert tv.layout == ir.TensorLayout.NZ
+        assert len(tv.stride) == 0
+
     def test_resolve_layout_from_closure(self):
         """Layout from closure variable."""
         resolver = _make_resolver(closure_vars={"my_layout": ir.TensorLayout.NZ})

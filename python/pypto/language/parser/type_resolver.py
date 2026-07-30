@@ -1470,6 +1470,11 @@ class TypeResolver:
         """
         if not isinstance(node, ast.Name):
             return None
+        # A bare layout name resolves as a layout, and did so before views were
+        # reachable by name — so keep that precedence and skip the evaluation,
+        # which is the expensive half of resolving this slot.
+        if node.id in self._LAYOUT_MAP:
+            return None
         success, value = self.expr_evaluator.try_eval_expr(node)
         if success and isinstance(value, ir.TensorView):
             return value
