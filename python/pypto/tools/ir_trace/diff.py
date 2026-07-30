@@ -506,81 +506,54 @@ def _pair_source_regions(
     after_gaps = after_regions[::2]
     before_functions = before_regions[1::2]
     after_functions = after_regions[1::2]
-    matcher = difflib.SequenceMatcher(
-        a=[region.function_key for region in before_functions],
-        b=[region.function_key for region in after_functions],
-        autojunk=False,
-    )
+    before_keys = {region.function_key for region in before_functions}
+    after_entries = {
+        region.function_key: (region, after_gaps[index + 1]) for index, region in enumerate(after_functions)
+    }
+    additions_before: dict[str | None, list[tuple[int, _SourceRegion]]] = {}
+    next_common_key: str | None = None
+    # Keep Before order, placing After-only functions before their next common key.
+    for after_index in range(len(after_functions) - 1, -1, -1):
+        after_function = after_functions[after_index]
+        if after_function.function_key in before_keys:
+            next_common_key = after_function.function_key
+        else:
+            additions_before.setdefault(next_common_key, []).append((after_index, after_function))
+
     pairs = [_RegionPair(before_gaps[0], after_gaps[0], None, None)]
 
-    for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
-        if tag == "equal":
-            for before_index, after_index in zip(
-                range(before_start, before_end), range(after_start, after_end), strict=True
-            ):
-                before_function = before_functions[before_index]
-                after_function = after_functions[after_index]
-                pairs.append(
-                    _RegionPair(
-                        before_function,
-                        after_function,
-                        before_function.function_key,
-                        before_function.function_name,
-                    )
+    def append_additions(next_key: str | None) -> None:
+        for after_index, after_function in reversed(additions_before.get(next_key, [])):
+            pairs.append(
+                _RegionPair(
+                    None,
+                    after_function,
+                    after_function.function_key,
+                    after_function.function_name,
                 )
-                pairs.append(
-                    _RegionPair(before_gaps[before_index + 1], after_gaps[after_index + 1], None, None)
-                )
-        elif tag == "delete":
-            for before_index in range(before_start, before_end):
-                before_function = before_functions[before_index]
-                pairs.append(
-                    _RegionPair(
-                        before_function,
-                        None,
-                        before_function.function_key,
-                        before_function.function_name,
-                    )
-                )
-                pairs.append(_RegionPair(before_gaps[before_index + 1], None, None, None))
-        elif tag == "insert":
-            for after_index in range(after_start, after_end):
-                after_function = after_functions[after_index]
-                pairs.append(
-                    _RegionPair(
-                        None,
-                        after_function,
-                        after_function.function_key,
-                        after_function.function_name,
-                    )
-                )
-                pairs.append(_RegionPair(None, after_gaps[after_index + 1], None, None))
-        elif tag == "replace":
-            for before_index in range(before_start, before_end):
-                before_function = before_functions[before_index]
-                pairs.append(
-                    _RegionPair(
-                        before_function,
-                        None,
-                        before_function.function_key,
-                        before_function.function_name,
-                    )
-                )
-                if before_index + 1 < before_end:
-                    pairs.append(_RegionPair(before_gaps[before_index + 1], None, None, None))
-            for after_index in range(after_start, after_end):
-                after_function = after_functions[after_index]
-                pairs.append(
-                    _RegionPair(
-                        None,
-                        after_function,
-                        after_function.function_key,
-                        after_function.function_name,
-                    )
-                )
-                if after_index + 1 < after_end:
-                    pairs.append(_RegionPair(None, after_gaps[after_index + 1], None, None))
-            pairs.append(_RegionPair(before_gaps[before_end], after_gaps[after_end], None, None))
+            )
+            pairs.append(_RegionPair(None, after_gaps[after_index + 1], None, None))
+
+    for before_index, before_function in enumerate(before_functions):
+        append_additions(before_function.function_key)
+        after_function, after_gap = after_entries.get(before_function.function_key, (None, None))
+        pairs.append(
+            _RegionPair(
+                before_function,
+                after_function,
+                before_function.function_key,
+                before_function.function_name,
+            )
+        )
+        pairs.append(
+            _RegionPair(
+                before_gaps[before_index + 1],
+                after_gap,
+                None,
+                None,
+            )
+        )
+    append_additions(None)
     return tuple(pairs)
 
 

@@ -149,14 +149,17 @@ convert_dump "$DUMP" "$REPORT_INPUT" "$CONTEXT_INPUT" "$ALLOW_OVERWRITE"
    RUN_PARENT="$WORKTREE/build/ir-trace-runs"
    mkdir -p "$RUN_PARENT"
    RUN_ROOT="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
-   test -z "$(find "$RUN_ROOT" -mindepth 1 -print -quit)"
+   RUN_MANIFEST="$(mktemp "$RUN_PARENT/manifest.XXXXXX")"
+   find "$RUN_ROOT" -mindepth 1 -print0 > "$RUN_MANIFEST" || { printf 'failed to enumerate fresh run root: %s\n' "$RUN_ROOT" >&2; exit 1; }
+   test ! -s "$RUN_MANIFEST" || { printf 'fresh run root is not empty: %s\n' "$RUN_ROOT" >&2; exit 1; }
    ```
 
 4. Run the exact command in this session with all user arguments, pass dumping, and documented output setting pointed at `RUN_ROOT`. For a Python script use `wt_python "$CASE_SCRIPT" <arguments>`; for another launcher run `assert_worktree_cli` immediately before it and prefix `PYTHONPATH="$WORKTREE_PYTHONPATH"`. Require status `0` and record the expanded command.
 5. Accept exactly one dump beneath the previously empty root, initialize report/context policy, and call the same conversion block:
 
    ```bash
-   mapfile -d '' FRESH_DUMPS < <(find "$RUN_ROOT" -type d -name passes_dump -print0)
+   find "$RUN_ROOT" -type d -name passes_dump -print0 > "$RUN_MANIFEST" || { printf 'failed to enumerate fresh dumps: %s\n' "$RUN_ROOT" >&2; exit 1; }
+   mapfile -d '' FRESH_DUMPS < "$RUN_MANIFEST"
    test "${#FRESH_DUMPS[@]}" -eq 1 || {
      printf 'expected exactly one fresh passes_dump under %s, found %s\n' "$RUN_ROOT" "${#FRESH_DUMPS[@]}" >&2
      printf '%s\n' "${FRESH_DUMPS[@]}" >&2
@@ -194,5 +197,4 @@ Hand off the complete file as a clickable absolute path. Report `WORKTREE`, `CLI
 ## Common mistakes
 
 - Running blocks in separate shells or invoking Python outside `wt_python`/the asserted worktree environment.
-- Replacing a missing dump, choosing the newest dump, or accepting zero/multiple full-flow dumps.
-- Reusing an HTML file, skipping standalone/copy validation, or handing off a relative path or incomplete source.
+- Replacing a missing dump, choosing the newest dump, accepting zero/multiple dumps, reusing an HTML file, or skipping complete absolute-path validation.

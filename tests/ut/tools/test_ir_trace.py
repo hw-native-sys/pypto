@@ -556,6 +556,46 @@ def test_build_trace_emits_added_and_deleted_functions_as_one_sided_sections(tmp
     assert after_numbers == list(range(1, len(after.splitlines()) + 1))
 
 
+def test_build_trace_pairs_reordered_functions_by_exact_key(tmp_path: Path):
+    before = textwrap.dedent(
+        """\
+        def alpha():
+            return "alpha"
+
+        def beta():
+            return "old"
+        """
+    )
+    after = textwrap.dedent(
+        """\
+        def beta():
+            return "new"
+
+        def alpha():
+            return "alpha"
+        """
+    )
+    dump = _write_dump(
+        tmp_path,
+        {
+            "00_frontend.py": before,
+            "01_after_TestPass.py": after,
+        },
+    )
+
+    trace = build_trace(discover_snapshots(dump), context=20)[0]
+    functions = [section for section in trace.sections if section.function_key is not None]
+
+    assert [section.function_key for section in functions] == ["alpha", "beta"]
+    assert all(
+        any(row.before_number is not None for hunk in section.hunks for row in hunk.rows)
+        and any(row.after_number is not None for hunk in section.hunks for row in hunk.rows)
+        for section in functions
+    )
+    beta = next(section for section in functions if section.function_key == "beta")
+    assert any(row.kind == "replace" for hunk in beta.hunks for row in hunk.rows)
+
+
 def test_build_trace_aligns_matching_operations_around_inserted_lines(tmp_path: Path):
     dump = _write_dump(
         tmp_path,
