@@ -24,27 +24,6 @@ from pypto import backend, ir, passes
 from pypto.backend import BackendType
 
 
-def _verify_no_roundtrip() -> passes.PassContext:
-    """Ambient property verification, minus the print->parse roundtrip instrument.
-
-    A few tests below stamp compiler-internal attrs (``dump_vars``, residency
-    sentinels) onto calls to observe how the pass propagates them. Those attrs
-    have no DSL print/parse surface, so the roundtrip instrument installed by
-    ``tests/ut/conftest.py`` drops them and reports a spurious ``Kwargs size
-    mismatch``. BEFORE_AND_AFTER property verification is deliberately KEPT — only
-    the roundtrip is suppressed, and only for the single pass call that needs it.
-
-    Tracked by hw-native-sys/pypto#2204: builtin-op call attrs go through a 2-key
-    allowlist on print (and an int/float/bool/str-only reader on parse), while
-    GlobalVar/Submit attrs use a fail-loud denylist. Once those converge, this
-    helper and all four of its call sites can go away.
-
-    Returns:
-        A ``PassContext`` carrying only the BEFORE_AND_AFTER verification instrument.
-    """
-    return passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)])
-
-
 @pytest.fixture(autouse=True)
 def _reset_backend():
     """Ensure no backend is configured so TileView inference is deterministic.
@@ -360,10 +339,7 @@ class TestInferTileMemorySpaceCubeOps:
                 )
 
         marked = _MarkMatmulDump().visit_program(Before)
-        # Builtin-call dump attrs are compiler-internal and have no DSL
-        # print/parse surface, so inspect the transformed IR directly.
-        with _verify_no_roundtrip():
-            after = passes.infer_tile_memory_space()(marked)
+        after = passes.infer_tile_memory_space()(marked)
         matmuls = []
 
         class _CollectMatmul(ir.IRVisitor):
@@ -412,10 +388,7 @@ class TestInferTileMemorySpaceCubeOps:
                 )
 
         marked = _MarkMatmulDump().visit_program(Before)
-        # Same compiler-internal `dump_vars` attr as the sibling test above: it has
-        # no DSL print/parse surface, so the roundtrip instrument is dropped here.
-        with _verify_no_roundtrip():
-            after = passes.infer_tile_memory_space()(marked)
+        after = passes.infer_tile_memory_space()(marked)
         matmuls = []
 
         class _CollectMatmul(ir.IRVisitor):
@@ -2411,10 +2384,7 @@ class RetargetedBridgeAttrs:
 
         before = _StampFirstLoad().visit_program(before)
         backend.set_backend_type(BackendType.Ascend910B)
-        # The sentinel is deliberately not a DSL-printable compiler attr, so
-        # disable the global print/parse instrument for this attr-lifetime test.
-        with _verify_no_roundtrip():
-            after = passes.infer_tile_memory_space()(before)
+        after = passes.infer_tile_memory_space()(before)
         load_attrs = []
 
         class _CollectLoadAttrs(ir.IRVisitor):
@@ -2467,10 +2437,7 @@ class MarkerOnlyScalarCall:
 
         before = _StampScalarCall().visit_program(before)
         backend.set_backend_type(BackendType.Ascend910B)
-        # Same non-DSL-printable sentinel attr as the sibling test above, so the
-        # print/parse instrument is dropped for this attr-lifetime check too.
-        with _verify_no_roundtrip():
-            after = passes.infer_tile_memory_space()(before)
+        after = passes.infer_tile_memory_space()(before)
         scalar_attrs = []
 
         class _CollectScalarAttrs(ir.IRVisitor):

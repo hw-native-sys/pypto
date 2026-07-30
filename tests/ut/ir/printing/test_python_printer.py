@@ -1807,5 +1807,126 @@ def test_keyword_named_tensor_op_round_trips(dsl_name):
     ir.assert_structural_equal(Program, pl.parse_program(printed))
 
 
+def test_builtin_op_call_generic_attrs_roundtrip():
+    """Every non-bespoke attr on a builtin-op Call round-trips, not just two keys.
+
+    The builtin-op writer used to be a hardcoded 2-key allowlist
+    (``pipeline_membership`` / the Tensor-to-Mat bridge marker), so any other key
+    was silently dropped on print with no diagnostic. Writer and reader are now
+    the same open-world denylist/``PrintAttrValue`` pair the GlobalVar-call and
+    Submit branches use, so an arbitrary key of any codec-supported value type
+    survives print -> reparse.
+    """
+    source = textwrap.dedent("""\
+        @pl.program
+        class BuiltinOpAttrs:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t = pl.tile.load(
+                    a,
+                    [0, 0],
+                    [128, 128],
+                    [128, 128],
+                    target_memory=pl.Mem.Vec,
+                    attrs={
+                        "my_int_attr": 11,
+                        "my_float_attr": 2.5,
+                        "my_bool_attr": True,
+                        "my_str_attr": "hello",
+                        "pipeline_membership": "0:3",
+                        "dump_vars": [a],
+                    },
+                )
+                r = pl.tile.store(t, [0, 0], out)
+                return r
+    """)
+
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+    for key in ("my_int_attr", "my_float_attr", "my_bool_attr", "my_str_attr", "dump_vars"):
+        assert key in printed, printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+    loads: list[ir.Call] = []
+
+    class _CollectLoads(ir.IRVisitor):
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.load").name:
+                loads.append(op)
+            super().visit_call(op)
+
+    _CollectLoads().visit_program(reparsed)
+    assert len(loads) == 1
+    attrs = dict(loads[0].attrs)
+    assert attrs["my_int_attr"] == 11
+    assert attrs["my_float_attr"] == 2.5
+    assert attrs["my_bool_attr"] is True
+    assert attrs["my_str_attr"] == "hello"
+    assert attrs["pipeline_membership"] == "0:3"
+    # The Var-list attr resolves back to the very same operand, by identity.
+    assert list(attrs["dump_vars"]) == [loads[0].args[0]]
+
+
+def test_task_dummy_extra_attr_roundtrips_alongside_deps():
+    """``system.task_dummy`` keeps its bespoke ``deps=`` surface AND an extra attr.
+
+    ``manual_dep_edges`` prints as ``deps=[...]`` and ``dummy_task`` is re-derived
+    from the op, so both stay out of the ``attrs={...}`` dict. Any third key must
+    still survive — the printer emits it, so the ``task_dummy`` parse path has to
+    accept ``attrs=`` rather than reject it as an unknown kwarg.
+    """
+    source = textwrap.dedent("""\
+        @pl.program
+        class TaskDummyAttrs:
+            @pl.function
+            def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+                return pl.system.task_invalid()
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self) -> pl.Scalar[pl.TASK_ID]:
+                with pl.manual_scope():
+                    tids = pl.array.create(4, pl.TASK_ID)
+                    barrier = pl.system.task_dummy(deps=[tids], attrs={"my_marker": 7})
+                    for p in pl.parallel(4):
+                        a, a_tid = pl.submit(self.kernel, deps=[barrier])
+                return pl.system.task_invalid()
+    """)
+
+    program = pl.parse_program(source)
+    printed = python_print(program, format=False)
+    assert "deps=[tids]" in printed, printed
+    assert 'attrs={"my_marker": 7}' in printed, printed
+    # dummy_task / manual_dep_edges keep their bespoke surfaces, so neither leaks
+    # into the generic dict.
+    assert "dummy_task" not in printed, printed
+    assert "manual_dep_edges" not in printed, printed
+
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert python_print(reparsed, format=False) == printed
+
+    dummies: list[ir.Call] = []
+
+    class _CollectDummies(ir.IRVisitor):
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("system.task_dummy").name:
+                dummies.append(op)
+            super().visit_call(op)
+
+    _CollectDummies().visit_program(reparsed)
+    assert len(dummies) == 1
+    attrs = dict(dummies[0].attrs)
+    assert attrs["my_marker"] == 7
+    assert attrs["dummy_task"] is True
+    assert len(list(attrs["manual_dep_edges"])) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1018,18 +1018,24 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     stream_ << op_name << "(";
   }
 
-  // Serialize ONLY op-call attrs that genuinely need to survive print -> parse,
-  // via an explicit allowlist. Most attrs are re-derived by the parser or have
-  // bespoke syntax. ``pipeline_membership`` and the compiler-generated
-  // Tensor-to-Mat bridge provenance have neither and must survive until their
-  // downstream passes consume them. Keep this helper available to special call
-  // forms below so an early return cannot silently drop either attr.
+  // Serialize op-call attrs into a trailing machine-only ``attrs={...}`` dict
+  // via an open-world DENYLIST: EVERY key round-trips unless it already owns a
+  // bespoke surface. This mirrors the GlobalVar-call branch above and the
+  // Submit branch below, so the three call-like paths share one policy — a new
+  // attr on a builtin-op call can never be silently dropped on print -> parse.
+  // A value type without a codec fails loudly inside ``PrintAttrValue``
+  // (surfacing the gap) rather than vanishing. The matching reader is
+  // ``ast_parser._parse_op_attrs`` -> ``_parse_attr_value``. Keep this helper
+  // available to the special call forms below so an early return cannot skip
+  // the dict.
   auto print_serialized_attrs = [&](bool need_comma) {
     std::vector<const std::pair<std::string, std::any>*> serialized_attrs;
     for (const auto& kv : op->attrs_) {
-      if (kv.first == kPipelineMembershipAttr || kv.first == kCompilerTensorToTileMatBridgeAttr) {
-        serialized_attrs.push_back(&kv);
-      }
+      // Bespoke surfaces, deliberately skipped here:
+      //  - manual_dep_edges -> printed as ``deps=[...]`` on system.task_dummy
+      //  - dummy_task       -> re-derived by the parser from the op itself
+      if (kv.first == kAttrManualDepEdges || kv.first == kAttrDummyTask) continue;
+      serialized_attrs.push_back(&kv);
     }
     if (serialized_attrs.empty()) return;
 
