@@ -13,7 +13,7 @@ import logging
 import os
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate
@@ -51,6 +51,124 @@ def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> B
     if platform in ("a5", "a5sim"):
         return BackendType.Ascend950
     raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
+
+
+class _PassPipelineResult(NamedTuple):
+    transformed_program: _ir_core.Program
+    memory_planner: _passes.MemoryPlanner
+    backend_type: BackendType
+
+
+def _preflight_pass_pipeline(
+    *,
+    operation: str,
+    backend_type: BackendType,
+    platform: str | None,
+    verification_level: _passes.VerificationLevel | None,
+    diagnostic_phase: _passes.DiagnosticPhase | None,
+    memory_planner: _passes.MemoryPlanner | None,
+) -> tuple[BackendType, _passes.PassContext | None]:
+    """Configure the backend and reject conflicts before artifact creation."""
+    effective_backend_type = _backend_type_for_platform(platform, backend_type)
+    _backend_core.set_backend_type(effective_backend_type)
+
+    outer = _passes.PassContext.current()
+    if verification_level is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with verification_level while a PassContext is already active. "
+            "Set the verification level on the existing PassContext instead."
+        )
+    if diagnostic_phase is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with diagnostic_phase while a PassContext is already active. "
+            "Set the diagnostic phase on the existing PassContext instead."
+        )
+    if memory_planner is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with memory_planner while a PassContext is already active. "
+            "Set the memory planner on the existing PassContext instead."
+        )
+    return effective_backend_type, outer
+
+
+def _run_pass_pipeline(  # noqa: PLR0913
+    program: _ir_core.Program,
+    *,
+    operation: str,
+    strategy: OptimizationStrategy = OptimizationStrategy.Default,
+    backend_type: BackendType = BackendType.Ascend910B,
+    platform: str | None = None,
+    verification_level: _passes.VerificationLevel | None = None,
+    diagnostic_phase: _passes.DiagnosticPhase | None = None,
+    disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
+    memory_planner: _passes.MemoryPlanner | None = None,
+    enable_pypto_l0c_double_buffer: bool | None = None,
+    analyze_auto_scopes_for_deps: bool = False,
+    extra_instruments: tuple[_passes.PassInstrument, ...] = (),
+    dump_passes: bool | PassDumpLevel = False,
+    passes_dump_dir: str | None = None,
+) -> _PassPipelineResult:
+    """Resolve pass settings and run the configured pass pipeline."""
+    effective_backend_type, outer = _preflight_pass_pipeline(
+        operation=operation,
+        backend_type=backend_type,
+        platform=platform,
+        verification_level=verification_level,
+        diagnostic_phase=diagnostic_phase,
+        memory_planner=memory_planner,
+    )
+
+    default_disabled = _passes.DiagnosticCheckSet()
+    default_disabled.insert(_passes.DiagnosticCheck.UnusedControlFlowResult)
+    if outer is not None:
+        instruments = list(outer.get_instruments()) + list(extra_instruments)
+        vlevel = verification_level if verification_level is not None else outer.get_verification_level()
+        dphase = diagnostic_phase if diagnostic_phase is not None else outer.get_diagnostic_phase()
+        disabled = (
+            disabled_diagnostics if disabled_diagnostics is not None else outer.get_disabled_diagnostics()
+        )
+        mplan = memory_planner if memory_planner is not None else outer.get_memory_planner()
+        dbc_flag = (
+            enable_pypto_l0c_double_buffer
+            if enable_pypto_l0c_double_buffer is not None
+            else outer.get_enable_pypto_l0c_double_buffer()
+        )
+    else:
+        instruments = list(extra_instruments)
+        vlevel = (
+            verification_level if verification_level is not None else _passes.get_default_verification_level()
+        )
+        dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
+        disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
+        mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
+        dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
+
+    if mplan == _passes.MemoryPlanner.PTOAS:
+        logger.warning(
+            "memory_planner=PTOAS: skipping PyPTO MemoryReuse + AllocateMemoryAddr; ptoas "
+            "PlanMemory (--pto-level=level2) owns lifetime reuse and address assignment. "
+            "MaterializeSemanticAliases still runs so semantics-required aliasing (loop-carried "
+            "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
+            "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
+            "resolution are deferred to ptoas — verify on-device."
+        )
+
+    prof = get_active_profiler()
+    passes_stage = prof.stage("passes") if prof is not None else nullcontext()
+    with ctx:
+        pm = PassManager.get_strategy(
+            strategy,
+            analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        )
+        with passes_stage:
+            transformed_program = pm.run_passes(
+                program,
+                dump_ir=dump_passes,
+                output_dir=passes_dump_dir,
+            )
+
+    return _PassPipelineResult(transformed_program, mplan, effective_backend_type)
 
 
 def compile(  # noqa: PLR0913
@@ -147,8 +265,14 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
-    effective_backend_type = _backend_type_for_platform(platform, backend_type)
-    _backend_core.set_backend_type(effective_backend_type)
+    _preflight_pass_pipeline(
+        operation="compile",
+        backend_type=backend_type,
+        platform=platform,
+        verification_level=verification_level,
+        diagnostic_phase=diagnostic_phase,
+        memory_planner=memory_planner,
+    )
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -159,23 +283,6 @@ def compile(  # noqa: PLR0913
         output_dir = os.path.join(base, f"{program.name}_{timestamp}")
 
     os.makedirs(output_dir, exist_ok=True)
-
-    outer = _passes.PassContext.current()
-    if verification_level is not None and outer is not None:
-        raise RuntimeError(
-            "compile() was called with verification_level while a PassContext is already active. "
-            "Set the verification level on the existing PassContext instead."
-        )
-    if diagnostic_phase is not None and outer is not None:
-        raise RuntimeError(
-            "compile() was called with diagnostic_phase while a PassContext is already active. "
-            "Set the diagnostic phase on the existing PassContext instead."
-        )
-    if memory_planner is not None and outer is not None:
-        raise RuntimeError(
-            "compile() was called with memory_planner while a PassContext is already active. "
-            "Set the memory planner on the existing PassContext instead."
-        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -189,57 +296,31 @@ def compile(  # noqa: PLR0913
     os.makedirs(report_dir, exist_ok=True)
     report_instrument = _passes.ReportInstrument(report_dir)
 
-    instruments: list[_passes.PassInstrument] = [report_instrument]
-    # Resolve effective settings: explicit arg > outer context > global default.
-    default_disabled = _passes.DiagnosticCheckSet()
-    default_disabled.insert(_passes.DiagnosticCheck.UnusedControlFlowResult)
-    if outer is not None:
-        instruments = list(outer.get_instruments()) + instruments
-        vlevel = verification_level if verification_level is not None else outer.get_verification_level()
-        dphase = diagnostic_phase if diagnostic_phase is not None else outer.get_diagnostic_phase()
-        disabled = (
-            disabled_diagnostics if disabled_diagnostics is not None else outer.get_disabled_diagnostics()
-        )
-        mplan = memory_planner if memory_planner is not None else outer.get_memory_planner()
-        dbc_flag = (
-            enable_pypto_l0c_double_buffer
-            if enable_pypto_l0c_double_buffer is not None
-            else outer.get_enable_pypto_l0c_double_buffer()
-        )
-    else:
-        vlevel = (
-            verification_level if verification_level is not None else _passes.get_default_verification_level()
-        )
-        dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
-        disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
-        mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
-        dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag)
-
-    if mplan == _passes.MemoryPlanner.PTOAS:
-        logger.warning(
-            "memory_planner=PTOAS: skipping PyPTO MemoryReuse + AllocateMemoryAddr; ptoas "
-            "PlanMemory (--pto-level=level2) owns lifetime reuse and address assignment. "
-            "MaterializeSemanticAliases still runs so semantics-required aliasing (loop-carried "
-            "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
-            "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
-            "resolution are deferred to ptoas — verify on-device."
-        )
-
     def _stage(name: str) -> AbstractContextManager[Any]:
         if prof is not None:
             return prof.stage(name)
         return nullcontext()
 
     try:
-        with ctx:
-            pm = PassManager.get_strategy(
-                strategy,
-                analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
-            )
-            passes_dump_dir = os.path.join(output_dir, "passes_dump")
-            with _stage("passes"):
-                transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
+        pipeline = _run_pass_pipeline(
+            program,
+            operation="compile",
+            strategy=strategy,
+            backend_type=backend_type,
+            platform=platform,
+            verification_level=verification_level,
+            diagnostic_phase=diagnostic_phase,
+            disabled_diagnostics=disabled_diagnostics,
+            memory_planner=memory_planner,
+            enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            extra_instruments=(report_instrument,),
+            dump_passes=dump_passes,
+            passes_dump_dir=os.path.join(output_dir, "passes_dump"),
+        )
+        transformed_program = pipeline.transformed_program
+        mplan = pipeline.memory_planner
+        effective_backend_type = pipeline.backend_type
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
