@@ -27,15 +27,28 @@ the runtime schedules them. Python is the authoring language, not the execution 
 
 ## Quickstart: the three levels in one program
 
+Below, the same computation — `x * x` — is written twice: once at tensor level, once at
+tile level. Both are `@pl.jit.incore` device kernels, and one orchestration entry
+dispatches both.
+
 ```python
 import pypto.language as pl
 
 @pl.jit.incore
-def scale(
+def square_tensor(
     x: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    # Tile level: on-chip buffers, moved explicitly
+    # Tensor level: name the whole array. Placement and movement are the compiler's.
+    out = pl.mul(x, x)
+    return out
+
+@pl.jit.incore
+def square_tile(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # Tile level: name the on-chip buffer, and move the data yourself.
     t = pl.load(x, [0, 0], [128, 128])
     y = pl.mul(t, t)
     pl.store(y, [0, 0], out)
@@ -44,27 +57,55 @@ def scale(
 @pl.jit
 def levels(
     x: pl.Tensor[[128, 128], pl.FP32],
-    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    out_t: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    out_k: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    # Tensor level: whole arrays; placement is the compiler's problem
-    return scale(x, out)
+    # Control plane: no computation, just dispatch.
+    out_t = square_tensor(x, out_t)
+    out_k = square_tile(x, out_k)
+    return out_t, out_k
 ```
 
-| Level | What you name | Where it appears above | Who decides placement |
-| ----- | ------------- | ---------------------- | --------------------- |
-| **Tensor** | Whole arrays in DDR | `levels` — passing `x` and `out` around | The compiler |
-| **Tile** | On-chip buffers | `scale` — `pl.load`, `pl.mul`, `pl.store` | You |
-| **Block** | Cores and their coordination | `pl.at(level=...)` names one; `pl.spmd` and `pl.cluster` go further | You, explicitly |
+The two kernels are interchangeable to the caller and produce the same numbers. They
+differ only in how much you said out loud:
 
-`pl.at` is the Block-level knob you meet first. `@pl.jit.incore` above already places the
-compute on a core, so this example does not need it; a single-function kernel says
-`with pl.at(level=pl.Level.CORE_GROUP):` instead — see
-[Quickstart](02-quickstart.md).
+| What differs | `square_tensor` | `square_tile` |
+| ------------ | --------------- | ------------- |
+| What you name | The whole array `x` | The on-chip buffer `t` |
+| Data movement | Compiler inserts it | You write `pl.load` / `pl.store` |
+| Region | Implicit — the whole tensor | Explicit — offsets `[0, 0]`, shape `[128, 128]` |
+| Memory space | Compiler chooses | You may pass `target_memory=` |
+| Lines of code | 1 | 3 |
 
-The quickstart stays entirely at tensor level: `out = pl.add(a, b)` with no `pl.load` in
-sight. You drop to tile level when you need to control what sits on chip and when — the
-`scale` function above is that step. Block level is for saying which core does what:
-multi-block dispatch, cluster scopes, mixed AIC/AIV kernels.
+`ConvertTensorToTileOps` turns the first into something very close to the second — compare
+the pass dumps to see it happen. So tile level is not a different language; it is the same
+program with the choices spelled out. You descend when a choice matters: which region, when
+it lands on chip, which buffer it lands in, how it is reused.
+
+Compiling `levels` produces **two** device kernels, one per `.incore` function:
+
+```text
+kernels/aiv/square_tensor.cpp
+kernels/aiv/square_tile.cpp
+```
+
+The three levels, and where each appears above:
+
+| Level | What you name | In this example | Who decides placement |
+| ----- | ------------- | --------------- | --------------------- |
+| **Tensor** | Whole arrays in DDR | `square_tensor`; also `levels`, which only passes arrays around | The compiler |
+| **Tile** | On-chip buffers | `square_tile` — `pl.load`, `pl.mul`, `pl.store` | You |
+| **Block** | Cores and their coordination | Not used here. `pl.at(level=...)` names one core group; `pl.spmd` and `pl.cluster` go further | You, explicitly |
+
+`pl.at` is the Block-level knob you meet first, and `@pl.jit.incore` is why this example
+does not need it: an `.incore` function is already placed on a core. A single-function
+kernel has no sub-function to carry that placement, so it opens the scope inline with
+`with pl.at(level=pl.Level.CORE_GROUP):` — see [Quickstart](02-quickstart.md).
+
+The quickstart stays entirely at tensor level — `out = pl.add(a, b)`, with no `pl.load` in
+sight — so `square_tensor` above is the shape you already know. `square_tile` is the step
+down. Block level is for saying which core does what: multi-block dispatch, cluster
+scopes, mixed AIC/AIV kernels.
 
 ## Mechanics
 

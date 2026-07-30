@@ -20,15 +20,27 @@ PyPTO 程序里没有任何东西是在 Python 运行它时执行的。装饰器
 
 ## Quickstart：一个程序里的三个层次
 
+下面把同一个计算 —— `x * x` —— 写了两遍：一次在张量级，一次在 tile 级。两者都是
+`@pl.jit.incore` 设备 kernel，由一个编排入口同时派发。
+
 ```python
 import pypto.language as pl
 
 @pl.jit.incore
-def scale(
+def square_tensor(
     x: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    # Tile 级：显式搬运的片上缓冲区
+    # 张量级：命名整个数组。放置与搬运是编译器的事。
+    out = pl.mul(x, x)
+    return out
+
+@pl.jit.incore
+def square_tile(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    # Tile 级：命名片上缓冲区，数据由你自己搬。
     t = pl.load(x, [0, 0], [128, 128])
     y = pl.mul(t, t)
     pl.store(y, [0, 0], out)
@@ -37,25 +49,51 @@ def scale(
 @pl.jit
 def levels(
     x: pl.Tensor[[128, 128], pl.FP32],
-    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    out_t: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    out_k: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    # 张量级：整个数组；放置是编译器的事
-    return scale(x, out)
+    # 控制面：不做计算，只派发。
+    out_t = square_tensor(x, out_t)
+    out_k = square_tile(x, out_k)
+    return out_t, out_k
 ```
 
-| 层次 | 你命名的东西 | 在上面出现在哪 | 谁决定放置 |
-| ---- | ------------ | -------------- | ---------- |
-| **张量（Tensor）** | DDR 中的整个数组 | `levels` —— 传递 `x` 与 `out` | 编译器 |
-| **Tile** | 片上缓冲区 | `scale` —— `pl.load`、`pl.mul`、`pl.store` | 你 |
-| **Block** | 核以及它们之间的协同 | `pl.at(level=...)` 指定其一；`pl.spmd`、`pl.cluster` 走得更远 | 你，显式地 |
+这两个 kernel 对调用方来说可以互换，算出来的数也一样。它们的差别只在于**你把多少事情说出了口**：
 
-`pl.at` 是你最先遇到的 Block 级旋钮。上面的 `@pl.jit.incore` 已经把计算放到了核上，所以本例
-不需要它；单函数 kernel 则改写成 `with pl.at(level=pl.Level.CORE_GROUP):` —— 见
-[快速上手](02-quickstart.md)。
+| 差别 | `square_tensor` | `square_tile` |
+| ---- | --------------- | ------------- |
+| 你命名的东西 | 整个数组 `x` | 片上缓冲区 `t` |
+| 数据搬运 | 编译器插入 | 你写 `pl.load` / `pl.store` |
+| 区域 | 隐式 —— 整个张量 | 显式 —— 偏移 `[0, 0]`、形状 `[128, 128]` |
+| 内存空间 | 编译器选择 | 你可以传 `target_memory=` |
+| 代码行数 | 1 | 3 |
 
-快速上手完全停留在张量级：`out = pl.add(a, b)`，一个 `pl.load` 都不出现。当你需要控制片上放置
-什么、何时放置时，才下到 tile 级 —— 上面的 `scale` 函数就是这一步。Block 级用于指明哪个核做
-什么：多 block 派发、cluster 作用域、AIC/AIV 混合 kernel。
+`ConvertTensorToTileOps` 会把前者变成很接近后者的东西 —— 对比 pass dump 就能看到这个过程。
+所以 tile 级不是另一门语言，而是同一个程序、把选择明说出来。当某个选择开始要紧时你才下去：
+哪个区域、什么时候上片、落在哪个缓冲区、怎么复用。
+
+编译 `levels` 会产出**两个**设备 kernel，每个 `.incore` 函数一个：
+
+```text
+kernels/aiv/square_tensor.cpp
+kernels/aiv/square_tile.cpp
+```
+
+三个层次，以及它们各自在上面出现在哪：
+
+| 层次 | 你命名的东西 | 在本例中 | 谁决定放置 |
+| ---- | ------------ | -------- | ---------- |
+| **张量（Tensor）** | DDR 中的整个数组 | `square_tensor`；以及只负责传递数组的 `levels` | 编译器 |
+| **Tile** | 片上缓冲区 | `square_tile` —— `pl.load`、`pl.mul`、`pl.store` | 你 |
+| **Block** | 核以及它们之间的协同 | 本例未用。`pl.at(level=...)` 指定一个核组；`pl.spmd`、`pl.cluster` 走得更远 | 你，显式地 |
+
+`pl.at` 是你最先遇到的 Block 级旋钮，而本例不需要它的原因正是 `@pl.jit.incore`：`.incore`
+函数本身就已经被放在核上了。单函数 kernel 没有子函数来承载这个放置，所以要用
+`with pl.at(level=pl.Level.CORE_GROUP):` 就地开作用域 —— 见[快速上手](02-quickstart.md)。
+
+快速上手完全停留在张量级 —— `out = pl.add(a, b)`，一个 `pl.load` 都不出现 —— 所以上面的
+`square_tensor` 就是你已经熟悉的那个样子，`square_tile` 才是往下走的那一步。Block 级用于指明
+哪个核做什么：多 block 派发、cluster 作用域、AIC/AIV 混合 kernel。
 
 ## Mechanics
 
