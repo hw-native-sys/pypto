@@ -135,30 +135,45 @@ Two properties of the IR matter to you as a user:
 Tile-level code is explicit about memory because the hardware is. `pl.load` and
 `pl.move` take a `target_memory=` argument naming where the data should land:
 
-```text
-DDR (off-chip)
- ├── Vec    unified buffer        <- pl.load()                      default
- └── Mat    L1 matrix buffer      <- pl.load(..., target_memory=pl.Mem.Mat)
-      ├── Left   L0A              <- pl.move(..., target_memory=pl.Mem.Left)
-      └── Right  L0B              <- pl.move(..., target_memory=pl.Mem.Right)
-           └── Acc  L0C           <- pl.matmul() writes here
-                └── DDR           <- pl.store()
-```
+The on-chip spaces are **six distinct buffers, not a nesting**. `Left` is not a region
+inside `Mat`, and `Acc` is not inside `Right` — they are separate hardware buffers that
+data moves *between*.
 
-| Space | Enum | Role |
-| ----- | ---- | ---- |
-| DDR | `pl.Mem.DDR` | Off-chip global memory; where `pl.Tensor` parameters live |
-| Vec | `pl.Mem.Vec` | Unified vector buffer — the default target of `pl.load` |
-| Mat | `pl.Mem.Mat` | L1 matrix buffer |
-| Left | `pl.Mem.Left` | L0A — matmul left operand |
-| Right | `pl.Mem.Right` | L0B — matmul right operand |
-| Acc | `pl.Mem.Acc` | L0C — matmul accumulator |
-| Bias | `pl.Mem.Bias` | Bias buffer on the AIC core |
+| Space | Enum | Hardware | Reachable directly from DDR? |
+| ----- | ---- | -------- | ---------------------------- |
+| DDR | `pl.Mem.DDR` | Off-chip global memory | — this *is* DDR; `pl.Tensor` parameters live here |
+| Vec | `pl.Mem.Vec` | Unified buffer | **Yes** — the default `pl.load` target |
+| Mat | `pl.Mem.Mat` | L1 | **Yes** — `pl.load(..., target_memory=pl.Mem.Mat)` |
+| Left | `pl.Mem.Left` | L0A, matmul left operand | No — only via `pl.move` from `Mat` / `Vec` |
+| Right | `pl.Mem.Right` | L0B, matmul right operand | No — only via `pl.move` |
+| Acc | `pl.Mem.Acc` | L0C, matmul accumulator | No — `pl.matmul` writes it |
+| Bias | `pl.Mem.Bias` | Bias buffer on the AIC core | No — only via `pl.move` |
 
 `pl.MemorySpace` and `pl.Mem` are the same enum under two names.
 
-The matmul path is the reason this hierarchy is exposed rather than hidden: operands
-have to reach L0A/L0B through L1, and the result accumulates in L0C.
+That last column is the load-bearing constraint: **a DDR-facing load can only land in `Vec`
+or `Mat`.** When a consumer needs `Left` / `Right` / `Acc` / `Bias`, the producer stops at
+`Mat` (or `Vec`) and `InferTileMemorySpace` inserts a `tile.move` to reach the specialized
+space — which is why the matmul path below has an explicit `pl.move` step.
+
+Dataflow, as opposed to containment. The two matmul operands **converge** on `Acc`, so this
+is a graph, not a tree:
+
+```text
+       pl.load(target_memory=Mat)      pl.move(Left)
+  DDR ────────────────────────► Mat ─────────────────► Left ┐
+                                                            │  pl.matmul
+                                                            ├──────────► Acc ──────► DDR
+  DDR ────────────────────────► Mat ─────────────────► Right┘                pl.store
+       pl.load(target_memory=Mat)      pl.move(Right)
+
+       pl.load()                  elementwise ops              pl.store()
+  DDR ───────────► Vec ─────────────────────────────► Vec ───────────────► DDR
+       (default)
+```
+
+The matmul path is the reason these spaces are exposed rather than hidden: operands have to
+reach L0A/L0B through L1, and the result accumulates in L0C.
 
 ```python
 @pl.jit.incore

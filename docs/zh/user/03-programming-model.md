@@ -121,29 +121,43 @@ pass 之后写一份快照；pass 本身在 [Passes](../dev/passes/index.md) 中
 Tile 级代码之所以对内存如此显式，是因为硬件本身如此。`pl.load` 与 `pl.move` 接受
 `target_memory=` 参数，指明数据应该落到哪里：
 
-```text
-DDR（片外）
- ├── Vec    统一缓冲区          <- pl.load()                      默认
- └── Mat    L1 矩阵缓冲区       <- pl.load(..., target_memory=pl.Mem.Mat)
-      ├── Left   L0A            <- pl.move(..., target_memory=pl.Mem.Left)
-      └── Right  L0B            <- pl.move(..., target_memory=pl.Mem.Right)
-           └── Acc  L0C         <- pl.matmul() 的结果写在这里
-                └── DDR         <- pl.store()
-```
+片上空间是**六个相互独立的缓冲区，不是嵌套关系**。`Left` 不是 `Mat` 内部的一块区域，`Acc`
+也不在 `Right` 里面 —— 它们是各自独立的硬件缓冲区，数据在它们**之间**搬运。
 
-| 空间 | 枚举 | 作用 |
-| ---- | ---- | ---- |
-| DDR | `pl.Mem.DDR` | 片外全局内存；`pl.Tensor` 参数所在之处 |
-| Vec | `pl.Mem.Vec` | 统一向量缓冲区 —— `pl.load` 的默认目标 |
-| Mat | `pl.Mem.Mat` | L1 矩阵缓冲区 |
-| Left | `pl.Mem.Left` | L0A —— matmul 左操作数 |
-| Right | `pl.Mem.Right` | L0B —— matmul 右操作数 |
-| Acc | `pl.Mem.Acc` | L0C —— matmul 累加器 |
-| Bias | `pl.Mem.Bias` | AIC 核上的 bias 缓冲区 |
+| 空间 | 枚举 | 硬件 | 能从 DDR 直达吗 |
+| ---- | ---- | ---- | --------------- |
+| DDR | `pl.Mem.DDR` | 片外全局内存 | —— 它本身就是 DDR；`pl.Tensor` 参数在这里 |
+| Vec | `pl.Mem.Vec` | 统一缓冲区 | **能** —— `pl.load` 的默认目标 |
+| Mat | `pl.Mem.Mat` | L1 | **能** —— `pl.load(..., target_memory=pl.Mem.Mat)` |
+| Left | `pl.Mem.Left` | L0A，matmul 左操作数 | 不能 —— 只能由 `Mat` / `Vec` 经 `pl.move` 到达 |
+| Right | `pl.Mem.Right` | L0B，matmul 右操作数 | 不能 —— 只能经 `pl.move` |
+| Acc | `pl.Mem.Acc` | L0C，matmul 累加器 | 不能 —— 由 `pl.matmul` 写入 |
+| Bias | `pl.Mem.Bias` | AIC 核上的 bias 缓冲区 | 不能 —— 只能经 `pl.move` |
 
 `pl.MemorySpace` 与 `pl.Mem` 是同一个枚举的两个名字。
 
-matmul 通路正是这套层次被暴露而非隐藏的原因：操作数必须经 L1 到达 L0A/L0B，结果在 L0C 累加。
+最后一列是承重的约束：**面向 DDR 的 load 只能落到 `Vec` 或 `Mat`。** 当消费者需要
+`Left` / `Right` / `Acc` / `Bias` 时，生产者先停在 `Mat`（或 `Vec`），再由
+`InferTileMemorySpace` 插入一个 `tile.move` 到专用空间 —— 这就是下面 matmul 通路里那一步
+显式 `pl.move` 的由来。
+
+下面画的是**数据流**而非包含关系。matmul 的两个操作数**汇聚**到 `Acc`，所以它是一张图、
+不是一棵树：
+
+```text
+       pl.load(target_memory=Mat)      pl.move(Left)
+  DDR ────────────────────────► Mat ─────────────────► Left ┐
+                                                            │  pl.matmul
+                                                            ├──────────► Acc ──────► DDR
+  DDR ────────────────────────► Mat ─────────────────► Right┘                pl.store
+       pl.load(target_memory=Mat)      pl.move(Right)
+
+       pl.load()                    逐元素算子                  pl.store()
+  DDR ───────────► Vec ─────────────────────────────► Vec ───────────────► DDR
+       （默认）
+```
+
+matmul 通路正是这些空间被暴露而非隐藏的原因：操作数必须经 L1 到达 L0A/L0B，结果在 L0C 累加。
 
 ```python
 @pl.jit.incore
