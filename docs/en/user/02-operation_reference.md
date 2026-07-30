@@ -274,7 +274,7 @@ normalize it.
 | `ors` | `(lhs: Tile, rhs: int \| Scalar) -> Tile` | Bitwise OR with scalar |
 | `xor` | `(lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | Bitwise XOR (requires tmp) |
 | `xors` | `(lhs: Tile, rhs: int \| Scalar, tmp: Tile) -> Tile` | XOR with scalar (requires tmp) |
-| `not_` | `(tile: Tile) -> Tile` | Bitwise NOT |
+| `not_` | `(tile: Tile) -> Tile` | Bitwise NOT (`int16`/`uint16` only) |
 | `shl` | `(lhs: Tile, rhs: Tile) -> Tile` | Left shift |
 | `shls` | `(lhs: Tile, rhs: int \| Scalar) -> Tile` | Left shift by scalar |
 | `shr` | `(lhs: Tile, rhs: Tile) -> Tile` | Right shift |

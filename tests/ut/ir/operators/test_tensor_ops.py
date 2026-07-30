@@ -4829,6 +4829,21 @@ def test_tensor_bitwise_rejects_rank_mismatch(builder_name, op_name):
         )
 
 
+@pytest.mark.parametrize(("builder_name", "op_name"), [("shls", "tensor.shls"), ("shrs", "tensor.shrs")])
+def test_tensor_shift_rejects_negative_constant(builder_name, op_name):
+    """Nothing downstream range-checks the shift count, so catch a constant here."""
+    with pytest.raises(ValueError, match=rf"{op_name} requires a non-negative shift count"):
+        getattr(ir.op.tensor, builder_name)(_bitwise_tensor_var([64]), -1)
+
+
+@pytest.mark.parametrize("builder_name", ["ands", "ors", "xors"])
+def test_tensor_bitwise_scalar_allows_negative_mask(builder_name):
+    """A negative mask is meaningful (-1 sets every bit) — only shifts are guarded."""
+    result_type = getattr(ir.op.tensor, builder_name)(_bitwise_tensor_var([64]), -1).type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+
+
 @pytest.mark.parametrize(("builder_name", "op_name"), _BITWISE_SCALAR_OPS)
 def test_tensor_bitwise_scalar_rejects_float_scalar(builder_name, op_name):
     """A float mask or shift count is meaningless; the ISA form takes an integer."""

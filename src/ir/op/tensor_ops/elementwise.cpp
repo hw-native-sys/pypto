@@ -28,6 +28,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -168,9 +169,15 @@ TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
 // Layered on the shared scalar deducer exactly as tensor.subs is (below): it already
 // validates arity and both operand kinds and, with preserve_lhs_dtype, returns the lhs
 // element type unchanged.
+// ``is_shift`` additionally rejects a statically negative shift count. It is scoped to
+// the shift ops on purpose: a negative *mask* is meaningful (``x & -1`` sets all bits),
+// whereas a negative shift distance has no defined result at any layer. Nothing
+// downstream catches it — PTO codegen maps tile.shls/shrs straight onto
+// pto.tshls/tshrs (src/backend/common/pto_ops_elementwise.cpp) with no range guard — so
+// a constant caught here would otherwise reach the hardware as garbage.
 TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name) {
+                                        const std::string& op_name, bool is_shift = false) {
   auto result_type = DeduceTensorOpElementwiseScalarType(args, kwargs, op_name, true);
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());  // accepts a window (issue #1694)
   auto scalar_type = As<ScalarType>(args[1]->GetType());
@@ -180,6 +187,13 @@ TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(scalar_type->dtype_.IsInt()) << "The operator " << op_name
                                      << " requires the shift/bitwise scalar to be an integer type, but got "
                                      << scalar_type->dtype_.ToString();
+  if (is_shift) {
+    if (auto shift_count = As<ConstInt>(args[1])) {
+      CHECK(shift_count->value_ >= 0)
+          << "The operator " << op_name << " requires a non-negative shift count, but got "
+          << shift_count->value_ << ". A negative shift distance has no defined result.";
+    }
+  }
   return result_type;
 }
 
@@ -508,7 +522,7 @@ REGISTER_OP("tensor.shls")
     .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shls");
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shls", true);
     });
 
 REGISTER_OP("tensor.shr")
@@ -528,7 +542,7 @@ REGISTER_OP("tensor.shrs")
     .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shrs");
+      return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shrs", true);
     });
 
 }  // namespace ir

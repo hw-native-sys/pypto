@@ -918,8 +918,9 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise left shift of tensor by scalar.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        The shift amount must be zero or positive. A negative constant is
+        rejected when the op is built; a negative value only known at runtime
+        is undefined behaviour on the hardware.
 
     Args:
         lhs: Left-hand side tensor (integer dtype)
@@ -955,8 +956,9 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise right shift of tensor by scalar.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        The shift amount must be zero or positive. A negative constant is
+        rejected when the op is built; a negative value only known at runtime
+        is undefined behaviour on the hardware.
 
     Args:
         lhs: Left-hand side tensor (integer dtype)

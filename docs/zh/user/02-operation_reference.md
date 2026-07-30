@@ -270,7 +270,7 @@ kernel 可以在后端修复后自动受益，无需改动前端。
 | `ors` | `(lhs: Tile, rhs: int \| Scalar) -> Tile` | 与标量按位或 |
 | `xor` | `(lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | 按位异或（需要 tmp） |
 | `xors` | `(lhs: Tile, rhs: int \| Scalar, tmp: Tile) -> Tile` | 与标量异或（需要 tmp） |
-| `not_` | `(tile: Tile) -> Tile` | 按位取反 |
+| `not_` | `(tile: Tile) -> Tile` | 按位取反（仅 `int16`/`uint16`） |
 | `shl` | `(lhs: Tile, rhs: Tile) -> Tile` | 左移 |
 | `shls` | `(lhs: Tile, rhs: int \| Scalar) -> Tile` | 左移标量位 |
 | `shr` | `(lhs: Tile, rhs: Tile) -> Tile` | 右移 |
