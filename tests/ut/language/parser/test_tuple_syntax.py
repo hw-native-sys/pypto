@@ -34,7 +34,7 @@ def _assert_same_exprs(actual: Sequence[ir.Expr], expected: Sequence[ir.Expr]) -
     """
     actual, expected = list(actual), list(expected)
     assert len(actual) == len(expected), f"expected {len(expected)} elements, got {len(actual)}"
-    for i, (got, want) in enumerate(zip(actual, expected)):
+    for i, (got, want) in enumerate(zip(actual, expected, strict=True)):
         assert got is want, f"element {i}: {got} is not the expected {want}"
 
 
@@ -112,7 +112,7 @@ class TestTupleLiteralParsing:
         (binding,) = _assign_stmts(func)
         elements = list(_make_tuple(binding).elements)
         assert len(elements) == 3
-        for element, expected in zip(elements, (1, 2, 3)):
+        for element, expected in zip(elements, (1, 2, 3), strict=True):
             assert isinstance(element, ir.ConstInt)
             assert element.value == expected
 
