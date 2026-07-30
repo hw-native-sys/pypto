@@ -77,6 +77,7 @@ from .tile_ops import (
     and_,
     ands,
     cmps,
+    concat_idx,
     gemv,
     gemv_acc,
     gemv_bias,
@@ -244,6 +245,7 @@ __all__ = [
     "recip",
     "write",
     "concat",
+    "concat_idx",
     "batch_matmul",
     # Promoted tile-only
     "create_tile",

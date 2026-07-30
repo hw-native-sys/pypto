@@ -144,6 +144,18 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   return "";
 }
 
+static std::string MakeConcatIdxCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, "pto.tconcatidx", 5);
+  std::vector<std::pair<std::string, std::string>> inputs;
+  inputs.reserve(4);
+  for (size_t i = 0; i < 4; ++i) {
+    inputs.emplace_back(codegen.GetExprAsCode(op->args_[i]), codegen.GetExprTypeAnnotation(op->args_[i]));
+  }
+  EmitInsOuts(codegen, "pto.tconcatidx", inputs);
+  return "";
+}
+
 static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, "pto.tsel", 4);
@@ -439,7 +451,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
     // Inplace variant: set_output_reuses_input(0) makes src/dst share UB addr.
-    {"tile.fillpad_inplace", "pto.tfillpad",         1},
+    {"tile.fillpad_inplace", "pto.tfillpad_inplace", 1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
@@ -496,6 +508,8 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(op_name) > 0) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+  reg("tile.concat_idx",
+      [](const CallPtr& op, codegen::CodegenBase& codegen) { return MakeConcatIdxCodegenPTO(op, codegen); });
 
   auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
                                    const char* attr_kind) {

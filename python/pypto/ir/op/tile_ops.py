@@ -438,6 +438,19 @@ def concat(
     return _ir_core.create_op_call("tile.concat", [src0, src1], {}, actual_span)
 
 
+def concat_idx(
+    src0: Expr,
+    src1: Expr,
+    src0_idx: Expr,
+    src1_idx: Expr,
+    dst: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Indexed per-row concatenation into ``dst``."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.concat_idx", [src0, src1, src0_idx, src1_idx, dst], {}, actual_span)
+
+
 def transpose_view(
     tile: Expr,
     span: Span | None = None,

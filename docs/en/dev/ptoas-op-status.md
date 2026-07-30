@@ -180,7 +180,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | **Data Rearrangement (15)** |  |  |  |  |  |  |  |  |
 | pto.tconcat | TCONCAT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ✅ | ❌ | ❌ | — | frontend, exact codegen, and the full dtype/index/valid-shape ST matrix are present; PTOAS v0.53 accepts the op, but A2/A3 execution reproducibly raises a CCU instruction-address exception; the pinned A2/A3 zero-segment path also underflows its repeat count |
 | pto.tgather | TGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tgatherb | TGATHERB | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
 | pto.tscatter | TSCATTER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
@@ -191,7 +191,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | the current codegen emits `pto.tfillpad` |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ✅ | — | corrected to exact same-name emission; zero/max/min modes pass on A2/A3 |
 | pto.textract_fp | TEXTRACT_FP / TEXTRACT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tinsert_fp | TINSERT_FP / TINSERT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | **Sorting (2)** |  |  |  |  |  |  |  |  |

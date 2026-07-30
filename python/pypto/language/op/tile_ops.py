@@ -33,6 +33,7 @@ __all__ = [
     "extract",
     "scatter_update",
     "concat",
+    "concat_idx",
     "move",
     "aiv_shard",
     "aic_gather",
@@ -1897,6 +1898,15 @@ def transpose(tile: Tile, axis1: int, axis2: int, tmp_tile: Tile | None = None) 
     tmp_expr = tmp_tile.unwrap() if tmp_tile is not None else None
     call_expr = _ir_ops.transpose(tile_expr, axis1, axis2, tmp=tmp_expr)
     return Tile(expr=call_expr)
+
+
+def concat_idx(src0: Tile, src1: Tile, src0_idx: Tile, src1_idx: Tile, dst: Tile) -> Tile:
+    """Indexed per-row concatenation into a destination tile."""
+    return Tile(
+        expr=_ir_ops.concat_idx(
+            src0.unwrap(), src1.unwrap(), src0_idx.unwrap(), src1_idx.unwrap(), dst.unwrap()
+        )
+    )
 
 
 def transpose_view(tile: Tile) -> Tile:

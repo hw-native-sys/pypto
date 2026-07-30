@@ -143,6 +143,8 @@ print(pto_code)
 | `tile.add(a, b, c)` | `pto.taddc` (3-operand add) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (tile + scalar) |
 | `tile.fillpad_expand(src, shape)` | `pto.tfillpad_expand ins(%src) outs(%dst)` (the `shape` tuple is type-deduction only; the larger `dst` and its pad come from the result type) |
+| `tile.fillpad_inplace(src, pad_value=...)` | `pto.tfillpad_inplace` (shared source/result storage) |
+| `tile.concat_idx(src0, src1, idx0, idx1, dst)` | `pto.tconcatidx` (reuses `dst`) |
 
 **`tile.slice` / `tile.assemble` lowering details.**  Both ops are lowered
 through `pto.subview`, which is a pure view alias of the source tile (no
