@@ -3730,6 +3730,98 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.subsc" in ir_str
 
+    @pytest.mark.parametrize("dtype", [DataType.INT16, DataType.INT32, DataType.FP16, DataType.FP32])
+    @pytest.mark.parametrize("op", [tile.addc, tile.subc])
+    def test_tile_carry_accepts_ptoas_dtype_union_and_preserves_view(self, dtype, op):
+        """TADDC/TSUBC keep the exact shared tile type, including valid extents and layout."""
+        span = ir.Span.unknown()
+        view = ir.TileView(
+            valid_shape=[7, 13],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+        tile_type = ir.TileType([8, 16], dtype, tile_view=view)
+        src0 = ir.Var("src0", tile_type, span)
+        src1 = ir.Var("src1", tile_type, span)
+        carry = ir.Var("carry", tile_type, span)
+
+        call = op(src0, src1, carry)
+
+        assert _tile_result_dtype(call) == dtype
+        assert call.type.shape == tile_type.shape
+        assert _valid_of(call.type) == [7, 13]
+        assert call.type.tile_view.blayout == ir.TileLayout.row_major
+
+    @pytest.mark.parametrize(
+        "dtype,literal",
+        [
+            (DataType.INT16, 1),
+            (DataType.INT32, 1),
+            (DataType.FP16, 1.5),
+            (DataType.FP32, 1.5),
+        ],
+    )
+    @pytest.mark.parametrize("op", [tile.addsc, tile.subsc])
+    def test_tile_scalar_carry_literal_uses_tile_dtype_and_preserves_view(self, dtype, literal, op):
+        """Literal scalar sugar is restamped to the shared PTOAS element dtype."""
+        span = ir.Span.unknown()
+        view = ir.TileView(
+            valid_shape=[5, 11],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+        tile_type = ir.TileType([8, 16], dtype, tile_view=view)
+        src0 = ir.Var("src0", tile_type, span)
+        carry = ir.Var("carry", tile_type, span)
+
+        call = op(src0, literal, carry)
+
+        assert _operand_dtype(call.args[1]) == dtype
+        assert _tile_result_dtype(call) == dtype
+        assert _valid_of(call.type) == [5, 11]
+
+    @pytest.mark.parametrize("op", [tile.addc, tile.subc])
+    def test_tile_carry_rejects_mixed_dtype_broadcast_and_valid_shape(self, op):
+        """Carry intrinsics do not provide dtype promotion or shape broadcasting."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([8, 16], DataType.FP32), span)
+        mixed = ir.Var("mixed", ir.TileType([8, 16], DataType.FP16), span)
+        broadcast = ir.Var("broadcast", ir.TileType([1, 16], DataType.FP32), span)
+        tail_view = ir.TileView(valid_shape=[7, 16])
+        tail = ir.Var("tail", ir.TileType([8, 16], DataType.FP32, tile_view=tail_view), span)
+
+        with pytest.raises(ValueError, match=r"same dtype"):
+            op(full, mixed, full)
+        with pytest.raises(ValueError, match=r"same physical shape"):
+            op(full, broadcast, full)
+        with pytest.raises(ValueError, match=r"same valid_shape"):
+            op(full, tail, full)
+
+    @pytest.mark.parametrize("op", [tile.addsc, tile.subsc])
+    def test_tile_scalar_carry_rejects_explicit_scalar_and_carry_mismatch(self, op):
+        """Typed scalar expressions and carry tiles must exactly match src0."""
+        span = ir.Span.unknown()
+        src0 = ir.Var("src0", ir.TileType([8, 16], DataType.INT32), span)
+        scalar = ir.ConstFloat(1.0, DataType.FP32, span)
+        mixed_carry = ir.Var("carry", ir.TileType([8, 16], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match=r"same dtype"):
+            op(src0, scalar, src0)
+        with pytest.raises(ValueError, match=r"same dtype"):
+            op(src0, 1, mixed_carry)
+
+    @pytest.mark.parametrize("op", [tile.addc, tile.subc, tile.addsc, tile.subsc])
+    def test_tile_carry_rejects_unsupported_dtype(self, op):
+        """INT8 is outside the current A2/A3 and A5 carry-op dtype union."""
+        span = ir.Span.unknown()
+        value = ir.Var("value", ir.TileType([8, 16], DataType.INT8), span)
+
+        with pytest.raises(ValueError, match=r"INT16, INT32, FP16, FP32"):
+            if op in (tile.addsc, tile.subsc):
+                op(value, 1, value)
+            else:
+                op(value, value, value)
+
     def test_tile_lrelu(self):
         """Test tile.lrelu operator - element-wise leaky ReLU with scalar slope."""
 

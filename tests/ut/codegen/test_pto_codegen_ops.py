@@ -548,6 +548,86 @@ class Test910BBlockOpsCodegen:
             validate_kernel_codegen(func_name, mlir_code)
 
 
+class TestCarryFamilyCodegen:
+    """Exact PTO emission for the four carry-family tile ops."""
+
+    def test_carry_ops_emit_three_inputs_and_tail_types(self):
+        @pl.program
+        class CarryPrograms:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_addc(
+                self,
+                src0: pl.Tensor[[16, 16], pl.FP32],
+                src1: pl.Tensor[[16, 16], pl.FP32],
+                carry: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src0_tile = pl.load(src0, [0, 0], [16, 16], valid_shapes=[11, 13])
+                src1_tile = pl.load(src1, [0, 0], [16, 16], valid_shapes=[11, 13])
+                carry_tile = pl.load(carry, [0, 0], [16, 16], valid_shapes=[11, 13])
+                result = pl.tile.addc(src0_tile, src1_tile, carry_tile)
+                return pl.store(result, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_subc(
+                self,
+                src0: pl.Tensor[[16, 16], pl.FP32],
+                src1: pl.Tensor[[16, 16], pl.FP32],
+                carry: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src0_tile = pl.load(src0, [0, 0], [16, 16], valid_shapes=[11, 13])
+                src1_tile = pl.load(src1, [0, 0], [16, 16], valid_shapes=[11, 13])
+                carry_tile = pl.load(carry, [0, 0], [16, 16], valid_shapes=[11, 13])
+                result = pl.tile.subc(src0_tile, src1_tile, carry_tile)
+                return pl.store(result, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_addsc(
+                self,
+                src0: pl.Tensor[[16, 16], pl.FP32],
+                carry: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src0_tile = pl.load(src0, [0, 0], [16, 16], valid_shapes=[11, 13])
+                carry_tile = pl.load(carry, [0, 0], [16, 16], valid_shapes=[11, 13])
+                result = pl.tile.addsc(src0_tile, 1.5, carry_tile)
+                return pl.store(result, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_subsc(
+                self,
+                src0: pl.Tensor[[16, 16], pl.FP32],
+                carry: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src0_tile = pl.load(src0, [0, 0], [16, 16], valid_shapes=[11, 13])
+                carry_tile = pl.load(carry, [0, 0], [16, 16], valid_shapes=[11, 13])
+                result = pl.tile.subsc(src0_tile, 1.5, carry_tile)
+                return pl.store(result, [0, 0], out)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(CarryPrograms)
+        expected_ops = {
+            "kernel_addc": "pto.taddc",
+            "kernel_subc": "pto.tsubc",
+            "kernel_addsc": "pto.taddsc",
+            "kernel_subsc": "pto.tsubsc",
+        }
+
+        for func in optimized.functions.values():
+            expected_op = expected_ops[func.name]
+            single = ir.Program([func], func.name, optimized.span)
+            mlir = codegen.PTOCodegen().generate(single)
+            op_line = next((line for line in mlir.splitlines() if expected_op in line), "")
+            assert op_line, f"{expected_op} not found in MLIR:\n{mlir}"
+            ins = op_line.split("ins(", 1)[1].split(")", 1)[0].split(":", 1)[0]
+            assert ins.count(",") == 2, f"{expected_op} must have three inputs: {op_line}"
+            assert "outs(" in op_line
+            assert "v_row=11" in op_line and "v_col=13" in op_line
+
+
 class TestRsqrtHighPrecisionCodegen:
     """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
 
