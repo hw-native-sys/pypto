@@ -16,9 +16,8 @@ tpop/tfree direction and pipe-id consistency checks (moved out of codegen).
 
 import pypto.language as pl
 import pytest
-from pypto import backend, passes
+from pypto import backend, ir, passes
 from pypto.backend import BackendType
-from pypto.ir.printer import python_print
 
 
 @pytest.fixture(autouse=True)
@@ -29,25 +28,30 @@ def _setup_backend():
     backend.reset_for_testing()
 
 
-def _stamp(program) -> str:
-    """Run convert_to_ssa then stamp_tfree_split and print the result.
+def _stamp(program):
+    """Run convert_to_ssa then stamp_tfree_split, returning the transformed program.
 
     Runs under the ambient ``conftest`` context (BEFORE_AND_AFTER property
     verification + the print->parse roundtrip instrument), so the pass output is
-    checked for free, not just the one ``tfree`` line the asserts below grep for.
+    checked for free on top of the structural comparison each test performs.
     """
     ssa = passes.convert_to_ssa()(program)
-    after = passes.stamp_tfree_split()(ssa)
-    return python_print(after)
+    return passes.stamp_tfree_split()(ssa)
 
 
-def _tfree_line(text: str) -> str:
-    return next(line.strip() for line in text.splitlines() if "tfree_to_ai" in line)
+def _run_prereqs_only(program):
+    """Normalize a hand-written ``Expected`` with the prerequisite pass only.
+
+    ``StampTfreeSplit`` runs after ``ConvertToSSA``, so ``Expected`` is written
+    in pre-SSA DSL form and lifted the same way -- without ever running the pass
+    under test, which would make the golden self-referential.
+    """
+    return passes.convert_to_ssa()(program)
 
 
 def test_tfree_gets_split_from_tpop():
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.AIV)
         def consumer(self):
             buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
@@ -55,14 +59,23 @@ def test_tfree_gets_split_from_tpop():
             t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
             pl.tfree_to_aic(t)
 
-    line = _tfree_line(_stamp(Prog))
-    assert "tfree_to_aic" in line
-    assert "split=2" in line, line
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(self):
+            buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=buf)
+            t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
+            # split copied off the originating tpop by the pass.
+            pl.tfree_to_aic(t, split=2)
+
+    After = _stamp(Before)
+    ir.assert_structural_equal(After, _run_prereqs_only(Expected))
 
 
 def test_tfree_gets_split_and_id_from_tpop():
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.AIV)
         def consumer(self):
             buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
@@ -70,13 +83,23 @@ def test_tfree_gets_split_and_id_from_tpop():
             t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1, id=3)
             pl.tfree_to_aic(t)
 
-    line = _tfree_line(_stamp(Prog))
-    assert "split=1" in line and "id=3" in line, line
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(self):
+            buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=buf, id=3)
+            t: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1, id=3)
+            # both split and the pipe id are copied off the originating tpop.
+            pl.tfree_to_aic(t, split=1, id=3)
+
+    After = _stamp(Before)
+    ir.assert_structural_equal(After, _run_prereqs_only(Expected))
 
 
 def test_tfree_id_mismatch_raises():
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.AIV)
         def consumer(self):
             buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
@@ -85,12 +108,12 @@ def test_tfree_id_mismatch_raises():
             pl.tfree_to_aic(t, id=0)
 
     with pytest.raises(ValueError, match="does not match originating"):
-        _stamp(Prog)
+        _stamp(Before)
 
 
 def test_tfree_direction_mismatch_raises():
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.AIV)
         def consumer(self):
             buf = pl.reserve_buffer(name="c2v", size=4096, base=0x1000)
@@ -99,7 +122,7 @@ def test_tfree_direction_mismatch_raises():
             pl.tfree_to_aiv(t)
 
     with pytest.raises(ValueError, match="requires its tile argument to come from"):
-        _stamp(Prog)
+        _stamp(Before)
 
 
 if __name__ == "__main__":

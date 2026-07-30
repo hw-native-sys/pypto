@@ -9,8 +9,12 @@
 
 """Unit tests for OptimizeOrchTensors pass.
 
-Transform tests use explicit Before/Expected programs where practical; small
-fallback tests compare against the non-windowized baseline structurally.
+Transform tests use explicit Before/Expected programs where practical. Tests
+asserting that the pass declines to rewrite (``..._stays_baseline`` /
+``..._falls_back_to_baseline``) compare against ``Before`` normalized by
+``_run_prereqs_only`` -- the Default pipeline prefix WITHOUT the pass under
+test. Never build a golden by running OptimizeOrchTensors itself: a regression
+in the baseline would then change both sides and the test would stay green.
 """
 
 import pypto.language as pl
@@ -56,24 +60,47 @@ def _strip_windowize_attrs(program):
     return _modify_incore_windowize(program, enable=False)
 
 
-def _run_to_optimize_orch_tensors(program, *, windowize=True):
+def _run_to_optimize_orch_tensors(program):
+    """Run the Default pipeline prefix, then OptimizeOrchTensors, with
+    ``windowize`` stamped on every InCore function (and stripped again after)."""
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    result = _with_incore_windowize(program) if windowize else program
+    result = _with_incore_windowize(program)
     for pass_name, pass_obj in zip(pm.pass_names, pm.passes, strict=True):
         if pass_name == "OptimizeOrchTensors":
             result = passes.optimize_orch_tensors()(result)
-            return _strip_windowize_attrs(result) if windowize else result
+            return _strip_windowize_attrs(result)
         result = pass_obj(result)
     raise AssertionError("Default pipeline did not run OptimizeOrchTensors")
 
 
-def _run_windowized_to_optimize_orch_tensors(program):
-    return _run_to_optimize_orch_tensors(program)
+def _run_prereqs_only(program):
+    """Normalize ``program`` with the Default pipeline prefix up to -- but NOT
+    including -- OptimizeOrchTensors.
+
+    This brings a program to the pipeline stage the pass under test observes
+    (SSA renaming, call flattening, ...) without ever running the pass itself,
+    so the result is usable as a golden. Mirrors the ``_run_prereqs_only``
+    helper in ``test_fuse_create_assemble_to_slice.py``.
+    """
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    result = program
+    for pass_name, pass_obj in zip(pm.pass_names, pm.passes, strict=True):
+        if pass_name == "OptimizeOrchTensors":
+            return result
+        result = pass_obj(result)
+    raise AssertionError("Default pipeline did not run OptimizeOrchTensors")
 
 
-def _assert_matches_non_windowized_baseline(before, after):
-    expected = _run_to_optimize_orch_tensors(before, windowize=False)
-    ir.assert_structural_equal(after, expected)
+def _assert_unchanged_by_pass(before, after):
+    """Assert OptimizeOrchTensors left ``before`` structurally unchanged.
+
+    ``after`` is the windowized run of the pass. The golden is ``before``
+    normalized by PREREQUISITE passes only -- the pass under test never runs on
+    the right-hand side. Building the golden from a second run of the pass (the
+    previous behaviour here) let a baseline regression cancel out on both sides
+    and keep the test green.
+    """
+    ir.assert_structural_equal(after, _run_prereqs_only(before))
 
 
 def _get_function(program, name: str):
@@ -1182,7 +1209,7 @@ class Program:
                 return self.tile_add(a, b, f)
 
         After = _run_to_optimize_orch_tensors(Before)
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("tile_add__windowed") is None
 
     def test_topk_name_does_not_block_eligible_input_window(self):
@@ -1282,7 +1309,7 @@ class Program:
                     result_rv = pl.yield_(block)
                 return result_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_final_store_keeps_already_detected_input_window(self):
@@ -1308,16 +1335,52 @@ class Program:
                 row: pl.Scalar[pl.INDEX] = 32
                 return self.mix_window(data, row, out)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        @pl.program
+        class Expected:
+            # The pass adds a windowed clone whose params are the [32, 64] strided
+            # views of the sliced parents, with the row offset folded to a 0 origin.
+            @pl.function(type=pl.FunctionType.InCore)
+            def mix_window__windowed(
+                self,
+                data: pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[
+                    pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]
+                ],
+            ) -> pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]:
+                tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.load(data, [0, 0], [32, 64], [32, 64])
+                result: pl.Tensor[
+                    [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ] = pl.tile.store(tile, [0, 0], out)
+                return result
 
-        printed_main = ir.python_print(_get_function(After, "main"))
-        assert "mix_window__windowed" in printed_main
-        assert "pl.tensor.slice(data" in printed_main
-        assert "pl.tensor.slice(out" in printed_main
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[64, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                data_win: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(data, [32, 64], [32, 0])
+                out_win: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(out, [32, 64], [32, 0])
+                windowed: pl.Tensor[
+                    [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ] = self.mix_window__windowed(data_win, 32, out_win)
+                return pl.tensor.assemble(out, windowed, [32, 0])
 
-        printed_windowed = ir.python_print(_get_function(After, "mix_window__windowed"))
-        assert "pl.tile.load(data__ssa_v0, [0, 0]" in printed_windowed
-        assert "pl.tile.store(tile__ssa_v0, [0, 0]" in printed_windowed
+            # The original callee is retained alongside the windowed clone.
+            @pl.function(type=pl.FunctionType.InCore)
+            def mix_window(
+                self,
+                data: pl.Tensor[[64, 128], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.load(data, [row_offset, 0], [32, 64], [32, 64])
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(tile, [row_offset, 0], out)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before)
+        ir.assert_structural_equal(After, _run_prereqs_only(Expected))
 
     def test_input_full_read_blocks_input_window_rewrite(self):
         @pl.program
@@ -1339,9 +1402,9 @@ class Program:
                 row: pl.Scalar[pl.INDEX] = 32
                 return self.consume(score, row)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("consume__windowed") is None
 
     def test_no_return_input_consumer_stays_full_tensor(self):
@@ -1366,8 +1429,8 @@ class Program:
                     _tid = pl.submit(self.fence, src, dummy)
                 return _tid
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
-        _assert_matches_non_windowized_baseline(Before, After)
+        After = _run_to_optimize_orch_tensors(Before)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("fence__windowed") is None
 
     def test_indexer_score_writes_window_but_topk_score_read_stays_full(self):
@@ -1425,7 +1488,7 @@ class Program:
                     score_out, topk_out = pl.yield_(score_rv, topk_next)
                 return score_out, topk_out
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "score_init__windowed" in printed_main
@@ -1591,9 +1654,9 @@ class Program:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        printed_main = ir.python_print(_get_function(After, "main"))
-        assert "cache_read__windowed" not in printed_main
-        assert "pl.tensor.slice(cache__ssa_v0" not in printed_main
+        # The guarded dynamic read is unwindowable, so the pass must decline to
+        # rewrite anything -- pinned over the whole program, not just `main`.
+        _assert_unchanged_by_pass(Before, After)
 
     def test_dynamic_indexed_reader_rejects_loop_local_non_dynamic_offset(self):
         @pl.program
@@ -1626,9 +1689,9 @@ class Program:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        printed_main = ir.python_print(_get_function(After, "main"))
-        assert "cache_read__windowed" not in printed_main
-        assert "pl.tensor.slice(cache__ssa_v0" not in printed_main
+        # The loop-local non-dynamic offset is rejected, so the pass must decline
+        # to rewrite anything -- pinned over the whole program, not just `main`.
+        _assert_unchanged_by_pass(Before, After)
 
     def test_windowable_writer_blocked_by_unwindowable_full_out_sibling(self):
         @pl.program
@@ -1664,9 +1727,9 @@ class Program:
                     out_rv = pl.yield_(write_next)
                 return out_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("init_row__windowed") is None
         assert After.get_function("write_prefix__windowed") is None
 
@@ -1703,9 +1766,9 @@ class Program:
                 result: pl.Tensor[[4, 16], pl.INT32] = self.full_overwrite(out_rv)
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("init_row__windowed") is None
         assert After.get_function("full_overwrite__windowed") is None
 
@@ -1735,9 +1798,9 @@ class Program:
                     out_rv = pl.yield_(write_next)
                 return out_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("init_row__windowed") is None
 
     def test_aggregate_input_window_loop_rewrites_qk_norm_shape(self):
@@ -1773,7 +1836,7 @@ class Program:
                 row: pl.Scalar[pl.INDEX] = 0
                 return self.qk_norm_like(q_out, k_out, q_proj, k_proj, row)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("qk_norm_like__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -1830,7 +1893,7 @@ class Program:
                 row: pl.Scalar[pl.INDEX] = 0
                 return self.qk_norm_like(q_out, k_out, q_rv, k_rv, row)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "qk_norm_like__windowed" in printed_main
@@ -1860,9 +1923,9 @@ class Program:
             ) -> pl.Tensor[[4, 4], pl.FP32]:
                 return self.diagonal_like(out)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("diagonal_like__windowed") is None
 
     def test_aggregate_output_overlap_and_hole_stays_baseline(self):
@@ -1888,9 +1951,9 @@ class Program:
             ) -> pl.Tensor[[2, 2], pl.FP32]:
                 return self.overlap_hole_like(out)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("overlap_hole_like__windowed") is None
 
     def test_output_window_disjointness_rejects_overlapping_inner_partition_loop(self):
@@ -1918,9 +1981,9 @@ class Program:
                     out_rv = pl.yield_(out_next)
                 return out_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("write_overlap__windowed") is None
 
     def test_aggregate_output_preserves_existing_pure_input_window(self):
@@ -2021,7 +2084,7 @@ class Program:
                 result: pl.Tensor[[16, 256], pl.FP32] = pl.tensor.assemble(out, result__windowed, [0, 0])
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
         printed_windowed = ir.python_print(_get_function(After, "aggregate_with_header__windowed"))
         assert "aggregate_with_header__windowed" in printed_main
@@ -2108,7 +2171,7 @@ class Program:
                 out_next = pl.tensor.assemble(out, out_next__windowed, [64, 0])
                 return out_next
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_output_window_uses_visible_loop_init_parent(self):
@@ -2183,7 +2246,7 @@ class Program:
                 result = pl.tensor.assemble(out, result__windowed, [64, 0])
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_sibling_writers_to_same_parent_can_window_with_runtime_overlap(self):
@@ -2210,7 +2273,7 @@ class Program:
                 second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 32, first)
                 return second
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2244,7 +2307,7 @@ class Program:
                     second_rv = pl.yield_(second)
                 return second_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2279,7 +2342,7 @@ class Program:
                     second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 64, first)
                 return second
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2312,7 +2375,7 @@ class Program:
                     result_rv = pl.yield_(result)
                 return result_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2360,7 +2423,7 @@ class Program:
                 second: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, 32, first)
                 return second
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("multi_stripe__windowed") is not None
         assert After.get_function("kernel_stripe__windowed") is not None
@@ -2459,7 +2522,7 @@ class Program:
                     out_phase_next = pl.yield_(out_branch_next)
                 return out_phase_next
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_multi_out_final_store_rewrites_both_outputs(self):
@@ -2565,7 +2628,7 @@ class Program:
                 ]
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_multi_out_same_callsite_parent_stays_baseline(self):
@@ -2597,9 +2660,9 @@ class Program:
                 )
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("kv_stripe__windowed") is None
 
     def test_return_reordered_multi_out_later_parent_read_still_externalizes(self):
@@ -2639,7 +2702,7 @@ class Program:
                 k_next: pl.Tensor[[256, 64], pl.FP32] = result[1]
                 return self.consume_full(k_next)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2681,7 +2744,7 @@ class Program:
                 out_next: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, row, out)
                 return self.consume_full(out_next)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2723,7 +2786,7 @@ class Program:
                 out_next: pl.Tensor[[128, 64], pl.FP32] = self.kernel_rows(out, row_base, data)
                 return self.consume_full(out_next)
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_rows__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -2907,7 +2970,7 @@ class Program:
                 )
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_post_outline_kv_nested_loop_local_parent_rewrites(self):
@@ -2974,7 +3037,7 @@ class Program:
                     final_k_rv, final_v_rv = pl.yield_(final_k_next, final_v_next)
                 return final_k_rv, final_v_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_proj__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
@@ -3057,7 +3120,7 @@ class Program:
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_overlapping_sequential_windows_stay_baseline(self):
@@ -3165,7 +3228,7 @@ class Program:
                 result = self.kernel_full(data, out)
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -3313,9 +3376,9 @@ class TestOutWindowSubmitCall:
                 result: pl.Tensor[[16, 64], pl.FP32] = self.overflow_store(out, data)
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("overflow_store__windowed") is None
 
     def test_dense_region_volume_overflow_falls_back_to_baseline(self):
@@ -3345,8 +3408,10 @@ class TestOutWindowSubmitCall:
 
         After = passes.optimize_orch_tensors()(_with_incore_windowize(Before))
 
-        expected = passes.optimize_orch_tensors()(Before)
-        ir.assert_structural_equal(_strip_windowize_attrs(After), expected)
+        # The pass runs directly here (no pipeline prefix), so `Before` is already
+        # at the stage the pass observes and is itself the golden: an overflowing
+        # dense-region volume must fall back to leaving the program untouched.
+        ir.assert_structural_equal(_strip_windowize_attrs(After), Before)
         assert After.get_function("overflow_volume__windowed") is None
 
     def test_inout_full_read_before_subset_write_stays_baseline(self):
@@ -3372,9 +3437,9 @@ class TestOutWindowSubmitCall:
                 result: pl.Tensor[[128, 64], pl.FP32] = self.update(acc, data)
                 return result
 
-        After = _run_windowized_to_optimize_orch_tensors(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
-        _assert_matches_non_windowized_baseline(Before, After)
+        _assert_unchanged_by_pass(Before, After)
         assert After.get_function("update__windowed") is None
 
 
