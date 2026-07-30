@@ -167,15 +167,15 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ❌ | — | frontend/codegen path exists; same-name ST is missing |
 | **Bitwise Operations (11)** |  |  |  |  |  |  |  |  |
-| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tand | TAND | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed/unsigned 8/16-bit patterns and valid_shape; A5 hardware verification pending |
+| pto.tor | TOR | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed/unsigned 8/16-bit patterns and valid_shape; A5 hardware verification pending |
+| pto.txor | TXOR | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed/unsigned 8/16-bit patterns, tmp, aliasing, and valid_shape; A5 hardware verification pending |
 | pto.tshl | TSHL | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tshr | TSHR | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tnot | TNOT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tands | TANDS | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed 8/16-bit scalar encoding and valid_shape; explicit unsigned PTOAS scalar types remain unsupported |
+| pto.tors | TORS | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed 8/16-bit scalar encoding and valid_shape; explicit unsigned PTOAS scalar types remain unsupported |
+| pto.txors | TXORS | tile | ✅ | ✅ | ❌ | ✅ | — | verified on A2/A3 hardware for signed 8/16-bit scalar encoding, tmp, aliasing, and valid_shape; explicit unsigned PTOAS scalar types remain unsupported |
 | pto.tshls | TSHLS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tshrs | TSHRS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | **Data Rearrangement (15)** |  |  |  |  |  |  |  |  |
@@ -274,5 +274,5 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend;
-110 have same-name ST coverage (106 regular STs and 4 distributed STs); 62 lack same-name ST coverage
-(52 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
+116 have same-name ST coverage (112 regular STs and 4 distributed STs); 56 lack same-name ST coverage
+(46 regular and 10 distributed); within these 204, another 32 ops are not suitable for standalone STs.
