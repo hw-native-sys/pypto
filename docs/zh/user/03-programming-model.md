@@ -262,7 +262,7 @@ def mm(
 ## See Also
 
 - [快速上手](02-quickstart.md) —— 本页所解释的那些例子。
-- [语言指南](01-language_guide.md) —— 完整表面：类型、控制流、作用域、编译。
+- [语言指南](language/index.md) —— 完整表面：类型、函数、控制流、内存、作用域与任务、编译期指令。
 - [Passes](../dev/passes/index.md) —— 流水线中的每个 pass，按执行顺序编号。
 - [IR 概览](../dev/ir/00-overview.md) —— IR 的结构与设计原则。
 - [集群架构](../reference/pto-isa/00-cluster_architecture.md) —— 执行模型所面向的 Cube + Vector 集群。

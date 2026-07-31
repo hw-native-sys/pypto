@@ -167,8 +167,19 @@ nav:
       - en/user/01-installation.md
       - en/user/02-quickstart.md
       - en/user/03-programming-model.md
+      - Language Guide:
+          - en/user/language/index.md
+          - en/user/language/00-types.md
+          - en/user/language/01-functions.md
+          - en/user/language/02-control-flow.md
+          - en/user/language/03-memory.md
+          - en/user/language/04-scopes-and-tasks.md
+          - en/user/language/05-directives.md
+      - Operations:
+          - en/user/ops/index.md
+          - en/user/ops/00-dispatch.md
+          - en/user/ops/01-catalog.md
       - en/user/01-language_guide.md
-      - en/user/02-operation_reference.md
       - en/user/00-getting_started.md
       - en/user/03-torch_codegen_debug.md
       - Distributed:

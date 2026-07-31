@@ -291,7 +291,7 @@ effect.
 
 - [Installation](01-installation.md) — getting to the point where these examples import.
 - [Programming Model](03-programming-model.md) — tensor vs. tile vs. block level, the two planes, the memory hierarchy, and the execution model.
-- [Language Guide](01-language_guide.md) — the full surface: tile-level authoring, `pl.load` / `pl.store`, memory spaces, and the `@pl.function` / `@pl.program` form `@pl.jit` specializes into.
-- [Operation Reference](02-operation_reference.md) — the operator surface across `pl.*`, `pl.tensor.*`, and `pl.tile.*`.
+- [Language Guide](language/index.md) — the full surface: tile-level authoring, `pl.load` / `pl.store`, memory spaces, and the `@pl.function` / `@pl.program` form `@pl.jit` specializes into.
+- [Operations](ops/index.md) — the operator surface across `pl.*`, `pl.tensor.*`, and `pl.tile.*`.
 - [Running on Device](00-getting_started.md) — resident device tensors, explicit dispatch, benchmarking, distributed execution.
 - `examples/kernels/` — tile-level kernels in the same `@pl.jit` idiom.

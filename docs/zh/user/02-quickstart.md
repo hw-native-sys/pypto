@@ -270,7 +270,7 @@ tile 级。
 
 - [安装](01-installation.md) —— 让这些例子能 import 起来。
 - [编程模型](03-programming-model.md) —— 张量 / tile / block 三级、两个面、内存层次与执行模型。
-- [语言指南](01-language_guide.md) —— 完整表面：tile 级写法、`pl.load` / `pl.store`、内存空间，以及 `@pl.jit` 所特化成的 `@pl.function` / `@pl.program` 形态。
-- [操作参考](02-operation_reference.md) —— `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌。
+- [语言指南](language/index.md) —— 完整表面：tile 级写法、`pl.load` / `pl.store`、内存空间，以及 `@pl.jit` 所特化成的 `@pl.function` / `@pl.program` 形态。
+- [算子](ops/index.md) —— `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌。
 - [在设备上运行](00-getting_started.md) —— 常驻设备张量、显式派发、性能基准、分布式执行。
 - `examples/kernels/` —— 同一套 `@pl.jit` 写法下的 tile 级 kernel。

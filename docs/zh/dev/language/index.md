@@ -10,4 +10,4 @@
 ## 另请参阅
 
 - [IR Parser](../ir/07-parser.md) —— 该语法如何变成 IR。
-- [语言指南](../../user/01-language_guide.md) —— 从用户视角看同一门语言。
+- [语言指南](../../user/language/index.md) —— 从用户视角看同一门语言。

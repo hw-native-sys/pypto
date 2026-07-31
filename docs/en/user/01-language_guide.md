@@ -1,625 +1,14 @@
-# PyPTO Language Guide
+# Compiling a Program
 
-Complete reference for the `pypto.language` (`pl`) module.
+Turning a program or a `@pl.jit` kernel into device kernels and host orchestration.
 
-## Type System
+> **The language material that used to live on this page has moved** to the
+> [Language Guide](language/index.md) chapter — types, functions, control flow, memory,
+> scopes and tasks, and directives each have their own page there, and the operator
+> surface is in [Operations](ops/index.md). What remains here is compilation, pending its
+> own chapter.
 
-### Data Types
-
-| Constant | Bits | Description |
-| -------- | ---- | ----------- |
-| `pl.BOOL` | 1 | Boolean |
-| `pl.INT4` / `pl.UINT4` | 4 | Signed / unsigned 4-bit integer |
-| `pl.INT8` / `pl.UINT8` | 8 | Signed / unsigned 8-bit integer |
-| `pl.INT16` / `pl.UINT16` | 16 | Signed / unsigned 16-bit integer |
-| `pl.INT32` / `pl.UINT32` | 32 | Signed / unsigned 32-bit integer |
-| `pl.INT64` / `pl.UINT64` | 64 | Signed / unsigned 64-bit integer |
-| `pl.FP16` | 16 | IEEE half-precision float |
-| `pl.BF16` | 16 | Brain float 16 |
-| `pl.FP32` | 32 | IEEE single-precision float |
-| `pl.FP4` | 4 | 4-bit float (packed MXFP4 E2M1×2; PTOAS `!pto.f4E2M1x2`) |
-| `pl.FP8E4M3FN` | 8 | 8-bit float (e4m3fn); MXFP8 data |
-| `pl.FP8E5M2` | 8 | 8-bit float (e5m2); MXFP8 data |
-| `pl.FP8E8M0` | 8 | MX block-scale exponent (E8M0); PTOAS `!pto.f8E8M0` / pto-isa `float8_e8m0_t` |
-| `pl.HF4` / `pl.HF8` | 4/8 | Hisilicon float formats |
-| `pl.INDEX` | 64 | Index type for index computations — loop vars, dimensions |
-
-### Container Types
-
-**`pl.Tensor[[shape], dtype]`** — DDR memory array (off-chip global memory).
-
-```python
-x: pl.Tensor[[64, 128], pl.FP32]        # 2D, 64×128, float32
-y: pl.Tensor[[256], pl.FP16]            # 1D, 256 elements, float16
-s: pl.Tensor[[64, 128], pl.UINT8, pl.MX_A_ZZ] # MX scale operand — see "Tensor Layouts"
-```
-
-**`pl.Tile[[shape], dtype]`** — on-chip memory buffer (unified buffer by default).
-
-```python
-t: pl.Tile[[64, 64], pl.FP32]           # 2D tile, 64×64
-```
-
-**`pl.Scalar[dtype]`** — single scalar value.
-
-```python
-s: pl.Scalar[pl.FP32]                   # float32 scalar
-idx: pl.Scalar[pl.INDEX]                # index scalar
-```
-
-### Tensor Layouts
-
-Write your `pl.Tensor[...]` annotations using the **runtime row-major
-shape** without a layout marker. Layout is an IR-internal concern that
-passes derive from the ops actually producing/consuming views; you do
-not need to express it in the type annotation.
-
-The one exception is the **MX layouts** (`pl.MX_A_ZZ` / `pl.MX_B_NN`),
-which describe a scale operand's on-disk packing that no op can derive —
-they must be annotated, and their loads need `target_memory=pl.Mem.Mat`
-and a `pl.UINT8` / `pl.FP8E8M0` dtype.
-
-```python
-# ✅ Recommended — source tensor shape, no layout marker:
-b: pl.Tensor[[N, K], pl.FP32]
-```
-
-```python
-# ❌ Rejected (RFC #1300 supplementary 1):
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → ParserTypeError at parse time
-```
-
-> **Why `pl.Tensor[..., pl.DN]` is rejected.** Writing the DN
-> layout-only shorthand forces you to mentally hold two coordinate systems
-> at once (the IR-logical post-view shape and the runtime row-major shape).
-> Drop the layout marker and write the runtime shape — for matmul B^T,
-> pass `b_trans=True` (or `a_trans=True`) to `pl.matmul`, or load natural
-> and apply `pl.tile.transpose_view(...)` (see "Data Movement" below); for slicing a DN-producing op, the slice inherits
-> the parent's layout automatically.
-
-For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
-tile-only, never a TensorType annotation. The `pl.NZ` constant remains
-available for tile annotations and IR-internal use. The parser does not
-reject `pl.Tensor[..., pl.NZ]`, but the annotation cannot compile: ptoas
-fails it with `layout mismatch: user-specified layout=nz but inferred=nd`.
-
-If you need to write a DN tensor at the IR level (e.g. when constructing
-fixtures or round-tripping printed IR), prefer
-`pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)` which forces
-explicit stride and avoids the implicit coordinate-flip hazard.
-
-### Dynamic Shapes
-
-Use `pl.dynamic()` for dimensions determined at runtime:
-
-```python
-M = pl.dynamic("M")
-N = pl.dynamic("N")
-
-@pl.function
-def dynamic_kernel(
-    a: pl.Tensor[[M, N], pl.FP32],
-) -> pl.Tensor[[M, N], pl.FP32]:
-    ...
-```
-
-### Parameter Directions
-
-By default, parameters are read-only inputs. Use wrappers for output parameters:
-
-| Direction | Syntax | Description |
-| --------- | ------ | ----------- |
-| Input (default) | `a: pl.Tensor[...]` | Read-only |
-| Output | `a: pl.Out[pl.Tensor[...]]` | Write-only output |
-| In/Out | `a: pl.InOut[pl.Tensor[...]]` | Read-write |
-
-```python
-@pl.function
-def kernel(
-    input_a: pl.Tensor[[64], pl.FP32],                    # In
-    output_b: pl.Out[pl.Tensor[[64], pl.FP32]],            # Out
-    accum_c: pl.InOut[pl.Tensor[[64], pl.FP32]],           # InOut
-) -> pl.Tensor[[64], pl.FP32]:
-    ...
-```
-
-## Operations
-
-### Dispatch Model
-
-PyPTO operations exist at three levels:
-
-| Namespace | Level | Description |
-| --------- | ----- | ----------- |
-| `pl.*` | Unified | Auto-dispatches based on input type (Tensor or Tile) |
-| `pl.tensor.*` | Tensor | DDR-level operations on `Tensor` objects |
-| `pl.tile.*` | Tile | On-chip operations on `Tile` objects |
-
-**Recommended:** Use `pl.*` (unified) when possible. The dispatcher picks the right implementation.
-
-```python
-# Unified — works with both Tensor and Tile
-result = pl.add(a, b)       # dispatches to tensor.add or tile.add
-result = pl.mul(a, scalar)   # dispatches to tensor.muls or tile.muls
-
-# Explicit tile-level (when you need tile-specific ops)
-tile = pl.tile.load(tensor, [0, 0], [64, 64])
-tile = pl.tile.adds(tile, 1.0)
-```
-
-### Python Operators
-
-Standard Python operators map to IR operations:
-
-| Python | IR operation | Example |
-| ------ | ------------ | ------- |
-| `a + b` | `add` | `c = a + b` |
-| `a - b` | `sub` | `c = a - b` |
-| `a * b` | `mul` | `c = a * b` |
-| `a / b` | `div` | `c = a / b` |
-| `a == b` | `eq` (compare) | `if a == 0:` |
-| `a != b` | `ne` (compare) | `if a != 0:` |
-| `a < b` | `lt` (compare) | `if a < n:` |
-| `a > b` | `gt` (compare) | `if a > 0:` |
-
-### Unified Operations
-
-Common `pl.*` operations — see [Operation Reference](02-operation_reference.md) for the complete list:
-
-```python
-c = pl.add(a, b)            # arithmetic (also sub, mul, div)
-c = pl.add(a, 1.0)          # scalar rhs auto-detected
-c = pl.cast(a, pl.FP16)     # type cast
-c = pl.reshape(a, [16, 8])  # shape operations (also transpose, slice)
-c = pl.matmul(a, b)         # linear algebra
-c = pl.row_sum(a)            # reductions (also row_max)
-```
-
-Not every `pl.cast` is one instruction. Whether a `(src, dst)` dtype pair maps to a
-single hardware `pto.tcvt` or is expanded into a multi-hop chain depends on the target
-architecture — for example `INT32 -> FP16` is one instruction on Ascend910B but lowers
-to `INT32 -> FP32 -> FP16` on Ascend950. The chain costs one `tcvt` per hop, and where
-an intermediate is narrower than the source it can differ from a directly rounded
-conversion by one ULP of the destination. See
-[LegalizeTileCast](../dev/passes/14-legalize_tile_cast.md) for the per-architecture
-tables of native pairs, expanded pairs and their hop counts.
-
-Tensor and Tile types also support Python subscript syntax as sugar for `slice`/`read`:
-
-```python
-row = A[0:16, :]       # equivalent to pl.slice(A, [16, N], [0, 0])
-elem = A[i, j]         # equivalent to pl.tensor.read(A, [i, j]) / pl.tile.read(A, [i, j])
-block = A[0:16, 0:32]  # equivalent to pl.slice(A, [16, 32], [0, 0])
-```
-
-The symmetric write form `dst[<slices...>] = src` is sugar for `pl.assemble`:
-
-```python
-out[i:i+16, j:j+32] = src   # equivalent to out = pl.assemble(out, src, [i, j])
-```
-
-This sugar is only available before SSA conversion — it rebinds `dst`, which is incompatible with strict SSA. Under `@pl.function(strict_ssa=True)` (or any post-SSA context), use the explicit `pl.assemble(...)` call instead.
-
-Use `pl.tile.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
-
-## Variable Assignment and SSA
-
-PyPTO's IR supports both **SSA** (Static Single Assignment) and **non-SSA** forms. In SSA form, every variable is assigned exactly once; in non-SSA form, you can reassign the same variable name multiple times.
-
-### Writing Style
-
-**Non-SSA (default)** — reassign variables freely, like normal Python:
-
-```python
-@pl.function
-def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # reassignment OK
-    return result
-```
-
-**SSA style** — each variable assigned once, using unique names:
-
-```python
-@pl.function
-def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    result_1: pl.Tensor[[64], pl.FP32] = pl.add(result_0, 1.0)
-    return result_1
-```
-
-Both produce valid IR. Use whichever style you prefer.
-
-### Automatic SSA Conversion
-
-Most optimization passes require SSA form. The compilation pipeline automatically runs `ConvertToSSA` early in the pipeline, so you don't need to worry about it — write non-SSA code and the compiler handles the conversion.
-
-### Strict SSA Mode
-
-Pass `strict_ssa=True` to enforce SSA at parse time. The parser will raise an error if you reassign a variable:
-
-```python
-@pl.function(strict_ssa=True)
-def example(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)  # ERROR: SSAViolationError
-    return result
-```
-
-This is useful for catching unintended variable shadowing, but is entirely optional.
-
-### Why `yield_` Exists
-
-In SSA form, control flow (loops, if/else) cannot simply reassign a variable — each assignment must be unique. `pl.yield_()` is the mechanism that carries values out of a control flow scope:
-
-- **Loops**: `pl.yield_()` passes the updated accumulator to the next iteration
-- **If/else**: `pl.yield_()` in both branches creates a merge point (phi node), producing a single result variable
-
-This is why loops with accumulators require `init_values` + `yield_`, and why if/else branches that produce values must both `yield_`.
-
-## Control Flow
-
-### For Loops — `pl.range()`
-
-**Simple loop:**
-
-```python
-for i in pl.range(10):
-    # i = 0, 1, 2, ..., 9
-    ...
-
-for i in pl.range(2, 10):
-    # i = 2, 3, ..., 9
-    ...
-
-for i in pl.range(0, 100, 4):
-    # i = 0, 4, 8, ..., 96
-    ...
-```
-
-**Loop with accumulators (`init_values`):**
-
-Accumulators carry values across iterations. Each iteration receives the previous values and must `yield_` new ones:
-
-```python
-@pl.function
-def sum_16_elements(data: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
-    init_sum: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
-
-    for i, (running_sum,) in pl.range(16, init_values=(init_sum,)):
-        chunk: pl.Tensor[[1], pl.FP32] = pl.slice(data, [1], [i])
-        new_sum: pl.Tensor[[1], pl.FP32] = pl.add(running_sum, chunk)
-        sum_out: pl.Tensor[[1], pl.FP32] = pl.yield_(new_sum)
-
-    # sum_out holds the final accumulated value after the loop
-    return sum_out
-```
-
-**Multiple accumulators:**
-
-```python
-@pl.function
-def find_max_and_sum(
-    data: pl.Tensor[[4, 64], pl.FP32],
-) -> pl.Tensor[[1, 64], pl.FP32]:
-    init_max: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
-    init_sum: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
-
-    for i, (acc_max, acc_sum) in pl.range(4, init_values=(init_max, init_sum)):
-        row: pl.Tensor[[1, 64], pl.FP32] = pl.slice(data, [1, 64], [i, 0])
-        new_max: pl.Tensor[[1, 64], pl.FP32] = pl.maximum(acc_max, row)
-        new_sum: pl.Tensor[[1, 64], pl.FP32] = pl.add(acc_sum, row)
-        out_max, out_sum = pl.yield_(new_max, new_sum)
-
-    return out_sum
-```
-
-### Parallel Loops — `pl.parallel()`
-
-Same syntax as `pl.range()`, but iterations may execute in parallel:
-
-```python
-for i in pl.parallel(0, num_blocks):
-    # iterations are independent, can run in parallel
-    ...
-```
-
-### While Loops — `pl.while_()`
-
-Always requires `init_values`. The condition is set with `pl.cond()` as the **first statement** in the loop body:
-
-```python
-for (x,) in pl.while_(init_values=(0,)):
-    pl.cond(x < 10)          # continue while x < 10
-    new_x = x + 1
-    x_out = pl.yield_(new_x)
-```
-
-### If/Else with `pl.yield_()`
-
-Branches that produce values must `yield_` them. This creates SSA phi nodes — both branches must yield the same number and type of values:
-
-```python
-@pl.function
-def conditional_update(
-    a: pl.Tensor[[64], pl.FP32],
-    delta: pl.Tensor[[64], pl.FP32],
-) -> pl.Tensor[[64], pl.FP32]:
-    init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-
-    for i, (prev,) in pl.range(4, init_values=(init,)):
-        if i == 0:
-            result: pl.Tensor[[64], pl.FP32] = pl.yield_(a)
-        else:
-            updated: pl.Tensor[[64], pl.FP32] = pl.add(prev, delta)
-            result: pl.Tensor[[64], pl.FP32] = pl.yield_(updated)
-        # result holds whichever branch executed
-        out: pl.Tensor[[64], pl.FP32] = pl.yield_(result)
-
-    return out
-```
-
-**Rule:** If one branch yields, the other must too. Both yield the same number of values.
-
-## Programs and Functions
-
-### `@pl.function`
-
-Parses a Python function into IR:
-
-```python
-@pl.function
-def my_func(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    ...
-```
-
-With function type:
-
-```python
-@pl.function(type=pl.FunctionType.InCore)
-def compute_kernel(...):
-    ...
-
-@pl.function(type=pl.FunctionType.Orchestration)
-def task_graph(...):
-    ...
-```
-
-| Function Type | Description | Typical Use |
-| ------------- | ----------- | ----------- |
-| `Opaque` | No specified context (default) | Standalone functions |
-| `InCore` | AICore compute kernel | Load/compute/store patterns |
-| `Orchestration` | Host-side coordinator | Create tensors, dispatch InCore tasks |
-
-### `@pl.program`
-
-Groups multiple functions into a program that can be compiled:
-
-```python
-@pl.program
-class MyProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(self, ...):
-        ...
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(self, ...):
-        result = self.kernel(...)   # cross-function call
-        return result
-```
-
-**Rules:**
-
-- Every method must have `self` as first parameter (stripped from IR)
-- Cross-function calls use `self.method_name(...)`
-- The decorated class becomes an `ir.Program`, not a Python class
-
-### `@pl.jit` family
-
-`@pl.jit` decorators let you author kernels as plain Python functions that
-are specialized into `@pl.program` source on first call (no class boundary
-required). Five variants — one per IR function kind — let a single program
-span host, chip, and core levels:
-
-| Decorator | IR target | Use for |
-| --------- | --------- | ------- |
-| `@pl.jit` | `FunctionType.Orchestration` | Chip-level entry point — top-level kernel that dispatches InCore work |
-| `@pl.jit.host` | `level=HOST, role=Orchestrator` | HOST-level entry — allocates window buffers and dispatches chip orchestrators per rank in distributed (L3+) programs |
-| `@pl.jit.incore` | `FunctionType.InCore` | Separate InCore sub-function (accepts `level=` to target a specific hierarchy level) |
-| `@pl.jit.inline` | `FunctionType.Inline` | Helper spliced at every call site by the `InlineFunctions` pass |
-| `@pl.jit.opaque` | `FunctionType.Opaque` | Separate IR function that may wrap orchestration loops and `pl.at` scopes |
-
-Sub-function deps (`.incore` / `.inline` / `.opaque`) are auto-discovered
-from the entry's body; the user just calls them by name. A `@pl.jit.host`
-entry additionally discovers `@pl.jit` (chip orchestration) deps, so a full
-distributed program can be authored without a single `@pl.program` class:
-
-```python
-import pypto.language as pl
-import pypto.language.distributed as pld
-
-@pl.jit.inline
-def reduce_step(local, peer, out): ...
-
-@pl.jit
-def chip_orch(
-    inp: pl.Tensor, out: pl.Out[pl.Tensor],
-    data: pl.InOut[pld.DistributedTensor], peer: pl.Scalar[pl.INT32],
-):
-    return reduce_step(inp, peer, out)   # auto-discovered sub-function
-
-@pl.jit.host
-def host_orch(
-    inputs: pl.Tensor[[2, 1, 256], pl.FP32],
-    outputs: pl.Out[pl.Tensor[[2, 1, 256], pl.FP32]],
-):
-    data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
-    for r in pl.range(pld.world_size()):
-        data = pld.window(data_buf, [1, 256], dtype=pl.FP32)
-        chip_orch(inputs[r], outputs[r], data, (r + 1) % pld.world_size(),
-                  device=r)            # device= dispatches per-rank
-    return outputs
-```
-
-`@pl.jit.host` rejects `level=` (HOST is implicit) and specializes into
-`@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)`. Plain
-`@pl.jit` entries do **not** auto-discover other `@pl.jit` entries — only
-`.host` reaches across the chip boundary, to keep two unrelated top-level
-kernels from silently folding into one program.
-
-By default the compiler inserts AUTO runtime scopes (`PTO2_SCOPE`) for you.
-To place them by hand with `with pl.scope()`, pass `auto_scope=False`:
-
-```python
-@pl.jit(auto_scope=False)              # Orchestration entry
-def orchestrator(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
-    with pl.scope():
-        out = tile_add(a, b, out)
-    return out
-
-@pl.jit.host(auto_scope=False)         # HOST orchestrator
-def host_orch(...): ...
-
-@pl.jit.inline(auto_scope=False)       # inline sub-function
-def layer(...):
-    with pl.scope():                   # lands in the caller after inlining
-        ...
-```
-
-`auto_scope=False` is accepted on the Orchestration entry (`@pl.jit`),
-the HOST orchestrator (`@pl.jit.host`), and inline sub-functions
-(`@pl.jit.inline`) — inline bodies are spliced into the caller, so their
-hand-placed scopes land there (the entry is usually `auto_scope=False`
-too; entry `True` + inline `False` is legal and just nests hand scopes
-inside compiler AUTO scopes). `.incore` / `.opaque` reject it — they
-outline into separate kernels. It specializes into
-`@pl.function(..., auto_scope=False)` — see the
-[MaterializeRuntimeScopes pass](../dev/passes/43-materialize_runtime_scopes.md)
-for the resulting scope-placement semantics.
-
-### `@pl.inline`
-
-Defines a function whose body is expanded at each call site (no separate function in the program):
-
-```python
-@pl.inline
-def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-    return result
-
-@pl.program
-class MyProgram:
-    @pl.function
-    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        y: pl.Tensor[[64], pl.FP32] = normalize(x)  # body inlined here
-        return y
-```
-
-### External Function Calls
-
-A standalone `@pl.function` can be called from within a `@pl.program`. It is added to the program as a separate function:
-
-```python
-@pl.function
-def softmax(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-    ...
-
-@pl.program
-class Model:
-    @pl.function
-    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        y: pl.Tensor[[64], pl.FP32] = softmax(x)  # call to external function
-        return y
-```
-
-### InCore Scopes
-
-Mark a code region as InCore execution without making a separate function:
-
-```python
-with pl.at(level=pl.Level.CORE_GROUP):
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-```
-
-To set a cross-core split mode (consumed by the `ExpandMixedKernel` pass), use
-`pl.split(...)`:
-
-```python
-# InCore + split hint:
-with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-```
-
-To pin the slot count (ring depth) of the automatic cross-core pipe, use
-`pl.cross_core_slot(...)`. It sizes a data channel rather than partitioning work,
-so it is independent of the split mode and the two combine freely:
-
-```python
-# Shrink the ring to 4 slots to free buffer space for a larger tile:
-with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.split(pl.SplitMode.UP_DOWN),
-                          pl.cross_core_slot(slot_num=4)]):
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-```
-
-Omit the entry to keep the default (8 slots when one direction is live, 4 per
-direction when both are).
-
-## Memory and Data Movement
-
-### Memory Hierarchy
-
-```text
-DDR (off-chip, global memory)
- │
- ├── Vec (unified buffer, on-chip)     ← pl.load() / pl.store()
- │    └── Compute (vector operations)
- │
- ├── Mat (L1 buffer)                   ← pl.load(..., target_memory=pl.Mem.Mat)
- │    ├── Left (L0A)                   ← pl.move(..., target_memory=pl.Mem.Left)
- │    └── Right (L0B)                  ← pl.move(..., target_memory=pl.Mem.Right)
- │         └── Acc (L0C)              ← pl.matmul() result
- │              └── DDR               ← pl.store()
-```
-
-### Memory Spaces — `MemorySpace` (short alias: `Mem`)
-
-Both `pl.MemorySpace` and `pl.Mem` refer to the same enum; use whichever you prefer.
-
-| Space | Enum | Description |
-| ----- | ---- | ----------- |
-| DDR | `Mem.DDR` | Off-chip global memory (Tensor parameters) |
-| Vec | `Mem.Vec` | Unified vector buffer (default for `pl.load`) |
-| Mat | `Mem.Mat` | L1 matrix buffer |
-| Left | `Mem.Left` | L0A — left matmul operand |
-| Right | `Mem.Right` | L0B — right matmul operand |
-| Acc | `Mem.Acc` | L0C — matmul accumulator |
-| Bias | `Mem.Bias` | Bias buffer (AIC core) |
-
-### Data Movement Operations
-
-```python
-tile = pl.load(tensor, [0, 0], [64, 64])                              # DDR → Vec
-tile_l1 = pl.load(tensor, [0, 0], [32, 32], target_memory=pl.Mem.Mat) # DDR → Mat
-tile_l0a = pl.move(tile_l1, target_memory=pl.Mem.Left)                # Mat → Left
-out = pl.store(tile, [0, 0], output)                                  # Tile → DDR
-```
-
-### Pattern: Matrix Multiply (DDR → Mat → Left/Right → Acc → DDR)
-
-```python
-a_l1 = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-b_l1 = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
-c_acc = pl.matmul(a_l0a, b_l0b)                     # result → Acc
-out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
-```
-
-## Compilation
-
-### `ir.compile()`
+## `ir.compile()`
 
 ```python
 from pypto import ir
@@ -638,52 +27,29 @@ output_dir = ir.compile(
 | --------- | ------- | ----------- |
 | `program` | `ir.Program` | Required program object (from `@pl.program` or equivalent) |
 | `strategy` | `OptimizationStrategy.Default` | `Default` = full tensor-oriented pipeline (the only strategy) |
-| `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (`import BackendType` from `pypto.backend`) |
-| `dump_passes` | `True`/`False` | If `True`, write IR snapshots under `<output_dir>/passes_dump/` after each pass (default `True`) |
-| `skip_ptoas` | `True`/`False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
-| `output_dir` | path or `None` | If `None`, uses `<base>/<program_name>_<timestamp>`, where `<base>` is the `PYPTO_PROG_BUILD_DIR` env var or `build_output` if unset; directory is created as needed |
-| `verification_level` | `None`, `ir.VerificationLevel.NONE`, `BASIC` | `None` = use default (`BASIC`, or override via `PYPTO_VERIFY_LEVEL`). Otherwise set explicit verification level |
+| `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (import `BackendType` from `pypto.backend`) |
+| `dump_passes` | `PassDumpLevel` | Write IR snapshots under `<output_dir>/passes_dump/` after each pass |
+| `skip_ptoas` | `True` / `False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
+| `output_dir` | path or `None` | If `None`, uses `<base>/<program_name>_<timestamp>`, where `<base>` is `PYPTO_PROG_BUILD_DIR` or `build_output`; created as needed |
+| `verification_level` | `None`, `ir.VerificationLevel.NONE`, `BASIC` | `None` = use the default (`BASIC`, or `PYPTO_VERIFY_LEVEL`) |
 
-### Optimization Pipeline
+`ir.compile()` takes more parameters than the ones above — diagnostics, memory planner
+selection, profiling, platform, and distributed configuration among them. The full table
+belongs to the execution chapter, which is not written yet; until then read the signature
+in `python/pypto/ir/compile.py`.
 
-The `Default` strategy runs the following main stages in order. This is a
-summary, not the full recipe — see the [pass documentation](../dev/passes/00-pass_manager.md)
-for every pass and its exact position:
+## `JITFunction.compile()`
 
-1. **UnrollLoops** — unroll loop iterations
-2. **CtrlFlowTransform** — rewrite control flow to structured IR
-3. **ConvertToSSA** — convert to static single assignment form
-4. **FlattenCallExpr** — flatten nested function calls
-5. **OutlineHierarchyScopes** — outline hierarchy scopes
-6. **OutlineIncoreScopes** — outline InCore scopes into separate functions
-7. **OutlineClusterScopes** — outline cluster scopes
-8. **ConvertTensorToTileOps** — convert tensor operations to tile operations
-9. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
-10. **InferTileMemorySpace** — infer tile memory spaces
-11. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
-12. **ExpandMixedKernel** — split mixed kernels when needed
-13. **InitMemRef** — assign memory spaces and insert buffer allocations
-14. **MemoryReuse** — share buffers with non-overlapping lifetimes
-15. **AllocateMemoryAddr** — assign concrete memory addresses
-
-### `JITFunction.compile()` (for `@pl.jit` kernels)
-
-`@pl.jit` kernels normally fuse specialize + compile + dispatch into a single
-`kernel(*args)` call. When you want to **split compile from runtime** — to
-drive execution through `ChipWorker.run` / `ChipWorker.register` yourself,
-to inspect the generated artifacts under `compiled.output_dir`, or to do
-ahead-of-time codegen validation — call `JITFunction.compile(*sample_args)`
-to get the underlying `CompiledProgram` without dispatching:
+`@pl.jit` kernels normally fuse specialize + compile + dispatch into one `kernel(*args)`
+call. `compile(*sample_args)` stops after compilation and returns the `CompiledProgram`:
 
 ```python
 @pl.jit
 def my_kernel(x, w, out): ...
 
-# Stage 1: compile only — no device call.
 compiled = my_kernel.compile(sample_x, sample_w, sample_out)
 print("artifacts in:", compiled.output_dir)
 
-# Stage 2: explicit runtime via the new worker API.
 from pypto.runtime import ChipWorker, RunConfig
 
 worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
@@ -695,19 +61,33 @@ worker.free_tensor(w_dev)
 worker.close()
 ```
 
-- `compile()` honours `config=RunConfig(...)` the same way `__call__` does:
-  compile-side knobs (`strategy`, `dump_passes`, diagnostics, ...) are
-  forwarded to `ir.compile()`. Runtime-side fields (`device_id`, DFX flags)
-  do not apply here — they affect dispatch, not the compiled artifact.
-- The returned `CompiledProgram` is the same object the JIT cache holds, so
-  subsequent `kernel(*args)` or `kernel.compile(*args)` calls with the same
-  specialization key hit the cache and return the exact same instance.
-- The `CompiledProgram` exposes the full extraction surface — `chip_callable`,
-  `runtime_name`, `runtime_config`, `build_orch_args`, `build_call_config`,
-  `output_dir`, `platform`, `output_indices` — so harnesses that drive
-  `simpler.worker.Worker` directly can do so on a JIT kernel without writing
-  a `@pl.program` wrapper.
+- `compile()` honours `config=RunConfig(...)` the same way `__call__` does: compile-side
+  knobs (`strategy`, `dump_passes`, diagnostics, …) are forwarded to `ir.compile()`.
+  Runtime-side fields (`device_id`, DFX flags) affect dispatch, not the artifact.
+- The returned `CompiledProgram` is the object the JIT cache holds, so a later call with
+  the same specialization key returns the identical instance.
+- It exposes the full extraction surface — `chip_callable`, `runtime_name`,
+  `runtime_config`, `build_orch_args`, `build_call_config`, `output_dir`, `platform`,
+  `output_indices` — so a harness driving the runtime directly can do so without writing a
+  `@pl.program` wrapper.
 
-### Debugging
+**`compile()`'s positional arguments are the kernel's own arguments, not compile
+options.** `compile(skip_ptoas=True)` is treated as a kernel argument and silently
+ignored; compile options go through `config=RunConfig(...)`.
 
-Use `node.as_python()` to inspect IR for functions or programs. Pass `concise=True` to omit intermediate type annotations for cleaner output. Compile with `dump_passes=True` to dump IR snapshots for each optimization stage under `passes_dump/` in the output directory.
+## Inspecting the result
+
+`node.as_python()` prints the IR of a function or program; `concise=True` omits
+intermediate type annotations. A `JITFunction` has no `as_python()` of its own — the IR
+exists once a specialization does, so print `compiled.program.as_python()`.
+
+`dump_passes=` writes a snapshot after every pass under `passes_dump/`, which is how you
+find the pass that changed something you did not expect.
+
+## See Also
+
+- [Language Guide](language/index.md) — the language surface this page used to cover.
+- [Operations](ops/index.md) — the operator catalog.
+- [Functions and Programs](language/01-functions.md) — the decorators being compiled.
+- [Pass Manager](../dev/passes/00-pass_manager.md) — the pipeline `strategy` selects.
+- [Torch Codegen Debug Guide](03-torch_codegen_debug.md) — comparing the result against PyTorch.

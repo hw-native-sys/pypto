@@ -11,8 +11,8 @@ executes it on device.
 | You are... | Start here |
 | ---------- | ---------- |
 | New to PyPTO | [Getting Started](user/00-getting_started.md) — install, first program, compile and run |
-| Writing kernels | [Language Guide](user/01-language_guide.md) — types, functions, control flow, memory, scopes |
-| Looking for an operator | [Operation Reference](user/02-operation_reference.md) — the `pl.*` / `pl.tensor.*` / `pl.tile.*` surface |
+| Writing kernels | [Language Guide](user/language/index.md) — types, functions, control flow, memory, scopes |
+| Looking for an operator | [Operations](user/ops/index.md) — the `pl.*` / `pl.tensor.*` / `pl.tile.*` surface |
 | Chasing a wrong result | [Torch Codegen Debug Guide](user/03-torch_codegen_debug.md) — run the IR through PyTorch and compare |
 | Working on the compiler | [Developer documentation](dev/index.md) — IR, passes, code generation |
 | Reading generated code | [PTO ISA reference](reference/index.md) — cluster architecture and instruction semantics |

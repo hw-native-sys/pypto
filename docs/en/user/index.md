@@ -10,11 +10,11 @@ Pick the path that matches what you are trying to do. All three assume
 ### I want to write my first kernel
 
 [Quickstart](02-quickstart.md) → [Programming Model](03-programming-model.md) →
-[Language Guide](01-language_guide.md)
+[Language Guide](language/index.md)
 
 Start by getting something to compile, then learn what it was doing, then fill in the
-rest of the surface. Keep [Operation Reference](02-operation_reference.md) open
-alongside — you will be looking up operators constantly at first.
+rest of the surface. Keep the [operator catalog](ops/01-catalog.md) open alongside — you
+will be looking up operators constantly at first.
 
 ### I have a kernel and the numbers are wrong
 
@@ -43,8 +43,9 @@ see the table below for where its material currently lives.
 | [Installation](01-installation.md) | Prerequisites, install from source, build options, verification, a tour of `examples/` |
 | [Quickstart](02-quickstart.md) | Tensor-level kernels with `@pl.jit` — no manual data movement — plus loops, splitting work across functions, compiling and reading the IR |
 | [Programming Model](03-programming-model.md) | Tensor / Tile / Block levels, control vs. execution plane, the pass pipeline, memory hierarchy, execution model |
-| [Language Guide](01-language_guide.md) | The full language: type system, operations, SSA and control flow, memory and data movement, InCore scopes, compilation |
-| [Operation Reference](02-operation_reference.md) | The operator surface across the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces |
+| [Language Guide](language/index.md) | The full language, one topic per page: types, functions, control flow, memory, scopes and tasks, directives |
+| [Operations](ops/index.md) | Choosing between the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces, plus the operator catalog |
+| [Compiling a Program](01-language_guide.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
 | [Running on Device](00-getting_started.md) | Resident device tensors, explicit dispatch, benchmarking, distributed execution |
 | [Torch Codegen Debug Guide](03-torch_codegen_debug.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
 
@@ -52,11 +53,11 @@ see the table below for where its material currently lives.
 
 | Capability | Where it is documented |
 | ---------- | ---------------------- |
-| Kernel authoring with `@pl.jit` (and the `@pl.function` / `@pl.program` form it specializes into) | [Quickstart](02-quickstart.md), [Language Guide](01-language_guide.md) |
+| Kernel authoring with `@pl.jit` (and the `@pl.function` / `@pl.program` form it specializes into) | [Quickstart](02-quickstart.md), [Functions and Programs](language/01-functions.md) |
 | Explicit on-chip memory placement (Vec / Mat / L0A / L0B / L0C) | [Programming Model](03-programming-model.md#memory-hierarchy) |
-| Control flow: loops, carried values, conditionals, while | [Language Guide](01-language_guide.md) |
+| Control flow: loops, carried values, conditionals, while | [Control Flow](language/02-control-flow.md) |
 | Multi-function programs and cross-function calls | [Quickstart](02-quickstart.md) |
-| The full `@pl.jit` family (`.incore`, `.inline`, `.opaque`, `.host`) | [Quickstart](02-quickstart.md), [Language Guide](01-language_guide.md) |
+| The full `@pl.jit` family (`.incore`, `.inline`, `.opaque`, `.host`) | [Quickstart](02-quickstart.md), [Functions and Programs](language/01-functions.md) |
 | Hand-written C++ kernel integration | [External Kernels](../dev/language/01-external-kernels.md) |
 | Device-resident tensors, explicit dispatch, benchmarking | [Running on Device](00-getting_started.md) |
 | Distributed (multi-card) programs and collectives | [Distributed Operators](../dev/distributed_ops.md) |
@@ -74,7 +75,7 @@ chapter. Until those land, the corresponding material lives in the
 
 | Topic | Current location |
 | ----- | ---------------- |
-| Tasks, dependencies, `manual_scope` / `submit` | [Python IR Syntax Specification](../dev/language/00-python_syntax.md), [AutoDeriveTaskDependencies](../dev/passes/37-auto_derive_task_dependencies.md) |
+| Tasks, dependencies, `manual_scope` / `submit` | [Scopes and Tasks](language/04-scopes-and-tasks.md) |
 | Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | Distributed DSL and collectives | [Distributed Operators](../dev/distributed_ops.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |

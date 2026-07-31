@@ -10,4 +10,4 @@ The Python DSL as the compiler sees it.
 ## See Also
 
 - [IR Parser](../ir/07-parser.md) — how this syntax becomes IR.
-- [Language Guide](../../user/01-language_guide.md) — the same language from a user's perspective.
+- [Language Guide](../../user/language/index.md) — the same language from a user's perspective.
