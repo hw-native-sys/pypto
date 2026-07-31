@@ -250,7 +250,7 @@ _CARRY_RE = re.compile(r"^\s*(\w+)__rv_v\d+\s*=\s*(\w+);\s*$", re.MULTILINE)
 def _orch_code(kernel) -> str:
     """Specialize + run the Default pipeline, then emit the orchestration C++ in-process.
 
-    ``compile_for_test`` returns the post-pass ``ir.Program`` without dispatching to a device;
+    ``lower`` returns the post-pass ``ir.Program`` without dispatching to a device;
     the torch tensors are read for shape/dtype only. ``codegen.generate_orchestration`` is the
     same emitter that writes ``<build>/orchestration/<name>.cpp``.
 
@@ -269,9 +269,8 @@ def _orch_code(kernel) -> str:
         torch.empty(CACHE_ROWS, HIDDEN, dtype=torch.bfloat16),
         torch.empty(ROWS, HIDDEN, dtype=torch.float32),
     )
-    kernel._cache.clear()
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        program = kernel.compile_for_test(*sample)
+        program = kernel.lower(*sample)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func).code

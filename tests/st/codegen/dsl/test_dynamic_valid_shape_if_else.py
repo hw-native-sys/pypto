@@ -40,10 +40,9 @@ class TestDynValidShapeIfElse:
 
     def test_last_block(self):
         """is_last=True path: partial valid_len (48) -- vlen < physical."""
-        dyn_valid_shape._cache.clear()
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.compile_for_test(data, 2.0, 48, out)
+        program = dyn_valid_shape.lower(data, 2.0, 48, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"
@@ -51,10 +50,9 @@ class TestDynValidShapeIfElse:
 
     def test_full_block(self):
         """is_last=False path: full valid_len (= BLOCK_COL) -- fillpad no-op."""
-        dyn_valid_shape._cache.clear()
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.compile_for_test(data, 2.0, BLOCK_COL, out)
+        program = dyn_valid_shape.lower(data, 2.0, BLOCK_COL, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"

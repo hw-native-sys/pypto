@@ -47,10 +47,9 @@ class TestLoopDynValidShape:
 
     def test_partial_block(self):
         """Partial vlen (48) -- mirrors the ``is_last`` branch of the old loop."""
-        dyn_valid_shape._cache.clear()
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.compile_for_test(data, 2.0, 48, out)
+        program = dyn_valid_shape.lower(data, 2.0, 48, out)
         # Post-pass program must be non-empty and well-formed.
         assert program is not None
         assert len(program.functions) >= 1, (
@@ -59,10 +58,9 @@ class TestLoopDynValidShape:
 
     def test_full_block(self):
         """Full vlen (= BLOCK_COL) -- mirrors the non-last branch of the old loop."""
-        dyn_valid_shape._cache.clear()
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.compile_for_test(data, 2.0, BLOCK_COL, out)
+        program = dyn_valid_shape.lower(data, 2.0, BLOCK_COL, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"

@@ -71,7 +71,7 @@ def _split_k_program():
 def test_split_k_matmul_compiles():
     """The split-K matmul compiles through the full pipeline into an entry + per-core kernel."""
     torch = pytest.importorskip("torch")
-    post = _split_k_program().compile_for_test(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
+    post = _split_k_program().lower(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
     func_types = {f.func_type for f in post.functions.values()}
     assert ir.FunctionType.Orchestration in func_types, f"expected an Orchestration entry, got {func_types}"
     assert any(ir.is_incore_type(f.func_type) for f in post.functions.values()), (
@@ -82,7 +82,7 @@ def test_split_k_matmul_compiles():
 def test_split_k_matmul_emits_atomic_add_store():
     """The per-core kernel accumulates its partial product with an atomic-add store."""
     torch = pytest.importorskip("torch")
-    post = _split_k_program().compile_for_test(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
+    post = _split_k_program().lower(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
     incore = next(f for f in post.functions.values() if ir.is_incore_type(f.func_type))
     mlir = codegen.PTOCodegen().generate(ir.Program([incore], incore.name, post.span))
 
@@ -135,7 +135,7 @@ def test_split_k_bf16_direct_emits_atomic_add_store():
     (previously this required an fp32 scratch + explicit cast).
     """
     torch = pytest.importorskip("torch")
-    post = _split_k_bf16_program().compile_for_test(
+    post = _split_k_bf16_program().lower(
         torch.randn(_M, _K, dtype=torch.bfloat16),
         torch.randn(_K, _N, dtype=torch.bfloat16),
         torch.empty(_M, _N, dtype=torch.bfloat16),
@@ -193,7 +193,7 @@ def test_split_k_fp16_direct_emits_atomic_add_store():
     cube fix-pipe path (half is a legal Acc->GM destination dtype).
     """
     torch = pytest.importorskip("torch")
-    post = _split_k_fp16_program().compile_for_test(
+    post = _split_k_fp16_program().lower(
         torch.randn(_M, _K, dtype=torch.float16),
         torch.randn(_K, _N, dtype=torch.float16),
         torch.empty(_M, _N, dtype=torch.float16),
@@ -248,7 +248,7 @@ def test_split_k_int32_emits_atomic_add_store():
     ``loc=acc, dtype=i32`` source tile.
     """
     torch = pytest.importorskip("torch")
-    post = _split_k_int32_program().compile_for_test(
+    post = _split_k_int32_program().lower(
         torch.randint(-4, 4, (_M, _K), dtype=torch.int8),
         torch.randint(-4, 4, (_K, _N), dtype=torch.int8),
         torch.zeros(_M, _N, dtype=torch.int32),
@@ -284,7 +284,7 @@ def test_split_k_matmul_numerically_correct():
     b = torch.randn(_K, _N, dtype=torch.float32)
     c = torch.zeros(_M, _N, dtype=torch.float32)
 
-    post = _split_k_program().compile_for_test(a, b, c)
+    post = _split_k_program().lower(a, b, c)
     code = torch_codegen(post)
     ns: dict = {}
     exec(code, ns)  # noqa: S102 — executing generated reference code is the point
@@ -334,7 +334,7 @@ def test_split_k_down_projection_pattern_numerically_correct():
     resid = torch.randn(_DM, _DN, dtype=torch.float32)
     out = torch.zeros(_DM, _DN, dtype=torch.bfloat16)
 
-    post = _down_proj_split_k_program().compile_for_test(mlp, w_down, resid, out)
+    post = _down_proj_split_k_program().lower(mlp, w_down, resid, out)
     code = torch_codegen(post)
     ns: dict = {}
     exec(code, ns)  # noqa: S102 — executing generated reference code is the point

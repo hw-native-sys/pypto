@@ -99,7 +99,7 @@ class TestElementwise:
         a = torch.randn(128, 128)
         b = torch.randn(128, 128)
         c = torch.empty(128, 128)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_tile_mul_128x128(self):
@@ -150,7 +150,7 @@ class TestElementwise:
         a = torch.randn(128, 128)
         b = torch.randn(128, 128)
         c = torch.empty(128, 128)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_tile_add_64x64(self):
@@ -201,7 +201,7 @@ class TestElementwise:
         a = torch.randn(64, 64)
         b = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_tile_mul_64x64(self):
@@ -252,7 +252,7 @@ class TestElementwise:
         a = torch.randn(64, 64)
         b = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
 
@@ -312,7 +312,7 @@ class TestFusedOps:
         a = torch.randn(128, 128)
         b = torch.randn(128, 128)
         c = torch.empty(128, 128)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_fused_add_relu(self):
@@ -365,7 +365,7 @@ class TestFusedOps:
         a = torch.randn(128, 128)
         b = torch.randn(128, 128)
         c = torch.empty(128, 128)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_fused_matmul_bias(self):
@@ -447,7 +447,7 @@ class TestFusedOps:
         b = torch.randn(64, 64)
         bias = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, b, bias, c)
+        got = orchestrator.lower(a, b, bias, c)
         ir.assert_structural_equal(got, expected)
 
     def test_fused_linear_relu(self):
@@ -531,7 +531,7 @@ class TestFusedOps:
         w = torch.randn(64, 64)
         bias = torch.randn(64, 64)
         y = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(x, w, bias, y)
+        got = orchestrator.lower(x, w, bias, y)
         ir.assert_structural_equal(got, expected)
 
 
@@ -593,7 +593,7 @@ class TestMatmul:
         a = torch.randn(64, 64)
         b = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
     def test_matmulacc_program(self):
@@ -658,7 +658,7 @@ class TestMatmul:
         a = torch.randn(64, 64)
         b = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, b, c)
+        got = orchestrator.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
 
@@ -719,7 +719,7 @@ class TestActivation:
 
         x = torch.randn(32, 128)
         out = torch.empty(32, 128)
-        got = silu_orch.compile_for_test(x, out)
+        got = silu_orch.lower(x, out)
         ir.assert_structural_equal(got, expected)
 
     def test_gelu(self):
@@ -775,7 +775,7 @@ class TestActivation:
 
         x = torch.randn(32, 128)
         out = torch.empty(32, 128)
-        got = gelu_orch.compile_for_test(x, out)
+        got = gelu_orch.lower(x, out)
         ir.assert_structural_equal(got, expected)
 
     def test_swiglu(self):
@@ -836,7 +836,7 @@ class TestActivation:
         gate = torch.randn(32, 128)
         up = torch.randn(32, 128)
         out = torch.empty(32, 128)
-        got = swiglu_orch.compile_for_test(gate, up, out)
+        got = swiglu_orch.lower(gate, up, out)
         ir.assert_structural_equal(got, expected)
 
     def test_geglu(self):
@@ -899,7 +899,7 @@ class TestActivation:
         gate = torch.randn(32, 128)
         up = torch.randn(32, 128)
         out = torch.empty(32, 128)
-        got = geglu_orch.compile_for_test(gate, up, out)
+        got = geglu_orch.lower(gate, up, out)
         ir.assert_structural_equal(got, expected)
 
 
@@ -964,7 +964,7 @@ class TestSoftmax:
 
         a = torch.randn(64, 64)
         out = torch.empty(64, 64)
-        got = orchestrator.compile_for_test(a, out)
+        got = orchestrator.lower(a, out)
         ir.assert_structural_equal(got, expected)
 
 
@@ -1044,7 +1044,7 @@ class TestNormalization:
         x = torch.randn(32, 64)
         gamma = torch.randn(1, 64)
         out = torch.empty(32, 64)
-        got = rms_norm_orch.compile_for_test(x, gamma, out)
+        got = rms_norm_orch.lower(x, gamma, out)
         ir.assert_structural_equal(got, expected)
 
     def test_layer_norm(self):
@@ -1138,7 +1138,7 @@ class TestNormalization:
         gamma = torch.randn(1, 64)
         beta = torch.randn(1, 64)
         out = torch.empty(32, 64)
-        got = layer_norm_orch.compile_for_test(x, gamma, beta, out)
+        got = layer_norm_orch.lower(x, gamma, beta, out)
         ir.assert_structural_equal(got, expected)
 
 
@@ -1209,7 +1209,7 @@ class TestAssemble:
         a = torch.randn(32, 16)
         b = torch.randn(16, 16)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, a, b, y)
+        got = orchestrator.lower(x, a, b, y)
         ir.assert_structural_equal(got, expected, enable_auto_mapping=True)
 
     def test_assemble_vec(self):
@@ -1260,7 +1260,7 @@ class TestAssemble:
         x = torch.randn(32, 32)
         src = torch.randn(32, 16)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, src, y)
+        got = orchestrator.lower(x, src, y)
         ir.assert_structural_equal(got, expected)
 
     def test_assemble_row_by_row(self):
@@ -1315,7 +1315,7 @@ class TestAssemble:
         x = torch.randn(32, 32)
         src = torch.randn(32, 16)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, src, y)
+        got = orchestrator.lower(x, src, y)
         ir.assert_structural_equal(got, expected)
 
     def test_assemble_double_loop(self):
@@ -1374,7 +1374,7 @@ class TestAssemble:
         x = torch.randn(32, 32)
         src = torch.randn(32, 16)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, src, y)
+        got = orchestrator.lower(x, src, y)
         ir.assert_structural_equal(got, expected)
 
     def test_assemble_loop_col_broadcast(self):
@@ -1427,7 +1427,7 @@ class TestAssemble:
         x = torch.randn(32, 32)
         src = torch.randn(32, 8)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, src, y)
+        got = orchestrator.lower(x, src, y)
         ir.assert_structural_equal(got, expected)
 
     def test_assemble_double_loop_broadcast(self):
@@ -1482,7 +1482,7 @@ class TestAssemble:
         x = torch.randn(32, 32)
         src = torch.randn(16, 16)
         y = torch.empty(32, 32)
-        got = orchestrator.compile_for_test(x, src, y)
+        got = orchestrator.lower(x, src, y)
         ir.assert_structural_equal(got, expected)
 
 
@@ -1552,7 +1552,7 @@ class TestDynamic:
         a = torch.randn(64, 128)
         b = torch.randn(64, 128)
         c = torch.empty(64, 128)
-        got = orchestrator_dyn.compile_for_test(a, b, c)
+        got = orchestrator_dyn.lower(a, b, c)
         ir.assert_structural_equal(got, expected)
 
 

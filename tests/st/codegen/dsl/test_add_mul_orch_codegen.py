@@ -40,19 +40,18 @@ class TestOrchestrationCodegen:
         - Post-pass IR has 3 outlined InCore (AIV) functions + 1 Orchestration
         - No exceptions are raised during compilation
         """
-        example_orch._cache.clear()
         a = torch.full((16, 16), 2.0, dtype=torch.float32)
         b = torch.full((16, 16), 3.0, dtype=torch.float32)
         output = torch.zeros((16, 16), dtype=torch.float32)
 
-        program = example_orch.compile_for_test(a, b, output)
+        program = example_orch.lower(a, b, output)
 
         # Verify post-pass IR shape: the example_orch entry composes three
         # @pl.jit.incore helpers (kernel_add_16, kernel_add_scalar_16,
         # kernel_mul_16); after OutlineIncoreScopes / pass pipeline the program
         # should hold exactly one Orchestration function plus three on-chip
         # (AIV) functions outlined from the incore scopes.
-        assert program is not None, "compile_for_test returned None"
+        assert program is not None, "lower returned None"
         types = [fn.func_type for fn in program.functions.values()]
         orch_count = sum(1 for t in types if t == FunctionType.Orchestration)
         aiv_count = sum(1 for t in types if t == FunctionType.AIV)

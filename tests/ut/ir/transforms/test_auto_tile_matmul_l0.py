@@ -868,9 +868,9 @@ class TestAutoTileMatmulL0MNTiling:
         b = torch.randn(256, 256, dtype=torch.float32)
         c = torch.zeros(256, 256, dtype=torch.float32)
 
-        # compile_for_test runs the full pipeline; AllocateMemoryAddr would
+        # lower runs the full pipeline; AllocateMemoryAddr would
         # raise on an L0c overflow if the output were not tiled.
-        post = kernel.compile_for_test(a, b, c)
+        post = kernel.lower(a, b, c)
         code = torch_codegen(post)
         ns: dict = {}
         exec(code, ns)  # noqa: S102 — executing generated reference code is the point

@@ -35,7 +35,7 @@ from examples.models.qwen3_jit.qwen3_decode import qwen3_decode  # noqa: E402
 
 def _make_args():
     def empty(shape, dtype):
-        # ``compile_for_test`` consumes only tensor *shape* and *dtype* metadata
+        # ``lower`` consumes only tensor *shape* and *dtype* metadata
         # (via ``_bind_args``); it never reads the tensor values. Filling the
         # Qwen3-32B weights + 512K-row KV cache with ``torch.*.normal_()`` is
         # ~37s of pure overhead per call (916M elements), so allocate
@@ -78,15 +78,15 @@ _POST_PASS: list = []
 def post_pass():
     """Compile the Qwen3 decode example once; shared across this module's tests."""
     if not _POST_PASS:
-        _POST_PASS.append(qwen3_decode.compile_for_test(*_make_args()))
+        _POST_PASS.append(qwen3_decode.lower(*_make_args()))
     return _POST_PASS[0]
 
 
 class TestQwen3JITCompile:
     """End-to-end compile of the Qwen3 JIT example."""
 
-    def test_qwen3_decode_compile_for_test(self, post_pass):
-        """compile_for_test runs the full pipeline; the post-pass IR drops all
+    def test_qwen3_decode_lower(self, post_pass):
+        """lower runs the full pipeline; the post-pass IR drops all
         Inline functions and outlines pl.at scopes into InCore-class kernels."""
         names = sorted(f.name for f in post_pass.functions.values())
 

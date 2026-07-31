@@ -48,7 +48,7 @@ def test_jit_spmd_for_loop():
             c = pl.store(pl.add(tile_a, tile_b), [offset, 0], c)
         return c
 
-    post = spmd_add.compile_for_test(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
+    post = spmd_add.lower(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
     func_types = {f.func_type for f in post.functions.values()}
     assert ir.FunctionType.Spmd in func_types, (
         f"expected an Spmd function from `for i in pl.spmd()`, got {func_types}"
@@ -76,7 +76,7 @@ def test_jit_spmd_with_form():
             c = add_kernel(a, b, c)
         return c
 
-    post = entry.compile_for_test(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
+    post = entry.lower(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
     func_types = {f.func_type for f in post.functions.values()}
     assert ir.FunctionType.Spmd in func_types, (
         f"expected an Spmd function from `with pl.spmd()`, got {func_types}"
@@ -103,7 +103,7 @@ def test_jit_spmd_inline_with_form_no_tid():
             c = pl.store(pl.add(tile_a, tile_b), [offset, 0], c)
         return c
 
-    post = entry.compile_for_test(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
+    post = entry.lower(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
     func_types = {f.func_type for f in post.functions.values()}
     assert ir.FunctionType.Spmd in func_types, (
         f"expected an Spmd function from the inline `with pl.spmd()` body, got {func_types}"
@@ -145,7 +145,7 @@ def test_jit_inline_helper_spmd_for_loop():
         c = spmd_helper(a, b, c)
         return c
 
-    post = entry.compile_for_test(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
+    post = entry.lower(torch.randn(128, 128), torch.randn(128, 128), torch.empty(128, 128))
     func_types = {f.func_type for f in post.functions.values()}
     # InlineFunctions splices away every Inline helper.
     assert ir.FunctionType.Inline not in func_types, (
@@ -162,7 +162,7 @@ def test_jit_spmd_sibling_pipeline_loops_reuse_names():
     Regression for issue #1432 / PR #1414: before #1414 the JIT specializer's
     alpha-renamer treated the second loop's ``k0`` / ``chunk`` as loop-carried
     rebinds of the first loop's locals, emitting a bridge that reads them
-    outside their defining scope — which ConvertToSSA rejects. ``compile_for_test``
+    outside their defining scope — which ConvertToSSA rejects. ``lower``
     raises if the specializer regresses.
     """
     torch = pytest.importorskip("torch")
@@ -189,7 +189,7 @@ def test_jit_spmd_sibling_pipeline_loops_reuse_names():
         out = rmsnorm_like(a, out)
         return out
 
-    post = entry.compile_for_test(
+    post = entry.lower(
         # Input is BF16 so the `pl.cast(..., FP32)` in `rmsnorm_like` is a
         # real cross-dtype promotion. Same-dtype casts are rejected at IR
         # construction time, so this fixture must not feed FP32 in.
@@ -227,7 +227,7 @@ def test_jit_spmd_with_form_as_tid_captures_and_wires_deps():
             out2 = pl.store(pl.add(u, u), [j * 64, 0], out2)
         return out2
 
-    post = entry.compile_for_test(torch.randn(128, 128), torch.empty(128, 128), torch.empty(128, 128))
+    post = entry.lower(torch.randn(128, 128), torch.empty(128, 128), torch.empty(128, 128))
     spmd_fns = [f for f in post.functions.values() if f.func_type == ir.FunctionType.Spmd]
     assert len(spmd_fns) == 2, (
         f"expected two Spmd functions from the two captured pl.spmd() dispatches, got {len(spmd_fns)}"

@@ -23,7 +23,7 @@ intent therefore rides a scope-level ``kAttrDumpVars`` carrier:
   - the outliner translates the captured scope dump Vars into the synthesised
     dispatch's ``dump_vars`` by Var identity.
 
-These run the full Default pass pipeline via ``compile_for_test`` (no device),
+These run the full Default pass pipeline via ``lower`` (no device),
 so they also exercise the print -> reparse roundtrip after every pass (the
 ``tests/ut/conftest.py`` autouse fixture). The companion device/manifest checks
 live in ``tests/st/runtime/framework_and_models/test_dump_tag.py``.
@@ -154,11 +154,10 @@ def test_dump_tag_reaches_outlined_dispatch_single_func():
     tagged inout — the single-kernel (one ``task_id``) invariant the scene test
     asserts on the runtime manifest."""
     torch = pytest.importorskip("torch")
-    _add_mul_with_dump_tags._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _add_mul_with_dump_tags.compile_for_test(a, c)
+    program = _add_mul_with_dump_tags.lower(a, c)
 
     dumps = _dispatch_dump_vars(program)
     assert len(dumps) == 2, f"expected two outlined dispatches, got {sorted(dumps)}"
@@ -177,11 +176,10 @@ def test_tag_survives_multi_level_inline_passthrough():
     outer inline consumes it) still reaches the deep dispatch — InlineFunctions
     carries it on the nested dispatch Call across each splice iteration."""
     torch = pytest.importorskip("torch")
-    _entry_tag_through_two_inline_levels._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _entry_tag_through_two_inline_levels.compile_for_test(a, c)
+    program = _entry_tag_through_two_inline_levels.lower(a, c)
 
     dumps = _dispatch_dump_vars(program)
     dumping = {name: dv for name, dv in dumps.items() if dv}
@@ -205,11 +203,10 @@ def test_dump_tag_reaches_for_form_spmd_dispatch():
          the outer wrapper Call, missing a tag attached to the inner kernel Call
          (where a body-local ``pl.dump_tag`` lands)."""
     torch = pytest.importorskip("torch")
-    _spmd_for_with_dump_tag._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _spmd_for_with_dump_tag.compile_for_test(a, c)
+    program = _spmd_for_with_dump_tag.lower(a, c)
 
     # (1) Parser: the inner outlined kernel dispatch carries the tagged Var.
     dumps = _dispatch_dump_vars(program)
@@ -260,13 +257,12 @@ def test_dump_tag_survives_cluster_group_mixed_split():
     constructor that drops ``attrs_``, so ``kAttrDumpVars`` was lost when the
     Group was split into AIC/AIV lanes."""
     torch = pytest.importorskip("torch")
-    _cluster_mixed_with_dump_tag._cache.clear()
 
     a = torch.randn(64, 64, dtype=torch.float32)
     b = torch.randn(64, 64, dtype=torch.float32)
     bias = torch.randn(64, 64, dtype=torch.float32)
     c = torch.zeros(64, 64, dtype=torch.float32)
-    program = _cluster_mixed_with_dump_tag.compile_for_test(a, b, bias, c)
+    program = _cluster_mixed_with_dump_tag.lower(a, b, bias, c)
 
     dumps = _dispatch_dump_vars(program)
     tagged = sorted({_base(n) for dv in dumps.values() for n in dv})
@@ -276,11 +272,10 @@ def test_dump_tag_survives_cluster_group_mixed_split():
 def test_no_dump_tag_yields_no_dispatch_dump_vars():
     """Without any marker, no dispatch carries dump_vars (selective dump off)."""
     torch = pytest.importorskip("torch")
-    _add_mul_no_tags._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _add_mul_no_tags.compile_for_test(a, c)
+    program = _add_mul_no_tags.lower(a, c)
 
     dumps = _dispatch_dump_vars(program)
     assert dumps, "expected outlined dispatches"

@@ -13,7 +13,7 @@ JIT is a specialization layer, not a distinct dispatch surface: a JIT function
 body is specialized then parsed exactly like ``@pl.program`` source, so the
 ``pl.at(..., allow_early_resolve=True)`` hint flows through the full Default
 pass pipeline (specialize -> parse -> outline -> codegen) unchanged. These run
-``compile_for_test`` (no device) and assert the synthesized dispatch's Arg
+``lower`` (no device) and assert the synthesized dispatch's Arg
 carries ``set_allow_early_resolve(true)`` (simpler#1065).
 """
 
@@ -49,11 +49,10 @@ def _orch_code(program: ir.Program) -> str:
 
 def test_jit_at_allow_early_resolve_emits_hint():
     torch = pytest.importorskip("torch")
-    _at_early_resolve_entry._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _at_early_resolve_entry.compile_for_test(a, c)
+    program = _at_early_resolve_entry.lower(a, c)
 
     code = _orch_code(program)
     assert "set_allow_early_resolve(true);" in code, code
@@ -62,11 +61,10 @@ def test_jit_at_allow_early_resolve_emits_hint():
 
 def test_jit_no_flag_emits_no_hint():
     torch = pytest.importorskip("torch")
-    _at_no_flag_entry._cache.clear()
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    program = _at_no_flag_entry.compile_for_test(a, c)
+    program = _at_no_flag_entry.lower(a, c)
 
     assert "set_allow_early_resolve" not in _orch_code(program)
 

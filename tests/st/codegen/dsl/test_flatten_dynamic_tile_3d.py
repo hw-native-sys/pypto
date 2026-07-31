@@ -75,7 +75,6 @@ class TestFlattenDynamicTile3D:
     def test_3d_dynamic_tile_now_compiles(self):
         """A user-chunked dynamic >2D tile compiles end-to-end: flatten lowers the
         static per-chunk tile to 2D while preserving the dynamic valid tail."""
-        cast_3d_dynamic._cache.clear()
         # Concrete arg shapes only seed specialization; B_DYN/S_DYN stay symbolic,
         # so the [1, CHUNK, 512] tile keeps a dynamic valid extent at pass time.
         # S=40 with CHUNK=16 exercises multiple chunks plus a partial tail (16 + 16 + 8).
@@ -84,8 +83,8 @@ class TestFlattenDynamicTile3D:
 
         # Runs the full pass pipeline (no raise). Before the fix, FlattenTileNdTo2D
         # dropped the dynamic valid_shape when flattening the >2D per-chunk tile.
-        program = cast_3d_dynamic.compile_for_test(x, out)
-        assert program is not None, "compile_for_test returned None"
+        program = cast_3d_dynamic.lower(x, out)
+        assert program is not None, "lower returned None"
         # The kernel's InCore function survives the pipeline.
         names = [fn.name for fn in program.functions.values()]
         assert any("cast_3d_dynamic" in n or "inner" in n for n in names), (
