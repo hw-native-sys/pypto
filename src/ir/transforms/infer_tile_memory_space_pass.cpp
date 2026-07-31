@@ -18,7 +18,6 @@
 #include <set>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -54,10 +53,6 @@ namespace ir {
 using transform_utils::GetLastYieldStmt;
 
 namespace {
-
-// Unregistered cube ops (not yet registered via REGISTER_OP but still need Acc output)
-const std::unordered_set<std::string> kUnregisteredCubeOps = {"tile.matmul_mx", "tile.matmul_mx_acc",
-                                                              "tile.matmul_mx_bias"};
 
 // Look up input constraints for an op. Returns nullptr if none.
 const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::string& op_name) {
@@ -99,7 +94,9 @@ class DemandCollector : public IRVisitor {
   }
 
   void VisitStmt_(const EvalStmtPtr& op) override {
-    if (auto call = As<Call>(op->expr_)) RecordDirectDemands(call);
+    if (auto call = As<Call>(op->expr_)) {
+      RecordDirectDemands(call);
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -124,7 +121,6 @@ class DemandCollector : public IRVisitor {
   // `dst -> src` edges for ops with OutputMemoryInheritsInput(), captured in
   // program order. Walked in reverse in PropagateThroughInheritInputOps.
   std::vector<std::pair<VarPtr, VarPtr>> edges_;
-
   void RecordDirectDemands(const CallPtr& call) {
     auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return;
@@ -289,7 +285,6 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     // Handle unregistered ops (backward compat)
     if (!registry.IsRegistered(op_name)) {
-      if (kUnregisteredCubeOps.count(op_name) > 0) return MemorySpace::Acc;
       return MemorySpace::Vec;
     }
 
@@ -863,6 +858,8 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
 
   // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args,
   // rewrite target_memory kwargs on retargetable producers to stay consistent.
+  // MX scale-address binding (tile.tget_scale_addr) is inserted afterwards by
+  // InsertMxScaleAddr, once every operand memory space is concrete.
   TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves());
   auto new_body = mutator.VisitStmt(func->body_);
 

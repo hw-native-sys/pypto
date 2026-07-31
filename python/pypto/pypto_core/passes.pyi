@@ -516,6 +516,16 @@ def infer_tile_memory_space() -> Pass:
     consumed before the pass returns.
     """
 
+def insert_mx_scale_addr() -> Pass:
+    """Insert ``tile.tget_scale_addr`` before MX matmul consumers.
+
+    Requires ``infer_tile_memory_space`` first so Left/LeftScale and
+    Right/RightScale pairs are resolved. Rewrites each ``matmul_mx`` family
+    call to consume the bound scale SSA. Bindings are never reused across MX
+    consumers because ``tget_scale_addr`` mutates a shared physical scale
+    buffer whose aliases are not represented by SSA identity.
+    """
+
 def materialize_tensor_strides() -> Pass:
     """Create the MaterializeTensorStrides pass (RFC #1300 §2.4).
 
@@ -907,6 +917,7 @@ __all__ = [
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",
+    "insert_mx_scale_addr",
     "materialize_tensor_strides",
     "resolve_backend_op_layouts",
     "normalize_return_order",

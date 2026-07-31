@@ -183,6 +183,7 @@ class PassManager:
             passes.auto_tile_matmul_l0,
             passes.canonicalize_tile_slice,
             passes.infer_tile_memory_space,
+            passes.insert_mx_scale_addr,
             passes.resolve_backend_op_layouts,
             # RFC #1300: convert AUTO pl.split mixed InCore functions into the explicit
             # split_aiv form (aiv_shard/aic_gather + halved vector sub-region) so

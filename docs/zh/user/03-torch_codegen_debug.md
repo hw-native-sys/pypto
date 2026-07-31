@@ -177,7 +177,7 @@ validate_pass_ir_codegen_results(
 典型输出格式：
 
 ```text
-==================== 19_after_ExpandMixedKernel ====================
+==================== 21_after_ExpandMixedKernel ====================
 validate tensor: 'out', max_abs_diff: 1.234567e-03, pass: True
 ```
 

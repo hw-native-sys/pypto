@@ -32,33 +32,34 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 15 | [AutoTileMatmulL0](15-auto_tile_matmul_l0.md) | 依据后端 L0 容量选择 L0 tile 形状 `(m, n, k)` 并据此分块 matmul |
 | 16 | [CanonicalizeTileSlice](16-canonicalize_tile_slice.md) | 把 `tile.slice` 下降为规范的 `tile.extract` 形式 |
 | 17 | [InferTileMemorySpace](17-infer_tile_memory_space.md) | 推断每个 tile 的片上 `MemorySpace`，并插入 `tile.move` 消解残留不匹配 |
-| 18 | [ResolveBackendOpLayouts](18-resolve_backend_op_layouts.md) | 修正逐元素算子所需的后端 tile layout |
-| 19 | [LowerAutoVectorSplit](19-lower_auto_vector_split.md) | 把 AUTO `pl.split` 的混合 InCore 函数转换为显式 `split_aiv` 形式 |
-| 20 | [ExpandMixedKernel](20-expand_mixed_kernel.md) | 把混合 InCore 函数拆分为独立的 AIC（Cube）与 AIV（Vector）kernel |
-| 21 | [InjectGMPipeBuffer](21-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910B） |
-| 22 | [SplitVectorKernel](22-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |
-| 23 | [StampTfreeSplit](23-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
-| 24 | [NormalizeReturnOrder](24-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
-| 25 | [SkewCrossCorePipeline](25-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
-| 26 | [LowerPipelineLoops](26-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
-| 27 | [CanonicalizeIOOrder](27-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
-| 28 | [MaterializeTensorStrides](28-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
-| 29 | [InitMemRef](29-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
-| 30 | [MaterializeSemanticAliases](30-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
-| 31 | [MemoryReuse](31-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc |
-| 32 | [AllocateMemoryAddr](32-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
-| 33 | [FoldNoOpReshape](33-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
-| 34 | [FuseCreateAssembleToSlice](34-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
-| 35 | [DeriveCallDirections](35-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
-| 36 | [AutoDeriveTaskDependencies](36-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
-| 37 | [ExpandManualPhaseFence](37-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
-| 38 | [SynthesizeAllReduceSignals](38-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
-| 39 | [MaterializeCommDomainScopes](39-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
-| 40 | [LowerHostTensorCollectives](40-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
-| 41 | [MaterializeDistTensorCtx](41-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
-| 42 | [MaterializeRuntimeScopes](42-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
-| 43 | [ClassifyIterArgCarry](43-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
-| 44 | [InsertCommFence](44-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
+| 18 | [InsertMxScaleAddr](18-insert_mx_scale_addr.md) | 在 memory space 解析完成后，于 MX matmul 消费者前插入 `tile.tget_scale_addr` |
+| 19 | [ResolveBackendOpLayouts](19-resolve_backend_op_layouts.md) | 修正逐元素算子所需的后端 tile layout |
+| 20 | [LowerAutoVectorSplit](20-lower_auto_vector_split.md) | 把 AUTO `pl.split` 的混合 InCore 函数转换为显式 `split_aiv` 形式 |
+| 21 | [ExpandMixedKernel](21-expand_mixed_kernel.md) | 把混合 InCore 函数拆分为独立的 AIC（Cube）与 AIV（Vector）kernel |
+| 22 | [InjectGMPipeBuffer](22-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910B） |
+| 23 | [SplitVectorKernel](23-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |
+| 24 | [StampTfreeSplit](24-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
+| 25 | [NormalizeReturnOrder](25-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
+| 26 | [SkewCrossCorePipeline](26-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
+| 27 | [LowerPipelineLoops](27-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
+| 28 | [CanonicalizeIOOrder](28-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
+| 29 | [MaterializeTensorStrides](29-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
+| 30 | [InitMemRef](30-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
+| 31 | [MaterializeSemanticAliases](31-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
+| 32 | [MemoryReuse](32-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc |
+| 33 | [AllocateMemoryAddr](33-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
+| 34 | [FoldNoOpReshape](34-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
+| 35 | [FuseCreateAssembleToSlice](35-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
+| 36 | [DeriveCallDirections](36-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
+| 37 | [AutoDeriveTaskDependencies](37-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
+| 38 | [ExpandManualPhaseFence](38-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
+| 39 | [SynthesizeAllReduceSignals](39-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
+| 40 | [MaterializeCommDomainScopes](40-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
+| 41 | [LowerHostTensorCollectives](41-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
+| 42 | [MaterializeDistTensorCtx](42-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
+| 43 | [MaterializeRuntimeScopes](43-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
+| 44 | [ClassifyIterArgCarry](44-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
+| 45 | [InsertCommFence](45-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
 
 ## 默认流水线之外
 

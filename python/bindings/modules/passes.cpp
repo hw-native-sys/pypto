@@ -481,6 +481,13 @@ void BindPass(nb::module_& m) {
              "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
+  passes.def("insert_mx_scale_addr", &pass::InsertMxScaleAddr,
+             "Create a pass that inserts tile.tget_scale_addr before MX matmul consumers\n\n"
+             "Requires InferTileMemorySpace first so Left/LeftScale and Right/RightScale\n"
+             "pairs are resolved. Rewrites each matmul_mx family call to consume the bound\n"
+             "scale SSA. Bindings are never reused across MX consumers because\n"
+             "tget_scale_addr mutates a shared physical scale buffer whose aliases are\n"
+             "not represented by SSA identity.");
   passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
              "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
              "Walks every TensorType reachable from the program and rewrites any\n"

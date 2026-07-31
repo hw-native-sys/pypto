@@ -227,7 +227,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
 作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](19-lower_auto_vector_split.md)。
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)。
 
 **任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
 携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动

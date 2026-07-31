@@ -71,6 +71,9 @@ __all__ = [
     "matmul_acc",
     "batch_matmul_acc",
     "matmul_bias",
+    "matmul_mx",
+    "matmul_mx_acc",
+    "matmul_mx_bias",
     "gemv",
     "gemv_acc",
     "gemv_bias",
@@ -1237,6 +1240,60 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
         Tile wrapping the matmul_bias operation
     """
     call_expr = _ir_ops.matmul_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+    """MX block-scale matrix multiplication.
+
+    Args:
+        lhs: Left-hand side data tile (FP8E4M3FN)
+        lhs_scale: Left-hand side scale tile (FP8E8M0)
+        rhs: Right-hand side data tile (FP8E4M3FN)
+        rhs_scale: Right-hand side scale tile (FP8E8M0)
+
+    Returns:
+        Tile wrapping the matmul_mx operation
+    """
+    call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+    """MX block-scale matmul with accumulation.
+
+    Args:
+        acc: Accumulator tile
+        lhs: Left-hand side data tile (FP8E4M3FN)
+        lhs_scale: Left-hand side scale tile (FP8E8M0)
+        rhs: Right-hand side data tile (FP8E4M3FN)
+        rhs_scale: Right-hand side scale tile (FP8E8M0)
+
+    Returns:
+        Tile wrapping the matmul_mx_acc operation
+    """
+    call_expr = _ir_ops.matmul_mx_acc(
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+    )
+    return Tile(expr=call_expr)
+
+
+def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
+    """MX block-scale matmul with bias.
+
+    Args:
+        lhs: Left-hand side data tile (FP8E4M3FN)
+        lhs_scale: Left-hand side scale tile (FP8E8M0)
+        rhs: Right-hand side data tile (FP8E4M3FN)
+        rhs_scale: Right-hand side scale tile (FP8E8M0)
+        bias: Bias tile
+
+    Returns:
+        Tile wrapping the matmul_mx_bias operation
+    """
+    call_expr = _ir_ops.matmul_mx_bias(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap()
+    )
     return Tile(expr=call_expr)
 
 

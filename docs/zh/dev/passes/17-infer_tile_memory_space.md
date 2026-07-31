@@ -15,7 +15,7 @@
 - InCore / Orchestration 拆分必须已完成（`SplitIncoreOrch`）
 - 语句结构必须已规范化（`NormalizedStmtStructure`）
 
-**使用时机**：在 `FlattenTileNdTo2D` 之后运行（中间还隔着 `LegalizeTileCast`、`AutoTileMatmulL0` 与 `CanonicalizeTileSlice`），先于 `ResolveBackendOpLayouts` / `ExpandMixedKernel`。它是 tile memory 成为下游契约的标准时点——尤其是 `ExpandMixedKernel` 的混合 kernel 检测和 `InitMemRef` 的缓冲区分配都直接读取该结果。
+**使用时机**：在 `FlattenTileNdTo2D` 之后运行（中间还隔着 `LegalizeTileCast`、`AutoTileMatmulL0` 与 `CanonicalizeTileSlice`），先于 `InsertMxScaleAddr` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`。它是 tile memory 成为下游契约的标准时点——尤其是 `InsertMxScaleAddr` 的 scale 绑定、`ExpandMixedKernel` 的混合 kernel 检测和 `InitMemRef` 的缓冲区分配都直接读取该结果。
 
 ## API
 
@@ -68,7 +68,7 @@ program_inferred = infer_pass(program)
 
 | 生产者类型 | 解析得到的 memory space |
 | ---------- | ----------------------- |
-| 未注册的 cube 算子（`tile.matmul_mx*`） | `Acc` |
+| 已注册 cube 算子（`tile.matmul`、`tile.matmul_mx` 等） | 来自 op memory spec（`Acc`） |
 | 其他未注册算子 | `Vec` |
 | 已注册但无 `MemorySpec` 的算子 | 若 `Call` 返回类型已设置且非 `DDR`，则使用之；否则 `Vec` |
 | `deduce_output_memory` 返回 `Some(s)` 的已注册算子（如 `tile.matmul → Acc`） | `s` |

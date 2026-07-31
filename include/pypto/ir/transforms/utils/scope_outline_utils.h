@@ -119,7 +119,7 @@ class PostStoreAliasCollector : public IRVisitor {
  * modes there is no representative; ``uniform_mode`` is reset to ``nullopt`` and
  * the outliner stamps ``split_aiv=true`` WITHOUT a function-level ``split`` mode.
  * The authoritative per-region mode is always ``node->split_``, consumed at
- * LowerAutoVectorSplit (21); downstream readers of the function-level mode
+ * LowerAutoVectorSplit (20); downstream readers of the function-level mode
  * (ExpandMixedKernel, SplitVectorKernel, MemoryReuse) tolerate the unset mode by
  * keying on the ``split_aiv`` marker / per-op split.
  */
@@ -1131,7 +1131,7 @@ class ScopeOutliner : public IRMutator {
       // Stamp a function-level representative ``split`` mode ONLY when all regions
       // share one mode (``uniform_mode``). Differing sibling modes have no single
       // representative: leave the function-level mode unset — the authoritative
-      // per-region mode rides ``node->split_`` (consumed at pass 21). No need to
+      // per-region mode rides ``node->split_`` (consumed at pass 20). No need to
       // re-check incore_split here: the CHECK above guarantees it is None.
       if (finder.uniform_mode.has_value()) {
         outlined_attrs.emplace_back("split", static_cast<int>(finder.uniform_mode.value()));

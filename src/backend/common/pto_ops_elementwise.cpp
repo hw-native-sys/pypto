@@ -14,6 +14,7 @@
  * @brief PTO codegen registration for elementwise / compute tile ops.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -632,9 +633,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
-    {"tile.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
-    // tile.matmul_acc and tile.gemv_acc have custom codegen (in-place accumulation)
+    // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
+    // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     {"tile.gemv",            "pto.tgemv",            2},
     // tile.gemv_acc has custom codegen (in-place accumulation)
@@ -964,8 +965,54 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     };
   };
 
+  // MX in-place acc (5 operands): same c_in==dst contract as make_acc_codegen,
+  // kept separate so the non-MX 3-arg helper stays untouched.
+  auto make_mx_acc_codegen = [](const std::string& pto_op) {
+    return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+      auto& codegen = AsPto(codegen_base);
+      CHECK(op->args_.size() == 5) << pto_op
+                                   << " requires 5 arguments: acc, lhs, lhs_scale, rhs, rhs_scale, but got "
+                                   << op->args_.size();
+
+      std::string dst = codegen.GetCurrentResultTarget();
+      INTERNAL_CHECK(!dst.empty()) << "Internal error: " << pto_op
+                                   << " Acc SSA must resolve (in-place c_in==dst)";
+      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+      std::ostringstream acc_inst;
+      acc_inst << pto_op << " ins(" << dst;
+      std::vector<std::string> operand_types = {dst_type};
+      for (size_t i = 1; i < op->args_.size(); ++i) {
+        acc_inst << ", " << codegen.GetExprAsCode(op->args_[i]);
+        operand_types.push_back(codegen.GetExprTypeAnnotation(op->args_[i]));
+      }
+      // Type annotations must be all present or all absent; a partial set
+      // would desync the `: t0, t1, ...` clause from operand positions.
+      const bool any_type_present = std::any_of(operand_types.begin(), operand_types.end(),
+                                                [](const std::string& t) { return !t.empty(); });
+      const bool all_types_present = std::all_of(operand_types.begin(), operand_types.end(),
+                                                 [](const std::string& t) { return !t.empty(); });
+      INTERNAL_CHECK(!any_type_present || all_types_present)
+          << "Internal error: " << pto_op
+          << " operand type annotations must all be present or all absent, got a partial set";
+      if (all_types_present) {
+        acc_inst << " : ";
+        for (size_t i = 0; i < operand_types.size(); ++i) {
+          if (i > 0) acc_inst << ", ";
+          acc_inst << operand_types[i];
+        }
+      }
+      acc_inst << ") outs(" << dst;
+      if (!dst_type.empty()) acc_inst << " : " << dst_type;
+      acc_inst << ")";
+      codegen.Emit(acc_inst.str());
+      return "";
+    };
+  };
+
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
+  reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
 }
 }  // namespace backend
 }  // namespace pypto

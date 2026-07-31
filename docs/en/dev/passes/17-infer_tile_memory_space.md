@@ -15,7 +15,7 @@ After this pass every `TileType` in InCore functions carries a concrete `memory_
 - InCore / Orchestration outlining must be done (`SplitIncoreOrch`)
 - Statement structure must be normalized (`NormalizedStmtStructure`)
 
-**When to use**: Run after `FlattenTileNdTo2D` — with `LegalizeTileCast`, `AutoTileMatmulL0` and `CanonicalizeTileSlice` in between — and before `ResolveBackendOpLayouts` / `ExpandMixedKernel`. It is the canonical point at which tile memory becomes a contract that downstream passes (especially `ExpandMixedKernel`'s mixed-kernel detection and `InitMemRef`'s buffer allocation) read.
+**When to use**: Run after `FlattenTileNdTo2D` — with `LegalizeTileCast`, `AutoTileMatmulL0` and `CanonicalizeTileSlice` in between — and before `InsertMxScaleAddr` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`. It is the canonical point at which tile memory becomes a contract that downstream passes (especially `InsertMxScaleAddr`'s scale binding, `ExpandMixedKernel`'s mixed-kernel detection and `InitMemRef`'s buffer allocation) read.
 
 ## API
 
@@ -68,7 +68,7 @@ For each `ForStmt` with `return_vars_`, after visiting the body the analyzer cop
 
 | Producer kind | Resolved memory space |
 | ------------- | --------------------- |
-| Unregistered cube ops (`tile.matmul_mx*`) | `Acc` |
+| Registered cube ops (`tile.matmul`, `tile.matmul_mx`, …) | From op memory spec (`Acc`) |
 | Other unregistered ops | `Vec` |
 | Registered op with no `MemorySpec` | Read from `Call` return type if set & not `DDR`; else `Vec` |
 | Registered op with `deduce_output_memory` returning `Some(s)` (e.g. `tile.matmul → Acc`) | `s` |

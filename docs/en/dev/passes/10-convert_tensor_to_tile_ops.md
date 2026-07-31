@@ -84,7 +84,7 @@ already rewritten in Phase 1 / 2a.
 
 When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits a natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for RHS) gets a zero-copy `tile.transpose_view` at the matmul site.
 
-The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](20-expand_mixed_kernel.md) split it into an AIC/AIV pair.
+The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](21-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
 ## Transpose Lowering
 
@@ -206,7 +206,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](19-lower_auto_vector_split.md) (pass 19). `ExpandMixedKernel` (pass 20) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) (pass 20). `ExpandMixedKernel` (pass 21) then folds both into the cross-core `tpush`/`tpop` machinery.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 

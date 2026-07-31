@@ -615,6 +615,44 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+// Helper for compiler-generated tile.tget_scale_addr (DPS, A5):
+//   pto.tget_scale_addr ins(%src : src_ty) outs(%dst_scale : dst_ty)
+//
+// IR surface: (dst_scale, src) with set_output_reuses_input(0). ISA / PTOAS take
+// only src in ins(); dst is the outs() scale tile (address = src_addr >> SHIFT).
+static std::string MakeTGetScaleAddrCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 2) << op->op_->name_ << " requires 2 arguments (dst_scale, src), but got "
+                               << op->args_.size();
+
+  std::string src = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_ty = codegen.GetCurrentResultTileBufTypeString();
+
+  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
+  INTERNAL_CHECK_SPAN(!dst.empty() && dst == input_ssa, op->span_)
+      << "Internal error: " << op->op_->name_
+      << " result SSA must alias the dst_scale input SSA (the in-place "
+         "aliasing from set_output_reuses_input(0) + InitMemRef did not take effect); got dst="
+      << dst << ", input=" << input_ssa
+      << ". This usually means IsInPlaceInput0DpsOp is out of sync with the op registry's "
+         "set_output_reuses_input flag.";
+
+  std::ostringstream oss;
+  oss << "pto.tget_scale_addr ins(" << src;
+  if (!src_ty.empty()) {
+    oss << " : " << src_ty;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_ty.empty()) {
+    oss << " : " << dst_ty;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper for tile.scatter (TSCATTER index form, DPS):
 //   pto.tscatter ins(%src, %indexes : src_ty, idx_ty) outs(%dst : dst_ty)
 //
@@ -902,6 +940,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
   // TupleGetItemExpr consumers (parser desugars `dst, cdst = ...`).
   reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherCompareCodegenPTO(op, codegen);
+  });
+  reg("tile.tget_scale_addr", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTGetScaleAddrCodegenPTO(op, codegen);
   });
   // tile.scatter (TSCATTER index form, DPS): 3-input op (dst, src, indexes).
   reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

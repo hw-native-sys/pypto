@@ -63,9 +63,9 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | 已有 backend hook，缺 IR/Python 前端与 ST |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | 已有 backend hook，缺 IR/Python 前端与 ST |
-| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | 已有 backend hook，缺 IR/Python 前端与 ST |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（最小 MXFP8 host-prequant）；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束)；设备数值 follow-up #1975 |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（`tile.matmul_mx_acc`）；ST 待补 |
+| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（`tile.matmul_mx_bias`）；ST 待补 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
@@ -191,7 +191,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tgetval | .GetValue | tile | ✅ | ✅ | ❌ | ✅ | — | 由 `tile.read` 发射 |
 | pto.tsetval | .SetValue | tile | ✅ | ✅ | ❌ | ✅ | — | 由 `tile.write` 发射 |
 | **MX 量化（6）** |  |  |  |  |  |  |  |  |
-| pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen；Mat→scale `tmov` 按源序发射，PTOAS `PTOA5NormalizeTMovPass` 重排为 bind-before-fill；见 [operators MX 约束](ir/05-operators.md#mx--ascend950ptoas-约束) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | 已有 backend hook，缺 IR/Python 前端与 ST |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |

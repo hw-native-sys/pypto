@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <any>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -1211,7 +1210,7 @@ class SSAConverter {
       return ExtractYield(scope->body_);
     }
     // SplitAivScopeStmt is likewise transparent: lowered in place by
-    // LowerAutoVectorSplit (pass 21), its body shares SSA state with the
+    // LowerAutoVectorSplit (pass 20), its body shares SSA state with the
     // enclosing function, so a for/if body whose trailing stmt is a region must
     // tunnel its carry-yield through the wrapper.
     if (auto scope = As<SplitAivScopeStmt>(s)) {

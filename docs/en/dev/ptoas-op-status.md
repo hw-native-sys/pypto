@@ -77,9 +77,9 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
-| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (minimal MXFP8 host-prequant); see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints); device numerical follow-up #1975 |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_acc`); ST pending |
+| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_bias`); ST pending |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
@@ -205,7 +205,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tgetval | .GetValue | tile | ✅ | ✅ | ❌ | ✅ | — | emitted by `tile.read` |
 | pto.tsetval | .SetValue | tile | ✅ | ✅ | ❌ | ✅ | — | emitted by `tile.write` |
 | **MX Quantization (6)** |  |  |  |  |  |  |  |  |
-| pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; Mat→scale `tmov` emitted in source order, PTOAS `PTOA5NormalizeTMovPass` reorders bind-before-fill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tquant.mx | TQUANT (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |

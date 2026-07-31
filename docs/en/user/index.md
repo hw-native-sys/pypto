@@ -74,8 +74,8 @@ chapter. Until those land, the corresponding material lives in the
 
 | Topic | Current location |
 | ----- | ---------------- |
-| Tasks, dependencies, `manual_scope` / `submit` | [Python IR Syntax Specification](../dev/language/00-python_syntax.md), [AutoDeriveTaskDependencies](../dev/passes/36-auto_derive_task_dependencies.md) |
-| Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/19-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/20-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
+| Tasks, dependencies, `manual_scope` / `submit` | [Python IR Syntax Specification](../dev/language/00-python_syntax.md), [AutoDeriveTaskDependencies](../dev/passes/37-auto_derive_task_dependencies.md) |
+| Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | Distributed DSL and collectives | [Distributed Operators](../dev/distributed_ops.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |
 | Runtime DFX flags, ring sizing, memory map | [Runtime DFX](../dev/03-runtime-dfx.md), [Per-Task Ring Sizing](../dev/05-runtime-ring-sizing.md), [Memory Map](../dev/07-memory-map.md) |

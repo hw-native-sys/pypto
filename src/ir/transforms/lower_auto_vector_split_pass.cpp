@@ -94,7 +94,7 @@ using split_axis::TileInfo;
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 constexpr const char* kSplitAivAttr = "split_aiv";
-// Stamped by the explicit-region path so ExpandMixedKernel (pass 19) skips its
+// Stamped by the explicit-region path so ExpandMixedKernel (pass 21) skips its
 // single-func-mode transpose-hazard check (validated per-region here instead).
 constexpr const char* kSplitAivRegionValidatedAttr = "split_aiv_region_validated";
 
@@ -845,7 +845,7 @@ bool BodyContainsSplitAivScope(const StmtPtr& body) { return FindFirstSplitAivSc
 // halve only the vector compute inside each region (region-local), leave
 // out-of-region compute full-width, drop each scope wrapper, and stamp
 // ``split_aiv`` (idempotent — already bridged at OutlineIncoreScopes) plus
-// ``split_aiv_region_validated`` (signals ExpandMixedKernel (pass 19) to skip its func-mode check).
+// ``split_aiv_region_validated`` (signals ExpandMixedKernel (pass 21) to skip its func-mode check).
 //
 // Region lowering deliberately does NOT cross a ``ScopeStmt``: a scope carries
 // outlining and name-visibility semantics that region-local halving must not
@@ -889,8 +889,8 @@ FunctionPtr LowerExplicitRegionFunction(const FunctionPtr& func) {
   (void)clone_map_unused;
 
   // Earned only now: the guard above proves every region was actually lowered,
-  // so ``split_aiv_region_validated`` is a true claim and pass 19
-  // (SplitVectorKernel) may skip its own single-func-mode check on its strength.
+  // so ``split_aiv_region_validated`` is a true claim and pass 21
+  // (ExpandMixedKernel) may skip its own single-func-mode check on its strength.
   auto attrs = func->attrs_;
   attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
                              [](const auto& kv) {

@@ -188,8 +188,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/29-init_memref.md#声明式分配) 与
-[MemoryReuse](../passes/31-memory_reuse.md#声明式分配)。
+参见 [InitMemRef](../passes/30-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/32-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 
@@ -442,7 +442,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/42-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/43-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 
@@ -466,7 +466,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.cross_core_slot(slot_num=N)` | 两种均适用 | 给内层 InCore 设置 `slot_num` 属性——自动跨核 pipe 的槽位数（环深），由 `ExpandMixedKernel` 消费。它只决定数据通道大小，**不**划分计算，因此可与 `pl.split_aiv` 区域共存（而 `pl.split(...)` 不能）。省略时沿用 PTOAS 默认值（单向 8，双向每方向 4）。 |
 
 > `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
-> [ExpandMixedKernel](../passes/20-expand_mixed_kernel.md#覆盖槽位数slot_num)。
+> [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
 示例参见 [语言指南](../../user/01-language_guide.md#incore-作用域)。
 

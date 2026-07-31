@@ -37,6 +37,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "AutoTileMatmulL0",
     "CanonicalizeTileSlice",
     "InferTileMemorySpace",
+    "InsertMxScaleAddr",
     "ResolveBackendOpLayouts",
     "LowerAutoVectorSplit",
     "ExpandMixedKernel",

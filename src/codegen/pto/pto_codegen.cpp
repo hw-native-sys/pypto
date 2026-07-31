@@ -352,11 +352,14 @@ int GetGMPipeSlotCount(int dir_mask) {
 //   * `tile.assemble` (`set_output_memory_inherit_input()`): the result is the
 //     target with one window overwritten — written in place so the out-of-window
 //     data is preserved (and the Acc->Mat pto.tmov stays a clean converting move,
-//     not an unsupported Mat->Mat preservation copy).
+//     not an unsupported Mat->Mat preservation copy);
+//   * `tile.tget_scale_addr` (`set_output_reuses_input(0)`): rebinds the scale
+//     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale.
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
-  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble");
+  return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
+         ir::IsOp(op, "tile.tget_scale_addr");
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
@@ -1826,12 +1829,12 @@ void PTOCodegen::EmitExtraAllocTiles() {
 
 void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   // Defensive: the first-class SplitAivScopeStmt region is consumed and erased
-  // by LowerAutoVectorSplit (pass 21), ~19 passes before codegen. There is no
+  // by LowerAutoVectorSplit (pass 20), well before codegen. There is no
   // ScopeStmt handler here, so a survivor would be silently unwrapped by the
   // base visitor — losing the region semantics. Fail loudly instead.
   INTERNAL_CHECK_SPAN(!ir::As<ir::SplitAivScopeStmt>(stmt), stmt->span_)
       << "Internal error: SplitAivScopeStmt reached PTO codegen; it must be lowered and erased by "
-         "LowerAutoVectorSplit (pass 21).";
+         "LowerAutoVectorSplit (pass 20).";
   ir::IRVisitor::VisitStmt(stmt);
 }
 

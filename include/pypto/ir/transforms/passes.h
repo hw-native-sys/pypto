@@ -558,6 +558,25 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
+ * @brief Insert tile.tget_scale_addr bindings before MX matmul consumers
+ *
+ * After InferTileMemorySpace has resolved Left/LeftScale and Right/RightScale
+ * operand spaces, inserts compiler-generated ``tile.tget_scale_addr(scale, data)``
+ * immediately before each ``tile.matmul_mx`` / ``_acc`` / ``_bias`` and rewrites
+ * the matmul to consume the bound scale SSA values.
+ *
+ * Bindings are not reused across consumers because tget mutates a shared
+ * physical scale buffer whose aliases cannot be represented by SSA identity.
+ * The pass therefore inserts a fresh binding at every consumer even when its
+ * scale operand is already the result of an earlier binding.
+ *
+ * Requirements:
+ * - Tile memory spaces must already be inferred (``TileMemoryInferred``)
+ * - Statement structure must be normalized (``NormalizedStmtStructure``)
+ */
+Pass InsertMxScaleAddr();
+
+/**
  * @brief Materialize implicit ND/DN strides on every TensorType (RFC #1300 §2.4)
  *
  * Walks every TensorType reachable from the program and rewrites any

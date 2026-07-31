@@ -2636,7 +2636,7 @@ void OpConversionRegistry::RegisterDistributedOps() {
 // High-level (@pl.jit / pl.spmd) author-facing shard / gather emitted inside a
 // ``for aiv_id in pl.split_aiv(...)`` region. Each lowers 1:1 to its tile op
 // (tile.aiv_shard / tile.aic_gather) so the result is byte-identical to what the
-// AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 18).
+// AUTO ``pl.split`` path produces via LowerAutoVectorSplit (pass 20).
 //
 // Boundary memory space. The tile-level split deducer (DeduceSplitReshape)
 // intentionally leaves it null (returns a TileType with a null memref / null

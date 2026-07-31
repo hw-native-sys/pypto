@@ -99,6 +99,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/broadcast.cpp
     src/ir/op/tile_ops/elementwise.cpp
     src/ir/op/tile_ops/matmul.cpp
+    src/ir/op/tile_ops/matmul_mx.cpp
     src/ir/op/tile_ops/memory.cpp
     src/ir/op/tile_ops/reduction.cpp
     src/ir/op/tile_ops/transform.cpp
@@ -174,6 +175,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
+    src/ir/transforms/insert_mx_scale_addr_pass.cpp
     src/ir/transforms/loop_invariant_mat_residency.cpp
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp

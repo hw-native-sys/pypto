@@ -67,8 +67,8 @@
 
 | 主题 | 当前位置 |
 | ---- | -------- |
-| 任务与依赖、`manual_scope` / `submit` | [Python IR 语法规范](../dev/language/00-python_syntax.md)、[AutoDeriveTaskDependencies](../dev/passes/36-auto_derive_task_dependencies.md) |
-| 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/19-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/20-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
+| 任务与依赖、`manual_scope` / `submit` | [Python IR 语法规范](../dev/language/00-python_syntax.md)、[AutoDeriveTaskDependencies](../dev/passes/37-auto_derive_task_dependencies.md) |
+| 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | 分布式 DSL 与集合通信 | [分布式算子](../dev/distributed_ops.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |
 | 运行时 DFX 开关、ring sizing、memory map | [运行时 DFX](../dev/03-runtime-dfx.md)、[逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md)、[内存图](../dev/07-memory-map.md) |
