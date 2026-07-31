@@ -1486,6 +1486,74 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         _assert_convert_output_equal(After, Expected)
 
+    def test_set_validshape_operand_loads_straight_to_mat(self):
+        """A matmul operand wrapped in tensor.set_validshape still loads straight to Mat (#2227).
+
+        ``tensor.set_validshape`` is pure metadata over the input's storage, so the
+        matmul's Mat requirement must propagate back through it to the load-like
+        producer. Without that back-propagation the operand materialises in Vec and
+        needs a tile.move to Mat — a vector->cube boundary that flips the otherwise
+        pure-CUBE InCore scope to MIXED, making ExpandMixedKernel split it into an
+        AIC/AIV pair.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a_src: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a: pl.Tensor[[16, 64], pl.BF16] = pl.slice(a_src, [16, 64], [0, 0])
+                av: pl.Tensor[[16, 64], pl.BF16] = pl.set_validshape(a, 8, 64)
+                y: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(av, b, out_dtype=pl.FP32)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                a_src: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                y: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(a_src, b)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a_src: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                ret0_out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                # Consumer-driven: the Mat demand reaches the slice THROUGH
+                # set_validshape, so no Vec load + tile.move(Mat) bridge appears.
+                a_mat: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    a_src, [0, 0], [16, 64], [16, 64], target_memory=pl.MemorySpace.Mat
+                )
+                av_mat = pl.tile.set_validshape(a_mat, 8, 64)
+                b_mat: pl.Tile[[64, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    b, [0, 0], [64, 64], [64, 64], target_memory=pl.MemorySpace.Mat
+                )
+                y_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Acc] = pl.tile.matmul(av_mat, b_mat)
+                out_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(y_tile, [0, 0], ret0_out)
+                return out_store
+
+            @pl.function
+            def main(
+                self,
+                a_src: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                ret0_out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                y: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(a_src, b, ret0_out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        _assert_convert_output_equal(After, Expected)
+
     def test_shared_kv_one_load_two_matmuls_b_trans(self):
         """A single sliced KV feeding a b_trans=True and a b_trans=False matmul lowers
         to ONE GM->L1 load + ONE zero-copy tile.transpose_view view, not two loads (#1776).

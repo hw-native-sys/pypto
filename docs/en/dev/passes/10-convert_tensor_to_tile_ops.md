@@ -84,6 +84,8 @@ already rewritten in Phase 1 / 2a.
 
 When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits a natural Mat `tile.load`; a transposed operand (`a_trans` for LHS, `b_trans` for RHS) gets a zero-copy `tile.transpose_view` at the matmul site.
 
+The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](20-expand_mixed_kernel.md) split it into an AIC/AIV pair.
+
 ## Transpose Lowering
 
 `tensor.transpose` lowers to a plain 3-arg **`tile.transpose(input, axis1, axis2)`**. The PTO `pto.ttrans` instruction needs a scratch workspace tile (same shape/dtype as the source), but that scratch is a pure codegen detail — not a semantic operand. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) is the **sole owner** of scratch materialization: it emits the codegen-ready 4-arg form (`tile.create` + `tile.transpose(..., tmp)`) for both 2D and per-page >2D transposes, still before the memory allocator runs (so the scratch gets a real UB address). Keeping scratch out of the high-level op means `tensor.transpose` and the DSL `pl.tile.transpose(tile, axis1, axis2)` stay 1:1 with the semantic operation.

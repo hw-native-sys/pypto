@@ -781,12 +781,21 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
 }
 
 // NOTE: Internal op for compiler-generated code only; should not be exposed to end users in future releases.
+// The result aliases the input's storage, so it inherits the input's memory
+// space — the same relation `tile.set_validshape` already declares. Without it,
+// ConvertTensorToTileOps cannot propagate a consumer's memory-space requirement
+// back through set_validshape to the load-like producer, so a matmul operand
+// wrapped in set_validshape is materialised in Vec and bridged to Mat with a
+// tile.move. That move is a vector->cube boundary, which flips an otherwise
+// pure-CUBE InCore scope to MIXED and makes ExpandMixedKernel split it into an
+// AIC/AIV pair (issue #2227).
 REGISTER_OP("tensor.set_validshape")
     .set_op_category("TensorOp")
     .set_description("Update valid-shape metadata of a tensor without data movement (internal)")
     .add_argument("tensor", "Input tensor (TensorType, 2D)")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSetValidShapeType(args, kwargs);

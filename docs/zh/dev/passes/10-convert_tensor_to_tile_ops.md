@@ -79,6 +79,8 @@ InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 /
 
 当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，生成自然的 Mat `tile.load`；转置操作数（LHS 用 `a_trans`，RHS 用 `b_trans`）在 matmul 处叠加零拷贝 `tile.transpose_view`。
 
+该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](20-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
+
 ## Transpose 下沉
 
 `tensor.transpose` 下沉为一个 3-arg 的 **`tile.transpose(input, axis1, axis2)`**。PTO 后端的 `pto.ttrans` 指令需要一个 scratch 工作 tile（与源 tile 同 shape/同 dtype），但该 scratch 纯属 codegen 细节，并非语义操作数。[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 是 scratch 物化的**唯一归属**：它为 2D 以及逐页 >2D 的 transpose 统一产出 codegen-ready 的 4-arg 形态（`tile.create` + `tile.transpose(..., tmp)`），且仍在内存分配器之前（scratch 仍能拿到真实 UB 地址）。把 scratch 从高层 op 中移除后，`tensor.transpose` 与 DSL `pl.tile.transpose(tile, axis1, axis2)` 都与语义操作保持 1:1。
