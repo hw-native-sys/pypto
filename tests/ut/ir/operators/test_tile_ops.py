@@ -11,6 +11,7 @@
 
 import inspect
 import math
+from typing import Any, cast
 
 import pypto.language as pl
 import pytest
@@ -4006,7 +4007,7 @@ class TestTileLoadOp:
         tensor = ir.Var("a", ir.TensorType([64, 128], DataType.FP32), span)
         removed_plural = "valid_" + "shapes"
         with pytest.raises(TypeError, match=rf"unexpected keyword argument '{removed_plural}'"):
-            tile.load(tensor, [0, 0], [64, 128], **{removed_plural: [32, 128]})
+            cast(Any, tile.load)(tensor, [0, 0], [64, 128], **{removed_plural: [32, 128]})
 
     def test_load_without_valid_shape_sets_tileview_from_shapes(self):
         """When valid_shape is not provided, TileView.valid_shape equals shapes."""
