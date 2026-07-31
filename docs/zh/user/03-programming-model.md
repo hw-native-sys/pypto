@@ -144,8 +144,10 @@ CodeGen             设备 kernel（.pto -> C++）+ 主机编排 C++
 
 每个阶段都可观测。`compiled.program.as_python()` 打印流水线出来的 IR；`dump_passes=` 会在每个
 pass 之后写一份快照；pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序
-编号。（`@pl.jit` 函数自身没有 `as_python()` —— IR 要等 `compile()` 或 `compile_for_test()`
-把它产出来之后才存在。）
+编号。`lower()` 会特化 JIT 函数、运行配置对应的 Pass 流水线，并返回 Pass 后的
+`ir.Program`。它不会执行代码生成，也不会填充编译缓存。需要验证代码生成时请使用
+`compile()`。（`@pl.jit` 函数自身没有 `as_python()`；请对 `lower()` 的结果调用
+`program.as_python()`，或在 `compile()` 后调用 `compiled.program.as_python()`。）
 
 作为用户，IR 的两个性质与你直接相关：
 

@@ -42,9 +42,10 @@ python -c "import pypto.language as pl; from pypto import ir; print(len(pl.__all
 226 exports
 ```
 
-然后确认一个真实 kernel 能走通整条 pass 流水线。`compile_for_test()` 会跑完所有 pass 并在代码
-生成之前停下，因此既不需要 ptoas 也不需要设备。请写成文件再运行，不要管道给 `python -`：
-`@pl.jit` 需要读取被装饰函数的源码，而 stdin 上取不到。
+然后确认一个真实 kernel 能走通整条 pass 流水线。`lower()` 会特化 JIT 函数、运行配置对应的
+Pass 流水线，并返回 Pass 后的 `ir.Program`。它不会执行代码生成，也不会填充编译缓存，因此既
+不需要 ptoas 也不需要设备。需要验证代码生成时请使用 `compile()`。请写成文件再运行，不要管道
+给 `python -`：`@pl.jit` 需要读取被装饰函数的源码，而 stdin 上取不到。
 
 ```bash
 cat > /tmp/pypto_check.py <<'PY'
@@ -58,7 +59,7 @@ def add(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
     return out
 
 x = torch.zeros((128, 128), dtype=torch.float32)
-program = add.compile_for_test(x, x, x)
+program = add.lower(x, x, x)
 print("pipeline OK:", type(program).__name__)
 PY
 

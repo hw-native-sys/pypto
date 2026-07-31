@@ -55,7 +55,7 @@ if __name__ == "__main__":
 
     a = torch.randn(128, 128, dtype=torch.float32)
     c = torch.zeros(128, 128, dtype=torch.float32)
-    prog = main_kernel.compile_for_test(a, c)
+    prog = main_kernel.lower(a, c)
     print(f"main_kernel: {len(prog.functions)} fn(s)")
     for fn in prog.functions.values():
         print(f"  {fn.name}: {fn.func_type}")

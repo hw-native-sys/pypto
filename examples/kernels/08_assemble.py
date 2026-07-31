@@ -47,8 +47,8 @@ Kernels (one representative per distinct pattern):
   tile_assemble_loop_col_broadcast   -- Vec->Vec: loop with column broadcast (no slice)
   tile_assemble_double_loop_broadcast -- Vec->Vec: nested loops, quadrant broadcast
 
-Note: ``__main__`` runs ``compile_for_test`` (full pass pipeline, no device
-execution) for each kernel. The per-mode hardware semantics of TINSERT
+Note: ``__main__`` runs ``lower`` (full pass pipeline, no code generation or
+device execution) for each kernel. The per-mode hardware semantics of TINSERT
 (Acc->Mat NZ vs. Vec->Vec ND_VEC) are best validated on device via
 ``tests/st/runtime/ops/test_assemble.py`` rather than against a torch reference.
 
@@ -166,7 +166,7 @@ def tile_assemble_double_loop_broadcast(
 
 
 if __name__ == "__main__":
-    # Smoke test each kernel via compile_for_test (no torch reference --
+    # Smoke test each kernel via lower (no torch reference --
     # tile.assemble's per-mode hardware semantics are best validated on device).
     cases = [
         (
@@ -226,6 +226,6 @@ if __name__ == "__main__":
         ),
     ]
     for name, fn, args in cases:
-        prog = fn.compile_for_test(*args)
+        prog = fn.lower(*args)
         print(f"{name}: {len(prog.functions)} fn(s)")
     print("OK")

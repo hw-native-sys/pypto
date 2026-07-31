@@ -199,25 +199,26 @@ passes_dump/   逐 pass 的 IR 快照
 > 要么被当作意外的 kernel 参数拒绝，要么被**静默忽略**。编译侧选项要通过
 > `config=RunConfig(...)` 传，它的编译类开关会转发给 `ir.compile()`。
 
-只想检查一个 kernel、完全不产出代码时，`compile_for_test()` 会跑完 pass 流水线并返回 pass 之后
-的 `ir.Program`：
+只想检查一个 kernel、不产出代码时，`lower()` 会特化 JIT 函数、运行配置对应的 Pass 流水线，
+并返回 Pass 后的 `ir.Program`：
 
 ```python
 import torch
 
 x = torch.zeros((128, 128), dtype=torch.float32)
-program = add.compile_for_test(x, x, x)
+program = add.lower(x, x, x)
 ```
 
-它在代码生成之前停下，所以很快 —— 但也意味着它**抓不到** codegen 阶段的错误，比如上面那个
-misplaced-tensor-op。想确认一个 kernel 真的能构建出来，用 `compile()`。
+它不会执行代码生成，也不会填充编译缓存。这让它很快，但也意味着它**抓不到** codegen 阶段的
+错误，比如上面那个 misplaced-tensor-op。需要验证代码生成时请使用 `compile()`。
 
 ### 读 IR
 
-`JITFunction` 没有 `as_python()` —— 它只有 `compile` 与 `compile_for_test` —— 所以 IR 要等其中
-之一把它产出来之后才可读：
+`JITFunction` 没有 `as_python()`。可以直接读取 `lower()` 返回的 `ir.Program`，也可以读取
+`compile()` 返回的 `CompiledProgram` 中保存的 `program`：
 
 ```python
+print(program.as_python())
 print(compiled.program.as_python())
 ```
 
@@ -258,7 +259,7 @@ tile 级。
 | **`Cannot reassign 'out' with a different type`** | 表达式的 dtype 与声明的 `Out` dtype 不一致 | 让它们一致，或把结果绑到一个新名字上 |
 | **`got an unexpected keyword argument 'skip_ptoas'`** | 把 `ir.compile()` 的选项传给了 `compile()` | 编译选项通过 `config=RunConfig(...)` 传 |
 | **输出张量回来时没有变化** | 结果写进了未声明 `pl.Out[...]` 的参数 | 加上方向 |
-| **`compile_for_test()` 过了但 `compile()` 失败** | `compile_for_test` 在代码生成之前就停了 | 预期行为 —— 真正的检查用 `compile()` |
+| **`lower()` 成功但 `compile()` 失败** | `lower()` 不执行代码生成 | 预期行为 —— 代码生成检查用 `compile()` |
 | **`AttributeError: as_python`** | 在 jit 函数上调用了它 | 它在 IR 上：`compiled.program.as_python()` |
 
 `PYPTO_PROG_BUILD_DIR` 是**运行时环境变量** —— `PYPTO_PROG_BUILD_DIR=/tmp/out python kernel.py`

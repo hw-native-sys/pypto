@@ -113,8 +113,8 @@ def qwen3_decode(  # noqa: PLR0913 — model signature is intrinsic
 
 
 if __name__ == "__main__":
-    # Minimal smoke test: build TensorMeta-shaped inputs and call
-    # ``compile_for_test`` to run the full pass pipeline (no device execution).
+    # Minimal smoke test: build TensorMeta-shaped inputs and call ``lower`` to
+    # run the full pass pipeline (no code generation or device execution).
     import torch
 
     def randn(shape, dtype):
@@ -138,7 +138,7 @@ if __name__ == "__main__":
         randn([INTERMEDIATE, HIDDEN], torch.bfloat16),  # w_down
         torch.empty([BATCH, HIDDEN], dtype=torch.bfloat16),  # out
     ]
-    post_pass = qwen3_decode.compile_for_test(*args)
-    print(f"Compiled program has {len(post_pass.functions)} function(s):")
+    post_pass = qwen3_decode.lower(*args)
+    print(f"Lowered program has {len(post_pass.functions)} function(s):")
     for fn in post_pass.functions.values():
         print(f"  {fn.name}: {fn.func_type}")

@@ -159,8 +159,11 @@ CodeGen             device kernels (.pto -> C++) + host orchestration C++
 Each stage is observable. `compiled.program.as_python()` prints the IR that came out of
 the pipeline; `dump_passes=` writes a snapshot after every pass; the passes themselves are
 documented individually in [Passes](../dev/passes/index.md), numbered in execution order.
-(`@pl.jit` functions have no `as_python()` of their own — the IR exists once `compile()` or
-`compile_for_test()` has produced it.)
+`lower()` specializes the JIT function, runs the configured pass pipeline, and returns
+the post-pass `ir.Program`. It performs no code generation and does not populate the
+compiled-program cache. Use `compile()` to verify code generation. (`@pl.jit` functions
+have no `as_python()` of their own; call `program.as_python()` on the result of `lower()`,
+or `compiled.program.as_python()` after `compile()`.)
 
 Two properties of the IR matter to you as a user:
 

@@ -214,26 +214,27 @@ Sample tensors are read for shape and dtype only; contents are never touched, so
 > silently ignored. Compile-side options travel through `config=RunConfig(...)`, whose
 > compile knobs are forwarded to `ir.compile()`.
 
-To check a kernel without producing code at all, `compile_for_test()` runs the pass
-pipeline and returns the post-pass `ir.Program`:
+To inspect a kernel without producing code, `lower()` specializes the JIT function, runs
+the configured pass pipeline, and returns the post-pass `ir.Program`:
 
 ```python
 import torch
 
 x = torch.zeros((128, 128), dtype=torch.float32)
-program = add.compile_for_test(x, x, x)
+program = add.lower(x, x, x)
 ```
 
-It stops before code generation, which makes it fast — but also means it does **not**
-catch codegen-stage errors such as the misplaced-tensor-op failure above. Use `compile()`
-when you want to know that a kernel really builds.
+It performs no code generation and does not populate the compiled-program cache. This
+makes it fast, but also means it does **not** catch codegen-stage errors such as the
+misplaced-tensor-op failure above. Use `compile()` to verify code generation.
 
 ### Reading the IR
 
-A `JITFunction` has no `as_python()` — only `compile` and `compile_for_test` — so the IR
-becomes readable once one of those has produced it:
+A `JITFunction` has no `as_python()`. Read the `ir.Program` returned by `lower()` directly,
+or read the `program` stored in the `CompiledProgram` returned by `compile()`:
 
 ```python
+print(program.as_python())
 print(compiled.program.as_python())
 ```
 
@@ -277,7 +278,7 @@ cached compilation. `examples/hello_world.py` is this pattern, at tile level.
 | **`Cannot reassign 'out' with a different type`** | The expression's dtype differs from the declared `Out` dtype | Match them, or bind the result to a new name |
 | **`got an unexpected keyword argument 'skip_ptoas'`** | An `ir.compile()` option passed to `compile()` | Pass compile options via `config=RunConfig(...)` |
 | **Output tensor comes back unchanged** | Result written to a parameter not declared `pl.Out[...]` | Add the direction |
-| **`compile_for_test()` passes but `compile()` fails** | `compile_for_test` stops before code generation | Expected — use `compile()` as the real check |
+| **`lower()` succeeds but `compile()` fails** | `lower()` does not run code generation | Expected — use `compile()` as the codegen check |
 | **`AttributeError: as_python`** | Called on the jit function | It lives on the IR: `compiled.program.as_python()` |
 
 `PYPTO_PROG_BUILD_DIR` is a **runtime environment variable** —

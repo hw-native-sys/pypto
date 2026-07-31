@@ -29,7 +29,7 @@ recommended workaround is to push the per-call/per-iteration choice of
 below.  Restoring the in-DSL ``if/else`` pattern requires a JIT
 specializer fix (see the comments in ``examples/models/qwen3_jit/``).
 
-Note: ``__main__`` runs ``compile_for_test`` only (no device execution).
+Note: ``__main__`` runs ``lower`` only (no code generation or device execution).
 Full end-to-end execution is exercised under
 ``tests/st/codegen/dsl/test_dyn_valid_shape_loop.py`` and
 ``tests/st/codegen/dsl/test_dynamic_valid_shape_if_else.py``.
@@ -77,16 +77,16 @@ def dyn_valid_shape(
 
 
 if __name__ == "__main__":
-    # Smoke test via compile_for_test (no device execution required).
+    # Smoke test via lower (no code generation or device execution required).
     # Same kernel, two different valid_shape values: full block (64) and
-    # partial last block (32). compile_for_test caches per concrete vlen,
-    # so both compile cleanly.
+    # partial last block (32). Both concrete vlen specializations run through
+    # the pass pipeline independently.
     data = torch.randn(Q_TILE, BLOCK_COL, dtype=torch.float32)
     out = torch.zeros(Q_TILE, BLOCK_COL, dtype=torch.float32)
 
-    prog_full = dyn_valid_shape.compile_for_test(data, 0.5, 64, out)
+    prog_full = dyn_valid_shape.lower(data, 0.5, 64, out)
     print(f"dyn_valid_shape (full): {len(prog_full.functions)} fn(s)")
 
-    prog_partial = dyn_valid_shape.compile_for_test(data, 0.5, 32, out)
+    prog_partial = dyn_valid_shape.lower(data, 0.5, 32, out)
     print(f"dyn_valid_shape (partial): {len(prog_partial.functions)} fn(s)")
     print("OK")
