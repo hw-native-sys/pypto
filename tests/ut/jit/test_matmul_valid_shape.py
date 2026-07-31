@@ -55,8 +55,7 @@ def compiled_programs(request: pytest.FixtureRequest) -> tuple[ir.Program, ir.Pr
         per_func_dyn,
         pl,
     )
-    matmul_valid_shape._cache.clear()
-    post_pass = matmul_valid_shape.compile_for_test(*args)
+    post_pass = matmul_valid_shape.lower(*args)
     incore = next(
         function for function in post_pass.functions.values() if ir.is_incore_type(function.func_type)
     )
