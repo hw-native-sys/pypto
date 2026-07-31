@@ -2001,7 +2001,7 @@ class JITFunction:
             kwargs,
             allow_signature_mode=True,
         )
-        pre_pass = self._compile_to_program(
+        pre_pass, rename_map = self._compile_to_program_with_rename_map(
             specialization.tensor_meta,
             specialization.scalar_values,
             specialization.scalar_dtypes,
@@ -2010,13 +2010,19 @@ class JITFunction:
         )
         lower_kwargs = _run_config_lower_kwargs(run_config) if run_config is not None else {}
         platform = run_config.platform if run_config is not None else None
-        return _run_pass_pipeline(
-            pre_pass,
-            operation="lower",
-            platform=platform,
-            inherit_outer_report_instruments=False,
-            **lower_kwargs,
-        ).transformed_program
+        try:
+            return _run_pass_pipeline(
+                pre_pass,
+                operation="lower",
+                platform=platform,
+                inherit_outer_report_instruments=False,
+                **lower_kwargs,
+            ).transformed_program
+        except Exception as exc:
+            rewritten = _rewrite_jit_error(exc, rename_map)
+            if rewritten is exc:
+                raise
+            raise rewritten from exc
 
     # ------------------------------------------------------------------
     # Compilation
@@ -2074,13 +2080,32 @@ class JITFunction:
         pl: Any,
     ) -> Any:
         """Specialize entry + deps and return the parsed pre-pass ``ir.Program``."""
+        program, _rename_map = self._compile_to_program_with_rename_map(
+            tensor_meta,
+            scalar_values,
+            scalar_dtypes,
+            per_func_dyn,
+            pl,
+        )
+        return program
+
+    def _compile_to_program_with_rename_map(
+        self,
+        tensor_meta: dict[str, TensorMeta],
+        scalar_values: dict[str, int | float | bool],
+        scalar_dtypes: dict[str, DataType],
+        per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
+        pl: Any,
+    ) -> tuple[Any, dict[str, str]]:
+        """Return the parsed pre-pass program and specializer rename map."""
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
         source = specializer.specialize()
         rename_map = specializer.rename_map
         try:
-            return pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
+            program = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
+            return program, rename_map
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
             if rewritten is exc:

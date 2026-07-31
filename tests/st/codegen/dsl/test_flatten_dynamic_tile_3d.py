@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end (compile-pipeline) test for the issue #1578 scenario.
+"""End-to-end lowering test for the issue #1578 scenario.
 
 A 3D+ tensor with a *dynamic* dimension that flows into a tile shape inside an
 ``pl.at`` (InCore) scope yields a >2D tile with a dynamic extent, which cannot be
@@ -20,7 +20,7 @@ is the user's choice (it strongly affects performance).
 ``FlattenTileNdTo2D`` then only needs to lower the per-chunk ``[1, CHUNK, 512]``
 tile to ``[CHUNK, 512]`` while **preserving the dynamic ``valid_shape``**
 (``ComputeMergedValidShape``) so the runtime tail survives. This test pins that
-the full ``@pl.jit`` pipeline compiles such a kernel.
+the full ``@pl.jit`` lowering pipeline accepts such a kernel.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
@@ -70,11 +70,14 @@ def cast_3d_dynamic(
 
 
 class TestFlattenDynamicTile3D:
-    """Compile-pipeline guard for issue #1578."""
+    """Lowering-pipeline guard for issue #1578."""
 
-    def test_3d_dynamic_tile_now_compiles(self):
-        """A user-chunked dynamic >2D tile compiles end-to-end: flatten lowers the
-        static per-chunk tile to 2D while preserving the dynamic valid tail."""
+    def test_3d_dynamic_tile_now_lowers(self):
+        """A user-chunked dynamic >2D tile survives end-to-end lowering.
+
+        Flatten lowers the static per-chunk tile to 2D while preserving the
+        dynamic valid tail.
+        """
         # Concrete arg shapes only seed specialization; B_DYN/S_DYN stay symbolic,
         # so the [1, CHUNK, 512] tile keeps a dynamic valid extent at pass time.
         # S=40 with CHUNK=16 exercises multiple chunks plus a partial tail (16 + 16 + 8).

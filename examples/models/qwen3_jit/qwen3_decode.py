@@ -117,25 +117,22 @@ if __name__ == "__main__":
     # run the full pass pipeline (no code generation or device execution).
     import torch
 
-    def randn(shape, dtype):
-        return torch.empty(shape, dtype=dtype).normal_()
-
     args = [
-        randn([BATCH, HIDDEN], torch.bfloat16),  # hidden_states
-        randn([1, HIDDEN], torch.float32),  # input_rms_weight
-        randn([HIDDEN, HIDDEN], torch.bfloat16),  # wq
-        randn([HIDDEN, KV_HIDDEN], torch.bfloat16),  # wk
-        randn([HIDDEN, KV_HIDDEN], torch.bfloat16),  # wv
-        torch.randint(1, MAX_SEQ + 1, (BATCH,), dtype=torch.int32),
-        randn([MAX_SEQ, HEAD_DIM], torch.float32),  # rope_cos
-        randn([MAX_SEQ, HEAD_DIM], torch.float32),  # rope_sin
-        randn([CACHE_ROWS, HEAD_DIM], torch.bfloat16),  # k_cache
-        randn([CACHE_ROWS, HEAD_DIM], torch.bfloat16),  # v_cache
-        randn([HIDDEN, HIDDEN], torch.bfloat16),  # wo
-        randn([1, HIDDEN], torch.float32),  # post_rms_weight
-        randn([HIDDEN, INTERMEDIATE], torch.bfloat16),  # w_gate
-        randn([HIDDEN, INTERMEDIATE], torch.bfloat16),  # w_up
-        randn([INTERMEDIATE, HIDDEN], torch.bfloat16),  # w_down
+        torch.empty([BATCH, HIDDEN], dtype=torch.bfloat16),  # hidden_states
+        torch.empty([1, HIDDEN], dtype=torch.float32),  # input_rms_weight
+        torch.empty([HIDDEN, HIDDEN], dtype=torch.bfloat16),  # wq
+        torch.empty([HIDDEN, KV_HIDDEN], dtype=torch.bfloat16),  # wk
+        torch.empty([HIDDEN, KV_HIDDEN], dtype=torch.bfloat16),  # wv
+        torch.empty([BATCH], dtype=torch.int32),  # seq_lens
+        torch.empty([MAX_SEQ, HEAD_DIM], dtype=torch.float32),  # rope_cos
+        torch.empty([MAX_SEQ, HEAD_DIM], dtype=torch.float32),  # rope_sin
+        torch.empty([CACHE_ROWS, HEAD_DIM], dtype=torch.bfloat16),  # k_cache
+        torch.empty([CACHE_ROWS, HEAD_DIM], dtype=torch.bfloat16),  # v_cache
+        torch.empty([HIDDEN, HIDDEN], dtype=torch.bfloat16),  # wo
+        torch.empty([1, HIDDEN], dtype=torch.float32),  # post_rms_weight
+        torch.empty([HIDDEN, INTERMEDIATE], dtype=torch.bfloat16),  # w_gate
+        torch.empty([HIDDEN, INTERMEDIATE], dtype=torch.bfloat16),  # w_up
+        torch.empty([INTERMEDIATE, HIDDEN], dtype=torch.bfloat16),  # w_down
         torch.empty([BATCH, HIDDEN], dtype=torch.bfloat16),  # out
     ]
     post_pass = qwen3_decode.lower(*args)

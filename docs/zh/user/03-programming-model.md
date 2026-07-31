@@ -145,8 +145,8 @@ CodeGen             设备 kernel（.pto -> C++）+ 主机编排 C++
 每个阶段都可观测。`lower()` 会特化 JIT 函数、运行配置对应的 Pass 流水线，并返回 Pass 后的
 `ir.Program`；对该结果调用 `program.as_python()`，即可查看最终 lowering 后的 IR。与之不同，
 `CompiledProgram.program` 保留的是特化后、Pass 前的 program，而不是 Pass 流水线的输出。
-`dump_passes=` 会在每个 Pass 之后写一份快照；Pass 本身在
-[Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序编号。
+调用 `compile()` 时设置 `dump_passes=`，会在每个 Pass 之后写一份快照；`lower()` 不会写
+Pass 快照。Pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序编号。
 
 `lower()` 不会执行代码生成，也不会填充编译缓存。需要验证代码生成时请使用 `compile()`。
 （`@pl.jit` 函数自身没有 `as_python()`；要查看 Pass 后的 IR，请检查 `lower()` 的结果；要查看

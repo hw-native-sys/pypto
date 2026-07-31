@@ -14,6 +14,8 @@ runtime APIs directly.
 Closes hw-native-sys/pypto#1455.
 """
 
+import importlib
+
 import pypto.language as pl
 import pytest
 from pypto.ir import OptimizationStrategy
@@ -219,6 +221,19 @@ class TestLowerReturnsProgram:
             with pytest.raises(RuntimeError, match=r"lower\(\).*memory_planner"):
                 add_kernel.lower(x, x, torch.empty_like(x), config=config)
         assert not artifact_dir.exists()
+
+    def test_lower_rewrites_specializer_names_in_pass_errors(self, monkeypatch):
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(16, 16)
+
+        def fail_pipeline(*_args, **_kwargs):
+            raise ValueError("Pass rejected variable 'c_v1'")
+
+        compile_module = importlib.import_module("pypto.ir.compile")
+        monkeypatch.setattr(compile_module, "_run_pass_pipeline", fail_pipeline)
+        with pytest.raises(ValueError, match="Pass rejected variable 'c'") as exc_info:
+            add_kernel.lower(x, x, torch.empty_like(x))
+        assert "c_v1" not in str(exc_info.value)
 
 
 class TestCompileForwardsRunConfig:

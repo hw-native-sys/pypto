@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Codegen smoke tests for dynamic valid_shape (single-block @pl.jit kernel).
+"""Lowering smoke tests for dynamic valid_shape (single-block @pl.jit kernel).
 
 The pre-JIT version of this test exercised a per-block loop with an in-DSL
 ``if/else`` that selected ``vlen`` per iteration.  In the @pl.jit world the
@@ -38,7 +38,7 @@ N_ROW = Q_TILE
 
 
 class TestLoopDynValidShape:
-    """Codegen smoke for dynamic valid_shape across both block lengths.
+    """Lowering smoke for dynamic valid_shape across both block lengths.
 
     The two cases mirror the two branches of the original in-DSL ``if/else``:
     the partial-last-block path (``vlen < BLOCK_COL``) and the full-block

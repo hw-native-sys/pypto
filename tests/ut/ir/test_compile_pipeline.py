@@ -47,7 +47,7 @@ def test_run_pass_pipeline_orders_outer_before_extra_instruments():
     assert isinstance(result.transformed_program, ir.Program)
     assert seen
     assert len(seen) % 2 == 0
-    for outer_event, extra_event in zip(seen[::2], seen[1::2]):
+    for outer_event, extra_event in zip(seen[::2], seen[1::2], strict=True):
         assert outer_event[0] == "outer"
         assert extra_event == ("extra", outer_event[1])
 

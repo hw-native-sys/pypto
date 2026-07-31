@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Codegen smoke tests for dynamic valid_shape branch selection.
+"""Lowering smoke tests for dynamic valid_shape branch selection.
 
 The pre-JIT version of this test exercised a single-call kernel that
 selected ``vlen`` via an in-DSL ``if/else`` based on an ``is_last`` flag.
@@ -31,7 +31,7 @@ from examples.kernels.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
 
 
 class TestDynValidShapeIfElse:
-    """Codegen smoke for the two branches of the (now caller-side) if/else.
+    """Lowering smoke for the two branches of the (now caller-side) if/else.
 
     The original kernel computed ``vlen`` from an ``is_last`` flag inside
     the kernel.  Each test below picks the same ``vlen`` value the kernel

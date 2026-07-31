@@ -74,7 +74,7 @@ The `config` keyword is consumed by JIT machinery exactly as it is for
 ### Behavior matrix
 
 | Entry point | Return value | Passes | Codegen | Cache | Device |
-| --- | --- | --- | --- | --- | --- |
+| ----------- | ------------ | ------ | ------- | ----- | ------ |
 | `kernel.lower(...)` | `ir.Program` | Yes | No | No read/write | No |
 | `kernel.compile(...)` | `CompiledProgram` | Yes | Yes | Read/write | No |
 | `kernel(...)` | Kernel result | Yes on miss | Yes on miss | Read/write | Yes |

@@ -6,9 +6,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""End-to-end test for orchestration function codegen.
+"""End-to-end test for orchestration function lowering.
 
-This test verifies the compilation pipeline for an orchestration program
+This test verifies the lowering pipeline for an orchestration program
 implementing the formula: f = (a + b + 1)(a + b + 2)
 
 Task Graph:
@@ -29,16 +29,16 @@ from examples.models.vector_dag import example_orch
 from pypto.ir import FunctionType
 
 
-class TestOrchestrationCodegen:
-    """Test suite for orchestration codegen."""
+class TestOrchestrationLowering:
+    """Test suite for orchestration lowering."""
 
-    def test_add_mul_orch_codegen(self):
-        """Test orchestration compilation through the pass pipeline.
+    def test_add_mul_orch_lowering(self):
+        """Test orchestration lowering through the pass pipeline.
 
         Verifies that:
-        - JIT entry compiles successfully through the full pass pipeline
+        - JIT entry lowers successfully through the full pass pipeline
         - Post-pass IR has 3 outlined InCore (AIV) functions + 1 Orchestration
-        - No exceptions are raised during compilation
+        - No exceptions are raised during lowering
         """
         a = torch.full((16, 16), 2.0, dtype=torch.float32)
         b = torch.full((16, 16), 3.0, dtype=torch.float32)

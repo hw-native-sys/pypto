@@ -159,8 +159,9 @@ CodeGen             device kernels (.pto -> C++) + host orchestration C++
 Each stage is observable. `lower()` specializes the JIT function, runs the configured
 pass pipeline, and returns the post-pass `ir.Program`; call `program.as_python()` on that
 result to inspect the final lowered IR. By contrast, `CompiledProgram.program` retains
-the specialized pre-pass program, not the pass pipeline's output. `dump_passes=` writes a
-snapshot after every pass, and the passes themselves are documented individually in
+the specialized pre-pass program, not the pass pipeline's output. When `compile()` is
+called with `dump_passes=`, it writes a snapshot after every pass; `lower()` never writes
+pass snapshots. The passes themselves are documented individually in
 [Passes](../dev/passes/index.md), numbered in execution order.
 
 `lower()` performs no code generation and does not populate the compiled-program cache.

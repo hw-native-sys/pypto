@@ -49,30 +49,17 @@ Then check that a real kernel makes it through the pass pipeline. `lower()` spec
 the JIT function, runs the configured pass pipeline, and returns the post-pass
 `ir.Program`. It performs no code generation and does not populate the compiled-program
 cache, so this needs neither ptoas nor a device. Use `compile()` to verify code generation.
-Write the check to a file rather than piping it to `python -`: `@pl.jit` reads the
-decorated function's source, which is unavailable on stdin.
+Run the checked-in lowering example rather than piping a function to `python -`:
+`@pl.jit` reads the decorated function's source, which is unavailable on stdin.
 
 ```bash
-cat > /tmp/pypto_check.py <<'PY'
-import pypto.language as pl
-import torch
-
-@pl.jit
-def add(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.add(a, b)
-    return out
-
-x = torch.zeros((128, 128), dtype=torch.float32)
-program = add.lower(x, x, x)
-print("pipeline OK:", type(program).__name__)
-PY
-
-python /tmp/pypto_check.py
+python examples/kernels/08_assemble.py
 ```
 
+The final line is:
+
 ```text
-pipeline OK: Program
+OK
 ```
 
 If that prints, the C++ core imported, the parser built IR, and the whole pass pipeline
