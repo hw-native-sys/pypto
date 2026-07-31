@@ -607,10 +607,17 @@ class TestSlots:
         """`ir.serialize` / `ir.deserialize` must keep a slot binding a declaration.
 
         A MemRef inside a TileType goes through the type serializer, not the node
-        one, so the standalone-MemRef tests do not cover it. Dropping the three
-        fields there does not merely lose the slot: `is_pinned_` goes with them, so
-        the declaration reads back as an ordinary compiler allocation and InitMemRef
-        stops treating it as declared at all.
+        one, so the standalone-MemRef tests do not cover it. Two things have to
+        survive, and each fails differently:
+
+        * the slot fields — dropping them takes `is_pinned_` too, so the
+          declaration reads back as an ordinary compiler allocation that
+          InitMemRef no longer treats as declared;
+        * the **shared base identity** — allocation identity is base_ *pointer*
+          identity, but the wire format names the base, so a reader that mints a
+          fresh Var per MemRef splits one declaration into one allocation per
+          slot. Both slots are needed to see it; a single-slot program round trips
+          fine either way.
         """
 
         @pl.program
@@ -621,18 +628,27 @@ class TestSlots:
                 a: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.load(
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[0], pl.Mem.Vec] = pl.load(
                     a, [0, 0], [64, 64]
                 )
-                return pl.store(t0, [0, 0], out)
+                t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.exp(t0)
+                return pl.store(t1, [0, 0], out)
 
         after = ir.deserialize(ir.serialize(Before))
         assert isinstance(after, ir.Program)
         ir.assert_structural_equal(after, Before)
-        memref = _tile_memrefs(after)["t0"]
-        assert memref.is_pinned_, "the round trip turned a declaration into a compiler allocation"
-        assert memref.slot_count_ == 2
-        assert isinstance(memref.slot_index_, ir.ConstInt) and memref.slot_index_.value == 1
+
+        memrefs = _tile_memrefs(after)
+        for name, slot in (("t0", 0), ("t1", 1)):
+            memref = memrefs[name]
+            assert memref.is_pinned_, f"'{name}' came back as a compiler allocation"
+            assert memref.slot_count_ == 2
+            assert isinstance(memref.slot_index_, ir.ConstInt) and memref.slot_index_.value == slot
+        # The two slots must still name ONE allocation...
+        assert memrefs["t0"].base_ is memrefs["t1"].base_, "the round trip split the shared base"
+        # ...which is what makes InitMemRef emit a single allocation for the set.
+        resolved = passes.init_mem_ref()(after)
+        assert len(_alloc_lines(resolved)) == 1, _alloc_lines(resolved)
 
     def test_runtime_slot_index_round_trips_under_variable_renaming(self):
         """A slot index must print with the *disambiguated* name of the var it names.

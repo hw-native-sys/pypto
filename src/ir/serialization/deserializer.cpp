@@ -195,8 +195,15 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     CHECK(has_base && has_byte_offset && has_size)
         << "MemRef missing required fields (base, byte_offset, or size)";
 
-    // Create a base Ptr variable from the name
-    auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+    // One base Ptr per allocation name. Allocation identity is base_ *pointer*
+    // identity (MemRef::SameAllocation, the DeclaredAllocMap key, the address
+    // allocator's base groups), and the wire format carries the base only by
+    // name — so minting a fresh Var per MemRef would split one allocation into
+    // as many as there are MemRefs naming it. For a declared allocation that is
+    // visible right after: its slots stop sharing storage and InitMemRef emits
+    // one full-sized allocation per slot instead of one for the set.
+    auto& base = memref_bases_[base_name];
+    if (!base) base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
     return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_pinned, slot_count,
                                     std::move(slot_index));
   }
@@ -522,6 +529,12 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
  private:
   std::unordered_map<uint64_t, IRNodePtr> id_to_ptr_;
+
+  /// Base Ptr per allocation name, so every MemRef naming one allocation shares
+  /// one Var. An embedded MemRef serializes its base by name, so without this the
+  /// reader mints a fresh Var per MemRef and the allocation identity — which the
+  /// IR carries as base_ *pointer* identity — is lost on the way back in.
+  std::unordered_map<std::string, VarPtr> memref_bases_;
 };
 
 // IRDeserializer implementation
