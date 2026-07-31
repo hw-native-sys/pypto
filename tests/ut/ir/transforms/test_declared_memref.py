@@ -587,6 +587,43 @@ class TestSlotRejects:
                     t: pl.Tile[[64, 64], pl.FP32, l0c[5], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
                     return pl.store(t, [0, 0], out)
 
+    def test_rejects_disagreeing_slot_counts_with_disjoint_uses(self):
+        """One name, one slot count — even when no later use re-checks it.
+
+        The "already recorded" sentinel must be a count no declaration can carry.
+        With 1 as the sentinel, an unsubscripted declaration recorded first never
+        consumed it, so a later `slots=2` on the same name silently overwrote it.
+
+        Overlapping uses hide that: the collector visits a Var at every occurrence,
+        so a 1-slot tile still live across the 2-slot declaration gets re-checked
+        and trips the mismatch anyway. Here each tile is fully consumed before the
+        next declaration appears, so the overwrite is the only thing standing
+        between the author and an allocation sized from a declaration they
+        contradicted.
+        """
+        with pytest.raises(ValueError, match="disagree on how many slots"):
+
+            @pl.program
+            class Before:
+                @pl.function
+                def main(
+                    self,
+                    a: pl.Tensor[[64, 64], pl.FP32],
+                    o1: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                    o2: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+                    t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf"), pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [64, 64]
+                    )
+                    r0: pl.Tensor[[64, 64], pl.FP32] = pl.store(t0, [0, 0], o1)
+                    t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [64, 64]
+                    )
+                    r1: pl.Tensor[[64, 64], pl.FP32] = pl.store(t1, [0, 0], o2)
+                    return r0, r1
+
+            passes.init_mem_ref()(Before)
+
     def test_rejects_zero_slots_at_construction(self):
         """`slots=0` is refused where it is written, not as a 0-byte allocation later."""
         with pytest.raises(ValueError, match="at least one slot"):

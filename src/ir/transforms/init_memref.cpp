@@ -118,8 +118,13 @@ std::optional<uint64_t> ShapedTypeSizeBytes(const ShapedTypePtr& type) {
 
 /// Slot geometry derived for one declared allocation.
 struct DeclaredAlloc {
-  uint64_t slot_size = 0;   ///< Bytes per slot — the largest tile bound to any slot
-  uint64_t slot_count = 1;  ///< How many slots the author declared
+  uint64_t slot_size = 0;  ///< Bytes per slot — the largest tile bound to any slot
+  /// How many slots the author declared; 0 until the first binding records it.
+  /// The sentinel must be a value a real declaration can never carry — 1 would
+  /// collide with an ordinary unsubscripted declaration, and a later, genuinely
+  /// different count would then overwrite it instead of tripping the mismatch
+  /// check. `Record` rejects anything below 1, so 0 is safe.
+  uint64_t slot_count = 0;
 
   /// Total bytes to allocate: every slot is the same size and they sit contiguously,
   /// which is what makes `slot_index * slot_size` a valid offset.
@@ -184,7 +189,7 @@ class DeclaredAllocCollector : public IRVisitor {
     CHECK_SPAN(binding->slot_count_ >= 1, var->span_)
         << "Declared allocation '" << base->name_hint_ << "' must have at least one slot, got "
         << binding->slot_count_;
-    if (alloc.slot_count == 1) {
+    if (alloc.slot_count == 0) {
       alloc.slot_count = binding->slot_count_;
     }
     CHECK_SPAN(alloc.slot_count == binding->slot_count_, var->span_)
