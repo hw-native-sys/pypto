@@ -1124,5 +1124,96 @@ class TestFlattenCallInReturn:
         ir.assert_structural_equal(After, NormalizeIR(Expected))
 
 
+class TestFlattenCallInYield:
+    """Tests for flattening Call expressions that appear directly inside YieldStmt.
+
+    Regression tests for issue #2229: `pl.yield_(some_call(...))` (no intermediate
+    variable) used to leave a YieldStmt-wrapped Call untouched. Passes that rewrite
+    operations walk top-level AssignStmt/EvalStmt, so they silently skipped it — a
+    `tensor.add` carried by a loop stayed `tensor.add` through
+    ConvertTensorToTileOps while its operands became Tiles, and the tensor-level
+    type check then rejected its own operand.
+    """
+
+    def test_single_call_in_for_yield(self):
+        """`pl.yield_(pl.add(acc, x))` binds the call to a temp before the yield."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for _i, (acc,) in pl.range(1, 4, init_values=(x,)):
+                    total: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(acc, x))
+                return total
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for _i, (acc,) in pl.range(1, 4, init_values=(x,)):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
+                    total: pl.Tensor[[64], pl.FP32] = pl.yield_(t__tmp_v0)
+                return total
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_nested_call_in_for_yield(self):
+        """A nested `pl.yield_(pl.mul(pl.add(...), 2.0))` extracts both calls."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for _i, (acc,) in pl.range(1, 4, init_values=(x,)):
+                    total: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(pl.add(acc, x), 2.0))
+                return total
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for _i, (acc,) in pl.range(1, 4, init_values=(x,)):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(acc, x)
+                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
+                    total: pl.Tensor[[64], pl.FP32] = pl.yield_(t__tmp_v1)
+                return total
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_call_in_if_yield(self):
+        """An IfStmt yield gets the same treatment; temps stay inside their branch."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag > 0:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.add(x, 1.0))
+                else:
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(pl.mul(x, 2.0))
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], flag: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if flag > 0:
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(t__tmp_v0)
+                else:
+                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    out: pl.Tensor[[64], pl.FP32] = pl.yield_(t__tmp_v1)
+                return out
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

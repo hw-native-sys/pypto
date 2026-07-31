@@ -42,6 +42,7 @@ namespace {
  * 3. For loop ranges (start/stop/step) cannot be calls
  * 4. Binary/unary expression operands cannot be calls
  * 5. Return values cannot be calls
+ * 6. Yield values cannot be calls
  *
  * Nested calls are extracted into temporary variables and inserted as
  * AssignStmt before the statement containing the nested call.
@@ -59,6 +60,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override;
+  StmtPtr VisitStmt_(const YieldStmtPtr& op) override;
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
@@ -359,6 +361,41 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ReturnStmtPtr& op) {
     // Extract any Call value into a temporary so codegen always sees the
     // dispatch as a real statement.
     if (As<Call>(visited)) {
+      visited = ExtractCallToTemp(visited);
+      changed = true;
+    } else if (visited.get() != value.get()) {
+      changed = true;
+    }
+    new_values.push_back(visited);
+  }
+
+  if (!changed) {
+    return op;
+  }
+  auto result = MutableCopy(op);
+  result->value_ = std::move(new_values);
+  return result;
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const YieldStmtPtr& op) {
+  // Note: Don't clear pending_stmts_, preserve previous state so the enclosing
+  // SeqStmts visitor inserts our extracted temporaries before the YieldStmt.
+  // A yield is always the trailing statement of its loop / branch body, so the
+  // temporaries land inside that body, where the yielded value is computed.
+
+  std::vector<ExprPtr> new_values;
+  new_values.reserve(op->value_.size());
+  bool changed = false;
+
+  for (const auto& value : op->value_) {
+    auto visited = VisitExpr(value);
+
+    // Same rationale as the ReturnStmt case above: a `yield call(...)` reaches
+    // the rest of the pipeline as a YieldStmt-wrapped Call, and passes that walk
+    // top-level AssignStmt/EvalStmt to rewrite operations silently skip it. That
+    // leaves, for instance, a `tensor.add` carried by a loop unconverted by
+    // ConvertTensorToTileOps while its operands become Tiles (issue #2229).
+    if (As<Call>(visited) || As<Submit>(visited)) {
       visited = ExtractCallToTemp(visited);
       changed = true;
     } else if (visited.get() != value.get()) {
