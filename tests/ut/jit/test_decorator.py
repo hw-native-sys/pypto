@@ -372,6 +372,11 @@ class TestJitCaching:
     ``_cache`` dict.  They do NOT execute on device (no NPU required).
     """
 
+    @pytest.fixture(autouse=True)
+    def _disable_ptoas_for_source_only_tests(self, monkeypatch, tmp_path):
+        """Keep cache compilation source-only on hosts with an unusable ptoas."""
+        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+
     def test_cache_hit_same_shape(self):
         """Second call with same shape returns cached program without recompilation."""
         torch = pytest.importorskip("torch")
@@ -394,9 +399,9 @@ class TestJitCaching:
         b = torch.randn(128, 128)
         c = torch.empty(128, 128)
 
-        add_kernel.compile_for_test(a, b, c)
+        add_kernel.compile(a, b, c)
         assert len(add_kernel._cache) == 1
-        add_kernel.compile_for_test(a, b, c)
+        add_kernel.compile(a, b, c)
         assert len(add_kernel._cache) == 1  # no new entry — cache hit
 
     def test_cache_miss_different_shape(self):
@@ -425,9 +430,9 @@ class TestJitCaching:
         b64 = torch.randn(64, 64)
         c64 = torch.empty(64, 64)
 
-        add_kernel2.compile_for_test(a128, b128, c128)
+        add_kernel2.compile(a128, b128, c128)
         assert len(add_kernel2._cache) == 1
-        add_kernel2.compile_for_test(a64, b64, c64)
+        add_kernel2.compile(a64, b64, c64)
         assert len(add_kernel2._cache) == 2  # different shape — cache miss
 
     def test_dynamic_dim_cache_hit_different_concrete_value(self):
@@ -453,9 +458,9 @@ class TestJitCaching:
         a512 = torch.randn(512, 128)
         c512 = torch.empty(512, 128)
 
-        dyn_kernel.compile_for_test(a256, c256)
+        dyn_kernel.compile(a256, c256)
         assert len(dyn_kernel._cache) == 1
-        dyn_kernel.compile_for_test(a512, c512)
+        dyn_kernel.compile(a512, c512)
         # Both M values → same cache entry (M is dynamic)
         assert len(dyn_kernel._cache) == 1
 
@@ -482,9 +487,9 @@ class TestJitCaching:
         a256 = torch.randn(256, 256)
         c256 = torch.empty(256, 256)
 
-        dyn_kernel2.compile_for_test(a128, c128)
+        dyn_kernel2.compile(a128, c128)
         assert len(dyn_kernel2._cache) == 1
-        dyn_kernel2.compile_for_test(a256, c256)
+        dyn_kernel2.compile(a256, c256)
         # K changed (128 → 256), should be different compilations
         assert len(dyn_kernel2._cache) == 2
 
@@ -528,9 +533,9 @@ class TestJitCaching:
         a512 = torch.randn(512, 128)
         c512 = torch.empty(512, 128)
 
-        ann_dyn_kernel.compile_for_test(a256, c256)
+        ann_dyn_kernel.compile(a256, c256)
         assert len(ann_dyn_kernel._cache) == 1
-        ann_dyn_kernel.compile_for_test(a512, c512)
+        ann_dyn_kernel.compile(a512, c512)
         # Both M values → same cache entry (M is dynamic via annotation alone).
         assert len(ann_dyn_kernel._cache) == 1
 
@@ -552,7 +557,7 @@ class TestJitCaching:
 
         a = torch.randn(64, 64)
         c = torch.empty(64, 64)
-        simple.compile_for_test(a, c)
+        simple.compile(a, c)
         cached_values = list(simple._cache.values())
         assert len(cached_values) == 1
         assert isinstance(cached_values[0], CompiledProgram)

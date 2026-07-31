@@ -16,10 +16,17 @@ Closes hw-native-sys/pypto#1455.
 
 import pypto.language as pl
 import pytest
+from pypto.ir import OptimizationStrategy
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
-from pypto.pypto_core import ir
+from pypto.pypto_core import ir, passes
 from pypto.runtime.runner import RunConfig
+
+
+@pytest.fixture(autouse=True)
+def _disable_ptoas_for_source_only_tests(monkeypatch, tmp_path):
+    """Keep compile() coverage source-only on hosts with an unusable ptoas."""
+    monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
 
 @jit.incore
@@ -63,27 +70,18 @@ class TestCompileReturnsCompiledProgram:
         second = add_kernel.compile(a, b, c)
         assert first is second
 
-    def test_call_then_compile_returns_cached_instance(self):
-        """``compile()`` after a regular call must return the cached CompiledProgram
-        — the two entry points share a cache and never recompile for the same key.
-
-        We cannot run ``__call__`` here without a device, but we can verify the
-        cache invariant by populating it via ``compile_for_test`` (which uses
-        the same key derivation) and checking ``compile`` is a hit.
-        """
+    def test_call_then_compile_returns_cached_instance(self, monkeypatch):
+        """``__call__`` and ``compile()`` share the same cached program."""
         torch = pytest.importorskip("torch")
 
         a = torch.zeros(96, 96, dtype=torch.float32)
         b = torch.zeros(96, 96, dtype=torch.float32)
         c = torch.empty(96, 96, dtype=torch.float32)
 
-        # compile_for_test() also fills self._cache via _compile()
-        add_kernel.compile_for_test(a, b, c)
-        cache_len_before = len(add_kernel._cache)
         compiled = add_kernel.compile(a, b, c)
-        assert isinstance(compiled, CompiledProgram)
-        # No new entry — compile() hit the cache.
-        assert len(add_kernel._cache) == cache_len_before
+        monkeypatch.setattr(CompiledProgram, "__call__", lambda self, *_args, **_kwargs: "called")
+        assert add_kernel(a, b, c) == "called"
+        assert add_kernel.compile(a, b, c) is compiled
 
     def test_compile_cache_miss_on_different_shape(self):
         """Different shape causes a new compilation (distinct CompiledProgram)."""
@@ -99,6 +97,94 @@ class TestCompileReturnsCompiledProgram:
         compiled_a = add_kernel.compile(a_a, b_a, c_a)
         compiled_b = add_kernel.compile(a_b, b_b, c_b)
         assert compiled_a is not compiled_b
+
+
+class TestLowerReturnsProgram:
+    """Verify ``lower()`` specializes and runs passes without compiling."""
+
+    def test_lower_returns_post_pass_program_without_compiling(self, monkeypatch):
+        torch = pytest.importorskip("torch")
+        a = torch.zeros(24, 24)
+        b = torch.zeros(24, 24)
+        c = torch.empty(24, 24)
+        cache_before = dict(add_kernel._cache)
+
+        def fail_compile(*_args, **_kwargs):
+            pytest.fail("lower() entered codegen")
+
+        monkeypatch.setattr(add_kernel, "_compile", fail_compile)
+        program = add_kernel.lower(a, b, c)
+        assert isinstance(program, ir.Program)
+        assert add_kernel._cache == cache_before
+
+    def test_lower_ignores_artifact_controls(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        artifact_dir = tmp_path / "must_not_exist"
+        config = RunConfig(
+            save_kernels=True,
+            save_kernels_dir=str(artifact_dir),
+            dump_passes=True,
+            compile_profiling=True,
+            codegen_only=True,
+            device_id=7,
+        )
+        x = torch.zeros(20, 20)
+        program = add_kernel.lower(x, x, torch.empty_like(x), config=config)
+        assert isinstance(program, ir.Program)
+        assert not artifact_dir.exists()
+
+    def test_lower_honors_strategy_through_real_pass_execution(self):
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(16, 16)
+        seen_default: list[str] = []
+        seen_debug: list[str] = []
+        default_instrument = passes.CallbackInstrument(
+            before_pass=lambda pass_obj, _program: seen_default.append(pass_obj.get_name()),
+            name="default",
+        )
+        debug_instrument = passes.CallbackInstrument(
+            before_pass=lambda pass_obj, _program: seen_debug.append(pass_obj.get_name()),
+            name="debug",
+        )
+        with passes.PassContext([default_instrument]):
+            add_kernel.lower(x, x, torch.empty_like(x))
+        with passes.PassContext([debug_instrument]):
+            add_kernel.lower(
+                x,
+                x,
+                torch.empty_like(x),
+                config=RunConfig(strategy=OptimizationStrategy.DebugTileOptimization),
+            )
+        assert "ConvertTensorToTileOps" in seen_default
+        assert "ConvertTensorToTileOps" not in seen_debug
+
+    def test_lower_supports_signature_and_keyword_modes(self):
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def copy(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = x
+            return out
+
+        assert isinstance(copy.lower(), ir.Program)
+        x = torch.zeros(16, 16)
+        assert isinstance(copy.lower(x=x, out=torch.empty_like(x)), ir.Program)
+
+    def test_lower_conflict_writes_no_artifacts(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        artifact_dir = tmp_path / "must_not_exist"
+        config = RunConfig(
+            memory_planner=passes.MemoryPlanner.PTOAS,
+            save_kernels_dir=str(artifact_dir),
+            dump_passes=True,
+            compile_profiling=True,
+        )
+        x = torch.zeros(16, 16)
+        with passes.PassContext([]):
+            with pytest.raises(RuntimeError, match=r"lower\(\).*memory_planner"):
+                add_kernel.lower(x, x, torch.empty_like(x), config=config)
+        assert not artifact_dir.exists()
 
 
 class TestCompileForwardsRunConfig:

@@ -64,6 +64,7 @@ from typing import Any, NamedTuple
 from pypto._external_source import external_source_digest
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
 
 from .cache import CacheKey, compute_source_hash, make_cache_key
@@ -1049,6 +1050,17 @@ class _SlicedArg(NamedTuple):
     drop: int
 
 
+class _Specialization(NamedTuple):
+    """Metadata derived from one signature or sample-argument specialization."""
+
+    param_names: list[str]
+    arguments: dict[str, Any]
+    tensor_meta: dict[str, TensorMeta]
+    scalar_values: dict[str, int | float | bool]
+    scalar_dtypes: dict[str, DataType]
+    per_func_dyn: dict[int, dict[str, dict[int, DynDim]]]
+
+
 def _arg_ref(arg: ast.expr) -> str | _SlicedArg | None:
     """Caller-side reference for a call argument.
 
@@ -1274,6 +1286,19 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         kwargs["output_dir"] = run_config.save_kernels_dir
     if run_config.distributed_config is not None:
         kwargs["distributed_config"] = run_config.distributed_config
+    if run_config.memory_planner is not None:
+        kwargs["memory_planner"] = run_config.memory_planner
+    return kwargs
+
+
+def _run_config_lower_kwargs(run_config: Any) -> dict[str, Any]:
+    """Extract pass-only keyword arguments from a ``pypto.runtime.RunConfig``."""
+    kwargs: dict[str, Any] = {
+        "strategy": run_config.strategy,
+        "diagnostic_phase": run_config.diagnostic_phase,
+        "disabled_diagnostics": run_config.disabled_diagnostics,
+        "analyze_auto_scopes_for_deps": run_config.analyze_auto_scopes_for_deps,
+    }
     if run_config.memory_planner is not None:
         kwargs["memory_planner"] = run_config.memory_planner
     return kwargs
@@ -1699,38 +1724,24 @@ class JITFunction:
     # Call
     # ------------------------------------------------------------------
 
-    def _resolve_compiled(
+    def _resolve_specialization(
         self,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         allow_signature_mode: bool = False,
-    ) -> tuple[Any, list[Any], Any | None]:
-        """Bind args, look up or build the CompiledProgram, return it with the
-        ordered positional arg list and the consumed RunConfig.
+    ) -> tuple[_Specialization, Any | None]:
+        """Bind signature or sample arguments and consume the ``RunConfig``.
 
-        Shared by :meth:`__call__` (which then dispatches) and :meth:`compile`
-        (which then returns the CompiledProgram). Centralises:
-
-        - ``config=`` keyword extraction (so it never leaks into the decorated
-          function's signature)
-        - ``_bind_args`` shape/dtype classification
-        - cache-key construction (platform + strategy participate so artefacts
-          for different targets never collide)
-        - on-miss ``_compile()`` invocation
+        Shared by :meth:`lower`, :meth:`__call__`, and :meth:`compile`.
 
         When ``allow_signature_mode`` is set and no positional args are given,
         the shape/dtype contract is read from the kernel's own annotations via
-        :meth:`_bind_args_from_signature` (compile-only; ``__call__`` never
-        enables this because on-device dispatch needs real tensors).
+        :meth:`_bind_args_from_signature`. :meth:`__call__` never enables this
+        because on-device dispatch needs real tensors.
 
         Returns:
-            ``(compiled, ordered_args, run_config)`` where ``ordered_args``
-            is the positional list in declared parameter order — keyword
-            callers like ``kernel(a=x, b=y)`` are normalised here so
-            downstream dispatch is order-agnostic.
+            The specialization metadata and the consumed ``RunConfig``.
         """
-        import pypto.language as pl  # noqa: PLC0415
-
         # Extract RunConfig without mutating *kwargs* — although the caller's
         # ``**kwargs`` dict is normally owned by Python at this scope, building
         # a fresh dict is the same cost and removes the ambiguity for readers
@@ -1753,6 +1764,42 @@ class JITFunction:
             param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
                 args, kwargs
             )
+
+        return (
+            _Specialization(
+                param_names,
+                arguments,
+                tensor_meta,
+                scalar_values,
+                scalar_dtypes,
+                per_func_dyn,
+            ),
+            run_config,
+        )
+
+    def _resolve_compiled(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        allow_signature_mode: bool = False,
+    ) -> tuple[Any, list[Any], Any | None]:
+        """Look up or build a specialized CompiledProgram.
+
+        Shared by :meth:`__call__` (which then dispatches) and :meth:`compile`
+        (which then returns the CompiledProgram). Cache keys include all inputs
+        that affect the generated artifact.
+
+        Returns:
+            ``(compiled, ordered_args, run_config)`` where ``ordered_args``
+            follows the decorated function's declared parameter order.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+
+        specialization, run_config = self._resolve_specialization(
+            args,
+            kwargs,
+            allow_signature_mode=allow_signature_mode,
+        )
 
         # Compile-side knobs (strategy, dump_passes, ...) come from the
         # RunConfig. Forwarding them lets a @pl.jit kernel honour the same
@@ -1781,11 +1828,13 @@ class JITFunction:
         memory_planner = _resolve_memory_planner(run_config)
         key = make_cache_key(
             source_hash=self._get_source_hash(),
-            param_names=param_names,
-            tensor_shapes={n: m.static_shape() for n, m in tensor_meta.items()},
-            tensor_dtypes={n: m.dtype for n, m in tensor_meta.items()},
-            dynamic_dims={(n, i) for n, m in tensor_meta.items() for i in m.dynamic_dim_indices()},
-            scalar_values=scalar_values,
+            param_names=specialization.param_names,
+            tensor_shapes={n: m.static_shape() for n, m in specialization.tensor_meta.items()},
+            tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
+            dynamic_dims={
+                (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
+            },
+            scalar_values=specialization.scalar_values,
             platform=platform,
             strategy=strategy,
             distributed_config=distributed_config,
@@ -1797,10 +1846,10 @@ class JITFunction:
         # L1 cache lookup
         if key not in self._cache:
             self._cache[key] = self._compile(
-                tensor_meta,
-                scalar_values,
-                scalar_dtypes,
-                per_func_dyn,
+                specialization.tensor_meta,
+                specialization.scalar_values,
+                specialization.scalar_dtypes,
+                specialization.per_func_dyn,
                 pl,
                 platform=platform,
                 **compile_kwargs,
@@ -1810,7 +1859,9 @@ class JITFunction:
         # like kernel(a=x, b=y) are routed correctly regardless of how the
         # caller passed them.
         compiled = self._cache[key]
-        ordered_args = [arguments[n] for n in param_names if n in arguments]
+        ordered_args = [
+            specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
+        ]
         return compiled, ordered_args, run_config
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -1923,6 +1974,47 @@ class JITFunction:
         compiled, _ordered_args, _run_config = self._resolve_compiled(args, kwargs, allow_signature_mode=True)
         return compiled
 
+    def lower(self, *args: Any, **kwargs: Any) -> _ir.Program:
+        """Specialize this JIT function and return its post-pass IR.
+
+        A ``config=RunConfig(...)`` keyword controls pass execution through its
+        strategy, diagnostics, dependency-analysis, memory-planner, and platform
+        fields. Runtime and artifact fields are ignored. This method does not
+        run code generation, invoke ``ptoas``, execute on a device, write
+        artifacts, or access the compiled-program cache.
+
+        Args:
+            *args: Positional sample arguments matching the decorated function.
+                Omit tensor samples to specialize from fully shaped annotations.
+            **kwargs: Keyword sample arguments and an optional ``config``.
+
+        Returns:
+            The specialized :class:`ir.Program` after configured passes.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+        from pypto.ir.compile import _run_pass_pipeline  # noqa: PLC0415
+
+        specialization, run_config = self._resolve_specialization(
+            args,
+            kwargs,
+            allow_signature_mode=True,
+        )
+        pre_pass = self._compile_to_program(
+            specialization.tensor_meta,
+            specialization.scalar_values,
+            specialization.scalar_dtypes,
+            specialization.per_func_dyn,
+            pl,
+        )
+        lower_kwargs = _run_config_lower_kwargs(run_config) if run_config is not None else {}
+        platform = run_config.platform if run_config is not None else None
+        return _run_pass_pipeline(
+            pre_pass,
+            operation="lower",
+            platform=platform,
+            **lower_kwargs,
+        ).transformed_program
+
     # ------------------------------------------------------------------
     # Compilation
     # ------------------------------------------------------------------
@@ -1978,12 +2070,7 @@ class JITFunction:
         per_func_dyn: dict[int, dict[str, dict[int, DynDim]]],
         pl: Any,
     ) -> Any:
-        """Specialize entry + deps and return the parsed ir.Program (pre-pass).
-
-        This method is intended for testing only — it lets tests inspect and
-        compare the specialized IR without running the full pass pipeline or
-        requiring the Ascend toolchain.
-        """
+        """Specialize entry + deps and return the parsed pre-pass ``ir.Program``."""
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts)
@@ -2097,67 +2184,6 @@ class JITFunction:
             auto_scope=self._auto_scope,
         )
         return dep_contexts + [entry_ctx]
-
-    def compile_for_test(self, *args: Any, **kwargs: Any) -> Any:
-        """Specialize, compile, and return the post-pass ir.Program for testing.
-
-        Runs the full pass pipeline and populates ``_cache`` with a
-        ``CompiledProgram`` (via ``ir.compile()``), then returns the post-pass
-        ``ir.Program`` for structural equality comparison in unit tests.
-
-        Unlike ``__call__``, this method does not execute on device.
-
-        Args:
-            *args: Positional arguments matching the decorated function's params.
-            **kwargs: Keyword arguments.
-
-        Returns:
-            ``ir.Program`` after the full pass pipeline, suitable for
-            ``ir.assert_structural_equal`` comparison.
-        """
-        import pypto.language as pl  # noqa: PLC0415
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
-
-        param_names, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
-            args, kwargs
-        )
-
-        key = make_cache_key(
-            source_hash=self._get_source_hash(),
-            param_names=param_names,
-            tensor_shapes={n: m.static_shape() for n, m in tensor_meta.items()},
-            tensor_dtypes={n: m.dtype for n, m in tensor_meta.items()},
-            dynamic_dims={(n, i) for n, m in tensor_meta.items() for i in m.dynamic_dim_indices()},
-            scalar_values=scalar_values,
-            platform=None,  # compile_for_test is platform-agnostic (testing only)
-            strategy=OptimizationStrategy.Default,  # _compile() uses the default strategy
-            # compile_for_test takes no RunConfig, so the planner can only come
-            # from an ambient PassContext — which still changes the artifact.
-            memory_planner=_resolve_memory_planner(None),
-            enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
-        )
-
-        # Populate cache via ir.compile() (codegen included) as a best-effort
-        # side effect.  Two known failure modes are both acceptable here:
-        #   (1) Single-function programs with incore scopes fail at
-        #       OutlineIncoreScopes (the pass only handles Opaque functions).
-        #   (2) Some programs fail at ptoas due to hardware-specific constraints
-        #       (e.g. tinsert loc=acc/mat mismatch on assemble kernels).
-        # In both cases the cache entry is simply left empty; the actual return
-        # value of this method comes from _compile_to_program() below, which
-        # runs only through the pass pipeline (no codegen) and always succeeds
-        # for structurally valid IR.
-        if key not in self._cache:
-            try:
-                self._cache[key] = self._compile(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
-            except Exception:
-                pass
-
-        # Return the post-pass ir.Program via the lightweight path
-        # (no codegen) for structural equality comparison.
-        pre_pass = self._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        return pm.run_passes(pre_pass)
 
     def __repr__(self) -> str:
         return f"JITFunction({self.__name__!r}, func_type={self._func_type!r})"

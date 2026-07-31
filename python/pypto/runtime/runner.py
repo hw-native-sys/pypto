@@ -81,6 +81,13 @@ _RING_DEPTH = 4
 class RunConfig:
     """Configuration for a :func:`run` invocation or harness test execution.
 
+    When passed to :meth:`pypto.jit.decorator.JITFunction.lower`, only
+    ``platform``, ``strategy``, diagnostics, dependency analysis, and
+    ``memory_planner`` affect pass execution. Runtime and artifact fields such
+    as ``device_id``, ``dump_passes``, ``save_kernels_dir``, and
+    ``compile_profiling`` are ignored; ``lower()`` does not execute or write
+    compilation artifacts.
+
     Attributes:
         platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
             (Ascend 910B) or ``"a5sim"`` / ``"a5"`` (Ascend 950).
