@@ -337,15 +337,29 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     }
   }
 
-  // Sort by byte_offset (ascending order) so alloc statements are in address order
+  // Sort by byte_offset (ascending order) so alloc statements are in address order.
+  //
+  // Comparing by offset only when *both* sides are constant, and by name
+  // otherwise, is not a strict weak ordering once dynamic offsets are reachable:
+  // with A=(name "z", offset 0), B=(name "a", offset 1) and C=(name "m", dynamic),
+  // A < B by offset and B < C by name, yet A < C is false — and a non-transitive
+  // comparator makes std::sort undefined behaviour. A declared allocation's
+  // runtime slot index made that case reachable.
+  //
+  // Ordering on one total key instead: constants first in address order, then
+  // dynamic addresses by name. `name_hint_` breaks ties among equal offsets so
+  // the result is deterministic (two MemRefs of one base group can share an
+  // offset, e.g. a view over its parent).
   std::sort(memref_pairs.begin(), memref_pairs.end(),
             [](const std::pair<const MemRef*, MemRefPtr>& a, const std::pair<const MemRef*, MemRefPtr>& b) {
               auto off_a = std::dynamic_pointer_cast<const ConstInt>(a.second->byte_offset_);
               auto off_b = std::dynamic_pointer_cast<const ConstInt>(b.second->byte_offset_);
-              if (off_a && off_b) {
+              if (static_cast<bool>(off_a) != static_cast<bool>(off_b)) {
+                return static_cast<bool>(off_a);  // constants before dynamic
+              }
+              if (off_a && off_b && off_a->value_ != off_b->value_) {
                 return off_a->value_ < off_b->value_;
               }
-              // Fallback: sort by name
               return a.second->name_hint_ < b.second->name_hint_;
             });
 

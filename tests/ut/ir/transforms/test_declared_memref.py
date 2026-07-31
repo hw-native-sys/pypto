@@ -603,6 +603,37 @@ class TestSlots:
         assert 'pl.MemRef("l0c", slots=2)[1]' in dumped, dumped
         ir.assert_structural_equal(Before, pl.parse_program(dumped))
 
+    def test_slots_survive_serialization_embedded_in_a_tile_type(self):
+        """`ir.serialize` / `ir.deserialize` must keep a slot binding a declaration.
+
+        A MemRef inside a TileType goes through the type serializer, not the node
+        one, so the standalone-MemRef tests do not cover it. Dropping the three
+        fields there does not merely lose the slot: `is_pinned_` goes with them, so
+        the declaration reads back as an ordinary compiler allocation and InitMemRef
+        stops treating it as declared at all.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("buf", slots=2)[1], pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64]
+                )
+                return pl.store(t0, [0, 0], out)
+
+        after = ir.deserialize(ir.serialize(Before))
+        assert isinstance(after, ir.Program)
+        ir.assert_structural_equal(after, Before)
+        memref = _tile_memrefs(after)["t0"]
+        assert memref.is_pinned_, "the round trip turned a declaration into a compiler allocation"
+        assert memref.slot_count_ == 2
+        assert isinstance(memref.slot_index_, ir.ConstInt) and memref.slot_index_.value == 1
+
     def test_runtime_slot_index_round_trips_under_variable_renaming(self):
         """A slot index must print with the *disambiguated* name of the var it names.
 
