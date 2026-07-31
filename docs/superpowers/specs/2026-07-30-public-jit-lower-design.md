@@ -99,7 +99,8 @@ not change successful IR:
 - `RunConfig.diagnostic_phase`
 - `RunConfig.disabled_diagnostics`
 - an active `PassContext`'s verification level, diagnostic phase, disabled
-  diagnostics, and pass instruments
+  diagnostics, and non-`ReportInstrument` pass instruments. Outer
+  `ReportInstrument` instances are filtered so `lower()` cannot emit a report.
 
 Their precedence exactly matches `ir.compile()`:
 
@@ -122,9 +123,11 @@ If an explicit `RunConfig.memory_planner` conflicts with an active
 choosing one.
 
 PyPTO itself creates no artifact directories during `lower()`. Explicit
-user-provided `PassContext` instruments are still invoked for parity with
-`compile()` and may perform their own documented side effects; those
-user-controlled effects are outside the no-artifact guarantee.
+user-provided `PassContext` callback instruments are still invoked for parity
+with `compile()` and may perform their own documented side effects; those
+user-controlled effects are outside the no-artifact guarantee. Outer
+`ReportInstrument` instances are the exception: `lower()` filters them to
+preserve its no-artifact contract.
 
 ## Internal Design
 
@@ -293,7 +296,8 @@ Add focused JIT tests that verify:
    the same precedence and conflict behavior as `compile()`.
 7. With `save_kernels_dir`, `dump_passes=True`, and compile profiling set,
    successful and failing `lower()` calls create no build directory, report, or
-   pass dump; an explicit outer instrument is still invoked.
+   pass dump; an explicit outer callback instrument is still invoked, while an
+   outer `ReportInstrument` is filtered.
 8. Binding, parse, pass, and configuration errors are propagated.
 9. `compile()` still reuses `CompiledProgram` cache entries.
 10. A focused parity test compares `lower()` with the shared internal pass
