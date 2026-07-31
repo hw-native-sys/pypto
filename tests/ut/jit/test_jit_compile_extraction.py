@@ -161,30 +161,22 @@ class TestLowerReturnsProgram:
         assert seen_passes
         assert not (tmp_path / "perf_hints.log").exists()
 
-    def test_lower_honors_strategy_through_real_pass_execution(self):
+    def test_lower_runs_the_configured_strategy_pipeline(self):
         torch = pytest.importorskip("torch")
         x = torch.zeros(16, 16)
         seen_default: list[str] = []
-        seen_debug: list[str] = []
         default_instrument = passes.CallbackInstrument(
             before_pass=lambda pass_obj, _program: seen_default.append(pass_obj.get_name()),
             name="default",
         )
-        debug_instrument = passes.CallbackInstrument(
-            before_pass=lambda pass_obj, _program: seen_debug.append(pass_obj.get_name()),
-            name="debug",
-        )
         with passes.PassContext([default_instrument]):
-            add_kernel.lower(x, x, torch.empty_like(x))
-        with passes.PassContext([debug_instrument]):
             add_kernel.lower(
                 x,
                 x,
                 torch.empty_like(x),
-                config=RunConfig(strategy=OptimizationStrategy.DebugTileOptimization),
+                config=RunConfig(strategy=OptimizationStrategy.Default),
             )
         assert "ConvertTensorToTileOps" in seen_default
-        assert "ConvertTensorToTileOps" not in seen_debug
 
     def test_lower_supports_signature_and_keyword_modes(self):
         torch = pytest.importorskip("torch")

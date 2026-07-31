@@ -23,9 +23,9 @@ orchestration codegen 直接读取，不再自行推导。
 count；若一个 `Sequential` 循环把该数组穿过内层 `pl.parallel` 向外传递，则继承内层
 的 extent。
 
-**何时运行**：`Default` 与 `DebugTileOptimization` 策略的最后一个 pass，紧跟在
-[`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) 之后。跑在最后意味着
-被分类的 IR 与 codegen 实际降级的 IR 完全一致。
+**何时运行**：`Default` 策略的最后一个 pass，紧跟在
+[`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) 之后。跑在最后
+意味着被分类的 IR 与 codegen 实际降级的 IR 完全一致。
 
 ## 别名等价类（alias class）
 

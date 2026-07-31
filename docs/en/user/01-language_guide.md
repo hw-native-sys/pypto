@@ -621,7 +621,7 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # auto-generated if None
-    strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization
+    strategy=ir.OptimizationStrategy.Default,  # the only optimization strategy
     dump_passes=True,                          # dump IR snapshots under output_dir/passes_dump/
     backend_type=BackendType.Ascend910B,
 )
@@ -630,7 +630,7 @@ output_dir = ir.compile(
 | Parameter | Options | Description |
 | --------- | ------- | ----------- |
 | `program` | `ir.Program` | Required program object (from `@pl.program` or equivalent) |
-| `strategy` | `OptimizationStrategy.Default`, `DebugTileOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes |
+| `strategy` | `OptimizationStrategy.Default` | `Default` = full tensor-oriented pipeline (the only strategy) |
 | `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (`import BackendType` from `pypto.backend`) |
 | `dump_passes` | `True`/`False` | If `True`, write IR snapshots under `<output_dir>/passes_dump/` after each pass (default `True`) |
 | `skip_ptoas` | `True`/`False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |

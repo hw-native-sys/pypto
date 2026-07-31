@@ -155,9 +155,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         strategy: Optimization strategy applied during compilation (an
             ``OptimizationStrategy`` member, or ``None`` for the JIT default).
             Included in the key because the strategy changes the compiled
-            artifact; without it, calling the same kernel with two strategies
-            (an A/B comparison) would return the first-compiled artifact for
-            both.
+            artifact; without it, calling the same kernel with ``None`` and
+            with an explicit strategy would return the first-compiled artifact
+            for both.
         distributed_config: Optional ``DistributedConfig`` forwarded to
             ``ir.compile()`` on the ``@pl.jit.host`` path. Included in the key
             because it is baked into the resulting

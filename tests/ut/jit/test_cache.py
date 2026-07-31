@@ -288,26 +288,6 @@ class TestMakeCacheKey:
         )
         assert k_none != k_named
 
-    def test_different_strategy_causes_miss(self):
-        """Same shapes/dtypes compiled with different strategies must not collide.
-
-        Keeps an A/B comparison honest: calling one kernel with two
-        strategies must compile twice, not serve the first artifact twice.
-        """
-        k_default = self._make_key(
-            param_names=["a"],
-            tensor_shapes={"a": (8, 8)},
-            tensor_dtypes={"a": DataType.FP32},
-            strategy=OptimizationStrategy.Default,
-        )
-        k_debug = self._make_key(
-            param_names=["a"],
-            tensor_shapes={"a": (8, 8)},
-            tensor_dtypes={"a": DataType.FP32},
-            strategy=OptimizationStrategy.DebugTileOptimization,
-        )
-        assert k_default != k_debug
-
     def test_same_strategy_is_cache_hit(self):
         k1 = self._make_key(
             param_names=["a"],

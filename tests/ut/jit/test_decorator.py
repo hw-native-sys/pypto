@@ -2244,14 +2244,14 @@ class TestCompileKwargForwarding:
         """Compile-side RunConfig fields map onto the ir.compile() parameter names."""
         artifacts_dir = tmp_path / "jit_artifacts"
         cfg = RunConfig(
-            strategy=OptimizationStrategy.DebugTileOptimization,
+            strategy=OptimizationStrategy.Default,
             dump_passes=True,
             compile_profiling=True,
             save_kernels_dir=str(artifacts_dir),
             analyze_auto_scopes_for_deps=True,
         )
         kwargs = _run_config_compile_kwargs(cfg)
-        assert kwargs["strategy"] == OptimizationStrategy.DebugTileOptimization
+        assert kwargs["strategy"] == OptimizationStrategy.Default
         assert kwargs["dump_passes"] is True
         assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
         assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
@@ -2436,7 +2436,7 @@ class TestCompileKwargForwarding:
 
         dc = DistributedConfig(device_ids=[0, 1])
         cfg = RunConfig(
-            strategy=OptimizationStrategy.DebugTileOptimization,
+            strategy=OptimizationStrategy.Default,
             dump_passes=True,
             compile_profiling=True,
             distributed_config=dc,
@@ -2455,7 +2455,7 @@ class TestCompileKwargForwarding:
             **_run_config_compile_kwargs(cfg),
         )
         assert result == "fake-compiled-program"
-        assert captured["strategy"] == OptimizationStrategy.DebugTileOptimization
+        assert captured["strategy"] == OptimizationStrategy.Default
         assert captured["dump_passes"] is True
         assert captured["profiling"] is True
         assert captured["platform"] == "a2a3sim"

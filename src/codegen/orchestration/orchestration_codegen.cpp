@@ -85,13 +85,13 @@ struct IterArgCarryPlan {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
-  // After ExpandMixedKernel runs (part of every Default / DebugTileOptimization
-  // pipeline), every InCore function reaching codegen has been split into AIC,
-  // AIV, or Group / Spmd wrappers. The two callers of this function
-  // (GenerateFunctionCallCode and GenerateSpmdCallCode) both filter Spmd /
-  // Group out before invoking it. Tests that bypass the pipeline must declare
-  // their kernels with the appropriate AIC / AIV type explicitly so codegen
-  // sees the concrete core type without re-deriving from body memory spaces.
+  // After ExpandMixedKernel runs (part of the Default pipeline), every InCore
+  // function reaching codegen has been split into AIC, AIV, or Group / Spmd
+  // wrappers. The two callers of this function (GenerateFunctionCallCode and
+  // GenerateSpmdCallCode) both filter Spmd / Group out before invoking it.
+  // Tests that bypass the pipeline must declare their kernels with the
+  // appropriate AIC / AIV type explicitly so codegen sees the concrete core
+  // type without re-deriving from body memory spaces.
   switch (func->func_type_) {
     case FunctionType::AIC:
       return CoreType::CUBE;

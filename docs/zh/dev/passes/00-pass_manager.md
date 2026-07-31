@@ -17,7 +17,7 @@
 - **属性跟踪**：Pass 声明所需、产生和失效的属性
 - **插桩**：PassContext 持有 PassInstrument，在每个 Pass 执行前/后运行
 - **运行时验证**：VerificationInstrument 根据实际 IR 检查属性
-- **基于策略的流水线**：预配置的优化级别（`Default`、`DebugTileOptimization`）
+- **基于策略的流水线**：预配置的优化级别（`Default`）
 - **不可变变换**：返回新的 IR 节点，不就地修改
 
 ## IRProperty 系统
@@ -396,7 +396,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### 策略补充说明
 
-`Default` 和 `DebugTileOptimization` 共享的 PTO tile 阶段顺序为：
+`Default` 的 PTO tile 阶段顺序为：
 
 1. [`LowerCompositeOps`](12-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md)
@@ -432,10 +432,6 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 32. [`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 33. [`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md)（把每个 ForStmt iter_arg 标注为平凡别名 / 重绑定 carry，并为 manual-scope TaskId fence 数组定尺）
 34. [`InsertCommFence`](44-insert_comm_fence.md)（在每个发布性写入与释放它的 pld.system.notify 之间插入整张 tensor 的 system.cacheinvalid + GM system.fence；跑在最后，使插入的 op 一路到 codegen 都紧邻其 notify）
-
-`DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
-tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用
-`Default`，以保证主维护流水线持续被覆盖。
 
 [`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO

@@ -12,7 +12,7 @@
 import os
 import re
 from collections.abc import Callable
-from enum import Enum
+from enum import Enum, unique
 
 from pypto.compile_profiling import CompileProfiler
 from pypto.pypto_core import ir as core_ir
@@ -85,11 +85,11 @@ def _format_warnings(
 PassFactory = Callable[[], passes.Pass]
 
 
+@unique
 class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
     Default = "Default"  # Full tensor-oriented PTO pipeline
-    DebugTileOptimization = "DebugTileOptimization"  # Debug-only PTO tile pipeline
 
 
 class PassDumpLevel(Enum):
@@ -149,6 +149,8 @@ class PassManager:
         analyze_auto_scopes_for_deps: bool,
     ) -> tuple[PassFactory, ...]:
         """Build the immutable pass-factory recipe for an optimization strategy."""
+        if strategy != OptimizationStrategy.Default:
+            raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
         tensor_prefix_passes: tuple[PassFactory, ...] = (
             # Eliminate FunctionType.Inline functions by splicing their bodies at
             # every call site. Runs FIRST so no downstream pass observes Inline
@@ -254,11 +256,7 @@ class PassManager:
             # insertion that touches no property.
             passes.insert_comm_fence,
         )
-        if strategy == OptimizationStrategy.Default:
-            return tensor_prefix_passes + tensor_only_passes + tile_pto_passes
-        if strategy == OptimizationStrategy.DebugTileOptimization:
-            return tensor_prefix_passes + tile_pto_passes
-        raise ValueError(f"Unsupported optimization strategy: {strategy!r}")
+        return tensor_prefix_passes + tensor_only_passes + tile_pto_passes
 
     @classmethod
     def get_strategy(

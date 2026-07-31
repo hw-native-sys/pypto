@@ -152,7 +152,7 @@ The test framework provides extensive configuration through pytest command-line 
 | ------ | ------- | ----------- |
 | `--platform` | `a2a3` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
-| `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `DebugTileOptimization` |
+| `--strategy` | `Default` | PyPTO optimization strategy (`Default` is the only supported value) |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
 | `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
@@ -257,25 +257,16 @@ pytest tests/st/ -v --forked --codegen-only --save-kernels
 
 ### Using Optimization Strategies
 
-PyPTO supports different optimization strategies. Select at runtime:
+`OptimizationStrategy.Default` is currently the only strategy, so `--strategy`
+needs no explicit value:
 
 ```bash
-# Use Default optimization strategy (default)
-pytest tests/st/ -v --forked
-
-# Combine with other options
 pytest tests/st/ -v --forked --save-kernels --dump-passes
 ```
 
-You can also override the strategy in individual test cases by implementing the `get_strategy()` method:
-
-```python
-from pypto.ir.pass_manager import OptimizationStrategy
-
-class MyTest(PTOTestCase):
-    def get_strategy(self):
-        return OptimizationStrategy.DebugTileOptimization
-```
+A test case can pin its strategy by implementing `get_strategy()`; the hook
+exists so a future strategy can be opted into per test without touching the
+harness.
 
 ### Parameterized Testing
 

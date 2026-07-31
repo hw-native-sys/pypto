@@ -40,9 +40,9 @@ lets the output round-trip: the inserted `with pl.scope()` blocks parse back onl
 under `auto_scope=False` (the parser rejects hand-placed AUTO scopes in the
 default mode, where the compiler owns placement).
 
-**When to use**: last pass in the `Default` and `DebugTileOptimization`
-strategies, after the final `Simplify`. Running dead last means no other
-transform has to reason about the inserted scope wrappers.
+**When to use**: last pass in the `Default` strategy, after the final
+`Simplify`. Running dead last means no other transform has to reason about
+the inserted scope wrappers.
 
 **Scope**: only `Orchestration` functions are modified. InCore / AIC / AIV /
 Group / Spmd bodies are never scope-wrapped by codegen, so they are returned
