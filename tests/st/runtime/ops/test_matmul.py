@@ -1525,10 +1525,14 @@ class TestMatmulOperations:
         torch.manual_seed(0)
         a = torch.randn(5, 16, dtype=torch.float32)
         b = torch.randn(16, 16, dtype=torch.float32)
-        output = torch.zeros((16, 16), dtype=torch.float32)
+        sentinel = 17.0
+        output = torch.full((16, 16), sentinel, dtype=torch.float32)
+        expected = output.clone()
         matmul_valid_shape(a, b, output, config=test_config)
-        expected = torch.zeros_like(output)
         expected[:5] = torch.matmul(a, b)
+        assert torch.equal(output[5:], torch.full_like(output[5:], sentinel)), (
+            "rows outside valid_shape were modified"
+        )
         assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3), (
             f"matmul_valid_shape failed: max diff = {(output - expected).abs().max().item()}"
         )

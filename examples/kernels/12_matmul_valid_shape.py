@@ -20,7 +20,7 @@ N = 16
 
 
 @pl.jit
-def matmul_valid_shape(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+def matmul_valid_shape(a: pl.Tensor, b: pl.Tensor, output: pl.InOut[pl.Tensor]):
     with pl.at(level=pl.Level.CORE_GROUP):
         a_mat: pl.Tile[
             [TILE_M, K],
@@ -42,7 +42,7 @@ def matmul_valid_shape(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
             pl.FP32,
             pl.Mem.Acc,
             pl.TileView(valid_shape=[VALID_M, N]),
-        ] = pl.matmul(a_left, b_right)
+        ] = pl.set_validshape(pl.matmul(a_left, b_right), VALID_M, N)
         pl.store(result, [0, 0], output)
     return output
 
