@@ -10,13 +10,13 @@
 """Integration test for the Qwen3-32B JIT decode example.
 
 Verifies that the cross-file ``@pl.jit.inline`` composition in
-``examples/models/qwen3_jit/`` compiles end-to-end through the full
-pass pipeline, producing the expected post-pass IR shape (one
-Orchestration entry + several InCore-class kernels)."""
+``examples/models/qwen3_jit/`` lowers through the full pass pipeline,
+producing the expected post-pass IR shape (one Orchestration entry + several
+InCore-class kernels) without codegen or build artifacts."""
 
 import pytest
 
-# Module-level skip — tests need torch to build random input tensors.
+# Module-level skip — tests need torch to construct tensor metadata samples.
 torch = pytest.importorskip("torch")
 
 from pypto.pypto_core import ir  # noqa: E402
@@ -62,31 +62,25 @@ def _make_args():
     ]
 
 
-# Module-level cache so the (non-trivial) end-to-end compile runs once and is
-# shared by both tests below — they assert on the *same* post-pass program, so
-# compiling per test only doubles the pipeline cost. A *function*-scoped fixture
-# (memoized here) is used rather than ``scope="class"`` on purpose: a
-# class-scoped fixture sets up *before* the function-scoped autouse fixtures in
-# ``tests/ut/conftest.py``, so the compile would escape the per-test
-# ``PYPTO_PROG_BUILD_DIR`` redirect and leave stale build_output dirs in the
-# repo. A function-scoped fixture runs after those autouse fixtures, so the
-# shared compile's artifacts land in pytest's tmp dir.
+# Module-level memoization keeps the non-trivial full-pipeline lowering to one
+# run. Both tests assert on the same artifact-free post-pass program; lowering
+# again for each test would only duplicate the pass cost.
 _POST_PASS: list = []
 
 
 @pytest.fixture
 def post_pass():
-    """Compile the Qwen3 decode example once; shared across this module's tests."""
+    """Lower the Qwen3 decode example once; share its post-pass program."""
     if not _POST_PASS:
         _POST_PASS.append(qwen3_decode.lower(*_make_args()))
     return _POST_PASS[0]
 
 
-class TestQwen3JITCompile:
-    """End-to-end compile of the Qwen3 JIT example."""
+class TestQwen3JITLowering:
+    """End-to-end lowering of the Qwen3 JIT example."""
 
     def test_qwen3_decode_lower(self, post_pass):
-        """lower runs the full pipeline; the post-pass IR drops all
+        """``lower()`` runs the full pipeline; the post-pass IR drops all
         Inline functions and outlines pl.at scopes into InCore-class kernels."""
         names = sorted(f.name for f in post_pass.functions.values())
 
