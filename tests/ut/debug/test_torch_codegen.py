@@ -286,14 +286,14 @@ def test_tile_load_store():
     tensor = _tensor_var("t", [256, 256])
     offsets = _make_tuple(_int(0), _int(0))
     shapes = _make_tuple(_int(64), _int(64))
-    valid_shapes = _make_tuple(_int(64), _int(64))
+    valid_shape = _make_tuple(_int(64), _int(64))
     tile = _tile_var("tile", [64, 64])
     output = _tensor_var("out", [256, 256])
     off2 = _make_tuple(_int(64), _int(0))
 
     load_call = _op_call(
         "tile.load",
-        [tensor, offsets, shapes, valid_shapes],
+        [tensor, offsets, shapes, valid_shape],
         {"target_memory": ir.MemorySpace.Vec},
     )
     store_call = _op_call("tile.store", [tile, off2, output])
@@ -1274,8 +1274,8 @@ def test_tensor_fillpad_min_uses_valid_shape():
     result = _tensor_var("result", [8, 64], DataType.FP32)
     shapes = _make_tuple(_int(8), _int(64))
     offsets = _make_tuple(_int(0), _int(0))
-    valid_shapes = _make_tuple(_int(8), _int(32))
-    sliced = _op_call("tensor.slice", [src, shapes, offsets, valid_shapes])
+    valid_shape = _make_tuple(_int(8), _int(32))
+    sliced = _op_call("tensor.slice", [src, shapes, offsets, valid_shape])
     padded = _op_call("tensor.fillpad", [sliced], {"pad_value": ir.PadValue.min})
     assign = ir.AssignStmt(result, padded, _span())
     ret = ir.ReturnStmt([result], _span())
@@ -1293,21 +1293,21 @@ def test_tensor_fillpad_min_uses_valid_shape():
 
 
 # ---------------------------------------------------------------------------
-# Test: valid_shapes masking in tile.load
+# Test: valid_shape masking in tile.load
 # ---------------------------------------------------------------------------
 
 
-def test_tile_load_valid_shapes_masks_invalid():
-    """tile.load should zero out data beyond valid_shapes."""
+def test_tile_load_valid_shape_masks_invalid():
+    """tile.load should zero out data beyond valid_shape."""
     tensor = _tensor_var("t", [8, 8])
     offsets = _make_tuple(_int(0), _int(0))
     shapes = _make_tuple(_int(8), _int(8))
-    valid_shapes = _make_tuple(_int(4), _int(4))
+    valid_shape = _make_tuple(_int(4), _int(4))
     tile = _tile_var("tile", [8, 8])
 
     call = _op_call(
         "tile.load",
-        [tensor, offsets, shapes, valid_shapes],
+        [tensor, offsets, shapes, valid_shape],
         {"target_memory": ir.MemorySpace.Vec},
     )
     assign = ir.AssignStmt(tile, call, _span())
@@ -1328,23 +1328,23 @@ def test_tile_load_valid_shapes_masks_invalid():
     assert result[7, 7] == 0.0
 
 
-def test_tile_load_passes_valid_shapes():
-    """tile.load codegen should pass valid_shapes as 4th arg to _tile_load."""
+def test_tile_load_passes_valid_shape():
+    """tile.load codegen should pass valid_shape as 4th arg to _tile_load."""
     tensor = _tensor_var("t", [64, 64])
     offsets = _make_tuple(_int(0), _int(0))
     shapes = _make_tuple(_int(32), _int(32))
-    valid_shapes = _make_tuple(_int(16), _int(16))
+    valid_shape = _make_tuple(_int(16), _int(16))
     tile = _tile_var("tile", [32, 32])
 
     call = _op_call(
         "tile.load",
-        [tensor, offsets, shapes, valid_shapes],
+        [tensor, offsets, shapes, valid_shape],
         {"target_memory": ir.MemorySpace.Vec},
     )
     assign = ir.AssignStmt(tile, call, _span())
     func = _simple_function("f", [tensor], assign)
     code = torch_codegen(func)
-    # Should pass all 4 args including valid_shapes
+    # Should pass all 4 args including valid_shape
     assert "_tile_load(t, (0, 0), (32, 32), (16, 16))" in code
 
 

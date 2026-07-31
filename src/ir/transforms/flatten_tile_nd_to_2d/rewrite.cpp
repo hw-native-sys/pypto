@@ -695,19 +695,19 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           auto shapes_tuple = As<MakeTuple>(sub_args[2]);
           INTERNAL_CHECK_SPAN(offsets_tuple && shapes_tuple, span)
               << "FlattenTileNdTo2D: tile.load offsets and shapes must be tuples";
-          auto valid_shapes_tuple = shapes_tuple;
+          auto valid_shape_tuple = shapes_tuple;
           if (sub_args.size() >= 4) {
-            valid_shapes_tuple = As<MakeTuple>(sub_args[3]);
-            INTERNAL_CHECK_SPAN(valid_shapes_tuple, span)
-                << "FlattenTileNdTo2D: tile.load valid_shapes must be a tuple";
+            valid_shape_tuple = As<MakeTuple>(sub_args[3]);
+            INTERNAL_CHECK_SPAN(valid_shape_tuple, span)
+                << "FlattenTileNdTo2D: tile.load valid_shape must be a tuple";
           }
           INTERNAL_CHECK_SPAN(offsets_tuple->elements_.size() == tensor_type->shape_.size() &&
                                   shapes_tuple->elements_.size() == tensor_type->shape_.size() &&
-                                  valid_shapes_tuple->elements_.size() == tensor_type->shape_.size(),
+                                  valid_shape_tuple->elements_.size() == tensor_type->shape_.size(),
                               span)
               << "FlattenTileNdTo2D: tile.load offset/shape ranks must match tensor rank";
           INTERNAL_CHECK_SPAN(tile_conversion_utils::IsRowMajorCollapseContiguous(
-                                  valid_shapes_tuple->elements_, tensor_type->shape_),
+                                  valid_shape_tuple->elements_, tensor_type->shape_),
                               span)
               << "FlattenTileNdTo2D: tile.load NZ 2D source-window collapse requires the valid "
                  "sub-box of the leading dims to be contiguous in row-major order";
@@ -723,12 +723,12 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
               std::vector<ExprPtr>{row_offset, offsets_tuple->elements_.back()}, span);
           sub_args[2] =
               std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(shapes_tuple->elements_, span), span);
-          auto flat_valid_shapes =
-              std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(valid_shapes_tuple->elements_, span), span);
+          auto flat_valid_shape =
+              std::make_shared<MakeTuple>(CollapseLeadingDimsTo2D(valid_shape_tuple->elements_, span), span);
           if (sub_args.size() >= 4) {
-            sub_args[3] = flat_valid_shapes;
+            sub_args[3] = flat_valid_shape;
           } else {
-            sub_args.push_back(flat_valid_shapes);
+            sub_args.push_back(flat_valid_shape);
           }
         }
 

@@ -50,7 +50,7 @@ Per-statement handling:
 
 | Tile op | Transformation |
 | ------- | -------------- |
-| `tile.load` (>2D) | Rebuild the result tile as 2D. For a natural NZ Mat load, also insert a shape-only 2D `tensor.view` on the source tensor, collapse leading offsets/shapes/valid_shapes to the 2D source window, and require that window to be row-major contiguous. Vec loads and transposed Mat loads keep the original rank>2 source window and only flatten the result tile |
+| `tile.load` (>2D) | Rebuild the result tile as 2D. For a natural NZ Mat load, also insert a shape-only 2D `tensor.view` on the source tensor, collapse leading offsets/shapes/valid_shape to the 2D source window, and require that window to be row-major contiguous. Vec loads and transposed Mat loads keep the original rank>2 source window and only flatten the result tile |
 | `tile.store` (rank>2 tensor) | Inject the original tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged. If the tile operand itself is still rank>2 (e.g. a user-written `tile.reshape` to 3D feeding `pl.assemble` into an N-D tensor view), insert a `tile.reshape` to flatten the tile operand to 2D first — the codegen requires a 2D tile while the original tile shape still flows through as the `shapes` partition operand |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
@@ -147,14 +147,14 @@ Hardware tiles map to fixed-size on-chip buffers, so every **physical** tile dim
 compile-time constant; the runtime extent lives in `TileView.valid_shape`. To process a dynamic
 dimension the user **writes the chunk loop themselves**: iterate the dynamic dim with `pl.range` in a
 static `CHUNK` step, and load each chunk as a static physical `[1, CHUNK, 512]` tile whose
-`valid_shapes` carries the runtime tail `min(CHUNK, s - c)`. The chunk size is the user's choice — it
+`valid_shape` carries the runtime tail `min(CHUNK, s - c)`. The chunk size is the user's choice — it
 strongly affects performance, so it is not auto-selected by the pass.
 
 ```python
-# User-written: chunk the dynamic S dim, clamp the tail in valid_shapes.
+# User-written: chunk the dynamic S dim, clamp the tail in valid_shape.
 for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
     valid = pl.min(CHUNK, s_dim - c)
-    t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shapes=[1, valid, 512])
+    t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shape=[1, valid, 512])
     t = pl.cast(t, target_type=pl.FP32)
     o = pl.store(t, [b, c, 0], o)        # static physical [1, CHUNK, 512], dynamic valid
     pl.yield_(o)

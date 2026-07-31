@@ -106,10 +106,10 @@ class MatmulBiasTestCase(PTOTestCase):
                 bias: pl.Tensor[[1, n], pl.FP32],
                 out: pl.Out[pl.Tensor[[om, n], pl.FP32]],
             ) -> pl.Tensor[[om, n], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [m, k], valid_shapes=a_v, target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [k, n], valid_shapes=b_v, target_memory=pl.MemorySpace.Mat)
+                tile_a = pl.load(a, [0, 0], [m, k], valid_shape=a_v, target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, [0, 0], [k, n], valid_shape=b_v, target_memory=pl.MemorySpace.Mat)
                 tile_bias = pl.load(
-                    bias, [0, 0], [1, n], valid_shapes=vn_bias, target_memory=pl.MemorySpace.Mat
+                    bias, [0, 0], [1, n], valid_shape=vn_bias, target_memory=pl.MemorySpace.Mat
                 )
                 out = pl.store(pl.tile.matmul_bias(tile_a, tile_b, tile_bias), off, out)
                 return out

@@ -127,7 +127,7 @@ class TileRowArgmax(_ArgBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
-                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
                 r: pl.Tile[[m, 1], pl.INT32] = pl.tile.row_argmax(t, tmp)
                 return pl.store(r, [0, 0], out)
@@ -157,7 +157,7 @@ class TileRowArgmin(_ArgBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[m, 1], pl.INT32]]
             ) -> pl.Tensor[[m, 1], pl.INT32]:
-                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
                 r: pl.Tile[[m, 1], pl.INT32] = pl.tile.row_argmin(t, tmp)
                 return pl.store(r, [0, 0], out)
@@ -187,7 +187,7 @@ class TileColArgmax(_ArgBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
-                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
                 r: pl.Tile[[1, n], pl.INT32] = pl.tile.col_argmax(t, tmp)
                 return pl.store(r, [0, 0], out)
@@ -217,7 +217,7 @@ class TileColArgmin(_ArgBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[1, n], pl.INT32]]
             ) -> pl.Tensor[[1, n], pl.INT32]:
-                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                t: pl.Tile[[m, n], dt] = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 tmp: pl.Tile[[m, n], dt] = pl.tile.create([m, n], dtype=dt, target_memory=pl.MemorySpace.Vec)
                 r: pl.Tile[[1, n], pl.INT32] = pl.tile.col_argmin(t, tmp)
                 return pl.store(r, [0, 0], out)

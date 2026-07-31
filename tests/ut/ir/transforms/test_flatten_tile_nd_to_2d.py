@@ -476,7 +476,7 @@ def _incore_cast_chain(shapes: list, valid: list, tensor_shape: list) -> ir.Prog
     dynamic axis); ``valid`` is the per-dim valid extent (may hold ``ir.Var``
     entries for runtime-dynamic dimensions). Built via IRBuilder so the result is
     well-formed SSA. ``tile.load`` is the 4-arg form (physical ``shapes`` +
-    ``valid_shapes``) the user writes when chunking a dynamic dim themselves.
+    ``valid_shape``) the user writes when chunking a dynamic dim themselves.
     """
     span = ir.Span.unknown()
     tensor_shape_exprs = _shape_exprs(tensor_shape)
@@ -489,7 +489,7 @@ def _incore_cast_chain(shapes: list, valid: list, tensor_shape: list) -> ir.Prog
         x = f.param("x", in_type)
         out_p = f.param("out", out_type, direction=ir.ParamDirection.Out)
         f.return_type(out_type)
-        x_tile = ib.let("x_tile", tile_ops.load(x, zeros, shapes, valid_shapes=valid, span=span))
+        x_tile = ib.let("x_tile", tile_ops.load(x, zeros, shapes, valid_shape=valid, span=span))
         y_tile = ib.let("y_tile", tile_ops.cast(x_tile, DataType.FP32, span=span))
         out_r = ib.let("out_0", tile_ops.store(y_tile, zeros, out_p, span=span))
         ib.return_stmt(out_r)
@@ -522,7 +522,7 @@ def _tile_calls(node) -> list[ir.Call]:
 
 class TestFlattenTileNdTo2DDynamicValid:
     """The user chunks a dynamic dim themselves (a static physical ``shapes`` with
-    the runtime extent in ``valid_shapes``); FlattenTileNdTo2D lowers the >2D
+    the runtime extent in ``valid_shape``); FlattenTileNdTo2D lowers the >2D
     per-chunk tile to 2D while **preserving the dynamic ``valid_shape``** so the
     runtime tail survives (issue #1578)."""
 
@@ -2881,10 +2881,10 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
         assert load_source.unique_id == view_stmt.var.unique_id
         offsets = cast(ir.MakeTuple, load_call.args[1])
         shapes = cast(ir.MakeTuple, load_call.args[2])
-        valid_shapes = cast(ir.MakeTuple, load_call.args[3])
+        valid_shape = cast(ir.MakeTuple, load_call.args[3])
         assert _const_int_values(offsets.elements) == [16, 0]
         assert _const_int_values(shapes.elements) == [16, 128]
-        assert _const_int_values(valid_shapes.elements) == [16, 128]
+        assert _const_int_values(valid_shape.elements) == [16, 128]
 
     @pytest.mark.parametrize("distributed", [False, True])
     def test_rank3_mat_load_preserves_partial_source_view(self, distributed: bool):

@@ -480,7 +480,7 @@ class TestFillpad:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 padded: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.fillpad(
                     tile_a, pad_value=pl.PadValue.max
@@ -535,14 +535,14 @@ class TestFillpad:
                 output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 padded_max: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.fillpad(
                     tile_a, pad_value=pl.PadValue.max
                 )
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_max, [0, 0], output_a)
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 padded_min: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.fillpad(
                     tile_b, pad_value=pl.PadValue.min
@@ -615,14 +615,14 @@ class TestFillpad:
                 output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 padded_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.fillpad(
                     tile_a, pad_value=pl.PadValue.max
                 )
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_a, [0, 0], output_a)
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 padded_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.fillpad(
                     tile_b, pad_value=pl.PadValue.max
@@ -704,11 +704,11 @@ class TestValidShapeDivergence:
                 output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[32, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[32, 64]
                 )
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
                 return result
@@ -761,11 +761,11 @@ class TestValidShapeDivergence:
                 output_b: pl.Out[pl.Tensor[[4, 64, 64], pl.FP32]],
             ) -> pl.Tensor[[4, 64, 64], pl.FP32]:
                 tile_a: pl.Tile[[4, 64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0, 0], [4, 64, 64], valid_shapes=[4, 48, 64]
+                    input_a, [0, 0, 0], [4, 64, 64], valid_shape=[4, 48, 64]
                 )
                 _res_a: pl.Tensor[[4, 64, 64], pl.FP32] = pl.store(tile_a, [0, 0, 0], output_a)
                 tile_b: pl.Tile[[4, 64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0, 0], [4, 64, 64], valid_shapes=[4, 32, 64]
+                    input_a, [0, 0, 0], [4, 64, 64], valid_shape=[4, 32, 64]
                 )
                 result: pl.Tensor[[4, 64, 64], pl.FP32] = pl.store(tile_b, [0, 0, 0], output_b)
                 return result
@@ -810,7 +810,7 @@ class TestValidShapeDivergence:
                 output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                    input_a, [0, 0], [64, 64], valid_shape=[48, 64]
                 )
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])

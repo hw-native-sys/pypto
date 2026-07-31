@@ -640,7 +640,7 @@ def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]
     params, locals assigned earlier in the body, and the test module globals,
     then instantiates it exactly as the body would.  This reconstructs the case
     regardless of parametrize→__init__ name renames (``valid`` →
-    ``valid_shapes``), hard-coded literal args (``dtype=DataType.FP16``),
+    ``valid_shape``), hard-coded literal args (``dtype=DataType.FP16``),
     positional args, the class-as-parameter pattern (``op_cls(...)``), or a
     locally-built config (``cfg = RunConfig(...); run(Case(config=cfg))``) — so
     the case is pre-compiled and batched instead of falling to the per-case

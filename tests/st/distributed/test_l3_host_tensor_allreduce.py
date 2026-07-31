@@ -205,7 +205,7 @@ def _build_host_allreduce(
                     inp,
                     [0, col],
                     [stage_rows, stage_cols],
-                    valid_shapes=[1, valid],
+                    valid_shape=[1, valid],
                 )
                 data_iter = pl.store(local, [0, col], data_iter)
                 staged_data = pl.yield_(data_iter)
@@ -231,7 +231,7 @@ def _build_host_allreduce(
                     data,
                     [0, col],
                     [stage_rows, stage_cols],
-                    valid_shapes=[1, valid],
+                    valid_shape=[1, valid],
                 )
                 out_iter = pl.store(reduced, [0, col], out_iter)
                 staged_out = pl.yield_(out_iter)

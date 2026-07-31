@@ -317,7 +317,7 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                         sij_batch,
                         [b * q_tile, 0],
                         [q_tile, block_size],
-                        valid_shapes=[q_tile, valid_len],
+                        valid_shape=[q_tile, valid_len],
                         target_memory=pl.MemorySpace.Vec,
                     )
                     s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)

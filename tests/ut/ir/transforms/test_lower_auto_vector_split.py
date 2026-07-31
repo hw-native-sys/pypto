@@ -2154,7 +2154,7 @@ def _lane_ref_in_non_address_arg_body(span, stmts, aiv_id, qk_h, data):
     just the address args would wrongly admit this."""
     valid = aiv_id + 1
     v = ir.Var("valid", valid.type, span)
-    load = T.load(data, [0, 0], [64, 128], valid_shapes=[v, 128], target_memory=MS.Vec, span=span)
+    load = T.load(data, [0, 0], [64, 128], valid_shape=[v, 128], target_memory=MS.Vec, span=span)
     t = ir.Var("t", load.type, span)
     stmts += [ir.AssignStmt(v, valid, span), ir.AssignStmt(t, load, span)]
     return t

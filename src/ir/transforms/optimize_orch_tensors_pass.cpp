@@ -306,8 +306,8 @@ class IterArgReuseOptimizer {
   // share storage (an accumulator); a plain load→store pair does not.
 
   /// Check that a tile.load call reads the full tensor — all offsets zero and
-  /// both `shapes` and `valid_shapes` match the tensor shape dimension-by-
-  /// dimension. `valid_shapes` differs from `shapes` for masked/padded loads,
+  /// both `shapes` and `valid_shape` match the tensor shape dimension-by-
+  /// dimension. `valid_shape` differs from `shapes` for masked/padded loads,
   /// which must NOT be treated as full loads.
   static bool IsFullTensorLoad(const CallPtr& load_call, const TensorTypePtr& tensor_type) {
     if (!load_call || load_call->args_.size() < 4 || !tensor_type) return false;

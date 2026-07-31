@@ -569,13 +569,13 @@ bool ReferencesLaneIndex(const std::vector<ExprPtr>& exprs,
 //
 // Only these args are consulted for a lane reference. A lane-derived scalar
 // anywhere ELSE in an addressing op — a shape, a valid_shape — does not localize
-// the window: ``tile.load(data, [0, 0], [64, 128], valid_shapes=[aiv_id + 1,
+// the window: ``tile.load(data, [0, 0], [64, 128], valid_shape=[aiv_id + 1,
 // 128])`` mentions aiv_id, yet both lanes still read the same base rows. Scanning
 // every arg would admit it and then trust its consumers as half-width.
 std::vector<ExprPtr> AddressArgs(const CallPtr& call) {
   const auto& args = call->args_;
   auto at = [&args](size_t i) -> ExprPtr { return i < args.size() ? args[i] : nullptr; };
-  if (IsOp(call, "tile.load")) return {at(1)};            // (tensor, offsets, shapes, valid_shapes)
+  if (IsOp(call, "tile.load")) return {at(1)};            // (tensor, offsets, shapes, valid_shape)
   if (IsOp(call, "tile.slice")) return {at(2)};           // (input, shape, offset, valid_shape, drop_dims)
   if (IsOp(call, "tile.extract")) return {at(1), at(2)};  // (src, index_row, index_col, shape)
   // (dst, src, dst_offset, src_offset, shapes[, valid_shape]) — DPS: the op reads

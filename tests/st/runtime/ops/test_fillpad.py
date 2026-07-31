@@ -38,7 +38,7 @@ class FillpadZeroProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile, pad_value=pl.PadValue.zero)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)
@@ -65,7 +65,7 @@ class FillpadMaxProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile, pad_value=pl.PadValue.max)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)
@@ -92,7 +92,7 @@ class FillpadMinProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile, pad_value=pl.PadValue.min)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)
@@ -119,7 +119,7 @@ class FillpadOddTailFP16Program:
         output: pl.Out[pl.Tensor[[1, 32], pl.FP16]],
     ) -> pl.Tensor[[1, 32], pl.FP16]:
         tile: pl.Tile[[1, 32], pl.FP16] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[1, 32], valid_shapes=[1, 17]
+            input_tensor, offsets=[0, 0], shapes=[1, 32], valid_shape=[1, 17]
         )
         padded_tile: pl.Tile[[1, 32], pl.FP16] = pl.fillpad(tile, pad_value=pl.PadValue.zero)
         return pl.store(padded_tile, offsets=[0, 0], output_tensor=output)

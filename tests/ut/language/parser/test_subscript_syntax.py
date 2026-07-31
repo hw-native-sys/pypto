@@ -239,7 +239,7 @@ class TestTileSubscript:
             x: pl.Tensor[[64, 128], pl.FP32],
             valid_cols: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
-            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shapes=[64, valid_cols])
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shape=[64, valid_cols])
             sliced: pl.Tile[[64, 128], pl.FP32] = t[:, :]
             return pl.store(sliced, [0, 0], x)
 
@@ -265,7 +265,7 @@ class TestTileSubscript:
             x: pl.Tensor[[64, 128], pl.FP32],
             valid_cols: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[64, 128], pl.FP32]:
-            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shapes=[64, valid_cols])
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shape=[64, valid_cols])
             sliced: pl.Tile[[64, 16], pl.FP32] = t[:, :16]
             return pl.store(sliced, [0, 0], x)
 

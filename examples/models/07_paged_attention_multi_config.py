@@ -104,7 +104,7 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
         """Two-pass softmax with partial-block support (VECTOR).
 
         Pass 1 finds global row_max, pass 2 computes exp+sum.
-        The last block (i == n_blocks - 1) uses valid_shapes + fillpad to mask
+        The last block (i == n_blocks - 1) uses valid_shape + fillpad to mask
         out invalid columns with -inf so they don't affect row_max or row_sum.
         Uses mi_out/li_out as GM scratch for cross-iteration state via store/load round-trips.
         """
@@ -118,7 +118,7 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
                 sij_buf,
                 [i * q_tile, 0],
                 [q_tile, block_size],
-                valid_shapes=[q_tile, valid_len],
+                valid_shape=[q_tile, valid_len],
                 target_memory=pl.MemorySpace.Vec,
             )
             s_tile_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
@@ -161,7 +161,7 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
                 sij_buf,
                 [i * q_tile, 0],
                 [q_tile, block_size],
-                valid_shapes=[q_tile, valid_len_p2],
+                valid_shape=[q_tile, valid_len_p2],
                 target_memory=pl.MemorySpace.Vec,
             )
             s_tile_p2 = pl.tile.fillpad(s_tile_raw, pad_value=pl.PadValue.min)

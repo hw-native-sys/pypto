@@ -789,7 +789,7 @@ class TestCompositeShapeDimVerification:
         """The inner var of a composite parameter dim is usable in the body.
 
         ``M`` appears inside the composite param dim ``M * 2`` and is also
-        referenced directly in the body (as a ``valid_shapes`` bound). The
+        referenced directly in the body (as a ``valid_shape`` bound). The
         recursive registration makes ``M`` visible in the outermost scope, so
         the body reference verifies cleanly.
         """
@@ -804,7 +804,7 @@ class TestCompositeShapeDimVerification:
                 a: pl.Tensor[[m * 2, n], pl.FP32],
                 output: pl.Tensor[[m * 2, n], pl.FP32],
             ) -> pl.Tensor[[m * 2, n], pl.FP32]:
-                a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[m, n])
+                a_tile = pl.load(a, [0, 0], [128, 128], valid_shape=[m, n])
                 out = pl.store(a_tile, [0, 0], output)
                 return out
 

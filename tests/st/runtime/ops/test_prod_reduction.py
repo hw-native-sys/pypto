@@ -511,7 +511,7 @@ class RowProd_ValidCol48_FP32:
         input_tensor: pl.Tensor[[32, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
     ) -> pl.Tensor[[32, 1], pl.FP32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shapes=[32, 48])
+        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shape=[32, 48])
         tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
@@ -536,7 +536,7 @@ class RowProd_ValidCol50_FP32:
         input_tensor: pl.Tensor[[32, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
     ) -> pl.Tensor[[32, 1], pl.FP32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shapes=[32, 50])
+        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shape=[32, 50])
         tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
@@ -561,7 +561,7 @@ class ColProd_ValidRow20_FP32:
         input_tensor: pl.Tensor[[32, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
     ) -> pl.Tensor[[1, 64], pl.FP32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shapes=[20, 64])
+        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64], valid_shape=[20, 64])
         result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_prod(tile)
         return pl.store(result, [0, 0], output)
 

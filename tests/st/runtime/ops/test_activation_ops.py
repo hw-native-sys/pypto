@@ -56,7 +56,7 @@ class _ActBase(PTOTestCase):
         *,
         m=16,
         n=16,
-        valid_shapes=None,
+        valid_shape=None,
         dtype=DataType.FP32,
         out_m=None,
         out_n=None,
@@ -64,7 +64,7 @@ class _ActBase(PTOTestCase):
         config=None,
     ):
         super().__init__(config)
-        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shape, dtype
         self._out_m, self._out_n, self._off = out_m or m, out_n or n, off
 
     def get_name(self) -> str:
@@ -73,7 +73,7 @@ class _ActBase(PTOTestCase):
         return f"tile_{self.op_name}_{self._m}x{self._n}_{self._dtype.value}{v}{o}"
 
     def define_tensors(self) -> list[TensorSpec]:
-        # The output's unwritten region (valid_shapes tail or the complement of an
+        # The output's unwritten region (valid_shape tail or the complement of an
         # offset store) is compared against golden zeros, so declare the output
         # InOut with a zero init: the runtime stages defined zeros (pure outputs
         # are no longer device-zeroed). The offset complement doubles as the
@@ -119,7 +119,7 @@ class TileReluTestCase(_ActBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.relu(a_tile), off, out)
                 return out
 
@@ -160,7 +160,7 @@ class TileLreluTestCase(_ActBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.lrelu(a_tile, slope), off, out)
                 return out
 
@@ -178,18 +178,18 @@ _LRELU_SLOPES = [0.0, 0.1, 1.0, -0.5, 2.0]
 
 
 class TestActivation:
-    """Tile-level relu/lrelu on a2a3 across shapes, valid_shapes, dtypes, offset, slope."""
+    """Tile-level relu/lrelu on a2a3 across shapes, valid_shape, dtypes, offset, slope."""
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_relu(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileReluTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(TileReluTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_lrelu(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileLreluTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(TileLreluTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")

@@ -1312,7 +1312,7 @@ def set_validshape(input, valid_rows, valid_cols):
 
     .. note::
         Internal API — intended for compiler-generated code. End users should
-        prefer ``pl.load(..., valid_shapes=...)`` plus ``pl.tile.fillpad``.
+        prefer ``pl.load(..., valid_shape=...)`` plus ``pl.tile.fillpad``.
     """
     if isinstance(input, Tensor):
         return _tensor.set_validshape(input, valid_rows, valid_cols)

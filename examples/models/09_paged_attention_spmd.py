@@ -217,7 +217,7 @@ def build_paged_attention_spmd_program(
                         [b * q_tile, 0],
                         [q_tile, block_size],
                         target_memory=pl.MemorySpace.Vec,
-                        valid_shapes=[q_tile, valid_len],
+                        valid_shape=[q_tile, valid_len],
                     )
                     s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
                     scaled = pl.mul(s_padded, scale_value)
