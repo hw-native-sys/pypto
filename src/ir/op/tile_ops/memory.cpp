@@ -91,9 +91,9 @@ TypePtr DeduceTileGetSubblockIdxType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
-  // load signature: (tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple)
+  // load signature: (tensor, offsets_tuple, shapes_tuple, valid_shape_tuple)
   CHECK(args.size() == 4) << "The operator " << op_name
-                          << " requires 4 arguments (tensor, offsets, shapes, valid_shapes), but got "
+                          << " requires 4 arguments (tensor, offsets, shapes, valid_shape), but got "
                           << args.size();
 
   // First argument must be a tensor-shaped source. AsTensorTypeLike accepts
@@ -117,21 +117,21 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
                       << " requires third argument to be a tuple (shapes), but got "
                       << args[2]->GetType()->TypeName();
 
-  // Fourth argument must be TupleType (valid_shapes)
-  auto valid_shapes_tuple = As<MakeTuple>(args[3]);
-  CHECK(valid_shapes_tuple) << "The operator " << op_name
-                            << " requires fourth argument to be a tuple (valid shapes), but got "
-                            << args[3]->GetType()->TypeName();
+  // Fourth argument must be TupleType (valid_shape)
+  auto valid_shape_tuple = As<MakeTuple>(args[3]);
+  CHECK(valid_shape_tuple) << "The operator " << op_name
+                           << " requires fourth argument to be a tuple (valid shape), but got "
+                           << args[3]->GetType()->TypeName();
 
-  // Verify offsets, shapes and valid_shapes have same number of dimensions
+  // Verify offsets, shapes and valid_shape have same number of dimensions
   CHECK(offsets_tuple->elements_.size() == shapes_tuple->elements_.size())
       << "The operator " << op_name
       << " requires offsets and shapes to have same number of dimensions, but got "
       << offsets_tuple->elements_.size() << " offsets and " << shapes_tuple->elements_.size() << " shapes";
-  CHECK(valid_shapes_tuple->elements_.size() == shapes_tuple->elements_.size())
+  CHECK(valid_shape_tuple->elements_.size() == shapes_tuple->elements_.size())
       << "The operator " << op_name
-      << " requires valid_shapes and shapes to have same number of dimensions, but got "
-      << valid_shapes_tuple->elements_.size() << " valid_shapes and " << shapes_tuple->elements_.size()
+      << " requires valid_shape and shapes to have the same number of dimensions, but got "
+      << valid_shape_tuple->elements_.size() << " valid_shape and " << shapes_tuple->elements_.size()
       << " shapes";
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
@@ -218,20 +218,20 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // the destination tile may deliberately overhang the source (that is what makes
   // a ragged tail expressible), but the bytes actually read must exist and must
   // be real data. Intersecting with the source valid region enforces both, and
-  // rejects a valid_shapes request that provably reads past the source. clamp=True
+  // rejects a valid_shape request that provably reads past the source. clamp=True
   // narrows such a request to the source edge instead of rejecting it.
   //
   // As with tensor.slice, the rule needs the window to be a rectangle in source
   // coordinates. A lower-rank window (e.g. a 2D tile out of a 3D tensor) is a
   // reinterpreting read whose dim correspondence is not this rectangle, so it
-  // keeps the valid_shapes it was given.
+  // keeps the valid_shape it was given.
   if (tile_shape.size() == tensor_type->shape_.size()) {
     tile_view.valid_shape = InferWindowReadValidShape({
         /*source_physical=*/tensor_type->shape_,
         /*source_valid=*/GetEffectiveTensorValidShape(*tensor_type),
         /*offsets=*/offsets_tuple->elements_,
         /*window=*/tile_shape,
-        /*requested_valid=*/valid_shapes_tuple->elements_,
+        /*requested_valid=*/valid_shape_tuple->elements_,
         /*kind=*/WindowReadKind::kClampedWindow,
         /*clamp=*/GetKwargOr<bool>(kwargs, "clamp", false),
         /*op_name=*/op_name,
@@ -241,7 +241,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
         /*span=*/args[0]->span_,
     });
   } else {
-    tile_view.valid_shape = valid_shapes_tuple->elements_;
+    tile_view.valid_shape = valid_shape_tuple->elements_;
   }
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape.
@@ -974,7 +974,7 @@ REGISTER_OP("tile.load")
         "shapes",
         "Shape of region to load in each dimension, in source tensor coordinates (TupleType of ScalarType)")
     .add_argument(
-        "valid_shapes",
+        "valid_shape",
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("clamp")

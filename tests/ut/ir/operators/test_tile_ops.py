@@ -9,6 +9,7 @@
 
 """Unit tests for tile operations."""
 
+import inspect
 import math
 
 import pypto.language as pl
@@ -3992,10 +3993,23 @@ class TestTileScalarOperandDtype:
 
 
 class TestTileLoadOp:
-    """Tests for tile.load operation with valid_shapes and TileView."""
+    """Tests for tile.load operation with valid_shape and TileView."""
 
-    def test_load_without_valid_shapes_sets_tileview_from_shapes(self):
-        """When valid_shapes not provided, TileView.valid_shape equals shapes."""
+    def test_load_uses_singular_valid_shape_keyword(self):
+        params = inspect.signature(tile.load).parameters
+        removed_plural = "valid_" + "shapes"
+        assert "valid_shape" in params
+        assert removed_plural not in params
+
+    def test_load_rejects_removed_plural_keyword(self):
+        span = ir.Span.unknown()
+        tensor = ir.Var("a", ir.TensorType([64, 128], DataType.FP32), span)
+        removed_plural = "valid_" + "shapes"
+        with pytest.raises(TypeError, match=rf"unexpected keyword argument '{removed_plural}'"):
+            tile.load(tensor, [0, 0], [64, 128], **{removed_plural: [32, 128]})
+
+    def test_load_without_valid_shape_sets_tileview_from_shapes(self):
+        """When valid_shape is not provided, TileView.valid_shape equals shapes."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
@@ -4008,15 +4022,15 @@ class TestTileLoadOp:
         assert isinstance(tile_type, ir.TileType)
         assert len(tile_type.get_effective_tile_view().valid_shape) == 2
 
-    def test_load_with_static_valid_shapes_sets_tileview(self):
-        """When valid_shapes provided as static ints, TileView.valid_shape reflects it."""
+    def test_load_with_static_valid_shape_sets_tileview(self):
+        """When valid_shape is provided as static ints, TileView.valid_shape reflects it."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
         tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
         tensor = ir.Var("a", tensor_type, span)
 
-        call = tile.load(tensor, [0, 0], [128, 128], valid_shapes=[64, 128])
+        call = tile.load(tensor, [0, 0], [128, 128], valid_shape=[64, 128])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -4025,8 +4039,8 @@ class TestTileLoadOp:
         # tile shape should still be [128, 128]
         assert len(tile_type.shape) == 2
 
-    def test_load_with_dynamic_valid_shapes_sets_tileview(self):
-        """When valid_shapes provided as symbolic vars, TileView.valid_shape uses them."""
+    def test_load_with_dynamic_valid_shape_sets_tileview(self):
+        """When valid_shape is provided as symbolic vars, TileView.valid_shape uses them."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
@@ -4035,7 +4049,7 @@ class TestTileLoadOp:
         M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
 
-        call = tile.load(tensor, [0, 0], [64, 128], valid_shapes=[M, N])
+        call = tile.load(tensor, [0, 0], [64, 128], valid_shape=[M, N])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -4045,8 +4059,8 @@ class TestTileLoadOp:
         assert tile_type.tile_view.valid_shape[0] is M
         assert tile_type.tile_view.valid_shape[1] is N
 
-    def test_load_via_pl_load_with_valid_shapes(self):
-        """pl.load with valid_shapes propagates TileView to the output tile."""
+    def test_load_via_pl_load_with_valid_shape(self):
+        """pl.load with valid_shape propagates TileView to the output tile."""
 
         @pl.program
         class Prog:
@@ -4057,7 +4071,7 @@ class TestTileLoadOp:
                 M: pl.Scalar[pl.INT64],
                 N: pl.Scalar[pl.INT64],
             ) -> pl.Tile[[128, 128], pl.FP32]:
-                tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
+                tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shape=[M, N])
                 return tile
 
         # Just verifying it builds without error
@@ -5228,19 +5242,19 @@ class TestWindowReadValidRegion:
         """A load can never report source padding as real data."""
         src = self._partial_tensor([64, 128], [40, 128])
 
-        call = tile.load(src, [0, 0], [64, 128], valid_shapes=[64, 128])
+        call = tile.load(src, [0, 0], [64, 128], valid_shape=[64, 128])
 
         # The request asked for all 64 rows; only 40 exist.
         assert _valid_of(call.type) == [40, 128]
 
     def test_load_rejects_a_request_that_reads_past_the_source(self):
-        """valid_shapes is what the DMA actually reads, so it must exist."""
+        """valid_shape is what the DMA actually reads, so it must exist."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
         # Claiming 64 valid rows at offset 64 reads to row 128 of a 100-row tensor.
         with pytest.raises(ValueError, match="reads past the end of dimension 0"):
-            tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[64, 128])
+            tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[64, 128])
 
     def test_load_tile_may_overhang_the_source(self):
         """The destination tile is an allocation, so only the read extent must fit."""
@@ -5248,7 +5262,7 @@ class TestWindowReadValidRegion:
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
         # A 64-row tile at offset 64 overhangs, but only 36 rows are read.
-        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[36, 128])
+        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[36, 128])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5260,7 +5274,7 @@ class TestWindowReadValidRegion:
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
-        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[64, 128], clamp=True)
+        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[64, 128], clamp=True)
 
         # clamp(100 - 64, 0, 64) = 36, intersected with the 64-row request -> 36.
         assert _valid_of(call.type) == [36, 128]
@@ -5281,15 +5295,15 @@ class TestWindowReadValidRegion:
         reparsed = pl.parse(ir.python_print(prog))
         ir.assert_structural_equal(reparsed, prog)
 
-    def test_load_lower_rank_window_keeps_its_valid_shapes(self):
+    def test_load_lower_rank_window_keeps_its_valid_shape(self):
         """A 2D tile out of a 3D tensor is a reinterpreting read, not a rectangle."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([4, 128, 64], DataType.FP32), span)
 
         # Window rank 2 over a rank-3 source: the rule does not apply, so the
-        # requested valid_shapes pass through untouched rather than being
+        # requested valid_shape passes through untouched rather than being
         # intersected against the wrong axes.
-        call = tile.load(tensor_var, [0, 0], [16, 64], valid_shapes=[16, 64])
+        call = tile.load(tensor_var, [0, 0], [16, 64], valid_shape=[16, 64])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5306,7 +5320,7 @@ class TestWindowReadValidRegion:
         tensor_var = ir.Var("a", ir.TensorType([256, 128], DataType.FP32), span)
 
         with pytest.raises(ValueError, match="exceeds the window extent"):
-            tile.load(tensor_var, [0, 0], [64, 128], valid_shapes=[128, 128])
+            tile.load(tensor_var, [0, 0], [64, 128], valid_shape=[128, 128])
 
     def test_load_keeps_the_request_when_the_source_extent_is_undecidable(self):
         """An undecidable source extent is trusted, not folded into a runtime min.
@@ -5326,7 +5340,7 @@ class TestWindowReadValidRegion:
         view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=[16, src_valid])
         tensor_var = ir.Var("a", ir.TensorType([16, 128], DataType.FP32, tensor_view=view), span)
 
-        call = tile.load(tensor_var, [0, 0], [16, 128], valid_shapes=[16, valid_len])
+        call = tile.load(tensor_var, [0, 0], [16, 128], valid_shape=[16, valid_len])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5334,13 +5348,13 @@ class TestWindowReadValidRegion:
         # The request survives verbatim -- no min() wrapped around SRC_VALID.
         assert result_type.tile_view.valid_shape[1] is valid_len
 
-    def test_load_symbolic_valid_shapes_survive_unchanged(self):
+    def test_load_symbolic_valid_shape_survives_unchanged(self):
         """A symbolic request is trusted: it is the caller's contract, not a guess."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([64, 128], DataType.FP32), span)
         m = ir.Var("M", ir.ScalarType(DataType.INT64), span)
 
-        call = tile.load(tensor_var, [0, 0], [64, 128], valid_shapes=[m, 128])
+        call = tile.load(tensor_var, [0, 0], [64, 128], valid_shape=[m, 128])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
