@@ -72,11 +72,10 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
     manager = PassManager(OptimizationStrategy.Default)
     names = manager.pass_names
     stop = names.index(last_pass)
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        for pass_obj in manager.passes[: stop + 1]:
-            pipeline = passes.PassPipeline()
-            pipeline.add_pass(pass_obj)
-            program = pipeline.run(program)
+    for pass_obj in manager.passes[: stop + 1]:
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(pass_obj)
+        program = pipeline.run(program)
     return program
 
 
