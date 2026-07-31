@@ -262,7 +262,15 @@ class IRSerializer::Impl {
 
     const auto& memref = *memref_opt.value();
     std::map<std::string, msgpack::object> memref_map;
+    // `base` (the name) is what old blobs carry and what old readers expect, so it
+    // stays. `base_node` is the base as a real node, which is what actually
+    // preserves identity: allocation identity is base_ *pointer* identity, and the
+    // node graph shares one object across every reference to it — including the
+    // alloc statement that defines the Ptr. Reconstructing a base from its name
+    // instead gives the MemRefs a Var that is not the alloc's, so the address
+    // allocator cannot match them to their allocation.
     memref_map["base"] = msgpack::object(memref.base_->name_hint_, zone);
+    memref_map["base_node"] = SerializeNode(memref.base_, zone);
     memref_map["byte_offset"] = SerializeNode(memref.byte_offset_, zone);
     memref_map["size"] = msgpack::object(memref.size_, zone);
     // An author-declared allocation is only a declaration because of these three

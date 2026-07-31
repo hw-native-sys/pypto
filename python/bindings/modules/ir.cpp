@@ -801,25 +801,28 @@ void BindIR(nb::module_& m) {
       // named forms can produce, since the parser rejects an empty literal.
       .def(
           "__init__",
-          [](MemRef* self, uint64_t slots, const Span& span) {
+          [](MemRef* self, const Span& span, uint64_t slots) {
             CheckSlotCount(slots);
             auto base = std::make_shared<Var>("", GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
                               /*is_pinned=*/true, slots);
           },
-          nb::arg("slots") = 1, nb::arg("span") = Span::unknown(),
+          // `slots` goes AFTER `span`: `span` was the first positional parameter
+          // before slots existed, so putting slots first would break
+          // `pl.MemRef(span)`. `slots` is written as a keyword either way.
+          nb::arg("span") = Span::unknown(), nb::arg("slots") = 1,
           "Declare an allocation of your own, named after the variable it is bound to. Size and "
           "address are left for InitMemRef to derive, and nothing else is ever packed into it. Pass "
           "slots=N for N equally-sized slots, selected by subscript in the tile annotation")
       .def(
           "__init__",
-          [](MemRef* self, const std::string& name, uint64_t slots, const Span& span) {
+          [](MemRef* self, const std::string& name, const Span& span, uint64_t slots) {
             CheckSlotCount(slots);
             auto base = std::make_shared<Var>(name, GetPtrType(), Span::unknown());
             new (self) MemRef(base, static_cast<int64_t>(0), static_cast<uint64_t>(0), span,
                               /*is_pinned=*/true, slots);
           },
-          nb::arg("name"), nb::arg("slots") = 1, nb::arg("span") = Span::unknown(),
+          nb::arg("name"), nb::arg("span") = Span::unknown(), nb::arg("slots") = 1,
           "Declare an allocation of your own under an explicit name, overriding the variable name")
       // `decl[k]` selects one slot. The result is the same declaration — same base
       // Ptr, so the slots share one allocation — differing only in slot_index_.

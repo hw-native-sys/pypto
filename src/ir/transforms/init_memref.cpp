@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -128,7 +129,16 @@ struct DeclaredAlloc {
 
   /// Total bytes to allocate: every slot is the same size and they sit contiguously,
   /// which is what makes `slot_index * slot_size` a valid offset.
-  [[nodiscard]] uint64_t TotalSize() const { return slot_size * slot_count; }
+  ///
+  /// Both factors are author-controlled (`slots=N` and the bound tile's shape), so
+  /// the product is checked rather than assumed: wrapping would turn an absurd
+  /// request into a *small* allocation and hand out addresses inside it.
+  [[nodiscard]] uint64_t TotalSize() const {
+    CHECK(slot_count == 0 || slot_size <= std::numeric_limits<uint64_t>::max() / slot_count)
+        << "Declared allocation is too large: " << slot_count << " slots of " << slot_size
+        << " bytes overflows a 64-bit size";
+    return slot_size * slot_count;
+  }
 };
 
 /// Base Ptr of a declared allocation -> its slot geometry.

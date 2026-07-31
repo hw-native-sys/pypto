@@ -1396,6 +1396,49 @@ bool StructuralEqualImpl<AssertMode>::EqualMemRef(const MemRefPtr& lhs, const Me
     return false;
   }
 
+  // 3. Declaration fields. These decide whether InitMemRef treats the MemRef as
+  // an author's allocation and which slot of it the tile lands on, so two MemRefs
+  // differing here describe different memory. Leaving them out also made every
+  // round-trip test that "passed" on assert_structural_equal alone vacuous.
+  if (lhs->is_pinned_ != rhs->is_pinned_) {
+    if constexpr (AssertMode) {
+      std::ostringstream msg;
+      msg << "MemRef is_pinned mismatch (" << std::boolalpha << lhs->is_pinned_ << " != " << rhs->is_pinned_
+          << ")";
+      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
+  if (lhs->slot_count_ != rhs->slot_count_) {
+    if constexpr (AssertMode) {
+      std::ostringstream msg;
+      msg << "MemRef slot_count mismatch (" << lhs->slot_count_ << " != " << rhs->slot_count_ << ")";
+      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
+  // The index is an Expr (a runtime slot index is legal), so compare it as one;
+  // "one side has an index" is itself a mismatch.
+  const bool lhs_has_slot = lhs->slot_index_.has_value() && *lhs->slot_index_;
+  const bool rhs_has_slot = rhs->slot_index_.has_value() && *rhs->slot_index_;
+  if (lhs_has_slot != rhs_has_slot) {
+    if constexpr (AssertMode) {
+      std::ostringstream msg;
+      msg << "MemRef slot_index presence mismatch (" << std::boolalpha << lhs_has_slot
+          << " != " << rhs_has_slot << ")";
+      ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+  if (lhs_has_slot && !Equal(*lhs->slot_index_, *rhs->slot_index_)) {
+    return false;
+  }
+
   return true;
 }
 

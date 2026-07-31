@@ -24,6 +24,7 @@ The feature spans three passes, so the tests are grouped by what they pin down:
 
 import re
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -688,6 +689,102 @@ class TestSlots:
         loop_var = dumped.split("pl.range(2):")[1].rsplit("for ", 1)[1].split(" in ")[0]
         assert f'l0c", slots=2)[{loop_var} % 2]' in second_loop, dumped
         ir.assert_structural_equal(Before, pl.parse_program(dumped))
+
+
+class TestSlotInvariants:
+    """Things outside the passes that must keep a declaration a declaration."""
+
+    def test_substitution_preserves_the_declaration_and_follows_the_slot_index(self):
+        """The generic mutator must carry the slot fields and rewrite the index.
+
+        `substitute_expr` rebuilds any MemRef whose base or offset changed. Rebuilding
+        it from base/offset/size alone silently demotes a declaration to a compiler
+        allocation mid-pipeline; and a slot index naming a substituted Var has to
+        follow that substitution or it dangles on the old Var.
+        """
+        span = ir.Span("f.py", 1, 0, 1, 1)
+        i = ir.Var("i", ir.ScalarType(ir.INDEX), span)
+        j = ir.Var("j", ir.ScalarType(ir.INDEX), span)
+        base = ir.Var("l0c", ir.PtrType(), span)
+        other_base = ir.Var("other", ir.PtrType(), span)
+        declared = ir.MemRef(base, 0, 0, span, True, 2, i)
+
+        # Substituting the *base* must not drop the declaration fields.
+        rebased = ir.substitute_expr(declared, [(base, other_base)])
+        assert isinstance(rebased, ir.MemRef)
+        assert rebased.is_pinned_, "substitution demoted a declaration to a compiler allocation"
+        assert rebased.slot_count_ == 2
+        assert rebased.slot_index_ is i
+
+        # Substituting the *index* must rewrite it.
+        reindexed = ir.substitute_expr(declared, [(i, j)])
+        assert isinstance(reindexed, ir.MemRef)
+        assert reindexed.slot_index_ is j, "slot index still refers to the old Var"
+        assert reindexed.is_pinned_ and reindexed.slot_count_ == 2
+
+    def test_declaration_ctor_keeps_its_positional_arguments(self):
+        """`slots` is a keyword; it must not displace the existing positional `span`."""
+        span = ir.Span("f.py", 1, 0, 1, 1)
+        assert ir.MemRef(span).is_pinned_
+        assert ir.MemRef("buf", span).base_.name_hint == "buf"
+        assert ir.MemRef(slots=2).slot_count_ == 2
+        assert ir.MemRef("buf", slots=2).slot_count_ == 2
+
+    def test_rejects_a_slot_count_that_overflows_the_total_size(self):
+        """`slots x slot_size` is author-controlled, so wrapping must not size a buffer.
+
+        Wrapping would turn an absurd request into a *small* allocation and then hand
+        out addresses inside it.
+        """
+        huge = pl.MemRef(slots=2**60)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32, huge[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                return pl.store(t, [0, 0], out)
+
+        with pytest.raises(ValueError, match="overflows a 64-bit size"):
+            passes.init_mem_ref()(Before)
+
+    def test_unbound_slots_still_count_against_the_space_limit(self, ascend_backend):
+        """A slot nothing is bound to still occupies memory.
+
+        The address verifier walks bound tiles, and each slot MemRef spans only its
+        own slot, so 12 slots with one tile bound would otherwise be counted as one
+        slot — and a buffer well over the space's capacity would verify clean.
+        """
+        big = pl.MemRef(slots=12)  # 12 x 16 KB = 192 KB > the 184 KB Vec space
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32, big[0], pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                return pl.tile.store(t, [0, 0], out)
+
+        with pytest.raises(pypto.Error, match="exceeds platform limit"):
+            with passes.PassContext([], passes.VerificationLevel.BASIC):
+                pipe = passes.PassPipeline()
+                for make in (
+                    passes.init_mem_ref,
+                    passes.materialize_semantic_aliases,
+                    passes.memory_reuse,
+                    passes.allocate_memory_addr,
+                ):
+                    pipe.add_pass(make())
+                pipe.run(Before)
 
 
 class TestSlotRejects:

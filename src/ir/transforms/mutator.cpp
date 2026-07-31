@@ -278,11 +278,26 @@ ExprPtr IRMutator::VisitExpr_(const MemRefPtr& op) {
   if (op->byte_offset_) {
     new_offset = ExprFunctor<ExprPtr>::VisitExpr(op->byte_offset_);
   }
-  if (new_base.get() == op->base_.get() && new_offset.get() == op->byte_offset_.get()) {
+  // A declared allocation's slot index is an ordinary expression over SSA values,
+  // so substitution has to follow it — otherwise a renamed loop variable leaves the
+  // index pointing at the old Var.
+  std::optional<ExprPtr> new_slot_index = op->slot_index_;
+  if (op->slot_index_.has_value() && *op->slot_index_) {
+    new_slot_index = ExprFunctor<ExprPtr>::VisitExpr(*op->slot_index_);
+  }
+  const bool slot_index_changed =
+      new_slot_index.has_value() != op->slot_index_.has_value() ||
+      (new_slot_index.has_value() && new_slot_index->get() != op->slot_index_->get());
+  if (new_base.get() == op->base_.get() && new_offset.get() == op->byte_offset_.get() &&
+      !slot_index_changed) {
     return op;
   }
-  auto fresh = std::make_shared<const MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset),
-                                              op->size_, op->span_);
+  // Carry is_pinned_ / slot_count_ / slot_index_ through: a substituted MemRef
+  // denotes the same storage as its source, and dropping them would silently turn
+  // an author's declaration into a compiler allocation mid-pipeline.
+  auto fresh =
+      std::make_shared<const MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset), op->size_,
+                                     op->span_, op->is_pinned_, op->slot_count_, std::move(new_slot_index));
   var_remap_[op.get()] = fresh;
   return fresh;
 }

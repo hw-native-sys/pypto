@@ -31,6 +31,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -154,6 +155,7 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for MemRef";
 
     std::string base_name;
+    VarPtr base_node;
     ExprPtr byte_offset = nullptr;
     uint64_t size = 0;
     // Absent in blobs written before declared allocations existed; those hold only
@@ -175,6 +177,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       if (key == "base") {
         p->val.convert(base_name);
         has_base = true;
+      } else if (key == "base_node") {
+        if (!p->val.is_nil()) {
+          base_node = As<Var>(DeserializeNode(p->val, zone));
+        }
       } else if (key == "byte_offset") {
         byte_offset = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
         has_byte_offset = true;
@@ -195,15 +201,24 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     CHECK(has_base && has_byte_offset && has_size)
         << "MemRef missing required fields (base, byte_offset, or size)";
 
-    // One base Ptr per allocation name. Allocation identity is base_ *pointer*
-    // identity (MemRef::SameAllocation, the DeclaredAllocMap key, the address
-    // allocator's base groups), and the wire format carries the base only by
-    // name — so minting a fresh Var per MemRef would split one allocation into
-    // as many as there are MemRefs naming it. For a declared allocation that is
-    // visible right after: its slots stop sharing storage and InitMemRef emits
-    // one full-sized allocation per slot instead of one for the set.
-    auto& base = memref_bases_[base_name];
-    if (!base) base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+    // Prefer the serialized base node: it comes from the shared node graph, so it
+    // is the very same Var object every other reference resolves to — including
+    // the alloc statement that defines the Ptr. Allocation identity in the IR is
+    // base_ *pointer* identity (MemRef::SameAllocation, InitMemRef's
+    // DeclaredAllocMap key, the address allocator's base groups and its
+    // declared-size lookup), so a base rebuilt from a name would not match its own
+    // allocation and the group would be sized as if it held one MemRef.
+    //
+    // Blobs written before `base_node` existed carry only the name. Interning one
+    // Var per name recovers the sharing *among the MemRefs* — the best that is
+    // available without the node — so those blobs at least keep their slots on one
+    // allocation.
+    VarPtr base = base_node;
+    if (!base) {
+      auto& interned = memref_bases_[base_name];
+      if (!interned) interned = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+      base = interned;
+    }
     return std::make_shared<MemRef>(base, byte_offset, size, Span::unknown(), is_pinned, slot_count,
                                     std::move(slot_index));
   }

@@ -169,7 +169,18 @@ inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
     }
   };
 
+  // A declared allocation's slot index may be a runtime expression (`l0c[i % 2]`),
+  // which names SSA values exactly like a shape or view expression does. Skipping it
+  // hides a dangling or out-of-scope slot Var from every verifier built on this
+  // walk (use-after-def, SSA scope checking).
+  auto visit_memref = [&visitor](const std::optional<MemRefPtr>& memref) {
+    if (!memref.has_value() || !*memref) return;
+    const auto& slot_index = (*memref)->slot_index_;
+    if (slot_index.has_value() && *slot_index) visitor.VisitExpr(*slot_index);
+  };
+
   if (auto tensor_type = AsTensorTypeLike(type)) {
+    visit_memref(tensor_type->memref_);
     visit_exprs(tensor_type->shape_);
     if (tensor_type->tensor_view_.has_value()) {
       const auto& tv = tensor_type->tensor_view_.value();
@@ -177,6 +188,7 @@ inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
       visit_exprs(tv.stride);
     }
   } else if (auto tile_type = As<TileType>(type)) {
+    visit_memref(tile_type->memref_);
     visit_exprs(tile_type->shape_);
     if (tile_type->tile_view_.has_value()) {
       const auto& tv = tile_type->tile_view_.value();
