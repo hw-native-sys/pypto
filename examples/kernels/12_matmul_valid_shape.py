@@ -41,9 +41,9 @@ def matmul_valid_shape(a: pl.Tensor, b: pl.Tensor, output: pl.InOut[pl.Tensor]):
             [TILE_M, N],
             pl.FP32,
             pl.Mem.Acc,
-            pl.TileView(valid_shape=[VALID_M, N]),
-        ] = pl.set_validshape(pl.matmul(a_left, b_right), VALID_M, N)
-        pl.store(result, [0, 0], output)
+        ] = pl.matmul(a_left, b_right)
+        valid_result: pl.Tile[[VALID_M, N], pl.FP32, pl.Mem.Acc] = pl.slice(result, [VALID_M, N], [0, 0])
+        pl.store(valid_result, [0, 0], output)
     return output
 
 

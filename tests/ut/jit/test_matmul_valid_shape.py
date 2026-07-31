@@ -9,11 +9,20 @@
 
 """Compile-level coverage for the matmul valid-shape example."""
 
+import importlib
+from typing import Any, cast
+
 import pypto.language as pl
 import pytest
-from examples.kernels.matmul_valid_shape import TILE_M, VALID_M, K, N, matmul_valid_shape
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
+
+_example = importlib.import_module("examples.kernels.12_matmul_valid_shape")
+TILE_M = cast(int, getattr(_example, "TILE_M"))
+VALID_M = cast(int, getattr(_example, "VALID_M"))
+K = cast(int, getattr(_example, "K"))
+N = cast(int, getattr(_example, "N"))
+matmul_valid_shape = cast(Any, getattr(_example, "matmul_valid_shape"))
 
 
 class _CallCollector(ir.IRVisitor):
@@ -72,18 +81,24 @@ def test_matmul_valid_shape_declares_inout_output(compiled_programs):
 def test_matmul_valid_shape_store_keeps_logical_result_extent(compiled_programs):
     """A physical 16x16 result stores only its five logically valid rows."""
     _, post_pass, incore = compiled_programs
-    collector = _CallCollector({"tile.matmul", "tile.store"})
+    collector = _CallCollector({"tile.matmul", "tile.slice", "tile.store"})
     collector.visit_stmt(incore.body)
 
     assert len(collector.calls["tile.matmul"]) == 1
+    assert len(collector.calls["tile.slice"]) == 1
     assert len(collector.calls["tile.store"]) == 1
     matmul_call = collector.calls["tile.matmul"][0]
+    slice_call = collector.calls["tile.slice"][0]
     store_call = collector.calls["tile.store"][0]
 
+    assert isinstance(matmul_call.type, ir.TileType)
     assert _const_values(matmul_call.type.shape) == [TILE_M, N]
+    assert isinstance(slice_call.type, ir.TileType)
+    assert _const_values(slice_call.type.shape) == [VALID_M, N]
+    assert _const_values(slice_call.type.get_effective_tile_view().valid_shape) == [VALID_M, N]
     stored_result_type = store_call.args[0].type
     assert isinstance(stored_result_type, ir.TileType)
-    assert _const_values(stored_result_type.shape) == [TILE_M, N]
+    assert _const_values(stored_result_type.shape) == [VALID_M, N]
     assert _const_values(stored_result_type.get_effective_tile_view().valid_shape) == [VALID_M, N]
 
     pto = codegen.PTOCodegen().generate(ir.Program([incore], incore.name, post_pass.span))
