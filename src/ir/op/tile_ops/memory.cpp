@@ -159,9 +159,9 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     CHECK(shapes_tuple->elements_.size() == 2)
         << "The operator " << op_name << " of an MX-layout tensor requires a 2D load window, got rank "
         << shapes_tuple->elements_.size();
-    CHECK(valid_shapes_tuple->elements_.size() == 2)
-        << "The operator " << op_name << " of an MX-layout tensor requires 2D valid_shapes, got rank "
-        << valid_shapes_tuple->elements_.size();
+    CHECK(valid_shape_tuple->elements_.size() == 2)
+        << "The operator " << op_name << " of an MX-layout tensor requires 2D valid_shape, got rank "
+        << valid_shape_tuple->elements_.size();
     const TensorView& source_view = *tensor_type->tensor_view_;
     const auto packed_stride =
         tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, source_view.layout);
