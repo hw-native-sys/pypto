@@ -391,9 +391,9 @@ with ib.function("tile_computation") as f:
 
 | 操作 | 描述 | Kwargs |
 | ---- | ---- | ------ |
-| `system.bar_all` | 全局屏障 | 无 |
-| `system.bar_v` | 向量屏障 | 无 |
-| `system.bar_m` | 矩阵屏障 | 无 |
+| `system.bar_all` | 全局屏障（下降为 `pto.barrier <PIPE_ALL>`） | 无 |
+| `system.bar_v` | 向量屏障（下降为 `pto.barrier <PIPE_V>`） | 无 |
+| `system.bar_m` | 矩阵屏障（下降为 `pto.barrier <PIPE_M>`） | 无 |
 | `system.fence` | 全局内存屏障（下降为 `pto.fence.barrier_all #pto.fence_scope<gm>`） | 无 |
 | `system.cacheinvalid` | 使 tensor 某个子区域对应的 cache line 失效。参数：`tensor`、`shapes`（N 维）、`offsets`（N 维）。任意区域大小（包括单个元素）都下降为 `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>` | 无 |
 | `system.syncall` | 跨核全员屏障（`pto::SYNCALL`）。`mode="hard"`（FFTS，无 operand）或 `mode="soft"`（GM 轮询，带 operand） | `core_type`（`"aiv_only"` \| `"aic_only"` \| `"mix"`）、`mode`（`"hard"` \| `"soft"`） |

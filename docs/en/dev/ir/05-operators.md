@@ -400,9 +400,9 @@ with ib.function("tile_computation") as f:
 
 | Operation | Description | Kwargs |
 | --------- | ----------- | ------ |
-| `system.bar_all` | Global barrier | None |
-| `system.bar_v` | Vector barrier | None |
-| `system.bar_m` | Matrix barrier | None |
+| `system.bar_all` | Global barrier (lowers to `pto.barrier <PIPE_ALL>`) | None |
+| `system.bar_v` | Vector barrier (lowers to `pto.barrier <PIPE_V>`) | None |
+| `system.bar_m` | Matrix barrier (lowers to `pto.barrier <PIPE_M>`) | None |
 | `system.fence` | Memory barrier over global memory (lowers to `pto.fence.barrier_all #pto.fence_scope<gm>`) | None |
 | `system.cacheinvalid` | Invalidate the cache lines backing a tensor sub-region. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>` | None |
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). `mode="hard"` (FFTS, no operands) or `mode="soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |

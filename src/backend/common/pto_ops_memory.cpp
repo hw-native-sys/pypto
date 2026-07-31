@@ -875,6 +875,19 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
     return std::string("");
   });
+
+  const auto register_pipe_barrier = [&reg](const char* op_name, const char* pipe) {
+    reg(op_name, [op_name, pipe](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = AsPto(codegen_base);
+      INTERNAL_CHECK_SPAN(op->args_.empty(), op->span_)
+          << op_name << " takes no arguments, got " << op->args_.size();
+      codegen.Emit(std::string("pto.barrier <") + pipe + ">");
+      return std::string("");
+    });
+  };
+  register_pipe_barrier("system.bar_v", "PIPE_V");
+  register_pipe_barrier("system.bar_m", "PIPE_M");
+  register_pipe_barrier("system.bar_all", "PIPE_ALL");
 }
 }  // namespace backend
 }  // namespace pypto

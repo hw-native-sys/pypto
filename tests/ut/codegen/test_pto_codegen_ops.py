@@ -3112,6 +3112,85 @@ class TestFenceCodegen:
         )
 
 
+class TestPipeBarrierCodegen:
+    """Tests that pl.system.bar_* lower to pto.barrier on the expected pipe."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_bar_all_emits_pipe_all_barrier(self):
+        """pl.system.bar_all() emits pto.barrier <PIPE_ALL>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_bar_all(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.bar_all()
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.barrier <PIPE_ALL>" in mlir, (
+            f"pto.barrier <PIPE_ALL> not found in MLIR:\n{mlir}"
+        )
+
+    def test_bar_v_emits_pipe_v_barrier(self):
+        """pl.system.bar_v() emits pto.barrier <PIPE_V>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_bar_v(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.bar_v()
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.barrier <PIPE_V>" in mlir, (
+            f"pto.barrier <PIPE_V> not found in MLIR:\n{mlir}"
+        )
+
+    def test_bar_m_emits_pipe_m_barrier(self):
+        """pl.system.bar_m() emits pto.barrier <PIPE_M>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_bar_m(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.bar_m()
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.barrier <PIPE_M>" in mlir, (
+            f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
+        )
+
+
 def _cmo_cacheinvalid_line(mlir: str) -> str:
     """Return the single `pto.cmo.cacheinvalid` line (the whole module contains a
     partition_tensor_view from the surrounding tile.store, so cmo-form assertions
