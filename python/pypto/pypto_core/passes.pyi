@@ -821,6 +821,7 @@ class l0_tile_chooser:
         align_m: int
         align_n: int
         align_k: int
+        l0c_align_m: int
         allow_a_stationary: bool
         allow_b_stationary: bool
         allow_double_buffer_c: bool

@@ -12,6 +12,7 @@
 import tempfile
 from pathlib import Path
 
+import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.backend import Backend950, BackendType
@@ -190,6 +191,11 @@ class TestBackend950L0Tiling:
     def test_l0_fractal_alignment_default(self):
         handler = Backend950.instance().get_handler()
         assert handler.get_l0_fractal_alignment() == 16
+
+    def test_l0c_physical_m_alignment_default(self):
+        handler = Backend950.instance().get_handler()
+        assert handler.get_l0c_m_alignment(pl.INT32) == 16
+        assert handler.get_l0c_m_alignment(pl.FP32) == 16
 
     def test_min_l0_tile_dim_default(self):
         handler = Backend950.instance().get_handler()

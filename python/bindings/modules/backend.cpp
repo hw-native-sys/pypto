@@ -159,6 +159,8 @@ void BindBackend(nb::module_& m) {
            "Mat (L1) on-chip SRAM capacity in bytes")
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,
            "Cube fractal alignment in elements for L0 tile dimensions m, n, k")
+      .def("get_l0c_m_alignment", &BackendHandler::GetL0cMAlignment, nb::arg("accumulator_dtype"),
+           "Physical M-row alignment of one L0C accumulator allocation")
       .def("get_min_l0_tile_dim", &BackendHandler::GetMinL0TileDim,
            "Minimum legal value for L0 tile dimensions m, n, k");
 

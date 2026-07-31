@@ -70,6 +70,13 @@ struct L0TileConfig {
   int align_n = 16;
   int align_k = 16;
 
+  // Physical row alignment of one L0C accumulator allocation. This is
+  // deliberately separate from align_m: align_m constrains legal cube work
+  // shapes, while l0c_align_m accounts for rows that occupy SRAM outside the
+  // logical/valid M extent. Ascend910B's INT8 -> INT32 path, for example,
+  // charges M=16 as 32 physical accumulator rows.
+  int l0c_align_m = 16;
+
   // --- Realizable mask -----------------------------------------------------
   // The chooser scores the design space (stationarity x dbC), but only EMITS
   // design points whose caller can lower. These gates select the realizable
@@ -219,7 +226,8 @@ struct L0TileResult {
  *   1. Enumerate the allowed (stationarity, dbC) combinations. For each, derive
  *      the operand depths and L0 budgets:
  *        A0 = L0A/(bytes_a*dbA), B0 = L0B/(bytes_b*dbB), C0 = L0C/(bytes_c*dbC).
- *   2. Enumerate every legal aligned (m, n) with m*n <= C0, and for each (m, n)
+ *   2. Enumerate every legal aligned (m, n) with
+ *      AlignUp(m, l0c_align_m)*n <= C0, and for each (m, n)
  *      every legal aligned k (m*k <= A0, n*k <= B0, k >= min_k; k | K when neither
  *      padding nor k_boundary; plus k == K when the full K fits one block). ALL k
  *      are scored -- ceil(K/k)*ceil(k/kt) is non-monotone in k when kt != align_k,
@@ -254,8 +262,8 @@ struct L0TileResult {
  *   4. Pick the global minimum-wall point across all enumerated combinations.
  *      A-stationary / B-stationary require k == K (operand residency). dbC = 2
  *      additionally requires a >= 2x2 grid, k == K, and that the single-L0C
- *      optimum already tiles. The
- *      (m, n) grid is bounded by m*n <= C0 and the operand caps, k by K/align_k:
+ *      optimum already tiles. The (m, n) grid is bounded by
+ *      AlignUp(m, l0c_align_m)*n <= C0 and the operand caps, k by K/align_k:
  *      O((C0/align^2) * (K/align_k)) per matmul -- a hardware constant, independent
  *      of IR size; the chooser runs once per matmul op, so the pass stays linear
  *      in the IR.

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
 
@@ -66,6 +67,9 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 128ULL * 1024; }
   [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
+  [[nodiscard]] int GetL0cMAlignment(const DataType& accumulator_dtype) const override {
+    return accumulator_dtype == DataType::INT32 ? 32 : GetL0FractalAlignment();
+  }
 
  private:
   Ascend910BHandler() = default;

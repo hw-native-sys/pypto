@@ -357,6 +357,19 @@ class BackendHandler {
   [[nodiscard]] virtual int GetL0FractalAlignment() const { return 16; }
 
   /**
+   * @brief Physical M-row alignment of an L0C accumulator allocation.
+   *
+   * This may be stricter than the legal cube work-shape alignment. The L0
+   * chooser, dbC planner, and InitMemRef allocator share it for physical SRAM
+   * footprint accounting; it does not reject a smaller logical or valid M
+   * extent.
+   */
+  [[nodiscard]] virtual int GetL0cMAlignment(const DataType& accumulator_dtype) const {
+    (void)accumulator_dtype;
+    return GetL0FractalAlignment();
+  }
+
+  /**
    * @brief Minimum legal value for L0 tile dimensions m, n, k.
    *
    * The cube unit cannot operate below this dimension; ChooseL0Tile rejects

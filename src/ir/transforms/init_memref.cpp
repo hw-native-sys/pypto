@@ -22,6 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -40,6 +43,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -101,18 +105,6 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
 
-// Byte size of a shaped type, or nullopt when any extent is dynamic.
-std::optional<uint64_t> ShapedTypeSizeBytes(const ShapedTypePtr& type) {
-  uint64_t num_elements = 1;
-  for (const auto& dim : type->shape_) {
-    auto const_dim = As<ConstInt>(dim);
-    // A non-positive extent would wrap the unsigned product into a huge size.
-    if (!const_dim || const_dim->value_ <= 0) return std::nullopt;
-    num_elements *= static_cast<uint64_t>(const_dim->value_);
-  }
-  return num_elements * type->dtype_.GetByte();
-}
-
 // ============================================================================
 // Author-declared allocations (`pl.Tile[..., pl.MemRef("name"), ...]`)
 // ============================================================================
@@ -167,6 +159,8 @@ MemRefPtr GetDeclaredAlloc(const TypePtr& type) {
 /// (the largest bound tile) and checking the bound tiles agree on memory space.
 class DeclaredAllocCollector : public IRVisitor {
  public:
+  explicit DeclaredAllocCollector(const backend::BackendHandler* handler) : handler_(handler) {}
+
   DeclaredAllocMap buffers;
 
   // Every binding reaches this pass on a Var's type, so one VarLike override
@@ -186,7 +180,8 @@ class DeclaredAllocCollector : public IRVisitor {
     const VarPtr& base = binding->base_;
     auto tile_type = As<TileType>(var->GetType());
 
-    auto size = ShapedTypeSizeBytes(tile_type);
+    const MemorySpace space = tile_type->GetMemorySpace().value_or(MemorySpace::DDR);
+    auto size = utils::StaticPhysicalAllocationBytes(tile_type, space, handler_);
     CHECK_SPAN(size.has_value(), var->span_)
         << "Tile '" << var->name_hint_ << "' is bound to the declared allocation '" << base->name_hint_
         << "' but has a dynamic shape; a declared allocation must be sized at compile time";
@@ -217,13 +212,15 @@ class DeclaredAllocCollector : public IRVisitor {
     }
   }
 
+  const backend::BackendHandler* handler_ = nullptr;
   std::map<const Var*, MemorySpace> spaces_;
 };
 
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const DeclaredAllocMap& declared_allocs) : declared_allocs_(declared_allocs) {}
+  InitMemRefMutator(const DeclaredAllocMap& declared_allocs, const backend::BackendHandler* handler)
+      : declared_allocs_(declared_allocs), handler_(handler) {}
 
   /// Whether `type` is bound to one of this function's declared allocations.
   [[nodiscard]] bool HasUserBinding(const TypePtr& type) const {
@@ -301,41 +298,28 @@ class InitMemRefMutator : public IRMutator {
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const VarPtr& var,
                                         std::optional<MemorySpace> memory_space) {
     const std::string var_name = var ? var->name_hint_ : "<anonymous>";
-    uint64_t size_bytes = 0;
-    if (As<TileType>(type)) {
-      uint64_t num_elements = 1;
-      for (size_t i = 0; i < type->shape_.size(); ++i) {
-        auto const_dim = As<ConstInt>(type->shape_[i]);
-        INTERNAL_CHECK_SPAN(const_dim, var ? var->span_ : Span::unknown())
-            << "InitMemRef requires static shape for variable '" << var_name << "', but shape element " << i
-            << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
-               "extent in TileView.valid_shape instead.";
-        INTERNAL_CHECK_SPAN(const_dim->value_ > 0, var ? var->span_ : Span::unknown())
-            << "InitMemRef requires positive shape for variable '" << var_name << "', but shape element " << i
-            << " is " << const_dim->value_;
-        num_elements *= static_cast<uint64_t>(const_dim->value_);
-      }
-
-      size_bytes = num_elements * ((type->dtype_.GetBit() + 7) / 8);
-    } else {
-      uint64_t num_elements = 1;
-      bool is_static = true;
-      for (const auto& dim : type->shape_) {
-        if (auto const_dim = As<ConstInt>(dim)) {
-          num_elements *= static_cast<uint64_t>(const_dim->value_);
-        } else {
-          is_static = false;
-          break;
-        }
-      }
-      if (is_static) {
-        size_bytes = num_elements * ((type->dtype_.GetBit() + 7) / 8);
-      }
-    }
-
     const Span& err_span = var ? var->span_ : Span::unknown();
     INTERNAL_CHECK_SPAN(memory_space.has_value(), err_span)
         << "Internal error: memory_space must be resolved before CreateMemRef";
+
+    if (As<TileType>(type)) {
+      for (size_t i = 0; i < type->shape_.size(); ++i) {
+        auto const_dim = As<ConstInt>(type->shape_[i]);
+        INTERNAL_CHECK_SPAN(const_dim, err_span)
+            << "InitMemRef requires static shape for variable '" << var_name << "', but shape element " << i
+            << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
+               "extent in TileView.valid_shape instead.";
+        INTERNAL_CHECK_SPAN(const_dim->value_ > 0, err_span)
+            << "InitMemRef requires positive shape for variable '" << var_name << "', but shape element " << i
+            << " is " << const_dim->value_;
+      }
+    }
+
+    auto static_size = utils::StaticPhysicalAllocationBytes(type, *memory_space, handler_);
+    INTERNAL_CHECK_SPAN(!As<TileType>(type) || static_size.has_value(), err_span)
+        << "InitMemRef cannot represent the physical allocation size for static tile variable '" << var_name
+        << "' without overflowing 64-bit bytes";
+    const uint64_t size_bytes = static_size.value_or(0);
 
     auto base =
         std::make_shared<Var>(BuildBasePtrName(*memory_space, next_id_++), GetPtrType(), Span::unknown());
@@ -450,22 +434,16 @@ class InitMemRefMutator : public IRMutator {
     // Accumulate: total_offset = parent.byte_offset + additional_offset
     ExprPtr total_offset = AddByteOffsets(parent_memref->byte_offset_, additional_offset);
 
-    // Compute view size from the output type
+    auto source_ms = ExtractMemorySpaceFromType(source->GetType());
+
+    // Compute the view's conservative physical range from the output type.
+    // Acc views must retain the backend's padded M-row footprint; otherwise
+    // alias/capacity analysis would see a smaller range than the hardware uses.
     uint64_t view_size = parent_memref->size_;  // default: same size as parent
     if (auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType())) {
-      uint64_t num_elements = 1;
-      bool is_static = true;
-      for (const auto& dim : out_shaped->shape_) {
-        if (auto const_dim = As<ConstInt>(dim)) {
-          num_elements *= static_cast<uint64_t>(const_dim->value_);
-        } else {
-          is_static = false;
-          break;
-        }
-      }
-      if (is_static) {
-        view_size = num_elements * ((out_shaped->dtype_.GetBit() + 7) / 8);
-      }
+      const MemorySpace space = source_ms.value_or(MemorySpace::DDR);
+      auto physical_size = utils::StaticPhysicalAllocationBytes(out_shaped, space, handler_);
+      if (physical_size) view_size = *physical_size;
     }
 
     // For pure aliases (no offset change, same size), share the SAME MemRef shared_ptr
@@ -483,7 +461,6 @@ class InitMemRefMutator : public IRMutator {
                                 ? parent_memref
                                 : std::make_shared<MemRef>(parent_memref->base_, total_offset, view_size);
 
-    auto source_ms = ExtractMemorySpaceFromType(source->GetType());
     std::optional<MemRefPtr> view_opt = view_memref;
     TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
         op->var_->GetType(), view_opt, [this](const ExprPtr& e) { return VisitExpr(e); }, source_ms);
@@ -734,6 +711,7 @@ class InitMemRefMutator : public IRMutator {
 
   std::map<VarPtr, VarPtr> var_map_;
   const DeclaredAllocMap& declared_allocs_;
+  const backend::BackendHandler* handler_ = nullptr;
   uint64_t next_id_ = 0;
 };
 
@@ -771,11 +749,17 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
+  const auto* ctx = PassContext::Current();
+  const backend::BackendHandler* handler = nullptr;
+  if (backend::BackendConfig::IsConfigured()) {
+    handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
+  }
+
   // Step 2: Resolve author-declared allocations (`pl.Tile[..., pl.MemRef("name"),
   // ...]`), then mutate variables to initialize their MemRef. They must be
   // collected up front: a declared allocation's size is the max over ALL tiles
   // bound to it, which is only known after the whole function has been seen.
-  DeclaredAllocCollector declared_alloc_collector;
+  DeclaredAllocCollector declared_alloc_collector(handler);
   declared_alloc_collector.VisitStmt(normalized_func->body_);
   const DeclaredAllocMap& declared_allocs = declared_alloc_collector.buffers;
 
@@ -792,7 +776,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
            "memory planner.";
   }
 
-  InitMemRefMutator mutator(declared_allocs);
+  InitMemRefMutator mutator(declared_allocs, handler);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());

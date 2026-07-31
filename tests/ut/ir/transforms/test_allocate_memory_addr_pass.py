@@ -217,7 +217,8 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
             mem_mat_6: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 16384)
             mem_left_7: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 1024)
             mem_right_8: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 16384)
-            mem_acc_9: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 1024)
+            # Logical M=4 still occupies one 16-row physical L0C block.
+            mem_acc_9: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
             lhs_tile: pl.Tile[[4, 128], pl.BF16, pl.MemRef(mem_mat_4, 0, 1024), pl.Mem.Mat] = pl.tile.load(
                 lhs, [0, 0], [4, 128], [4, 128], target_memory=pl.Mem.Mat
             )
@@ -234,13 +235,13 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
             rhs0_tile_Right: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_right_8, 0, 16384), pl.Mem.Right] = (
                 pl.tile.move(rhs0_tile, target_memory=pl.Mem.Right)
             )
-            _acc0: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 1024), pl.Mem.Acc] = pl.tile.matmul(
+            _acc0: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
                 lhs_tile_Left, rhs0_tile_Right
             )
             rhs1_tile_Right: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_right_8, 0, 16384), pl.Mem.Right] = (
                 pl.tile.move(rhs1_tile, target_memory=pl.Mem.Right)
             )
-            acc1: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 1024), pl.Mem.Acc] = pl.tile.matmul(
+            acc1: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 4096), pl.Mem.Acc] = pl.tile.matmul(
                 lhs_tile_Left, rhs1_tile_Right
             )
             result: pl.Tensor[[4, 64], pl.FP32, pl.MemRef("mem_ddr_3", 0, 1024)] = pl.tile.store(

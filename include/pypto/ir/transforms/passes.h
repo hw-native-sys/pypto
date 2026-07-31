@@ -457,11 +457,22 @@ Pass LegalizeTileCast();
  * loop; a non-divisor aligned K tail is peeled into a final
  * ``tile.matmul_acc``.
  *
- * When the ``[M, N]`` accumulator exceeds L0c, plain ``tile.matmul`` is
- * M/N-tiled.  A result consumed by one output store uses direct-to-GM
- * placement; a result consumed entirely as a later matmul operand is assembled
- * into an on-chip Mat scratch.  The Mat-scratch route also folds a compatible
- * f32-to-bf16/f16 ``tile.cast(mode="rint")`` into the FIXPIPE writeback.
+ * L0C legality uses the backend's physical accumulator-row alignment, which
+ * may be stricter than the logical cube shape (for example, an INT32 M=16
+ * result occupies 32 rows on Ascend910B).  When that physical ``[M, N]``
+ * footprint exceeds L0c, plain ``tile.matmul`` is M/N-tiled.  A result consumed
+ * by one output store uses direct-to-GM placement; a result consumed entirely
+ * as a later matmul operand is assembled into an on-chip Mat scratch.  The
+ * Mat-scratch route also folds a compatible f32-to-bf16/f16
+ * ``tile.cast(mode="rint")`` into the FIXPIPE writeback.
+ *
+ * The canonical frontend split-K form -- a full-output accumulator placeholder,
+ * a pipeline carrying it through ``tile.matmul`` / ``tile.matmul_acc``, then
+ * one store -- is M/N-tiled at the enclosing-loop level.  Each output sub-tile
+ * completes the whole source K reduction before the next sub-tile starts, so
+ * an oversized full Acc is never materialized.  Arbitrary standalone
+ * ``tile.matmul_acc`` calls with caller-owned accumulators remain deferred with
+ * ``PH-AT-006``.
  *
  * Full-K M/N grids may use output-, A-, or B-stationary loop orders.  L0C
  * double-buffering is enabled under PTOAS and is available as a PyPTO planner

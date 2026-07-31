@@ -44,6 +44,7 @@ def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConf
     cfg.bytes_c = 4  # FP32 accumulator
     cfg.min_m = cfg.min_n = cfg.min_k = 16
     cfg.align_m = cfg.align_n = cfg.align_k = 16
+    cfg.l0c_align_m = 16
     # Realizable-mask gates default OFF (output-stationary, dbC=1) — the
     # algorithm the pass realizes today. Tests open a gate to exercise an axis.
     cfg.allow_a_stationary = False
@@ -64,7 +65,8 @@ def _capacities_ok(
     a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
     b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
-    return m * k <= a0 and k * n <= b0 and m * n <= c0
+    physical_m = _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m
+    return m * k <= a0 and k * n <= b0 and physical_m * n <= c0
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +236,33 @@ class TestL0TilingEdgeCases:
         # should match K (no K-iter needed).
         assert result.k >= 64
         assert result.m >= 64 and result.n >= 64
+
+    def test_int32_physical_accumulator_rows_force_n_tiling(self):
+        """Issue #2232: an INT32 [16, 1152] accumulator occupies 32 physical
+        rows on Ascend910B, so it is 144 KiB and cannot remain one L0C tile.
+
+        The logical 16-row calculation is only 72 KiB and therefore used to
+        let the chooser return the full N while splitting K alone.
+        """
+        boundary = _default_config(M=16, N=1024, K=128)
+        boundary.bytes_a = boundary.bytes_b = 1
+        boundary.bytes_c = 4
+        boundary.l0c_align_m = 32
+        exact_fit = passes.l0_tile_chooser.choose_l0_tile(boundary)
+        assert (exact_fit.m, exact_fit.n) == (16, 1024)
+
+        cfg = _default_config(M=16, N=1152, K=128)
+        cfg.bytes_a = cfg.bytes_b = 1
+        cfg.bytes_c = 4
+
+        cfg.l0c_align_m = 16
+        logical = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (logical.m, logical.n) == (16, 1152)
+
+        cfg.l0c_align_m = 32
+        physical = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert physical.n < 1152
+        assert _capacities_ok(physical.m, physical.n, physical.k, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -413,10 +442,11 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_2d: bool, require_full_k:
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     best = None
     m = cfg.min_m
-    while m <= cfg.M and m * cfg.min_n <= c0:
+    while m <= cfg.M and _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m * cfg.min_n <= c0:
         if not (require_2d and _cdiv(cfg.M, m) < 2):
+            physical_m = _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m
             n = cfg.min_n
-            while n <= min(cfg.N, c0 // m):
+            while n <= min(cfg.N, c0 // physical_m):
                 if not (require_2d and _cdiv(cfg.N, n) < 2):
                     for k in _legal_ks(m, n, cfg, a0, b0):
                         if require_full_k and k != cfg.K:
@@ -452,7 +482,8 @@ def _brute_optimum(cfg) -> tuple:
             if stat == _OS and not dbc:
                 continue  # baseline, already scored
             c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
-            if c0 < cfg.min_m * cfg.min_n:
+            min_physical_m = _cdiv(cfg.min_m, cfg.l0c_align_m) * cfg.l0c_align_m
+            if c0 < min_physical_m * cfg.min_n:
                 continue
             cand = _enumerate_best(cfg, stat, dbc, require_2d=dbc, require_full_k=(stat != _OS or dbc))
             if cand is not None and cand[0][0] < best_key[0]:  # strictly lower wall

@@ -37,6 +37,8 @@ operand slices, so the produced IR is L0-typed end-to-end and roundtrips
 cleanly through the autouse print/parse fixture.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend as _backend
@@ -1932,6 +1934,38 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
         return Before
 
+    @staticmethod
+    def _int8_pipeline(tile_n: int):
+        """Four-trip direct-store pipeline with an M=16 INT32 accumulator."""
+        width = 4 * tile_n
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                q: pl.Tensor[[16, 32], pl.INT8],
+                b: pl.Tensor[[32, width], pl.INT8],
+                out: pl.Out[pl.Tensor[[16, width], pl.INT32]],
+            ) -> pl.Tensor[[16, width], pl.INT32]:
+                q_mat: pl.Tile[[16, 32], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                    q, [0, 0], [16, 32], target_memory=pl.Mem.Mat
+                )
+                q_l0: pl.Tile[[16, 32], pl.INT8, pl.Mem.Left] = pl.tile.move(q_mat, target_memory=pl.Mem.Left)
+                b_mat: pl.Tile[[32, width], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [32, width], target_memory=pl.Mem.Mat
+                )
+                for ni, (out_i,) in pl.pipeline(0, width, tile_n, stage=2, init_values=(out,)):
+                    b_l0: pl.Tile[[32, tile_n], pl.INT8, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, ni, [32, tile_n], target_memory=pl.Mem.Right
+                    )
+                    c: pl.Tile[[16, tile_n], pl.INT32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
+                    out_s: pl.Tensor[[16, width], pl.INT32] = pl.tile.store(c, [0, ni], out_i)
+                    out_r = pl.yield_(out_s)
+                return out_r
+
+        return Before
+
     def test_marks_only_direct_inner_pipeline_when_two_accumulators_fit(self):
         """#2131 shape: shared L0A, moving L0B, and two 8 KiB L0C slots."""
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
@@ -2057,6 +2091,40 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
         After = passes.auto_tile_matmul_l0()(self._single_matmul_pipeline(tile_m=128))
         assert "pipeline_double_buffer_c" in ir.python_print(After)
+
+    @pytest.mark.parametrize(("tile_n", "expected_marker"), [(512, True), (768, False)])
+    def test_int32_physical_rows_gate_pipeline_double_buffer_capacity(self, tile_n, expected_marker):
+        """M=16 INT32 occupies 32 physical rows on 910B: two 16x512
+        accumulators exactly fit L0C, while two 16x768 accumulators need 192 KiB."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        after = passes.auto_tile_matmul_l0()(self._int8_pipeline(tile_n))
+        assert ("pipeline_double_buffer_c" in ir.python_print(after)) is expected_marker
+
+    def test_int32_dbc_allocations_use_non_overlapping_physical_ranges(self):
+        """The admitted 16x512 INT32 ping-pong gets two physical 64 KiB
+        allocations, not adjacent logical 32 KiB ranges that overlap in SRAM."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            self._int8_pipeline(tile_n=512)
+        )
+        printed = ir.python_print(allocated)
+        alloc_lines = [line for line in printed.splitlines() if "tile.alloc(pl.Mem.Acc" in line]
+        assert len(alloc_lines) == 2
+        assert all("tile.alloc(pl.Mem.Acc, 65536)" in line for line in alloc_lines)
+
+        ranges = {
+            (int(offset), int(size))
+            for offset, size in re.findall(
+                r"pl\.MemRef\(mem_acc_[^,]+, pl\.const\((\d+), pl\.INT64\), (\d+)\), pl\.Mem\.Acc",
+                printed,
+            )
+        }
+        assert ranges == {(0, 65536), (65536, 65536)}
 
     def test_ptoas_planner_leaves_existing_pipeline_unchanged(self):
         """#2131 targets PyPTO; PTOAS already supplies physical Acc separation."""
@@ -2644,11 +2712,11 @@ class TestAutoTileMatmulL0Skips:
         ir.assert_structural_equal(After, Before)
 
     def test_oversized_matmul_acc_mn_deferred(self):
-        """An oversized ``tile.matmul_acc`` output (512×512 FP32 on Ascend950,
-        1 MB > L0c) would need M/N tiling, but the ``matmul_acc`` M/N path —
-        which must slice the caller's [M, N] accumulator per sub-tile — is
-        deferred.  The pass emits ``PH-AT-006`` and leaves the call untouched
-        (only the *plain* ``tile.matmul`` direct-store M/N fold is implemented)."""
+        """An arbitrary oversized ``tile.matmul_acc`` output (512×512 FP32 on
+        Ascend950, 1 MB > L0c) would require slices of its caller-owned [M, N]
+        accumulator, so it remains deferred with ``PH-AT-006``. The supported
+        split-K case is instead matched as a canonical create/pipeline/store
+        chain and tiled outside the K loop."""
 
         @pl.program
         class Before:

@@ -28,7 +28,9 @@ from typing import cast
 import pypto
 import pypto.language as pl
 import pytest
+from pypto import backend as _backend
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir import MemorySpace
 
 
@@ -146,6 +148,43 @@ class TestBasic:
 
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    @pytest.mark.parametrize(
+        ("backend_type", "expected_acc_bytes"),
+        [(BackendType.Ascend910B, 16384), (BackendType.Ascend950, 8192)],
+    )
+    def test_int32_acc_allocation_uses_backend_physical_m_rows(self, backend_type, expected_acc_bytes):
+        """A logical 16x128 INT32 accumulator occupies 32 physical M rows on
+        910B, while 950 retains the ordinary 16-row footprint."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(backend_type)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[16, 32], pl.INT8],
+                input_b: pl.Tensor[[32, 128], pl.INT8],
+                output: pl.Out[pl.Tensor[[16, 128], pl.INT32]],
+            ) -> pl.Tensor[[16, 128], pl.INT32]:
+                a_mat: pl.Tile[[16, 32], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                    input_a, [0, 0], [16, 32], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[32, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                    input_b, [0, 0], [32, 128], target_memory=pl.Mem.Mat
+                )
+                a_l0: pl.Tile[[16, 32], pl.INT8, pl.Mem.Left] = pl.tile.move(a_mat, target_memory=pl.Mem.Left)
+                b_l0: pl.Tile[[32, 128], pl.INT8, pl.Mem.Right] = pl.tile.move(
+                    b_mat, target_memory=pl.Mem.Right
+                )
+                acc: pl.Tile[[16, 128], pl.INT32, pl.Mem.Acc] = pl.tile.matmul(a_l0, b_l0)
+                output = pl.tile.store(acc, [0, 0], output)
+                return output
+
+        printed = ir.python_print(passes.init_mem_ref()(Before))
+        assert f"pl.tile.alloc(pl.Mem.Acc, {expected_acc_bytes})" in printed
+        assert f", pl.const(0, pl.INT64), {expected_acc_bytes}), pl.Mem.Acc]" in printed
 
 
 class TestMemRefSharing:

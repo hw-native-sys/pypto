@@ -14,11 +14,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 
 namespace pypto {
 namespace ir {
@@ -366,7 +368,8 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
   // Aligned-down boundary tiles (m <= M but M % m != 0) are still permitted —
   // the full-K emitter peels the partial boundary into a straight-line tail.
   if (!cfg.allow_padding && (m > cfg.M || n > cfg.N)) return std::nullopt;
-  if (static_cast<int64_t>(m) * n > C0) return std::nullopt;
+  auto c_elements = L0cPhysicalElements(m, n, cfg.l0c_align_m);
+  if (!c_elements || *c_elements > static_cast<uint64_t>(C0)) return std::nullopt;
   Candidate c;
   c.m = m;
   c.n = n;
@@ -393,7 +396,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 //   and for the dbC=2 ping-pong (realized only by the full-K pipelined emitter).
 //
 // Complexity: O((C0 / align^2) * (K / align_k)) per matmul -- the (m, n) grid is
-// bounded by m*n <= C0 and the L0A/L0B capacities, k by K/align_k. A hardware
+// bounded by AlignUp(m,l0c_align_m)*n <= C0 and the L0A/L0B capacities, k by K/align_k. A hardware
 // constant per op, independent of IR size. The chooser runs once per matmul op
 // (matmul ops are O(N)), so the pass stays linear in the IR.
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
@@ -402,10 +405,17 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
   const int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
   std::optional<Candidate> best;
   for (int64_t m = cfg.min_m; m <= m_hi; m += cfg.align_m) {
-    // n >= min_n must fit m*n <= C0; once it cannot, no larger m can either.
-    if (m * static_cast<int64_t>(cfg.min_n) > C0) break;
+    auto physical_m_elements = L0cPhysicalElements(m, /*n=*/1, cfg.l0c_align_m);
+    if (!physical_m_elements ||
+        *physical_m_elements > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      break;
+    }
+    const int64_t physical_m = static_cast<int64_t>(*physical_m_elements);
+    // n >= min_n must fit the physical accumulator footprint; once it cannot,
+    // no larger m can either.
+    if (physical_m * static_cast<int64_t>(cfg.min_n) > C0) break;
     if (require_2d && CeilDiv(static_cast<int64_t>(cfg.M), m) < 2) continue;
-    const int64_t n_max = std::min<int64_t>(n_hi, C0 / m);
+    const int64_t n_max = std::min<int64_t>(n_hi, C0 / physical_m);
     for (int64_t n = cfg.min_n; n <= n_max; n += cfg.align_n) {
       if (require_2d && CeilDiv(static_cast<int64_t>(cfg.N), n) < 2) continue;
       for (const int k : EnumerateLegalKs(static_cast<int>(m), static_cast<int>(n), cfg, A0, B0)) {
@@ -426,7 +436,8 @@ int64_t L0aBudget(const L0TileConfig& cfg, const OperandDB& db) {
 int64_t L0bBudget(const L0TileConfig& cfg, const OperandDB& db) {
   return static_cast<int64_t>(cfg.l0b_bytes) / (static_cast<int64_t>(cfg.bytes_b) * (db.b ? 2 : 1));
 }
-// L0C element budget per accumulator: halved for dbC=2 (m * n * bytes_c <= L0C / dbC).
+// L0C element budget per accumulator: halved for dbC=2. Candidate legality
+// additionally rounds m up to cfg.l0c_align_m before applying this budget.
 int64_t L0cBudget(const L0TileConfig& cfg, const Regime& r) {
   return static_cast<int64_t>(cfg.l0c_bytes) / (static_cast<int64_t>(cfg.bytes_c) * (r.dbc ? 2 : 1));
 }
@@ -443,8 +454,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: element byte sizes must be positive";
   CHECK(cfg.min_m > 0 && cfg.min_n > 0 && cfg.min_k > 0)
       << "ChooseL0Tile: minimum tile dimensions must be positive";
-  CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0)
-      << "ChooseL0Tile: tile alignments must be positive";
+  CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0 && cfg.l0c_align_m > 0)
+      << "ChooseL0Tile: tile and physical L0C alignments must be positive";
   CHECK(cfg.bw_a > 0.0 && cfg.bw_b > 0.0 && cfg.bw_drain > 0.0)
       << "ChooseL0Tile: roofline bandwidths must be strictly positive (got bw_a=" << cfg.bw_a
       << ", bw_b=" << cfg.bw_b << ", bw_drain=" << cfg.bw_drain << ") -- they divide the load/drain cost.";
@@ -483,7 +494,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   CHECK(B0 >= static_cast<int64_t>(cfg.min_n) * cfg.min_k)
       << "ChooseL0Tile: L0b capacity " << B0 << " elements is too small to fit the minimum tile ("
       << cfg.min_k << " x " << cfg.min_n << ")";
-  CHECK(C0_base >= static_cast<int64_t>(cfg.min_m) * cfg.min_n)
+  const auto min_c_elements = L0cPhysicalElements(cfg.min_m, cfg.min_n, cfg.l0c_align_m);
+  CHECK(min_c_elements && C0_base >= static_cast<int64_t>(*min_c_elements))
       << "ChooseL0Tile: L0c capacity " << C0_base << " elements is too small to fit the minimum tile ("
       << cfg.min_m << " x " << cfg.min_n << ")";
 
@@ -519,7 +531,9 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
         const Regime r{stat, /*dbc=*/dbc == 1};
         if (is_os && !r.dbc) continue;  // baseline, already scored
         const int64_t c0 = L0cBudget(cfg, r);
-        if (c0 < static_cast<int64_t>(cfg.min_m) * cfg.min_n) continue;  // can't fit min tile
+        if (!min_c_elements || c0 < static_cast<int64_t>(*min_c_elements)) {
+          continue;  // can't fit the physical minimum tile
+        }
         // Operand-stationary pins an operand across K (k == K); dbC=2 needs the
         // full-K emitter (k == K) and a >= 2x2 grid for the ping-pong.
         const bool require_full_k = !is_os || r.dbc;
