@@ -101,9 +101,10 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
   Such a result lands in its source's allocation, so it cannot be placed elsewhere;
   bind the source instead.
 
-A fourth rule — tiles bound to one allocation must not be live at the same time — needs
+A fourth rule — tiles bound to **one slot** must not be live at the same time — needs
 lifetime information and is therefore checked in
-[MemoryReuse](31-memory_reuse.md#declared-allocations).
+[MemoryReuse](31-memory_reuse.md#declared-allocations). Tiles on *different* slots are
+meant to be live together; that is what a multi-slot declaration is for.
 
 ```python
 ping, pong = pl.MemRef(), pl.MemRef()

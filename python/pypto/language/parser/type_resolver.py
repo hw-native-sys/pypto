@@ -18,7 +18,7 @@ from pypto.language.typing.dynamic import DynVar
 from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import DataType, ir
 
-from .diagnostics import ParserTypeError
+from .diagnostics import ParserError, ParserTypeError
 from .expr_evaluator import ExprEvaluator
 
 
@@ -1968,11 +1968,19 @@ class TypeResolver:
             if method is not None:
                 return getattr(lhs, method)(rhs)
 
-        raise ParserTypeError(
-            f"MemRef byte_offset must be an integer or variable, got: {ast.unparse(node)}",
-            span=self._get_span(node),
-            hint="Use an integer value for the byte offset, e.g., 0 or 1024",
-        )
+        # A resolved slot index becomes part of the byte offset (`i % 2 * 16384`),
+        # so the offset can be any pure index expression — more than the
+        # add/sub/mul handled above. Fall back to the same index-expression parser
+        # the slot subscript and TileView fields use, so a printed program with a
+        # runtime slot round-trips.
+        try:
+            return self._parse_tileview_expr(node)
+        except ParserError:
+            raise ParserTypeError(
+                f"MemRef byte_offset must be an index expression, got: {ast.unparse(node)}",
+                span=self._get_span(node),
+                hint="Use an integer, a variable, or arithmetic over them, e.g. 1024 or i % 2 * 512",
+            ) from None
 
     def _resolve_memory_space(self, node: ast.expr) -> "ir.MemorySpace":
         """Resolve a memory space AST node (e.g., pl.Mem.DDR or pl.MemorySpace.DDR)."""

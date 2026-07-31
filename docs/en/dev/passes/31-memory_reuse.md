@@ -117,9 +117,13 @@ The cost is the author's to manage: pinning trades capacity for parallelism, and
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.
 
-**Overlap check.** Two tiles independently bound to one allocation must not be live at the
-same time — that is not reuse, it is the later write destroying data the earlier tile
-still needs. This pass owns the check because it is where lifetimes are computed
+**Overlap check.** Two tiles independently bound to the **same slot** must not be live at
+the same time — that is not reuse, it is the later write destroying data the earlier tile
+still needs. The check is per slot, not per allocation: two tiles on *different* slots of a
+`pl.MemRef(slots=N)` declaration are meant to be live together (that is the ping-pong), and
+only tiles landing on one slot can corrupt each other. A runtime slot index (`l0c[i % 2]`)
+has no static slot to attribute a tile to, so the check is skipped there — the rotation is
+the author's to get right — while isolation from every other allocation still holds. This pass owns the check because it is where lifetimes are computed
 (`ComputeLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
 allowed (one tile's last read may be the statement that produces the next member).
 Tiles that land on the allocation by inheritance rather than by binding — views, in-place

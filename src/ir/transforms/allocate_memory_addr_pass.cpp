@@ -335,6 +335,19 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
     }
+
+    // Capacity is checked HERE because this is the only place the number is exact.
+    // The footprint is built from each buffer'strue reserved size, so it counts a
+    // declared allocation's unbound slots and does not depend on any tile's address
+    // being constant. Reconstructing it downstream from the addressed tiles cannot
+    // do either: a slot nobody binds leaves no MemRef to see, and a runtime slot
+    // index leaves no constant to add up.
+    if (backend::BackendConfig::IsConfigured()) {
+      const uint64_t limit = backend::GetBackend()->GetMemSize(space);
+      const uint64_t used = footprint.HighWater();
+      CHECK(limit == 0 || used <= limit) << MemorySpaceToString(space) << " buffer usage (" << used
+                                         << " bytes) exceeds platform limit (" << limit << " bytes)";
+    }
   }
 
   // Sort by byte_offset (ascending order) so alloc statements are in address order.
@@ -458,23 +471,6 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     }
   }
 
-  /// Record how many bytes each allocation actually reserves.
-  ///
-  /// Walking bound tiles alone under-reports a multi-slot declaration: each slot
-  /// MemRef spans only its own slot, so slots nothing is bound to are invisible and
-  /// a 12-slot buffer is counted as one slot. The alloc statement is the only place
-  /// the whole reservation is stated.
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto call = As<Call>(op->value_); call && op->var_) {
-      if (IsOp(call, "tile.alloc") && call->args_.size() >= 2) {
-        if (auto size = As<ConstInt>(call->args_[1]); size && size->value_ > 0) {
-          alloc_sizes_[op->var_.get()] = static_cast<uint64_t>(size->value_);
-        }
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
   [[nodiscard]] const std::unordered_map<MemorySpace, uint64_t>& GetHighWaterMarks() const {
     return high_water_;
   }
@@ -483,9 +479,6 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
   std::vector<Diagnostic>& diagnostics_;
   std::set<const MemRef*> seen_;
   std::unordered_map<MemorySpace, uint64_t> high_water_;
-  /// Bytes each alloc statement reserves, and where each allocation's members start.
-  std::map<const Var*, uint64_t> alloc_sizes_;
-  std::map<const Var*, std::pair<MemorySpace, uint64_t>> base_min_offset_;
 
   void CheckMemRefAddr(const MemRefPtr& memref, MemorySpace memory_space, const std::string& var_name,
                        const Span& span) {
@@ -520,30 +513,6 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;
     auto& hw = high_water_[memory_space];
     if (end > hw) hw = end;
-
-    // Remember where this allocation's members start, so the reservation recorded
-    // from its alloc statement can be placed (see ApplyAllocReservations).
-    const uint64_t offset = static_cast<uint64_t>(const_offset->value_);
-    auto [it, inserted] = base_min_offset_.try_emplace(memref->base_.get(), memory_space, offset);
-    if (!inserted && offset < it->second.second) it->second.second = offset;
-  }
-
- public:
-  /// Fold each allocation's *reserved* size into the high-water marks.
-  ///
-  /// Exact whenever a tile is bound to the allocation's first slot, which is the
-  /// normal case (`l0c[0]` / `l0c[i % 2]`), since the lowest member offset is then
-  /// the buffer's base. If the author binds only higher slots the estimate is
-  /// conservative — it can over-report, never under-report, so a program that fits
-  /// is never silently accepted as fitting when it does not.
-  void ApplyAllocReservations() {
-    for (const auto& [base, size] : alloc_sizes_) {
-      auto it = base_min_offset_.find(base);
-      if (it == base_min_offset_.end()) continue;
-      const auto& [space, base_addr] = it->second;
-      auto& hw = high_water_[space];
-      if (base_addr + size > hw) hw = base_addr + size;
-    }
   }
 };
 
@@ -563,7 +532,6 @@ class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
 
       AllocatedMemoryAddrVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
-      verifier.ApplyAllocReservations();
 
       if (!be) continue;
 

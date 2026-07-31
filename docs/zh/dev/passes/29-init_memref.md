@@ -92,8 +92,9 @@ program_with_memrefs = init_pass(program)
 - 绑定 view / 原地算子（`tile.reshape`、`tile.matmul_acc` 等）的输出。这类结果物理上**就是**
   其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
 
-第四条规则——绑定到同一 buffer 的 tile 生命周期不得重叠——需要生命周期信息，因此在
-[MemoryReuse](31-memory_reuse.md#声明式分配) 中检查。
+第四条规则——绑定到**同一槽位**的 tile 生命周期不得重叠——需要生命周期信息，因此在
+[MemoryReuse](31-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时
+存活，这正是多槽位声明的用途。
 
 ```python
 ping, pong = pl.MemRef(), pl.MemRef()

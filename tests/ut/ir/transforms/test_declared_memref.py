@@ -24,7 +24,6 @@ The feature spans three passes, so the tests are grouped by what they pin down:
 
 import re
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -755,11 +754,12 @@ class TestSlotInvariants:
     def test_unbound_slots_still_count_against_the_space_limit(self, ascend_backend):
         """A slot nothing is bound to still occupies memory.
 
-        The address verifier walks bound tiles, and each slot MemRef spans only its
-        own slot, so 12 slots with one tile bound would otherwise be counted as one
-        slot — and a buffer well over the space's capacity would verify clean.
+        Each slot MemRef spans only its own slot, so 12 slots with one tile bound
+        would be counted as one slot if the footprint were reconstructed from the
+        addressed tiles — and a buffer well over the space's capacity would compile
+        clean.
         """
-        big = pl.MemRef(slots=12)  # 12 x 16 KB = 192 KB > the 184 KB Vec space
+        big = pl.MemRef(slots=12)  # 12 x 16 KB = 192 KB > the Vec space
 
         @pl.program
         class Before:
@@ -774,17 +774,60 @@ class TestSlotInvariants:
                 )
                 return pl.tile.store(t, [0, 0], out)
 
-        with pytest.raises(pypto.Error, match="exceeds platform limit"):
-            with passes.PassContext([], passes.VerificationLevel.BASIC):
-                pipe = passes.PassPipeline()
-                for make in (
-                    passes.init_mem_ref,
-                    passes.materialize_semantic_aliases,
-                    passes.memory_reuse,
-                    passes.allocate_memory_addr,
-                ):
-                    pipe.add_pass(make())
-                pipe.run(Before)
+        with pytest.raises(ValueError, match="exceeds platform limit"):
+            passes.allocate_memory_addr()(_run_memory_pipeline(Before))
+
+    def test_a_runtime_slot_index_does_not_hide_an_oversized_allocation(self, ascend_backend):
+        """The capacity check must not depend on any tile's address being constant.
+
+        With a runtime index there is no constant offset to add up, so a footprint
+        reconstructed from addressed tiles sees nothing at all — and the same 192 KB
+        buffer that is rejected above would sail through.
+        """
+        big = pl.MemRef(slots=12)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[768, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i in pl.range(12):
+                    t: pl.Tile[[64, 64], pl.FP32, big[i % 12], pl.Mem.Vec] = pl.tile.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.Mem.Vec
+                    )
+                    out = pl.tile.store(t, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError, match="exceeds platform limit"):
+            passes.allocate_memory_addr()(_run_memory_pipeline(Before))
+
+    def test_binding_only_a_high_slot_does_not_overstate_the_footprint(self, ascend_backend):
+        """Nothing forces the author to use slot 0, and skipping it costs nothing.
+
+        `slots=8` reserves 128 KB, which fits. Deriving the buffer's base from the
+        lowest bound tile would place it at slot 7's address and count 240 KB, so a
+        legal program would be rejected.
+        """
+        hi = pl.MemRef(slots=8)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32, hi[7], pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                return pl.tile.store(t, [0, 0], out)
+
+        after = passes.allocate_memory_addr()(_run_memory_pipeline(Before))
+        assert f"{8 * 64 * 64 * 4}" in _alloc_lines(after)[0], _alloc_lines(after)
 
 
 class TestSlotRejects:
