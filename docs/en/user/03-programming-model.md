@@ -156,14 +156,18 @@ Pass pipeline       the default strategy, in order: inline, SSA, outline scopes,
 CodeGen             device kernels (.pto -> C++) + host orchestration C++
 ```
 
-Each stage is observable. `compiled.program.as_python()` prints the IR that came out of
-the pipeline; `dump_passes=` writes a snapshot after every pass; the passes themselves are
-documented individually in [Passes](../dev/passes/index.md), numbered in execution order.
-`lower()` specializes the JIT function, runs the configured pass pipeline, and returns
-the post-pass `ir.Program`. It performs no code generation and does not populate the
-compiled-program cache. Use `compile()` to verify code generation. (`@pl.jit` functions
-have no `as_python()` of their own; call `program.as_python()` on the result of `lower()`,
-or `compiled.program.as_python()` after `compile()`.)
+Each stage is observable. `lower()` specializes the JIT function, runs the configured
+pass pipeline, and returns the post-pass `ir.Program`; call `program.as_python()` on that
+result to inspect the final lowered IR. By contrast, `CompiledProgram.program` retains
+the specialized pre-pass program, not the pass pipeline's output. `dump_passes=` writes a
+snapshot after every pass, and the passes themselves are documented individually in
+[Passes](../dev/passes/index.md), numbered in execution order.
+
+`lower()` performs no code generation and does not populate the compiled-program cache.
+Use `compile()` to verify code generation. (`@pl.jit` functions have no `as_python()` of
+their own; inspect the `lower()` result for post-pass IR, or
+`compiled.program.as_python()` for the specialized pre-pass IR retained after
+`compile()`.)
 
 Two properties of the IR matter to you as a user:
 

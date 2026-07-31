@@ -107,6 +107,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     enable_pypto_l0c_double_buffer: bool | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
+    inherit_outer_report_instruments: bool = True,
     dump_passes: bool | PassDumpLevel = False,
     passes_dump_dir: str | None = None,
 ) -> _PassPipelineResult:
@@ -122,7 +123,14 @@ def _run_pass_pipeline(  # noqa: PLR0913
     default_disabled = _passes.DiagnosticCheckSet()
     default_disabled.insert(_passes.DiagnosticCheck.UnusedControlFlowResult)
     if outer is not None:
-        instruments = list(outer.get_instruments()) + list(extra_instruments)
+        outer_instruments = list(outer.get_instruments())
+        if not inherit_outer_report_instruments:
+            outer_instruments = [
+                instrument
+                for instrument in outer_instruments
+                if not isinstance(instrument, _passes.ReportInstrument)
+            ]
+        instruments = outer_instruments + list(extra_instruments)
         vlevel = verification_level if verification_level is not None else outer.get_verification_level()
         dphase = diagnostic_phase if diagnostic_phase is not None else outer.get_diagnostic_phase()
         disabled = (

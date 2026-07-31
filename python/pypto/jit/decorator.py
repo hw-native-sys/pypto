@@ -2014,6 +2014,7 @@ class JITFunction:
             pre_pass,
             operation="lower",
             platform=platform,
+            inherit_outer_report_instruments=False,
             **lower_kwargs,
         ).transformed_program
 

@@ -142,12 +142,15 @@ Pass 流水线         默认策略，按序：内联、SSA、外提作用域、
 CodeGen             设备 kernel（.pto -> C++）+ 主机编排 C++
 ```
 
-每个阶段都可观测。`compiled.program.as_python()` 打印流水线出来的 IR；`dump_passes=` 会在每个
-pass 之后写一份快照；pass 本身在 [Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序
-编号。`lower()` 会特化 JIT 函数、运行配置对应的 Pass 流水线，并返回 Pass 后的
-`ir.Program`。它不会执行代码生成，也不会填充编译缓存。需要验证代码生成时请使用
-`compile()`。（`@pl.jit` 函数自身没有 `as_python()`；请对 `lower()` 的结果调用
-`program.as_python()`，或在 `compile()` 后调用 `compiled.program.as_python()`。）
+每个阶段都可观测。`lower()` 会特化 JIT 函数、运行配置对应的 Pass 流水线，并返回 Pass 后的
+`ir.Program`；对该结果调用 `program.as_python()`，即可查看最终 lowering 后的 IR。与之不同，
+`CompiledProgram.program` 保留的是特化后、Pass 前的 program，而不是 Pass 流水线的输出。
+`dump_passes=` 会在每个 Pass 之后写一份快照；Pass 本身在
+[Passes](../dev/passes/index.md) 中逐个有文档，并按执行顺序编号。
+
+`lower()` 不会执行代码生成，也不会填充编译缓存。需要验证代码生成时请使用 `compile()`。
+（`@pl.jit` 函数自身没有 `as_python()`；要查看 Pass 后的 IR，请检查 `lower()` 的结果；要查看
+`compile()` 后保留的特化后、Pass 前 IR，请调用 `compiled.program.as_python()`。）
 
 作为用户，IR 的两个性质与你直接相关：
 

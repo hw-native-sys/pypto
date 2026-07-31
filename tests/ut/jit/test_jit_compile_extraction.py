@@ -98,6 +98,16 @@ class TestCompileReturnsCompiledProgram:
         compiled_b = add_kernel.compile(a_b, b_b, c_b)
         assert compiled_a is not compiled_b
 
+    def test_compile_keeps_outer_report_instrument(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(19, 19)
+
+        with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
+            compiled = add_kernel.compile(x, x, torch.empty_like(x))
+
+        assert isinstance(compiled, CompiledProgram)
+        assert (tmp_path / "perf_hints.log").is_file()
+
 
 class TestLowerReturnsProgram:
     """Verify ``lower()`` specializes and runs passes without compiling."""
@@ -132,6 +142,22 @@ class TestLowerReturnsProgram:
         program = add_kernel.lower(x, x, torch.empty_like(x), config=config)
         assert isinstance(program, ir.Program)
         assert not artifact_dir.exists()
+
+    def test_lower_filters_outer_report_instrument_but_runs_callbacks(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        seen_passes: list[str] = []
+        report_instrument = passes.ReportInstrument(str(tmp_path))
+        callback_instrument = passes.CallbackInstrument(
+            before_pass=lambda pass_obj, _program: seen_passes.append(pass_obj.get_name()),
+            name="observer",
+        )
+        x = torch.zeros(17, 17)
+
+        with passes.PassContext([report_instrument, callback_instrument]):
+            add_kernel.lower(x, x, torch.empty_like(x))
+
+        assert seen_passes
+        assert not (tmp_path / "perf_hints.log").exists()
 
     def test_lower_honors_strategy_through_real_pass_execution(self):
         torch = pytest.importorskip("torch")
