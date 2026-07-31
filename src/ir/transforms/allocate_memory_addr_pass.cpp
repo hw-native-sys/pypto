@@ -167,6 +167,23 @@ class MemRefUpdateMutator : public IRMutator {
   }
 };
 
+/// The base Ptrs of the author-declared (`pinned=True`) allocations in a body.
+///
+/// InitMemRef deliberately drops `is_pinned_` / `slot_index_` from the MemRefs it
+/// resolves — slots exist only until they are resolved — so by this pass the only
+/// remaining record of which allocations the author declared is the `pinned=True`
+/// kwarg on their alloc statements. That distinction matters here because a
+/// declared allocation is the one place a *dynamic* address is meaningful.
+class PinnedAllocBaseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> bases;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto base = GetPinnedAllocBase(op)) bases.insert(base.get());
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
 /**
  * @brief Allocate memory addresses using the given allocation policy
  *
@@ -175,10 +192,13 @@ class MemRefUpdateMutator : public IRMutator {
  * MemRefs (e.g. produced by ``tile.slice``) — every view physically aliases
  * its parent allocation, so they should share one address slot rather than
  * each consuming size_ bytes of fresh L1.
+ *
+ * ``pinned_bases`` are the author-declared allocations; only those may receive a
+ * dynamic (expression) address.
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space,
-    const MemoryAllocatorPolicy& policy) {
+    const MemoryAllocatorPolicy& policy, const std::set<const Var*>& pinned_bases) {
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
   for (const auto& [memref, memory_space] : memrefs) {
@@ -247,21 +267,28 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         // through `pto.subview`, so its address must come from this MemRef
         // (issue #1510).
         //
-        // A *dynamic* offset cannot fold, so the address becomes the expression
-        // `base_addr + offset` and codegen lowers it into the tile's runtime
-        // address assignment. That is how a declared allocation's runtime slot
-        // index (`l0c[i % 2]`, scaled to a byte offset by InitMemRef) reaches the
-        // hardware. Dropping the offset here — the old behaviour — would silently
-        // address slot 0 on every iteration.
+        // A *dynamic* offset cannot fold. For a declared allocation the address
+        // becomes the expression `base_addr + offset` and codegen lowers it into
+        // the tile's runtime address assignment — that is how a runtime slot index
+        // (`l0c[i % 2]`, scaled to a byte offset by InitMemRef) reaches the
+        // hardware. Dropping it would silently address slot 0 every iteration.
         //
-        // A dynamic-offset `tile.slice` view is unaffected either way: codegen
-        // re-derives its offset from the slice op's own operands (`pto.subview`)
-        // rather than from this address.
+        // Every OTHER dynamic offset keeps the old behaviour: fall back to the
+        // bare base. Those are `tile.slice` views, which reach codegen through
+        // `pto.subview` and re-derive their offset from the slice op's own
+        // operands, so this address is unused — and emitting the expression anyway
+        // is actively harmful: it is not renderable at the `pto.alloc_tile addr`
+        // position and PTOAS rejects the module with "expected SSA operand".
         //
         // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
         // operand; PTO codegen reads this dtype from the ConstInt 1:1.
         ExprPtr member_addr_expr;
-        if (auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
+        auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_);
+        if (!old_offset && pinned_bases.count(old_memref->base_.get()) == 0) {
+          // Not a declared allocation: bare base, exactly as before slots existed.
+          old_offset = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
+        }
+        if (old_offset) {
           member_addr_expr = std::make_shared<ConstInt>(static_cast<int64_t>(base_addr) + old_offset->value_,
                                                         DataType::INT64, Span::unknown());
         } else {
@@ -321,8 +348,12 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
-  // Step 3: Allocate memory addresses using the policy
-  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);
+  // Step 3: Allocate memory addresses using the policy. Declared allocations are
+  // the only ones that may take a dynamic address (a runtime slot index).
+  PinnedAllocBaseCollector pinned_collector;
+  pinned_collector.VisitStmt(func->body_);
+  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy,
+                                              pinned_collector.bases);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
