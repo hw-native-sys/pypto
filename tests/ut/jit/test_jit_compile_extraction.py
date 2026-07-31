@@ -171,6 +171,14 @@ class TestLowerReturnsProgram:
         x = torch.zeros(16, 16)
         assert isinstance(copy.lower(x=x, out=torch.empty_like(x)), ir.Program)
 
+    def test_lower_signature_failure_guides_source_only_callers(self):
+        with pytest.raises(TypeError) as exc_info:
+            add_kernel.lower()
+
+        message = str(exc_info.value)
+        assert "lower(*sample_tensors)" in message
+        assert "compile(*sample_tensors)" in message
+
     def test_lower_conflict_writes_no_artifacts(self, tmp_path):
         torch = pytest.importorskip("torch")
         artifact_dir = tmp_path / "must_not_exist"

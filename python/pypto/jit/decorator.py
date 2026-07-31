@@ -228,8 +228,9 @@ def _signature_tensor_meta(
     """Build TensorMeta from a shaped ``pl.Tensor[[...], dtype]`` annotation.
 
     Static dims use the annotation integer; dynamic dims (``pl.dynamic`` /
-    ``bind_dynamic``) get a placeholder extent since the compiled artifact is
-    extent-independent. ``dynvar_cls`` is the lazily-imported ``DynVar`` type.
+    ``bind_dynamic``) get a placeholder extent because the specialized program
+    remains extent-independent. ``dynvar_cls`` is the lazily-imported ``DynVar``
+    type.
     """
     shape = annotation.shape
     extents = [
@@ -249,7 +250,7 @@ def _signature_scalar_value(
     param: inspect.Parameter,
     kwargs: dict[str, Any],
 ) -> int | float | bool:
-    """Resolve a scalar parameter's value for signature-mode compile.
+    """Resolve a scalar parameter's value for signature-mode specialization.
 
     Value comes from ``kwargs`` (by param name) or the signature default; a
     scalar with neither is an error (the signature carries no value).
@@ -261,8 +262,8 @@ def _signature_scalar_value(
     else:
         raise TypeError(
             f"@pl.jit function '{func_name}': scalar parameter '{name}' has no value. When "
-            f"compiling from the signature, pass scalar values as keyword arguments, e.g. "
-            f"compile({name}=...)."
+            f"specializing from annotations, pass scalar values as keyword arguments, e.g. "
+            f"lower({name}=...) or compile({name}=...)."
         )
     if not isinstance(value, (int, float, bool)):
         raise TypeError(
@@ -1625,13 +1626,13 @@ class JITFunction:
         """Derive the same metadata as :meth:`_bind_args`, but from the kernel's
         own parameter annotations — no tensor arguments required.
 
-        Used by :meth:`compile` when called with no positional arguments. Each
-        tensor parameter's ``pl.Tensor[[...], dtype]`` annotation supplies the
-        shape/dtype contract directly: static dims are annotation integers,
-        dynamic dims (``pl.dynamic`` / ``bind_dynamic``) are marked dynamic and
-        given a placeholder extent — the compiled artifact is extent-independent
-        because dynamic dims collapse to ``None`` in the cache key and lower to
-        runtime ``pl.tensor.dim`` reads.
+        Used by :meth:`lower` and :meth:`compile` in annotation-driven signature
+        mode. Each tensor parameter's ``pl.Tensor[[...], dtype]`` annotation
+        supplies the shape/dtype contract directly: static dims are annotation
+        integers, while dynamic dims (``pl.dynamic`` / ``bind_dynamic``) are
+        marked dynamic and given a placeholder extent. Dynamic dimensions lower
+        to runtime ``pl.tensor.dim`` reads and, on the compiled path, collapse to
+        ``None`` in the cache key.
 
         Scalar parameters carry no value in the signature, so their values must
         come from ``kwargs`` (or a signature default).
@@ -1684,10 +1685,10 @@ class JITFunction:
             # shape/dtype. ``pl.Out[...]``/``pl.InOut[...]`` unwrap to their
             # inner type, so both directions flow through the instance branch.
             bare_msg = (
-                f"@pl.jit function '{self.__name__}': cannot compile from the signature because "
-                f"parameter '{name}' has a bare 'pl.Tensor' annotation with no shape. Give it a "
-                f"full 'pl.Tensor[[...], dtype]' annotation, or call compile(*sample_tensors) "
-                f"with sample tensors instead."
+                f"@pl.jit function '{self.__name__}': cannot specialize from the signature "
+                f"because parameter '{name}' has a bare 'pl.Tensor' annotation with no shape. "
+                f"Give it a full 'pl.Tensor[[...], dtype]' annotation, or pass sample tensors "
+                f"to lower(*sample_tensors) or compile(*sample_tensors)."
             )
             if isinstance(annotation, Tensor):
                 if annotation.shape is None or annotation.dtype is None:
@@ -1712,11 +1713,12 @@ class JITFunction:
             raise TypeError(
                 f"@pl.jit function '{self.__name__}': cannot infer parameter '{name}' from the "
                 f"signature (annotation: {annotation!r}). Annotate it as a shaped 'pl.Tensor' / "
-                f"'pl.Scalar[dtype]', or call compile(*sample_args) with sample values."
+                f"'pl.Scalar[dtype]', or pass sample values to lower(*sample_args) or "
+                f"compile(*sample_args)."
             )
 
-        # No positional args in signature mode; ``ordered_args`` (unused by
-        # compile()) derives from this, so scalars suffice as its source.
+        # Signature mode has no tensor sample arguments. Preserve supplied
+        # scalar values in the same arguments mapping returned by _bind_args.
         arguments = dict(scalar_values)
         return param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn_maps
 
@@ -1750,11 +1752,11 @@ class JITFunction:
         if "config" in kwargs:
             kwargs = {k: v for k, v in kwargs.items() if k != "config"}
 
-        # Signature mode (compile() only) reads shapes from the annotations,
-        # but ONLY when no tensor values were supplied — positionally OR by
-        # keyword. Keyword tensor samples (``compile(a=x, b=y)``) must still bind
-        # through ``_bind_args``/``sig.bind`` as before; scalar/config kwargs do
-        # not block signature mode.
+        # Annotation-driven signature mode (lower() and compile()) reads shapes
+        # from annotations, but ONLY when no tensor values were supplied —
+        # positionally OR by keyword. Keyword tensor samples (``lower(a=x)`` or
+        # ``compile(a=x)``) must still bind through ``_bind_args``/``sig.bind``;
+        # scalar/config kwargs do not block signature mode.
         signature_mode = allow_signature_mode and not args and not any(_is_tensor(v) for v in kwargs.values())
         if signature_mode:
             param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = (
