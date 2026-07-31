@@ -68,7 +68,6 @@
 
 | 主题 | 当前位置 |
 | ---- | -------- |
-| 任务与依赖、`manual_scope` / `submit` | [作用域与任务](language/04-scopes-and-tasks.md) |
 | 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | 分布式 DSL 与集合通信 | [分布式算子](../dev/distributed_ops.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |

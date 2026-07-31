@@ -139,7 +139,7 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
 | ---- | -------- | ---- |
 | **解析期出现布局相关的 `DeprecationWarning`** | 用了 `pl.Tensor[..., pl.DN]` 注解 | 去掉标记，写运行期 shape，给 `pl.matmul` 传 `b_trans=True` |
 | **数字看起来对得上却报 shape 不匹配** | DN 注解翻转了坐标系 | 写源 shape；确认消费方要的是不是 `transpose_view` |
-| **只有两个任务重叠时结果才出错** | 会被写入的缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
+| **只有两个任务重叠时结果才出错** | 读写缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
 | **读 `Out` 参数读到垃圾** | `Out` 承诺的是先写后读 | 若此前内容有意义，改用 `pl.InOut[...]` |
 | **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) |
 | **两个本应相同的维度被当成互相独立** | 调了两次 `pl.dynamic("M")` | 只创建一次 `DynVar` 并复用该对象 |

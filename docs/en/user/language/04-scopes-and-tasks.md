@@ -212,14 +212,14 @@ tasks.
 
 ## Edge Cases
 
-> **Fatal pitfall:** writing one dispatch after another does not order them. If the
-> relationship is not visible as a buffer overlap the runtime can see, there is no edge,
-> and the two tasks may overlap. The result is a race that reproduces intermittently and
-> vanishes under a debugger. State the edge with `deps=`.
-
-> **Fatal pitfall:** `predicate=` over a tensor whose producer is not in `deps=` reads
-> whatever happened to be there. Nothing reports it — the task is skipped, or not, based
-> on stale data.
+> **Fatal pitfalls:**
+>
+> - Writing one dispatch after another does not order them. If the relationship is not
+>   visible as a buffer overlap the runtime can see, there is no edge, and the two tasks
+>   may overlap. The result is a race that reproduces intermittently and vanishes under a
+>   debugger. State the edge with `deps=`.
+> - `predicate=` over a tensor whose producer is not in `deps=` reads whatever happened to
+>   be there. Nothing reports it — the task is skipped, or not, based on stale data.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |

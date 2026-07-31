@@ -114,7 +114,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **`pl.matmul` 拒绝它的操作数** | 操作数不在 `Left` / `Right` | 先 `pl.load` 到 `Mat`，再 `pl.move` |
+| **tile 级 `pl.matmul` 拒绝它的操作数** | 操作数不在 `Left` / `Right` | 先 `pl.load` 到 `Mat`，再 `pl.move` |
 | **`pl.load(..., target_memory=pl.Mem.Left)` 被拒绝** | DDR load 只能到 `Vec` / `Mat` | 先 load 到 `Mat`，再 `pl.move` 到 `Left` |
 | **只有最后一块 tile 的规约结果不对** | 填充值参与了规约 | 用 `pl.set_validshape`，并选对 `PadValue` |
 | **InCore 函数内 `pl.create_tensor` 失败** | 张量分配是控制面的事 | 在控制面分配，或改为接收 `pl.Out[...]` 参数 |

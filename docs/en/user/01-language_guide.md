@@ -28,7 +28,7 @@ output_dir = ir.compile(
 | `program` | `ir.Program` | Required program object (from `@pl.program` or equivalent) |
 | `strategy` | `OptimizationStrategy.Default` | `Default` = full tensor-oriented pipeline (the only strategy) |
 | `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (import `BackendType` from `pypto.backend`) |
-| `dump_passes` | `PassDumpLevel` | Write IR snapshots under `<output_dir>/passes_dump/` after each pass |
+| `dump_passes` | `bool \| PassDumpLevel` | Write IR snapshots under `<output_dir>/passes_dump/` after each pass |
 | `skip_ptoas` | `True` / `False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
 | `output_dir` | path or `None` | If `None`, uses `<base>/<program_name>_<timestamp>`, where `<base>` is `PYPTO_PROG_BUILD_DIR` or `build_output`; created as needed |
 | `verification_level` | `None`, `ir.VerificationLevel.NONE`, `BASIC` | `None` = use the default (`BASIC`, or `PYPTO_VERIFY_LEVEL`) |
@@ -72,8 +72,9 @@ worker.close()
   `@pl.program` wrapper.
 
 **`compile()`'s positional arguments are the kernel's own arguments, not compile
-options.** `compile(skip_ptoas=True)` is treated as a kernel argument and silently
-ignored; compile options go through `config=RunConfig(...)`.
+options.** `compile(skip_ptoas=True)` is bound against the kernel's signature and raises
+`TypeError: got an unexpected keyword argument 'skip_ptoas'`; compile options go through
+`config=RunConfig(...)`.
 
 ## Inspecting the result
 

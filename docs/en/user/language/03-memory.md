@@ -144,7 +144,7 @@ covering how to drive them is not written yet.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **`pl.matmul` rejects its operands** | Operands are not in `Left` / `Right` | `pl.load` to `Mat`, then `pl.move` |
+| **Tile-level `pl.matmul` rejects its operands** | Operands are not in `Left` / `Right` | `pl.load` to `Mat`, then `pl.move` |
 | **`pl.load(..., target_memory=pl.Mem.Left)` rejected** | DDR loads reach only `Vec` / `Mat` | Load to `Mat`, then `pl.move` to `Left` |
 | **Reduction result wrong only for the last tile** | Padding participates in the reduction | `pl.set_validshape`, and pick the right `PadValue` |
 | **`pl.create_tensor` inside an InCore function fails** | Tensor allocation is control-plane work | Allocate on the control plane, or take a `pl.Out[...]` parameter |

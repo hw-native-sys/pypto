@@ -66,8 +66,8 @@ class Adder:
         return out
 ```
 
-| | `@pl.jit` | `@pl.program` |
-| --- | --------- | ------------- |
+| Aspect | `@pl.jit` | `@pl.program` |
+| ------ | --------- | ------------- |
 | Function kind | From the decorator variant | From `type=` |
 | Sub-function wiring | Discovered from the body | Written as `self.method(...)` |
 | Types | Specialized from the first call's arguments | Declared in annotations |
@@ -152,8 +152,8 @@ does. Call `lower(*args)` for the post-pass `ir.Program`, or `compile(*args)` an
 `compiled.program.as_python()` for the specialized, pre-pass IR.
 
 **3. `compile()` takes the kernel's own arguments, not compile options.** Compile-time
-knobs go through `config=RunConfig(...)`; a stray `compile(skip_ptoas=True)` is treated as
-a kernel argument. `@pl.jit` detects whether `ptoas` is available on its own, so
+knobs go through `config=RunConfig(...)`. A stray `compile(skip_ptoas=True)` is bound
+against the kernel's signature and raises `TypeError: got an unexpected keyword argument`. `@pl.jit` detects whether `ptoas` is available on its own, so
 `skip_ptoas` is not something you need to pass.
 
 ### `@pl.function` and `@pl.program`
@@ -233,7 +233,7 @@ A hand-written C++ kernel can be called like any other function. See
 | **`Misplaced tensor op ... should be inside InCore block`** | Operators directly in a `@pl.jit` body | Wrap in `with pl.at(level=pl.Level.CORE_GROUP):` or move to `@pl.jit.incore` |
 | **`AttributeError: 'JITFunction' object has no attribute 'as_python'`** | Printing IR that does not exist yet | `f.lower(*args)`, or `f.compile(*args)` then `compiled.program.as_python()` |
 | **`lower()` passes but `compile()` fails** | `lower()` runs no code generation | Expected — use `compile()` to check codegen |
-| **A compile option is silently ignored** | It was passed to `compile()` as a kernel argument | Pass `config=RunConfig(...)` |
+| **`TypeError: got an unexpected keyword argument`** | A compile option was passed to `compile()`, which binds against the kernel's signature | Pass `config=RunConfig(...)` |
 | **A second top-level kernel is missing from the program** | Plain `@pl.jit` does not discover other `@pl.jit` entries | Use `@pl.jit.host`, or make the callee `.incore` / `.opaque` |
 | **`auto_scope=False` rejected** | Used on `.incore` / `.opaque` | Put it on the entry or on an `.inline` helper |
 | **`self` missing from a `@pl.program` method** | Every method needs it | Add `self`; it is stripped from the IR |

@@ -75,7 +75,6 @@ chapter. Until those land, the corresponding material lives in the
 
 | Topic | Current location |
 | ----- | ---------------- |
-| Tasks, dependencies, `manual_scope` / `submit` | [Scopes and Tasks](language/04-scopes-and-tasks.md) |
 | Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | Distributed DSL and collectives | [Distributed Operators](../dev/distributed_ops.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |

@@ -50,7 +50,6 @@ t = pl.tile.adds(t, 1.0)  # tile-specific spelling
 
 | 仅张量级 | 原因 |
 | -------- | ---- |
-| `pl.tensor.read` / `write` | 对 DDR 数组做元素访问 |
 | `pl.create_tensor`、`pl.full`、`pl.assemble` | 整块数组的创建与放置 |
 | `pl.dim` | 张量的运行期维度 |
 

@@ -177,7 +177,7 @@ rather than weakening the direction. See
 | ------- | ------------ | --- |
 | **`DeprecationWarning` at parse time about layout** | `pl.Tensor[..., pl.DN]` annotation | Drop the marker, write the runtime shape, pass `b_trans=True` to `pl.matmul` |
 | **Shape mismatch the numbers seem to satisfy** | A DN annotation flipped the coordinate system | Write the source shape; check whether the consumer wanted a `transpose_view` |
-| **Results wrong only when two tasks overlap** | A written buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
+| **Results wrong only when two tasks overlap** | A read-write buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
 | **Reading an `Out` parameter returns garbage** | `Out` promises write-before-read | Use `pl.InOut[...]` if the prior contents matter |
 | **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) for multi-hop pairs |
 | **Two dimensions that should match are treated as independent** | Two separate `pl.dynamic("M")` calls | Create the `DynVar` once and reuse the object |

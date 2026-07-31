@@ -54,8 +54,8 @@ class Adder:
         return out
 ```
 
-| | `@pl.jit` | `@pl.program` |
-| --- | --------- | ------------- |
+| 对比项 | `@pl.jit` | `@pl.program` |
+| ------ | --------- | ------------- |
 | 函数类别 | 由装饰器变体决定 | 由 `type=` 决定 |
 | 子函数连接 | 从函数体自动发现 | 写成 `self.method(...)` |
 | 类型 | 由首次调用的实参特化 | 在注解里声明 |
@@ -127,7 +127,7 @@ def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP3
 
 **2. `JITFunction` 没有 `as_python()`。** 在特化发生之前 IR 并不存在。调用 `lower(*args)` 拿 Pass 后的 `ir.Program`，或调用 `compile(*args)` 后读 `compiled.program.as_python()` 拿特化后、Pass 前的 IR。
 
-**3. `compile()` 收的是 kernel 自己的参数，不是编译选项。** 编译期开关走 `config=RunConfig(...)`；误写的 `compile(skip_ptoas=True)` 会被当成 kernel 实参。`@pl.jit` 会自行检测 ptoas 是否可用，所以你不需要传 `skip_ptoas`。
+**3. `compile()` 收的是 kernel 自己的参数，不是编译选项。** 编译期开关走 `config=RunConfig(...)`；误写的 `compile(skip_ptoas=True)` 会拿去和 kernel 签名做绑定，并抛出 `TypeError: got an unexpected keyword argument`。`@pl.jit` 会自行检测 ptoas 是否可用，所以你不需要传 `skip_ptoas`。
 
 ### `@pl.function` 与 `@pl.program`
 
@@ -182,7 +182,7 @@ print("artifacts in:", compiled.output_dir)
 | **`Misplaced tensor op ... should be inside InCore block`** | 算子直接写在 `@pl.jit` 体内 | 包进 `with pl.at(level=pl.Level.CORE_GROUP):` 或移入 `@pl.jit.incore` |
 | **`AttributeError: 'JITFunction' object has no attribute 'as_python'`** | 在 IR 尚不存在时打印它 | 用 `f.lower(*args)`，或 `f.compile(*args)` 后取 `compiled.program.as_python()` |
 | **`lower()` 通过但 `compile()` 失败** | `lower()` 不执行代码生成 | 预期行为 —— 代码生成检查用 `compile()` |
-| **某个编译选项被静默忽略** | 它作为 kernel 实参传给了 `compile()` | 改传 `config=RunConfig(...)` |
+| **`TypeError: got an unexpected keyword argument`** | 编译选项传给了 `compile()`，而它会拿去和 kernel 签名绑定 | 改传 `config=RunConfig(...)` |
 | **程序里少了第二个顶层 kernel** | 普通 `@pl.jit` 不发现其他 `@pl.jit` 入口 | 改用 `@pl.jit.host`，或把被调方改成 `.incore` / `.opaque` |
 | **`auto_scope=False` 被拒绝** | 用在了 `.incore` / `.opaque` 上 | 放到入口或 `.inline` 辅助函数上 |
 | **`@pl.program` 方法缺 `self`** | 每个方法都需要 | 补上 `self`；它会从 IR 中剥离 |

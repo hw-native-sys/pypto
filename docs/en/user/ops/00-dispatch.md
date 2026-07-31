@@ -58,7 +58,6 @@ the namespace directly is correct in those cases, not a fallback:
 
 | Only at tensor level | Why |
 | -------------------- | --- |
-| `pl.tensor.read` / `write` | Element access on a DDR array |
 | `pl.create_tensor`, `pl.full`, `pl.assemble` | Whole-array creation and placement |
 | `pl.dim` | A tensor's runtime dimension |
 

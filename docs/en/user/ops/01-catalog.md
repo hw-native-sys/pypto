@@ -48,7 +48,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `exp` `log` | `pl.` | Exponential, natural logarithm |
-| `sqrt` `rsqrt` | `pl.` (t) | Square root; reciprocal square root (`high_precision=` trades speed for accuracy) |
+| `sqrt` `rsqrt` | `pl.` | Square root; reciprocal square root. `high_precision=` applies to the tensor path only — at tile level call `pl.tile.rsqrt(src, tmp=...)`, which needs a caller-supplied scratch tile |
 | `sin` `cos` | `pl.` | Trigonometric |
 
 ## Comparison and selection
@@ -58,7 +58,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | `cmp` `cmps` | `pl.` | Compare two operands / operand against a scalar |
 | `maximum` `minimum` | `pl.` | Elementwise max / min of two operands |
 | `maximums` `minimums` | `pl.` (t) | Elementwise max / min against a scalar |
-| `max` `min` | `pl.` (t) | Tile max / min |
+| `max` `min` | `pl.` (t) | Scalar max / min of two values — **not** a tile reduction. To reduce a tile use `row_max` / `col_max` (and the `min` forms) |
 | `sel` `sels` | `pl.` (t) | Select by mask, tensor and scalar forms |
 
 ## Activations
@@ -100,9 +100,9 @@ tile depend on the pad value; see
 | -------- | ----- | ------------ |
 | `row_expand` `col_expand` | `pl.` | Broadcast a reduced axis back to full width |
 | `row_expand_add` `row_expand_sub` `row_expand_mul` | `pl.` | Broadcast fused with an arithmetic op |
-| `row_expand_div` `row_expand_max` `row_expand_min` | `pl.` | " |
+| `row_expand_div` `row_expand_max` `row_expand_min` | `pl.` | Broadcast fused with division, max, or min |
 | `col_expand_add` `col_expand_sub` `col_expand_mul` | `pl.` | Column-wise equivalents |
-| `col_expand_div` `col_expand_max` `col_expand_min` | `pl.` | " |
+| `col_expand_div` `col_expand_max` `col_expand_min` | `pl.` | Column-wise division, max, and min |
 | `row_expand_expdif` `col_expand_expdif` | `pl.` | Broadcast fused with `exp(x - m)` — the softmax kernel |
 | `expand_clone` `expands` | `pl.` | Broadcast a value across a shape |
 | `fillpad` `fillpad_expand` | `pl.` | Fill the invalid region; optionally broadcast in the same step |
@@ -127,9 +127,9 @@ tile depend on the pad value; see
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `matmul` | `pl.` | Matrix multiply; `a_trans=` / `b_trans=` transpose an operand in place of a DN annotation |
-| `matmul_acc` | `pl.` (t) | Multiply-accumulate into an existing `Acc` tile |
+| `matmul_acc` | `pl.` | Multiply-accumulate into an existing `Acc` tile |
 | `matmul_bias` | `pl.` (t) | Multiply with a bias operand |
-| `batch_matmul` | `pl.` | Batched multiply |
+| `batch_matmul` | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | Matrix-vector forms |
 
 ## Gather, scatter, sort

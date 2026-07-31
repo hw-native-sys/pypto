@@ -44,7 +44,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `exp` `log` | `pl.` | 指数、自然对数 |
-| `sqrt` `rsqrt` | `pl.` (t) | 平方根；倒数平方根（`high_precision=` 以速度换精度） |
+| `sqrt` `rsqrt` | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径 —— tile 级请直接调 `pl.tile.rsqrt(src, tmp=...)`，它需要调用方自备一块 scratch tile |
 | `sin` `cos` | `pl.` | 三角函数 |
 
 ## 比较与选择
@@ -54,7 +54,7 @@
 | `cmp` `cmps` | `pl.` | 比较两个操作数 / 操作数与标量 |
 | `maximum` `minimum` | `pl.` | 两个操作数的逐元素最大 / 最小 |
 | `maximums` `minimums` | `pl.` (t) | 与标量的逐元素最大 / 最小 |
-| `max` `min` | `pl.` (t) | tile 最大 / 最小 |
+| `max` `min` | `pl.` (t) | 两个标量取最大 / 最小 —— **不是** tile 规约。规约 tile 请用 `row_max` / `col_max`（以及对应的 `min` 形式） |
 | `sel` `sels` | `pl.` (t) | 按掩码选择，张量与标量形式 |
 
 ## 激活
@@ -92,9 +92,9 @@
 | ---- | ---- | ---- |
 | `row_expand` `col_expand` | `pl.` | 把被规约的轴广播回全宽 |
 | `row_expand_add` `row_expand_sub` `row_expand_mul` | `pl.` | 广播与算术融合 |
-| `row_expand_div` `row_expand_max` `row_expand_min` | `pl.` | 同上 |
+| `row_expand_div` `row_expand_max` `row_expand_min` | `pl.` | 广播与除法、取最大、取最小融合 |
 | `col_expand_add` `col_expand_sub` `col_expand_mul` | `pl.` | 按列的对应形式 |
-| `col_expand_div` `col_expand_max` `col_expand_min` | `pl.` | 同上 |
+| `col_expand_div` `col_expand_max` `col_expand_min` | `pl.` | 按列的除法、取最大、取最小 |
 | `row_expand_expdif` `col_expand_expdif` | `pl.` | 与 `exp(x - m)` 融合的广播 —— softmax 的核心 |
 | `expand_clone` `expands` | `pl.` | 把一个值广播到某个形状 |
 | `fillpad` `fillpad_expand` | `pl.` | 填充无效区；可在同一步里广播 |
@@ -119,9 +119,9 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `matmul` | `pl.` | 矩阵乘；`a_trans=` / `b_trans=` 用来替代 DN 注解转置操作数 |
-| `matmul_acc` | `pl.` (t) | 乘累加进已有的 `Acc` tile |
+| `matmul_acc` | `pl.` | 乘累加进已有的 `Acc` tile |
 | `matmul_bias` | `pl.` (t) | 带 bias 操作数的乘法 |
-| `batch_matmul` | `pl.` | 批量矩阵乘 |
+| `batch_matmul` | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | 矩阵-向量形式 |
 
 ## Gather、Scatter、排序

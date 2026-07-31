@@ -24,7 +24,7 @@ output_dir = ir.compile(
 | `program` | `ir.Program` | 必填的程序对象（来自 `@pl.program` 或等价物） |
 | `strategy` | `OptimizationStrategy.Default` | `Default` = 完整的面向张量流水线（唯一策略） |
 | `backend_type` | `BackendType.Ascend910B`、`BackendType.Ascend950` | pass 与 codegen 的目标硬件（从 `pypto.backend` 导入 `BackendType`） |
-| `dump_passes` | `PassDumpLevel` | 每个 pass 之后把 IR 快照写到 `<output_dir>/passes_dump/` |
+| `dump_passes` | `bool \| PassDumpLevel` | 每个 pass 之后把 IR 快照写到 `<output_dir>/passes_dump/` |
 | `skip_ptoas` | `True` / `False` | 跳过 ptoas 步骤；输出裸 `.pto`（MLIR）而非编译好的 C++ 包装（默认 `False`） |
 | `output_dir` | 路径或 `None` | 为 `None` 时使用 `<base>/<program_name>_<timestamp>`，其中 `<base>` 取自 `PYPTO_PROG_BUILD_DIR`，未设则为 `build_output`；目录按需创建 |
 | `verification_level` | `None`、`ir.VerificationLevel.NONE`、`BASIC` | `None` = 使用默认值（`BASIC`，或由 `PYPTO_VERIFY_LEVEL` 覆盖） |
@@ -57,7 +57,7 @@ worker.close()
 - 返回的 `CompiledProgram` 就是 JIT 缓存持有的那个对象，因此之后用同一特化 key 调用会拿到完全相同的实例。
 - 它暴露完整的提取接口 —— `chip_callable`、`runtime_name`、`runtime_config`、`build_orch_args`、`build_call_config`、`output_dir`、`platform`、`output_indices` —— 因此直接驱动运行时的测试框架无需再写一个 `@pl.program` 包装。
 
-**`compile()` 的位置参数是 kernel 自己的参数，不是编译选项。** `compile(skip_ptoas=True)` 会被当作 kernel 实参并静默忽略；编译选项走 `config=RunConfig(...)`。
+**`compile()` 的位置参数是 kernel 自己的参数，不是编译选项。** `compile(skip_ptoas=True)` 会拿去和 kernel 签名做绑定，并抛出 `TypeError: got an unexpected keyword argument 'skip_ptoas'`；编译选项走 `config=RunConfig(...)`。
 
 ## 检视结果
 
