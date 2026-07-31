@@ -7,14 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Matmul with a 16-row physical tile and five valid rows."""
+"""Matmul with a 32-row physical tile and 16 valid rows."""
 
 import pypto.language as pl
 import torch
 from pypto.runtime import RunConfig
 
-VALID_M = 5
-TILE_M = 16
+VALID_M = 16
+TILE_M = 32
 K = 16
 N = 16
 
@@ -42,8 +42,7 @@ def matmul_valid_shape(a: pl.Tensor, b: pl.Tensor, output: pl.InOut[pl.Tensor]):
             pl.FP32,
             pl.Mem.Acc,
         ] = pl.matmul(a_left, b_right)
-        valid_result: pl.Tile[[VALID_M, N], pl.FP32, pl.Mem.Acc] = pl.slice(result, [VALID_M, N], [0, 0])
-        pl.store(valid_result, [0, 0], output)
+        pl.store(result, [0, 0], output)
     return output
 
 

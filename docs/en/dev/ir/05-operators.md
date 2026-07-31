@@ -105,6 +105,12 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+For 2D `tile.matmul`, the result keeps the physical `[M, N]` shape and
+derives its valid region from the corresponding output axes:
+`[lhs.valid_shape[0], rhs.valid_shape[1]]`. This preserves a static partial
+M or N extent through the matrix multiplication without shrinking the boxed
+accumulator tile.
+
 At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
 dimensions, and keeps the same operand-only interface style as `tile.matmul`.

@@ -78,27 +78,22 @@ def test_matmul_valid_shape_declares_inout_output(compiled_programs):
     assert entry.param_directions[-1] == ir.ParamDirection.InOut
 
 
-def test_matmul_valid_shape_store_keeps_logical_result_extent(compiled_programs):
-    """A physical 16x16 result stores only its five logically valid rows."""
+def test_matmul_valid_shape_stores_boxed_result(compiled_programs):
+    """The boxed 32x16 result stores only its 16 hardware-aligned valid rows."""
     _, post_pass, incore = compiled_programs
-    collector = _CallCollector({"tile.matmul", "tile.slice", "tile.store"})
+    collector = _CallCollector({"tile.matmul", "tile.store"})
     collector.visit_stmt(incore.body)
 
     assert len(collector.calls["tile.matmul"]) == 1
-    assert len(collector.calls["tile.slice"]) == 1
     assert len(collector.calls["tile.store"]) == 1
     matmul_call = collector.calls["tile.matmul"][0]
-    slice_call = collector.calls["tile.slice"][0]
     store_call = collector.calls["tile.store"][0]
 
     assert isinstance(matmul_call.type, ir.TileType)
     assert _const_values(matmul_call.type.shape) == [TILE_M, N]
-    assert isinstance(slice_call.type, ir.TileType)
-    assert _const_values(slice_call.type.shape) == [VALID_M, N]
-    assert _const_values(slice_call.type.get_effective_tile_view().valid_shape) == [VALID_M, N]
     stored_result_type = store_call.args[0].type
     assert isinstance(stored_result_type, ir.TileType)
-    assert _const_values(stored_result_type.shape) == [VALID_M, N]
+    assert _const_values(stored_result_type.shape) == [TILE_M, N]
     assert _const_values(stored_result_type.get_effective_tile_view().valid_shape) == [VALID_M, N]
 
     pto = codegen.PTOCodegen().generate(ir.Program([incore], incore.name, post_pass.span))

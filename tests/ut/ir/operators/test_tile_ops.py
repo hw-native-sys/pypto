@@ -2022,6 +2022,17 @@ class TestTileBroadcastOps:
 class TestTileMatMulOps:
     """Test suite for tile-level matrix multiplication operators."""
 
+    def test_tile_matmul_propagates_output_valid_shape(self):
+        """Matmul derives its valid M/N from the corresponding operand axes."""
+        lhs = _partial_tile([32, 32], [16, 24], name="lhs")
+        rhs = _partial_tile([32, 48], [24, 32], name="rhs")
+
+        result_type = tile.matmul(lhs, rhs).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)] == [32, 48]
+        assert _valid_of(result_type) == [16, 32]
+
     def test_tile_matmul(self):
         """Test tile.matmul operator - matrix multiplication."""
 
