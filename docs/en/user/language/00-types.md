@@ -130,6 +130,15 @@ DN tensor deliberately at the IR level (test fixtures, round-tripping printed IR
 `pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)`, which forces the stride to be
 explicit and avoids the implicit coordinate flip.
 
+`pl.MX_A_ZZ` and `pl.MX_B_NN` are the two remaining layout constants. They tag the **GM
+scale tensor** of an MX (microscaling) operand on Ascend950 — `MX_A_ZZ` for the left/A
+scale pack, `MX_B_NN` for the right/B one — so that a Mat-to-scale `pl.move` can check the
+source layout instead of byte-copying incompatible data into `LeftScale` / `RightScale`.
+They are the one case where a layout marker on a `pl.Tensor` annotation is required rather
+than discouraged. Current limitations: an MX `pl.load` must pass `target_memory=pl.Mem.Mat`
+explicitly, MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`, `view`) and
+MX `remote_load` are rejected, and MX matmul is not supported yet.
+
 ### Dynamic shapes
 
 `pl.dynamic(name)` creates a symbolic dimension. The same `DynVar` object used in several

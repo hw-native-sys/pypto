@@ -105,6 +105,8 @@ DN 简写被弃用，是因为它逼着你同时在脑子里维护两套坐标�
 
 `pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 只用于 tile —— 那是硬件 tile 布局，永远不做 `pl.Tensor` 注解。若确实要在 IR 层构造 DN 张量（测试夹具、printed IR 往返），优先用 `pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)`：它强制 stride 显式化，避开隐式坐标翻转。
 
+剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。当前限制：MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`；MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`、`view`）与 MX `remote_load` 会被拒绝；尚不支持 MX 矩阵乘。
+
 ### 动态 shape
 
 `pl.dynamic(name)` 创建一个符号维度。同一个 `DynVar` 对象在多处注解中使用时指的是同一维 —— 复用这个对象，不要在表示同一个值时再造一个同名的。
