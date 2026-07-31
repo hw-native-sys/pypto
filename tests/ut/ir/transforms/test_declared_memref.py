@@ -22,6 +22,8 @@ The feature spans three passes, so the tests are grouped by what they pin down:
   * ``TestRejects``      — declarations the compiler must refuse
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -62,6 +64,22 @@ def _const_offset(memref: ir.MemRef) -> int:
     offset = memref.byte_offset_
     assert isinstance(offset, ir.ConstInt), f"expected a constant offset, got {type(offset).__name__}"
     return offset.value
+
+
+def _tile_byte_ranges(program: ir.Program) -> list[tuple[str, str, int, int]]:
+    """(tile name, base name, start, end) for every addressed on-chip tile MemRef.
+
+    Read off the printed program because after AllocateMemoryAddr the address IS
+    the MemRef's byte offset, and the printed form names the base it belongs to.
+    """
+    pattern = re.compile(r"(\w+): pl\.Tile\[.*?pl\.MemRef\((\w+), pl\.const\((\d+), pl\.INT64\), (\d+)\)")
+    ranges = []
+    for line in program.as_python().splitlines():
+        m = pattern.search(line)
+        if m:
+            offset, size = int(m.group(3)), int(m.group(4))
+            ranges.append((m.group(1), m.group(2), offset, offset + size))
+    return ranges
 
 
 def _alloc_lines(program: ir.Program) -> list[str]:
@@ -502,6 +520,64 @@ class TestSlots:
 
         bases = set(_base_names(_run_memory_pipeline(Before)).values())
         assert "l0c" in bases
+
+    def test_slots_reserve_the_whole_allocation(self, ascend_backend):
+        """A multi-slot declaration must reserve every slot, not just the largest one.
+
+        Each slot MemRef is sized to its own slot — that is what keeps `MayAlias`
+        from calling the two halves of a ping-pong aliased. The *buffer* underneath
+        them is still `slots x slot_size`, and the address allocator has to reserve
+        that much: sizing the buffer from the largest member reserves one slot and
+        lets the next allocation land exactly on top of slot 1.
+
+        The declaration is named `aaa` so it sorts first — addresses are handed out
+        in name order, so this puts the other buffers after it, where a short
+        reservation collides.
+        """
+        aaa = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                o1: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                o2: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+                m0: pl.Tile[[64, 64], pl.FP32, aaa[0], pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                m1: pl.Tile[[64, 64], pl.FP32, aaa[1], pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                x: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                y: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], target_memory=pl.Mem.Vec
+                )
+                s1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(m0, x)
+                s2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(m1, y)
+                r1: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(s1, [0, 0], o1)
+                r2: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(s2, [0, 0], o2)
+                return r1, r2
+
+        # Driven directly: AllocateMemoryAddr only runs on InCore functions, and the
+        # Default strategy skips it entirely under the PTOAS planner.
+        after = passes.allocate_memory_addr()(_run_memory_pipeline(Before))
+        ranges = _tile_byte_ranges(after)
+        assert len(ranges) >= 4, f"expected addressed tiles, got {ranges}"
+        # Slot 1 must sit inside its own allocation's reservation, so nothing on a
+        # different base may overlap it.
+        for name_a, base_a, start_a, end_a in ranges:
+            for name_b, base_b, start_b, end_b in ranges:
+                if base_a >= base_b:
+                    continue
+                assert not (start_a < end_b and start_b < end_a), (
+                    f"{name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
+                    f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
+                )
 
     def test_slots_round_trip(self):
         """The printed form carries both `slots=` and the subscript.

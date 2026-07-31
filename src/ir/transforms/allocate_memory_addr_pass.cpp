@@ -167,19 +167,38 @@ class MemRefUpdateMutator : public IRMutator {
   }
 };
 
-/// The base Ptrs of the author-declared (`pinned=True`) allocations in a body.
+/// Author-declared (`pinned=True`) allocations in a body: base Ptr -> reserved bytes.
 ///
 /// InitMemRef deliberately drops `is_pinned_` / `slot_index_` from the MemRefs it
 /// resolves — slots exist only until they are resolved — so by this pass the only
-/// remaining record of which allocations the author declared is the `pinned=True`
-/// kwarg on their alloc statements. That distinction matters here because a
-/// declared allocation is the one place a *dynamic* address is meaningful.
-class PinnedAllocBaseCollector : public IRVisitor {
+/// remaining record of an author's declaration is its alloc statement. Two things
+/// here depend on it:
+///
+///  * a declared allocation is the one place a *dynamic* address is meaningful;
+///  * it is the one place the allocation is deliberately **larger than any single
+///    MemRef in it**. A multi-slot declaration reserves `slots x slot_size` while
+///    each slot MemRef is sized to its own slot, so sizing the buffer from the
+///    largest member — as every other base can be — would reserve one slot and let
+///    the next allocation land on top of slot 1.
+///
+/// The size therefore has to come from the alloc statement, which InitMemRef
+/// already sized to the whole slot set.
+class PinnedAllocCollector : public IRVisitor {
  public:
-  std::set<const Var*> bases;
+  std::map<const Var*, uint64_t> alloc_sizes;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto base = GetPinnedAllocBase(op)) bases.insert(base.get());
+    if (auto base = GetPinnedAllocBase(op)) {
+      // CreateAllocStatement builds `alloc(memory_space, size)`, so the size is
+      // args_[1]. Absent or non-constant, fall back to the members (0 = no floor).
+      uint64_t size = 0;
+      if (auto call = As<Call>(op->value_); call && call->args_.size() >= 2) {
+        if (auto const_size = As<ConstInt>(call->args_[1]); const_size && const_size->value_ > 0) {
+          size = static_cast<uint64_t>(const_size->value_);
+        }
+      }
+      alloc_sizes.emplace(base.get(), size);
+    }
     IRVisitor::VisitStmt_(op);
   }
 };
@@ -193,12 +212,14 @@ class PinnedAllocBaseCollector : public IRVisitor {
  * its parent allocation, so they should share one address slot rather than
  * each consuming size_ bytes of fresh L1.
  *
- * ``pinned_bases`` are the author-declared allocations; only those may receive a
- * dynamic (expression) address.
+ * ``pinned_alloc_sizes`` maps each author-declared allocation's base to the bytes
+ * its alloc statement reserves. Those are the only bases that may receive a
+ * dynamic (expression) address, and the only ones whose buffer can be larger than
+ * their largest member (a multi-slot declaration).
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space,
-    const MemoryAllocatorPolicy& policy, const std::set<const Var*>& pinned_bases) {
+    const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes) {
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
   for (const auto& [memref, memory_space] : memrefs) {
@@ -246,8 +267,16 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
             << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
         slot_size = std::max(slot_size, static_cast<uint64_t>(ref->size_));
       }
+      // A declared allocation reserves what its alloc statement says, which for a
+      // multi-slot declaration exceeds any single member. Everything else is sized
+      // by its largest member, as before.
+      uint64_t buffer_size = slot_size;
+      auto declared_size = pinned_alloc_sizes.find(base_key);
+      if (declared_size != pinned_alloc_sizes.end()) {
+        buffer_size = std::max(buffer_size, declared_size->second);
+      }
       // Reserve this base-group's physical buffer; base_addr is where its members land.
-      const uint64_t base_addr = footprint.OpenBuffer(slot_size);
+      const uint64_t base_addr = footprint.OpenBuffer(buffer_size);
 
       // Bump the whole group to `current_addr`, then preserve each member's
       // own offset within the slot: new byte_offset = base_addr + old offset.
@@ -284,7 +313,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         // operand; PTO codegen reads this dtype from the ConstInt 1:1.
         ExprPtr member_addr_expr;
         auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_);
-        if (!old_offset && pinned_bases.count(old_memref->base_.get()) == 0) {
+        if (!old_offset && pinned_alloc_sizes.count(old_memref->base_.get()) == 0) {
           // Not a declared allocation: bare base, exactly as before slots existed.
           old_offset = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
         }
@@ -350,10 +379,10 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 
   // Step 3: Allocate memory addresses using the policy. Declared allocations are
   // the only ones that may take a dynamic address (a runtime slot index).
-  PinnedAllocBaseCollector pinned_collector;
+  PinnedAllocCollector pinned_collector;
   pinned_collector.VisitStmt(func->body_);
   auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy,
-                                              pinned_collector.bases);
+                                              pinned_collector.alloc_sizes);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
