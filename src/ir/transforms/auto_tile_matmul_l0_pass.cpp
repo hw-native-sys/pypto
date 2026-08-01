@@ -294,18 +294,23 @@ struct AccInitValue {
 /// Build an Acc placeholder whose allocation may be box-padded while its valid
 /// rectangle remains the logical output tile. The ordinary unpadded case keeps
 /// the historical single ``tile.create`` form byte-for-byte.
-AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, int64_t valid_m,
-                                        int64_t valid_n, const DataType& dtype, const std::string& name_hint,
+AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, ExprPtr valid_m,
+                                        ExprPtr valid_n, const DataType& dtype, const std::string& name_hint,
                                         const Span& span) {
-  if (physical_m == valid_m && physical_n == valid_n) {
+  INTERNAL_CHECK_SPAN(valid_m && valid_n, span)
+      << "Internal error: accumulator initializer requires two valid extents";
+  auto valid_m_const = As<ConstInt>(valid_m);
+  auto valid_n_const = As<ConstInt>(valid_n);
+  if (valid_m_const && valid_n_const && physical_m == valid_m_const->value_ &&
+      physical_n == valid_n_const->value_) {
     auto init = BuildAccInit(physical_m, physical_n, dtype, name_hint, span);
     return AccInitValue{{init}, init->var_};
   }
 
   auto storage = BuildAccInit(physical_m, physical_n, dtype, name_hint + "_storage", span);
   auto& reg = OpRegistry::GetInstance();
-  auto narrowed_call = reg.Create("tile.set_validshape",
-                                  {storage->var_, MakeIndex(valid_m, span), MakeIndex(valid_n, span)}, span);
+  auto narrowed_call =
+      reg.Create("tile.set_validshape", {storage->var_, std::move(valid_m), std::move(valid_n)}, span);
   auto narrowed_var = std::make_shared<Var>(name_hint, narrowed_call->GetType(), span);
   auto narrowed = std::make_shared<AssignStmt>(narrowed_var, narrowed_call, span);
   return AccInitValue{{storage, narrowed}, narrowed_var};
@@ -324,6 +329,10 @@ struct KLoopRewrite {
   int64_t m = 0;
   int64_t n = 0;
   int64_t k = 0;
+  /// Logical output window carried by the loop accumulator. These may be
+  /// smaller than m/n when a boxed boundary operand is physically padded.
+  ExprPtr valid_m = nullptr;
+  ExprPtr valid_n = nullptr;
   /// Output sub-tile origin (row, col) within the [M, N] product. The per-iter
   /// extracts slice ``lhs[mi : mi + m, ko : ko + k]`` and ``rhs[ko : ko + k,
   /// ni : ni + n]``. Null means 0 — the K-only path (m == M, n == N) leaves
@@ -424,10 +433,11 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
       loop_iter_type = r.acc_init->GetType();
     } else {
       auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
-      auto c_init = BuildAccInit(r.m, r.n, acc_dtype, base + "_l0_init", sp);
-      out.push_back(c_init);
-      loop_init = c_init->var_;
-      loop_iter_type = c_init->var_->GetType();
+      auto c_init =
+          BuildAccInitWithValidShape(r.m, r.n, r.valid_m, r.valid_n, acc_dtype, base + "_l0_init", sp);
+      for (auto& stmt : c_init.stmts) out.push_back(std::move(stmt));
+      loop_init = c_init.value;
+      loop_iter_type = c_init.value->GetType();
     }
   }
 
@@ -512,6 +522,10 @@ struct MatmulTiling {
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
+  /// Logical output extents. Ordinarily identical to M/N; a box-padded
+  /// boundary matmul keeps the larger physical M/N in the operands/result.
+  ExprPtr output_valid_m = nullptr;
+  ExprPtr output_valid_n = nullptr;
   /// Chosen L0 stationarity (which operand is pinned single-buffered across the
   /// moving grid). Output-stationary unless the chooser picked A/B-stationary
   /// (k == K); BuildFullKPipelined sets the loop order + single-buffers the
@@ -556,6 +570,37 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
   r.m = m_eff;
   r.n = n_eff;
   r.k = t.k;
+  auto local_valid_extent = [&](const ExprPtr& output_valid, const ExprPtr& offset,
+                                int64_t physical_extent) -> ExprPtr {
+    INTERNAL_CHECK_SPAN(output_valid, t.assign->span_)
+        << "Internal error: matmul output requires a logical valid extent";
+    if (!offset) return output_valid;
+
+    // Constant output grids are by far the common case. Fold them here so the
+    // generated set_validshape operands stay simple constants.
+    if (auto valid_const = As<ConstInt>(output_valid)) {
+      if (auto offset_const = As<ConstInt>(offset)) {
+        return MakeIndex(std::clamp<int64_t>(valid_const->value_ - offset_const->value_, 0, physical_extent),
+                         t.assign->span_);
+      }
+    }
+
+    // Keep the zero-offset form canonical with InferWindowReadValidShape. This
+    // also avoids asking the verifier to prove `max(valid, 0) - 0 == valid`.
+    if (auto offset_const = As<ConstInt>(offset); offset_const && offset_const->value_ == 0) {
+      return MakeMin(output_valid, MakeIndex(physical_extent, t.assign->span_), t.assign->span_);
+    }
+
+    // The logical window of a physical sub-tile is
+    // clamp(output_valid - offset, 0, physical_extent). Spell the lower clamp
+    // as max(output_valid, offset) - offset so UINT64 valid extents cannot
+    // underflow when the sub-tile starts beyond the logical boundary.
+    auto clamped_valid = MakeMax(output_valid, offset, t.assign->span_);
+    auto remaining = MakeSub(clamped_valid, offset, t.assign->span_);
+    return MakeMin(remaining, MakeIndex(physical_extent, t.assign->span_), t.assign->span_);
+  };
+  r.valid_m = local_valid_extent(t.output_valid_m, mi, m_eff);
+  r.valid_n = local_valid_extent(t.output_valid_n, ni, n_eff);
   r.mi = std::move(mi);
   r.ni = std::move(ni);
   r.name_base = std::move(name_base);
@@ -566,8 +611,9 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 /// so which L0 tile shape to use.  Returns the tiling plan on success;
 /// otherwise nullopt and (when useful) appends a PerfHint.  The caller
 /// dispatches K-only vs M/N tiling on ``MatmulTiling::needs_mn_tiling()``.
-std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vector<Diagnostic>& hints,
-                                          bool force_output_stationary = false) {
+std::optional<MatmulTiling> AnalyzeMatmul(
+    const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
+    std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -630,6 +676,9 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   // accumulator footprint.
   auto out_tile = As<TileType>(call->GetType());
   INTERNAL_CHECK(out_tile) << "Internal error: tile.matmul result is not a TileType";
+  const auto output_valid_shape = tile_view_semantics::GetEffectiveTileView(*out_tile).valid_shape;
+  INTERNAL_CHECK_SPAN(output_valid_shape.size() == 2, assign->span_)
+      << "Internal error: tile.matmul result valid_shape must be 2D";
   uint32_t bytes_c = DTypeBytes(out_tile->dtype_);
   if (bytes_a == 0 || bytes_b == 0 || bytes_c == 0) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-003",
@@ -673,6 +722,16 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   cfg.align_n = handler->GetL0FractalAlignment();
   cfg.align_k = handler->GetL0FractalAlignment();
   cfg.l0c_align_m = handler->GetL0cMAlignment(out_tile->dtype_);
+  if (output_box_alignment) {
+    INTERNAL_CHECK_SPAN(output_box_alignment->rows > 0 && output_box_alignment->cols > 0 &&
+                            output_box_alignment->rows <= std::numeric_limits<int>::max() &&
+                            output_box_alignment->cols <= std::numeric_limits<int>::max(),
+                        assign->span_)
+        << "Internal error: canonical split-K operand boxing has an invalid alignment ["
+        << output_box_alignment->rows << ", " << output_box_alignment->cols << "]";
+    cfg.box_align_m = static_cast<int>(output_box_alignment->rows);
+    cfg.box_align_n = static_cast<int>(output_box_alignment->cols);
+  }
   cfg.min_m = handler->GetMinL0TileDim();
   cfg.min_n = handler->GetMinL0TileDim();
   cfg.min_k = handler->GetMinL0TileDim();
@@ -775,6 +834,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(const AssignStmtPtr& assign, std::vect
   t.m = res.m;
   t.n = res.n;
   t.k = res.k;
+  t.output_valid_m = output_valid_shape[0];
+  t.output_valid_n = output_valid_shape[1];
   t.stationarity = res.stationarity;
   t.os_holds_a = res.os_holds_a;
   // dbC=2 is realized only by the full-K emitter: BuildFullKPipelined attaches
@@ -1250,8 +1311,8 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
       M,    N,    K_lhs};
 }
 
-std::optional<CanonicalOutputWindow> BuildCanonicalOutputWindow(const CanonicalSplitKAccMatch& match,
-                                                                int64_t valid_m, int64_t valid_n) {
+std::optional<tile_view_semantics::BoxedTileAlignment> GetCanonicalOutputBoxAlignment(
+    const CanonicalSplitKAccMatch& match) {
   auto lhs_type = As<TileType>(match.lhs_load->var_->GetType());
   auto rhs_type = As<TileType>(match.rhs_load->var_->GetType());
   INTERNAL_CHECK_SPAN(lhs_type && rhs_type, match.loop->span_)
@@ -1261,11 +1322,18 @@ std::optional<CanonicalOutputWindow> BuildCanonicalOutputWindow(const CanonicalS
   const auto rhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*rhs_type);
   if (!lhs_alignment || !rhs_alignment) return std::nullopt;
 
+  return tile_view_semantics::BoxedTileAlignment{/*rows=*/lhs_alignment->rows,
+                                                 /*cols=*/rhs_alignment->cols};
+}
+
+CanonicalOutputWindow BuildCanonicalOutputWindow(
+    const CanonicalSplitKAccMatch& match, int64_t valid_m, int64_t valid_n,
+    const tile_view_semantics::BoxedTileAlignment& output_box_alignment) {
   return CanonicalOutputWindow{
       /*valid_m=*/valid_m,
       /*valid_n=*/valid_n,
-      /*physical_m=*/AlignStaticExtent(valid_m, lhs_alignment->rows, match.loop->span_),
-      /*physical_n=*/AlignStaticExtent(valid_n, rhs_alignment->cols, match.loop->span_),
+      /*physical_m=*/AlignStaticExtent(valid_m, output_box_alignment.rows, match.loop->span_),
+      /*physical_n=*/AlignStaticExtent(valid_n, output_box_alignment.cols, match.loop->span_),
   };
 }
 
@@ -1380,11 +1448,21 @@ struct CanonicalSplitKFold {
 
 std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSplitKAccMatch& match,
                                                              std::vector<Diagnostic>& hints) {
+  const auto output_box_alignment = GetCanonicalOutputBoxAlignment(match);
+  if (!output_box_alignment) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+                       "canonical split-K M/N tiling needs boxed Mat operand layouts with a supported static "
+                       "fractal alignment; left untouched",
+                       match.loop->span_);
+    return std::nullopt;
+  }
   // The source loop already realizes output-stationary accumulation across its
   // K blocks. Use the conservative output-stationary chooser regime for the
-  // output grid; the recursively visited narrowed calls independently choose
-  // their legal inner K blocking.
-  auto tiling = AnalyzeMatmul(match.matmul, hints, /*force_output_stationary=*/true);
+  // output grid. Account for the same Mat boxing that RebuildLoad will apply to
+  // every physical output window, so chooser capacity cannot admit a logical
+  // tile that becomes oversized after padding. The recursively visited
+  // narrowed calls independently choose their legal inner K blocking.
+  auto tiling = AnalyzeMatmul(match.matmul, hints, /*force_output_stationary=*/true, output_box_alignment);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
   auto store_call = As<Call>(match.store->value_);
@@ -1410,17 +1488,10 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       const int64_t m_eff = std::min<int64_t>(tiling->m, match.M - mi);
       const std::string suffix = "_mn" + std::to_string(step);
       auto out_ty = As<TileType>(match.matmul->var_->GetType());
-      const auto window = BuildCanonicalOutputWindow(match, m_eff, n_eff);
-      if (!window) {
-        hints.emplace_back(
-            DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
-            "canonical split-K M/N tiling needs boxed Mat operand layouts with a supported static "
-            "fractal alignment; left untouched",
-            match.loop->span_);
-        return std::nullopt;
-      }
-      auto init = BuildAccInitWithValidShape(window->physical_m, window->physical_n, window->valid_m,
-                                             window->valid_n, out_ty->dtype_,
+      const auto window = BuildCanonicalOutputWindow(match, m_eff, n_eff, *output_box_alignment);
+      auto init = BuildAccInitWithValidShape(window.physical_m, window.physical_n,
+                                             MakeIndex(window.valid_m, match.init->span_),
+                                             MakeIndex(window.valid_n, match.init->span_), out_ty->dtype_,
                                              match.init->var_->name_hint_ + suffix, match.init->span_);
       for (auto& init_stmt : init.stmts) stmts.push_back(std::move(init_stmt));
 
@@ -1429,7 +1500,7 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       auto cloned_loop = As<ForStmt>(clone.cloned_body);
       INTERNAL_CHECK_SPAN(cloned_loop, match.loop->span_)
           << "Internal error: canonical split-K loop clone is not a ForStmt";
-      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, *window, suffix);
+      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, window, suffix);
       auto narrowed = As<ForStmt>(retiler.VisitStmt(cloned_loop));
       INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
           << "Internal error: canonical split-K retiling did not return a ForStmt";

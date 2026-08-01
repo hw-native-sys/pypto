@@ -18,7 +18,7 @@ This aligns MemRef objects consistently: if two tiles share a MemRef in
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, ir, passes
+from pypto import DataType, InternalError, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -870,30 +870,13 @@ def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
     return result
 
 
-def _collect_move_assign_stmts(program: ir.Program) -> list[ir.AssignStmt]:
-    """Return every ``x = tile.move(...)`` AssignStmt in the first function."""
-    result: list[ir.AssignStmt] = []
-    main_func = next(iter(program.functions.values()))
-    move_op_name = ir.get_op("tile.move").name
-
-    class _Collector(ir.IRVisitor):
-        def visit_assign_stmt(self, stmt):  # type: ignore[override]
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == move_op_name:
-                result.append(stmt)
-            super().visit_assign_stmt(stmt)
-
-    visitor = _Collector()
-    visitor.visit_stmt(main_func.body)
-    return result
-
-
 def _divergent_acc_phi_program() -> ir.Program:
     """A divergent Acc if-phi: ``then`` yields the pre-if seed ``pre``, ``else``
     accumulates in place into ``prev``.
 
     The accumulator coalescer must decline this shape (``pre`` runs
     unconditionally, so retargeting it onto ``prev`` would clobber the
-    accumulator), leaving YieldFixup to reconcile the phi with a tile.move.
+    accumulator), leaving a divergent Acc carry that YieldFixup must reject.
     Shared by the tests that assert each half of that contract.
     """
 
@@ -1948,44 +1931,16 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_synthesized_acc_move_var_and_call_agree_on_tile_view(self):
-        """The move YieldFixup synthesizes to reconcile a divergent Acc phi must
-        type its LHS Var and its Call identically.
+    def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
+        """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
 
-        The Var's type is cloned from the move source (canonical Acc view, so
-        ``tile_view=None``) while the Call's type comes from ``tile.move``'s own
-        deduction. If the two disagree, the printer emits only the Var's
-        (view-less) annotation and the parser refills the view from the Call —
-        so the program no longer survives print->parse. The per-pass roundtrip
-        instrument in ``tests/ut/conftest.py`` catches that; this test pins the
-        underlying invariant so a failure names the actual defect.
+        The divergent phi cannot be safely coalesced because one seed is
+        produced before the branch. Reject it before codegen rather than emit a
+        type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
+        buffers.
         """
-        After = _run_pipeline(_divergent_acc_phi_program())
-
-        moves = _collect_move_assign_stmts(After)
-        assert len(moves) == 1, (
-            f"expected YieldFixup to synthesize exactly one tile.move, got "
-            f"{len(moves)}:\n{ir.python_print(After)}"
-        )
-        var_type = moves[0].var.type
-        call_type = moves[0].value.type
-        assert isinstance(var_type, ir.TileType) and isinstance(call_type, ir.TileType)
-        # Compare the full tile semantics, not just view presence: a matching
-        # tile_view means nothing if the two sides disagree on memory_space,
-        # because the space is what the absent view resolves against.
-        for label, tile_type in (("var", var_type), ("call", call_type)):
-            assert tile_type.memory_space == ir.MemorySpace.Acc, (
-                f"synthesized tile.move {label} must stay in Acc, got "
-                f"{tile_type.memory_space}\n{ir.python_print(After)}"
-            )
-            assert tile_type.tile_view is None, (
-                f"synthesized tile.move {label} must carry the canonical (absent) Acc "
-                f"view, got {tile_type.tile_view}\n{ir.python_print(After)}"
-            )
-            fractal = tile_type.get_effective_tile_view().fractal
-            assert fractal == 1024, (
-                f"an Acc tile is NZ-boxed at 1024, {label} got {fractal}\n{ir.python_print(After)}"
-            )
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(_divergent_acc_phi_program())
 
 
 class TestControlFlow:
@@ -2973,15 +2928,11 @@ class TestTopDownRetargeter:
         the coalescer must skip this phi (leaving it to YieldFixup) and keep
         ``pre`` and ``prev`` on distinct buffers.
         """
-        # The un-coalesced divergent Acc phi is the documented out-of-scope case
-        # (YieldFixup emits its usual move); we only assert the safety property —
-        # the pre-if seed was NOT retargeted onto the accumulator.
-        After = _run_pipeline(_divergent_acc_phi_program())
-        bases = _collect_tile_memref_bases(After)
-        assert bases["pre"] != bases["prev"], (
-            f"pre-if seed must not be coalesced onto the accumulator buffer (clobber): "
-            f"pre={bases.get('pre')} prev={bases.get('prev')}\n{ir.python_print(After)}"
-        )
+        # Branch-locality correctly prevents unsafe coalescing. Because Acc->Acc
+        # tile.move is unsupported, YieldFixup must then fail loudly instead of
+        # emitting invalid IR for this unlowerable control-flow shape.
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            _run_pipeline(_divergent_acc_phi_program())
 
     def test_seed_branch_write_only_clobber_blocks_acc_coalesce(self):
         """Safety gate for the accumulator-if-phi coalescer's branch-tail
@@ -3002,9 +2953,8 @@ class TestTopDownRetargeter:
         ``memory_reuse`` alone: the clobbering alias is a specific buffer layout
         that only surfaces after allocation, so it cannot be expressed through the
         high-level ``init_mem_ref`` path (which hands every tile a distinct base).
-        The declined phi is reconciled by YieldFixup's usual (legal,
-        distinct-buffer) move — we assert only the safety property, that ``seed``
-        was NOT retargeted onto the accumulator buffer.
+        The required safety decline leaves divergent Acc buffers. Because no
+        legal Acc->Acc move exists, YieldFixup must reject this unlowerable shape.
         """
 
         @pl.program
@@ -3058,13 +3008,8 @@ class TestTopDownRetargeter:
                 )
                 return result
 
-        After = passes.memory_reuse()(Before)
-        bases = _collect_tile_memref_bases(After)
-        assert bases["seed"] != bases["prev"], (
-            f"seed must not be coalesced onto the accumulator buffer when a later write-only op "
-            f"clobbers it in the branch tail: seed={bases.get('seed')} prev={bases.get('prev')}\n"
-            f"{ir.python_print(After)}"
-        )
+        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
+            passes.memory_reuse()(Before)
 
     def test_retargeter_declines_when_target_still_live(self):
         """Safety check: if target's base is read after the candidate

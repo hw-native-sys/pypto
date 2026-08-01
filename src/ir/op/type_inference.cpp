@@ -523,19 +523,6 @@ ExprPtr MinExtent(const ExprPtr& lhs, const ExprPtr& rhs, const Span& span) {
   return FoldExtent(MakeMin(lhs, rhs, span));
 }
 
-/// `max(extent, 0)`, elided whenever the sign of the extent is already settled: a
-/// non-negative extent is its own clamp, and a non-positive one clamps to a literal
-/// zero rather than a `max` node that only ever evaluates to zero.
-ExprPtr ClampNonNegative(const ExprPtr& extent, const Span& span) {
-  if (ProveValidExtentLessEqual(IndexZero(), extent) == ProofResult::kTrue) {
-    return extent;
-  }
-  if (ProveValidExtentLessEqual(extent, IndexZero()) == ProofResult::kTrue) {
-    return IndexZero();
-  }
-  return FoldExtent(MakeMax(extent, IndexZero(), span));
-}
-
 /// The extent of dimension `i` that a read must keep inside its source.
 ///
 /// Under kExactWindow nothing trims the window, so all of it has to fit,
@@ -657,10 +644,14 @@ std::vector<ExprPtr> InferWindowReadValidShape(const WindowReadValidShapeParams&
       CHECK_SPAN(IsIntegerScalarExpr(offset), params.span)
           << params.op_name << " offset " << i << " must be an integer scalar to narrow dimension " << i
           << " against a partial source, but got " << offset->GetType()->TypeName();
-      const ExprPtr remaining = ProveValidExtentEqual(offset, IndexZero()) == ProofResult::kTrue
-                                    ? src_valid
-                                    : FoldExtent(MakeSub(src_valid, offset, params.span));
-      available = MinExtent(ClampNonNegative(remaining, params.span), window, params.span);
+      // max(src_valid, offset) - offset is equivalent to
+      // max(src_valid - offset, 0), but cannot underflow when src_valid is a
+      // UINT64 symbolic extent smaller than the offset.
+      const ExprPtr remaining =
+          ProveValidExtentEqual(offset, IndexZero()) == ProofResult::kTrue
+              ? src_valid
+              : FoldExtent(MakeSub(MakeMax(src_valid, offset, params.span), offset, params.span));
+      available = MinExtent(remaining, window, params.span);
     }
 
     // result = min(requested, available).

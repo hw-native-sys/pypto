@@ -742,6 +742,8 @@ void BindPass(nb::module_& m) {
       .def_rw("align_n", &utils::L0TileConfig::align_n)
       .def_rw("align_k", &utils::L0TileConfig::align_k)
       .def_rw("l0c_align_m", &utils::L0TileConfig::l0c_align_m)
+      .def_rw("box_align_m", &utils::L0TileConfig::box_align_m)
+      .def_rw("box_align_n", &utils::L0TileConfig::box_align_n)
       .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
       .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)

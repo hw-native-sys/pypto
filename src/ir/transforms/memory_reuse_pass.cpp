@@ -470,7 +470,8 @@ class TopDownRetargeter {
       auto seed_def = defs_.find(seed_var);
       if (seed_def == defs_.end() || seed_def->second.kind != VarDef::kAssign) continue;
       // The seed must be a Call producer we can retype; a bare-Var / tuple rename
-      // cannot be retargeted — leave it to YieldFixup rather than hard-failing.
+      // cannot be retargeted. Leave the phi untouched; YieldFixup will reject
+      // the residual Acc mismatch because no legal copy exists.
       auto seed_assign = As<AssignStmt>(seed_def->second.assign_stmt);
       if (!seed_assign || !As<Call>(seed_assign->value_)) continue;
 
@@ -482,7 +483,8 @@ class TopDownRetargeter {
       //  (b) the accumulator buffer is dead *within the branch* after the seed
       //      (exclusivity covers only cross-branch and post-if reads, not a
       //      same-branch tail read between the seed producer and the yield).
-      // When either fails, fall back to YieldFixup (leave the phi untouched here).
+      // When either fails, leave the phi untouched here. YieldFixup will fail
+      // loudly rather than emit an unsupported Acc->Acc move.
       const auto& seed_anc = seed_def->second.ancestors;
       const bool in_branch = std::any_of(seed_anc.begin(), seed_anc.end(),
                                          [&](const StmtPtr& a) { return a.get() == if_stmt.get(); });
@@ -597,7 +599,27 @@ class TopDownRetargeter {
     //      different buffer than its init, which YieldFixupMutator reconciles
     //      with a real move (see AlignLoopCarriesToInitMutator's contract).
     //      Same-space targets are unaffected: only the MemRef base moves.
-    if (IsOutputMemoryInheritInput(entry)) return false;
+    if (IsOutputMemoryInheritInput(entry)) {
+      // Most view ops can carry a sub-region offset, so retargeting their LHS
+      // directly would lose view-relative addressing. tile.set_validshape is
+      // the narrow exception: it is a zero-offset, shape-preserving alias of
+      // its first argument. Retarget that storage producer first, then record
+      // the view result on the same target. This lets padded loop-carried Acc
+      // initializers coalesce with their accumulator instead of leaving a
+      // divergent Acc carry for YieldFixup to reject.
+      if (!IsOp(call, "tile.set_validshape") || call->args_.empty()) return false;
+      auto input_var = AsVarLike(call->args_[0]);
+      if (!input_var) return false;
+      auto input_tile = GetTileTypeWithMemRef(input_var->GetType());
+      auto output_tile = GetTileTypeWithMemRef(var->GetType());
+      if (!input_tile || !output_tile ||
+          !MemRef::SameAllocation(GetDefinedMemRef(input_tile), GetDefinedMemRef(output_tile))) {
+        return false;
+      }
+      if (!TryRetargetVar(input_var, target, target_memory)) return false;
+      PlanRewrite(var, target, target_memory);
+      return true;
+    }
     if (HasKwarg(*call, "target_memory") && !TargetMemoryKwargMatches(*call, target_memory)) {
       return false;
     }
@@ -2587,9 +2609,10 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
  * Handles both ForStmt and IfStmt:
  * - ForStmt: MemoryReuse may assign different MemRefs to iter_arg and yield value.
  *   Since yield value becomes the next iteration's iter_arg, they must use the
- *   same buffer. When they differ, insert a tile.move before yield.
+ *   same buffer. When they differ, insert a tile.move before yield, except that
+ *   divergent Acc buffers are rejected because Acc->Acc moves are unsupported.
  * - IfStmt: MemoryReuse may change MemRefs of variables inside branches.
- *   Patch return_vars to match the yield value's MemRef.
+ *   Patch return_vars to match the yield value's MemRef, using the same Acc guard.
  */
 class YieldFixupMutator : public IRMutator {
  public:
@@ -2756,6 +2779,14 @@ class YieldFixupMutator : public IRMutator {
                                             std::optional<MemorySpace> target_memory) {
     INTERNAL_CHECK_SPAN(target_memory.has_value(), source->span_)
         << "Internal error: target TileType must have memory_space for tile.move";
+    auto source_tile = GetTileTypeWithMemRef(source->GetType());
+    INTERNAL_CHECK_SPAN(source_tile, source->span_)
+        << "Internal error: YieldFixup tile.move source must be a TileType with MemRef";
+    INTERNAL_CHECK_SPAN(
+        !(source_tile->GetMemorySpace() == MemorySpace::Acc && target_memory.value() == MemorySpace::Acc),
+        source->span_)
+        << "Internal error: MemoryReuse cannot reconcile divergent L0C accumulator buffers with "
+           "tile.move; accumulator control-flow values must be coalesced before YieldFixup.";
     auto& op_reg = OpRegistry::GetInstance();
     std::vector<std::pair<std::string, std::any>> kwargs = {
         {"target_memory", std::any(target_memory.value())}};

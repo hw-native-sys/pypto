@@ -38,6 +38,27 @@ constexpr int64_t AlignUp(int64_t x, int64_t a) { return ((x + a - 1) / a) * a; 
 
 constexpr int64_t CeilDiv(int64_t a, int64_t b) { return (a + b - 1) / b; }
 
+// Physical extent after the caller's boxed-layout padding. Reuse the shared
+// overflow-safe L0C alignment helper rather than duplicating unsigned
+// round-up arithmetic here; n=1 makes its result exactly AlignUp(extent,
+// alignment).
+std::optional<uint64_t> BoxedExtent(int64_t extent, int64_t alignment) {
+  return L0cPhysicalElements(extent, /*n=*/1, alignment);
+}
+
+// Exact L0C allocation occupied after caller-side Mat boxing and backend L0C
+// row padding. The ordering mirrors lowering: first materialize a physical
+// [boxed_m, boxed_n] result type, then allocate that type in L0C.
+std::optional<uint64_t> CandidateL0cPhysicalElements(int64_t m, int64_t n, const L0TileConfig& cfg) {
+  const auto boxed_m = BoxedExtent(m, cfg.box_align_m);
+  const auto boxed_n = BoxedExtent(n, cfg.box_align_n);
+  if (!boxed_m || !boxed_n || *boxed_m > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+      *boxed_n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return std::nullopt;
+  }
+  return L0cPhysicalElements(static_cast<int64_t>(*boxed_m), static_cast<int64_t>(*boxed_n), cfg.l0c_align_m);
+}
+
 // ===========================================================================
 // Candidate scoring
 // ===========================================================================
@@ -92,8 +113,14 @@ struct Candidate {
 //   * allow_padding: aligned k bounded by the aligned-up problem size.
 std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t A0, int64_t B0) {
   std::vector<int> ks;
-  const int64_t k_from_a = A0 / m;
-  const int64_t k_from_b = B0 / n;
+  const auto boxed_m = BoxedExtent(m, cfg.box_align_m);
+  const auto boxed_n = BoxedExtent(n, cfg.box_align_n);
+  if (!boxed_m || !boxed_n || *boxed_m > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+      *boxed_n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return ks;
+  }
+  const int64_t k_from_a = A0 / static_cast<int64_t>(*boxed_m);
+  const int64_t k_from_b = B0 / static_cast<int64_t>(*boxed_n);
   const int64_t cap = std::min(k_from_a, k_from_b);  // max k that fits L0a and L0b
   const int64_t k_problem =
       cfg.allow_padding ? std::max<int64_t>(AlignUp(static_cast<int64_t>(cfg.K), cfg.align_k), cfg.min_k)
@@ -368,7 +395,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
   // Aligned-down boundary tiles (m <= M but M % m != 0) are still permitted —
   // the full-K emitter peels the partial boundary into a straight-line tail.
   if (!cfg.allow_padding && (m > cfg.M || n > cfg.N)) return std::nullopt;
-  auto c_elements = L0cPhysicalElements(m, n, cfg.l0c_align_m);
+  auto c_elements = CandidateL0cPhysicalElements(m, n, cfg);
   if (!c_elements || *c_elements > static_cast<uint64_t>(C0)) return std::nullopt;
   Candidate c;
   c.m = m;
@@ -396,16 +423,24 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 //   and for the dbC=2 ping-pong (realized only by the full-K pipelined emitter).
 //
 // Complexity: O((C0 / align^2) * (K / align_k)) per matmul -- the (m, n) grid is
-// bounded by AlignUp(m,l0c_align_m)*n <= C0 and the L0A/L0B capacities, k by K/align_k. A hardware
-// constant per op, independent of IR size. The chooser runs once per matmul op
-// (matmul ops are O(N)), so the pass stays linear in the IR.
+// bounded by AlignUp(AlignUp(m,box_align_m),l0c_align_m) *
+// AlignUp(n,box_align_n) <= C0 and the boxed L0A/L0B capacities, k by
+// K/align_k. A hardware constant per op, independent of IR size. The chooser
+// runs once per matmul op (matmul ops are O(N)), so the pass stays linear in
+// the IR.
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
                                        int64_t C0, bool require_2d, bool require_full_k) {
   const int64_t m_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.M), cfg.align_m) : cfg.M;
   const int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
   std::optional<Candidate> best;
   for (int64_t m = cfg.min_m; m <= m_hi; m += cfg.align_m) {
-    auto physical_m_elements = L0cPhysicalElements(m, /*n=*/1, cfg.l0c_align_m);
+    const auto boxed_m = BoxedExtent(m, cfg.box_align_m);
+    const auto boxed_min_n = BoxedExtent(cfg.min_n, cfg.box_align_n);
+    if (!boxed_m || !boxed_min_n || *boxed_m > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        *boxed_min_n > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      break;
+    }
+    auto physical_m_elements = L0cPhysicalElements(static_cast<int64_t>(*boxed_m), /*n=*/1, cfg.l0c_align_m);
     if (!physical_m_elements ||
         *physical_m_elements > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       break;
@@ -413,7 +448,7 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
     const int64_t physical_m = static_cast<int64_t>(*physical_m_elements);
     // n >= min_n must fit the physical accumulator footprint; once it cannot,
     // no larger m can either.
-    if (physical_m * static_cast<int64_t>(cfg.min_n) > C0) break;
+    if (physical_m > C0 / static_cast<int64_t>(*boxed_min_n)) break;
     if (require_2d && CeilDiv(static_cast<int64_t>(cfg.M), m) < 2) continue;
     const int64_t n_max = std::min<int64_t>(n_hi, C0 / physical_m);
     for (int64_t n = cfg.min_n; n <= n_max; n += cfg.align_n) {
@@ -437,7 +472,8 @@ int64_t L0bBudget(const L0TileConfig& cfg, const OperandDB& db) {
   return static_cast<int64_t>(cfg.l0b_bytes) / (static_cast<int64_t>(cfg.bytes_b) * (db.b ? 2 : 1));
 }
 // L0C element budget per accumulator: halved for dbC=2. Candidate legality
-// additionally rounds m up to cfg.l0c_align_m before applying this budget.
+// additionally applies caller-side m/n boxing and then rounds m up to
+// cfg.l0c_align_m before applying this budget.
 int64_t L0cBudget(const L0TileConfig& cfg, const Regime& r) {
   return static_cast<int64_t>(cfg.l0c_bytes) / (static_cast<int64_t>(cfg.bytes_c) * (r.dbc ? 2 : 1));
 }
@@ -454,7 +490,8 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: element byte sizes must be positive";
   CHECK(cfg.min_m > 0 && cfg.min_n > 0 && cfg.min_k > 0)
       << "ChooseL0Tile: minimum tile dimensions must be positive";
-  CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0 && cfg.l0c_align_m > 0)
+  CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0 && cfg.l0c_align_m > 0 && cfg.box_align_m > 0 &&
+        cfg.box_align_n > 0)
       << "ChooseL0Tile: tile and physical L0C alignments must be positive";
   CHECK(cfg.bw_a > 0.0 && cfg.bw_b > 0.0 && cfg.bw_drain > 0.0)
       << "ChooseL0Tile: roofline bandwidths must be strictly positive (got bw_a=" << cfg.bw_a
@@ -488,14 +525,19 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   const Regime base_regime;  // OS, dbC=1
   const int64_t C0_base = L0cBudget(cfg, base_regime);
 
-  CHECK(A0 >= static_cast<int64_t>(cfg.min_m) * cfg.min_k)
+  const auto min_boxed_m = BoxedExtent(cfg.min_m, cfg.box_align_m);
+  const auto min_boxed_n = BoxedExtent(cfg.min_n, cfg.box_align_n);
+  CHECK(min_boxed_m && *min_boxed_m <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
+        static_cast<int64_t>(*min_boxed_m) <= A0 / cfg.min_k)
       << "ChooseL0Tile: L0a capacity " << A0 << " elements is too small to fit the minimum tile ("
       << cfg.min_m << " x " << cfg.min_k << ")";
-  CHECK(B0 >= static_cast<int64_t>(cfg.min_n) * cfg.min_k)
+  CHECK(min_boxed_n && *min_boxed_n <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
+        static_cast<int64_t>(*min_boxed_n) <= B0 / cfg.min_k)
       << "ChooseL0Tile: L0b capacity " << B0 << " elements is too small to fit the minimum tile ("
       << cfg.min_k << " x " << cfg.min_n << ")";
-  const auto min_c_elements = L0cPhysicalElements(cfg.min_m, cfg.min_n, cfg.l0c_align_m);
-  CHECK(min_c_elements && C0_base >= static_cast<int64_t>(*min_c_elements))
+  const auto min_c_elements = CandidateL0cPhysicalElements(cfg.min_m, cfg.min_n, cfg);
+  CHECK(min_c_elements && *min_c_elements <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
+        C0_base >= static_cast<int64_t>(*min_c_elements))
       << "ChooseL0Tile: L0c capacity " << C0_base << " elements is too small to fit the minimum tile ("
       << cfg.min_m << " x " << cfg.min_n << ")";
 

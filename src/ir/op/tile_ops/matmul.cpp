@@ -71,7 +71,19 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   const ExprPtr& k_dim_lhs = lhs_valid[1];
   const ExprPtr& k_dim_rhs = rhs_valid[0];
 
-  // Try to verify K dimensions match if they are constant
+  // Physical boxes must remain compatible even when their logical valid
+  // windows are narrower. Downstream extraction and L0 tiling index the
+  // physical K extent directly.
+  auto physical_k_lhs_const = As<ConstInt>(lhs_shape[1]);
+  auto physical_k_rhs_const = As<ConstInt>(rhs_shape[0]);
+  if (physical_k_lhs_const && physical_k_rhs_const) {
+    CHECK(physical_k_lhs_const->value_ == physical_k_rhs_const->value_)
+        << "The operator " << op_name
+        << " requires matching physical inner dimensions, but got lhs K=" << physical_k_lhs_const->value_
+        << " and rhs K=" << physical_k_rhs_const->value_;
+  }
+
+  // The logical computation windows must match as well.
   auto k_lhs_const = As<ConstInt>(k_dim_lhs);
   auto k_rhs_const = As<ConstInt>(k_dim_rhs);
 
@@ -146,7 +158,35 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   const ExprPtr& m_dim_acc = acc_valid[0];
   const ExprPtr& n_dim_acc = acc_valid[1];
 
-  // Verify dimensions match
+  // The aliased Acc result, lhs, and rhs must agree in physical M/N/K. Valid
+  // windows are checked separately below and may be narrower than these boxes.
+  auto physical_m_acc_const = As<ConstInt>(acc_shape[0]);
+  auto physical_m_lhs_const = As<ConstInt>(lhs_shape[0]);
+  auto physical_n_acc_const = As<ConstInt>(acc_shape[1]);
+  auto physical_n_rhs_const = As<ConstInt>(rhs_shape[1]);
+  auto physical_k_lhs_const = As<ConstInt>(lhs_shape[1]);
+  auto physical_k_rhs_const = As<ConstInt>(rhs_shape[0]);
+
+  if (physical_m_acc_const && physical_m_lhs_const) {
+    CHECK(physical_m_acc_const->value_ == physical_m_lhs_const->value_)
+        << "The operator " << op_name
+        << " requires matching physical M dimensions, but got acc M=" << physical_m_acc_const->value_
+        << " and lhs M=" << physical_m_lhs_const->value_;
+  }
+  if (physical_n_acc_const && physical_n_rhs_const) {
+    CHECK(physical_n_acc_const->value_ == physical_n_rhs_const->value_)
+        << "The operator " << op_name
+        << " requires matching physical N dimensions, but got acc N=" << physical_n_acc_const->value_
+        << " and rhs N=" << physical_n_rhs_const->value_;
+  }
+  if (physical_k_lhs_const && physical_k_rhs_const) {
+    CHECK(physical_k_lhs_const->value_ == physical_k_rhs_const->value_)
+        << "The operator " << op_name
+        << " requires matching physical K dimensions, but got lhs K=" << physical_k_lhs_const->value_
+        << " and rhs K=" << physical_k_rhs_const->value_;
+  }
+
+  // Verify logical valid dimensions match.
   auto m_acc_const = As<ConstInt>(m_dim_acc);
   auto m_lhs_const = As<ConstInt>(lhs_valid[0]);
   auto n_acc_const = As<ConstInt>(n_dim_acc);

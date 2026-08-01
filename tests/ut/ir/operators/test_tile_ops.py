@@ -2071,6 +2071,64 @@ class TestTileMatMulOps:
         assert _const_values(matmul_acc_type.shape) == [16, 32]
         assert _valid_of(matmul_acc_type) == [16, 16]
 
+    def test_matmul_rejects_mismatched_physical_k_with_matching_valid_k(self):
+        """Logical K agreement does not make incompatible physical boxes legal."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(dims(16, 32), DataType.INT8, tile_view=ir.TileView(valid_shape=dims(16, 16))),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(dims(16, 32), DataType.INT8, tile_view=ir.TileView(valid_shape=dims(16, 16))),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="matching physical inner dimensions"):
+            tile.matmul(lhs, rhs)
+
+    @pytest.mark.parametrize(
+        ("acc_shape", "lhs_shape", "rhs_shape", "message"),
+        [
+            ((32, 32), (16, 16), (16, 32), "physical M"),
+            ((16, 64), (16, 16), (16, 32), "physical N"),
+            ((16, 32), (16, 32), (16, 32), "physical K"),
+        ],
+    )
+    def test_matmul_acc_rejects_mismatched_physical_boxes_with_matching_valid_shape(
+        self, acc_shape, lhs_shape, rhs_shape, message
+    ):
+        """All three physical dimensions remain part of the matmul_acc contract."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        valid_shape = dims(16, 16)
+        acc = ir.Var(
+            "acc",
+            ir.TileType(dims(*acc_shape), DataType.INT32, tile_view=ir.TileView(valid_shape=valid_shape)),
+            span,
+        )
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(dims(*lhs_shape), DataType.INT8, tile_view=ir.TileView(valid_shape=valid_shape)),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(dims(*rhs_shape), DataType.INT8, tile_view=ir.TileView(valid_shape=valid_shape)),
+            span,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            tile.matmul_acc(acc, lhs, rhs)
+
     def test_tile_matmul(self):
         """Test tile.matmul operator - matrix multiplication."""
 

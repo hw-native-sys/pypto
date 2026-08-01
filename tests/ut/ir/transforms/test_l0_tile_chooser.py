@@ -45,6 +45,7 @@ def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConf
     cfg.min_m = cfg.min_n = cfg.min_k = 16
     cfg.align_m = cfg.align_n = cfg.align_k = 16
     cfg.l0c_align_m = 16
+    cfg.box_align_m = cfg.box_align_n = 1
     # Realizable-mask gates default OFF (output-stationary, dbC=1) — the
     # algorithm the pass realizes today. Tests open a gate to exercise an axis.
     cfg.allow_a_stationary = False
@@ -65,8 +66,10 @@ def _capacities_ok(
     a0 = cfg.l0a_bytes // (cfg.bytes_a * (2 if dba else 1))
     b0 = cfg.l0b_bytes // (cfg.bytes_b * (2 if dbb else 1))
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
-    physical_m = _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m
-    return m * k <= a0 and k * n <= b0 and physical_m * n <= c0
+    boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
+    boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
+    physical_m = _cdiv(boxed_m, cfg.l0c_align_m) * cfg.l0c_align_m
+    return boxed_m * k <= a0 and k * boxed_n <= b0 and physical_m * boxed_n <= c0
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +267,44 @@ class TestL0TilingEdgeCases:
         assert physical.n < 1152
         assert _capacities_ok(physical.m, physical.n, physical.k, cfg)
 
+    def test_boxed_output_footprint_is_charged_before_candidate_selection(self):
+        """The canonical split-K rewrite boxes an INT8 Right panel's logical
+        N=80 window to 96 columns. The formerly selected (336,80,96) tile is
+        135168 bytes after that padding and must not pass a 128 KiB L0C gate."""
+        cfg = _default_config(M=656, N=80, K=768)
+        cfg.bytes_a = cfg.bytes_b = 1
+        cfg.bytes_c = 4
+        cfg.l0c_align_m = 32
+        cfg.box_align_m = 16
+        cfg.box_align_n = 32
+        cfg.allow_k_boundary = True
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert (result.m, result.n, result.k) != (336, 80, 96)
+        assert _capacities_ok(result.m, result.n, result.k, cfg)
+
+    @pytest.mark.parametrize(
+        ("limited_buffer", "box_field"), [("l0a_bytes", "box_align_m"), ("l0b_bytes", "box_align_n")]
+    )
+    def test_boxed_operand_footprint_limits_k(self, limited_buffer, box_field):
+        """Mat boxing participates in operand legality as well as L0C.
+
+        A logical 16x64 INT8 panel exactly fits a 1024-element double-buffered
+        operand budget. Boxing its output axis to 32 makes full K illegal and
+        forces k=32, for either L0A or L0B.
+        """
+        cfg = _default_config(M=16, N=16, K=64)
+        cfg.bytes_a = cfg.bytes_b = 1
+        cfg.allow_k_boundary = True
+        setattr(cfg, limited_buffer, 2048)
+        setattr(cfg, box_field, 32)
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert (result.m, result.n, result.k) == (16, 16, 32)
+        assert _capacities_ok(result.m, result.n, result.k, cfg)
+
 
 # ---------------------------------------------------------------------------
 # Capacity / alignment invariants
@@ -420,7 +461,9 @@ def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
     A non-divisor k (the K-peel) is admitted only when K is itself align_k-aligned
     (peel_ok); a non-16-aligned K has no legal k here and is rejected upstream.
     """
-    cap = min(a0 // m, b0 // n)  # max k fitting L0a and L0b
+    boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
+    boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
+    cap = min(a0 // boxed_m, b0 // boxed_n)  # max k fitting boxed L0a and L0b
     k_problem = max(_cdiv(cfg.K, cfg.align_k) * cfg.align_k, cfg.min_k) if cfg.allow_padding else cfg.K
     k_hi = (min(cap, k_problem) // cfg.align_k) * cfg.align_k
     peel_ok = cfg.allow_k_boundary and cfg.K % cfg.align_k == 0
@@ -442,12 +485,17 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_2d: bool, require_full_k:
     c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
     best = None
     m = cfg.min_m
-    while m <= cfg.M and _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m * cfg.min_n <= c0:
+    min_boxed_n = _cdiv(cfg.min_n, cfg.box_align_n) * cfg.box_align_n
+    while m <= cfg.M:
+        boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
+        physical_m = _cdiv(boxed_m, cfg.l0c_align_m) * cfg.l0c_align_m
+        if physical_m * min_boxed_n > c0:
+            break
         if not (require_2d and _cdiv(cfg.M, m) < 2):
-            physical_m = _cdiv(m, cfg.l0c_align_m) * cfg.l0c_align_m
             n = cfg.min_n
             while n <= min(cfg.N, c0 // physical_m):
-                if not (require_2d and _cdiv(cfg.N, n) < 2):
+                boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
+                if physical_m * boxed_n <= c0 and not (require_2d and _cdiv(cfg.N, n) < 2):
                     for k in _legal_ks(m, n, cfg, a0, b0):
                         if require_full_k and k != cfg.K:
                             continue
@@ -482,8 +530,10 @@ def _brute_optimum(cfg) -> tuple:
             if stat == _OS and not dbc:
                 continue  # baseline, already scored
             c0 = cfg.l0c_bytes // (cfg.bytes_c * (2 if dbc else 1))
-            min_physical_m = _cdiv(cfg.min_m, cfg.l0c_align_m) * cfg.l0c_align_m
-            if c0 < min_physical_m * cfg.min_n:
+            min_boxed_m = _cdiv(cfg.min_m, cfg.box_align_m) * cfg.box_align_m
+            min_boxed_n = _cdiv(cfg.min_n, cfg.box_align_n) * cfg.box_align_n
+            min_physical_m = _cdiv(min_boxed_m, cfg.l0c_align_m) * cfg.l0c_align_m
+            if c0 < min_physical_m * min_boxed_n:
                 continue
             cand = _enumerate_best(cfg, stat, dbc, require_2d=dbc, require_full_k=(stat != _OS or dbc))
             if cand is not None and cand[0][0] < best_key[0]:  # strictly lower wall

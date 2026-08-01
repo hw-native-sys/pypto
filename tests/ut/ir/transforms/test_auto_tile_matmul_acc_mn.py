@@ -17,6 +17,8 @@ from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
 
+_TILE_STORE_OP = ir.get_op("tile.store").name
+
 M = 16
 N = 1152
 K_TOTAL = 1024
@@ -27,6 +29,19 @@ WIDE_M = 272
 WIDE_N = 144
 WIDE_K_TOTAL = 256
 WIDE_K_TILE = 128
+
+# Keep the same output boundary while making each source panel large enough for
+# AutoTile to apply its ordinary inner-K rewrite after the enclosing-loop fold.
+COMPOSE_K_TOTAL = 768
+COMPOSE_K_TILE = 384
+
+# Full-pipeline counterpart to the reviewer's (656,80,768) chooser case. The
+# old logical candidate (576,48,32) boxes to physical Acc [576,64] = 144 KiB,
+# while these smaller source panels also fit together in the 512 KiB Mat arena.
+BOX_CAP_M = 576
+BOX_CAP_N = 48
+BOX_CAP_K_TOTAL = 256
+BOX_CAP_K_TILE = 128
 
 
 @pl.jit
@@ -72,6 +87,68 @@ def canonical_split_k_mn(
     return c
 
 
+@pl.jit
+def canonical_split_k_n_boundary_retiles_k(
+    a: pl.Tensor[[WIDE_M, COMPOSE_K_TOTAL], pl.INT8],
+    b: pl.Tensor[[COMPOSE_K_TOTAL, WIDE_N], pl.INT8],
+    c: pl.Out[pl.Tensor[[WIDE_M, WIDE_N], pl.INT32]],
+):
+    """Compose an N-tail padded output with the ordinary inner-K rewrite."""
+    for _ in pl.spmd(1):
+        acc = pl.create_tensor([WIDE_M, WIDE_N], dtype=pl.INT32)
+        for kb in pl.pipeline(0, COMPOSE_K_TOTAL // COMPOSE_K_TILE, stage=2):
+            k0 = kb * COMPOSE_K_TILE
+            at = a[0:WIDE_M, k0 : k0 + COMPOSE_K_TILE]
+            bt = b[k0 : k0 + COMPOSE_K_TILE, 0:WIDE_N]
+            if k0 == 0:
+                acc = pl.matmul(at, bt, out_dtype=pl.INT32)
+            else:
+                acc = pl.matmul_acc(acc, at, bt)
+        c[0:WIDE_M, 0:WIDE_N] = acc
+    return c
+
+
+@pl.program
+class BoxedCapacityBefore:
+    """Tile-level canonical input for a realizable boxed-capacity counterexample.
+
+    The reviewer's exact (656,80,768) panels exceed the 910B Mat arena when
+    co-resident. This equivalent shape exercises the same post-selection N-box
+    overflow while keeping unrelated operand capacity out of the regression.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[BOX_CAP_M, BOX_CAP_K_TOTAL], pl.INT8],
+        b: pl.Tensor[[BOX_CAP_K_TOTAL, BOX_CAP_N], pl.INT8],
+        c: pl.Out[pl.Tensor[[BOX_CAP_M, BOX_CAP_N], pl.INT32]],
+    ) -> pl.Tensor[[BOX_CAP_M, BOX_CAP_N], pl.INT32]:
+        acc_init: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.tile.create(
+            [BOX_CAP_M, BOX_CAP_N], dtype=pl.INT32, target_memory=pl.Mem.Acc
+        )
+        for k0, (acc_iter,) in pl.pipeline(
+            0, BOX_CAP_K_TOTAL, BOX_CAP_K_TILE, init_values=(acc_init,), stage=2
+        ):
+            at: pl.Tile[[BOX_CAP_M, BOX_CAP_K_TILE], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                a, [0, k0], [BOX_CAP_M, BOX_CAP_K_TILE], target_memory=pl.Mem.Mat
+            )
+            bt: pl.Tile[[BOX_CAP_K_TILE, BOX_CAP_N], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                b, [k0, 0], [BOX_CAP_K_TILE, BOX_CAP_N], target_memory=pl.Mem.Mat
+            )
+            if k0 == 0:
+                acc_first: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.tile.matmul(at, bt)
+                acc_phi: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.yield_(acc_first)
+            else:
+                acc_next: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_iter, at, bt
+                )
+                acc_phi: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.yield_(acc_next)
+            acc: pl.Tile[[BOX_CAP_M, BOX_CAP_N], pl.INT32, pl.Mem.Acc] = pl.yield_(acc_phi)
+        c = pl.tile.store(acc, [0, 0], c)
+        return c
+
+
 def _jit_program(kernel):
     """Specialize a fully annotated JIT function without running passes."""
     _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = kernel._bind_args_from_signature({})
@@ -109,7 +186,7 @@ class _StampStoreAttrs(ir.IRMutator):
     def visit_call(self, op: ir.Call) -> ir.Expr:
         expr = super().visit_call(op)
         call = expr if isinstance(expr, ir.Call) else op
-        if call.op.name != "tile.store":
+        if call.op.name != _TILE_STORE_OP:
             return expr
         attrs = dict(call.attrs)
         attrs["test_store_marker"] = 2232
@@ -124,7 +201,7 @@ class _StoreAttrCollector(ir.IRVisitor):
         self.attrs: list[dict] = []
 
     def visit_call(self, op: ir.Call) -> None:
-        if op.op.name == "tile.store":
+        if op.op.name == _TILE_STORE_OP:
             self.attrs.append(dict(op.attrs))
         super().visit_call(op)
 
@@ -185,6 +262,126 @@ def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
     assert "pl.tile.store(acc__rv_v2_mn3, [144, 128]" in printed
 
 
+def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
+    """A box-padded 16-column output tail remains logically 16 columns when
+    the post-fold matmul is K-tiled again. In particular, the inner loop's Acc
+    initializer must not widen its valid N extent back to the physical 32."""
+    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        after = passes.auto_tile_matmul_l0()(before)
+
+    printed = ir.python_print(after)
+    assert printed.count("in pl.pipeline(2, stage=2") == 4
+    assert printed.count("pl.tile.store(") == 4
+    assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
+    assert "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16])" in printed
+    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.tile.set_validshape(" in printed
+    assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
+
+
+def test_already_padded_output_localizes_valid_shape_across_mn_grid():
+    """Explicit M/N grid offsets intersect, rather than reset, valid_shape.
+
+    The physical output is 288 columns but only 272 are logical. AutoTile must
+    therefore keep the final physical 32-column panel at valid N=16 even though
+    that panel is emitted by BuildSplitKGrid with a nonzero output offset.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[512, 384], pl.INT8],
+            rhs: pl.Tensor[[384, 288], pl.INT8],
+            out: pl.Out[pl.Tensor[[512, 288], pl.INT32]],
+        ) -> pl.Tensor[[512, 288], pl.INT32]:
+            lhs_mat: pl.Tile[[512, 384], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                lhs, [0, 0], [512, 384], target_memory=pl.Mem.Mat
+            )
+            rhs_mat: pl.Tile[
+                [384, 288],
+                pl.INT8,
+                pl.Mem.Mat,
+                pl.TileView(valid_shape=[384, 272]),
+            ] = pl.tile.load(
+                rhs,
+                [0, 0],
+                [384, 288],
+                valid_shapes=[384, 272],
+                target_memory=pl.Mem.Mat,
+            )
+            product: pl.Tile[
+                [512, 288],
+                pl.INT32,
+                pl.Mem.Acc,
+                pl.TileView(valid_shape=[512, 272]),
+            ] = pl.tile.matmul(lhs_mat, rhs_mat)
+            out = pl.tile.store(product, [0, 0], out)
+            return out
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+    assert printed.count("pl.tile.store(") >= 4
+    assert "pl.TileView(valid_shape=[" in printed
+    assert re.search(
+        r"pl\.Tile\[\[\d+, 32\], pl\.INT32, pl\.Mem\.Acc, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
+        printed,
+    ), printed
+    assert re.search(
+        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
+        printed,
+    ), printed
+
+
+def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
+    """The sub-grid intersection remains symbolic when valid N is dynamic."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[512, 384], pl.INT8],
+            rhs: pl.Tensor[[384, 288], pl.INT8],
+            out: pl.Out[pl.Tensor[[512, 288], pl.INT32]],
+            valid_n: pl.Scalar[pl.UINT64],
+        ) -> pl.Tensor[[512, 288], pl.INT32]:
+            lhs_mat: pl.Tile[[512, 384], pl.INT8, pl.Mem.Mat] = pl.tile.load(
+                lhs, [0, 0], [512, 384], target_memory=pl.Mem.Mat
+            )
+            rhs_mat: pl.Tile[
+                [384, 288],
+                pl.INT8,
+                pl.Mem.Mat,
+                pl.TileView(valid_shape=[384, valid_n]),
+            ] = pl.tile.load(
+                rhs,
+                [0, 0],
+                [384, 288],
+                valid_shapes=[384, valid_n],
+                target_memory=pl.Mem.Mat,
+            )
+            product: pl.Tile[
+                [512, 288],
+                pl.INT32,
+                pl.Mem.Acc,
+                pl.TileView(valid_shape=[512, valid_n]),
+            ] = pl.tile.matmul(lhs_mat, rhs_mat)
+            out = pl.tile.store(product, [0, 0], out)
+            return out
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+    assert "pl.max(valid_n, pl.cast(256, pl.UINT64)) - pl.cast(256, pl.UINT64)" in printed
+    assert "valid_n - pl.cast(256, pl.UINT64)" not in printed
+
+
 def test_canonical_split_k_preserves_store_attrs_on_every_output_tile():
     """The one source store becomes one store per output tile without losing
     compiler metadata carried in ``Call.attrs``."""
@@ -211,15 +408,40 @@ def test_issue_2232_full_default_pipeline_allocates():
         assert result is not None
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_canonical_split_k_chooser_accounts_for_full_window_boxing(planner):
+    """The pre-phase must not emit an Acc that overflows only after N boxing.
+
+    Running the complete Default pipeline is the allocation regression: the
+    PyPTO planner rejects an L0C arena above 128 KiB, so this test also proves
+    the corrected candidate survives all downstream physical accounting. The
+    chooser unit test separately pins the reviewer's exact (656,80,768) case.
+    """
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _lower_to_auto_tile_input(BoxedCapacityBefore)
+    after_auto_tile = passes.auto_tile_matmul_l0()(before)
+    printed = ir.python_print(after_auto_tile)
+
+    assert "pl.Tile[[576, 64], pl.INT32, pl.Mem.Acc" not in printed
+    assert "pl.Tile[[576, 48], pl.INT32, pl.Mem.Acc" not in printed
+    with passes.PassContext([], memory_planner=planner):
+        assert (
+            PassManager.get_strategy(OptimizationStrategy.Default).run_passes(BoxedCapacityBefore) is not None
+        )
+
+
 def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
-    """Generated PTO allocates N=32 while computing/storing only valid N=16."""
+    """After secondary K tiling, PTO still allocates N=32 with valid N=16."""
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
     from pypto.pypto_core import codegen  # noqa: PLC0415
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-        _jit_program(canonical_split_k_mn)
+        _jit_program(canonical_split_k_n_boundary_retiles_k)
     )
     incore = [func for func in optimized.functions.values() if func.func_type == pl.FunctionType.AIC]
     assert len(incore) == 1
@@ -227,7 +449,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     pto = codegen.PTOCodegen().generate(single)
 
     assert re.search(
-        r"valid_col = %c16_index : !pto\.tile_buf<loc=mat, dtype=i8, rows=128, cols=32,",
+        r"valid_col = %c16_index : !pto\.tile_buf<loc=mat, dtype=i8, rows=384, cols=32,",
         pto,
     ), pto
     assert re.search(
@@ -235,6 +457,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert "!pto.tile_buf<loc=mat, dtype=i8, rows=128, cols=16," not in pto
+    assert "pto.tmov" not in pto, f"accumulator chains must coalesce without tile.move:\n{pto}"
 
 
 if __name__ == "__main__":
