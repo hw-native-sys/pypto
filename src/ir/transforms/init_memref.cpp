@@ -105,6 +105,53 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
 
+/// Byte envelope touched by a static packed slice, relative to its first
+/// element. This is deliberately distinct from the physical allocation size:
+/// L0C row padding belongs to the root allocation and must not be applied again
+/// to a view beginning part-way through that allocation.
+std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const ShapedTypePtr& parent,
+                                                 const ShapedTypePtr& view) {
+  if (!call || (!IsOp(call, "tensor.slice") && !IsOp(call, "tile.slice"))) return std::nullopt;
+  if (!parent || !view || call->args_.size() < 2) return std::nullopt;
+  // Use the requested pre-drop shape rather than the result rank so
+  // tile.slice(..., drop_dims=...) keeps the parent strides of dimensions that
+  // disappear from the result type.
+  auto requested_shape = As<MakeTuple>(call->args_[1]);
+  if (!requested_shape || parent->shape_.size() != requested_shape->elements_.size()) {
+    return std::nullopt;
+  }
+
+  uint64_t max_linear_offset = 0;
+  uint64_t stride = 1;
+  for (size_t rev = 0; rev < parent->shape_.size(); ++rev) {
+    const size_t i = parent->shape_.size() - 1 - rev;
+    auto parent_dim = As<ConstInt>(parent->shape_[i]);
+    auto view_dim = As<ConstInt>(requested_shape->elements_[i]);
+    if (!parent_dim || !view_dim || parent_dim->value_ <= 0 || view_dim->value_ <= 0 ||
+        view_dim->value_ > parent_dim->value_) {
+      return std::nullopt;
+    }
+
+    const uint64_t parent_extent = static_cast<uint64_t>(parent_dim->value_);
+    const uint64_t view_extent = static_cast<uint64_t>(view_dim->value_);
+    if (view_extent - 1 > std::numeric_limits<uint64_t>::max() / stride) return std::nullopt;
+    const uint64_t contribution = (view_extent - 1) * stride;
+    if (max_linear_offset > std::numeric_limits<uint64_t>::max() - contribution) return std::nullopt;
+    max_linear_offset += contribution;
+    if (rev + 1 < parent->shape_.size()) {
+      if (stride > std::numeric_limits<uint64_t>::max() / parent_extent) return std::nullopt;
+      stride *= parent_extent;
+    }
+  }
+
+  const uint64_t element_bytes = view->dtype_.GetByte();
+  if (element_bytes == 0 || max_linear_offset == std::numeric_limits<uint64_t>::max() ||
+      max_linear_offset + 1 > std::numeric_limits<uint64_t>::max() / element_bytes) {
+    return std::nullopt;
+  }
+  return (max_linear_offset + 1) * element_bytes;
+}
+
 // ============================================================================
 // Author-declared allocations (`pl.Tile[..., pl.MemRef("name"), ...]`)
 // ============================================================================
@@ -436,14 +483,18 @@ class InitMemRefMutator : public IRMutator {
 
     auto source_ms = ExtractMemorySpaceFromType(source->GetType());
 
-    // Compute the view's conservative physical range from the output type.
-    // Acc views must retain the backend's padded M-row footprint; otherwise
-    // alias/capacity analysis would see a smaller range than the hardware uses.
+    // Keep ordinary aliases/reshapes at the parent's physical range. A slice
+    // narrows that range to the packed parent-layout envelope it can touch.
+    // Crucially, this is a VIEW span, not a fresh allocation footprint: an Acc
+    // slice beginning at row 16 of a 32-row INT32 allocation must end at the
+    // root boundary, not acquire another 32 rows of L0C padding.
     uint64_t view_size = parent_memref->size_;  // default: same size as parent
-    if (auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType())) {
-      const MemorySpace space = source_ms.value_or(MemorySpace::DDR);
-      auto physical_size = utils::StaticPhysicalAllocationBytes(out_shaped, space, handler_);
-      if (physical_size) view_size = *physical_size;
+    if (auto call = As<Call>(new_value)) {
+      auto parent_shaped = std::dynamic_pointer_cast<const ShapedType>(source->GetType());
+      auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
+      if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
+        view_size = *slice_span;
+      }
     }
 
     // For pure aliases (no offset change, same size), share the SAME MemRef shared_ptr

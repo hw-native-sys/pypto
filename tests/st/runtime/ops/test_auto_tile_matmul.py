@@ -20,7 +20,8 @@ Validates on device the cases from examples/kernels/11_auto_tile_matmul.py:
     ``pto.tinsert``, so the bf16 downcast stays on the cube. full-K (K=64) and split-K (K=512).
   - **Loop-carried matmul_acc M/N tiling** -- issue #2232's INT8→INT32 ``[16, 1152]``
     split-K reduction. Its physical 32-row accumulator is 144 KiB on Ascend910B, so AutoTile
-    must place an output grid outside the source K loop rather than materialize the full Acc.
+    must place an output grid outside the source K loop rather than materialize the full Acc;
+    a second non-issue shape exercises simultaneous M and N boundary tiles.
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot
 give (actual execution). Ascend910B (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
@@ -54,6 +55,11 @@ _ACC_K = 1024
 _ACC_K_TILE = 128
 _ACC_N_TOTAL = _ACC_N * 8
 
+_BOUNDARY_M = 272
+_BOUNDARY_N = 144
+_BOUNDARY_K = 256
+_BOUNDARY_K_TILE = 128
+
 
 @pl.jit
 def matmul_acc_mn_issue_2232(
@@ -74,6 +80,27 @@ def matmul_acc_mn_issue_2232(
             else:
                 acc = pl.matmul_acc(acc, at, bt)
         c[0:_ACC_M, n0 : n0 + _ACC_N] = acc
+    return c
+
+
+@pl.jit
+def matmul_acc_mn_boundaries(
+    a: pl.Tensor[[_BOUNDARY_M, _BOUNDARY_K], pl.INT8],
+    b: pl.Tensor[[_BOUNDARY_K, _BOUNDARY_N], pl.INT8],
+    c: pl.Out[pl.Tensor[[_BOUNDARY_M, _BOUNDARY_N], pl.INT32]],
+):
+    """General split-K case requiring both M and N boundary output tiles."""
+    for _ in pl.spmd(1):
+        acc = pl.create_tensor([_BOUNDARY_M, _BOUNDARY_N], dtype=pl.INT32)
+        for kb in pl.pipeline(0, _BOUNDARY_K // _BOUNDARY_K_TILE, stage=2):
+            k0 = kb * _BOUNDARY_K_TILE
+            at = a[0:_BOUNDARY_M, k0 : k0 + _BOUNDARY_K_TILE]
+            bt = b[k0 : k0 + _BOUNDARY_K_TILE, 0:_BOUNDARY_N]
+            if k0 == 0:
+                acc = pl.matmul(at, bt, out_dtype=pl.INT32)
+            else:
+                acc = pl.matmul_acc(acc, at, bt)
+        c[0:_BOUNDARY_M, 0:_BOUNDARY_N] = acc
     return c
 
 
@@ -125,6 +152,23 @@ class TestAutoTileMatmulL0:
         expected = a.int() @ b.int()
         assert torch.equal(out, expected), (
             f"matmul_acc M/N tiling mismatch: max abs diff = {(out - expected).abs().max().item()}"
+        )
+
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_loop_carried_matmul_acc_both_mn_boundaries(self, test_config, planner):
+        """General #2232 rewrite: exact INT8→INT32 split-K with partial tiles
+        on both output axes, under both memory planners."""
+        matmul_acc_mn_boundaries._cache.clear()
+        torch.manual_seed(1)
+        a = torch.randint(-3, 4, (_BOUNDARY_M, _BOUNDARY_K), dtype=torch.int8)
+        b = torch.randint(-3, 4, (_BOUNDARY_K, _BOUNDARY_N), dtype=torch.int8)
+        out = torch.zeros((_BOUNDARY_M, _BOUNDARY_N), dtype=torch.int32)
+
+        matmul_acc_mn_boundaries(a, b, out, config=_cfg(test_config, planner))
+
+        expected = a.int() @ b.int()
+        assert torch.equal(out, expected), (
+            f"matmul_acc both-boundary tiling mismatch: max abs diff = {(out - expected).abs().max().item()}"
         )
 
     @pytest.mark.parametrize("planner", _PLANNERS)

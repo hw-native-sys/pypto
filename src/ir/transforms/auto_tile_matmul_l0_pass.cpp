@@ -900,12 +900,14 @@ class SubtilePlacer {
 class DirectGmPlacer : public SubtilePlacer {
  public:
   DirectGmPlacer(ExprPtr base_r, ExprPtr base_c, VarPtr out_in,
-                 std::vector<std::pair<std::string, std::any>> store_kwargs, Span span)
+                 std::vector<std::pair<std::string, std::any>> store_kwargs,
+                 std::vector<std::pair<std::string, std::any>> store_attrs, Span span)
       : base_r_(std::move(base_r)),
         base_c_(std::move(base_c)),
         out_in_(std::move(out_in)),
         out_base_(out_in_->name_hint_),
         kwargs_(std::move(store_kwargs)),
+        attrs_(std::move(store_attrs)),
         sp_(std::move(span)) {}
 
   [[nodiscard]] VarPtr Init(std::vector<StmtPtr>& /*stmts*/) override { return out_in_; }
@@ -915,7 +917,10 @@ class DirectGmPlacer : public SubtilePlacer {
     auto& reg = OpRegistry::GetInstance();
     auto offs = std::make_shared<MakeTuple>(
         std::vector<ExprPtr>{AddOffset(base_r_, row_off, sp_), AddOffset(base_c_, col_off, sp_)}, sp_);
-    auto scall = reg.Create("tile.store", {sub, offs, chain_in}, kwargs_, sp_);
+    auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, kwargs_, sp_);
+    auto scall = attrs_.empty() ? deduced
+                                : std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_,
+                                                         attrs_, deduced->GetType(), deduced->span_);
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
     return sv;
@@ -926,6 +931,7 @@ class DirectGmPlacer : public SubtilePlacer {
   VarPtr out_in_;
   std::string out_base_;
   std::vector<std::pair<std::string, std::any>> kwargs_;
+  std::vector<std::pair<std::string, std::any>> attrs_;
   Span sp_;
 };
 
@@ -1326,11 +1332,14 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   INTERNAL_CHECK_SPAN(offsets && out_in, match.store->span_)
       << "Internal error: matched canonical split-K store became invalid";
   DirectGmPlacer placer(offsets->elements_[0], offsets->elements_[1], out_in, store_call->kwargs_,
-                        match.store->span_);
+                        store_call->attrs_, match.store->span_);
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
   const int64_t num_m = (match.M + tiling->m - 1) / tiling->m;
   const int64_t num_n = (match.N + tiling->n - 1) / tiling->n;
+  // Output-sensitive expansion: each source statement is cloned once per
+  // required output tile, matching BuildSplitKGrid. Work is O(input IR plus
+  // emitted IR); there is no repeated scan of the surrounding program.
   int step = 0;
   for (int64_t nj = 0; nj < num_n; ++nj) {
     const int64_t ni = nj * tiling->n;
@@ -1699,7 +1708,8 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
       return skip(
           "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
     }
-    DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_, sp);
+    DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_,
+                          store_call->attrs_, sp);
     auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
     return MNFold{std::move(stmts), last_out, store_stmt->var_, store_stmt};
   }

@@ -78,9 +78,11 @@ inline std::optional<uint64_t> StaticPhysicalAllocationBytes(const ShapedTypePtr
     // not-yet-lowered rank; all supported cube accumulators are at least 2D.
     if (extents.size() < 2) return std::nullopt;
     // Bare pass tests historically support allocation without configuring a
-    // backend. Both current backends use at least the 16-row cube fractal, so
-    // preserve that conservative architecture-neutral fallback.
-    const int64_t alignment = handler ? handler->GetL0cMAlignment(type->dtype_) : 16;
+    // backend. Use the strictest alignment among the current backends rather
+    // than guessing low: Ascend910B INT32 accumulators occupy 32 physical M
+    // rows, while every other currently supported combination uses 16.
+    const int64_t fallback_alignment = type->dtype_ == DataType::INT32 ? 32 : 16;
+    const int64_t alignment = handler ? handler->GetL0cMAlignment(type->dtype_) : fallback_alignment;
     const uint64_t m = extents[extents.size() - 2];
     const uint64_t n = extents.back();
     if (m > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||

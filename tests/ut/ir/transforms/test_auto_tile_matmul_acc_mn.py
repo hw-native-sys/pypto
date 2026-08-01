@@ -101,6 +101,32 @@ def _lower_to_auto_tile_input(program):
     return program
 
 
+class _StampStoreAttrs(ir.IRMutator):
+    """Attach opaque compiler metadata to source stores before AutoTile."""
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        expr = super().visit_call(op)
+        call = expr if isinstance(expr, ir.Call) else op
+        if call.op.name != "tile.store":
+            return expr
+        attrs = dict(call.attrs)
+        attrs["test_store_marker"] = 2232
+        return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
+
+
+class _StoreAttrCollector(ir.IRVisitor):
+    """Collect attrs from every tile.store in a rewritten program."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attrs: list[dict] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        if op.op.name == "tile.store":
+            self.attrs.append(dict(op.attrs))
+        super().visit_call(op)
+
+
 def test_issue_2232_canonical_input_shape():
     """Pin the real loop/if/matmul_acc shape seen by AutoTileMatmulL0."""
     before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro))
@@ -148,6 +174,19 @@ def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
     assert output_stores == source_k_loops
     assert "[144, 0]" in printed  # M boundary tile
     assert "[0, 128]" in printed  # N boundary tile
+
+
+def test_canonical_split_k_preserves_store_attrs_on_every_output_tile():
+    """The one source store becomes one store per output tile without losing
+    compiler metadata carried in ``Call.attrs``."""
+    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn))
+    stamped = _StampStoreAttrs().visit_program(before)
+    after = passes.auto_tile_matmul_l0()(stamped)
+
+    collector = _StoreAttrCollector()
+    collector.visit_program(after)
+    assert len(collector.attrs) >= 4
+    assert all(attrs.get("test_store_marker") == 2232 for attrs in collector.attrs)
 
 
 def test_issue_2232_full_default_pipeline_allocates():
