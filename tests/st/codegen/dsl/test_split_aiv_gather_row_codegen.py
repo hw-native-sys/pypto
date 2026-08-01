@@ -39,7 +39,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-import pypto  # noqa: E402
 import pypto.language as pl  # noqa: E402
 from pypto.runtime import RunConfig  # noqa: E402
 
@@ -152,8 +151,13 @@ def _default_ring_kv_qk(
 def test_default_ring_depth_reports_the_reserved_bytes():
     """Without pl.cross_core_slot the 8-slot default ring overflows L1, and the
     diagnostic must attribute the bytes and name the knob rather than reporting a
-    bare number the author cannot act on."""
-    with pytest.raises(pypto.Error) as exc:
+    bare number the author cannot act on.
+
+    The reserve-buffer overflow is caught by AllocateMemoryAddresses' in-pass
+    ``CHECK`` (``pypto::ValueError`` -> a builtin ``ValueError``), not by the
+    ``AllocatedMemoryAddr`` verifier — which is why both carry the same note.
+    """
+    with pytest.raises(ValueError) as exc:
         _default_ring_kv_qk.lower(config=RunConfig(platform="a2a3"))
     message = str(exc.value)
     assert "Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes)" in message

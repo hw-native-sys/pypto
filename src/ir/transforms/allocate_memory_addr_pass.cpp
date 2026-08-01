@@ -59,6 +59,53 @@ using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 // ReserveBufferBaseMap / ReservedEndBySpace / ResolveReserveBufferBases now live in the shared
 // reserve_buffer_utils.h so AllocateMemoryAddr and MemoryReuse resolve the reserved region identically.
 
+/// Whether any of `resolution`'s buffers is one of the automatic cross-core pipe
+/// rings, i.e. whether `pl.cross_core_slot(slot_num=N)` can actually move these
+/// bytes. Matched on the name BuildAutomaticPipeSetup mints via
+/// BuildPipeBufferName ("<func>_c2v_slot_buffer" / "<func>_v2c_slot_buffer") — the
+/// prefix is the pre-split kernel's name, so only the suffix is stable here. A
+/// hand-authored `pl.reserve_buffer` must NOT be pointed at that knob: it cannot
+/// shrink a buffer the author sized themselves.
+bool HasCrossCorePipeRing(const ReserveBufferResolution& resolution) {
+  auto ends_with = [](const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+  };
+  for (const auto& [call, base] : resolution.resolved_bases) {
+    if (!call) continue;
+    const auto name = call->GetKwarg<std::string>("name", "");
+    if (ends_with(name, "_c2v_slot_buffer") || ends_with(name, "_v2c_slot_buffer")) return true;
+  }
+  return false;
+}
+
+/// The "N of those bytes are reserved by system.reserve_buffer" clause appended to a
+/// capacity-overflow message, or empty when `space` pays for no reserve buffer.
+///
+/// A reserve_buffer is NOT a MemRef: every tile is allocated *above* it, so it is
+/// counted in the footprint yet is invisible in the per-tile accounting an author can
+/// inspect. On a cube/vector boundary carrying a large tile the automatic pipe ring is
+/// routinely most of the overflow, so name those bytes — and the knob for them, but
+/// only when the buffer really is a pipe ring.
+///
+/// Shared by the in-pass capacity CHECK and the AllocatedMemoryAddr verifier so the two
+/// explain the same overflow identically. Which of them a given compile hits depends on
+/// configuration (the pass CHECK is skipped under memory_planner=PTOAS, which skips the
+/// pass), so the wording must not live in only one of them.
+std::string ReservedBytesNote(const ReserveBufferResolution& resolution, MemorySpace space) {
+  const auto& ends = resolution.reserved_end_by_space;
+  auto it = ends.find(space);
+  if (it == ends.end() || it->second == 0) return "";
+  std::string note = ". " + std::to_string(it->second) +
+                     " of those bytes are reserved by system.reserve_buffer, not by tiles";
+  if (HasCrossCorePipeRing(resolution)) {
+    note +=
+        " — this function's cross-core pipe ring. Lower its depth with "
+        "optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the "
+        "tile that crosses the cube/vector boundary";
+  }
+  return note;
+}
+
 // Mutator to update MemRef addresses in IR (both variable types and alloc statements)
 class MemRefUpdateMutator : public IRMutator {
  public:
@@ -219,8 +266,9 @@ class PinnedAllocCollector : public IRVisitor {
  * their largest member (a multi-slot declaration).
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
-    const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space,
+    const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
     const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes) {
+  const ReservedEndBySpace& reserved_end_by_space = reserve_resolution.reserved_end_by_space;
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
   for (const auto& [memref, memory_space] : memrefs) {
@@ -346,8 +394,9 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     if (backend::BackendConfig::IsConfigured()) {
       const uint64_t limit = backend::GetBackend()->GetMemSize(space);
       const uint64_t used = footprint.HighWater();
-      CHECK(limit == 0 || used <= limit) << MemorySpaceToString(space) << " buffer usage (" << used
-                                         << " bytes) exceeds platform limit (" << limit << " bytes)";
+      CHECK(limit == 0 || used <= limit)
+          << MemorySpaceToString(space) << " buffer usage (" << used << " bytes) exceeds platform limit ("
+          << limit << " bytes)" << ReservedBytesNote(reserve_resolution, space);
     }
   }
 
@@ -409,8 +458,8 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // the only ones that may take a dynamic address (a runtime slot index).
   PinnedAllocCollector pinned_collector;
   pinned_collector.VisitStmt(func->body_);
-  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy,
-                                              pinned_collector.alloc_sizes);
+  auto memref_pairs =
+      AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
@@ -517,25 +566,6 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
   }
 };
 
-/// Whether any of `resolution`'s buffers is one of the automatic cross-core pipe
-/// rings, i.e. whether `pl.cross_core_slot(slot_num=N)` can actually move these
-/// bytes. Matched on the name BuildAutomaticPipeSetup mints via
-/// BuildPipeBufferName ("<func>_c2v_slot_buffer" / "<func>_v2c_slot_buffer") —
-/// the function name prefix is the pre-split kernel's, so only the suffix is
-/// stable here. A hand-authored `pl.reserve_buffer` for anything else must NOT be
-/// pointed at that knob: it cannot shrink a buffer the author sized themselves.
-bool HasCrossCorePipeRing(const ReserveBufferResolution& resolution) {
-  auto ends_with = [](const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-  };
-  for (const auto& [call, base] : resolution.resolved_bases) {
-    if (!call) continue;
-    const auto name = call->GetKwarg<std::string>("name", "");
-    if (ends_with(name, "_c2v_slot_buffer") || ends_with(name, "_v2c_slot_buffer")) return true;
-  }
-  return false;
-}
-
 }  // namespace
 
 class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
@@ -579,22 +609,7 @@ class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
             *reserved = ResolveReserveBufferBases(func, *policy);
           }
         }
-        // A reserve_buffer is NOT a MemRef: every tile is allocated above it, so it is
-        // counted in this high-water mark yet is invisible in the per-tile accounting an
-        // author can inspect. Name those bytes unconditionally — but only point at
-        // pl.cross_core_slot when the buffer really is the automatic pipe ring, since
-        // that knob cannot shrink a buffer the author reserved themselves.
-        const auto& ends = reserved->reserved_end_by_space;
-        if (auto it = ends.find(space); it != ends.end() && it->second > 0) {
-          message += ". " + std::to_string(it->second) +
-                     " of those bytes are reserved by system.reserve_buffer, not by tiles";
-          if (HasCrossCorePipeRing(*reserved)) {
-            message +=
-                " — this function's cross-core pipe ring. Lower its depth with "
-                "optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or "
-                "shrink the tile that crosses the cube/vector boundary";
-          }
-        }
+        message += ReservedBytesNote(*reserved, space);
         diagnostics.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 1, message, func->span_);
       }
     }

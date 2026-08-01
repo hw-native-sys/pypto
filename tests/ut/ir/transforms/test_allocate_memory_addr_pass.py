@@ -552,13 +552,20 @@ def _overflowing_mat_program(buffer_name):
 
 
 def _overflow_message(program):
-    """Run init_mem_ref + allocate_memory_addr under AFTER verification and return
-    the capacity diagnostic the verifier raises."""
+    """Run init_mem_ref + allocate_memory_addr and return the capacity diagnostic.
+
+    A reserve-buffer overflow is caught by AllocateMemoryAddresses' own in-pass
+    ``CHECK`` (it owns the only exact footprint), which raises ``pypto::ValueError``
+    -> a builtin ``ValueError``. That is a different exception type from the
+    ``AllocatedMemoryAddr`` verifier's ``pypto.Error`` used by the tile-only
+    overflow test above — the two checks report the same condition through
+    different mechanisms, so each test asserts the type its own path raises.
+    """
     program = passes.init_mem_ref()(program)
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.allocate_memory_addr())
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
-        with pytest.raises(pypto.Error) as exc:
+        with pytest.raises(ValueError) as exc:
             pipeline.run(program)
     return str(exc.value)
 

@@ -175,7 +175,7 @@ class MyBackend : public Backend {
 
 ## 容量校验
 
-`AllocatedMemoryAddr` 属性校验器按内存空间跟踪高水位（`addr + size`），并与 `Backend::GetMemSize(space)` 比较，超限即报错。
+容量检查存在于两处：`AllocateMemoryAddresses` 自身的 in-pass `CHECK`（它掌握唯一精确的 footprint——会计入已声明分配中未绑定的 slot，且不依赖每个 tile 地址都是常量），以及 `AllocatedMemoryAddr` 属性校验器（按内存空间跟踪高水位 `addr + size`）。两者都与 `Backend::GetMemSize(space)` 比较，且都会输出下面这段说明——具体命中哪一个取决于配置，因此该措辞是共享的（`ReservedBytesNote`），而非只写在其中一处。
 
 由于 `system.reserve_buffer` 预留的是一段前导窗口、其后所有 tile 才依次分配，这些字节会计入高水位，但它们**不是** MemRef——在作者能查看的逐 tile 账目中完全不可见。因此当溢出的空间正是为某个 reserve buffer 付费的那个空间时，诊断会显式归因这些字节：
 

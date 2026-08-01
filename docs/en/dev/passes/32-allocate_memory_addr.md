@@ -175,7 +175,7 @@ When no backend is configured (e.g., in unit tests), the pass falls back to `Def
 
 ## Capacity verification
 
-The `AllocatedMemoryAddr` property verifier tracks the high-water mark (`addr + size`) per memory space and compares it against `Backend::GetMemSize(space)`. Exceeding the limit is an error.
+Capacity is checked in two places: `AllocateMemoryAddresses`' own in-pass `CHECK`, which owns the only exact footprint (it counts a declared allocation's unbound slots and does not need every tile address to be constant), and the `AllocatedMemoryAddr` property verifier, which tracks the high-water mark (`addr + size`) per memory space. Both compare against `Backend::GetMemSize(space)`, and both emit the note below — which of them a compile hits depends on configuration, so the wording is shared (`ReservedBytesNote`) rather than living in one of them.
 
 Because `system.reserve_buffer` reserves a leading window that every tile is then allocated *above*, its bytes are counted in the high-water mark but are **not** a MemRef — they are invisible in the per-tile accounting an author can inspect. When the overflowing space is the one that pays for a reserve buffer, the diagnostic therefore attributes those bytes explicitly:
 
