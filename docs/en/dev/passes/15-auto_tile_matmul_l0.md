@@ -170,7 +170,7 @@ for ko, (c_iter,) in pl.pipeline(0, 512, 32, init_values=(c_t1_init,), stage=2):
 out_t1 = pl.store(c_t1, [256, 0], out_t0)  # store sub-tile to out[256:512, 0:256]
 ```
 
-Boundary sub-tiles (when `m`/`n` do not divide `M`/`N`) use static partial extents `[min(m, M-mi), min(n, N-ni)]` — e.g. a 256×256 FP32 matmul on Ascend910B (chooser picks `m = 192, n = 160`) tiles into sub-tiles of `192×160`, `192×96`, `64×160`, `64×96`.
+Boundary sub-tiles (when `m`/`n` do not divide `M`/`N`) have logical extents `[min(m, M-mi), min(n, N-ni)]` — e.g. a 256×256 FP32 matmul on Ascend910B (chooser picks `m = 192, n = 160`) tiles into logical sub-tiles of `192×160`, `192×96`, `64×160`, `64×96`. For the canonical split-K rewrite, each boundary operand's physical Mat shape is rounded up to the effective boxed-layout granularity while `valid_shape` retains that logical extent. `tile.matmul` / `tile.matmul_acc` propagate the same physical/valid distinction to the loop-carried Acc, and `tile.store` transfers only the valid rectangle at the original logical offset. For example, an INT8 Right tile with a 16-column N tail is represented physically as `[K, 32]` with `valid_shape=[K, 16]`, producing an Acc with physical N=32 and valid N=16.
 
 For a canonical split-K chain, the same grid encloses the **source** reduction rather than slicing its final Acc. In issue #2232, the logical INT32 `[16, 1152]` result occupies `32 × 1152 × 4 = 144 KiB` physically on Ascend910B, so it is split along N. Each generated N tile runs all eight source K blocks and stores its result before the next N tile starts.
 

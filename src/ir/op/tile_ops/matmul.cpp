@@ -62,14 +62,14 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   CHECK(rhs_shape.size() == 2) << "The operator " << op_name << " requires rhs to be 2D, but got "
                                << rhs_shape.size() << " dimensions";
 
-  // Matrix multiplication: [M, K] @ [K, N] -> [M, N]
-  // We need to verify that K dimensions match
-  // Note: In PTO ISA, we see [M, K] @ [K, N] -> [M, N]
-
-  ExprPtr m_dim = lhs_shape[0];
-  ExprPtr k_dim_lhs = lhs_shape[1];
-  ExprPtr k_dim_rhs = rhs_shape[0];
-  ExprPtr n_dim = rhs_shape[1];
+  // Matrix multiplication: [M, K] @ [K, N] -> [M, N]. Physical boxed
+  // storage may be wider than the valid computation window, so dimensional
+  // compatibility follows valid_shape while the result allocation follows
+  // the operands' physical M/N extents.
+  const auto lhs_valid = GetValidShape(lhs_type);
+  const auto rhs_valid = GetValidShape(rhs_type);
+  const ExprPtr& k_dim_lhs = lhs_valid[1];
+  const ExprPtr& k_dim_rhs = rhs_valid[0];
 
   // Try to verify K dimensions match if they are constant
   auto k_lhs_const = As<ConstInt>(k_dim_lhs);
@@ -89,8 +89,10 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   auto result_dtype =
       (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
-  // Output shape is [M, N]
-  std::vector<ExprPtr> output_shape = {m_dim, n_dim};
+  // Physical output shape follows the boxed operands; only their valid M/N
+  // rectangle contains computed values.
+  std::vector<ExprPtr> output_shape = {lhs_shape[0], rhs_shape[1]};
+  std::vector<ExprPtr> output_valid_shape = {lhs_valid[0], rhs_valid[1]};
 
   // Acc layout (Nz), taken from the destination space's implicit layout rather
   // than a hand-written triple. fractal is the inner box size in *bytes* — 16
@@ -99,7 +101,7 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid_shape);
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
@@ -136,17 +138,21 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   CHECK(rhs_shape.size() == 2) << "The operator " << op_name << " requires rhs to be 2D, but got "
                                << rhs_shape.size() << " dimensions";
 
-  // Matrix multiplication with accumulation: acc[M, N] += lhs[M, K] @ rhs[K, N]
-  ExprPtr m_dim_acc = acc_shape[0];
-  ExprPtr n_dim_acc = acc_shape[1];
+  // Matrix multiplication with accumulation: acc[M, N] += lhs[M, K] @ rhs[K, N].
+  // Match the logical valid rectangle, not padding in the boxed allocations.
+  const auto acc_valid = GetValidShape(acc_type);
+  const auto lhs_valid = GetValidShape(lhs_type);
+  const auto rhs_valid = GetValidShape(rhs_type);
+  const ExprPtr& m_dim_acc = acc_valid[0];
+  const ExprPtr& n_dim_acc = acc_valid[1];
 
   // Verify dimensions match
   auto m_acc_const = As<ConstInt>(m_dim_acc);
-  auto m_lhs_const = As<ConstInt>(lhs_shape[0]);
+  auto m_lhs_const = As<ConstInt>(lhs_valid[0]);
   auto n_acc_const = As<ConstInt>(n_dim_acc);
-  auto n_rhs_const = As<ConstInt>(rhs_shape[1]);
-  auto k_lhs_const = As<ConstInt>(lhs_shape[1]);
-  auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
+  auto n_rhs_const = As<ConstInt>(rhs_valid[1]);
+  auto k_lhs_const = As<ConstInt>(lhs_valid[1]);
+  auto k_rhs_const = As<ConstInt>(rhs_valid[0]);
 
   if (m_acc_const && m_lhs_const) {
     CHECK(m_acc_const->value_ == m_lhs_const->value_)
@@ -180,14 +186,14 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires accumulator dtype " << result_dtype.ToString()
       << ", but got " << acc_type->dtype_.ToString();
 
-  // Output shape is [M, N] (same as accumulator)
-  std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
+  // The output aliases the accumulator's physical storage and valid region.
+  std::vector<ExprPtr> output_shape = acc_shape;
 
   // Acc layout (Nz) — as in tile.matmul, from the destination's implicit layout.
   TileView tile_view;
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = acc_valid;
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }

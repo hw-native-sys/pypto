@@ -172,7 +172,7 @@ for ko, (c_iter,) in pl.pipeline(0, 512, 32, init_values=(c_t1_init,), stage=2):
 out_t1 = pl.store(c_t1, [256, 0], out_t0)  # 子块 store 到 out[256:512, 0:256]
 ```
 
-边界子块（当 `m`/`n` 不整除 `M`/`N`）使用静态部分尺寸 `[min(m, M-mi), min(n, N-ni)]` —— 例如 Ascend910B 上的 256×256 FP32 matmul（chooser 选 `m = 192, n = 160`）会切成 `192×160`、`192×96`、`64×160`、`64×96` 四个子块。
+边界子块（当 `m`/`n` 不整除 `M`/`N`）的逻辑尺寸为 `[min(m, M-mi), min(n, N-ni)]` —— 例如 Ascend910B 上的 256×256 FP32 matmul（chooser 选 `m = 192, n = 160`）会切成逻辑尺寸为 `192×160`、`192×96`、`64×160`、`64×96` 的四个子块。对于规范 split-K 改写，每个边界操作数的物理 Mat shape 会按其有效 boxed layout 粒度向上对齐，而 `valid_shape` 保留该逻辑尺寸。`tile.matmul` / `tile.matmul_acc` 将相同的物理/有效尺寸区别传播到循环携带的 Acc，`tile.store` 则仍在原逻辑偏移处只传输有效矩形。例如，N 尾块为 16 列的 INT8 Right tile 会以物理 `[K, 32]`、`valid_shape=[K, 16]` 表示，并产生物理 N=32、有效 N=16 的 Acc。
 
 对于规范 split-K 链，同一输出网格包围的是完整的**源 K 归约**，而不是切片最终 Acc。Issue #2232 中，逻辑 INT32 `[16, 1152]` 结果在 Ascend910B 上的物理占用为 `32 × 1152 × 4 = 144 KiB`，因此需要沿 N 切分。每个生成的 N 子块都会运行全部八个源 K block 并 store 结果，然后才开始下一个 N 子块。
 

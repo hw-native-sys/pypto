@@ -14,7 +14,6 @@
  * @brief PTO codegen registration for data-movement / tile-view / shuffle ops.
  */
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -386,17 +385,12 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // valid_shape, so a dynamic transfer extent leaves the physical carve-out — and
   // hence this box-multiple invariant — untouched.
   const bool boxed = view_info.slayout != ir::TileLayout::none_box;
+  const auto box_alignment = ir::tile_view_semantics::GetBoxedTileAlignment(*dst_tile_type);
+  INTERNAL_CHECK_SPAN(!boxed || box_alignment.has_value(), op->span_)
+      << "Internal error: tile.gather_row destination uses an unsupported boxed layout";
   auto round_up = [](int64_t n, int64_t mult) { return ((n + mult - 1) / mult) * mult; };
-  // NZ fractal granularity: M0 = 16 rows; the C0 lane count along columns is
-  // fractal_bytes / dtype_bytes / M0 (both collapse to 16 for fp16/bf16).
-  constexpr int64_t kNZFractalRows = 16;
-  const int64_t dtype_bytes = std::max<int64_t>(1, static_cast<int64_t>(dst_tile_type->dtype_.GetBit()) / 8);
-  const int64_t box_cols =
-      view_info.fractal > 0
-          ? std::max<int64_t>(1, static_cast<int64_t>(view_info.fractal) / dtype_bytes / kNZFractalRows)
-          : kNZFractalRows;
-  const int64_t phys_rows = boxed ? round_up(sv_rows, kNZFractalRows) : sv_rows;
-  const int64_t phys_cols = boxed ? round_up(sv_cols, box_cols) : sv_cols;
+  const int64_t phys_rows = boxed ? round_up(sv_rows, box_alignment->rows) : sv_rows;
+  const int64_t phys_cols = boxed ? round_up(sv_cols, box_alignment->cols) : sv_cols;
 
   view_info.rows = phys_rows;
   view_info.cols = phys_cols;

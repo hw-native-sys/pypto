@@ -34,6 +34,51 @@ inline constexpr int kMXScaleFractal = 32;
 /// Acc (L0C) fractal size: the accumulator is NZ-boxed at 1024 bytes.
 inline constexpr uint64_t kAccFractal = 1024;
 
+/// Static row/column granularity of one boxed tile storage unit.
+struct BoxedTileAlignment {
+  int64_t rows = 1;
+  int64_t cols = 1;
+};
+
+/// Return the physical shape granularity imposed by a boxed TileView.
+///
+/// The result mirrors PTO's boxed ``tile_buf`` contract. Fractal-512 tiles
+/// orient their 32-byte axis according to ``slayout``; accumulator
+/// fractal-1024 tiles are 16x16, and MX-scale fractal-32 tiles are 16x2 or
+/// 2x16 according to ``slayout``. Non-boxed or unsupported layouts return
+/// ``nullopt`` so callers cannot silently apply a guessed alignment.
+inline std::optional<BoxedTileAlignment> GetBoxedTileAlignment(const TileView& view, const DataType& dtype) {
+  if (view.slayout == TileLayout::none_box) return std::nullopt;
+
+  switch (view.fractal) {
+    case kAccFractal:
+      return BoxedTileAlignment{/*rows=*/16, /*cols=*/16};
+    case kMXScaleFractal:
+      if (view.slayout == TileLayout::row_major) {
+        return BoxedTileAlignment{/*rows=*/16, /*cols=*/2};
+      }
+      if (view.slayout == TileLayout::col_major) {
+        return BoxedTileAlignment{/*rows=*/2, /*cols=*/16};
+      }
+      return std::nullopt;
+    case 512: {
+      constexpr int64_t kAlignedBytes = 32;
+      const int64_t element_bytes = static_cast<int64_t>(dtype.GetByte());
+      if (element_bytes <= 0 || kAlignedBytes % element_bytes != 0) return std::nullopt;
+      const int64_t packed_extent = kAlignedBytes / element_bytes;
+      if (view.slayout == TileLayout::row_major) {
+        return BoxedTileAlignment{/*rows=*/16, /*cols=*/packed_extent};
+      }
+      if (view.slayout == TileLayout::col_major) {
+        return BoxedTileAlignment{/*rows=*/packed_extent, /*cols=*/16};
+      }
+      return std::nullopt;
+    }
+    default:
+      return std::nullopt;
+  }
+}
+
 /// Return whether two shape-like expression lists are statically identical.
 inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
   if (lhs.size() != rhs.size()) {
@@ -243,6 +288,11 @@ inline TileView GetEffectiveTileView(const TileType& tile_type) {
     return effective;
   }
   return GetImplicitTileView(tile_type.shape_, tile_type.memory_space_);
+}
+
+/// TileType overload that first resolves implicit memory-space layout.
+inline std::optional<BoxedTileAlignment> GetBoxedTileAlignment(const TileType& tile_type) {
+  return GetBoxedTileAlignment(GetEffectiveTileView(tile_type), tile_type.dtype_);
 }
 
 }  // namespace pypto::ir::tile_view_semantics

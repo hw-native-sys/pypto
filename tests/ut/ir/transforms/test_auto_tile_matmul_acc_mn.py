@@ -9,6 +9,8 @@
 
 """Issue #2232: M/N-tile a canonical loop-carried ``tile.matmul_acc`` reduction."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend as _backend
@@ -174,6 +176,13 @@ def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
     assert output_stores == source_k_loops
     assert "[144, 0]" in printed  # M boundary tile
     assert "[0, 128]" in printed  # N boundary tile
+    # The logical 16-column N tail occupies a legal 32-column INT8 Mat box;
+    # that same physical/logical split propagates through the Acc chain.
+    assert "[128, 32], [128, 16], target_memory=pl.Mem.Mat" in printed
+    assert "pl.Tile[[128, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[128, 16])]" in printed
+    # Stores keep the logical output offsets and rely on valid_shape to avoid
+    # transferring padded columns.
+    assert "pl.tile.store(acc__rv_v2_mn3, [144, 128]" in printed
 
 
 def test_canonical_split_k_preserves_store_attrs_on_every_output_tile():
@@ -200,6 +209,32 @@ def test_issue_2232_full_default_pipeline_allocates():
     for kernel in (issue_2232_repro, canonical_split_k_mn):
         result = pass_manager.run_passes(_jit_program(kernel))
         assert result is not None
+
+
+def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
+    """Generated PTO allocates N=32 while computing/storing only valid N=16."""
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+        _jit_program(canonical_split_k_mn)
+    )
+    incore = [func for func in optimized.functions.values() if func.func_type == pl.FunctionType.AIC]
+    assert len(incore) == 1
+    single = ir.Program([incore[0]], incore[0].name, optimized.span)
+    pto = codegen.PTOCodegen().generate(single)
+
+    assert re.search(
+        r"valid_col = %c16_index : !pto\.tile_buf<loc=mat, dtype=i8, rows=128, cols=32,",
+        pto,
+    ), pto
+    assert re.search(
+        r"valid_col = %c16_index : !pto\.tile_buf<loc=acc, dtype=i32, rows=(128|144), cols=32,",
+        pto,
+    ), pto
+    assert "!pto.tile_buf<loc=mat, dtype=i8, rows=128, cols=16," not in pto
 
 
 if __name__ == "__main__":

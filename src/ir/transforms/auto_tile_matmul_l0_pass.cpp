@@ -143,6 +143,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -172,6 +173,16 @@ ExprPtr MakeIndexTuple(const std::vector<int64_t>& values, const Span& span) {
   elements.reserve(values.size());
   for (auto v : values) elements.push_back(MakeIndex(v, span));
   return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
+int64_t AlignStaticExtent(int64_t extent, int64_t alignment, const Span& span) {
+  INTERNAL_CHECK_SPAN(extent > 0 && alignment > 0, span)
+      << "Internal error: tile extent/alignment must be positive, got " << extent << "/" << alignment;
+  const int64_t remainder = extent % alignment;
+  const int64_t increment = remainder == 0 ? 0 : alignment - remainder;
+  INTERNAL_CHECK_SPAN(extent <= std::numeric_limits<int64_t>::max() - increment, span)
+      << "Internal error: box-aligning tile extent " << extent << " by " << alignment << " overflows int64";
+  return extent + increment;
 }
 
 /// True if `tile`'s 2D shape is static and its memory space is one of
@@ -273,6 +284,31 @@ AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const st
   auto call = reg.Create("tile.create", {MakeIndexTuple({m, n}, span)}, kwargs, span);
   auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
   return std::make_shared<AssignStmt>(var, call, span);
+}
+
+struct AccInitValue {
+  std::vector<StmtPtr> stmts;
+  VarPtr value;
+};
+
+/// Build an Acc placeholder whose allocation may be box-padded while its valid
+/// rectangle remains the logical output tile. The ordinary unpadded case keeps
+/// the historical single ``tile.create`` form byte-for-byte.
+AccInitValue BuildAccInitWithValidShape(int64_t physical_m, int64_t physical_n, int64_t valid_m,
+                                        int64_t valid_n, const DataType& dtype, const std::string& name_hint,
+                                        const Span& span) {
+  if (physical_m == valid_m && physical_n == valid_n) {
+    auto init = BuildAccInit(physical_m, physical_n, dtype, name_hint, span);
+    return AccInitValue{{init}, init->var_};
+  }
+
+  auto storage = BuildAccInit(physical_m, physical_n, dtype, name_hint + "_storage", span);
+  auto& reg = OpRegistry::GetInstance();
+  auto narrowed_call = reg.Create("tile.set_validshape",
+                                  {storage->var_, MakeIndex(valid_m, span), MakeIndex(valid_n, span)}, span);
+  auto narrowed_var = std::make_shared<Var>(name_hint, narrowed_call->GetType(), span);
+  auto narrowed = std::make_shared<AssignStmt>(narrowed_var, narrowed_call, span);
+  return AccInitValue{{storage, narrowed}, narrowed_var};
 }
 
 struct KLoopRewrite {
@@ -1061,6 +1097,13 @@ struct CanonicalSplitKAccMatch {
   int64_t K = 0;  ///< K width of one source split-K iteration
 };
 
+struct CanonicalOutputWindow {
+  int64_t valid_m = 0;
+  int64_t valid_n = 0;
+  int64_t physical_m = 0;
+  int64_t physical_n = 0;
+};
+
 std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(const StmtPtr& body,
                                                                              const char* op_name) {
   auto seq = As<SeqStmts>(body);
@@ -1207,6 +1250,25 @@ std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
       M,    N,    K_lhs};
 }
 
+std::optional<CanonicalOutputWindow> BuildCanonicalOutputWindow(const CanonicalSplitKAccMatch& match,
+                                                                int64_t valid_m, int64_t valid_n) {
+  auto lhs_type = As<TileType>(match.lhs_load->var_->GetType());
+  auto rhs_type = As<TileType>(match.rhs_load->var_->GetType());
+  INTERNAL_CHECK_SPAN(lhs_type && rhs_type, match.loop->span_)
+      << "Internal error: canonical split-K operand loads lost their TileTypes";
+
+  const auto lhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*lhs_type);
+  const auto rhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*rhs_type);
+  if (!lhs_alignment || !rhs_alignment) return std::nullopt;
+
+  return CanonicalOutputWindow{
+      /*valid_m=*/valid_m,
+      /*valid_n=*/valid_n,
+      /*physical_m=*/AlignStaticExtent(valid_m, lhs_alignment->rows, match.loop->span_),
+      /*physical_n=*/AlignStaticExtent(valid_n, rhs_alignment->cols, match.loop->span_),
+  };
+}
+
 CallPtr PreserveCallAttrs(const CallPtr& original, const CallPtr& deduced) {
   if (original->attrs_.empty()) return deduced;
   return std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, original->attrs_,
@@ -1220,8 +1282,8 @@ class CanonicalSplitKRetiler : public IRMutator {
  public:
   CanonicalSplitKRetiler(const CanonicalSplitKAccMatch& match,
                          const std::unordered_map<const Var*, VarPtr>& clone_map, const VarPtr& init,
-                         int64_t mi, int64_t ni, int64_t m, int64_t n, std::string suffix)
-      : mi_(mi), ni_(ni), m_(m), n_(n), k_(match.K), suffix_(std::move(suffix)) {
+                         int64_t mi, int64_t ni, CanonicalOutputWindow window, std::string suffix)
+      : mi_(mi), ni_(ni), window_(window), k_(match.K), suffix_(std::move(suffix)) {
     auto cloned = [&](const VarPtr& original) -> VarPtr {
       auto it = clone_map.find(original.get());
       INTERNAL_CHECK_SPAN(it != clone_map.end(), original->span_)
@@ -1238,9 +1300,9 @@ class CanonicalSplitKRetiler : public IRMutator {
     auto old_iter = std::dynamic_pointer_cast<const IterArg>(old_iter_var);
     INTERNAL_CHECK_SPAN(old_iter, match.loop->span_)
         << "Internal error: canonical split-K IterArg cloned as a plain Var";
-    auto acc_ty = BuildAccInit(m_, n_, As<TileType>(match.matmul->var_->GetType())->dtype_,
-                               match.matmul->var_->name_hint_ + suffix_ + "_type", match.matmul->span_)
-                      ->var_->GetType();
+    INTERNAL_CHECK_SPAN(init, match.loop->span_)
+        << "Internal error: canonical split-K output tile has no accumulator initializer";
+    auto acc_ty = init->GetType();
     auto new_iter = std::make_shared<IterArg>(old_iter->name_hint_ + suffix_, acc_ty, init, old_iter->span_);
     var_remap_[old_iter.get()] = new_iter;
 
@@ -1287,12 +1349,12 @@ class CanonicalSplitKRetiler : public IRMutator {
     std::vector<ExprPtr> new_offsets = offsets->elements_;
     if (lhs) {
       new_offsets[0] = OffsetPlus(new_offsets[0], mi_, call->span_);
-      args[2] = MakeIndexTuple({m_, k_}, call->span_);
-      args[3] = MakeIndexTuple({m_, k_}, call->span_);
+      args[2] = MakeIndexTuple({window_.physical_m, k_}, call->span_);
+      args[3] = MakeIndexTuple({window_.valid_m, k_}, call->span_);
     } else {
       new_offsets[1] = OffsetPlus(new_offsets[1], ni_, call->span_);
-      args[2] = MakeIndexTuple({k_, n_}, call->span_);
-      args[3] = MakeIndexTuple({k_, n_}, call->span_);
+      args[2] = MakeIndexTuple({k_, window_.physical_n}, call->span_);
+      args[3] = MakeIndexTuple({k_, window_.valid_n}, call->span_);
     }
     args[1] = std::make_shared<MakeTuple>(std::move(new_offsets), call->span_);
     auto deduced = OpRegistry::GetInstance().Create(call->op_->name_, args, call->kwargs_, call->span_);
@@ -1305,8 +1367,7 @@ class CanonicalSplitKRetiler : public IRMutator {
   const Var* matmul_acc_ = nullptr;
   int64_t mi_ = 0;
   int64_t ni_ = 0;
-  int64_t m_ = 0;
-  int64_t n_ = 0;
+  CanonicalOutputWindow window_;
   int64_t k_ = 0;
   std::string suffix_;
 };
@@ -1349,16 +1410,26 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       const int64_t m_eff = std::min<int64_t>(tiling->m, match.M - mi);
       const std::string suffix = "_mn" + std::to_string(step);
       auto out_ty = As<TileType>(match.matmul->var_->GetType());
-      auto init = BuildAccInit(m_eff, n_eff, out_ty->dtype_, match.init->var_->name_hint_ + suffix,
-                               match.init->span_);
-      stmts.push_back(init);
+      const auto window = BuildCanonicalOutputWindow(match, m_eff, n_eff);
+      if (!window) {
+        hints.emplace_back(
+            DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+            "canonical split-K M/N tiling needs boxed Mat operand layouts with a supported static "
+            "fractal alignment; left untouched",
+            match.loop->span_);
+        return std::nullopt;
+      }
+      auto init = BuildAccInitWithValidShape(window->physical_m, window->physical_n, window->valid_m,
+                                             window->valid_n, out_ty->dtype_,
+                                             match.init->var_->name_hint_ + suffix, match.init->span_);
+      for (auto& init_stmt : init.stmts) stmts.push_back(std::move(init_stmt));
 
-      std::unordered_map<const Var*, ExprPtr> seed = {{match.init->var_.get(), init->var_}};
+      std::unordered_map<const Var*, ExprPtr> seed = {{match.init->var_.get(), init.value}};
       auto clone = DeepClone(match.loop, seed, /*clone_def_vars=*/true);
       auto cloned_loop = As<ForStmt>(clone.cloned_body);
       INTERNAL_CHECK_SPAN(cloned_loop, match.loop->span_)
           << "Internal error: canonical split-K loop clone is not a ForStmt";
-      CanonicalSplitKRetiler retiler(match, clone.var_map, init->var_, mi, ni, m_eff, n_eff, suffix);
+      CanonicalSplitKRetiler retiler(match, clone.var_map, init.value, mi, ni, *window, suffix);
       auto narrowed = As<ForStmt>(retiler.VisitStmt(cloned_loop));
       INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
           << "Internal error: canonical split-K retiling did not return a ForStmt";

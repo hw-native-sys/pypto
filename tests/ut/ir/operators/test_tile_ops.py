@@ -2026,6 +2026,51 @@ class TestTileBroadcastOps:
 class TestTileMatMulOps:
     """Test suite for tile-level matrix multiplication operators."""
 
+    def test_matmul_and_acc_propagate_padded_operand_valid_shape(self):
+        """Matmul uses logical valid extents inside box-aligned storage.
+
+        A boundary Right tile may require 32 physical INT8 columns even when
+        only 16 columns are in bounds.  The resulting Acc tile must retain the
+        physical width for allocation and the logical width for computation
+        and stores; ``matmul_acc`` must preserve both.
+        """
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs_type = ir.TileType(
+            dims(16, 128),
+            DataType.INT8,
+            tile_view=ir.TileView(valid_shape=dims(16, 128)),
+            memory_space=ir.MemorySpace.Left,
+        )
+        rhs_type = ir.TileType(
+            dims(128, 32),
+            DataType.INT8,
+            tile_view=ir.TileView(valid_shape=dims(128, 16)),
+            memory_space=ir.MemorySpace.Right,
+        )
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        matmul_type = tile.matmul(lhs, rhs).type
+        assert isinstance(matmul_type, ir.TileType)
+        assert _const_values(matmul_type.shape) == [16, 32]
+        assert _valid_of(matmul_type) == [16, 16]
+
+        acc_type = ir.TileType(
+            dims(16, 32),
+            DataType.INT32,
+            tile_view=ir.TileView(valid_shape=dims(16, 16)),
+            memory_space=ir.MemorySpace.Acc,
+        )
+        acc = ir.Var("acc", acc_type, span)
+        matmul_acc_type = tile.matmul_acc(acc, lhs, rhs).type
+        assert isinstance(matmul_acc_type, ir.TileType)
+        assert _const_values(matmul_acc_type.shape) == [16, 32]
+        assert _valid_of(matmul_acc_type) == [16, 16]
+
     def test_tile_matmul(self):
         """Test tile.matmul operator - matrix multiplication."""
 
