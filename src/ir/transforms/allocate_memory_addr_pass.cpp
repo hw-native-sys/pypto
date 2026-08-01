@@ -42,6 +42,8 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -59,27 +61,39 @@ using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 // ReserveBufferBaseMap / ReservedEndBySpace / ResolveReserveBufferBases now live in the shared
 // reserve_buffer_utils.h so AllocateMemoryAddr and MemoryReuse resolve the reserved region identically.
 
-/// Whether any of `resolution`'s buffers is one of the automatic cross-core pipe
-/// rings, i.e. whether `pl.cross_core_slot(slot_num=N)` can actually move these
-/// bytes. Matched on the name BuildAutomaticPipeSetup mints via
-/// BuildPipeBufferName ("<func>_c2v_slot_buffer" / "<func>_v2c_slot_buffer") — the
-/// prefix is the pre-split kernel's name, so only the suffix is stable here. A
-/// hand-authored `pl.reserve_buffer` must NOT be pointed at that knob: it cannot
-/// shrink a buffer the author sized themselves.
-bool HasCrossCorePipeRing(const ReserveBufferResolution& resolution) {
-  auto ends_with = [](const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+/// Whether `resolution` holds one of the automatic cross-core pipe rings, i.e.
+/// whether `pl.cross_core_slot(slot_num=N)` can actually move these bytes.
+///
+/// Matched EXACTLY, not by suffix. BuildAutomaticPipeSetup mints the ring's name as
+/// BuildPipeBufferName(<mixed kernel name>, dir) while ExpandMixedKernel names the
+/// halves "<mixed kernel name>_aic" / "_aiv", so the expected names are
+/// reconstructible from this function's own name. That precision matters because
+/// `pl.reserve_buffer` takes an arbitrary name: a hand-authored
+/// "scratch_v2c_slot_buffer" would pass a suffix test and then be pointed at a knob
+/// that cannot resize it.
+bool HasCrossCorePipeRing(const ReserveBufferResolution& resolution, const std::string& func_name) {
+  auto strip_suffix = [&func_name](const std::string& suffix) -> std::string {
+    if (func_name.size() <= suffix.size()) return "";
+    if (func_name.compare(func_name.size() - suffix.size(), suffix.size(), suffix) != 0) return "";
+    return func_name.substr(0, func_name.size() - suffix.size());
   };
+  std::vector<std::string> expected;
+  for (const auto& kernel : {strip_suffix("_aic"), strip_suffix("_aiv")}) {
+    if (kernel.empty()) continue;
+    expected.push_back(cross_core_pipe::BuildPipeBufferName(kernel, core_affinity::PipeDirection::C2V));
+    expected.push_back(cross_core_pipe::BuildPipeBufferName(kernel, core_affinity::PipeDirection::V2C));
+  }
+  if (expected.empty()) return false;
   for (const auto& [call, base] : resolution.resolved_bases) {
     if (!call) continue;
     const auto name = call->GetKwarg<std::string>("name", "");
-    if (ends_with(name, "_c2v_slot_buffer") || ends_with(name, "_v2c_slot_buffer")) return true;
+    if (std::find(expected.begin(), expected.end(), name) != expected.end()) return true;
   }
   return false;
 }
 
-/// The "N of those bytes are reserved by system.reserve_buffer" clause appended to a
-/// capacity-overflow message, or empty when `space` pays for no reserve buffer.
+/// The "the first N bytes ... are reserved" clause appended to a capacity-overflow
+/// message, or empty when `space` pays for no reserve buffer.
 ///
 /// A reserve_buffer is NOT a MemRef: every tile is allocated *above* it, so it is
 /// counted in the footprint yet is invisible in the per-tile accounting an author can
@@ -87,19 +101,27 @@ bool HasCrossCorePipeRing(const ReserveBufferResolution& resolution) {
 /// routinely most of the overflow, so name those bytes — and the knob for them, but
 /// only when the buffer really is a pipe ring.
 ///
+/// The figure is `reserved_end_by_space`: the aligned max-END that tiles are placed
+/// above, which is exactly the quantity charged to this overflow. It is deliberately
+/// NOT worded as "bytes the buffers occupy" — an explicitly based buffer
+/// (`base=0x1000, size=4096`) or an alignment gap makes the floor exceed the summed
+/// buffer sizes, so the wording states the floor.
+///
 /// Shared by the in-pass capacity CHECK and the AllocatedMemoryAddr verifier so the two
 /// explain the same overflow identically. Which of them a given compile hits depends on
 /// configuration (the pass CHECK is skipped under memory_planner=PTOAS, which skips the
 /// pass), so the wording must not live in only one of them.
-std::string ReservedBytesNote(const ReserveBufferResolution& resolution, MemorySpace space) {
+std::string ReservedBytesNote(const ReserveBufferResolution& resolution, MemorySpace space,
+                              const std::string& func_name) {
   const auto& ends = resolution.reserved_end_by_space;
   auto it = ends.find(space);
   if (it == ends.end() || it->second == 0) return "";
-  std::string note = ". " + std::to_string(it->second) +
-                     " of those bytes are reserved by system.reserve_buffer, not by tiles";
-  if (HasCrossCorePipeRing(resolution)) {
+  std::string note = ". The first " + std::to_string(it->second) +
+                     " bytes of that space are reserved by system.reserve_buffer, so tiles are "
+                     "allocated above them";
+  if (HasCrossCorePipeRing(resolution, func_name)) {
     note +=
-        " — this function's cross-core pipe ring. Lower its depth with "
+        " — this is the cross-core pipe ring. Lower its depth with "
         "optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the "
         "tile that crosses the cube/vector boundary";
   }
@@ -267,7 +289,8 @@ class PinnedAllocCollector : public IRVisitor {
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
-    const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes) {
+    const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes,
+    const std::string& func_name) {
   const ReservedEndBySpace& reserved_end_by_space = reserve_resolution.reserved_end_by_space;
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
@@ -396,7 +419,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       const uint64_t used = footprint.HighWater();
       CHECK(limit == 0 || used <= limit)
           << MemorySpaceToString(space) << " buffer usage (" << used << " bytes) exceeds platform limit ("
-          << limit << " bytes)" << ReservedBytesNote(reserve_resolution, space);
+          << limit << " bytes)" << ReservedBytesNote(reserve_resolution, space, func_name);
     }
   }
 
@@ -458,8 +481,8 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // the only ones that may take a dynamic address (a runtime slot index).
   PinnedAllocCollector pinned_collector;
   pinned_collector.VisitStmt(func->body_);
-  auto memref_pairs =
-      AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes);
+  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy,
+                                              pinned_collector.alloc_sizes, func->name_);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
@@ -609,7 +632,7 @@ class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
             *reserved = ResolveReserveBufferBases(func, *policy);
           }
         }
-        message += ReservedBytesNote(*reserved, space);
+        message += ReservedBytesNote(*reserved, space, func->name_);
         diagnostics.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 1, message, func->span_);
       }
     }

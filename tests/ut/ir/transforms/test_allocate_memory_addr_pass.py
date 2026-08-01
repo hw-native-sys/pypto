@@ -531,12 +531,17 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
 
 def _overflowing_mat_program(buffer_name):
     """AIC function reserving 512KB under ``buffer_name`` plus one 8192-byte Mat
-    tile above it — Mat high-water 532480 > the 524288 limit."""
+    tile above it — Mat high-water 532480 > the 524288 limit.
+
+    Named ``kernel_aic`` on purpose: ExpandMixedKernel names the cube half
+    ``<mixed kernel>_aic`` and BuildAutomaticPipeSetup names its ring
+    ``<mixed kernel>_v2c_slot_buffer``, so only that pairing is the real pipe ring.
+    """
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.AIC)
-        def main(
+        def kernel_aic(
             self,
             input_a: pl.Tensor[[64, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
@@ -581,7 +586,10 @@ def test_overflow_diagnostic_attributes_the_cross_core_pipe_ring(ascend_backend)
     """
     message = _overflow_message(_overflowing_mat_program("kernel_v2c_slot_buffer"))
     assert re.search(r"Mat buffer usage \(532480 bytes\) exceeds platform limit \(524288 bytes\)", message)
-    assert "524288 of those bytes are reserved by system.reserve_buffer" in message
+    # Stated as the allocation FLOOR, not as "bytes the buffers occupy": an
+    # explicitly based buffer or an alignment gap makes the floor exceed the
+    # summed sizes, and the floor is what this overflow was charged.
+    assert "The first 524288 bytes of that space are reserved by system.reserve_buffer" in message
     assert "cross-core pipe ring" in message
     assert "pl.cross_core_slot(slot_num=N)" in message
 
@@ -592,7 +600,20 @@ def test_overflow_diagnostic_omits_ring_knob_for_a_hand_authored_buffer(ascend_b
     shrink a buffer the author sized themselves.
     """
     message = _overflow_message(_overflowing_mat_program("my_scratch_buffer"))
-    assert "524288 of those bytes are reserved by system.reserve_buffer" in message
+    assert "The first 524288 bytes of that space are reserved by system.reserve_buffer" in message
+    assert "cross-core pipe ring" not in message
+    assert "cross_core_slot" not in message
+
+
+def test_overflow_diagnostic_omits_ring_knob_on_a_pipe_name_collision(ascend_backend):
+    """`pl.reserve_buffer` takes an ARBITRARY name, so the pipe-ring test cannot be a
+    suffix match: a hand-authored "scratch_v2c_slot_buffer" ends in the pipe suffix
+    yet is not the ring, and pl.cross_core_slot cannot resize it. The expected name
+    is reconstructed exactly (BuildPipeBufferName of this function's kernel name),
+    so the collision is rejected.
+    """
+    message = _overflow_message(_overflowing_mat_program("scratch_v2c_slot_buffer"))
+    assert "The first 524288 bytes of that space are reserved by system.reserve_buffer" in message
     assert "cross-core pipe ring" not in message
     assert "cross_core_slot" not in message
 
@@ -608,7 +629,7 @@ def test_overflow_diagnostic_omits_ring_note_for_an_unrelated_space(ascend_backe
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.AIC)
-        def main(
+        def kernel_aic(
             self,
             input_a: pl.Tensor[[64, 752], pl.FP32],
             out_0: pl.Out[pl.Tensor[[64, 752], pl.FP32]],

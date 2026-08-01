@@ -161,7 +161,7 @@ def test_default_ring_depth_reports_the_reserved_bytes():
         _default_ring_kv_qk.lower(config=RunConfig(platform="a2a3"))
     message = str(exc.value)
     assert "Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes)" in message
-    assert "1048576 of those bytes are reserved by system.reserve_buffer" in message
+    assert "The first 1048576 bytes of that space are reserved by system.reserve_buffer" in message
     assert "cross-core pipe ring" in message
     assert "pl.cross_core_slot(slot_num=N)" in message
 

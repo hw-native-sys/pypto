@@ -154,13 +154,13 @@ gather"。
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
-           optimizations=[pl.cross_core_slot(slot_num=2)]):     # 见下文 ring 说明
+           optimizations=[pl.cross_core_slot(slot_num=2)]):     # see the ring note below
     for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
-        ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane 半 extent
+        ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
         for k in pl.range(64):
             src = pl.cast(pl.read(idx, [aiv * 64 + k]), pl.INDEX)
-            ub = pl.gather_row(ub, pool, [k, 0], [src, 0], [1, 512])   # src_offset 由 lane 派生
-        kv = pl.aic_gather(ub)                                  # V2C -> Mat 中的 [128, 512]
+            ub = pl.gather_row(ub, pool, [k, 0], [src, 0], [1, 512])   # lane-derived src_offset
+        kv = pl.aic_gather(ub)                                  # V2C -> [128, 512] in Mat
     out[0:16, 0:128] = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
 ```
 
