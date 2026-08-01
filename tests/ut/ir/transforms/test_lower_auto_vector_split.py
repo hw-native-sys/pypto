@@ -2108,6 +2108,46 @@ def _lane_localized_extract_body(span, stmts, aiv_id, qk_h, data):
     return r
 
 
+def _lane_localized_gather_row_body(span, stmts, aiv_id, qk_h, data):
+    """A tile.gather_row localized via its SRC_OFFSET arg (index 3) — the scattered
+    per-lane gather of issue #2244.
+
+    The accumulator is a ``tile.full`` authored at the per-lane HALF extent, so it
+    is a NEUTRAL generator (not in half_tiles) and the gather is admitted purely on
+    its lane-referencing READ offset: each lane pulls a different GM row into its
+    own UB half."""
+    acc_call = T.full([64, 128], FP32, 0.0, span=span)
+    acc = ir.Var("acc", acc_call.type, span)
+    row = aiv_id * 64
+    rv = ir.Var("src_row", row.type, span)
+    gr = T.gather_row(acc, data, [0, 0], [rv, 0], [1, 128], span=span)
+    t = ir.Var("t", gr.type, span)
+    relu = T.maximum(qk_h, t, span=span)
+    r = ir.Var("relu", relu.type, span)
+    stmts += [
+        ir.AssignStmt(acc, acc_call, span),
+        ir.AssignStmt(rv, row, span),
+        ir.AssignStmt(t, gr, span),
+        ir.AssignStmt(r, relu, span),
+    ]
+    return r
+
+
+def _gather_row_dst_only_localized_body(span, stmts, aiv_id, qk_h, data):
+    """A tile.gather_row whose lane reference sits in DST_OFFSET (index 2) while
+    SRC_OFFSET is lane-invariant: both lanes read the SAME GM row into different
+    slots. Only the READ offset localizes a gather, so this must still be
+    reported."""
+    acc_call = T.full([64, 128], FP32, 0.0, span=span)
+    acc = ir.Var("acc", acc_call.type, span)
+    row = aiv_id * 64
+    rv = ir.Var("dst_row", row.type, span)
+    gr = T.gather_row(acc, data, [rv, 0], [0, 0], [1, 128], span=span)
+    t = ir.Var("t", gr.type, span)
+    stmts += [ir.AssignStmt(acc, acc_call, span), ir.AssignStmt(rv, row, span), ir.AssignStmt(t, gr, span)]
+    return t
+
+
 def _lane_ref_in_non_address_arg_body(span, stmts, aiv_id, qk_h, data):
     """A tile.load whose OFFSET is [0, 0] — both lanes read the same base rows —
     but which mentions aiv_id in its valid_shape. Scanning every arg instead of
@@ -2201,6 +2241,42 @@ def test_region_admits_lane_localized_extract():
         _lower(_admission_program(span, _lane_localized_extract_body, wrap=True)),
         _admission_program(span, _lane_localized_extract_body, wrap=False),
     )
+
+
+def test_region_admits_lane_localized_gather_row():
+    """tile.gather_row localized through its SRC_OFFSET arg (index 3) is admitted.
+
+    This is the scattered per-lane gather of issue #2244: ``pl.gather_row`` is the
+    only op that reads GM at an arbitrary RUNTIME offset, so a paged KV top-k list
+    can only be sharded across the two AIV lanes this way. Before the op was added
+    to ``AddressArgs`` its address was never consulted, and the pass's own fix (2)
+    ("localize it with the region's lane index") was unreachable for it."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _lane_localized_gather_row_body, wrap=True)),
+        _admission_program(span, _lane_localized_gather_row_body, wrap=False),
+    )
+
+
+def test_region_admits_lane_localized_gather_row_nested_in_loop():
+    """The real shape: the per-row gather sits inside a ``pl.range`` loop while
+    ``aiv_id`` is bound at the region head, so the lane-scalar set must survive the
+    scan's loop recursion for the gather to be admitted."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _lane_localized_gather_row_body, wrap=True, nest_in_loop=True)),
+        _admission_program(span, _lane_localized_gather_row_body, wrap=False, nest_in_loop=True),
+    )
+
+
+def test_region_rejects_gather_row_localized_only_on_dst():
+    """A gather is per-lane only when its READ offset is lane-derived. With the
+    lane reference in ``dst_offset`` and a lane-invariant ``src_offset``, both
+    lanes fetch the SAME GM row — full-width work replicated — so it must still be
+    reported. This is what pins ``AddressArgs`` to src_offset alone. NEGATIVE
+    test: no ``After`` IR."""
+    with pytest.raises(ValueError, match=r"mixes explicit.*tile\.gather_row"):
+        _lower(_admission_program(ir.Span.unknown(), _gather_row_dst_only_localized_body, wrap=True))
 
 
 def test_region_rejects_lane_reference_outside_address_args():

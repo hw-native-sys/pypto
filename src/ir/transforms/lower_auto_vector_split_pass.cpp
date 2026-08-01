@@ -578,6 +578,15 @@ std::vector<ExprPtr> AddressArgs(const CallPtr& call) {
   if (IsOp(call, "tile.load")) return {at(1)};            // (tensor, offsets, shapes, valid_shapes)
   if (IsOp(call, "tile.slice")) return {at(2)};           // (input, shape, offset, valid_shape, drop_dims)
   if (IsOp(call, "tile.extract")) return {at(1), at(2)};  // (src, index_row, index_col, shape)
+  // (dst, src, dst_offset, src_offset, shapes[, valid_shape]) — DPS: the op reads
+  // a GM row window at ``src_offset`` and writes it into its own accumulator at
+  // ``dst_offset``. Only ``src_offset`` is the READ window, so only it localizes:
+  // a lane-derived src_offset means the two lanes gather DIFFERENT rows (the
+  // per-lane scattered gather). A lane-derived dst_offset with a lane-invariant
+  // src is the opposite shape — both lanes fetch the same rows into different
+  // slots of a FULL-width accumulator — which is exactly what this scan must
+  // still reject.
+  if (IsOp(call, "tile.gather_row")) return {at(3)};
   return {};
 }
 
@@ -737,9 +746,11 @@ void ValidateMixedExplicitRegion(const std::vector<StmtPtr>& stmts, const Span& 
          "region in half-width form, so these full-width ops would be left un-localized and both AIV "
          "lanes would compute the full tile. Fix it one of three ways: (1) derive the op from the "
          "tile.aiv_shard result; (2) localize it yourself with the region's lane index, e.g. load at "
-         "'base + aiv_id * HALF' at the half extent — an op whose arguments reference aiv_id is "
-         "per-lane by construction and is accepted; or (3) remove the explicit "
-         "tile.aiv_shard/tile.aic_gather and let the implicit affinity-gated path halve the region.";
+         "'base + aiv_id * HALF' at the half extent — an op whose READ address references aiv_id is "
+         "per-lane by construction and is accepted. The lane reference must land in that read "
+         "address (the offset selecting which window the op reads), not in a shape, a valid_shape, "
+         "or a destination slot; or (3) remove the explicit tile.aiv_shard/tile.aic_gather and let "
+         "the implicit affinity-gated path halve the region.";
 }
 
 // Top-level walk for the explicit ``SplitAivScopeStmt`` path. Statements OUTSIDE

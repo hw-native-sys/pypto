@@ -529,6 +529,94 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
             set_backend_type(prior_type)
 
 
+def _overflowing_mat_program(buffer_name):
+    """AIC function reserving 512KB under ``buffer_name`` plus one 8192-byte Mat
+    tile above it — Mat high-water 532480 > the 524288 limit."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
+        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            _ = pl.reserve_buffer(name=buffer_name, size=524288)
+            tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
+                input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
+            )
+            result: pl.Tensor[[64, 64], pl.BF16] = pl.store(tile_a, [0, 0], out_0)
+            return result
+
+    return Before
+
+
+def _overflow_message(program):
+    """Run init_mem_ref + allocate_memory_addr under AFTER verification and return
+    the capacity diagnostic the verifier raises."""
+    program = passes.init_mem_ref()(program)
+    pipeline = passes.PassPipeline()
+    pipeline.add_pass(passes.allocate_memory_addr())
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
+        with pytest.raises(pypto.Error) as exc:
+            pipeline.run(program)
+    return str(exc.value)
+
+
+def test_overflow_diagnostic_attributes_the_cross_core_pipe_ring(ascend_backend):
+    """An overflow dominated by a reserve_buffer must SAY so.
+
+    A reserve_buffer is not a MemRef — every tile is allocated above it — so it is
+    counted in the high-water mark yet invisible in the per-tile accounting an
+    author can inspect. For the automatic cross-core pipe ring (named by
+    BuildPipeBufferName) the diagnostic must also name pl.cross_core_slot, the
+    knob that actually shrinks those bytes.
+    """
+    message = _overflow_message(_overflowing_mat_program("kernel_v2c_slot_buffer"))
+    assert re.search(r"Mat buffer usage \(532480 bytes\) exceeds platform limit \(524288 bytes\)", message)
+    assert "524288 of those bytes are reserved by system.reserve_buffer" in message
+    assert "cross-core pipe ring" in message
+    assert "pl.cross_core_slot(slot_num=N)" in message
+
+
+def test_overflow_diagnostic_omits_ring_knob_for_a_hand_authored_buffer(ascend_backend):
+    """A reserve_buffer that is NOT the automatic pipe ring still gets its bytes
+    attributed, but must not be pointed at pl.cross_core_slot — that knob cannot
+    shrink a buffer the author sized themselves.
+    """
+    message = _overflow_message(_overflowing_mat_program("my_scratch_buffer"))
+    assert "524288 of those bytes are reserved by system.reserve_buffer" in message
+    assert "cross-core pipe ring" not in message
+    assert "cross_core_slot" not in message
+
+
+def test_overflow_diagnostic_omits_ring_note_for_an_unrelated_space(ascend_backend):
+    """The attribution is scoped to the space that actually pays for the buffer.
+
+    An AIC reserve_buffer reserves Mat only, so a Vec overflow in the same
+    function must NOT be blamed on it — otherwise the hint would send an author
+    to a knob that cannot move the number they were shown.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 752], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[64, 752], pl.FP32]],
+        ) -> pl.Tensor[[64, 752], pl.FP32]:
+            # Small Mat ring; the overflow is in Vec (192512 > 188416).
+            _ = pl.reserve_buffer(name="kernel_v2c_slot_buffer", size=4096)
+            tile_a: pl.Tile[[64, 752], pl.FP32] = pl.load(input_a, [0, 0], [64, 752])
+            result: pl.Tensor[[64, 752], pl.FP32] = pl.store(tile_a, [0, 0], out_0)
+            return result
+
+    message = _overflow_message(Before)
+    assert re.search(r"Vec buffer usage .* exceeds platform limit", message)
+    assert "reserved by system.reserve_buffer" not in message
+
+
 def test_allocate_memory_addr_uses_default_policy_without_backend():
     """Test that AllocateMemoryAddr falls back to DefaultMemoryAllocatorPolicy when no backend is configured.
 

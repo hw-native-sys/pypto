@@ -130,6 +130,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests alloc statements are prepended to the function body's top-level `SeqStmts`
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
+- Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
 
 ## Allocation Policy
 
@@ -171,3 +172,21 @@ class MyBackend : public Backend {
 ```
 
 When no backend is configured (e.g., in unit tests), the pass falls back to `DefaultMemoryAllocatorPolicy` automatically.
+
+## Capacity verification
+
+The `AllocatedMemoryAddr` property verifier tracks the high-water mark (`addr + size`) per memory space and compares it against `Backend::GetMemSize(space)`. Exceeding the limit is an error.
+
+Because `system.reserve_buffer` reserves a leading window that every tile is then allocated *above*, its bytes are counted in the high-water mark but are **not** a MemRef — they are invisible in the per-tile accounting an author can inspect. When the overflowing space is the one that pays for a reserve buffer, the diagnostic therefore attributes those bytes explicitly:
+
+```text
+Function 'qk_pv_aic': Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes).
+1048576 of those bytes are reserved by system.reserve_buffer, not by tiles — this
+function's cross-core pipe ring. Lower its depth with
+optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the
+tile that crosses the cube/vector boundary
+```
+
+The ring is `slot_size x slot_num` bytes, built by `BuildAutomaticPipeSetup` (`src/ir/transforms/utils/cross_core_pipe.cpp`) — `slot_size` is the FULL tile the consuming core pops, and `slot_num` defaults to 8 for a one-way pipe and 4 for a bidirectional one. Those policy numbers are deliberately kept out of the message so it cannot go stale; the byte count it reports is read from the same `ResolveReserveBufferBases` result the allocator used as its floor. The ring lives in the **consuming** core's memory — Mat/L1 for V2C (`pl.aic_gather`), Vec/UB for C2V (`pl.aiv_shard`) — so the note is emitted only for the space that `GetReserveBufferMemorySpace` maps the function to. Two things are scoped deliberately: a Vec overflow in a function whose reserve buffer is in Mat gets the bare message, and the `pl.cross_core_slot` remediation is appended only when a buffer is actually one of the pipe rings (matched on the `_c2v_slot_buffer` / `_v2c_slot_buffer` name `BuildPipeBufferName` mints). A hand-authored `pl.reserve_buffer` still gets its bytes attributed, but is not pointed at a knob that cannot shrink it.
+
+The ring depth is deliberately **not** auto-capped to fit: depth is the cross-core pipelining depth, so silently shrinking it would turn a loud compile error into a quiet throughput regression.

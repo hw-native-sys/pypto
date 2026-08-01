@@ -157,7 +157,14 @@ any of the following holds:
 | -------- | --- |
 | Consumes a `tile.aiv_shard` result (transitively) | It is in the half-width dataflow by construction. |
 | A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
-| An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` — whose **address** args reference the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2) — a lane reference in a `shape` or `valid_shape` does not move the window, so it does not admit. |
+| An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row` — whose **read address** references the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the read-offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2, `tile.gather_row` arg 3 = `src_offset`) — a lane reference in a `shape`, a `valid_shape`, or a *destination* slot does not move the window, so it does not admit. |
+
+`tile.gather_row` is the DMA case: it is DPS, so it carries **two** offsets, and
+only `src_offset` decides whether the two lanes do different work. A lane-derived
+`src_offset` means each lane pulls its own scattered GM rows (admitted); a
+lane-derived `dst_offset` over a lane-invariant `src_offset` means both lanes
+fetch the *same* rows into different slots of a full-width accumulator (still
+reported). See "Per-lane scattered gather" below.
 
 Anything else that classifies `VECTOR` is reported. Two consequences worth
 knowing:
@@ -179,6 +186,44 @@ Because the region is built via the generic `BeginScope`/`EndScope` and is
 non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an
 `if`; the region path recurses into compound statements to find and lower every
 region while preserving the surrounding control flow.
+
+### Per-lane scattered gather
+
+`pl.gather_row` is the only op that reads GM at an arbitrary **runtime** offset,
+so it is how a paged/top-k row set is sharded across the two AIV lanes — each
+lane assembles half of the tile in UB and `pl.aic_gather` hands the reassembled
+tile to the cube:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
+           optimizations=[pl.cross_core_slot(slot_num=2)]):     # see the ring note below
+    for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+        ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
+        for k in pl.range(64):
+            src = pl.cast(pl.read(idx, [aiv * 64 + k]), pl.INDEX)
+            ub = pl.gather_row(ub, pool, [k, 0], [src, 0], [1, 512])   # lane-derived src_offset
+        kv = pl.aic_gather(ub)                                  # V2C -> [128, 512] in Mat
+    out[0:16, 0:128] = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+```
+
+Two authoring rules make this work:
+
+- **Write the accumulator at the half extent.** `pl.full` is a generator, so it is
+  accepted at whatever extent you give it and never joins the half-width dataflow
+  on its own. The gather is admitted on its lane-derived `src_offset`; the guard
+  proves *intent*, not *extent*, so a full-extent accumulator here would be
+  gathered back to `2 x FULL` and mismatch downstream.
+- **Size the cross-core ring.** The V2C ring reserves `slot_size x slot_num` bytes
+  of the consuming core's memory (L1 for V2C, UB for C2V), where `slot_size` is
+  the **full** tile the consumer pops — `128 x 512 x 2 = 131072` here — and
+  `slot_num` defaults to **8** for a one-way pipe. That is 1 MB of a 512 KB L1, so
+  the default depth cannot express this shape; `pl.cross_core_slot(slot_num=N)`
+  lowers it. A kernel that pushes once per invocation needs no more than 2. If you
+  omit it, `AllocateMemoryAddr` reports the overflow and names the reserved bytes.
+
+Note that `pl.aiv_shard` is **not** an alternative to the half-extent `pl.full`
+here: it is the C→V transfer and requires an `Acc` (cube-produced) operand, so it
+cannot shard a value the vector lane produced itself.
 
 ### Regions must be scope-free
 
