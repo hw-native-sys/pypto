@@ -192,6 +192,7 @@ codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& s
   c.slayout = tv.slayout;
   c.fractal = tv.fractal;
   c.pad = tv.pad;
+  c.compact = tv.compact;
 
   c.v_row = c.rows;
   c.v_col = c.cols;
@@ -468,7 +469,7 @@ std::string MaterializeSubviewOperandIfNeeded(const ir::ExprPtr& expr, codegen::
 
 // Verify that two TileTypes share the strict "same tile config" required by
 // pto.subview: identical dtype, identical TileView (blayout, slayout, fractal,
-// pad), and pad must be null since pto.subview is a pure view and does not
+// pad, compact), and pad must be null since pto.subview is a pure view and does not
 // pad.  Memory-space equality is enforced separately (via memory_inherit
 // rules on the op definition); this helper checks the tile_view fields that
 // must be byte-for-byte compatible for a subview to be legal.
@@ -489,6 +490,9 @@ void CheckSubviewTileCompat(const ir::TileType& source, const ir::TileType& resu
                                         << res_v.fractal << "); pto.subview requires identical fractal";
   CHECK(src_v.pad == res_v.pad)
       << op_name << ": pad mismatch between source and result; pto.subview requires identical pad mode";
+  CHECK(src_v.compact == res_v.compact)
+      << op_name
+      << ": compact mismatch between source and result; pto.subview requires identical compact mode";
   CHECK(src_v.pad == ir::PadValue::null)
       << op_name << ": pto.subview does not support pad_value (" << static_cast<int>(src_v.pad)
       << "); apply tile.fillpad on the result tile instead of carrying a pad on the slice/assemble window";

@@ -200,7 +200,11 @@ For Python DSL annotations, omitted `TileView` syntax is normalized to an
 implicit TileView derived from the tile shape and, when present, the tile
 memory space. Redundant explicit defaults such as `pl.TileView()` are treated
 as semantically equivalent to the omitted form and may print back in canonical
-syntax.
+syntax. `TileView.compact` records whether a partial boxed tile uses PTO's
+valid-region-packed representation (`CompactMode.normal`) or the ordinary
+physical-box representation (`CompactMode.null`, the default). The compiler
+sets this automatically for partial `tile.extract` transfers into L0A/L0B;
+normal user code does not need to select it.
 
 The implicit view depends on the memory space, so the constructor collapses a
 view to `nullopt` only against the space it is given. An `f_deduce_type`

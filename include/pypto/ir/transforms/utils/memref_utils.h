@@ -130,7 +130,8 @@ inline std::optional<TileView> RemapTileViewExprs(const std::optional<TileView>&
   }
   changed = true;
   return TileView(std::move(new_valid_shape), std::move(new_stride), std::move(new_start_offset),
-                  tile_view->blayout, tile_view->slayout, tile_view->fractal, tile_view->pad);
+                  tile_view->blayout, tile_view->slayout, tile_view->fractal, tile_view->pad,
+                  tile_view->compact);
 }
 
 /// Rewrite the SSA values a *pinned* MemRef's slot index names.

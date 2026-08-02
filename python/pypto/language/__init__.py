@@ -42,6 +42,7 @@ from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     AtomicType,
+    CompactMode,
     ForKind,
     FunctionType,
     Level,
@@ -493,6 +494,7 @@ __all__ = [
     "TensorView",
     "TileLayout",
     "PadValue",
+    "CompactMode",
     "TileView",
     "ND",
     "DN",

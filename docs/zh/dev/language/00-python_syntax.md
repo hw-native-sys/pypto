@@ -194,6 +194,8 @@ tile: pl.Tile[
   shape / memory-space 组合推导。
 - 显式写出的 `pl.TileView()`（或只是在重复这些隐式默认值的写法）与省略写法在语义上等价。
   parser / printer 的往返过程中，二者可能会被规范化为同一种打印形式。
+- `compact=pl.CompactMode.normal` 表示部分 boxed tile 的 PTO 紧凑传输格式。PyPTO 会为
+  L0A/L0B 中部分有效的 `tile.extract` 结果自动推导该值，kernel 通常不应直接设置它。
 
 ## 表达式 (Expression)
 

@@ -295,6 +295,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         } else {
           CHECK(false) << "Unknown PadValue: " << pad_str;
         }
+      } else if (key == "compact") {
+        std::string compact_str;
+        p->val.convert(compact_str);
+        tile_view.compact = StringToCompactMode(compact_str);
       }
     }
 

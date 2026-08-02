@@ -87,7 +87,7 @@ bool operator==(const TileView& lhs, const TileView& rhs) {
   return AreExprVectorsEqual(lhs.valid_shape, rhs.valid_shape) &&
          AreExprVectorsEqual(lhs.stride, rhs.stride) && AreExprsEqual(lhs.start_offset, rhs.start_offset) &&
          lhs.blayout == rhs.blayout && lhs.slayout == rhs.slayout && lhs.fractal == rhs.fractal &&
-         lhs.pad == rhs.pad;
+         lhs.pad == rhs.pad && lhs.compact == rhs.compact;
 }
 
 bool operator!=(const TileView& lhs, const TileView& rhs) { return !(lhs == rhs); }
@@ -139,6 +139,7 @@ size_t Hash(const TileView& tv) {
   h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.slayout)));
   h = hash_combine(h, std::hash<uint64_t>{}(tv.fractal));
   h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.pad)));
+  h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.compact)));
   return static_cast<size_t>(h);
 }
 
@@ -201,6 +202,26 @@ TileLayout StringToTileLayout(const std::string& str) {
   throw TypeError("Unknown TileLayout string: " + str);
 }
 
+std::string CompactModeToString(CompactMode mode) {
+  switch (mode) {
+    case CompactMode::null:
+      return "null";
+    case CompactMode::normal:
+      return "normal";
+    default:
+      throw TypeError("Unknown CompactMode value: " + std::to_string(static_cast<int>(mode)));
+  }
+}
+
+CompactMode StringToCompactMode(const std::string& str) {
+  if (str == "null") {
+    return CompactMode::null;
+  } else if (str == "normal") {
+    return CompactMode::normal;
+  }
+  throw TypeError("Unknown CompactMode string: " + str);
+}
+
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), memref_(std::move(memref)) {
   for (int64_t dim : shape) {
@@ -221,12 +242,13 @@ TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout lay
 
 TileView::TileView(const std::vector<int64_t>& valid_shape_ints, const std::vector<int64_t>& stride_ints,
                    ExprPtr start_offset_, TileLayout blayout_, TileLayout slayout_, uint64_t fractal_,
-                   PadValue pad_)
+                   PadValue pad_, CompactMode compact_)
     : start_offset(std::move(start_offset_)),
       blayout(blayout_),
       slayout(slayout_),
       fractal(fractal_),
-      pad(pad_) {
+      pad(pad_),
+      compact(compact_) {
   for (int64_t v : valid_shape_ints) {
     valid_shape.push_back(std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()));
   }

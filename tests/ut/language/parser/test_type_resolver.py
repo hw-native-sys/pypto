@@ -256,6 +256,35 @@ class TestTypeResolver:
         assert "pl.TileView(" in printed
         assert "valid_shape=[16, 64]" in printed
 
+    @pytest.mark.parametrize(
+        ("compact", "printed_name"),
+        [
+            (ir.CompactMode.normal, "normal"),
+        ],
+    )
+    def test_tileview_compact_mode_printer_roundtrip(self, compact, printed_name):
+        """A non-default compact mode survives Python print and parse."""
+        span = ir.Span.unknown()
+        original = ir.TileType(
+            [32, 32],
+            DataType.INT8,
+            tile_view=ir.TileView(valid_shape=[32, 16], compact=compact),
+            memory_space=ir.MemorySpace.Right,
+        )
+
+        printed = ir.python_print_type(original)
+        assert f"compact=pl.CompactMode.{printed_name}" in printed
+
+        reparsed = _make_resolver().resolve_type(ast.parse(printed, mode="eval").body)
+        assert isinstance(reparsed, ir.TileType)
+        assert reparsed.tile_view is not None
+        assert reparsed.tile_view.compact == compact
+        ir.assert_structural_equal(
+            ir.Var("value", original, span),
+            ir.Var("value", reparsed, span),
+            enable_auto_mapping=True,
+        )
+
     @pytest.mark.parametrize("annotation", _DEFAULT_TILEVIEW_ANNOTATIONS)
     def test_tile_type_text_roundtrip_is_stable_after_canonicalization(self, annotation: str):
         """Once canonicalized, the printed tile type should parse and print stably."""

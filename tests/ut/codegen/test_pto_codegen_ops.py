@@ -2635,6 +2635,15 @@ class TestTileMoveLayoutNoopElision:
         tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
         assert not tmovs, f"same-addr same-layout tile.move must elide pto.tmov; got:\n{tmovs}\nfull:\n{mlir}"
 
+    def test_same_addr_different_compact_mode_emits_tmov(self):
+        """A compact representation change at one address is not a no-op."""
+        compact = ir.TileView(compact=ir.CompactMode.normal)
+        mlir = self._generate_mlir(
+            self._vec_tile_move_program(dst_view=compact, name="move_noncompact_to_compact_same_addr")
+        )
+        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
+        assert tmovs, f"same-addr compact conversion must emit pto.tmov; got none in:\n{mlir}"
+
 
 class TestTileStoreAtomicCodegen:
     """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""

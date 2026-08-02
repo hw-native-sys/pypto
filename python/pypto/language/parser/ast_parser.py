@@ -293,6 +293,8 @@ def _has_printable_tile_view(
         return True
     if tile_view.pad != ir.PadValue.null:
         return True
+    if tile_view.compact != ir.CompactMode.null:
+        return True
     return False
 
 

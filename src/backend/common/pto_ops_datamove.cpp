@@ -260,8 +260,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   std::string view_type = codegen::FormatTileBufTypeString(
       codegen::MemorySpaceToMLIR(view_memory_space), view_type_info.dtype_str, view_type_info.rows,
       view_type_info.cols, view_type_info.blayout, view_type_info.slayout, view_type_info.fractal,
-      view_type_info.pad, view_type_info.v_row, view_type_info.v_col, view_type_info.v_row_dynamic,
-      view_type_info.v_col_dynamic);
+      view_type_info.pad, view_type_info.compact, view_type_info.v_row, view_type_info.v_col,
+      view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
   std::string dst_view = codegen.NewNamedTemp("assemble_view");
   std::ostringstream sv;
@@ -402,8 +402,8 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   if (vc_const) view_info.v_col = vc_const->value_;
   std::string view_type = codegen::FormatTileBufTypeString(
       codegen::MemorySpaceToMLIR(dst_space), view_info.dtype_str, view_info.rows, view_info.cols,
-      view_info.blayout, view_info.slayout, view_info.fractal, view_info.pad, view_info.v_row,
-      view_info.v_col, view_info.v_row_dynamic, view_info.v_col_dynamic);
+      view_info.blayout, view_info.slayout, view_info.fractal, view_info.pad, view_info.compact,
+      view_info.v_row, view_info.v_col, view_info.v_row_dynamic, view_info.v_col_dynamic);
 
   // Coerce the extent to `index` once, then feed both consumers from it:
   // pto.subview's valid_row/valid_col are Optional<Index> and partition_view sizes
@@ -1022,8 +1022,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     std::string view_type = codegen::FormatTileBufTypeString(
         codegen::MemorySpaceToMLIR(*source_tile_type->memory_space_), view_type_info.dtype_str,
         view_type_info.rows, view_type_info.cols, view_type_info.blayout, view_type_info.slayout,
-        view_type_info.fractal, view_type_info.pad, view_type_info.v_row, view_type_info.v_col,
-        view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
+        view_type_info.fractal, view_type_info.pad, view_type_info.compact, view_type_info.v_row,
+        view_type_info.v_col, view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
     std::string view_ssa = codegen.NewNamedTemp("slice_view");
     std::ostringstream oss;

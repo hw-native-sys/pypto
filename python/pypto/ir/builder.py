@@ -689,6 +689,7 @@ class IRBuilder:
         slayout: ir.TileLayout = ir.TileLayout.none_box,
         fractal: int = 512,
         pad: ir.PadValue = ir.PadValue.null,
+        compact: ir.CompactMode = ir.CompactMode.null,
         span: ir.Span | None = None,
     ) -> ir.TileView:
         """Create a TileView with normalized expressions.
@@ -701,6 +702,7 @@ class IRBuilder:
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size in bytes, not elements (default: 512)
             pad: Pad mode (default: null)
+            compact: Partial-tile compact mode (default: null)
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -716,7 +718,16 @@ class IRBuilder:
         valid_shape_exprs = [_normalize_expr(dim, actual_span) for dim in valid_shape]
         stride_exprs = [_normalize_expr(s, actual_span) for s in stride]
         start_offset_expr = _normalize_expr(start_offset, actual_span)
-        return ir.TileView(valid_shape_exprs, stride_exprs, start_offset_expr, blayout, slayout, fractal, pad)
+        return ir.TileView(
+            valid_shape_exprs,
+            stride_exprs,
+            start_offset_expr,
+            blayout,
+            slayout,
+            fractal,
+            pad,
+            compact,
+        )
 
     def tensor_view(
         self,

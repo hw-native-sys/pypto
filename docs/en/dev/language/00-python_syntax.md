@@ -211,6 +211,9 @@ tile: pl.Tile[
 - An explicit `pl.TileView()` (or one that only repeats those implicit defaults) is treated as
   semantically equivalent to the omitted form. Parser / printer roundtrips may canonicalize both
   forms to the same printed syntax.
+- `compact=pl.CompactMode.normal` represents PTO's packed transfer format for a partial boxed tile.
+  PyPTO infers it for partial `tile.extract` results in L0A/L0B, so kernels normally should not set it
+  directly.
 
 ## Expressions
 

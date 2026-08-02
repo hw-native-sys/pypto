@@ -145,13 +145,13 @@ print(pto_code)
 **`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
 下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。
 `pto.subview` 要求结果 `tile_buf` 与源 `tile_buf` 在 `dtype`、`memory_space`、
-`blayout`、`slayout`、`fractal` 和 `pad` 上完全一致，因此
-`DeduceTileSliceType` 会将源 `TileView` 的这四个字段透传到结果，使新生成的
+`blayout`、`slayout`、`fractal`、`pad` 和 `compact` 上完全一致，因此
+`DeduceTileSliceType` 会将源 `TileView` 的这五个字段透传到结果，使新生成的
 `TileType` 天然满足约束。后端 codegen 还会在下沉时执行 `CheckSubviewTileCompat`
 做兜底校验：
 
 - 源和结果都必须显式携带 `TileView`。
-- `dtype`、`blayout`、`slayout`、`fractal` 与 `pad` 必须严格相等。
+- `dtype`、`blayout`、`slayout`、`fractal`、`pad` 与 `compact` 必须严格相等。
 - `pad` 必须为 `PadValue::null`——`pto.subview` 是视图而不是 fillpad；如果
   需要 zero/min/max 填充，请在切出来的子 tile 上再调用 `tile.fillpad`。
 
@@ -509,7 +509,8 @@ tile_c = pl.mul(tile_a, tile_b)
 
 ### Tile 缓冲区属性
 
-生成的 `alloc_tile` 操作从 TileType 元数据推导数据类型和维度, 从关联的 TileView 推导布局/分形/填充 (如有):
+生成的 `alloc_tile` 操作从 TileType 元数据推导数据类型和维度，并从关联的 TileView
+推导布局/分形/填充/紧凑模式（如有）：
 
 ```mlir
 !pto.tile_buf<
@@ -522,7 +523,8 @@ tile_c = pl.mul(tile_a, tile_b)
   blayout=row_major,   // Block layout (from TileView, default: row_major)
   slayout=none_box,    // Scatter layout (from TileView, default: none_box)
   fractal=512,         // Fractal size in bytes, not elements (from TileView, default: 512)
-  pad=0                // Pad mode as int (from TileView, default: 0/null)
+  pad=0,               // Pad mode as int (from TileView, default: 0/null)
+  compact=1            // Optional compact mode (normal=1; null=0 时省略)
 >
 ```
 
@@ -534,8 +536,11 @@ tile_c = pl.mul(tile_a, tile_b)
 | `slayout` | `TileView::slayout` | `none_box`, `row_major`, `col_major` | `none_box` |
 | `fractal` | `TileView::fractal` | uint64 | `512` |
 | `pad` | `TileView::pad` | `null(0)`, `zero(1)`, `max(2)`, `min(3)` | `null(0)` |
+| `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
 
-当 MemRef 没有关联 TileView 时, 代码生成器使用上表中的默认值。
+当 MemRef 没有关联 TileView 时，代码生成器使用上表中的默认值。默认的 null
+`compact` 属性不会输出。进入 L0A/L0B 的部分 `tile.extract` 会自动设置
+`normal(1)`，使 TEXTRACT 仅传输逻辑 `valid_shape`，而不会把 box 对齐填充当作数据。
 
 ## 内核包装器生成 (PTO 后端)
 

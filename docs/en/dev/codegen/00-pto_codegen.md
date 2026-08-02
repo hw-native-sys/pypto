@@ -148,13 +148,13 @@ print(pto_code)
 through `pto.subview`, which is a pure view alias of the source tile (no
 data movement, no extra `pto.alloc_tile`).  `pto.subview` requires the
 result `tile_buf` to share `dtype`, `memory_space`, `blayout`, `slayout`,
-`fractal`, and `pad` with the source — `DeduceTileSliceType` propagates
-those four `TileView` fields from the source so the produced `TileType`
+`fractal`, `pad`, and `compact` with the source — `DeduceTileSliceType` propagates
+those five `TileView` fields from the source so the produced `TileType`
 satisfies the constraints by construction.  Backend codegen also runs a
 `CheckSubviewTileCompat` guard at lowering time:
 
 - Source and result must both carry an explicit `TileView`.
-- `dtype`, `blayout`, `slayout`, `fractal`, and `pad` must match exactly.
+- `dtype`, `blayout`, `slayout`, `fractal`, `pad`, and `compact` must match exactly.
 - `pad` must be `PadValue::null` — `pto.subview` is a view, not a fillpad,
   so use `tile.fillpad` on the slice result if zero/min/max padding is
   required.
@@ -520,7 +520,8 @@ The codegen:
 
 ### Tile Buffer Attributes
 
-Generated `alloc_tile` operations derive dtype and dimensions from TileType metadata, and layout/fractal/pad from the associated TileView (when available):
+Generated `alloc_tile` operations derive dtype and dimensions from TileType metadata, and
+layout/fractal/pad/compact mode from the associated TileView (when available):
 
 ```mlir
 !pto.tile_buf<
@@ -533,7 +534,8 @@ Generated `alloc_tile` operations derive dtype and dimensions from TileType meta
   blayout=row_major,   // Block layout (from TileView, default: row_major)
   slayout=none_box,    // Scatter layout (from TileView, default: none_box)
   fractal=512,         // Fractal size in bytes, not elements (from TileView, default: 512)
-  pad=0                // Pad mode as int (from TileView, default: 0/null)
+  pad=0,               // Pad mode as int (from TileView, default: 0/null)
+  compact=1            // Optional compact mode (normal=1; omitted for null=0)
 >
 ```
 
@@ -545,8 +547,12 @@ Generated `alloc_tile` operations derive dtype and dimensions from TileType meta
 | `slayout` | `TileView::slayout` | `none_box`, `row_major`, `col_major` | `none_box` |
 | `fractal` | `TileView::fractal` | uint64 | `512` |
 | `pad` | `TileView::pad` | `null(0)`, `zero(1)`, `max(2)`, `min(3)` | `null(0)` |
+| `compact` | `TileView::compact` | `null(0)`, `normal(1)` | `null(0)` |
 
 When no TileView is associated with the MemRef, the codegen falls back to the default values listed above.
+The `compact` attribute is omitted for its null default. A partial `tile.extract` into L0A/L0B sets
+`normal(1)` automatically so TEXTRACT transfers only the logical `valid_shape` instead of treating
+box-alignment padding as data.
 
 ## Kernel Wrapper Generation (PTO Backend)
 

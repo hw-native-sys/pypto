@@ -1734,6 +1734,7 @@ class TypeResolver:
         slayout: ir.TileLayout | None = None
         fractal: int | None = None
         pad: ir.PadValue = ir.PadValue.null
+        compact: ir.CompactMode = ir.CompactMode.null
         for kw in node.keywords:
             if kw.arg == "valid_shape":
                 valid_shape = self._parse_tileview_expr_list(kw.value)
@@ -1755,11 +1756,16 @@ class TypeResolver:
                 fractal = val
             elif kw.arg == "pad":
                 pad = self._resolve_padvalue(kw.value)
+            elif kw.arg == "compact":
+                compact = self._resolve_compactmode(kw.value)
             else:
                 raise ParserTypeError(
                     f"Unknown TileView keyword argument: {kw.arg!r}",
                     span=self._get_span(kw),
-                    hint="Supported: valid_shape, stride, start_offset, blayout, slayout, fractal, pad",
+                    hint=(
+                        "Supported: valid_shape, stride, start_offset, blayout, slayout, "
+                        "fractal, pad, compact"
+                    ),
                 )
         # If valid_shape was not explicitly given, inherit from tile_shape so roundtrip is stable
         if valid_shape is None and tile_shape is not None:
@@ -1789,6 +1795,7 @@ class TypeResolver:
             slayout=slayout if slayout is not None else impl_slayout,
             fractal=fractal if fractal is not None else impl_fractal,
             pad=pad,
+            compact=compact,
         )
 
     def _tile_shape_to_expr_list(self, shape: "Sequence[int | ir.Expr]") -> "list[ir.Expr]":
@@ -1921,6 +1928,20 @@ class TypeResolver:
             f"Unknown PadValue value: {ast.unparse(node)}",
             span=self._get_span(node),
             hint="Use pl.PadValue.null, pl.PadValue.zero, pl.PadValue.max, or pl.PadValue.min",
+        )
+
+    def _resolve_compactmode(self, node: ast.expr) -> "ir.CompactMode":
+        """Resolve pl.CompactMode.xxx to ir.CompactMode."""
+        compact_modes = {
+            "null": ir.CompactMode.null,
+            "normal": ir.CompactMode.normal,
+        }
+        if isinstance(node, ast.Attribute) and node.attr in compact_modes:
+            return compact_modes[node.attr]
+        raise ParserTypeError(
+            f"Unknown CompactMode value: {ast.unparse(node)}",
+            span=self._get_span(node),
+            hint="Use pl.CompactMode.null or pl.CompactMode.normal",
         )
 
     @staticmethod

@@ -643,6 +643,11 @@ void BindIR(nb::module_& m) {
       .value("col_major", TileLayout::col_major, "Column-major layout")
       .export_values();
 
+  // CompactMode enum - must be before TileView.
+  nb::enum_<CompactMode>(ir, "CompactMode", "Partial-tile compact mode enumeration")
+      .value("null", CompactMode::null, "Ordinary non-compact layout")
+      .value("normal", CompactMode::normal, "Compact valid-region layout");
+
   // TileView - immutable struct for tile view information.
   //
   // Fields are read-only from Python so that hash and equality remain stable
@@ -650,21 +655,23 @@ void BindIR(nb::module_& m) {
   // constructor, not by mutating fields.
   nb::class_<TileView>(
       ir, "TileView",
-      "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad. "
+      "Tile view representation with valid shape, stride, start offset, layouts, fractal, pad, and "
+      "compact mode. "
       "Immutable from Python — set all fields at construction time.")
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
-                    uint64_t, PadValue>(),
+                    uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
            nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
            nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
-           nb::arg("pad") = PadValue::null,
-           "Create a tile view; all fields default to empty/null/row_major/none_box/512/null. "
+           nb::arg("pad") = PadValue::null, nb::arg("compact") = CompactMode::null,
+           "Create a tile view; fields default to empty/null/row_major/none_box/512/null/null. "
            "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
-                    uint64_t, PadValue>(),
+                    uint64_t, PadValue, CompactMode>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
+           nb::arg("compact") = CompactMode::null,
            "Create a tile view with integer valid_shape and stride, auto-converted to ConstInt. "
            "fractal is a size in bytes, not elements.")
       .def_ro("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
@@ -679,6 +686,7 @@ void BindIR(nb::module_& m) {
               "FP32/INT32). MX scale tiles carry 32, the MX block size (1-byte scale dtype, so "
               "bytes and elements coincide).")
       .def_ro("pad", &TileView::pad, "Pad mode")
+      .def_ro("compact", &TileView::compact, "Partial-tile compact mode")
       .def(
           "__eq__", [](const TileView& self, const TileView& other) { return self == other; },
           nb::arg("other"), "Structural equality comparison")

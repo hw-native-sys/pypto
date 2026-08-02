@@ -43,8 +43,9 @@ const char* TileLayoutToStr(ir::TileLayout layout);
 /// v_row/v_col are the valid shape dimensions (may differ from rows/cols).
 std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                     int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                    uint64_t fractal, ir::PadValue pad, int64_t v_row, int64_t v_col,
-                                    bool v_row_dynamic = false, bool v_col_dynamic = false);
+                                    uint64_t fractal, ir::PadValue pad, ir::CompactMode compact,
+                                    int64_t v_row, int64_t v_col, bool v_row_dynamic = false,
+                                    bool v_col_dynamic = false);
 
 /// Intermediate result holder for ExtractTileTypeInfo.
 struct TileTypeComponents {
@@ -55,6 +56,7 @@ struct TileTypeComponents {
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
   ir::PadValue pad = ir::PadValue::null;
+  ir::CompactMode compact = ir::CompactMode::null;
   int64_t v_row = 32;
   int64_t v_col = 32;
   bool v_row_dynamic = false;

@@ -377,6 +377,15 @@ class PadValue(enum.Enum):
     min = ...
     """Min value padding."""
 
+class CompactMode(enum.Enum):
+    """Partial-tile compact mode enumeration."""
+
+    null = ...
+    """Ordinary non-compact layout."""
+
+    normal = ...
+    """Compact valid-region layout."""
+
 class TensorView:
     """Tensor view representation with stride, layout, valid shape, and pad mode."""
 
@@ -601,7 +610,7 @@ class DistributedTensorType(TensorType):
 
 class TileView:
     """Tile view: read-only representation of valid shape, stride, start offset,
-    layouts, fractal, and pad. Construct with all values; fields cannot be mutated
+    layouts, fractal, pad, and compact mode. Construct with all values; fields cannot be mutated
     after construction (so hash/equality stay stable for use as set/dict keys)."""
 
     valid_shape: Final[Sequence[Expr]]
@@ -633,6 +642,9 @@ class TileView:
     pad: Final[PadValue]
     """Pad mode."""
 
+    compact: Final[CompactMode]
+    """Partial-tile compact mode."""
+
     def __init__(
         self,
         valid_shape: Sequence[Expr | int | Scalar] | None = None,
@@ -642,8 +654,9 @@ class TileView:
         slayout: TileLayout = ...,
         fractal: int = ...,
         pad: PadValue = ...,
+        compact: CompactMode = ...,
     ) -> None:
-        """Create a tile view; all fields default to empty/None/row_major/none_box/512/null.
+        """Create a tile view; all fields default to empty/None/row_major/none_box/512/null/null.
 
         Args:
             valid_shape: Valid shape dimensions (Expr/int/Scalar, ints auto-converted to ConstInt)
@@ -653,6 +666,7 @@ class TileView:
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size in bytes, not elements (default: 512)
             pad: Pad mode (default: null)
+            compact: Partial-tile compact mode (default: null)
         """
 
     def __eq__(self, other: object) -> bool:

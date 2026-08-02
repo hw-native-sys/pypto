@@ -274,7 +274,9 @@ def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     assert printed.count("in pl.pipeline(2, stage=2") == 4
     assert printed.count("pl.tile.store(") == 4
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
-    assert "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16])" in printed
+    assert (
+        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+    ) in printed
     assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
@@ -332,7 +334,8 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
         printed,
     ), printed
     assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
+        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, "
+        r"pl\.TileView\(valid_shape=\[\d+, 16\], compact=pl\.CompactMode\.normal\)\]",
         printed,
     ), printed
 
@@ -454,6 +457,11 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     ), pto
     assert re.search(
         r"valid_col = %c16_index : !pto\.tile_buf<loc=acc, dtype=i32, rows=(128|144), cols=32,",
+        pto,
+    ), pto
+    assert re.search(
+        r"!pto\.tile_buf<loc=right, dtype=i8, rows=192, cols=32, "
+        r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
     assert "!pto.tile_buf<loc=mat, dtype=i8, rows=128, cols=16," not in pto

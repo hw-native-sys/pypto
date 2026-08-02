@@ -1221,6 +1221,13 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         }
         return false;
       }
+      // Compare compact mode
+      if (lhs_tv.compact != rhs_tv.compact) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TileView compact mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
     }
     // Compare memory_space
     if (lhs_tile->memory_space_.has_value() != rhs_tile->memory_space_.has_value()) {

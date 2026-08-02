@@ -229,8 +229,8 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   }
 
   // Slice produces a window over the source tile.  PTO's pto.subview semantics
-  // require the result tile_buf to share dtype, memory space, and the four
-  // tile-config fields (blayout, slayout, fractal, pad) with the source.
+  // require the result tile_buf to share dtype, memory space, and the five
+  // tile-config fields (blayout, slayout, fractal, pad, compact) with the source.
   // Inherit only those fields from the source TileView; recompute the
   // window-specific fields (valid_shape and physical stride/start_offset are
   // inherent to the slice itself, not the parent buffer).  Tiles without an
@@ -243,6 +243,7 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     tile_view.slayout = src_v.slayout;
     tile_view.fractal = src_v.fractal;
     tile_view.pad = src_v.pad;
+    tile_view.compact = src_v.compact;
   } else {
     tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
   }
@@ -326,6 +327,7 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
       ComputeReshapeValidShape(GetValidShape(tile_type), tile_type->shape_, new_shape,
                                source_view.blayout == TileLayout::row_major, args[0]->span_, "tile.reshape");
   tile_view.pad = source_view.pad;
+  tile_view.compact = source_view.compact;
 
   tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
 
@@ -464,8 +466,8 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   // scatter axis) has no major-ness and is left unchanged. This maps each
   // layout to its transpose dual: NZ<->ZN, NN<->ZZ, ND<->DN. (A plain swap of
   // the two fields would be correct only for NZ/ZN, and would wrongly leave
-  // NN/ZZ fixed and produce an illegal none_box blayout for ND/DN.) fractal/pad
-  // are byte-level invariants and carry through unchanged.
+  // NN/ZZ fixed and produce an illegal none_box blayout for ND/DN.) fractal,
+  // pad, and compact mode are byte-level invariants and carry through unchanged.
   auto flip_major = [](TileLayout l) -> TileLayout {
     switch (l) {
       case TileLayout::row_major:
@@ -483,6 +485,7 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   tile_view.slayout = flip_major(src_v.slayout);
   tile_view.fractal = src_v.fractal;
   tile_view.pad = src_v.pad;
+  tile_view.compact = src_v.compact;
   std::vector<ExprPtr> valid_shape = src_v.valid_shape.empty() ? tile_type->shape_ : src_v.valid_shape;
   std::swap(valid_shape[ndim - 2], valid_shape[ndim - 1]);
   tile_view.valid_shape = valid_shape;
@@ -759,6 +762,18 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   } else if (target == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  }
+
+  // A partial Mat->L0A/L0B extract is a compact boundary transfer, not a
+  // physical-width copy. PTO-ISA's non-compact TEXTRACT path does not receive
+  // valid-row/valid-col operands; selecting it for a box-padded tail copies
+  // padding as data (issue #2232). Keep this inference at the operation/type
+  // boundary so every producer of a partial tile.extract gets the same legal
+  // tile config, while full extracts and non-L0 destinations remain byte-
+  // identical to their historical non-compact form.
+  if ((target == MemorySpace::Left || target == MemorySpace::Right) &&
+      !tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, dst_shape)) {
+    tile_view.compact = CompactMode::normal;
   }
 
   // Canonicalize the view once, against the space it is actually a view of --

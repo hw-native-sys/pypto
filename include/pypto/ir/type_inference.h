@@ -584,10 +584,10 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim);
 std::string FormatShape(const std::vector<ExprPtr>& shape);
 
 /**
- * @brief Propagate blayout and pad from a source TileType's tile_view into a new TileView
+ * @brief Propagate layout/config metadata from a source TileType's tile_view into a new TileView
  *
  * Many tile ops preserve the layout properties of their primary input. This helper copies
- * blayout and pad when the source has a tile_view, avoiding repeated inline checks.
+ * the metadata those operations preserve, avoiding repeated inline checks.
  *
  * @param dst Destination TileView (valid_shape should already be set)
  * @param src Source TileType whose tile_view properties are inherited
@@ -599,6 +599,7 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
   dst.blayout = eff.blayout;
   dst.slayout = eff.slayout;
   dst.pad = eff.pad;
+  dst.compact = eff.compact;
 }
 
 namespace detail {

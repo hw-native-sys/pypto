@@ -428,7 +428,7 @@ class TileMemorySpaceMutator : public IRMutator {
   // slayout/fractal) to the target's implicit view — the source's layout
   // (e.g. Vec defaults from tile.create) becomes a mismatch once the space
   // changes (Acc expects col_major/row_major). Other metadata (valid_shape,
-  // stride, start_offset, pad) reflects the actual data and is preserved.
+  // stride, start_offset, pad, compact) reflects the actual data and is preserved.
   std::optional<TypePtr> ComputeRewrittenType(const VarPtr& op) const {
     auto tile_type = As<TileType>(op->GetType());
     auto mem_it = var_memory_.find(op);

@@ -146,10 +146,18 @@ assert len(restored.type.tile_view.valid_shape) == 2
   "tile_view": {
     "valid_shape": [...], // Array of Expr nodes
     "stride": [...],      // Array of Expr nodes
-    "start_offset": {...} // Expr node
+    "start_offset": {...},// Expr node or nil
+    "blayout": "row_major",
+    "slayout": "none_box",
+    "fractal": 512,
+    "pad": "null",
+    "compact": "normal"
   }
 }
 ```
+
+在引入 `compact` 字段之前写出的 blob 会省略该键，反序列化时按
+`CompactMode.null` 处理。
 
 ### 带 Kwargs 的 Call
 

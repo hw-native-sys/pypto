@@ -13,6 +13,7 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    CompactMode,
     Expr,
     MemorySpace,
     MemRef,
@@ -176,6 +177,7 @@ class _TileViewMeta(type):
         slayout: TileLayout = TileLayout.none_box,
         fractal: int = 512,
         pad: PadValue = PadValue.null,
+        compact: CompactMode = CompactMode.null,
     ) -> "_TileViewBase":
         if isinstance(start_offset, int):
             start_offset = _normalize_expr(start_offset)
@@ -187,6 +189,7 @@ class _TileViewMeta(type):
             slayout,
             fractal,
             pad,
+            compact,
         )
 
 

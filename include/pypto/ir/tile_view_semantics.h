@@ -202,7 +202,8 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
 
 /// Return whether TileView matches the printer's raw TileView() defaults.
 inline bool IsDefaultPrintedTileView(const TileView& tile_view, const std::vector<ExprPtr>& shape) {
-  if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null) {
+  if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null ||
+      tile_view.compact != CompactMode::null) {
     return false;
   }
 
@@ -214,7 +215,7 @@ inline bool IsDefaultPrintedTileView(const TileView& tile_view, const std::vecto
 
   TileView default_view;
   return tile_view.blayout == default_view.blayout && tile_view.slayout == default_view.slayout &&
-         tile_view.fractal == default_view.fractal;
+         tile_view.fractal == default_view.fractal && tile_view.compact == default_view.compact;
 }
 
 /// Return whether TileView matches the semantics of omitted Python syntax.
@@ -227,13 +228,14 @@ inline bool IsImplicitPrintedTileView(const TileView& tile_view, const std::vect
   if (!tile_view.valid_shape.empty() && !ShapeExprListsEquivalent(tile_view.valid_shape, shape)) {
     return false;
   }
-  if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null) {
+  if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null ||
+      tile_view.compact != CompactMode::null) {
     return false;
   }
 
   TileView implicit_view = GetImplicitTileView(shape, memory_space);
   return tile_view.blayout == implicit_view.blayout && tile_view.slayout == implicit_view.slayout &&
-         tile_view.fractal == implicit_view.fractal;
+         tile_view.fractal == implicit_view.fractal && tile_view.compact == implicit_view.compact;
 }
 
 /// Normalize sparse/default TileView syntax to a comparable semantic form.
@@ -263,7 +265,7 @@ inline bool CanOmitExplicitEmptyTileView(const std::vector<ExprPtr>& shape,
   TileView default_view;
   TileView implicit_view = GetImplicitTileView(shape, memory_space);
   return implicit_view.blayout == default_view.blayout && implicit_view.slayout == default_view.slayout &&
-         implicit_view.fractal == default_view.fractal;
+         implicit_view.fractal == default_view.fractal && implicit_view.compact == default_view.compact;
 }
 
 /// Return the valid_shape the printer should materialize for tile operations.

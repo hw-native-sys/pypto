@@ -367,6 +367,10 @@ class IRSerializer::Impl {
     }
     tv_map["pad"] = msgpack::object(pad_str, zone);
 
+    // Serialize compact mode. Older blobs omit this key and deserialize to
+    // CompactMode::null via TileView's field default.
+    tv_map["compact"] = msgpack::object(CompactModeToString(tile_view->compact), zone);
+
     return msgpack::object(tv_map, zone);
   }
 

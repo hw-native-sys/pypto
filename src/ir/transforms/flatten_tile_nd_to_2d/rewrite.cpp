@@ -647,7 +647,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, "tile.load result");
 
         auto flat_shape_exprs = Make2DShapeExprs(merged, last, span);
-        // Preserve any TileView (blayout/slayout/fractal/pad) the source tile
+        // Preserve any TileView (blayout/slayout/fractal/pad/compact) the source tile
         // already carried — e.g. LowerCompositeOps tags a transposed-load Mat
         // rhs with TileView(blayout=row_major, slayout=col_major) so the
         // downstream TLOAD matches the DN2ZN pattern. The implicit Mat default
@@ -665,7 +665,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             flat_valid = ComputeMergedValidShape(orig_tv.valid_shape, span);
           }
           flat_tile_view = TileView(flat_valid, /*stride=*/{}, /*start_offset=*/nullptr, orig_tv.blayout,
-                                    orig_tv.slayout, orig_tv.fractal, orig_tv.pad);
+                                    orig_tv.slayout, orig_tv.fractal, orig_tv.pad, orig_tv.compact);
         } else {
           flat_tile_view = tile_view_semantics::GetImplicitTileView(flat_shape_exprs, flat_memory_space);
         }

@@ -29,7 +29,7 @@ namespace ir {
  *
  * Captures the full set of attributes that PTO alloc_tile uses to declare a
  * buffer: memory space, element type, physical shape, layout, fractal, pad,
- * and valid-shape dimensions.  Two tiles that share the same MemRef (storage
+ * compact mode, and valid-shape dimensions.  Two tiles that share the same MemRef (storage
  * slot) are PTO-compatible only when they have either the same signature, or
  * their differences can be materialised via existing PTO view ops
  * (treshape, textract, tfillpad).
@@ -43,6 +43,7 @@ struct TileBufSignature {
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
   ir::PadValue pad = ir::PadValue::null;
+  ir::CompactMode compact = ir::CompactMode::null;
   int64_t v_row = 32;
   int64_t v_col = 32;
   bool v_row_dynamic = false;
@@ -51,7 +52,7 @@ struct TileBufSignature {
   bool operator==(const TileBufSignature& o) const {
     return memory_space == o.memory_space && dtype == o.dtype && rows == o.rows && cols == o.cols &&
            blayout == o.blayout && slayout == o.slayout && fractal == o.fractal && pad == o.pad &&
-           v_row == o.v_row && v_col == o.v_col && v_row_dynamic == o.v_row_dynamic &&
+           compact == o.compact && v_row == o.v_row && v_col == o.v_col && v_row_dynamic == o.v_row_dynamic &&
            v_col_dynamic == o.v_col_dynamic;
   }
   bool operator!=(const TileBufSignature& o) const { return !(*this == o); }
@@ -96,6 +97,7 @@ struct TileBufSignature {
       sig.slayout = tv.slayout;
       sig.fractal = tv.fractal;
       sig.pad = tv.pad;
+      sig.compact = tv.compact;
       if (tv.valid_shape.size() >= 1) {
         if (auto c0 = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
           sig.v_row = c0->value_;
@@ -124,7 +126,7 @@ struct TileBufSignature {
    * Two signatures that differ only in fields that PTO view ops can
    * materialise (pad, valid_shape, reshape shape) share the same root.
    * The root keeps: memory_space, dtype, physical rows/cols, blayout,
-   * slayout, fractal.
+   * slayout, fractal, compact mode.
    */
   [[nodiscard]] TileBufSignature RootSignature() const {
     TileBufSignature root = *this;
@@ -154,7 +156,8 @@ struct TileBufSignature {
 
     // Different physical shape but same memory_space + dtype → reshape
     // Element count must match to ensure the physical buffer capacity is compatible
-    if (blayout == other.blayout && slayout == other.slayout && fractal == other.fractal) {
+    if (blayout == other.blayout && slayout == other.slayout && fractal == other.fractal &&
+        compact == other.compact) {
       const __int128 lhs_elems = static_cast<__int128>(rows) * static_cast<__int128>(cols);
       const __int128 rhs_elems = static_cast<__int128>(other.rows) * static_cast<__int128>(other.cols);
       return lhs_elems == rhs_elems;
@@ -162,7 +165,7 @@ struct TileBufSignature {
 
     // [1, N] RowMajor and [N, 1] ColMajor are physically identical in memory
     // (same N elements, same byte sequence); tile.reshape converts between them at zero cost.
-    if (slayout == other.slayout && fractal == other.fractal) {
+    if (slayout == other.slayout && fractal == other.fractal && compact == other.compact) {
       const bool is_1d_transpose =
           (rows == 1 && cols > 1 && blayout == ir::TileLayout::row_major && other.rows > 1 &&
            other.cols == 1 && other.blayout == ir::TileLayout::col_major &&

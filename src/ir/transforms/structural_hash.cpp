@@ -518,6 +518,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       h = hash_combine(h, static_cast<result_type>(tv.fractal));
       // Hash pad
       h = hash_combine(h, static_cast<result_type>(tv.pad));
+      // Hash compact mode
+      h = hash_combine(h, static_cast<result_type>(tv.compact));
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }

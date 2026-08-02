@@ -146,10 +146,18 @@ assert len(restored.type.tile_view.valid_shape) == 2
   "tile_view": {
     "valid_shape": [...], // Array of Expr nodes
     "stride": [...],      // Array of Expr nodes
-    "start_offset": {...} // Expr node
+    "start_offset": {...},// Expr node or nil
+    "blayout": "row_major",
+    "slayout": "none_box",
+    "fractal": 512,
+    "pad": "null",
+    "compact": "normal"
   }
 }
 ```
+
+Blobs written before the `compact` field was introduced omit that key and
+deserialize as `CompactMode.null`.
 
 ### Call with Kwargs
 

@@ -260,11 +260,33 @@ std::string TileLayoutToString(TileLayout layout);
 TileLayout StringToTileLayout(const std::string& str);
 
 /**
+ * @brief Tile compact-mode enumeration
+ *
+ * Controls how partial boxed tiles are packed by layout-changing operations:
+ * - null: Use the ordinary physical-tile layout
+ * - normal: Pack only the valid region for a boundary tile
+ */
+enum class CompactMode {
+  null,    ///< Ordinary non-compact layout
+  normal,  ///< Compact valid-region layout
+};
+
+/**
+ * @brief Convert CompactMode enum to string
+ */
+std::string CompactModeToString(CompactMode mode);
+
+/**
+ * @brief Convert string to CompactMode enum
+ */
+CompactMode StringToCompactMode(const std::string& str);
+
+/**
  * @brief Tile view representation
  *
  * Represents the view information for a tile, including valid shape,
  * stride, start offset, block layout, scatter layout, fractal size,
- * and pad mode. This is used by TileType to track how a tile views
+ * pad mode, and compact mode. This is used by TileType to track how a tile views
  * its underlying memory.
  *
  * @note `fractal` is a size **in bytes**, not an element count. In a boxed
@@ -286,6 +308,7 @@ struct TileView {
   TileLayout slayout = TileLayout::none_box;   ///< Scatter layout
   uint64_t fractal = 512;                      ///< Fractal size in bytes (not elements)
   PadValue pad = PadValue::null;               ///< Pad mode
+  CompactMode compact = CompactMode::null;     ///< Partial-tile compact mode
 
   /**
    * @brief Default constructor for aggregate initialization
@@ -302,17 +325,19 @@ struct TileView {
    * @param slayout Scatter layout
    * @param fractal Fractal size in bytes (not elements)
    * @param pad Pad mode
+   * @param compact Partial-tile compact mode
    */
   TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset,
            TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
-           uint64_t fractal = 512, PadValue pad = PadValue::null)
+           uint64_t fractal = 512, PadValue pad = PadValue::null, CompactMode compact = CompactMode::null)
       : valid_shape(std::move(valid_shape)),
         stride(std::move(stride)),
         start_offset(std::move(start_offset)),
         blayout(blayout),
         slayout(slayout),
         fractal(fractal),
-        pad(pad) {}
+        pad(pad),
+        compact(compact) {}
 
   /**
    * @brief Constructor with integer valid_shape and stride (auto-converted to ConstInt)
@@ -324,10 +349,11 @@ struct TileView {
    * @param slayout Scatter layout
    * @param fractal Fractal size in bytes (not elements)
    * @param pad Pad mode
+   * @param compact Partial-tile compact mode
    */
   TileView(const std::vector<int64_t>& valid_shape, const std::vector<int64_t>& stride, ExprPtr start_offset,
            TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
-           uint64_t fractal = 512, PadValue pad = PadValue::null);
+           uint64_t fractal = 512, PadValue pad = PadValue::null, CompactMode compact = CompactMode::null);
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -341,7 +367,8 @@ struct TileView {
                            reflection::UsualField(&TileView::blayout, "blayout"),
                            reflection::UsualField(&TileView::slayout, "slayout"),
                            reflection::UsualField(&TileView::fractal, "fractal"),
-                           reflection::UsualField(&TileView::pad, "pad"));
+                           reflection::UsualField(&TileView::pad, "pad"),
+                           reflection::UsualField(&TileView::compact, "compact"));
   }
 };
 

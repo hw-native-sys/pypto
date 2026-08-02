@@ -128,8 +128,8 @@ const char* TileLayoutToStr(ir::TileLayout layout) {
 
 std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                     int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                    uint64_t fractal, ir::PadValue pad, int64_t v_row, int64_t v_col,
-                                    bool v_row_dynamic, bool v_col_dynamic) {
+                                    uint64_t fractal, ir::PadValue pad, ir::CompactMode compact,
+                                    int64_t v_row, int64_t v_col, bool v_row_dynamic, bool v_col_dynamic) {
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
   oss << ", rows=" << rows << ", cols=" << cols;
@@ -138,7 +138,11 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
   oss << ", blayout=" << TileLayoutToStr(blayout);
   oss << ", slayout=" << TileLayoutToStr(slayout);
   oss << ", fractal=" << fractal;
-  oss << ", pad=" << static_cast<int>(pad) << ">";
+  oss << ", pad=" << static_cast<int>(pad);
+  if (compact != ir::CompactMode::null) {
+    oss << ", compact=" << static_cast<int>(compact);
+  }
+  oss << ">";
   return oss.str();
 }
 
@@ -172,6 +176,7 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   c.slayout = view.slayout;
   c.fractal = view.fractal;
   c.pad = view.pad;
+  c.compact = view.compact;
   return c;
 }
 

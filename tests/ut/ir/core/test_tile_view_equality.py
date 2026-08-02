@@ -31,6 +31,7 @@ def _make_view(
     slayout=ir.TileLayout.none_box,
     fractal=512,
     pad=ir.PadValue.null,
+    compact=ir.CompactMode.null,
 ):
     """Create a TileView with given parameters, using sensible defaults."""
     span = _make_span()
@@ -40,7 +41,7 @@ def _make_view(
         stride = [_make_const(1, span), _make_const(16, span)]
     if start_offset is None:
         start_offset = _make_const(0, span)
-    return ir.TileView(valid_shape, stride, start_offset, blayout, slayout, fractal, pad)
+    return ir.TileView(valid_shape, stride, start_offset, blayout, slayout, fractal, pad, compact)
 
 
 class TestTileViewEquality:
@@ -111,6 +112,12 @@ class TestTileViewEquality:
         v2 = _make_view(pad=ir.PadValue.zero)
         assert v1 != v2
 
+    def test_different_compact_mode(self):
+        """Views with different compact modes are not equal."""
+        v1 = _make_view(compact=ir.CompactMode.null)
+        v2 = _make_view(compact=ir.CompactMode.normal)
+        assert v1 != v2
+
     def test_symbolic_same_object_equal(self):
         """Symbolic exprs that are the same object compare equal."""
         span = _make_span()
@@ -168,6 +175,26 @@ class TestTileViewHashEqConsistency:
         v2 = _make_view(valid_shape=[sym], stride=[_make_const(1, span)])
         assert v1 == v2
         assert hash(v1) == hash(v2)
+
+    def test_tile_types_distinguish_compact_mode_structurally(self):
+        """Structural equality and hashing both include compact representation."""
+        span = _make_span()
+        valid_shape = [_make_const(32, span), _make_const(16, span)]
+        null_type = ir.TileType(
+            [32, 32],
+            DataType.INT8,
+            tile_view=_make_view(valid_shape=valid_shape, compact=ir.CompactMode.null),
+            memory_space=ir.MemorySpace.Right,
+        )
+        compact_type = ir.TileType(
+            [32, 32],
+            DataType.INT8,
+            tile_view=_make_view(valid_shape=valid_shape, compact=ir.CompactMode.normal),
+            memory_space=ir.MemorySpace.Right,
+        )
+
+        assert not ir.structural_equal(null_type, compact_type)
+        assert ir.structural_hash(null_type) != ir.structural_hash(compact_type)
 
 
 if __name__ == "__main__":
