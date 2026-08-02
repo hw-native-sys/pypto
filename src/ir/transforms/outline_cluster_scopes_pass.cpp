@@ -184,8 +184,8 @@ class LaunchSpecStamper : public IRMutator {
     }
     // No mapping to apply — a param-less Group, or a constant core_num that
     // references nothing. Substitution would be a no-op either way.
-    auto translated = param_to_arg.empty() ? spec.core_num
-                                           : transform_utils::Substitute(spec.core_num, param_to_arg);
+    auto translated =
+        param_to_arg.empty() ? spec.core_num : transform_utils::Substitute(spec.core_num, param_to_arg);
     RejectCalleeBoundCoreNum(spec, translated);
     return translated;
   }
