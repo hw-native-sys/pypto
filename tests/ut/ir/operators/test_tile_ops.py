@@ -4115,6 +4115,35 @@ class TestTileMoveOp:
         assert call.type.tile_view is None
         assert call.type.get_effective_tile_view().fractal == expected_fractal
 
+    @pytest.mark.parametrize(
+        ("source_space", "view_stored"),
+        [
+            # Mat's layout triple differs from Acc's only in fractal, so adopting
+            # the destination's 1024 lands exactly on Acc's implicit view.
+            (ir.MemorySpace.Mat, False),
+            # Vec's blayout/slayout follow the source, so the view stays explicit —
+            # but fractal is still the destination's.
+            (ir.MemorySpace.Vec, True),
+        ],
+    )
+    def test_move_into_acc_adopts_acc_fractal_from_non_acc_source(self, source_space, view_stored):
+        """A 512-fractal source moved into Acc must report Acc's 1024.
+
+        The same-space cases above cannot show this: an Acc source already has
+        fractal 1024, so they pass even if the result wrongly inherited it from
+        the source instead of taking it from the destination."""
+        source = self._tile_var(source_space)
+        source_type = source.type
+        assert isinstance(source_type, ir.TileType)
+        assert source_type.get_effective_tile_view().fractal == 512
+
+        call = tile.move(source, target_memory=ir.MemorySpace.Acc)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.memory_space == ir.MemorySpace.Acc
+        assert (call.type.tile_view is not None) == view_stored
+        assert call.type.get_effective_tile_view().fractal == 1024
+
     def test_acc_to_vec_move_keeps_vec_fractal(self):
         """Moving out of Acc must adopt Vec's granularity, not carry 1024 along:
         the cube->vec pipe un-fractalizes the data during transfer."""

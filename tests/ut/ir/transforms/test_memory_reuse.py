@@ -1970,13 +1970,22 @@ class TestYieldFixup:
         var_type = moves[0].var.type
         call_type = moves[0].value.type
         assert isinstance(var_type, ir.TileType) and isinstance(call_type, ir.TileType)
-        assert var_type.tile_view is None and call_type.tile_view is None, (
-            f"synthesized tile.move '{moves[0].var.name_hint}' must carry the canonical "
-            f"(absent) Acc view on both sides: var={var_type.tile_view} "
-            f"call={call_type.tile_view}\n{ir.python_print(After)}"
-        )
-        fractal = var_type.get_effective_tile_view().fractal
-        assert fractal == 1024, f"an Acc tile is NZ-boxed at 1024, got {fractal}"
+        # Compare the full tile semantics, not just view presence: a matching
+        # tile_view means nothing if the two sides disagree on memory_space,
+        # because the space is what the absent view resolves against.
+        for label, tile_type in (("var", var_type), ("call", call_type)):
+            assert tile_type.memory_space == ir.MemorySpace.Acc, (
+                f"synthesized tile.move {label} must stay in Acc, got "
+                f"{tile_type.memory_space}\n{ir.python_print(After)}"
+            )
+            assert tile_type.tile_view is None, (
+                f"synthesized tile.move {label} must carry the canonical (absent) Acc "
+                f"view, got {tile_type.tile_view}\n{ir.python_print(After)}"
+            )
+            fractal = tile_type.get_effective_tile_view().fractal
+            assert fractal == 1024, (
+                f"an Acc tile is NZ-boxed at 1024, {label} got {fractal}\n{ir.python_print(After)}"
+            )
 
 
 class TestControlFlow:
