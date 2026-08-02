@@ -232,7 +232,8 @@ class LaunchSpecStamper : public IRMutator {
  * 1. Outline ScopeStmt(Cluster) into Function(Group) (first pass)
  * 2. Outline standalone ScopeStmt(Spmd) into Function(Spmd) (second pass)
  * 3. For nested Spmd inside Cluster: unwrap the Spmd scope and propagate
- *    core_num/sync_start as function attrs on the Group
+ *    core_num/sync_start onto the Group's dispatch (only the self-contained
+ *    spmd_unwrapped marker stays on the Group)
  * 4. Parent function type is preserved (not promoted)
  */
 Pass OutlineClusterScopes() {

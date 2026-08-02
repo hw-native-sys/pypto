@@ -1015,6 +1015,9 @@ class TestDynamicSpmdLaunchSpec:
         """print -> parse must succeed; a decorator-scoped var raised NameError."""
         printed = ir.python_print(self._build(), format=False)
         assert "core_num" in printed
+        # A reparse alone is not proof: a __FREE_VAR-marked name still parses,
+        # it just binds a different Var. The name must be genuinely bound.
+        assert "__FREE_VAR" not in printed
         reparsed = pl.parse(printed)
         assert isinstance(reparsed, ir.Program)
 

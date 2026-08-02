@@ -272,6 +272,18 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "HardSyncallOccupancy"; }
 
+  // Per-Verify() cache for the hard-syncall walk. Like DirectCallees, this is a
+  // pure function of the kernel, and a kernel dispatched from S launch sites
+  // would otherwise be re-walked S times — the same nested-scan shape the
+  // callee cache closes (pass-complexity.md).
+  using SyncallCache = std::unordered_map<const Function*, std::vector<HardSyncall>>;
+
+  static const std::vector<HardSyncall>& HardSyncallsCached(const FunctionPtr& fn, SyncallCache* cache) {
+    auto [it, inserted] = cache->try_emplace(fn.get());
+    if (inserted) it->second = CollectHardSyncalls(fn);
+    return it->second;
+  }
+
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     // Occupancy depends on the target SoC's physical core counts; without a
@@ -297,6 +309,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
     // to cache; this keeps the verifier O(N) in IR size regardless of how many
     // dispatches target the same callee.
     std::unordered_map<const Function*, std::vector<FunctionPtr>> direct_callee_cache;
+    SyncallCache syncall_cache;
     auto direct_callees_cached = [&](const FunctionPtr& f) -> const std::vector<FunctionPtr>& {
       auto [it, inserted] = direct_callee_cache.try_emplace(f.get());
       if (inserted) it->second = DirectCallees(f, program);
@@ -319,11 +332,16 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       // still carry a constant ``core_num`` on the function, so keep reading it.
       if (fn->HasAttr(kAttrCoreNum)) {
         // sync_start rides alongside, emitted only when true (absent => false).
-        // Resolve the launched kernels the same way a dispatch does, so a
-        // non-wrapper function carrying a legacy attr is checked as itself
-        // rather than being descended into.
+        // Classify exactly as the pre-dispatch-carrier code did: a Spmd wrapper
+        // or ANY Group carrying the attr launches its callees. Legacy IR pre-
+        // dates kAttrSpmdUnwrapped, so gating on that marker here would demote
+        // an old cluster-unwrapped Group to a mixed kernel and misjudge its
+        // occupancy. Other function types are checked as themselves.
+        const bool legacy_wrapper =
+            fn->func_type_ == FunctionType::Spmd || fn->func_type_ == FunctionType::Group;
         CheckLaunchSite(fn->GetAttr<ExprPtr>(kAttrCoreNum, nullptr), fn->GetAttr<bool>(kAttrSyncStart, false),
-                        launched_kernels(fn), total_vector, total_cube, program, query_defs, diagnostics);
+                        legacy_wrapper ? direct_callees_cached(fn) : std::vector<FunctionPtr>{fn},
+                        total_vector, total_cube, program, query_defs, &syncall_cache, diagnostics);
       }
 
       // Launch sites. A dispatch carries its spec as kAttrCoreNum /
@@ -335,13 +353,13 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (!call_core_num || !call->op_) continue;
         CheckLaunchSite(call_core_num, call->GetAttr<bool>(kAttrSyncStart, false),
                         launched_kernels(program->GetFunction(call->op_->name_)), total_vector, total_cube,
-                        program, query_defs, diagnostics);
+                        program, query_defs, &syncall_cache, diagnostics);
       }
       for (const auto& submit : collector.submits) {
         if (!submit->core_num_.has_value() || !submit->op_) continue;
         CheckLaunchSite(*submit->core_num_, submit->sync_start_,
                         launched_kernels(program->GetFunction(submit->op_->name_)), total_vector, total_cube,
-                        program, query_defs, diagnostics);
+                        program, query_defs, &syncall_cache, diagnostics);
       }
     }
   }
@@ -366,18 +384,19 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
   static void CheckLaunchSite(const ExprPtr& core_num_expr, bool sync_start,
                               const std::vector<FunctionPtr>& callees, int total_vector, int total_cube,
                               const ProgramPtr& program, const LaunchQueryDefCollector& query_defs,
-                              std::vector<Diagnostic>& diagnostics) {
+                              SyncallCache* syncalls, std::vector<Diagnostic>& diagnostics) {
     if (!core_num_expr) return;
     const LaunchWidth width = ClassifyWidth(core_num_expr, query_defs);
     if (width.kind == LaunchWidthKind::Unknown) return;  // opaque launch count — cannot check statically
     for (const auto& callee : callees) {
-      CheckLaunchedKernel(callee, width, sync_start, total_vector, total_cube, program, diagnostics);
+      CheckLaunchedKernel(callee, width, sync_start, total_vector, total_cube, program, syncalls,
+                          diagnostics);
     }
   }
 
   static void CheckLaunchedKernel(const FunctionPtr& kernel, const LaunchWidth& width, bool sync_start,
                                   int total_vector, int total_cube, const ProgramPtr& program,
-                                  std::vector<Diagnostic>& diagnostics) {
+                                  SyncallCache* syncalls, std::vector<Diagnostic>& diagnostics) {
     if (!kernel) return;
 
     // Standalone AIV kernel: 1 block = 1 AIV core. Only an aiv_only barrier is
@@ -385,7 +404,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
     // launch provides. (A dual-AIV-dispatched AIV kernel is a mixed-kernel lane
     // reached via Group, handled by the Group branch — not a standalone launch.)
     if (kernel->func_type_ == FunctionType::AIV && !kernel->HasAttr("dual_aiv_dispatch")) {
-      for (const auto& hs : CollectHardSyncalls(kernel)) {
+      for (const auto& hs : HardSyncallsCached(kernel, syncalls)) {
         if (hs.core_type != "aiv_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "vector-only (AIV)", "CUBE"), hs.span);
@@ -401,7 +420,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
 
     // Standalone AIC kernel: 1 block = 1 AIC core. Symmetric to the AIV case.
     if (kernel->func_type_ == FunctionType::AIC) {
-      for (const auto& hs : CollectHardSyncalls(kernel)) {
+      for (const auto& hs : HardSyncallsCached(kernel, syncalls)) {
         if (hs.core_type != "aic_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "cube-only (AIC)", "VECTOR"), hs.span);
@@ -431,7 +450,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (!sub || (sub->func_type_ != FunctionType::AIC && sub->func_type_ != FunctionType::AIV)) {
           continue;
         }
-        auto hard_syncalls = CollectHardSyncalls(sub);
+        const auto& hard_syncalls = HardSyncallsCached(sub, syncalls);
         if (!hard_syncalls.empty()) {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0, *msg,
                                    hard_syncalls.front().span);
