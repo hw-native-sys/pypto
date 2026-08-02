@@ -844,6 +844,47 @@ inline std::vector<std::pair<std::string, std::any>> WithDumpVarsAttr(
 inline constexpr const char* kAttrDevice = "device";
 
 /**
+ * @brief Reserved attr keys for an SPMD launch spec on a dispatch ``Call``.
+ *
+ * Value types: ``ExprPtr`` for ``core_num`` (a ``ConstInt``, a caller-local
+ * ``Var``, index arithmetic over caller locals, or a launch-shape query such as
+ * ``pl.system.available_cluster_count()``); ``bool`` for ``sync_start``
+ * (emitted only when true — absent means false).
+ *
+ * The launch spec belongs to the launch SITE, not the launched function: its
+ * Vars are bound in the *dispatching* function, so a ``Function`` carrying it
+ * would reference names it does not bind — unprintable as a decorator (a
+ * decorator is evaluated before any body binds those names) and invisible to
+ * the visitor / mutator, which walk one function at a time. ``ScopeOutliner``
+ * therefore moves ``SpmdScopeStmt::core_num_`` onto the synthesised dispatch:
+ * these attrs on the plain-``Call`` path, and the first-class
+ * ``Submit::core_num_`` / ``sync_start_`` fields on the Submit path.
+ *
+ * SSA / substitution passes MUST rewrite Vars inside ``core_num`` — see
+ * ``kAttrDevice`` for the same requirement and the same failure mode.
+ */
+inline constexpr const char* kAttrCoreNum = "core_num";
+inline constexpr const char* kAttrSyncStart = "sync_start";
+
+/**
+ * @brief True for a ``Call``/``Submit`` attr key whose value is a single
+ * ``ExprPtr`` naming an IR subtree evaluated in the node's own scope.
+ *
+ * Every walker that rewrites or collects Vars must recurse into these — the
+ * visitor (def-use / liveness), the mutator (substitution), and the SSA pass.
+ * They are listed here once because the set was previously spelled out
+ * per-site, and a key added to some sites but not others silently dangles in
+ * the ones that were missed.
+ *
+ * Not included: ``VarPtr`` / ``vector<VarPtr>`` attrs (kAttrTaskIdVar,
+ * kAttrManualDepEdges, kAttrDumpVars, ...), which every walker handles
+ * separately because a Var is remapped rather than recursed into.
+ */
+[[nodiscard]] inline bool IsExprValuedCallAttr(const std::string& key) {
+  return key == kAttrDevice || key == kAttrCoreNum;
+}
+
+/**
  * @brief Reserved attr key for a dispatch predicate — ``predicate=(t[i] > 0)``.
  *
  * Value type: ``ExprPtr`` — the comparison Expr as written (e.g.

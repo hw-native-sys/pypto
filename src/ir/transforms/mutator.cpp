@@ -400,22 +400,21 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
           continue;
         }
       }
-    } else if (k == kAttrDevice) {
-      // The distributed dispatch ``device=`` attr holds a single ExprPtr (a
-      // ConstInt rank or a Var loop index). It references a Var defined
-      // elsewhere (the host-orch ``for r in pl.range(P)`` loop var), so it must
-      // be remapped alongside the args — otherwise a loop-var substitution
-      // (e.g. the P==1 unroll folding ``r`` -> ``0``) rewrites the slice
-      // subscripts but leaves ``device=r`` dangling to the now-undefined loop
-      // var, and codegen emits an unbound index -> NameError. Mirrors the
-      // kAttrDevice handling in the SSA pass.
-      const auto* dev = std::any_cast<ExprPtr>(&v);
-      if (dev && *dev) {
-        auto new_dev = ExprFunctor<ExprPtr>::VisitExpr(*dev);
-        INTERNAL_CHECK_SPAN(new_dev, op->span_) << "Call device attribute mutated to null";
-        if (new_dev.get() != dev->get()) {
+    } else if (IsExprValuedCallAttr(k)) {
+      // Expr-valued dispatch attrs (``device=`` selector, ``core_num`` launch
+      // width) hold a single ExprPtr over Vars defined elsewhere in this
+      // function, so they must be remapped alongside the args — otherwise a
+      // substitution (e.g. the P==1 unroll folding ``r`` -> ``0``) rewrites the
+      // slice subscripts but leaves ``device=r`` dangling to the now-undefined
+      // loop var, and codegen emits an unbound index -> NameError. Mirrors the
+      // SSA pass's SubstCallAttrs and ``Submit::core_num_`` below.
+      const auto* attr_expr = std::any_cast<ExprPtr>(&v);
+      if (attr_expr && *attr_expr) {
+        auto new_expr = ExprFunctor<ExprPtr>::VisitExpr(*attr_expr);
+        INTERNAL_CHECK_SPAN(new_expr, op->span_) << "Call '" << k << "' attribute mutated to null";
+        if (new_expr.get() != attr_expr->get()) {
           attrs_changed = true;
-          new_attrs.emplace_back(k, std::any(std::move(new_dev)));
+          new_attrs.emplace_back(k, std::any(std::move(new_expr)));
           continue;
         }
       }

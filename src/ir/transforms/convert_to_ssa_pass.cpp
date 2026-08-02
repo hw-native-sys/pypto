@@ -337,8 +337,11 @@ class SSAConverter {
   ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
   ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (selective dump
   ///     targets from ``pl.dump_tag`` / ``dumps=``)
-  ///   * ``kAttrDevice`` — ``ExprPtr`` (host-orch dispatch device selector,
-  ///     typically a loop induction Var that SSA must version)
+  ///   * every ``IsExprValuedCallAttr`` key — ``ExprPtr`` (the host-orch
+  ///     dispatch ``device=`` selector, typically a loop induction Var that SSA
+  ///     must version; the SPMD ``core_num`` launch width). Routed through the
+  ///     shared predicate so a new Expr-valued attr cannot be added to some
+  ///     walkers and silently missed here.
   ///
   /// ``kAttrArgDirOverrideVars`` is scope-only and handled by the separate
   /// ``SubstScopeAttrs`` path below.
@@ -375,13 +378,13 @@ class SSAConverter {
             continue;
           }
         }
-      } else if (k == kAttrDevice) {
-        const auto* dev = std::any_cast<ExprPtr>(&v);
-        if (dev && *dev) {
-          auto new_dev = SubstExpr(*dev);
-          if (new_dev.get() != dev->get()) {
+      } else if (IsExprValuedCallAttr(k)) {
+        const auto* attr_expr = std::any_cast<ExprPtr>(&v);
+        if (attr_expr && *attr_expr) {
+          auto new_expr = SubstExpr(*attr_expr);
+          if (new_expr.get() != attr_expr->get()) {
             changed = true;
-            out.emplace_back(k, std::any(std::move(new_dev)));
+            out.emplace_back(k, std::any(std::move(new_expr)));
             continue;
           }
         }

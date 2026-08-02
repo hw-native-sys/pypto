@@ -129,6 +129,18 @@ std::vector<FunctionPtr> DirectCallees(const FunctionPtr& fn, const ProgramPtr& 
   return out;
 }
 
+// True when dispatching `fn` launches the kernels its BODY calls, rather than
+// `fn` itself: an outlined Spmd wrapper (scope-based ``with pl.spmd(...)``), or
+// a Group whose body WAS a ``pl.cluster(): with pl.spmd(...)`` region
+// (kAttrSpmdUnwrapped). Everything else — including a mixed-kernel Group reached
+// by ``pl.spmd_submit(self.kernel, ..., core_num=N)`` — is itself the launched
+// kernel, so CheckLaunchedKernel applies its Group / AIC / AIV rules directly.
+bool IsLaunchWrapper(const FunctionPtr& fn) {
+  if (!fn) return false;
+  return fn->func_type_ == FunctionType::Spmd ||
+         (fn->func_type_ == FunctionType::Group && fn->GetAttr<bool>(kAttrSpmdUnwrapped, false));
+}
+
 struct HardSyncall {
   std::string core_type;
   Span span;
@@ -273,34 +285,58 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       if (fn && fn->body_) query_defs.VisitStmt(fn->body_);
     }
 
-    for (const auto& [gv, fn] : program->functions_) {
-      if (!fn) continue;
+    // Memoize the per-function callee walk. ``LaunchedKernels`` is consulted
+    // once per launch SITE (not once per function as the pre-dispatch-carrier
+    // code was), and ``DirectCallees`` is a full body traversal — without a
+    // cache two dispatches to the same wrapper would each re-walk it, which is
+    // the nested-scan shape ``pass-complexity.md`` forbids. Both arguments are
+    // loop-invariant for the whole Verify() run, so the walk is pure and safe
+    // to cache; this keeps the verifier O(N) in IR size regardless of how many
+    // dispatches target the same callee.
+    std::unordered_map<const Function*, std::vector<FunctionPtr>> direct_callee_cache;
+    auto direct_callees_cached = [&](const FunctionPtr& f) -> const std::vector<FunctionPtr>& {
+      auto [it, inserted] = direct_callee_cache.try_emplace(f.get());
+      if (inserted) it->second = DirectCallees(f, program);
+      return it->second;
+    };
+    auto launched_kernels = [&](const FunctionPtr& callee) -> std::vector<FunctionPtr> {
+      if (!callee) return {};
+      return IsLaunchWrapper(callee) ? direct_callees_cached(callee) : std::vector<FunctionPtr>{callee};
+    };
 
-      // Launch-site functions: a Spmd wrapper (scope-based pl.spmd), or a Group
-      // carrying a core_num attr (a pl.cluster()-nested pl.spmd unwrapped by
-      // OutlineClusterScopes). A Group *without* core_num is a mixed-kernel
-      // wrapper (a launch callee), handled inside CheckLaunchedKernel.
-      const bool is_launch_fn = fn->func_type_ == FunctionType::Spmd ||
-                                (fn->func_type_ == FunctionType::Group && fn->HasAttr("core_num"));
-      if (is_launch_fn) {
-        // sync_start rides as a launch-function attr, emitted only when true by
-        // OutlineHierarchyScopes / OutlineClusterScopes (absent => false).
-        CheckLaunchSite(fn->GetAttr<ExprPtr>("core_num", nullptr), fn->GetAttr<bool>("sync_start", false),
-                        DirectCallees(fn, program), total_vector, total_cube, program, query_defs,
+    for (const auto& [gv, fn] : program->functions_) {
+      if (!fn || !fn->body_) continue;
+
+      CallSubmitCollector collector;
+      collector.VisitStmt(fn->body_);
+
+      // Legacy launch-function carrier: a Function that spells its launch spec
+      // in its own attrs. No pass produces this any more — the spec rides the
+      // dispatch (see kAttrCoreNum) — but hand-written and deserialized IR can
+      // still carry a constant ``core_num`` on the function, so keep reading it.
+      if (fn->HasAttr(kAttrCoreNum)) {
+        // sync_start rides alongside, emitted only when true (absent => false).
+        CheckLaunchSite(fn->GetAttr<ExprPtr>(kAttrCoreNum, nullptr), fn->GetAttr<bool>(kAttrSyncStart, false),
+                        direct_callees_cached(fn), total_vector, total_cube, program, query_defs,
                         diagnostics);
       }
 
-      // Submit launch sites: pl.spmd_submit(..., core_num=N) carries the block
-      // count on the Submit node itself (a plain pl.submit leaves core_num_ unset).
-      if (!fn->body_) continue;
-      CallSubmitCollector collector;
-      collector.VisitStmt(fn->body_);
+      // Launch sites. A dispatch carries its spec as kAttrCoreNum /
+      // kAttrSyncStart Call attrs (an outlined ``with pl.spmd(...)``) or in the
+      // first-class Submit fields (``pl.spmd_submit``, or an ``as tid`` scope).
+      // A plain call / submit has neither, so this is a no-op there.
+      for (const auto& call : collector.calls) {
+        auto call_core_num = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+        if (!call_core_num || !call->op_) continue;
+        CheckLaunchSite(call_core_num, call->GetAttr<bool>(kAttrSyncStart, false),
+                        launched_kernels(program->GetFunction(call->op_->name_)), total_vector, total_cube,
+                        program, query_defs, diagnostics);
+      }
       for (const auto& submit : collector.submits) {
         if (!submit->core_num_.has_value() || !submit->op_) continue;
-        auto callee = program->GetFunction(submit->op_->name_);
-        if (!callee) continue;
-        CheckLaunchSite(*submit->core_num_, submit->sync_start_, {callee}, total_vector, total_cube, program,
-                        query_defs, diagnostics);
+        CheckLaunchSite(*submit->core_num_, submit->sync_start_,
+                        launched_kernels(program->GetFunction(submit->op_->name_)), total_vector, total_cube,
+                        program, query_defs, diagnostics);
       }
     }
   }

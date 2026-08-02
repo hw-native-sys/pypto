@@ -62,12 +62,14 @@ class TestSpmdScopeTaskIdCodegen:
                 return codegen.generate_orchestration(program, func).code
         raise ValueError("No orchestration function found in program")
 
-    def test_as_tid_launch_spec_via_function_attr_fallback(self):
-        """A tid-bearing Spmd dispatch still emits set_block_num / set_require_sync_start.
+    def test_as_tid_launch_spec_rides_the_submit(self):
+        """A tid-bearing Spmd dispatch emits set_block_num / set_require_sync_start.
 
-        The Submit's ``core_num`` is None (SubmitToCallView emits no core_num attr),
-        so this proves ``EffectiveLaunchSpec`` falls back to the Spmd Function's
-        ``core_num`` / ``sync_start`` attrs.
+        The launch spec rides the dispatch, so it lands in the Submit's
+        first-class ``core_num_`` / ``sync_start_`` fields — surfaced to
+        ``EffectiveLaunchSpec`` as Call-view attrs by ``SubmitToCallView``. The
+        outlined Spmd Function must NOT carry it: ``core_num`` is evaluated in
+        the caller's scope, and a Function is a closed scope.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -108,7 +110,7 @@ class TestSpmdScopeTaskIdCodegen:
         spmd_func = transformed.get_function("main_spmd_0")
         assert spmd_func is not None
         assert spmd_func.func_type == pl.FunctionType.Spmd
-        assert "core_num" in spmd_func.attrs  # launch spec rides on the Spmd Function
+        assert "core_num" not in spmd_func.attrs  # launch spec rides the dispatch
 
         code = self._codegen(transformed)
         assert "params_t0.launch_spec.set_block_num(4);" in code, code

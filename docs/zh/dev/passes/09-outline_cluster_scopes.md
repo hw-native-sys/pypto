@@ -4,7 +4,7 @@
 
 ## 概述
 
-该 Pass 将 `ClusterScopeStmt` 节点变换为独立的 `Function(Group)` 定义，并将原作用域替换为对提取函数的调用。它还会把未嵌套在 Cluster 内部的 standalone `SpmdScopeStmt` 提取为 `Function(Spmd)`。Group 函数表示共享同一物理集群 (Cluster) 资源的协同调度 AIC（Cube）+ AIV（Vector）内核组，而 Spmd 函数保留 standalone 调度所需的 `core_num` / `sync_start` 语义。
+该 Pass 将 `ClusterScopeStmt` 节点变换为独立的 `Function(Group)` 定义，并将原作用域替换为对提取函数的调用。它还会把未嵌套在 Cluster 内部的 standalone `SpmdScopeStmt` 提取为 `Function(Spmd)`。Group 函数表示共享同一物理集群 (Cluster) 资源的协同调度 AIC（Cube）+ AIV（Vector）内核组，而 standalone 调度语义（`core_num` / `sync_start`）则挂到合成出的调度点上 —— 参见[启动规格 (launch spec) 的存放位置](#启动规格-launch-spec-的存放位置)。
 
 **前置条件**：
 
@@ -33,8 +33,8 @@ program_outlined = outline_pass(program)
 1. **扫描 Cluster 作用域**：在 Opaque/Orchestration 函数中查找所有 `ClusterScopeStmt` 节点
 2. **提取 Cluster 作用域**：将每个 Cluster 作用域体提取为 `Function(func_type=Group)`
 3. **扫描 standalone Spmd 作用域**：在变换后的函数体中查找所有未嵌套在 Cluster 内部的 `SpmdScopeStmt` 节点
-4. **提取 standalone Spmd 作用域**：将每个 standalone Spmd 作用域体提取为 `Function(func_type=Spmd)`，并把 `core_num` / `sync_start` 复制到函数 attrs
-5. **展开 Group 内嵌 Spmd**：对于 `pl.cluster(): with pl.spmd(...): ...`，保留单一 Group 函数，并把 `core_num` / `sync_start` 提升到 Group attrs
+4. **提取 standalone Spmd 作用域**：将每个 standalone Spmd 作用域体提取为 `Function(func_type=Spmd)`，并把 `core_num` / `sync_start` 挂到合成出的**调度点**（Call attrs；`as tid` 作用域则用 `Submit` 字段）——绝不挂在被提取的函数上
+5. **展开 Group 内嵌 Spmd**：对于 `pl.cluster(): with pl.spmd(...): ...`，保留单一 Group 函数，把 `core_num` / `sync_start` 挂到其**调度点**（由于该规格是从被调用方内部提取的，需经调度点实参回译），并在 Group 上打上自包含的 `spmd_unwrapped` 标记
 6. **替换作用域**：将作用域语句替换为对提取函数的调用 + 输出赋值
 7. **添加到程序**：将提取的函数前置到程序的函数列表中
 
@@ -107,7 +107,7 @@ class Before:
 ```python
 @pl.program
 class After:
-    @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4, "sync_start": True})
+    @pl.function(type=pl.FunctionType.Spmd)
     def main_spmd_0(self, x: pl.Tensor[[64], pl.FP32],
                     out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
         out = self.kernel(x, out)
@@ -116,9 +116,40 @@ class After:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x: pl.Tensor[[64], pl.FP32],
              out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-        out = self.main_spmd_0(x, out)
+        out = self.main_spmd_0(x, out, attrs={"core_num": 4, "sync_start": True})
         return out
 ```
+
+### 启动规格 (launch spec) 的存放位置
+
+`core_num` / `sync_start` 挂在**调度点 (dispatch)** 上，而不是被提取出的函数上：
+
+| 调度形态 | 载体 |
+| -------- | ---- |
+| 普通 `Call`（`with pl.spmd(...)`） | `attrs["core_num"]`（`ExprPtr`）与 `attrs["sync_start"]`（`bool`，仅为真时发出） |
+| `Submit`（`with pl.spmd(...) as tid`） | 一等字段 `Submit::core_num_` / `sync_start_` |
+| `pl.cluster(): with pl.spmd(...)` 产生的 `Group` | 同上，挂在调度点；Group 上只保留 `spmd_unwrapped` 标记 |
+
+`core_num` 是在*调度方*函数作用域中求值的表达式，可能引用调用者的局部标量（例如
+`m = pl.tensor.dim(a, 0)` 之后的 `pl.spmd(m // 16)`）。而 `Function` 是封闭作用域
+(closed scope)：其引用的每个 Var 都必须能解析到自身的参数或函数体内的定义。因此把该表达式
+存到被调用函数上，会产生一个引用了自己未绑定名字的 Function —— 打印出来是一个在任何函数体
+绑定这些名字之前就被求值的装饰器（程序无法被重新解析），并且对逐函数遍历的 visitor / mutator
+不可见。把启动规格保留在调度点即可同时消除这三个问题，且无需任何特殊处理：现有的 Call attr
+打印/解析编解码器本就能往返一个通用 `ExprPtr`，其引用的 Var 对 def-use 与 DCE 而言也只是
+普通的局部使用。
+
+Group 情形多一步：其规格是从被调用方*内部*提取的，其中的计数引用的是 Group 的**形参**
+（cluster 提取时把调用者的标量捕获成了形参）。`LaunchSpecStamper` 通过调度点做
+`params_[i] -> args_[i]` 映射回译，使该 attr 引用的 Var 在调用点确实存活。
+
+留在 Group 上的是 `spmd_unwrapped`（`bool`）—— 它确实属于函数作用域：它陈述的是该函数
+自身函数体的性质，不引用任何外部内容。它告诉启动点的消费者：调度这个 Group 启动的是其
+函数体所调用的 kernel，而不是把 Group 自身当作 mixed kernel —— 这正是占用率校验器过去
+依据「是否存在 `core_num` attr」所作的区分。
+
+Orchestration 代码生成通过 `EffectiveLaunchSpec` 读取该规格：优先取调度点自身的 attrs；
+启动函数回退路径保留，用于手写或反序列化 IR 中仍在函数上写常量 `core_num` 的情形。
 
 ## 实现
 
