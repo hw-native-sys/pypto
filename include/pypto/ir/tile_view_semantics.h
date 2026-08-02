@@ -13,6 +13,7 @@
 #define PYPTO_IR_TILE_VIEW_SEMANTICS_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -29,6 +30,9 @@ namespace pypto::ir::tile_view_semantics {
 
 /// MX block-scale fractal size: one shared exponent per 32 elements (A5 ISA).
 inline constexpr int kMXScaleFractal = 32;
+
+/// Acc (L0C) fractal size: the accumulator is NZ-boxed at 1024 bytes.
+inline constexpr uint64_t kAccFractal = 1024;
 
 /// Return whether two shape-like expression lists are statically identical.
 inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
@@ -58,12 +62,33 @@ inline TileLayout InferImplicitTileLayoutFromShape(const std::vector<ExprPtr>& s
   return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
 }
 
+/// Boxing granularity implied by a memory space. Unlike blayout/slayout it does
+/// not depend on the shape, so a caller that only needs the fractal (e.g. an op
+/// deducing a result that lands in `memory_space`) can skip building a whole
+/// TileView. GetImplicitTileView below delegates here so the two cannot drift.
+inline uint64_t GetImplicitFractal(const std::optional<MemorySpace>& memory_space) {
+  if (!memory_space.has_value()) {
+    return TileView{}.fractal;
+  }
+  switch (*memory_space) {
+    // MX scale tiles: one shared exponent per 32 elements.
+    case MemorySpace::LeftScale:
+    case MemorySpace::RightScale:
+      return kMXScaleFractal;
+    case MemorySpace::Acc:
+      return kAccFractal;
+    default:
+      return TileView{}.fractal;
+  }
+}
+
 /// Build the implicit TileView semantics represented by omitted Python syntax.
 inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
                                     const std::optional<MemorySpace>& memory_space = std::nullopt) {
   TileView implicit_view;
   implicit_view.valid_shape = shape;
   implicit_view.blayout = InferImplicitTileLayoutFromShape(shape);
+  implicit_view.fractal = GetImplicitFractal(memory_space);
 
   if (memory_space.has_value()) {
     switch (*memory_space) {
@@ -76,21 +101,18 @@ inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
         implicit_view.slayout = TileLayout::col_major;
         break;
       case MemorySpace::LeftScale:
-        // ISA TileLeftScale: RowMajor / RowMajor, MX scale fractal size 32.
+        // ISA TileLeftScale: RowMajor / RowMajor.
         implicit_view.blayout = TileLayout::row_major;
         implicit_view.slayout = TileLayout::row_major;
-        implicit_view.fractal = kMXScaleFractal;
         break;
       case MemorySpace::RightScale:
-        // ISA TileRightScale: ColMajor / ColMajor, MX scale fractal size 32.
+        // ISA TileRightScale: ColMajor / ColMajor.
         implicit_view.blayout = TileLayout::col_major;
         implicit_view.slayout = TileLayout::col_major;
-        implicit_view.fractal = kMXScaleFractal;
         break;
       case MemorySpace::Acc:
         implicit_view.blayout = TileLayout::col_major;
         implicit_view.slayout = TileLayout::row_major;
-        implicit_view.fractal = 1024;
         break;
       default:
         break;

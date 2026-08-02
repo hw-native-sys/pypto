@@ -4086,6 +4086,51 @@ class TestTileCreateOp:
         assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
 
 
+class TestTileMoveOp:
+    """Tests for tile.move result-view deduction."""
+
+    @staticmethod
+    def _tile_var(space):
+        return ir.Var("t_src", ir.TileType([16, 64], DataType.FP32, None, None, space), ir.Span.unknown())
+
+    @pytest.mark.parametrize(
+        ("space", "expected_fractal"),
+        [
+            (ir.MemorySpace.Vec, 512),
+            (ir.MemorySpace.Mat, 512),
+            (ir.MemorySpace.Acc, 1024),
+        ],
+    )
+    def test_same_space_move_deduces_destination_implicit_view(self, space, expected_fractal):
+        """`fractal` is the destination buffer's boxing granularity, not the
+        TileView default: Acc (L0C) is NZ-boxed at 1024. A move that changes
+        neither space nor layout must therefore deduce exactly the destination's
+        implicit view, which is stored canonically as None. With the default 512
+        an Acc result stays explicit — and since a pass-synthesized move's LHS
+        Var carries no view, the print->parse roundtrip breaks."""
+        call = tile.move(self._tile_var(space), target_memory=space)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.memory_space == space
+        assert call.type.tile_view is None
+        assert call.type.get_effective_tile_view().fractal == expected_fractal
+
+    def test_acc_to_vec_move_keeps_vec_fractal(self):
+        """Moving out of Acc must adopt Vec's granularity, not carry 1024 along:
+        the cube->vec pipe un-fractalizes the data during transfer."""
+        call = tile.move(
+            self._tile_var(ir.MemorySpace.Acc),
+            target_memory=ir.MemorySpace.Vec,
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.get_effective_tile_view().fractal == 512
+        # row_major/none_box/512 *is* Vec's implicit view — stored canonically.
+        assert call.type.tile_view is None
+
+
 class TestTileScalarOps:
     """Tests for tile scalar read/write ops (tile.read / tile.write)."""
 

@@ -197,7 +197,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       tile_view.blayout = TileLayout::row_major;
       tile_view.slayout = TileLayout::row_major;
     }
-    tile_view.fractal = 32;
+    tile_view.fractal = tile_view_semantics::kMXScaleFractal;
   } else if (target_memory_opt.has_value()) {
     if (*target_memory_opt == MemorySpace::Mat) {
       tile_view.blayout = TileLayout::col_major;
@@ -409,11 +409,17 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
 
+  // blayout/slayout follow the source — a move preserves the logical layout —
+  // but `fractal` is the destination buffer's boxing granularity, not a source
+  // property, so it comes from the destination space. See
+  // docs/en/dev/ir/05-operators.md "Result view of tile.move".
   TileView tile_view;
   tile_view.blayout = source_view.blayout;
   tile_view.slayout = source_view.slayout;
+  tile_view.fractal = tile_view_semantics::GetImplicitFractal(space);
 
-  // Hardcoded layout for Left/Right/scale (hardware requirements)
+  // Hardcoded layout for Left/Right/scale (hardware requirements; their fractal
+  // already comes from the destination-implicit seed above)
   if (space == MemorySpace::Left) {
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
@@ -421,13 +427,12 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
   } else if (space == MemorySpace::LeftScale) {
+    // fractal is already kMXScaleFractal via the destination-implicit seed above.
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::row_major;
-    tile_view.fractal = 32;
   } else if (space == MemorySpace::RightScale) {
     tile_view.blayout = TileLayout::col_major;
     tile_view.slayout = TileLayout::col_major;
-    tile_view.fractal = 32;
   }
 
   // Ordinary destinations permit explicit layouts. Scale destinations have
@@ -471,7 +476,7 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     const TileLayout required_layout =
         space == MemorySpace::LeftScale ? TileLayout::row_major : TileLayout::col_major;
     CHECK(source_view.blayout == required_layout && source_view.slayout == required_layout &&
-          source_view.fractal == 32)
+          source_view.fractal == tile_view_semantics::kMXScaleFractal)
         << "The operator " << op_name << " into " << MemorySpaceToString(space)
         << " requires the source Mat tile to use the matching "
         << (space == MemorySpace::LeftScale ? "row/row/32" : "col/col/32") << " layout";

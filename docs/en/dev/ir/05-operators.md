@@ -310,6 +310,7 @@ with ib.function("tensor_example") as f:
 | **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
+| - | `tile.move` | Move a tile between memory spaces (`target_memory`) — see [Result view of tile.move](#result-view-of-tilemove) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
@@ -325,6 +326,26 @@ with ib.function("tensor_example") as f:
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (DPS — `dst` is in/out). A PyPTO codegen form lowered to a `pto.tscatter` mask emission — **not** a distinct pto-isa instruction (unlike `tile.gather_mask`). See [Mask patterns](#mask-patterns). |
 
 `tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views.
+
+### Result view of `tile.move`
+
+The deduced result `TileView` splits by field:
+
+| Field | Source of the result value |
+| ----- | -------------------------- |
+| `blayout` / `slayout` | The source tile's effective view — a move preserves the logical layout — unless the destination is `Left` / `Right` / `LeftScale` / `RightScale` (hardware-fixed) or a `blayout` / `slayout` kwarg overrides it |
+| `fractal` | The **destination** space's boxing granularity, never the source's: `Acc` (L0C, NZ-boxed) is 1024, MX scale tiles are 32, everything else 512 |
+| `valid_shape` / `pad` | Carried over from the source |
+| `stride` / `start_offset` | Dropped — the destination is a dense buffer |
+
+`fractal` comes from the destination because it describes how the destination
+buffer is boxed; `tile_view_semantics::GetImplicitFractal` supplies it. It is
+also what makes a same-space, same-layout move canonical:
+`OpRegistry::Create` stamps `memory_space` onto the deduced type, so a result
+view matching the destination's implicit view collapses to `nullopt` — the same
+per-space implicit view
+[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
+retyped tile to.
 
 ### Reshape and the valid region
 

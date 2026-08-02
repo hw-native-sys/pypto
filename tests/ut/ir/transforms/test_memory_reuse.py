@@ -870,6 +870,62 @@ def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
     return result
 
 
+def _collect_move_assign_stmts(program: ir.Program) -> list[ir.AssignStmt]:
+    """Return every ``x = tile.move(...)`` AssignStmt in the first function."""
+    result: list[ir.AssignStmt] = []
+    main_func = next(iter(program.functions.values()))
+    move_op_name = ir.get_op("tile.move").name
+
+    class _Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == move_op_name:
+                result.append(stmt)
+            super().visit_assign_stmt(stmt)
+
+    visitor = _Collector()
+    visitor.visit_stmt(main_func.body)
+    return result
+
+
+def _divergent_acc_phi_program() -> ir.Program:
+    """A divergent Acc if-phi: ``then`` yields the pre-if seed ``pre``, ``else``
+    accumulates in place into ``prev``.
+
+    The accumulator coalescer must decline this shape (``pre`` runs
+    unconditionally, so retargeting it onto ``prev`` would clobber the
+    accumulator), leaving YieldFixup to reconcile the phi with a tile.move.
+    Shared by the tests that assert each half of that contract.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            lhs: pl.Tensor[[16, 64], pl.BF16],
+            rhs: pl.Tensor[[64, 64], pl.BF16],
+            cond: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+            )
+            sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+            )
+            prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # the accumulator
+            pre: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # pre-if seed
+            if cond < 1:
+                phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(pre)
+            else:
+                acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(prev, sa, sb)
+                phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(acc)
+            result: pl.Tensor[[16, 64], pl.FP32] = pl.store(phi, [0, 0], out)
+            return result
+
+    return Before
+
+
 class TestViewOps:
     """Tests for view operations (reshape) with memory reuse."""
 
@@ -1892,6 +1948,36 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_synthesized_acc_move_var_and_call_agree_on_tile_view(self):
+        """The move YieldFixup synthesizes to reconcile a divergent Acc phi must
+        type its LHS Var and its Call identically.
+
+        The Var's type is cloned from the move source (canonical Acc view, so
+        ``tile_view=None``) while the Call's type comes from ``tile.move``'s own
+        deduction. If the two disagree, the printer emits only the Var's
+        (view-less) annotation and the parser refills the view from the Call —
+        so the program no longer survives print->parse. The per-pass roundtrip
+        instrument in ``tests/ut/conftest.py`` catches that; this test pins the
+        underlying invariant so a failure names the actual defect.
+        """
+        After = _run_pipeline(_divergent_acc_phi_program())
+
+        moves = _collect_move_assign_stmts(After)
+        assert len(moves) == 1, (
+            f"expected YieldFixup to synthesize exactly one tile.move, got "
+            f"{len(moves)}:\n{ir.python_print(After)}"
+        )
+        var_type = moves[0].var.type
+        call_type = moves[0].value.type
+        assert isinstance(var_type, ir.TileType) and isinstance(call_type, ir.TileType)
+        assert var_type.tile_view is None and call_type.tile_view is None, (
+            f"synthesized tile.move '{moves[0].var.name_hint}' must carry the canonical "
+            f"(absent) Acc view on both sides: var={var_type.tile_view} "
+            f"call={call_type.tile_view}\n{ir.python_print(After)}"
+        )
+        fractal = var_type.get_effective_tile_view().fractal
+        assert fractal == 1024, f"an Acc tile is NZ-boxed at 1024, got {fractal}"
+
 
 class TestControlFlow:
     """Tests for correct lifetime analysis across control flow boundaries."""
@@ -2878,38 +2964,10 @@ class TestTopDownRetargeter:
         the coalescer must skip this phi (leaving it to YieldFixup) and keep
         ``pre`` and ``prev`` on distinct buffers.
         """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[16, 64], pl.BF16],
-                rhs: pl.Tensor[[64, 64], pl.BF16],
-                cond: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                sa: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat
-                )
-                sb: pl.Tile[[64, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat
-                )
-                prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # the accumulator
-                pre: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)  # pre-if seed
-                if cond < 1:
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(pre)
-                else:
-                    acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(prev, sa, sb)
-                    phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(acc)
-                result: pl.Tensor[[16, 64], pl.FP32] = pl.store(phi, [0, 0], out)
-                return result
-
-        # Verification off: the un-coalesced divergent Acc phi is the documented
-        # out-of-scope case (YieldFixup emits its usual move); we only assert the
-        # safety property — the pre-if seed was NOT retargeted onto the accumulator.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            After = _run_pipeline(Before)
+        # The un-coalesced divergent Acc phi is the documented out-of-scope case
+        # (YieldFixup emits its usual move); we only assert the safety property —
+        # the pre-if seed was NOT retargeted onto the accumulator.
+        After = _run_pipeline(_divergent_acc_phi_program())
         bases = _collect_tile_memref_bases(After)
         assert bases["pre"] != bases["prev"], (
             f"pre-if seed must not be coalesced onto the accumulator buffer (clobber): "
@@ -2935,9 +2993,9 @@ class TestTopDownRetargeter:
         ``memory_reuse`` alone: the clobbering alias is a specific buffer layout
         that only surfaces after allocation, so it cannot be expressed through the
         high-level ``init_mem_ref`` path (which hands every tile a distinct base).
-        Verification off: the declined phi is reconciled by YieldFixup's usual
-        (legal, distinct-buffer) move — we assert only the safety property, that
-        ``seed`` was NOT retargeted onto the accumulator buffer.
+        The declined phi is reconciled by YieldFixup's usual (legal,
+        distinct-buffer) move — we assert only the safety property, that ``seed``
+        was NOT retargeted onto the accumulator buffer.
         """
 
         @pl.program
@@ -2991,8 +3049,7 @@ class TestTopDownRetargeter:
                 )
                 return result
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            After = passes.memory_reuse()(Before)
+        After = passes.memory_reuse()(Before)
         bases = _collect_tile_memref_bases(After)
         assert bases["seed"] != bases["prev"], (
             f"seed must not be coalesced onto the accumulator buffer when a later write-only op "
