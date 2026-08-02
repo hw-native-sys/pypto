@@ -157,6 +157,8 @@ MemoryClass ClassifyMemory(MemorySpace space) {
     case MemorySpace::Right:
     case MemorySpace::Acc:
     case MemorySpace::Bias:
+    case MemorySpace::LeftScale:
+    case MemorySpace::RightScale:
       return MemoryClass::L0;
     case MemorySpace::ScalarLocal:
       return MemoryClass::Scalar;

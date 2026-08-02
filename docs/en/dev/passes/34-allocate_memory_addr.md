@@ -83,7 +83,9 @@ and a conservative half-open lifetime. The problem has:
 - **hard constraints** for lifetime interference, reserved ranges, semantic
   no-alias rules, target hazards, incompatible Vec ND/NZ storage layouts, and
   requested pipeline-stage separation. Author-declared `pl.MemRef` allocations
-  are also hard-separated from every other allocation in their memory space;
+  are also hard-separated from every other allocation in their memory space.
+  A multi-slot declaration is placed as one buffer covering its full declared
+  extent, while each member retains its constant or runtime-selected slot offset;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
   built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
@@ -117,11 +119,11 @@ Pipeline intent uses a strict-then-soft policy:
    an infeasibility certificate.
 
 > **Toolchain requirement:** `DSA_RP` relies on ptoas InsertSync recognizing
-> physical range overlap across distinct allocation roots. That support is
-> provided by [PTOAS PR #948](https://github.com/hw-native-sys/PTOAS/pull/948)
-> or its merged/released equivalent. The currently pinned ptoas v0.48 lacks it,
-> so this PyPTO branch is stacked on that change and is blocked from production
-> rollout until the toolchain pin is updated.
+> physical range overlap across distinct allocation roots. Use a modern ptoas
+> containing the tile-native memory planner and its cross-root local-overlap
+> analysis (PTOAS PR #913 and follow-up fixes). Older releases that compare
+> allocation-root identity without comparing planned physical ranges are not
+> compatible with DSA-RP placements.
 
 The model, recognizer, solver, validation, and writeback are all in-process.
 `DSA_RP` exposes no problem export, placement replay, reference-placement, or

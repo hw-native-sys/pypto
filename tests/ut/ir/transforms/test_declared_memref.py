@@ -489,6 +489,14 @@ class TestSlots:
         ]
         assert rotated, "the runtime slot address folded to a constant"
 
+        dsa_after = _run_dsa_rp_pipeline(Before)
+        dsa_rotated = [
+            mr
+            for name, mr in _tile_memrefs(dsa_after).items()
+            if not isinstance(mr.byte_offset_, ir.ConstInt)
+        ]
+        assert dsa_rotated, "DSA-RP folded the runtime slot address to a constant"
+
     def test_unsubscripted_declaration_is_unchanged(self):
         """A declaration with one slot behaves exactly as before slots existed."""
         scratch = pl.MemRef()
@@ -576,19 +584,23 @@ class TestSlots:
 
         # Driven directly: AllocateMemoryAddr only runs on InCore functions, and the
         # Default strategy skips it entirely under the PTOAS planner.
-        after = passes.allocate_memory_addr()(_run_memory_pipeline(Before))
-        ranges = _tile_byte_ranges(after)
-        assert len(ranges) >= 4, f"expected addressed tiles, got {ranges}"
-        # Slot 1 must sit inside its own allocation's reservation, so nothing on a
-        # different base may overlap it.
-        for name_a, base_a, start_a, end_a in ranges:
-            for name_b, base_b, start_b, end_b in ranges:
-                if base_a >= base_b:
-                    continue
-                assert not (start_a < end_b and start_b < end_a), (
-                    f"{name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
-                    f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
-                )
+        placements = {
+            "PYPTO": passes.allocate_memory_addr()(_run_memory_pipeline(Before)),
+            "DSA_RP": _run_dsa_rp_pipeline(Before),
+        }
+        for planner, after in placements.items():
+            ranges = _tile_byte_ranges(after)
+            assert len(ranges) >= 4, f"{planner}: expected addressed tiles, got {ranges}"
+            # Slot 1 must sit inside its own allocation's reservation, so nothing
+            # on a different base may overlap it.
+            for name_a, base_a, start_a, end_a in ranges:
+                for name_b, base_b, start_b, end_b in ranges:
+                    if base_a >= base_b:
+                        continue
+                    assert not (start_a < end_b and start_b < end_a), (
+                        f"{planner}: {name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
+                        f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
+                    )
 
     def test_slots_round_trip(self):
         """The printed form carries both `slots=` and the subscript.

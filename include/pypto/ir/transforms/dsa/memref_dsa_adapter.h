@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
 #include <cstdint>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,6 +44,7 @@ using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 struct PreparedProblem {
   dsa::DsaProblem strict_problem;
   std::unordered_map<const Var*, dsa::BufferId> buffer_id_by_base;
+  std::set<const Var*> declared_allocation_bases;
   std::vector<dsa::Separation> pipeline_pairs;
 };
 

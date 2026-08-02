@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -58,6 +59,10 @@ struct AllocationSeparation {
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
   std::vector<AllocationSeparation> separations;
+  /// Full byte extent of each author-declared allocation. This can exceed any
+  /// member MemRef when the declaration contains multiple runtime-selected
+  /// slots.
+  std::map<const Var*, uint64_t> declared_allocation_sizes;
 };
 
 /**

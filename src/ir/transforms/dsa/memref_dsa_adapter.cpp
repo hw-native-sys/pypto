@@ -73,6 +73,10 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
   INTERNAL_CHECK(func != nullptr) << "DSA-RP cannot analyze a null function";
 
   PreparedProblem prepared;
+  for (const auto& [base, size] : allocation_plan.declared_allocation_sizes) {
+    static_cast<void>(size);
+    prepared.declared_allocation_bases.insert(base);
+  }
   std::vector<std::optional<dsa::BufferId>> buffer_by_interval(allocation_plan.intervals.size());
   std::map<MemorySpace, dsa::Pool> pools;
   std::map<MemorySpace, uint64_t> fallback_capacity;
@@ -199,21 +203,32 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
     INTERNAL_CHECK_SPAN(offset != nullptr, old_memref->span_)
         << "DSA-RP writeback has no placement for buffer " << buffer->second;
 
-    int64_t relative_offset = 0;
+    ExprPtr address;
     if (const auto relative = As<ConstInt>(old_memref->byte_offset_)) {
-      relative_offset = relative->value_;
+      INTERNAL_CHECK_SPAN(relative->value_ >= 0, old_memref->span_)
+          << "DSA-RP writeback encountered a negative relative MemRef offset";
+      const uint64_t relative_value = static_cast<uint64_t>(relative->value_);
+      INTERNAL_CHECK_SPAN(
+          *offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - relative_value,
+          old_memref->span_)
+          << "DSA-RP address exceeds PyPTO's signed INT64 representation";
+      address = std::make_shared<ConstInt>(static_cast<int64_t>(*offset + relative_value), DataType::INT64,
+                                           Span::unknown());
+    } else if (prepared.declared_allocation_bases.count(old_memref->base_.get()) != 0) {
+      INTERNAL_CHECK_SPAN(*offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                          old_memref->span_)
+          << "DSA-RP address exceeds PyPTO's signed INT64 representation";
+      auto base = std::make_shared<ConstInt>(static_cast<int64_t>(*offset), DataType::INDEX, Span::unknown());
+      address = std::make_shared<Add>(base, old_memref->byte_offset_, DataType::INDEX, Span::unknown());
+    } else {
+      // Ordinary dynamic view offsets are re-derived by their PTO subview op;
+      // only declared runtime slots carry their expression into alloc_tile.
+      address = std::make_shared<ConstInt>(static_cast<int64_t>(*offset), DataType::INT64, Span::unknown());
     }
-    INTERNAL_CHECK_SPAN(relative_offset >= 0, old_memref->span_)
-        << "DSA-RP writeback encountered a negative relative MemRef offset";
-    const uint64_t relative = static_cast<uint64_t>(relative_offset);
-    INTERNAL_CHECK_SPAN(*offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - relative,
-                        old_memref->span_)
-        << "DSA-RP address exceeds PyPTO's signed INT64 representation";
 
-    auto address = std::make_shared<ConstInt>(static_cast<int64_t>(*offset + relative), DataType::INT64,
-                                              Span::unknown());
     auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, std::move(address),
-                                               old_memref->size_, old_memref->span_);
+                                               old_memref->size_, old_memref->span_, old_memref->is_pinned_,
+                                               old_memref->slot_count_, old_memref->slot_index_);
     replacements.emplace_back(old_memref.get(), std::move(new_memref));
   }
 

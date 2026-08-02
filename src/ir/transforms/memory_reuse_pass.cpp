@@ -1845,23 +1845,42 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
   }
 }
 
-/// Collect the allocation bases declared by the author through one-argument
-/// `pl.MemRef(...)` annotations.
+/// Collect the full byte extent of allocations declared by the author.
 ///
 /// InitMemRef hoists every alloc to the function body's top-level SeqStmts.
-/// Both MemoryReuse and DSA-RP consume this helper: the former protects pinned
-/// slots in its packer, while the latter turns the same contract into hard DSA
-/// separations.
-std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
-                                             const std::string& consumer) {
+/// A multi-slot declaration is larger than any one member MemRef, so DSA-RP
+/// must take the extent from the alloc statement rather than reconstruct it
+/// from members.
+std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, const Span& span,
+                                                       const std::string& consumer) {
   auto top_level = As<SeqStmts>(body);
   INTERNAL_CHECK_SPAN(top_level, span)
       << consumer << " expects a top-level SeqStmts body (InitMemRef normalizes it), got "
       << (body ? body->TypeName() : "null");
 
-  std::set<const Var*> pinned_bases;
+  std::map<const Var*, uint64_t> pinned_allocations;
   for (const auto& stmt : top_level->stmts_) {
-    if (auto base = GetPinnedAllocBase(stmt)) pinned_bases.insert(base.get());
+    auto base = GetPinnedAllocBase(stmt);
+    if (!base) continue;
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    auto size = call && call->args_.size() >= 2 ? As<ConstInt>(call->args_[1]) : nullptr;
+    INTERNAL_CHECK_SPAN(size && size->value_ > 0, stmt->span_)
+        << consumer << " expected declared allocation '" << base->name_hint_
+        << "' to have a positive constant byte extent after InitMemRef";
+    pinned_allocations.emplace(base.get(), static_cast<uint64_t>(size->value_));
+  }
+  return pinned_allocations;
+}
+
+/// Collect the allocation bases declared by the author through `pl.MemRef`.
+std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
+                                             const std::string& consumer) {
+  const auto allocations = CollectPinnedAllocSizes(body, span, consumer);
+  std::set<const Var*> pinned_bases;
+  for (const auto& [base, size] : allocations) {
+    static_cast<void>(size);
+    pinned_bases.insert(base);
   }
   return pinned_bases;
 }
@@ -3252,11 +3271,17 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
 AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   auto analysis = ComputeLifetimes(func->body_);
-  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(func->body_, func->span_, "DSA-RP");
+  const auto pinned_allocations = CollectPinnedAllocSizes(func->body_, func->span_, "DSA-RP");
+  std::set<const Var*> pinned_bases;
+  for (const auto& [base, size] : pinned_allocations) {
+    static_cast<void>(size);
+    pinned_bases.insert(base);
+  }
   ValidateDeclaredAllocs(func->body_, pinned_bases, analysis.var_liveness);
 
   AllocationPlan plan;
   plan.intervals = std::move(analysis.lifetimes);
+  plan.declared_allocation_sizes = pinned_allocations;
   // DSA places the physical allocation identity, whose extent must cover every
   // mandatory alias/view in the sharing group. Keep this correction local to
   // DSA-RP so the legacy MemoryReuse heuristic retains its established sizing.
@@ -3270,6 +3295,11 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
             << "Expected every allocation sharing-group member to carry a MemRef";
         allocation_size = std::max(allocation_size, GetDefinedMemRef(tile_type)->size_);
       }
+    }
+    const auto representative_memref = GetTypeMemRef(interval.variable->GetType());
+    if (representative_memref.has_value() && representative_memref.value()) {
+      const auto declared = pinned_allocations.find(representative_memref.value()->base_.get());
+      if (declared != pinned_allocations.end()) allocation_size = std::max(allocation_size, declared->second);
     }
     interval.size = allocation_size;
   }
