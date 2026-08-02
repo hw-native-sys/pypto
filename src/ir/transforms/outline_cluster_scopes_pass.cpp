@@ -16,12 +16,14 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -46,6 +48,10 @@ struct SpmdLaunchSpec {
   ExprPtr core_num;
   bool sync_start = false;
   FunctionPtr group;
+  /// Every Var the Group binds (params + body definitions). ``core_num`` must
+  /// reference none of them once translated into caller scope — see
+  /// ``LaunchSpecStamper::ToCallerScope``.
+  std::unordered_set<const Var*> callee_bound;
 };
 
 /// Unwrap a nested Spmd scope in a Group function body: replace the
@@ -178,8 +184,32 @@ class LaunchSpecStamper : public IRMutator {
     }
     // No mapping to apply — a param-less Group, or a constant core_num that
     // references nothing. Substitution would be a no-op either way.
-    if (param_to_arg.empty()) return spec.core_num;
-    return transform_utils::Substitute(spec.core_num, param_to_arg);
+    auto translated = param_to_arg.empty() ? spec.core_num
+                                           : transform_utils::Substitute(spec.core_num, param_to_arg);
+    RejectCalleeBoundCoreNum(spec, translated);
+    return translated;
+  }
+
+  /// The dispatch's args can only recover a count the cluster *captured* from
+  /// the caller. A count bound by a statement INSIDE ``pl.cluster()`` has no
+  /// corresponding arg, so it would be stamped onto the dispatch still naming a
+  /// Var only the callee binds — the closed-scope violation this carrier move
+  /// exists to remove, reappearing at the call site. Reject it with an
+  /// actionable message instead of emitting an unbound name.
+  static void RejectCalleeBoundCoreNum(const SpmdLaunchSpec& spec, const ExprPtr& translated) {
+    if (spec.callee_bound.empty() || !translated) return;
+    outline_utils::VarDefUseCollector uses;
+    uses.VisitExpr(translated);
+    for (const auto* used : uses.var_uses) {
+      CHECK_SPAN(spec.callee_bound.count(used) == 0, spec.group->span_)
+          << "pl.spmd() block count references '" << used->name_hint_
+          << "', which is defined inside the enclosing pl.cluster(). The block count is evaluated at "
+             "the cluster's launch site, so it must be computed before `with pl.cluster():` and "
+             "captured, e.g.\n"
+             "    n = pl.system.available_cluster_count()\n"
+             "    with pl.cluster():\n"
+             "        with pl.spmd(n):";
+    }
   }
 
   const std::unordered_map<std::string, SpmdLaunchSpec>& specs_;
@@ -253,6 +283,14 @@ Pass OutlineClusterScopes() {
         outlined = UnwrapNestedSpmd(outlined, &spec);
         if (!spec.core_num) continue;
         spec.group = outlined;
+        // Snapshot what the Group binds once, so the per-dispatch scope check
+        // below is a hash lookup rather than a re-walk of the body.
+        for (const auto& param : outlined->params_) {
+          if (param) spec.callee_bound.insert(param.get());
+        }
+        outline_utils::VarDefUseCollector group_defs;
+        if (outlined->body_) group_defs.VisitStmt(outlined->body_);
+        spec.callee_bound.insert(group_defs.var_defs.begin(), group_defs.var_defs.end());
         group_launch_specs.emplace(outlined->name_, std::move(spec));
       }
       if (!group_launch_specs.empty()) {

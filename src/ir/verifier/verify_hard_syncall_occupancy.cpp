@@ -29,10 +29,13 @@
 // resolved (AIV / AIC / Group), which is what lets us map SPMD blocks to physical
 // cores per launch shape. It covers every SPMD launch site whose block count it
 // can classify (see below):
-//   - `FunctionType::Spmd` function  (scope-based `with/for pl.spmd`)          [core_num attr]
-//   - `FunctionType::Group` function with a core_num attr (`pl.cluster()`-nested
-//     `pl.spmd`, unwrapped by OutlineClusterScopes)                            [core_num attr]
-//   - a `Submit` node with a core_num (`pl.spmd_submit(..., core_num=N)`)      [Submit::core_num_]
+//   - a `Call` dispatch carrying the launch spec (scope-based `with/for pl.spmd`
+//     and `pl.cluster()`-nested `pl.spmd`, both outlined by
+//     OutlineClusterScopes)                                                    [core_num Call attr]
+//   - a `Submit` node with a core_num (`pl.spmd_submit(..., core_num=N)`,
+//     or an `as tid` scope)                                                    [Submit::core_num_]
+//   - a Function still spelling the spec in its own attrs — no pass produces
+//     this, but hand-written / deserialized IR may                             [core_num Function attr]
 //
 // A launch width is one of:
 //   - a compile-time literal N, checked against the target SoC's physical counts;
@@ -316,9 +319,11 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       // still carry a constant ``core_num`` on the function, so keep reading it.
       if (fn->HasAttr(kAttrCoreNum)) {
         // sync_start rides alongside, emitted only when true (absent => false).
+        // Resolve the launched kernels the same way a dispatch does, so a
+        // non-wrapper function carrying a legacy attr is checked as itself
+        // rather than being descended into.
         CheckLaunchSite(fn->GetAttr<ExprPtr>(kAttrCoreNum, nullptr), fn->GetAttr<bool>(kAttrSyncStart, false),
-                        direct_callees_cached(fn), total_vector, total_cube, program, query_defs,
-                        diagnostics);
+                        launched_kernels(fn), total_vector, total_cube, program, query_defs, diagnostics);
       }
 
       // Launch sites. A dispatch carries its spec as kAttrCoreNum /

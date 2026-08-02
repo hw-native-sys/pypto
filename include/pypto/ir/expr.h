@@ -867,14 +867,20 @@ inline constexpr const char* kAttrCoreNum = "core_num";
 inline constexpr const char* kAttrSyncStart = "sync_start";
 
 /**
- * @brief True for a ``Call``/``Submit`` attr key whose value is a single
- * ``ExprPtr`` naming an IR subtree evaluated in the node's own scope.
+ * @brief True for a ``Call`` attr key whose value is a single ``ExprPtr``
+ * naming an IR subtree evaluated in the node's own scope.
  *
- * Every walker that rewrites or collects Vars must recurse into these — the
- * visitor (def-use / liveness), the mutator (substitution), and the SSA pass.
- * They are listed here once because the set was previously spelled out
- * per-site, and a key added to some sites but not others silently dangles in
- * the ones that were missed.
+ * Every walker that rewrites or collects Vars over Call attrs must recurse into
+ * these — the visitor (def-use / liveness), the mutator (substitution), and the
+ * SSA pass. They are listed here once because the set was previously spelled
+ * out per-site, and a key added to some sites but not others silently dangles
+ * in the ones that were missed.
+ *
+ * Scope note: this covers the ``Call`` arms only. ``Submit`` keeps its
+ * Expr-valued launch spec and predicate in first-class fields
+ * (``core_num_`` / ``predicate_``) that the base walkers already visit, so the
+ * Submit arms have no attr of this shape to consult. A ``kAttrDevice`` on a
+ * Submit would not be walked — a pre-existing gap, unrelated to these keys.
  *
  * Not included: ``VarPtr`` / ``vector<VarPtr>`` attrs (kAttrTaskIdVar,
  * kAttrManualDepEdges, kAttrDumpVars, ...), which every walker handles

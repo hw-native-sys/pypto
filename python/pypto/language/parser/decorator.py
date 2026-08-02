@@ -461,10 +461,11 @@ def _resolve_external_source(external_source: str | Path, caller_frame: Any) -> 
     return str(path)
 
 
-# ``pl.system.available_*_count()`` used as an SPMD launch width lands in the
-# Spmd wrapper's ``attrs["core_num"]``, which the printer emits as the call
-# itself (it binds no variable, so there is no name to reference). Recovering it
-# needs no scope, unlike a Var-valued core_num.
+# ``pl.system.available_*_count()`` used as an SPMD launch width can still appear
+# in a decorator's ``attrs["core_num"]`` (a legacy Function-level launch spec —
+# the outliner now puts the spec on the dispatch instead). The printer emits it
+# as the call itself: it binds no variable, so there is no name to reference and
+# recovering it needs no scope, unlike a Var-valued core_num.
 _LAUNCH_QUERY_ATTR_OPS = ("available_cluster_count", "available_aiv_count")
 
 

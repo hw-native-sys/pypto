@@ -14,10 +14,8 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
-#include "pypto/ir/expr.h"
 #include "pypto/ir/stmt.h"
 
 namespace pypto {

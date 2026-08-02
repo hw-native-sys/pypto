@@ -230,9 +230,11 @@ std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::o
   } else {
     throw pypto::TypeError("attrs must be a dict, list of (key, value) tuples, or None");
   }
-  // Ergonomic auto-wrap: Function attrs["core_num"] is typed as ExprPtr, but
-  // users and text-parser reparse sites commonly supply a plain int — wrap it
-  // as ConstInt(DataType::INDEX) so the codegen-side ExprPtr read is uniform.
+  // Ergonomic auto-wrap: attrs["core_num"] is typed as ExprPtr, but users and
+  // text-parser reparse sites commonly supply a plain int — wrap it as
+  // ConstInt(DataType::INDEX) so the codegen-side ExprPtr read is uniform.
+  // Load-bearing for the dispatch Call attrs the outliner now emits, as well as
+  // a legacy Function-level spec.
   for (auto& [key, value] : attrs) {
     if (key == "core_num" && value.type() == typeid(int)) {
       auto n = std::any_cast<int>(value);
@@ -1077,8 +1079,8 @@ void BindIR(nb::module_& m) {
         // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
         result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
-        // IR expressions stored in attrs (e.g. attrs["device"] on Orchestration
-        // dispatch calls; attrs["core_num"] on Function attrs for outlined Spmd).
+        // IR expressions stored in attrs (e.g. attrs["device"] and
+        // attrs["core_num"] on Orchestration dispatch calls).
         result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }
     }
