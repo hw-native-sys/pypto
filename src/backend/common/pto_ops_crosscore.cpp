@@ -288,8 +288,15 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
   }
 
+  // A frontend tpop result is not itself a locally bound tile in PTOAS, so
+  // pto.set_validshape cannot mutate it directly.  When transport uses the
+  // full physical box, pop into a temporary and expose the logical result as
+  // a metadata-only, full-box subview with explicit valid extents.  PTOAS
+  // lowers the tpop temporary to declare_tile and the subview to an alias;
+  // there is no extra data movement.
+  std::string transport_buf = use_full_box ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
-  oss << result_buf << " = pto.tpop_from_" << target;
+  oss << transport_buf << " = pto.tpop_from_" << target;
   if (!transport_row.empty() || !transport_col.empty()) {
     INTERNAL_CHECK_SPAN(!transport_row.empty() && !transport_col.empty(), op->span_)
         << "Internal error: " << op_name << " dynamic valid_shape requires both valid_row and valid_col";
@@ -301,8 +308,21 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   }
   codegen.Emit(oss.str());
   if (use_full_box) {
-    codegen.Emit("pto.set_validshape " + result_buf + ", " + logical_row + ", " + logical_col + " : " +
-                 result_type);
+    const auto& shape = result_tile_type->shape_;
+    auto rows = As<ir::ConstInt>(shape[0]);
+    auto cols = As<ir::ConstInt>(shape[1]);
+    INTERNAL_CHECK_SPAN(rows && cols, op->span_)
+        << "Internal error: full-box tpop localization requires a compile-time constant physical shape";
+    std::string zero = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
+    std::string logical_buf = codegen.NewNamedTemp("tpop_logical");
+    std::ostringstream subview;
+    subview << logical_buf << " = pto.subview " << transport_buf << "[" << zero << ", " << zero << "] sizes ["
+            << rows->value_ << ", " << cols->value_ << "] valid [" << logical_row << ", " << logical_col
+            << "] : " << result_type << " -> " << logical_type;
+    codegen.Emit(subview.str());
+    codegen.RegisterTileBufType(logical_buf, logical_type);
+    codegen.SetCurrentResultBuf(logical_buf);
   }
 
   return "";
