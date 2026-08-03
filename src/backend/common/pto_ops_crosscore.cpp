@@ -269,17 +269,21 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // dual-AIV no-split path uses such a replay only to balance the pipe.
   auto result_tile_type = codegen.GetCurrentResultTileType();
   bool statically_empty = false;
+  bool has_static_logical_shape = false;
   if (result_tile_type) {
     const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+    has_static_logical_shape = result_view.valid_shape.size() >= 2;
     for (const auto& valid_dim : result_view.valid_shape) {
-      if (auto dim_const = As<ir::ConstInt>(valid_dim); dim_const && dim_const->value_ == 0) {
+      auto dim_const = As<ir::ConstInt>(valid_dim);
+      has_static_logical_shape = has_static_logical_shape && static_cast<bool>(dim_const);
+      if (dim_const && dim_const->value_ == 0) {
         statically_empty = true;
       }
     }
   }
   const bool use_full_box = std::string_view(target) == "aic" && split == 0 && !logical_row.empty() &&
-                            !logical_col.empty() && !statically_empty && result_tile_type &&
-                            result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec &&
+                            !logical_col.empty() && has_static_logical_shape && !statically_empty &&
+                            result_tile_type && result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec &&
                             result_tile_type->shape_.size() >= 2;
   std::string transport_row = logical_row;
   std::string transport_col = logical_col;
@@ -289,11 +293,16 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   }
 
   // A frontend tpop result is not itself a locally bound tile in PTOAS, so
-  // pto.set_validshape cannot mutate it directly.  When transport uses the
-  // full physical box, pop into a temporary and expose the logical result as
-  // a metadata-only, full-box subview with explicit valid extents.  PTOAS
-  // lowers the tpop temporary to declare_tile and the subview to an alias;
-  // there is no extra data movement.
+  // pto.set_validshape cannot mutate it directly. When transport uses the
+  // full physical box, pop into a temporary and expose the logical result via
+  // pto.treshape. PTOAS has a dedicated zero-copy treshape-over-tpop lowering
+  // that preserves the FIFO tile handle while rebuilding its static valid
+  // metadata. A full-box pto.subview is not equivalent here: PTOAS lowers that
+  // path through a disconnected tile handle on A2/A3.
+  //
+  // Treshape carries no valid-row/valid-col operands, so it can restore only
+  // static logical extents. Keep the existing direct TPOP behavior for dynamic
+  // valid shapes until PTO exposes a dynamic metadata rebind for pipe entries.
   std::string transport_buf = use_full_box ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
   oss << transport_buf << " = pto.tpop_from_" << target;
@@ -309,18 +318,14 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   codegen.Emit(oss.str());
   if (use_full_box) {
     const auto& shape = result_tile_type->shape_;
-    auto rows = As<ir::ConstInt>(shape[0]);
-    auto cols = As<ir::ConstInt>(shape[1]);
-    INTERNAL_CHECK_SPAN(rows && cols, op->span_)
+    INTERNAL_CHECK_SPAN(As<ir::ConstInt>(shape[0]) && As<ir::ConstInt>(shape[1]), op->span_)
         << "Internal error: full-box tpop localization requires a compile-time constant physical shape";
-    std::string zero = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
+    INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
+        << "Internal error: full-box tpop localization requires a logical tile type";
     std::string logical_buf = codegen.NewNamedTemp("tpop_logical");
-    std::ostringstream subview;
-    subview << logical_buf << " = pto.subview " << transport_buf << "[" << zero << ", " << zero << "] sizes ["
-            << rows->value_ << ", " << cols->value_ << "] valid [" << logical_row << ", " << logical_col
-            << "] : " << result_type << " -> " << logical_type;
-    codegen.Emit(subview.str());
+    codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
+                 logical_type);
     codegen.RegisterTileBufType(logical_buf, logical_type);
     codegen.SetCurrentResultBuf(logical_buf);
   }

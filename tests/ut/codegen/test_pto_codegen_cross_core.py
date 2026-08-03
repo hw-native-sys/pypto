@@ -494,8 +494,8 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v_col=?" in tpop_line
         assert "pto.alloc_tile" not in mlir_code
 
-    def test_tpop_no_split_acc_to_vec_uses_box_then_restores_dynamic_valid_shape(self):
-        """A partial no-split C2V pop transports the box, then restores its logical shape."""
+    def test_tpop_no_split_acc_to_vec_preserves_dynamic_valid_shape(self):
+        """A dynamic C2V valid shape stays on TPOP because treshape has no dynamic operands."""
         span = ir.Span.unknown()
         valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
         tile_view = ir.TileView(valid_shape=[ir.ConstInt(8, pl.INT64, span), valid_col])
@@ -519,13 +519,12 @@ class TestCrossCoreTpushTpopCodegen:
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_static_row_program", span))
         lines = [line.strip() for line in mlir_code.splitlines()]
         tpop_line = next(line for line in lines if "pto.tpop_from_aic" in line)
-        restore_line = next(line for line in lines if "pto.subview" in line)
 
-        assert "pto.tpop_from_aic(%c16_index, %c64_index) {split = 0}" in tpop_line
+        assert "pto.tpop_from_aic(%c8_index, %arg0) {split = 0}" in tpop_line
         assert "v_row=?" in tpop_line
         assert "v_col=?" in tpop_line
-        assert "sizes [16, 64] valid [%c8_index, %arg0]" in restore_line
-        assert "v_row=?" in restore_line and "v_col=?" in restore_line
+        assert "pto.treshape" not in mlir_code
+        assert "pto.subview" not in mlir_code
         assert "pto.set_validshape" not in mlir_code
 
     def test_tpop_static_non_full_valid_shape_operands(self):
@@ -773,17 +772,16 @@ class TestCrossCoreTpushTpopCodegen:
 
         consumer_lines = [line.strip() for line in consumer_code.splitlines()]
         pop_index = next(i for i, line in enumerate(consumer_lines) if "pto.tpop_from_aic" in line)
-        subview_index = next(i for i, line in enumerate(consumer_lines) if "pto.subview" in line)
+        reshape_index = next(i for i, line in enumerate(consumer_lines) if "pto.treshape" in line)
         assert "pto.tpop_from_aic(%c16_index, %c32_index) {split = 0}" in consumer_lines[pop_index]
         transport = re.search(r"^(%\w+) = pto\.tpop_from_aic", consumer_lines[pop_index])
         assert transport is not None
-        assert pop_index < subview_index
-        assert f"pto.subview {transport.group(1)}[%c0_index, %c0_index]" in consumer_lines[subview_index]
-        assert "sizes [16, 32] valid [%c16_index, %c24_index]" in consumer_lines[subview_index]
-        assert "v_row=16, v_col=24" in consumer_lines[subview_index]
+        assert pop_index < reshape_index
+        assert f"pto.treshape {transport.group(1)}" in consumer_lines[reshape_index]
+        assert "rows=16, cols=32, v_row=16, v_col=24" in consumer_lines[reshape_index]
         assert "pto.set_validshape" not in consumer_code, (
             "a frontend tpop result is not a locally bound PTOAS tile; logical shape "
-            f"restoration must use a metadata-only subview:\n{consumer_code}"
+            f"restoration must use a metadata-only treshape:\n{consumer_code}"
         )
 
     @pytest.mark.parametrize(
