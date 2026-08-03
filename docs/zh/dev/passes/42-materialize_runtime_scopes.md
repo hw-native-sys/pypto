@@ -35,8 +35,10 @@ parser 直接物化进 IR。这是控制 scope 粒度（ring 隔离）、MANUAL 
 `auto_scope=False` 下才能解析回来（parser 在默认模式下拒绝手写 AUTO scope，
 默认模式由编译器决定放置）。
 
-**何时使用**：在 `Default` 策略中作为最后一个 pass 运行，位于最终的 `Simplify`
-之后。放在最末意味着其它任何 transform 都无需处理被插入的 scope 包裹。
+**何时使用**：在 `Default` 策略中紧跟最终的 `Simplify` 之后运行，位于
+[`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md) 与
+[`InsertCommFence`](44-insert_comm_fence.md) 之前。跑在所有改写型 transform
+之后意味着它们都无需处理被插入的 scope 包裹。
 
 **作用范围**：仅修改 `Orchestration` 函数。InCore / AIC / AIV / Group / Spmd
 的函数体从不会被 codegen 包裹 scope，因此原样返回。

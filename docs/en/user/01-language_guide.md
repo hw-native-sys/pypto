@@ -639,7 +639,9 @@ output_dir = ir.compile(
 
 ### Optimization Pipeline
 
-The `Default` strategy runs these passes in order:
+The `Default` strategy runs the following main stages in order. This is a
+summary, not the full recipe — see the [pass documentation](../dev/passes/00-pass_manager.md)
+for every pass and its exact position:
 
 1. **UnrollLoops** — unroll loop iterations
 2. **CtrlFlowTransform** — rewrite control flow to structured IR

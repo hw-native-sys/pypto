@@ -615,7 +615,8 @@ output_dir = ir.compile(
 
 ### 优化流水线
 
-`Default` 策略按顺序运行以下 pass：
+`Default` 策略按顺序运行以下主要阶段。这里只是摘要，并非完整流水线 ——
+完整的 pass 列表及其确切位置见 [pass 文档](../dev/passes/00-pass_manager.md)：
 
 1. **UnrollLoops** —— 展开循环迭代
 2. **CtrlFlowTransform** —— 将控制流改写为结构化 IR

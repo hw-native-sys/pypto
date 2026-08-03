@@ -89,7 +89,9 @@ class TestPassManagerBasics:
     def test_pass_manager_rejects_unknown_strategy(self):
         """An unsupported strategy value raises instead of silently running Default."""
         with pytest.raises(ValueError, match="Unsupported optimization strategy"):
-            ir.PassManager.get_strategy("NotAStrategy")
+            # Deliberately ill-typed: the guard exists for values the type system
+            # rules out, so exercising it requires stepping outside the annotation.
+            ir.PassManager.get_strategy("NotAStrategy")  # type: ignore[arg-type]
 
     def test_auto_scope_deps_switch_forwarded_to_pass_factory(self, monkeypatch):
         """PassManager forwards the high-level AUTO-scope deps switch."""

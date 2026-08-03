@@ -239,8 +239,9 @@ class PassManager:
             passes.simplify,
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
             # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
-            # 1:1 from the IR. Runs dead last, after the final Simplify, so no
-            # other transform has to reason about the inserted scope wrappers.
+            # 1:1 from the IR. Runs after the final Simplify and after every
+            # rewriting transform, so none of them has to reason about the
+            # inserted scope wrappers.
             passes.materialize_runtime_scopes,
             # Classify each Orchestration ForStmt iter_arg as a trivial alias or a
             # materialised rebind carry (and size manual-scope TaskId array
