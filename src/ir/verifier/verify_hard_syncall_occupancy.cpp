@@ -315,11 +315,6 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       if (inserted) it->second = DirectCallees(f, program);
       return it->second;
     };
-    auto launched_kernels = [&](const FunctionPtr& callee) -> std::vector<FunctionPtr> {
-      if (!callee) return {};
-      return IsLaunchWrapper(callee) ? direct_callees_cached(callee) : std::vector<FunctionPtr>{callee};
-    };
-
     // Resolve a dispatch's effective launch spec exactly as orchestration
     // codegen's EffectiveLaunchSpec does: the dispatch's own spec wins, and the
     // callee's Function attr is only a fallback for a dispatch that carries
