@@ -1179,7 +1179,15 @@ class MemRef(Var):
         slot: Expr | None = ...,
     ) -> None: ...
     @overload
-    def __init__(self, base: Var, byte_offset: Expr, size: int, span: Span = ...) -> None: ...
+    def __init__(
+        self,
+        base: Var,
+        byte_offset: Expr,
+        size: int,
+        span: Span = ...,
+        slots: int = ...,
+        slot: Expr | None = ...,
+    ) -> None: ...
     @overload
     def __init__(self, base: str, byte_offset: int, size: int, span: Span = ...) -> None: ...
     @overload

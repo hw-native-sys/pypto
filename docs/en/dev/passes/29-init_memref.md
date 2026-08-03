@@ -77,6 +77,22 @@ This pass **consumes** the declaration: the MemRef it produces is an ordinary on
 carrying the derived size, with the flag cleared. From there on the allocation's
 `pinned=True` kwarg is what marks it as the author's.
 
+Slot geometry is the exception — `slot_count_` and `slot_index_` survive on the resolved
+MemRef. Resolving the index into `byte_offset_` answers *where* the slot lands; it does
+not stop the MemRef from being slot *k* of an *N*-slot allocation, and PTO codegen reads
+exactly that to emit one ptoas `pto.alloc_multi_tile` region with a `pto.multi_tile_get`
+per use, instead of *N* unrelated allocs. The two are related, not independent:
+`byte_offset_` is derived from the index, and `AllocateMemoryAddr` may rebase it onto a
+physical address, so the index is the author's *selection* and the offset is its resolved
+*location*. Both print, so a dump round-trips as
+`pl.MemRef(base, offset, size, slots=N)[k]`.
+
+Under `memory_planner=PTOAS` a **single-slot** declaration is rejected: its isolation is
+enforced by `MemoryReuse`, which ptoas replaces wholesale, and no ptoas concept carries it
+instead. A multi-slot declaration is accepted — its slots become a ptoas region whose
+segments ptoas is forbidden to merge — see
+[Python syntax](../language/00-python_syntax.md#under-the-ptoas-memory-planner).
+
 The declaration lives on the assigned `Var`, not on the RHS `Call` — `ConvertToSSA` merges
 it into the Var's type and op type deduction never produces a MemRef — so any pass that
 rebuilds a type from the Call must carry it over explicitly. `ConvertToSSA` does the

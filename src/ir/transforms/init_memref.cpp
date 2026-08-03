@@ -299,8 +299,16 @@ class InitMemRefMutator : public IRMutator {
     // allocation for the verifier, and overlapping slot 0 for MayAlias, which
     // would report the ping-pong's two halves as aliasing. The allocation itself
     // is sized to the full set separately, where the alloc statement is built.
+    //
+    // The slot geometry rides along on the resolved MemRef. Resolving the index
+    // into an offset answers *where* the slot lands; it does not stop the MemRef
+    // from being slot k of an N-slot allocation, and that is what lets PTO codegen
+    // emit `pto.alloc_multi_tile` / `pto.multi_tile_get` instead of N unrelated
+    // allocs. `is_pinned_` still clears here: the declaration is resolved, and the
+    // flag is what confines MemRef rebuilds to the pre-InitMemRef window.
     return std::make_shared<MemRef>(binding->base_, SlotByteOffset(*binding, it->second),
-                                    it->second.slot_size);
+                                    it->second.slot_size, Span::unknown(), /*is_pinned=*/false,
+                                    binding->slot_count_, binding->slot_index_);
   }
 
   /// The byte offset a declaration's slot index denotes, folded when constant.
@@ -818,12 +826,22 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // wholesale under memory_planner=PTOAS. Honoring the declaration's allocation
   // but not its isolation would hand back exactly the coalescing the author
   // declared it to prevent, so reject the combination rather than degrade quietly.
-  if (!declared_allocs.empty()) {
-    CHECK(ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS)
-        << "A declared allocation (one-argument pl.MemRef(...)) is not supported under "
-           "memory_planner=PTOAS: ptoas owns memory planning and would be free to coalesce the "
-           "allocations you separated. Drop the declarations, or compile with the default PyPTO "
-           "memory planner.";
+  //
+  // A MULTI-SLOT declaration is the exception: it lowers to a ptoas
+  // `pto.alloc_multi_tile` region, and ptoas plans the N slots into disjoint
+  // physical segments it is explicitly forbidden to alias-merge. The separation
+  // the author asked for — slot k is not slot j — is therefore carried into ptoas
+  // rather than lost, which is the whole reason the multi-buffer form exists. A
+  // single-slot declaration has no such counterpart and stays rejected.
+  if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+    for (const auto& [base, alloc] : declared_allocs) {
+      CHECK(alloc.slot_count > 1)
+          << "A single-slot declared allocation (pl.MemRef(\"" << base->name_hint_
+          << "\")) is not supported under memory_planner=PTOAS: ptoas owns memory planning and "
+             "would be free to coalesce the allocations you separated. Declare it with "
+             "pl.MemRef(slots=N) — N slots become one ptoas multi-buffer region whose slots ptoas "
+             "keeps disjoint — or compile with the default PyPTO memory planner.";
+    }
   }
 
   InitMemRefMutator mutator(declared_allocs, handler);

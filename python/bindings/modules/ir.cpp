@@ -828,6 +828,7 @@ void BindIR(nb::module_& m) {
           "__init__",
           [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span,
              bool is_pinned, uint64_t slots, const ExprPtr& slot) {
+            CheckSlotCount(slots);
             new (self) MemRef(base, byte_offset, size, span, is_pinned, slots, slot);
           },
           nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
@@ -835,9 +836,18 @@ void BindIR(nb::module_& m) {
           "Create a memory reference with base Ptr, integer byte_offset, and size. Set is_pinned for an "
           "author-declared allocation whose size the parser leaves for InitMemRef to derive; slots/slot "
           "select one slot of a multi-slot declaration")
-      .def(nb::init<VarPtr, ExprPtr, uint64_t, Span>(), nb::arg("base"), nb::arg("byte_offset"),
-           nb::arg("size"), nb::arg("span") = Span::unknown(),
-           "Create a memory reference with base Ptr, byte_offset expression, and size")
+      .def(
+          "__init__",
+          [](MemRef* self, const VarPtr& base, const ExprPtr& byte_offset, uint64_t size, const Span& span,
+             uint64_t slots, const ExprPtr& slot) {
+            CheckSlotCount(slots);
+            new (self) MemRef(base, byte_offset, size, span, /*is_pinned=*/false, slots, slot);
+          },
+          nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
+          nb::arg("slots") = 1, nb::arg("slot") = nb::none(),
+          "Create a memory reference with base Ptr, byte_offset expression, and size. slots/slot record "
+          "which slot of a multi-slot allocation this is, which outlives InitMemRef resolving the index "
+          "into the offset")
       .def_ro("is_pinned_", &MemRef::is_pinned_,
               "True for an author-declared allocation, false for a compiler allocation")
       .def_ro("slot_count_", &MemRef::slot_count_,

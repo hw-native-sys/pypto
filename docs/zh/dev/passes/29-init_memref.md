@@ -71,6 +71,19 @@ program_with_memrefs = init_pass(program)
 本 pass 会**消费**掉这个声明：它产出的 MemRef 是一个携带推导大小的普通 MemRef，标志位已清除。
 此后由分配点的 `pinned=True` kwarg 标记该分配归作者所有。
 
+槽位信息是例外——`slot_count_` 与 `slot_index_` 会保留在解析后的 MemRef 上。把下标折算进
+`byte_offset_` 回答的是槽位**落在哪里**，并不改变"这是某块 N 槽分配的第 k 个槽位"这一事实；
+PTO codegen 正是读取它，才能发出一块 ptoas `pto.alloc_multi_tile` 区域并在每个使用点发一条
+`pto.multi_tile_get`，而不是 N 块互不相关的分配。两者是派生关系而非彼此独立：`byte_offset_`
+由下标算出，`AllocateMemoryAddr` 还可能把它重定位到物理地址上，因此下标是作者的**选择**，
+偏移是它解析后的**位置**。两者都会打印，所以 dump 可以按
+`pl.MemRef(base, offset, size, slots=N)[k]` 往返。
+
+在 `memory_planner=PTOAS` 下，**单槽位**声明会被拒绝：它的隔离性由 `MemoryReuse` 保证，而该
+pass 被 ptoas 整体替换，ptoas 侧也没有对应概念来接管。多槽位声明则被接受——它的槽位会成为一块
+ptoas 区域，ptoas 被禁止合并这些物理段，详见
+[Python 语法](../language/00-python_syntax.md#在-ptoas-内存规划器下)。
+
 声明位于被赋值的 `Var` 上而非 RHS `Call` 上——`ConvertToSSA` 只把它合并进 Var 的类型，而算子类型
 推导永远不产生 MemRef——因此任何从 Call 重建类型的 pass 都必须显式携带它。`ConvertToSSA` 负责
 合并；`FlattenTileNdTo2D` 在四处重建中都携带（ND 展平、≤2D `tile.load`、rank>2 `tile.create`/`tile.full`、通用 tile 算子）；

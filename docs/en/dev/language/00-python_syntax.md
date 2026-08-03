@@ -166,6 +166,28 @@ other. When the index is a runtime expression there is no static slot to attribu
 to, so the check is skipped — the rotation is yours to get right — while isolation from
 every other allocation still holds.
 
+##### Under the ptoas memory planner
+
+`slots=N` is the one declaration form `memory_planner=PTOAS` accepts. ptoas has a matching
+concept — a `pto.alloc_multi_tile` region of N slots it must keep in disjoint physical
+segments — so codegen hands it the declaration whole: one region, and each use selects its
+slot with `pto.multi_tile_get`. The slot **index** is what ptoas receives (not the byte
+offset it resolves to), which is what lets it prove which accesses can share a slot and
+give the rotation per-slot event ids, overlapping iteration *i*'s load with iteration
+*i-1*'s compute.
+
+A single-slot `pl.MemRef()` has no such counterpart and stays rejected under that planner:
+ptoas would be free to pack the buffer you separated. So does a multi-slot declaration
+whose slots ptoas cannot describe — differently shaped tiles across slots, a space other
+than Vec / Mat / Acc, a runtime valid shape, or a slot carried out of an `if` or loop as a
+phi. Those are errors naming the shape, not silent fallbacks, because a fallback would
+undo the separation you declared.
+
+The default PyPTO planner is unaffected: it bakes addresses, and at
+`--pto-level=level3` ptoas does not fold its per-slot address fan-out, so the region form
+would there lose the very slot analysis it exists for
+([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
+
 A declared name lives in its own namespace — it never resolves to a Python variable that
 happens to share it. The memory space **is** required (a `TileType` always pairs a
 MemRef with a space), and all tiles bound to one allocation must agree on it. Tiles left

@@ -714,7 +714,11 @@ class TypeResolver:
         elif self._is_memref_node(node.value):
             inline = self.resolve_memref(node.value)
             if not inline.is_pinned_:
-                return None
+                # A resolved slot: `pl.MemRef(base, offset, size, slots=N)[k]`, what
+                # the printer emits once InitMemRef has scaled the index into the
+                # offset. The offset and size are already right, so only the index
+                # is read back.
+                return self._resolve_slot_of_resolved_memref(inline, node, span)
             decl_name = inline.base_.name_hint
             slot_count = inline.slot_count_
         else:
@@ -739,6 +743,54 @@ class TypeResolver:
                 hint=f"Subscript within [0, {slot_count}), or declare more slots",
             )
         return self._make_declared_memref(decl_name, span, slots=slot_count, slot=index)
+
+    def _resolve_slot_of_resolved_memref(
+        self, inline: "ir.MemRef", node: ast.Subscript, span: "ir.Span"
+    ) -> "ir.MemRef":
+        """Read the slot index back off an already-resolved MemRef.
+
+        ``pl.MemRef(base, offset, size, slots=N)[k]`` is the printed form of a slot
+        after `InitMemRef` has scaled ``k`` into ``offset``. Reparsing must restore
+        ``slot_index_`` — dropping it would leave an ordinary MemRef at the same
+        address, and PTO codegen would emit N unrelated allocs instead of one ptoas
+        multi-buffer.
+
+        Args:
+            inline: The resolved MemRef the subscript applies to
+            node: The subscript AST node
+            span: Source location
+
+        Returns:
+            The same MemRef with ``slot_index_`` set
+
+        Raises:
+            ParserTypeError: If the MemRef holds a single slot, or a constant index
+                is out of range
+        """
+        name = inline.base_.name_hint
+        if inline.slot_count_ <= 1:
+            raise ParserTypeError(
+                f"'{name}' holds a single slot, so it cannot be subscripted",
+                span=span,
+                hint="Print/parse a multi-slot MemRef as pl.MemRef(base, offset, size, slots=N)[k]",
+            )
+        index = self._parse_tileview_expr(node.slice)
+        const_index = index.value if isinstance(index, ir.ConstInt) else None
+        if const_index is not None and not 0 <= const_index < inline.slot_count_:
+            raise ParserTypeError(
+                f"Slot index {const_index} is out of range for '{name}', "
+                f"which holds {inline.slot_count_} slot(s)",
+                span=span,
+                hint=f"Subscript within [0, {inline.slot_count_})",
+            )
+        return ir.MemRef(
+            inline.base_,
+            inline.byte_offset_,
+            inline.size_,
+            span,
+            slots=inline.slot_count_,
+            slot=index,
+        )
 
     def _declared_alloc_name(self, declared: "ir.MemRef", node: ast.Name) -> str:
         """The name a declared allocation goes by, and the checks that keep it one.
@@ -2033,7 +2085,14 @@ class TypeResolver:
                 byte_offset = self._resolve_memref_byte_offset(node.args[1])
                 size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
                 base_var = self._intern_base_ptr(base_name, span)
-                return ir.MemRef(base_var, byte_offset, size, span)
+                # `slots=N` on a resolved MemRef: InitMemRef has already turned the
+                # subscript into the offset above, but which slot of what this is
+                # outlives that resolution — PTO codegen reads it to emit one ptoas
+                # multi-buffer rather than N unrelated allocs. The subscript that
+                # carries the index is handled by `_resolve_memref_slot_ref`.
+                return ir.MemRef(
+                    base_var, byte_offset, size, span, slots=self._resolve_slots_kwarg(node, span)
+                )
 
             # Legacy fallback: pl.MemRef(addr_int, size, id)
             addr_val = self._resolve_int_literal(node.args[0], "addr")

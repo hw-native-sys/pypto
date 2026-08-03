@@ -2968,7 +2968,19 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   oss << ", " << PrintSubExpr(memref.byte_offset_);
 
   // Print size
-  oss << ", " << memref.size_ << ")";
+  oss << ", " << memref.size_;
+
+  // Slot geometry survives InitMemRef (it says which slot of what this MemRef is,
+  // not merely how to compute its offset), so a resolved slot has to print it too
+  // or the reparsed MemRef silently becomes an ordinary one at the same offset —
+  // and PTO codegen would emit N unrelated allocs instead of one multi-buffer.
+  if (memref.slot_count_ > 1) oss << ", slots=" << memref.slot_count_;
+  oss << ")";
+  if (memref.slot_index_.has_value() && *memref.slot_index_) {
+    // The index may be a runtime expression, so print it through the expression
+    // printer rather than assuming a constant.
+    oss << "[" << PrintSubExpr(*memref.slot_index_) << "]";
+  }
   return oss.str();
 }
 

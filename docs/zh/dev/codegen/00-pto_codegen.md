@@ -298,6 +298,38 @@ print(pto_code)
 > 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由
 > ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
 
+#### 多槽位声明映射为一块 ptoas 区域（`PTOAS` 模式）
+
+多槽位的声明式分配（`pl.MemRef(slots=N)`，见
+[Python 语法](../language/00-python_syntax.md#槽位)）不会被降为 N 条 `alloc_tile`，而是
+对应到 ptoas 自己的多缓冲二元组：函数头声明一块区域，每个使用点选一个槽位：
+
+```mlir
+%l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
+        : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
+scf.for %i = %c0_index to %c4_index step %c1_index {
+  %0 = arith.remsi %i, %c2_index : index
+  %t = pto.multi_tile_get %l0c_mb[%0]
+     : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
+  ...
+}
+```
+
+有两点关键：
+
+- **不带 `addr`。** 区域由 ptoas `PlanMemory` 放置，且它被禁止合并这些槽位——这正是把作者
+  声明的隔离带进 `level2` 的方式。
+- **操作数是槽位下标，而不是** `InitMemRef` 由它算出的字节偏移。ptoas 通过匹配下标的仿射形态
+  （`i % 2`）判断哪些访问可能落在同一槽位，这才是轮转能拿到按槽位的（动态）event id 的原因
+  ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
+
+`PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
+不一致、内存空间不属于 Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if`
+或循环、槽位数不在 ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
+`alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。`PYPTO` 模式下则完全不发射区域：
+在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，区域形式反而会丢掉它赖以存在的
+槽位分析（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
+
 ### 加载操作转换
 
 **PyPTO IR**:

@@ -54,27 +54,34 @@ class MemRef : public Var {
   /// without being inferred from `size_`.
   bool is_pinned_;
 
-  /// How many equally-sized slots the declared allocation holds
+  /// How many equally-sized slots the allocation holds
   /// (`pl.MemRef("name", slots=N)`); 1 for an unsubscripted declaration.
-  /// Meaningful only while `is_pinned_`.
   uint64_t slot_count_;
 
-  /// Which slot of the declared allocation this MemRef denotes (`l0c[k]`), as an
+  /// Which slot of the allocation this MemRef denotes (`l0c[k]`), as an
   /// expression so the index may be a runtime value (`l0c[i & 1]`). Null when the
-  /// declaration is unsubscripted. Meaningful only while `is_pinned_`.
+  /// declaration is unsubscripted.
   ///
-  /// `InitMemRef` consumes both fields: it sizes one slot to the largest tile
-  /// bound to any slot, sizes the allocation to `slot_count_ * slot`, and turns
-  /// this index into `byte_offset_ = slot_index_ * slot` (folded to a `ConstInt`
-  /// when the index is constant). The resolved MemRef is an ordinary one — flag
-  /// cleared, count back to 1, index dropped — so slots exist only in the window
-  /// where they still need resolving.
+  /// `InitMemRef` resolves both fields into geometry: it sizes one slot to the
+  /// largest tile bound to any slot, sizes the allocation to `slot_count_ * slot`,
+  /// and turns this index into `byte_offset_ = slot_index_ * slot` (folded to a
+  /// `ConstInt` when the index is constant). It does **not** drop them —
+  /// `byte_offset_` says where the slot lands, these two still say *which slot of
+  /// what* it is, which is what PTO codegen needs to emit ptoas
+  /// `pto.alloc_multi_tile` / `pto.multi_tile_get` rather than N unrelated allocs.
+  /// `is_pinned_` does clear, so "still to resolve" and "is a slot" stay separate
+  /// questions.
+  ///
+  /// The two are related, not independent: `byte_offset_` is derived from this
+  /// index and `AllocateMemoryAddr` may rebase it onto a physical address, so the
+  /// index is the author's selection and the offset is its resolved location.
   ///
   /// Because the index may name SSA values, it is the one MemRef field that
   /// substitution must rewrite; `CloneTypeWithMemRefAndRemapExprs` does so, and
-  /// only for a pinned MemRef. That restriction is what keeps rebuilds out of the
-  /// passes that key on MemRef pointer identity (`AllocateMemoryAddr`), all of
-  /// which run after InitMemRef has cleared the flag.
+  /// only for a pinned MemRef. That restriction keeps rebuilds out of the passes
+  /// that key on MemRef pointer identity (`AllocateMemoryAddr`). After InitMemRef
+  /// the index is exposed to the same staleness as the SSA values already inside
+  /// `byte_offset_`, which substitution likewise leaves alone.
   std::optional<ExprPtr> slot_index_;
 
   /**

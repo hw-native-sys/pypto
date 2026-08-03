@@ -1,0 +1,337 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""``pl.MemRef(slots=N)`` lowered to a ptoas multi-buffer region.
+
+A declared multi-slot allocation says "one allocation, N uniform slots, this use
+takes slot k" — which is exactly ptoas's ``pto.alloc_multi_tile`` /
+``pto.multi_tile_get``. Describing it that way is what lets ptoas plan the slots
+as one region and derive per-slot (dynamic event id) synchronization from the
+slot expression, instead of seeing N unrelated buffers.
+
+Only under the **PTOAS** planner. Under the PyPTO planner ptoas runs at
+``--pto-level=level3``, where the explicit-address fan-out is not constant-folded
+and slot narrowing degrades to conservative aliasing (hw-native-sys/PTOAS#1106) —
+so the baked-address ``pto.alloc_tile`` path stays.
+"""
+
+# DSL function bodies are parsed as AST, not executed — suppress pyright errors.
+# pyright: reportUndefinedVariable=false
+
+import pypto.language as pl
+import pytest
+from pypto import backend, ir
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen, passes
+
+ROTATING = pl.MemRef(slots=2)
+CONST_SLOTS = pl.MemRef(slots=2)
+SINGLE = pl.MemRef()
+TOO_MANY = pl.MemRef(slots=17)
+MIXED_SHAPES = pl.MemRef(slots=2)
+MIXED_BINDING = pl.MemRef(slots=2)
+
+
+@pl.program
+class RotatingSlot:
+    """The ping-pong: one allocation, the slot alternating per iteration."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for i, (acc_i,) in pl.range(4, init_values=(seed,)):
+            t: pl.Tile[[64, 64], pl.FP32, ROTATING[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+            r = pl.yield_(acc_next)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
+@pl.program
+class ConstantSlots:
+    """Two constant slots of one allocation — no rotation, still one region."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, CONST_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        t1: pl.Tile[[64, 64], pl.FP32, CONST_SLOTS[1], pl.Mem.Vec] = pl.exp(t0)
+        return pl.store(t1, [0, 0], output)
+
+
+@pl.program
+class TooManySlots:
+    """17 slots — one past ptoas's `multi_tile_buf` bound.
+
+    Small tiles on purpose: 17 slots must still fit the Vec budget, so that the
+    PyPTO planner accepts the program and the only thing under test is ptoas's
+    slot-count bound.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        t0: pl.Tile[[32, 32], pl.FP32, TOO_MANY[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        t1: pl.Tile[[32, 32], pl.FP32, TOO_MANY[1], pl.Mem.Vec] = pl.exp(t0)
+        return pl.store(t1, [0, 0], output)
+
+
+@pl.program
+class MixedSlotShapes:
+    """Slots holding differently shaped tiles — ptoas slots are uniform."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        big_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        small_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
+        big: pl.Tile[[64, 64], pl.FP32, MIXED_SHAPES[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
+        small: pl.Tile[[32, 32], pl.FP32, MIXED_SHAPES[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
+        return r_big, r_small
+
+
+@pl.program
+class UnsubscriptedBinding:
+    """One tile takes a slot, another binds the allocation whole."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, MIXED_BINDING[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        t1: pl.Tile[[64, 64], pl.FP32, MIXED_BINDING, pl.Mem.Vec] = pl.exp(t0)
+        return pl.store(t1, [0, 0], output)
+
+
+@pl.program
+class SingleSlotDeclaration:
+    """An unsubscripted declaration is one buffer, not a region."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, SINGLE, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(t0, [0, 0], output)
+
+
+def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+    """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=planner):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program)
+    func = next(f for f in optimized.functions.values() if f.name == "kernel")
+    single = ir.Program([func], "kernel", optimized.span)
+    # The planner also decides the address mode: PTOAS plans (no addr, level2),
+    # PyPTO bakes (addr, level3) — same pairing compile() applies.
+    emit_tile_addr = planner == passes.MemoryPlanner.PYPTO
+    return codegen.PTOCodegen().generate(single, emit_tile_addr=emit_tile_addr)
+
+
+def _lines(mlir: str, needle: str) -> list[str]:
+    return [line.strip() for line in mlir.splitlines() if needle in line]
+
+
+def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
+    """Map every TileType assignment's var name to its MemRef."""
+    found: dict[str, ir.MemRef] = {}
+
+    def walk(stmt):
+        if stmt is None:
+            return
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.var.type, ir.TileType):
+            memref = stmt.var.type.memref
+            if memref is not None:
+                found[stmt.var.name_hint] = memref
+        for attr in ("body", "then_body", "else_body", "stmts"):
+            sub = getattr(stmt, attr, None)
+            if sub is None:
+                continue
+            for child in sub if isinstance(sub, (list, tuple)) else [sub]:
+                walk(child)
+
+    for func in program.functions.values():
+        walk(func.body)
+    return found
+
+
+class TestPtoasPlannerEmitsMultiBuffer:
+    """Under the ptoas planner a slotted declaration becomes one region."""
+
+    def test_rotating_slot_becomes_one_region_read_by_slot(self):
+        """N slots are one `alloc_multi_tile`; the use selects its slot."""
+        mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PTOAS)
+
+        allocs = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(allocs) == 1, f"expected exactly one multi-buffer region:\n{mlir}"
+        assert "count=2" in allocs[0], f"the region must carry the declared slot count:\n{allocs[0]}"
+        # ptoas PlanMemory owns the placement — an addr operand is rejected at level2.
+        assert "addr" not in allocs[0], f"the region must not carry an address:\n{allocs[0]}"
+
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert gets, f"expected the slot to be read from the region:\n{mlir}"
+        region = allocs[0].split("=")[0].strip()
+        assert all(region in get for get in gets), f"every slot must come from {region}:\n{mlir}"
+
+    def test_rotating_slot_index_reaches_ptoas_as_an_index(self):
+        """The slot operand is the index itself, not the byte offset.
+
+        ptoas matches the slot's affine form (`iv % N`) to decide whether two
+        accesses can touch the same slot, and that is what earns the per-slot
+        event ids. Handing it a byte offset (`i % 2 * 16384`) would defeat it.
+        """
+        mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PTOAS)
+        get = _lines(mlir, "pto.multi_tile_get")[0]
+        slot_ssa = get.split("[")[1].split("]")[0]
+
+        # The slot SSA is defined by a remainder over the loop induction variable,
+        # with no scaling by the slot size in between.
+        definition = next((ln for ln in mlir.splitlines() if ln.strip().startswith(f"{slot_ssa} =")), None)
+        assert definition is not None, f"slot operand {slot_ssa} has no definition:\n{mlir}"
+        assert "remui" in definition or "remsi" in definition, (
+            f"the slot operand must be the index expression, got: {definition}"
+        )
+        slot_bytes = 64 * 64 * 4
+        assert str(slot_bytes) not in definition, (
+            f"the slot operand must not be scaled to a byte offset: {definition}"
+        )
+
+    def test_constant_slots_share_one_region(self):
+        """Constant slots are the same story — one region, two selections."""
+        mlir = _codegen(ConstantSlots, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2, f"expected one get per slot:\n{mlir}"
+        slots = {get.split("[")[1].split("]")[0] for get in gets}
+        assert len(slots) == 2, f"the two slots must be distinct:\n{mlir}"
+
+    def test_slot_tiles_take_no_alloc_tile(self):
+        """A slot is taken from the region, never allocated beside it."""
+        mlir = _codegen(ConstantSlots, passes.MemoryPlanner.PTOAS)
+        get_handles = {get.split("=")[0].strip() for get in _lines(mlir, "pto.multi_tile_get")}
+        allocated = {ln.split("=")[0].strip() for ln in _lines(mlir, "pto.alloc_tile")}
+        assert not (get_handles & allocated), f"a slot handle must have exactly one definition:\n{mlir}"
+
+
+class TestFallbacks:
+    """Everything the ptoas multi-buffer form does not cover keeps alloc_tile."""
+
+    def test_pypto_planner_keeps_baked_addresses(self):
+        """level3 gets no region: its address fan-out loses slot narrowing.
+
+        See hw-native-sys/PTOAS#1106 — under an explicit base address ptoas emits
+        an unfolded `arith.addi` per slot and falls back to conservative aliasing,
+        which is worse than the plain baked-address path.
+        """
+        mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PYPTO)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), f"level3 must not use a region:\n{mlir}"
+        assert not _lines(mlir, "pto.multi_tile_get"), f"level3 must not use a region:\n{mlir}"
+        assert _lines(mlir, "pto.alloc_tile"), f"expected the ordinary alloc path:\n{mlir}"
+
+    def test_single_slot_declaration_is_still_rejected(self):
+        """One slot has no ptoas counterpart, so its isolation cannot be kept.
+
+        ptoas requires a count of at least 2, so a single-slot declaration cannot
+        become a region — and a plain `alloc_tile` would leave ptoas free to pack
+        the buffer the author separated. It stays rejected, now pointing at
+        `slots=N` as the supported spelling.
+        """
+        with pytest.raises(ValueError, match="single-slot declared allocation"):
+            _codegen(SingleSlotDeclaration, passes.MemoryPlanner.PTOAS)
+
+    def test_single_slot_declaration_still_works_under_pypto(self):
+        """Nothing about the PyPTO planner's handling of declarations changed."""
+        mlir = _codegen(SingleSlotDeclaration, passes.MemoryPlanner.PYPTO)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), f"a single slot is not a region:\n{mlir}"
+        assert _lines(mlir, "pto.alloc_tile"), f"expected the ordinary alloc path:\n{mlir}"
+
+
+class TestUnsupportedShapesAreLoud:
+    """A shape ptoas cannot describe is an error, never a quiet per-slot alloc.
+
+    Falling back would leave ptoas free to plan the slots on top of each other —
+    exactly the separation the declaration exists to state.
+    """
+
+    @pytest.mark.parametrize(
+        ("program", "reason"),
+        [
+            (TooManySlots, "17"),
+            (MixedSlotShapes, "differently shaped tiles"),
+            (UnsubscriptedBinding, "without selecting a slot"),
+        ],
+        ids=["slot-count-out-of-range", "non-uniform-slot-type", "unsubscripted-binding"],
+    )
+    def test_blocked_shape_names_itself(self, program, reason):
+        with pytest.raises(ValueError, match=reason):
+            _codegen(program, passes.MemoryPlanner.PTOAS)
+
+    @pytest.mark.parametrize(
+        "program",
+        [TooManySlots, MixedSlotShapes, UnsubscriptedBinding],
+        ids=["slot-count-out-of-range", "non-uniform-slot-type", "unsubscripted-binding"],
+    )
+    def test_pypto_planner_accepts_them_all(self, program):
+        """None of these are errors in themselves — only ptoas cannot describe them."""
+        mlir = _codegen(program, passes.MemoryPlanner.PYPTO)
+        assert _lines(mlir, "pto.alloc_tile"), f"expected the ordinary alloc path:\n{mlir}"
+
+
+class TestSlotGeometrySurvivesInitMemRef:
+    """The resolved MemRef still knows which slot of what it is."""
+
+    def test_resolved_memref_keeps_slot_count_and_index(self):
+        """InitMemRef resolves the index into an offset without erasing it."""
+        after = passes.init_mem_ref()(ConstantSlots)
+        slots = [mr for mr in _tile_memrefs(after).values() if mr.slot_count_ > 1]
+        assert slots, "the declaration's slots must survive InitMemRef"
+        assert all(mr.slot_index_ is not None for mr in slots), (
+            "a resolved slot must still name the slot it selects"
+        )
+        # ...and the offset is still resolved, as before.
+        assert {mr.byte_offset_.value for mr in slots} == {0, 64 * 64 * 4}
+
+    def test_resolved_slot_round_trips_through_the_printer(self):
+        """A post-InitMemRef dump reparses as the same slot, not a bare offset.
+
+        Structural equality compares the slot fields, so dropping them on the way
+        out would make the round trip report a MemRef mismatch — and codegen would
+        read the reparsed program as N unrelated allocations.
+        """
+        after = passes.init_mem_ref()(ConstantSlots)
+        dumped = after.as_python()
+        assert "slots=2" in dumped, f"the printed MemRef must carry its slot count:\n{dumped}"
+        ir.assert_structural_equal(pl.parse_program(dumped), after)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

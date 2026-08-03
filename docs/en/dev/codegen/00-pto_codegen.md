@@ -309,6 +309,43 @@ renders those shared MemRefs as a single `tile_buf` handle with an in-place
 > (`AllocateMemoryAddr`); those are deferred to ptoas. `compile()` emits a
 > warning — verify affected kernels on-device.
 
+#### Multi-slot declarations become one ptoas region (`PTOAS` mode)
+
+A declared multi-slot allocation (`pl.MemRef(slots=N)`, see
+[Python syntax](../language/00-python_syntax.md#slots)) is not lowered to N
+`alloc_tile`s. It maps onto ptoas's own multi-buffer pair, one region declared in
+the function head and one slot selection per use:
+
+```mlir
+%l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
+        : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
+scf.for %i = %c0_index to %c4_index step %c1_index {
+  %0 = arith.remsi %i, %c2_index : index
+  %t = pto.multi_tile_get %l0c_mb[%0]
+     : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
+  ...
+}
+```
+
+Two properties matter:
+
+- **No `addr`.** ptoas `PlanMemory` places the region and is forbidden to merge
+  its slots, which is what carries the author's separation into `level2`.
+- **The operand is the slot index, not the byte offset** `InitMemRef` derived from
+  it. ptoas matches the index's affine form (`i % 2`) to decide which accesses can
+  share a slot, and that is what earns the rotation per-slot (dynamic) event ids —
+  iteration *i*'s load overlapping iteration *i-1*'s compute.
+
+`PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
+cannot describe (slots holding differently shaped tiles, a space other than Vec /
+Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as a phi,
+a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape, because
+falling back to per-slot `alloc_tile` would let ptoas plan the slots on top of each
+other. Under `PYPTO` no region is emitted at all: at `--pto-level=level3` ptoas
+does not fold its per-slot address fan-out, so the region form would lose the slot
+analysis it exists for
+([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
+
 ### Load Operation Transformation
 
 **PyPTO IR**:

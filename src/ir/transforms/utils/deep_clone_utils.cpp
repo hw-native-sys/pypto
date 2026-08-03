@@ -132,12 +132,20 @@ class DeepCloneMutator : public IRMutator {
       }
     }
     auto new_offset = op->byte_offset_ ? IRMutator::VisitExpr(op->byte_offset_) : op->byte_offset_;
+    // The slot index names SSA values exactly as the offset does — it outlives
+    // InitMemRef and becomes the operand of a `pto.multi_tile_get` — so it has to
+    // follow the same substitution. Leaving it behind would give a clone whose
+    // offset moved but whose slot index still points at the original loop var.
+    std::optional<ExprPtr> new_slot_index = op->slot_index_;
+    if (new_slot_index.has_value() && *new_slot_index) {
+      new_slot_index = IRMutator::VisitExpr(*new_slot_index);
+    }
     // A clone denotes the same storage as its source, so it keeps
     // is_pinned_ and its slot fields: dropping them would silently un-bind every tile in a cloned
     // region — e.g. the per-stage bodies LowerPipelineLoops produces.
     auto fresh =
         std::make_shared<MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset), op->size_,
-                                 op->span_, op->is_pinned_, op->slot_count_, op->slot_index_);
+                                 op->span_, op->is_pinned_, op->slot_count_, std::move(new_slot_index));
     expr_map_[op.get()] = fresh;
     return fresh;
   }
