@@ -145,6 +145,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     memory_planner: "MemoryPlanner | None" = None,
     enable_pypto_l0c_double_buffer: bool = False,
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
+    dep_layouts: tuple[tuple[str, str, str], ...] = (),
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -156,6 +157,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         tensor_layouts: Annotated layout per tensor parameter name, where the
             annotation declares one. See :class:`TensorCacheInfo.layout` for
             why the layout has to split the key on its own.
+        dep_layouts: ``(dep name, parameter, layout)`` triples for layouts the
+            reachable deps declare themselves. Same reasoning as
+            ``tensor_layouts``, one call deeper: they shape the generated dep
+            signatures but appear in no entry-parameter meta, and a postponed
+            annotation hides a rebind from ``source_hash``.
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
@@ -225,6 +231,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
         ("enable_pypto_l0c_double_buffer", enable_pypto_l0c_double_buffer),
+        ("dep_layouts", dep_layouts),
     )
     return (
         source_hash,

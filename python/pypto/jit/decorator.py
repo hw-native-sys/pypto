@@ -1576,6 +1576,30 @@ class JITFunction:
     # Lazy dep discovery
     # ------------------------------------------------------------------
 
+    def _dep_declared_layouts(self) -> tuple[tuple[str, str, str], ...]:
+        """Layouts every reachable dep declares on its own parameters.
+
+        ``_overlay_dep_declared_layouts`` folds these into the generated dep
+        signatures, so they change the artifact — but they live outside the
+        entry's ``tensor_meta``, and a postponed annotation
+        (``pl.Tensor[..., L]`` with a module-level ``L``) keeps the source text,
+        and therefore ``source_hash``, identical when ``L`` is rebound. Without
+        them in the key, rebinding ``L`` would hand the second call the first
+        one's artifact.
+
+        Returns:
+            Sorted ``(dep name, parameter, layout)`` triples — a stable,
+            hashable component for the cache key
+        """
+        deps, _, _, _ = self._get_dep_graph()
+        return tuple(
+            sorted(
+                (dep.__name__, param, str(layout))
+                for dep in deps
+                for param, layout in _param_layouts(dep._func, dep.__name__).items()
+            )
+        )
+
     def _get_dep_graph(
         self,
     ) -> tuple[
@@ -1989,6 +2013,7 @@ class JITFunction:
             tensor_shapes={n: m.static_shape() for n, m in specialization.tensor_meta.items()},
             tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
             tensor_layouts={n: m.layout for n, m in specialization.tensor_meta.items()},
+            dep_layouts=self._dep_declared_layouts(),
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },

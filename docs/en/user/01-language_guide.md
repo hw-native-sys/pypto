@@ -31,7 +31,7 @@ Complete reference for the `pypto.language` (`pl`) module.
 ```python
 x: pl.Tensor[[64, 128], pl.FP32]        # 2D, 64×128, float32
 y: pl.Tensor[[256], pl.FP16]            # 1D, 256 elements, float16
-z: pl.Tensor[[64, 128], pl.FP16, pl.NZ] # With NZ layout
+s: pl.Tensor[[64, 128], pl.UINT8, pl.MX_A_ZZ] # With a layout (see below)
 ```
 
 **`pl.Tile[[shape], dtype]`** — on-chip memory buffer (unified buffer by default).
@@ -74,7 +74,9 @@ b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → ParserTypeError at parse time
 
 For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
 tile-only, never a TensorType annotation. The `pl.NZ` constant remains
-available for tile annotations and IR-internal use.
+available for tile annotations and IR-internal use. The parser does not
+reject `pl.Tensor[..., pl.NZ]`, but the annotation cannot compile: ptoas
+fails it with `layout mismatch: user-specified layout=nz but inferred=nd`.
 
 If you need to write a DN tensor at the IR level (e.g. when constructing
 fixtures or round-tripping printed IR), prefer

@@ -17,7 +17,7 @@ from pypto.jit.cache import (
     make_cache_key,
 )
 from pypto.jit.decorator import _resolve_enable_pypto_l0c_double_buffer, _resolve_memory_planner
-from pypto.pypto_core import DataType, passes
+from pypto.pypto_core import DataType, ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import RunConfig
 
@@ -64,6 +64,8 @@ class TestMakeCacheKey:
         analyze_auto_scopes_for_deps=False,
         memory_planner=None,
         enable_pypto_l0c_double_buffer=False,
+        tensor_layouts=None,
+        dep_layouts=(),
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -78,6 +80,8 @@ class TestMakeCacheKey:
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            tensor_layouts=tensor_layouts,
+            dep_layouts=dep_layouts,
         )
 
     def test_basic_key_structure(self):
@@ -99,6 +103,7 @@ class TestMakeCacheKey:
             ("analyze_auto_scopes_for_deps", False),
             ("memory_planner", None),
             ("enable_pypto_l0c_double_buffer", False),
+            ("dep_layouts", ()),
         )
 
     def test_tensor_shape_in_key(self):
@@ -215,6 +220,23 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (8, 8)},
             tensor_dtypes={"a": DataType.FP32},
         )
+        assert k1 != k2
+
+    def test_different_tensor_layouts_cause_miss(self):
+        """A layout can reach the annotation through a variable, leaving the
+        source text — and so ``source_hash`` — identical. It must split the key
+        on its own."""
+        common = {"param_names": ["a"], "tensor_shapes": {"a": (8, 8)}, "tensor_dtypes": {"a": DataType.FP32}}
+        k1 = self._make_key(**common, tensor_layouts={"a": ir.TensorLayout.MX_A_ZZ})
+        k2 = self._make_key(**common, tensor_layouts={"a": ir.TensorLayout.MX_B_NN})
+        assert k1 != k2
+
+    def test_different_dep_layouts_cause_miss(self):
+        """Same, one call deeper: a layout a *dep* declares appears in no entry
+        parameter meta, so it needs its own key component."""
+        common = {"param_names": ["a"], "tensor_shapes": {"a": (8, 8)}, "tensor_dtypes": {"a": DataType.FP32}}
+        k1 = self._make_key(**common, dep_layouts=(("dep", "x", "TensorLayout.MX_A_ZZ"),))
+        k2 = self._make_key(**common, dep_layouts=(("dep", "x", "TensorLayout.MX_B_NN"),))
         assert k1 != k2
 
     def test_different_platforms_cause_miss(self):
