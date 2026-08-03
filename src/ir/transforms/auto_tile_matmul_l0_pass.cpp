@@ -992,6 +992,17 @@ class SubtilePlacer {
                                        const ExprPtr& col_off, const VarPtr& chain_in, int step) = 0;
 };
 
+CallPtr PreserveCallAttrs(const std::vector<std::pair<std::string, std::any>>& attrs,
+                          const CallPtr& deduced) {
+  if (attrs.empty()) return deduced;
+  return std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, attrs, deduced->GetType(),
+                                deduced->span_);
+}
+
+CallPtr PreserveCallAttrs(const CallPtr& original, const CallPtr& deduced) {
+  return PreserveCallAttrs(original->attrs_, deduced);
+}
+
 /// Direct-store placement: ``out = tile.store(sub, [base_r + mi, base_c + ni],
 /// out_prev)`` per sub-tile, chaining the DDR output tensor in SSA form.
 class DirectGmPlacer : public SubtilePlacer {
@@ -1015,9 +1026,7 @@ class DirectGmPlacer : public SubtilePlacer {
     auto offs = std::make_shared<MakeTuple>(
         std::vector<ExprPtr>{AddOffset(base_r_, row_off, sp_), AddOffset(base_c_, col_off, sp_)}, sp_);
     auto deduced = reg.Create("tile.store", {sub, offs, chain_in}, kwargs_, sp_);
-    auto scall = attrs_.empty() ? deduced
-                                : std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_,
-                                                         attrs_, deduced->GetType(), deduced->span_);
+    auto scall = PreserveCallAttrs(attrs_, deduced);
     auto sv = std::make_shared<Var>(out_base_ + "_t" + std::to_string(step), scall->GetType(), sp_);
     stmts.push_back(std::make_shared<AssignStmt>(sv, scall, sp_));
     return sv;
@@ -1337,12 +1346,6 @@ CanonicalOutputWindow BuildCanonicalOutputWindow(
   };
 }
 
-CallPtr PreserveCallAttrs(const CallPtr& original, const CallPtr& deduced) {
-  if (original->attrs_.empty()) return deduced;
-  return std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, original->attrs_,
-                                deduced->GetType(), deduced->span_);
-}
-
 /// Retile one DeepClone of the canonical source K loop. Definitions are fresh
 /// already; this mutator narrows the two GM->Mat loads and re-deduces both MAD
 /// calls plus the if/loop phi types for one [m, n] output tile.
@@ -1474,6 +1477,9 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
                         store_call->attrs_, match.store->span_);
   std::vector<StmtPtr> stmts;
   VarPtr chain = placer.Init(stmts);
+  auto out_ty = As<TileType>(match.matmul->var_->GetType());
+  INTERNAL_CHECK_SPAN(out_ty, match.matmul->span_)
+      << "Internal error: canonical split-K matmul result lost its TileType";
   const int64_t num_m = (match.M + tiling->m - 1) / tiling->m;
   const int64_t num_n = (match.N + tiling->n - 1) / tiling->n;
   // Output-sensitive expansion: each source statement is cloned once per
@@ -1487,7 +1493,6 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       const int64_t mi = mj * tiling->m;
       const int64_t m_eff = std::min<int64_t>(tiling->m, match.M - mi);
       const std::string suffix = "_mn" + std::to_string(step);
-      auto out_ty = As<TileType>(match.matmul->var_->GetType());
       const auto window = BuildCanonicalOutputWindow(match, m_eff, n_eff, *output_box_alignment);
       auto init = BuildAccInitWithValidShape(window.physical_m, window.physical_n,
                                              MakeIndex(window.valid_m, match.init->span_),

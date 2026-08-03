@@ -17,6 +17,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "pypto/core/logging.h"
@@ -538,8 +539,10 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   const auto min_c_elements = CandidateL0cPhysicalElements(cfg.min_m, cfg.min_n, cfg);
   CHECK(min_c_elements && *min_c_elements <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) &&
         C0_base >= static_cast<int64_t>(*min_c_elements))
-      << "ChooseL0Tile: L0c capacity " << C0_base << " elements is too small to fit the minimum tile ("
-      << cfg.min_m << " x " << cfg.min_n << ")";
+      << "ChooseL0Tile: L0c capacity " << C0_base
+      << " elements is too small to fit the minimum physical tile footprint ("
+      << (min_c_elements ? std::to_string(*min_c_elements) : std::string("unrepresentable"))
+      << " elements for logical " << cfg.min_m << " x " << cfg.min_n << ")";
 
   // 3. Score the design space. The baseline (output-stationary, dbC=1) is today's
   //    realizable algorithm and is always scored. Within a regime the wall

@@ -689,8 +689,8 @@ class IRBuilder:
         slayout: ir.TileLayout = ir.TileLayout.none_box,
         fractal: int = 512,
         pad: ir.PadValue = ir.PadValue.null,
-        compact: ir.CompactMode = ir.CompactMode.null,
         span: ir.Span | None = None,
+        compact: ir.CompactMode = ir.CompactMode.null,
     ) -> ir.TileView:
         """Create a TileView with normalized expressions.
 
@@ -702,8 +702,8 @@ class IRBuilder:
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size in bytes, not elements (default: 512)
             pad: Pad mode (default: null)
-            compact: Partial-tile compact mode (default: null)
             span: Optional explicit span. If None, captured from call site.
+            compact: Partial-tile compact mode (default: null)
 
         Returns:
             TileView: The created tile view

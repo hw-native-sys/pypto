@@ -531,10 +531,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
   // unsupported same-space address pairs (fixes #1310).
   //
-  // Do NOT elide when TileView layouts or compact representations differ (e.g.
-  // A5 V→C ND→NZ adapt before tpush_to_aic). MemoryReuse may still co-locate the
-  // converted tile with its source at the same address; eliding then drops the
-  // real representation change and silently preserves the source format.
+  // Do NOT elide when TileView layouts, padding, or compact representations
+  // differ (e.g. A5 V→C ND→NZ adapt before tpush_to_aic). MemoryReuse may still
+  // co-locate the converted tile with its source at the same address; eliding
+  // then drops the real representation change and silently preserves the source
+  // format.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
@@ -567,10 +568,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
           if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
             const auto src_view = ir::tile_view_semantics::GetEffectiveTileView(*src_tile);
             const auto dst_view = ir::tile_view_semantics::GetEffectiveTileView(*dst_tile);
-            const bool same_layout =
+            const bool same_representation =
                 src_view.blayout == dst_view.blayout && src_view.slayout == dst_view.slayout &&
-                src_view.fractal == dst_view.fractal && src_view.compact == dst_view.compact;
-            if (same_layout) {
+                src_view.fractal == dst_view.fractal && src_view.pad == dst_view.pad &&
+                src_view.compact == dst_view.compact;
+            if (same_representation) {
               // Alias the destination to the source SSA value so downstream
               // references use the source's defined buffer, not the destination's
               // alloc_tile (which would be unwritten after eliding the tmov).

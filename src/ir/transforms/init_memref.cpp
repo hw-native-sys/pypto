@@ -819,7 +819,6 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // but not its isolation would hand back exactly the coalescing the author
   // declared it to prevent, so reject the combination rather than degrade quietly.
   if (!declared_allocs.empty()) {
-    const auto* ctx = PassContext::Current();
     CHECK(ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS)
         << "A declared allocation (one-argument pl.MemRef(...)) is not supported under "
            "memory_planner=PTOAS: ptoas owns memory planning and would be free to coalesce the "

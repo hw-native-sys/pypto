@@ -1441,6 +1441,28 @@ class TestIRBuilderHelpers:
         assert len(tv.valid_shape) == 2
         assert len(tv.stride) == 2
 
+    def test_builder_tile_view_preserves_positional_span(self):
+        """The pre-compact positional ``span`` argument remains source-compatible."""
+        ib = IRBuilder()
+        span = ir.Span("legacy.py", 3, 4, 3, 12)
+
+        tv = ib.tile_view(
+            [16, 16],
+            [1, 16],
+            0,
+            ir.TileLayout.row_major,
+            ir.TileLayout.none_box,
+            512,
+            ir.PadValue.null,
+            span,
+            compact=ir.CompactMode.normal,
+        )
+
+        assert tv.compact == ir.CompactMode.normal
+        assert tv.start_offset.span.filename == span.filename
+        assert tv.start_offset.span.begin_line == span.begin_line
+        assert tv.start_offset.span.begin_column == span.begin_column
+
     def test_builder_tensor_type(self):
         """Test IRBuilder.tensor_type() helper."""
         ib = IRBuilder()

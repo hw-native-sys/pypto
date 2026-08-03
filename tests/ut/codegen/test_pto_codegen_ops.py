@@ -2644,6 +2644,15 @@ class TestTileMoveLayoutNoopElision:
         tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
         assert tmovs, f"same-addr compact conversion must emit pto.tmov; got none in:\n{mlir}"
 
+    def test_same_addr_different_pad_mode_emits_tmov(self):
+        """A pad-mode change at one address is not a no-op."""
+        padded = ir.TileView(pad=ir.PadValue.max)
+        mlir = self._generate_mlir(
+            self._vec_tile_move_program(dst_view=padded, name="move_unpadded_to_padded_same_addr")
+        )
+        tmovs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln]
+        assert tmovs, f"same-addr pad conversion must emit pto.tmov; got none in:\n{mlir}"
+
 
 class TestTileStoreAtomicCodegen:
     """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""
