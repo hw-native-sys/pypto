@@ -49,7 +49,7 @@ program_2d = flatten_pass(program)
 
 | Tile 操作 | 变换方式 |
 | --------- | -------- |
-| `tile.load`（>2D） | 将结果 tile 重建为 2D。对于 natural NZ Mat load，还会在源张量上插入 shape-only 的 2D `tensor.view`，把 leading offsets/shapes/valid_shapes 折叠到 2D 源窗口，并要求该窗口按 row-major 连续可折叠。Vec load 和 transposed Mat load 保留原始 rank>2 源窗口，只展平结果 tile |
+| `tile.load`（>2D） | 将结果 tile 重建为 2D。对于 natural NZ Mat load，还会在源张量上插入 shape-only 的 2D `tensor.view`，把 leading offsets/shapes/valid_shape 折叠到 2D 源窗口，并要求该窗口按 row-major 连续可折叠。Vec load 和 transposed Mat load 保留原始 rank>2 源窗口，只展平结果 tile |
 | `tile.store`（rank>2 张量） | 在转换后 IR 中注入原始张量 rank 对应的分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变。若 tile 操作数本身仍是 rank>2(例如用户显式 `tile.reshape` 升到 3D 后再喂给 `pl.assemble` 写入 N-D 张量视图),pass 会先插入一个 `tile.reshape` 把 tile 操作数压回 2D —— codegen 要求 tile 必须是 2D,而原始 tile shape 仍由 `shapes` 分区操作数携带 |
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
@@ -128,14 +128,14 @@ class After:
 
 硬件 Tile 对应固定大小的片上缓冲，因此每个**物理** Tile 维度都必须是编译期常量；运行时实际范围保存在
 `TileView.valid_shape` 中。要处理动态维，用户**自己写分块循环**：用 `pl.range` 以静态 `CHUNK` 步进迭代
-动态维，每趟把这一块 load 成静态物理 `[1, CHUNK, 512]` 的 tile，并在 `valid_shapes` 里用
+动态维，每趟把这一块 load 成静态物理 `[1, CHUNK, 512]` 的 tile，并在 `valid_shape` 里用
 `min(CHUNK, s - c)` 夹住尾块。chunk 大小由用户决定 —— 它对性能影响显著，因此 Pass 不自动选取：
 
 ```python
-# 用户自己写：对动态 S 维分块，在 valid_shapes 里夹住尾块。
+# 用户自己写：对动态 S 维分块，在 valid_shape 里夹住尾块。
 for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
     valid = pl.min(CHUNK, s_dim - c)
-    t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shapes=[1, valid, 512])
+    t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shape=[1, valid, 512])
     t = pl.cast(t, target_type=pl.FP32)
     o = pl.store(t, [b, c, 0], o)        # 物理静态 [1, CHUNK, 512]，valid 动态
     pl.yield_(o)

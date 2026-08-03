@@ -36,7 +36,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 _PL_DT = {DataType.FP32: pl.FP32, DataType.FP16: pl.FP16}
 
-# (label, m, n, valid_shapes) — the full shape/valid sweep (used by sqrt).
+# (label, m, n, valid_shape) — the full shape/valid sweep (used by sqrt).
 _SHAPE_CFGS = [
     ("16x16", 16, 16, None),
     ("32x64", 32, 64, None),
@@ -85,7 +85,7 @@ class _UnaryMathBase(PTOTestCase):
         *,
         m=16,
         n=16,
-        valid_shapes=None,
+        valid_shape=None,
         dtype=DataType.FP32,
         input_fn=None,
         out_m=None,
@@ -104,7 +104,7 @@ class _UnaryMathBase(PTOTestCase):
         if dtype == DataType.FP16 and config is None:
             self.config.rtol = 2e-3
             self.config.atol = 2e-3
-        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shape, dtype
         self._input_fn = input_fn or _positive
         self._out_m, self._out_n, self._off = out_m or m, out_n or n, off
 
@@ -132,7 +132,7 @@ class _UnaryMathBase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
-            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
+            # Region outside valid_shape stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = self._ref(a[:vm, :vn])
         else:
@@ -158,7 +158,7 @@ class TileSinTestCase(_UnaryMathBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.sin(a_tile), off, out)
                 return out
 
@@ -189,7 +189,7 @@ class TileCosTestCase(_UnaryMathBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.cos(a_tile), off, out)
                 return out
 
@@ -220,7 +220,7 @@ class TileSqrtTestCase(_UnaryMathBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.sqrt(a_tile), off, out)
                 return out
 
@@ -235,24 +235,24 @@ class TileSqrtTestCase(_UnaryMathBase):
 
 
 class TestUnaryMath:
-    """Tile-level sin/cos/sqrt on a2a3 across shapes, valid_shapes, dtypes, offset, input ranges."""
+    """Tile-level sin/cos/sqrt on a2a3 across shapes, valid_shape, dtypes, offset, input ranges."""
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _TRIG_SHAPE_CFGS, ids=[c[0] for c in _TRIG_SHAPE_CFGS])
     def test_tile_sin(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileSinTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(TileSinTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _TRIG_SHAPE_CFGS, ids=[c[0] for c in _TRIG_SHAPE_CFGS])
     def test_tile_cos(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileCosTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(TileCosTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_sqrt(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileSqrtTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(TileSqrtTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")

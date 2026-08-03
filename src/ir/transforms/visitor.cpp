@@ -82,12 +82,21 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   // Var-typed attrs reference Vars defined elsewhere in the IR. Treat them as
   // real uses so analyses such as the unused-variable check don't flag a Var
   // referenced only via ``deps=[tid]`` or ``dumps=[t]`` / ``pl.dump_tag``.
+  // Expr-valued attrs (IsExprValuedCallAttr: ``device=``, ``core_num``) are real
+  // operands evaluated in this function's scope, so recurse into them too —
+  // otherwise a scalar assigned only to size an SPMD launch looks dead, gets
+  // eliminated, and leaves the attr dangling. Mirrors ``Submit::core_num_``
+  // below and the matching arm in ``IRMutator::VisitExpr_(CallPtr)``.
   for (const auto& [k, v] : op->attrs_) {
-    if (k != kAttrManualDepEdges && k != kAttrCompilerManualDepEdges && k != kAttrDumpVars) continue;
-    const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-    if (!edges) continue;
-    for (const auto& e : *edges) {
-      if (e) VisitExpr(e);
+    if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges || k == kAttrDumpVars) {
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (!edges) continue;
+      for (const auto& e : *edges) {
+        if (e) VisitExpr(e);
+      }
+    } else if (IsExprValuedCallAttr(k)) {
+      const auto* attr_expr = std::any_cast<ExprPtr>(&v);
+      if (attr_expr && *attr_expr) VisitExpr(*attr_expr);
     }
   }
 }

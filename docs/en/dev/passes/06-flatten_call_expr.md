@@ -11,6 +11,7 @@ This pass ensures that call expressions do not appear in nested contexts by extr
 3. For loop ranges (start/stop/step) cannot be calls
 4. Binary/unary expression operands cannot be calls
 5. Return values cannot be calls
+6. Yield values cannot be calls
 
 **Requires**: `TypeChecked`, `SSAForm` properties. These properties are automatically verified at BASIC level once produced; use a `VerificationInstrument` via `PassContext` if you need required properties to be validated before running passes.
 
@@ -49,7 +50,10 @@ program_flat = flatten_pass(program)
 
 - Before AssignStmt/EvalStmt: Insert directly before
 - Before IfStmt/ForStmt: Insert as sibling statements in the enclosing `SeqStmts`
+- Before ReturnStmt/YieldStmt: Insert directly before. A yield is the trailing statement of its loop / branch body, so its temporaries land **inside** that body, where the yielded value is computed
 - Inside ScopeStmt (`pl.at()`): Temporaries are always inserted **inside** the scope body, preserving execution-context boundaries
+
+**Why ReturnStmt and YieldStmt matter.** Downstream passes and codegen rewrite operations by walking top-level `AssignStmt` / `EvalStmt`. A Call left directly in a `return` or `pl.yield_` is invisible to them: a `return call(...)` used to be silently dropped from orchestration codegen, and a `pl.yield_(pl.add(acc, row))` used to keep its `tensor.add` unconverted while `ConvertTensorToTileOps` lowered the surrounding operands to Tiles — surfacing much later as a tensor-level operator rejecting a `TileType` argument.
 
 ## Example
 

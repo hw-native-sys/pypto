@@ -310,11 +310,12 @@ with ib.function("tensor_example") as f:
 | **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
+| - | `tile.move` | Move a tile between memory spaces (`target_memory`) — see [Result view of tile.move](#result-view-of-tilemove) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
-| - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |
+| - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat). The result's layout comes from `target_memory`'s implicit view, except `Left`/`Right`, which take the TEXTRACT-side L0 formats (these differ from `tile.move`'s TMOV-side ones) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match). Carries the source's `valid_shape` through without widening it — see [Reshape and the valid region](#reshape-and-the-valid-region) |
 | - | `tile.reinterpret_view` | Zero-copy view with a different dtype and the same exact bytes; optional shape uses layout-aware inference (packed flat tiles only) |
 | - | `tile.transpose` | Swap two axes of a tile |
@@ -325,6 +326,28 @@ with ib.function("tensor_example") as f:
 | - | `tile.scatter_mask` | Mask-pattern row-scatter: write each `src` row into the mask-marked columns of `dst` (DPS — `dst` is in/out). A PyPTO codegen form lowered to a `pto.tscatter` mask emission — **not** a distinct pto-isa instruction (unlike `tile.gather_mask`). See [Mask patterns](#mask-patterns). |
 
 `tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views.
+
+### Result view of `tile.move`
+
+The deduced result `TileView` splits by field:
+
+| Field | Source of the result value |
+| ----- | -------------------------- |
+| `blayout` / `slayout` | The **destination** space's implicit layout wherever it has one of its own (`Mat`, `Acc`, `Left`, `Right`, `LeftScale`, `RightScale`); for the flat spaces (`Vec`, `Bias`, …) the source tile's effective layout carries over. A `blayout` / `slayout` kwarg overrides either |
+| `fractal` | The **destination** space's boxing granularity, never the source's: `Acc` (L0C, NZ-boxed) is 1024, MX scale tiles are 32, everything else 512 |
+| `valid_shape` / `pad` | Carried over from the source |
+| `stride` / `start_offset` | Dropped — the destination is a dense buffer |
+
+The layout comes from the destination because it describes how that buffer is
+boxed; `tile_view_semantics::GetImplicitTileLayout` supplies it. `Right` needs a
+local override — L0B requires `blayout=row_major` even for an `[N, 1]` shape,
+whose implicit `blayout` is `col_major`.
+
+`tile.move` stamps the destination `memory_space` itself (see the `TileType`
+contract in [Types](02-types.md#tiletype)), so a result view matching the
+destination's implicit view collapses to `nullopt` — the same per-space view
+[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
+retyped tile to.
 
 ### Reshape and the valid region
 

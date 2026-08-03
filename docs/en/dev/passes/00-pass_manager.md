@@ -17,7 +17,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 - **Property Tracking**: Passes declare required, produced, and invalidated properties
 - **Instrumentation**: PassContext holds PassInstruments that run before/after each pass
 - **Runtime Verification**: VerificationInstrument checks properties against actual IR
-- **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`, `DebugTileOptimization`)
+- **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
 
 ## IRProperty System
@@ -396,7 +396,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### Strategy Notes
 
-The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
+The PTO-oriented tile stage of `Default` is:
 
 1. [`LowerCompositeOps`](12-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md)
@@ -432,10 +432,6 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 32. [`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 33. [`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md) (stamps each ForStmt iter_arg as trivial alias / rebind carry, and sizes manual-scope TaskId fence arrays)
 34. [`InsertCommFence`](44-insert_comm_fence.md) (inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs dead last so the inserted ops stay adjacent to their notify through codegen)
-
-`DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
-without the tensor-only prefix passes. Use `Default` for normal compilation and
-for non-strategy-specific tests so the maintained pipeline stays covered.
 
 [`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.

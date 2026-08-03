@@ -146,7 +146,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::ReturnParamsExplicit,
                                    IRProperty::AivSplitValid,
                                    IRProperty::HardSyncallOccupancyValid,
-                                   IRProperty::IterArgCarryClassified};
+                                   IRProperty::IterArgCarryClassified,
+                                   IRProperty::RuntimeScopesMaterialized};
   return props;
 }
 

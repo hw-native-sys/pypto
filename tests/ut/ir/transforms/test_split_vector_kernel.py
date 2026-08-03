@@ -262,7 +262,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         dim = ir.ConstInt(16, pl.INDEX, span)
         offsets = ir.MakeTuple([zero, zero], span)
         shapes = ir.MakeTuple([dim, dim], span)
-        valid_shapes = ir.MakeTuple([dim, dim], span)
+        valid_shape = ir.MakeTuple([dim, dim], span)
 
         data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
         out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
@@ -270,13 +270,13 @@ class TestSplitVectorKernelNoSplitA2A3:
         load_view = ir.TileView(valid_shape=[dim, dim])
         load_type = ir.TileType([16, 16], pl.FP32, None, load_view, ir.MemorySpace.Vec)
         loaded = ir.Var("loaded", load_type, span)
-        # Canonical 4-operand tile.load ([tensor, offsets, shapes, valid_shapes])
+        # Canonical 4-operand tile.load ([tensor, offsets, shapes, valid_shape])
         # with the full kwarg set the DSL/IR builder emits (target_memory +
         # transpose). Matching the canonical operand/kwarg arity is what lets the
         # hand-built body survive the print->parse roundtrip verifier.
         load_call = ir.Call(
             ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shapes],
+            [data, offsets, shapes, valid_shape],
             {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,
@@ -349,7 +349,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         sub = ir.ConstInt(8, pl.INDEX, span)
         offsets = ir.MakeTuple([zero, zero], span)
         shapes = ir.MakeTuple([dim, dim], span)
-        valid_shapes = ir.MakeTuple([dim, dim], span)
+        valid_shape = ir.MakeTuple([dim, dim], span)
         slice_shape = ir.MakeTuple([dim, sub], span)
 
         data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
@@ -366,7 +366,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         # what the DSL/IR builder emits, so it needs no padding.
         load_call = ir.Call(
             ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shapes],
+            [data, offsets, shapes, valid_shape],
             {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,
@@ -443,7 +443,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         dim = ir.ConstInt(16, pl.INDEX, span)
         offsets = ir.MakeTuple([zero, zero], span)
         shapes = ir.MakeTuple([dim, dim], span)
-        valid_shapes = ir.MakeTuple([dim, dim], span)
+        valid_shape = ir.MakeTuple([dim, dim], span)
 
         data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
         out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
@@ -454,7 +454,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         loaded = ir.Var("loaded", load_type, span)
         load_call = ir.Call(
             ir.Op("tile.load"),
-            [data, offsets, shapes, valid_shapes],
+            [data, offsets, shapes, valid_shape],
             {"target_memory": ir.MemorySpace.Vec},
             load_type,
             span,

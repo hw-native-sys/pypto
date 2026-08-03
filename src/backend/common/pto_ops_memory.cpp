@@ -89,15 +89,15 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
   INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "tile.load third argument must be a tuple (shapes)";
 
-  // valid_shapes is optional: when omitted (callers built before the 4-arg
+  // valid_shape is optional: when omitted (callers built before the 4-arg
   // signature was introduced, or hand-written IR), fall back to shapes so the
   // partition_view covers the entire physical region — equivalent to the DSL
-  // behavior `pl.load(..., valid_shapes=None)`.
-  auto valid_shapes_tuple = shapes_tuple;
+  // behavior `pl.load(..., valid_shape=None)`.
+  auto valid_shape_tuple = shapes_tuple;
   if (op->args_.size() >= 4) {
-    valid_shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
-    INTERNAL_CHECK_SPAN(valid_shapes_tuple, op->span_)
-        << "tile.load fourth argument must be a tuple (valid_shapes)";
+    valid_shape_tuple = As<ir::MakeTuple>(op->args_[3]);
+    INTERNAL_CHECK_SPAN(valid_shape_tuple, op->span_)
+        << "tile.load fourth argument must be a tuple (valid_shape)";
   }
 
   auto tensor_type = AsTensorTypeLike(tensor->GetType());
@@ -125,13 +125,13 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   }
   const bool is_mx_load = !pto_layout.empty();
 
-  // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
+  // RFC #1300 P7: the IR's offsets / shapes / valid_shape are already in
   // canonical coordinates (matching the source TensorType's shape). There is
   // no implicit dn_swap here — earlier passes ensure all coordinate systems
   // match before codegen.
-  std::vector<std::string> partition_dims = GetDimStrings(valid_shapes_tuple->elements_);
+  std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
-  std::vector<std::string> size_codes = GetSizeCodes(valid_shapes_tuple->elements_, codegen);
+  std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
 
   std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
   std::string partition_view = EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type,

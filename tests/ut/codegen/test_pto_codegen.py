@@ -341,10 +341,10 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     result_var = ir.Var("result", ir.TensorType([128, 128], DataType.FP32), span)
     offsets = ir.MakeTuple([zero, zero], span)
     shapes = ir.MakeTuple([size, size], span)
-    valid_shapes = ir.MakeTuple([m_var, n_var], span)
+    valid_shape = ir.MakeTuple([m_var, n_var], span)
 
     load_call = ir.Call(
-        ir.Op("tile.load"), [input_tensor, offsets, shapes, valid_shapes], {}, load_tile_type, span
+        ir.Op("tile.load"), [input_tensor, offsets, shapes, valid_shape], {}, load_tile_type, span
     )
     fillpad_call = ir.Call(
         ir.Op("tile.fillpad"),
@@ -439,7 +439,7 @@ def test_pto_codegen_fillpad_inplace():
     shapes = ir.MakeTuple([size, size], span)
 
     # Intentionally use the 3-arg form to exercise the backend fallback when
-    # valid_shapes is omitted (equivalent to `pl.load(..., valid_shapes=None)`).
+    # valid_shape is omitted (equivalent to `pl.load(..., valid_shape=None)`).
     load_call = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, load_tile_type, span)
     fillpad_inplace_call = ir.Call(
         ir.Op("tile.fillpad_inplace"),
@@ -2395,8 +2395,8 @@ class TestColumnVectorCodegen:
                 # Explicit DN view with the canonical-packed strides for shape
                 # [16, 1] (stride[-2]=1, stride[-1]=shape[-2]=16). Using the
                 # explicit TensorView form (RFC #1300 supplementary 1 escape
-                # hatch) instead of the deprecated pl.Tensor[..., pl.DN]
-                # shorthand. This test specifically verifies the
+                # hatch) — the pl.Tensor[..., pl.DN] shorthand is not
+                # accepted. This test specifically verifies the
                 # column-vector DN codegen path, so the DN view is the test
                 # subject — not a load-time alias.
                 col_vec: pl.Tensor[

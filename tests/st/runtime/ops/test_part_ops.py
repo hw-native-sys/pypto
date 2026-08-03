@@ -84,8 +84,8 @@ def _tile_part_add(v_rows: int, v_cols: int):
             src1: pl.Tensor[[M, N], pl.FP32],
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
-            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shapes=[M, N])
-            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shapes=[v_rows, v_cols])
+            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shape=[M, N])
+            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shape=[v_rows, v_cols])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.part_add(t0, t1)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -113,8 +113,8 @@ def _tile_part_mul(v_rows: int, v_cols: int):
             src1: pl.Tensor[[M, N], pl.FP32],
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
-            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shapes=[M, N])
-            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shapes=[v_rows, v_cols])
+            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shape=[M, N])
+            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shape=[v_rows, v_cols])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.part_mul(t0, t1)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -142,8 +142,8 @@ def _tile_part_max(v_rows: int, v_cols: int):
             src1: pl.Tensor[[M, N], pl.FP32],
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
-            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shapes=[M, N])
-            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shapes=[v_rows, v_cols])
+            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shape=[M, N])
+            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shape=[v_rows, v_cols])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.part_max(t0, t1)
             out = pl.store(out_tile, [0, 0], out)
             return out
@@ -171,8 +171,8 @@ def _tile_part_min(v_rows: int, v_cols: int):
             src1: pl.Tensor[[M, N], pl.FP32],
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
-            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shapes=[M, N])
-            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shapes=[v_rows, v_cols])
+            t0: pl.Tile[[M, N], pl.FP32] = pl.load(src0, [0, 0], [M, N], valid_shape=[M, N])
+            t1: pl.Tile[[M, N], pl.FP32] = pl.load(src1, [0, 0], [M, N], valid_shape=[v_rows, v_cols])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.part_min(t0, t1)
             out = pl.store(out_tile, [0, 0], out)
             return out

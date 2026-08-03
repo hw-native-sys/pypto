@@ -123,7 +123,7 @@ class TileRowMinCase(PTOTestCase):
                 src: pl.Tensor[[m, n], dtype],
                 out: pl.InOut[pl.Tensor[[m, 1], dtype]],
             ) -> pl.Tensor[[m, 1], dtype]:
-                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shapes=valid_shape)
+                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shape=valid_shape)
                 tmp: pl.Tile[[tmp_m, tmp_n], dtype] = pl.tile.create(
                     [tmp_m, tmp_n], dtype=dtype, target_memory=pl.MemorySpace.Vec
                 )

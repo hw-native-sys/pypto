@@ -366,6 +366,25 @@ inline ParamDirection StringToParamDirection(const std::string& str) {
 }
 
 /**
+ * @brief Reserved Function attr key marking a Group whose body was a
+ * ``pl.cluster(): with pl.spmd(...)`` region.
+ *
+ * Value type: ``bool`` (emitted only when true). Stamped by
+ * ``OutlineClusterScopes``' ``UnwrapNestedSpmd`` when it replaces the nested
+ * Spmd scope with its body and moves the launch spec onto the Group's dispatch
+ * (``kAttrCoreNum`` there — the spec cannot live on the Group, whose scope does
+ * not bind the caller-local Vars it references).
+ *
+ * This marker is what remains function-scoped, and legitimately so: it states a
+ * property of THIS function's body, references nothing outside it, and is a
+ * plain bool that round-trips through the decorator. It tells a launch-site
+ * consumer that dispatching this Group launches the kernels its body calls,
+ * rather than the Group itself as a mixed kernel — the distinction the
+ * occupancy verifier used to draw from the presence of a ``core_num`` attr.
+ */
+inline constexpr const char* kAttrSpmdUnwrapped = "spmd_unwrapped";
+
+/**
  * @brief Function definition
  *
  * Represents a complete function definition with name, parameters, return types, and body.

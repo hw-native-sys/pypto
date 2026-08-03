@@ -15,16 +15,16 @@ torch-aware helpers (make_tensor_arg, scalar_to_uint64) come from the
 """
 
 from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
-    CallConfig,
-    ChipCallable,
-    ChipStorageTaskArgs,
-    CoreCallable,
-    DataType,
-    Tensor,
-    scalar_to_uint64,
+    CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
+    ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
+    ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+    CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
+    DataType,  # pyright: ignore[reportAttributeAccessIssue]
+    Tensor,  # pyright: ignore[reportAttributeAccessIssue]
+    scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
-from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
-from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImports]
+from simpler.worker import Worker  # pyright: ignore[reportMissingImports, reportAttributeAccessIssue]
+from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImports, reportAttributeAccessIssue]
     make_tensor_arg,
     torch_dtype_to_datatype,
 )

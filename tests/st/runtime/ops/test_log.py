@@ -108,7 +108,7 @@ class TileLogCase(PTOTestCase):
                 src: pl.Tensor[[m, n], dtype],
                 out: pl.InOut[pl.Tensor[[m, n], dtype]],
             ) -> pl.Tensor[[m, n], dtype]:
-                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shapes=valid_shape)
+                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shape=valid_shape)
                 result: pl.Tile[[m, n], dtype] = pl.tile.log(src_tile, high_precision=high_precision)
                 return pl.store(result, [0, 0], out)
 

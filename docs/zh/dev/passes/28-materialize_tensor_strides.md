@@ -66,7 +66,7 @@ Pass **幂等** —— 在已物化的 IR 上重跑等于无操作（类型比�
 
 ## 示例
 
-**Before** —— InCore 形参带有空 stride 的 DN view（用户写的 `pl.Tensor[..., pl.DN]` 未给显式 stride 提示）：
+**Before** —— InCore 形参带有空 stride 的 DN view（写 `pl.TensorView(layout=DN)` 但未给显式 stride 提示）：
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)

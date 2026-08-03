@@ -14,7 +14,9 @@ import re
 import pypto.language as pl
 import pytest
 from _orchestration_codegen_common import (
+    _finalize_for_codegen,
     _generate_orch_code,
+    _orch_func_from_program,
 )
 from pypto import backend, codegen, passes
 from pypto.backend import BackendType
@@ -1197,6 +1199,8 @@ class TestOrchestrationMore:
             type=ir.FunctionType.Orchestration,
         )
         program = ir.Program([func], "test_prog", span)
+        program = _finalize_for_codegen(program)
+        func = _orch_func_from_program(program)
 
         code = codegen.generate_orchestration(program, func).code
         lines = code.splitlines()

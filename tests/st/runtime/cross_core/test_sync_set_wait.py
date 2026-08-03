@@ -98,7 +98,7 @@ def sync_set_wait_odd_shape(
             transfer,
             [0, 0],
             [CUBE_PHYSICAL_ROWS, K],
-            valid_shapes=[ROWS, K],
+            valid_shape=[ROWS, K],
             target_memory=pl.Mem.Mat,
         )
         weight_mat: pl.Tile[[K, N], pl.FP32, pl.Mem.Mat] = pl.load(
@@ -144,7 +144,7 @@ def sync_set_wait_odd_last_axis(
                     input_tensor,
                     [0, 0],
                     [LR_ROWS, LR_LEFT_PHYSICAL_COLS],
-                    valid_shapes=[LR_ROWS, LR_LEFT_COLS],
+                    valid_shape=[LR_ROWS, LR_LEFT_COLS],
                 )
                 pl.store(left, [0, 0], transfer)
             else:
@@ -172,7 +172,7 @@ def sync_set_wait_odd_last_axis(
             transfer,
             [0, 0],
             [LR_CUBE_ROWS, LR_CUBE_COLS],
-            valid_shapes=[LR_ROWS, LR_COLS],
+            valid_shape=[LR_ROWS, LR_COLS],
             target_memory=pl.Mem.Mat,
         )
         weight_mat: pl.Tile[[LR_CUBE_COLS, LR_OUTPUT_COLS], pl.FP16, pl.Mem.Mat] = pl.load(

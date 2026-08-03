@@ -72,7 +72,7 @@ class After:
 
 ## Pipeline Position
 
-UnrollLoops runs **once** in `Default` and `DebugTileOptimization`, before control flow structuring:
+UnrollLoops runs **once** in `Default`, before control flow structuring:
 
 ```text
 UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → OutlineHierarchyScopes → OutlineIncoreScopes → ...

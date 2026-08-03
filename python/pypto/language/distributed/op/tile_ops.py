@@ -53,6 +53,13 @@ def remote_load(
     is a *remote* slice of a window-bound :class:`pld.DistributedTensor`.
     Address translation happens at codegen via ``CommRemoteOffset`` + addptr + make_tensor_view.
 
+    .. code-block:: python
+
+       # Barrier example — after notify/wait, all windows are visible.
+       peer_tile = pld.tile.remote_load(
+           data, peer=peer, offsets=[0, 0], shape=[1, SIZE]
+       )
+
     All arguments are positional-or-keyword (mirroring :func:`pl.tile.load`),
     so the printed IR — which emits them positionally — round-trips through
     the parser. Callers may still pass them by keyword for readability.
@@ -135,6 +142,13 @@ def remote_store(
     destination is a *remote* slice of a window-bound
     :class:`pld.DistributedTensor`. Address translation happens at codegen
     via ``CommRemoteOffset`` + addptr + make_tensor_view.
+
+    .. code-block:: python
+
+       # Write a computed tile into peer rank 1's data window.
+       pld.tile.remote_store(tile, data, peer=1, offsets=[0, 0])
+       # remote_store is a raw write with no synchronization of its own —
+       # pair it with pld.system.notify()/wait() to signal completion.
 
     All arguments are positional-or-keyword (mirroring :func:`pl.tile.store`),
     so the printed IR — which emits them positionally — round-trips through

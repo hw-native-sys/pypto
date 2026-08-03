@@ -57,7 +57,7 @@ class _ScalarOpBase(PTOTestCase):
         *,
         m=16,
         n=16,
-        valid_shapes=None,
+        valid_shape=None,
         dtype=DataType.FP32,
         rhs=2.0,
         out_m=None,
@@ -66,7 +66,7 @@ class _ScalarOpBase(PTOTestCase):
         config=None,
     ):
         super().__init__(config)
-        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shape, dtype
         self._rhs, self._out_m, self._out_n, self._off = rhs, out_m or m, out_n or n, off
 
     def get_name(self) -> str:
@@ -91,7 +91,7 @@ class _ScalarOpBase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
-            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
+            # Region outside valid_shape stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = self._ref(a[:vm, :vn])
         else:
@@ -117,7 +117,7 @@ class TileMulsTestCase(_ScalarOpBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.muls(a_tile, rhs), off, out)
                 return out
 
@@ -148,7 +148,7 @@ class TileDivsTestCase(_ScalarOpBase):
             def kernel(
                 self, a: pl.Tensor[[m, n], dt], out: pl.InOut[pl.Tensor[[om, on], dt]]
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
                 out = pl.store(pl.tile.divs(a_tile, rhs), off, out)
                 return out
 
@@ -172,7 +172,7 @@ class ColExpandAddTestCase(PTOTestCase):
         *,
         m=16,
         n=16,
-        valid_shapes=None,
+        valid_shape=None,
         dtype=DataType.FP32,
         out_m=None,
         out_n=None,
@@ -180,7 +180,7 @@ class ColExpandAddTestCase(PTOTestCase):
         config=None,
     ):
         super().__init__(config)
-        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shape, dtype
         self._out_m, self._out_n, self._off = out_m or m, out_n or n, off
 
     def get_name(self) -> str:
@@ -212,8 +212,8 @@ class ColExpandAddTestCase(PTOTestCase):
                 col_vec: pl.Tensor[[1, n], dt],
                 out: pl.InOut[pl.Tensor[[om, on], dt]],
             ) -> pl.Tensor[[om, on], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
-                col_tile = pl.load(col_vec, [0, 0], [1, n], valid_shapes=col_vshape)
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
+                col_tile = pl.load(col_vec, [0, 0], [1, n], valid_shape=col_vshape)
                 out = pl.store(pl.tile.col_expand_add(a_tile, col_tile), off, out)
                 return out
 
@@ -235,7 +235,7 @@ class ColExpandAddTestCase(PTOTestCase):
         r, c = self._off
         if self._valid:
             vm, vn = self._valid
-            # Region outside valid_shapes stays zero — matches the InOut zero-init staged to device.
+            # Region outside valid_shape stays zero — matches the InOut zero-init staged to device.
             res = torch.zeros_like(a)
             res[:vm, :vn] = a[:vm, :vn] + col[:, :vn]
         else:
@@ -254,13 +254,13 @@ class TestVectorMisc:
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_muls(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileMulsTestCase(m=m, n=n, valid_shapes=valid, rhs=2.5))
+        result = test_runner.run(TileMulsTestCase(m=m, n=n, valid_shape=valid, rhs=2.5))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_divs(self, test_runner, label, m, n, valid):
-        result = test_runner.run(TileDivsTestCase(m=m, n=n, valid_shapes=valid, rhs=2.0))
+        result = test_runner.run(TileDivsTestCase(m=m, n=n, valid_shape=valid, rhs=2.0))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")
@@ -293,7 +293,7 @@ class TestVectorMisc:
     @pytest.mark.platforms("a2a3")
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_col_expand_add(self, test_runner, label, m, n, valid):
-        result = test_runner.run(ColExpandAddTestCase(m=m, n=n, valid_shapes=valid))
+        result = test_runner.run(ColExpandAddTestCase(m=m, n=n, valid_shape=valid))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3")

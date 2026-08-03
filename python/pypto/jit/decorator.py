@@ -1883,7 +1883,8 @@ class JITFunction:
         (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
         ``ir.compile()`` via :func:`_run_config_compile_kwargs`, and its
         runtime fields drive on-device execution.  ``strategy`` also takes
-        part in the cache key so two strategies never share a cache entry.
+        part in the cache key so artifacts compiled under different strategy
+        values never share a cache entry.
 
         Args:
             *args: Positional arguments matching the decorated function's params.

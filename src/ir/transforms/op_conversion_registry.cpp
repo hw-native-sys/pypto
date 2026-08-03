@@ -450,10 +450,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
           // pad_value on a tensor.slice over a TensorType input, the pad intent is
           // lost here — a follow-up tile.fillpad is the workaround until tile.load
           // grows its own pad_value kwarg.
-          auto valid_shapes = (args.size() == 4) ? args[3] : shape;
+          auto valid_shape = (args.size() == 4) ? args[3] : shape;
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-          auto load_call =
-              op_reg.Create("tile.load", {input, offset, shape, valid_shapes}, load_kwargs, span);
+          auto load_call = op_reg.Create("tile.load", {input, offset, shape, valid_shape}, load_kwargs, span);
           return ConversionResult{load_call};
         }
 
@@ -739,15 +738,14 @@ void OpConversionRegistry::RegisterMemoryOps() {
         auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
         auto shapes = MakeShapeTuple(tensor_type->shape_, span);
 
-        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
+        std::vector<ExprPtr> logical_valid_shape = tensor_type->shape_;
         if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
-          valid_shape = tensor_type->tensor_view_->valid_shape;
+          logical_valid_shape = tensor_type->tensor_view_->valid_shape;
         }
-        auto valid_shapes = MakeShapeTuple(valid_shape, span);
+        auto valid_shape = MakeShapeTuple(logical_valid_shape, span);
 
         std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-        auto load_call =
-            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
+        auto load_call = op_reg.Create("tile.load", {input, offsets, shapes, valid_shape}, load_kwargs, span);
         auto load_var = std::make_shared<Var>("fillpad_src", load_call->GetType(), span);
 
         std::vector<StmtPtr> prologue;
@@ -786,15 +784,14 @@ void OpConversionRegistry::RegisterMemoryOps() {
         // Load the (smaller) source tensor into a tile carrying its valid region.
         auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
         auto shapes = MakeShapeTuple(tensor_type->shape_, span);
-        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
+        std::vector<ExprPtr> logical_valid_shape = tensor_type->shape_;
         if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
-          valid_shape = tensor_type->tensor_view_->valid_shape;
+          logical_valid_shape = tensor_type->tensor_view_->valid_shape;
         }
-        auto valid_shapes = MakeShapeTuple(valid_shape, span);
+        auto valid_shape = MakeShapeTuple(logical_valid_shape, span);
 
         std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-        auto load_call =
-            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
+        auto load_call = op_reg.Create("tile.load", {input, offsets, shapes, valid_shape}, load_kwargs, span);
         auto load_var = std::make_shared<Var>("fillpad_expand_src", load_call->GetType(), span);
 
         std::vector<StmtPtr> prologue;
@@ -928,13 +925,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
 
         auto load_tensor_tile = [&](const ExprPtr& tensor, const ExprPtr& offsets,
                                     const std::vector<ExprPtr>& shape,
-                                    const std::vector<ExprPtr>& valid_shape, const std::string& name_hint,
-                                    std::vector<StmtPtr>& stmts) -> ExprPtr {
+                                    const std::vector<ExprPtr>& logical_valid_shape,
+                                    const std::string& name_hint, std::vector<StmtPtr>& stmts) -> ExprPtr {
           auto shapes = MakeShapeTuple(shape, span);
-          auto valid_shapes = MakeShapeTuple(valid_shape, span);
+          auto valid_shape = MakeShapeTuple(logical_valid_shape, span);
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
           auto load_call =
-              op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shapes}, load_kwargs, span);
+              op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shape}, load_kwargs, span);
           auto load_var = std::make_shared<Var>(name_hint, load_call->GetType(), span);
           stmts.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
           return load_var;

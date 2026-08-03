@@ -66,9 +66,9 @@ class _TileColExpandBase(PTOTestCase):
     __test__ = False
     op_name = ""
 
-    def __init__(self, *, m=M, n=N, valid_shapes=None, dtype=DataType.FP32, config=None, platform=None):
+    def __init__(self, *, m=M, n=N, valid_shape=None, dtype=DataType.FP32, config=None, platform=None):
         super().__init__(config, platform=platform)
-        self._m, self._n, self._valid, self._dtype = m, n, valid_shapes, dtype
+        self._m, self._n, self._valid, self._dtype = m, n, valid_shape, dtype
 
     def get_name(self) -> str:
         v = f"_v{self._valid[0]}x{self._valid[1]}" if self._valid else ""
@@ -89,7 +89,7 @@ class _TileColExpandBase(PTOTestCase):
         a, v = tensors["a"], tensors["v"]
         if self._valid:
             vm, vn = self._valid
-            # Region outside valid_shapes is undefined by contract — mark NaN so validate_golden skips it.
+            # Region outside valid_shape is undefined by contract — mark NaN so validate_golden skips it.
             res = torch.full_like(a, float("nan"))
             res[:vm, :vn] = self._ref(a[:vm, :vn], v[:, :vn])
         else:
@@ -119,8 +119,8 @@ class TileColExpandDivCase(_TileColExpandBase):
                 v: pl.Tensor[[1, n], dt],
                 out: pl.Out[pl.Tensor[[m, n], dt]],
             ) -> pl.Tensor[[m, n], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
-                v_tile = pl.load(v, [0, 0], [1, n], valid_shapes=[1, v_cols])
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
+                v_tile = pl.load(v, [0, 0], [1, n], valid_shape=[1, v_cols])
                 out_tile = pl.tile.col_expand_div(a_tile, v_tile)
                 return pl.store(out_tile, [0, 0], out)
 
@@ -158,8 +158,8 @@ class TileColExpandSubCase(_TileColExpandBase):
                 v: pl.Tensor[[1, n], dt],
                 out: pl.Out[pl.Tensor[[m, n], dt]],
             ) -> pl.Tensor[[m, n], dt]:
-                a_tile = pl.load(a, [0, 0], [m, n], valid_shapes=vshape)
-                v_tile = pl.load(v, [0, 0], [1, n], valid_shapes=[1, v_cols])
+                a_tile = pl.load(a, [0, 0], [m, n], valid_shape=vshape)
+                v_tile = pl.load(v, [0, 0], [1, n], valid_shape=[1, v_cols])
                 out_tile = pl.tile.col_expand_sub(a_tile, v_tile)
                 return pl.store(out_tile, [0, 0], out)
 
@@ -187,13 +187,13 @@ class TestTileColExpandArith:
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_div(self, test_runner, platform, label, m, n, valid):
-        result = test_runner.run(TileColExpandDivCase(m=m, n=n, valid_shapes=valid, platform=platform))
+        result = test_runner.run(TileColExpandDivCase(m=m, n=n, valid_shape=valid, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
     @pytest.mark.parametrize("label,m,n,valid", _SHAPE_CFGS, ids=[c[0] for c in _SHAPE_CFGS])
     def test_tile_sub(self, test_runner, platform, label, m, n, valid):
-        result = test_runner.run(TileColExpandSubCase(m=m, n=n, valid_shapes=valid, platform=platform))
+        result = test_runner.run(TileColExpandSubCase(m=m, n=n, valid_shape=valid, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)

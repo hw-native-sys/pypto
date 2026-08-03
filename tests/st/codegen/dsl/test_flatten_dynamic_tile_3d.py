@@ -14,7 +14,7 @@ A 3D+ tensor with a *dynamic* dimension that flows into a tile shape inside an
 flattened directly. The user handles it by **writing the chunk loop themselves**:
 they iterate the dynamic dimension with ``pl.range`` in a static ``CHUNK`` step
 and load each chunk as a static physical ``[1, CHUNK, 512]`` tile whose
-``valid_shapes`` carries the runtime tail ``min(CHUNK, s - c)``. The chunk size
+``valid_shape`` carries the runtime tail ``min(CHUNK, s - c)``. The chunk size
 is the user's choice (it strongly affects performance).
 
 ``FlattenTileNdTo2D`` then only needs to lower the per-chunk ``[1, CHUNK, 512]``
@@ -49,7 +49,7 @@ def cast_3d_dynamic(
 
     The user iterates the dynamic S dim in CHUNK steps and loads each chunk as a
     static ``[1, CHUNK, 512]`` tile, clamping the tail with
-    ``valid_shapes=[1, min(CHUNK, s - c), 512]`` so the last (partial) chunk does
+    ``valid_shape=[1, min(CHUNK, s - c), 512]`` so the last (partial) chunk does
     not read out of bounds.
     """
     b_dim = pl.tensor.dim(x, 0)
@@ -62,7 +62,7 @@ def cast_3d_dynamic(
             # (the LHS supplies the post-loop binding); bare pl.yield_ is rejected.
             for c, (o,) in pl.range(0, s_dim, CHUNK, init_values=(out,)):
                 valid = pl.min(CHUNK, s_dim - c)
-                t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shapes=[1, valid, 512])
+                t = pl.load(x, [b, c, 0], [1, CHUNK, 512], valid_shape=[1, valid, 512])
                 t = pl.cast(t, target_type=pl.FP32)
                 o = pl.store(t, [b, c, 0], o)
                 chunk_out = pl.yield_(o)  # noqa: F841 — parser requires the yield-LHS binding

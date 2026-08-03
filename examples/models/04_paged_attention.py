@@ -118,7 +118,7 @@ def kernel_softmax_prepare_unaligned(
     pl.Tensor[[16, 1], pl.FP32],
 ]:
     """Softmax prepare with unaligned valid_len: load, set_validshape, fillpad, scale, softmax (VECTOR)."""
-    s_tile = pl.load(sij, [0, 0], [16, 128], valid_shapes=[16, valid_len], target_memory=pl.MemorySpace.Vec)
+    s_tile = pl.load(sij, [0, 0], [16, 128], valid_shape=[16, valid_len], target_memory=pl.MemorySpace.Vec)
     s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
     scaled = pl.mul(s_padded, scale)
     tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
@@ -381,7 +381,7 @@ def build_paged_attention_unaligned_program(
 
     Unlike build_paged_attention_program which slices sij to [q_tile, valid_len],
     this variant passes the full sij tensor to kernel_softmax_prepare_unaligned
-    with valid_len as a scalar. The kernel uses pl.load(..., valid_shapes=...)
+    with valid_len as a scalar. The kernel uses pl.load(..., valid_shape=...)
     + fillpad to handle the unaligned region via pto.set_validshape.
     """
     query_rows = batch * num_heads

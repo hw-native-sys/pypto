@@ -39,7 +39,7 @@ class FillpadInplaceZeroProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad_inplace(tile, pad_value=pl.PadValue.zero)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)
@@ -66,7 +66,7 @@ class FillpadInplaceMaxProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad_inplace(tile, pad_value=pl.PadValue.max)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)
@@ -93,7 +93,7 @@ class FillpadInplaceMinProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shapes=[48, 64]
+            input_tensor, offsets=[0, 0], shapes=[64, 64], valid_shape=[48, 64]
         )
         padded_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad_inplace(tile, pad_value=pl.PadValue.min)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_tile, offsets=[0, 0], output_tensor=output)

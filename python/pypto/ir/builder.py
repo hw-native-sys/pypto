@@ -699,7 +699,7 @@ class IRBuilder:
             start_offset: Starting offset (int or Expr)
             blayout: Block layout (default: row_major)
             slayout: Scatter layout (default: none_box)
-            fractal: Fractal size (default: 512)
+            fractal: Fractal size in bytes, not elements (default: 512)
             pad: Pad mode (default: null)
             span: Optional explicit span. If None, captured from call site.
 

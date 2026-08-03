@@ -109,6 +109,7 @@ plugins:
             Code Generation: 代码生成
             Backend: 后端
             Debug: 调试
+            Distributed: 分布式
   # Renders `pl.*` / `pypto.runtime.*` API pages from source docstrings. No
   # generated pages are wired into the nav yet -- that lands with the Reference
   # chapter (see issue #2120); the handler is configured here so the contract
@@ -170,6 +171,13 @@ nav:
       - en/user/02-operation_reference.md
       - en/user/00-getting_started.md
       - en/user/03-torch_codegen_debug.md
+      - Distributed:
+          - en/user/distributed/index.md
+          - en/user/distributed/00-model.md
+          - en/user/distributed/01-collectives.md
+          - en/user/distributed/02-primitives.md
+          - en/user/distributed/03-execution.md
+          - en/user/distributed/04-debugging.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:

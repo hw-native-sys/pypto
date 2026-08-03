@@ -116,7 +116,7 @@ class FillpadExpandNarrowValidFP32:
         input_tensor: pl.Tensor[[48, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        src: pl.Tile[[48, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [48, 64], valid_shapes=[40, 50])
+        src: pl.Tile[[48, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [48, 64], valid_shape=[40, 50])
         dst: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad_expand(src, [64, 64], pad_value=pl.PadValue.zero)
         return pl.store(dst, [0, 0], output)
 
@@ -139,7 +139,7 @@ class FillpadExpandNarrowValidBothMinFP32:
         input_tensor: pl.Tensor[[64, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
     ) -> pl.Tensor[[64, 128], pl.FP32]:
-        src: pl.Tile[[64, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [64, 64], valid_shapes=[40, 50])
+        src: pl.Tile[[64, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [64, 64], valid_shape=[40, 50])
         dst: pl.Tile[[64, 128], pl.FP32] = pl.tile.fillpad_expand(src, [64, 128], pad_value=pl.PadValue.min)
         return pl.store(dst, [0, 0], output)
 
@@ -162,7 +162,7 @@ class FillpadExpandTailValidFP32:
         input_tensor: pl.Tensor[[8, 16], pl.FP32],
         output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
     ) -> pl.Tensor[[16, 32], pl.FP32]:
-        src: pl.Tile[[8, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [8, 16], valid_shapes=[8, 10])
+        src: pl.Tile[[8, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [8, 16], valid_shape=[8, 10])
         dst: pl.Tile[[16, 32], pl.FP32] = pl.tile.fillpad_expand(src, [16, 32], pad_value=pl.PadValue.zero)
         return pl.store(dst, [0, 0], output)
 
@@ -204,7 +204,7 @@ class FillpadExpandNarrowValidFP16:
         input_tensor: pl.Tensor[[48, 64], pl.FP16],
         output: pl.Out[pl.Tensor[[64, 64], pl.FP16]],
     ) -> pl.Tensor[[64, 64], pl.FP16]:
-        src: pl.Tile[[48, 64], pl.FP16] = pl.load(input_tensor, [0, 0], [48, 64], valid_shapes=[40, 50])
+        src: pl.Tile[[48, 64], pl.FP16] = pl.load(input_tensor, [0, 0], [48, 64], valid_shape=[40, 50])
         dst: pl.Tile[[64, 64], pl.FP16] = pl.tile.fillpad_expand(src, [64, 64], pad_value=pl.PadValue.zero)
         return pl.store(dst, [0, 0], output)
 
@@ -225,7 +225,7 @@ class FillpadExpandRowINT32:
         input_tensor: pl.Tensor[[48, 64], pl.INT32],
         output: pl.Out[pl.Tensor[[64, 64], pl.INT32]],
     ) -> pl.Tensor[[64, 64], pl.INT32]:
-        src: pl.Tile[[48, 64], pl.INT32] = pl.load(input_tensor, [0, 0], [48, 64], valid_shapes=[40, 50])
+        src: pl.Tile[[48, 64], pl.INT32] = pl.load(input_tensor, [0, 0], [48, 64], valid_shape=[40, 50])
         dst: pl.Tile[[64, 64], pl.INT32] = pl.tile.fillpad_expand(src, [64, 64], pad_value=pl.PadValue.zero)
         return pl.store(dst, [0, 0], output)
 

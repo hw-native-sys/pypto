@@ -15,7 +15,9 @@ import pypto.language as pl
 import pytest
 from _orchestration_codegen_common import (
     SELF_ALIAS_RE,
+    _finalize_for_codegen,
     _generate_orch_code,
+    _orch_func_from_program,
 )
 from pypto import backend, codegen
 from pypto.backend import BackendType
@@ -48,7 +50,8 @@ class TestTaskIsValidCodegen:
             b = ib.let("b", check)
             ib.return_stmt(b)
         orch_func = orch_f.get_result()
-        program = ir.Program([orch_func], "test_task_is_valid", ir.Span.unknown())
+        program = _finalize_for_codegen(ir.Program([orch_func], "test_task_is_valid", ir.Span.unknown()))
+        orch_func = _orch_func_from_program(program)
 
         code = codegen.generate_orchestration(program, orch_func).code
         assert "bool b = tid.is_valid();" in code, code
@@ -103,7 +106,8 @@ class TestTupleLineagePointerKeying:
             ib.return_stmt(ib.make_tuple([fa, fb]))
 
         orch_func = orch_f.get_result()
-        program = ir.Program([orch_func], "test_tuple_pointer_keying", span)
+        program = _finalize_for_codegen(ir.Program([orch_func], "test_tuple_pointer_keying", span))
+        orch_func = _orch_func_from_program(program)
         code = codegen.generate_orchestration(program, orch_func).code
 
         # No declared name may appear twice (the conflicting-declaration bug).
@@ -138,7 +142,8 @@ class TestUnregisteredOpError:
             ib.return_stmt(filled)
         orch_func = orch_f.get_result()
 
-        program = ir.Program([orch_func], "test_prog", ir.Span.unknown())
+        program = _finalize_for_codegen(ir.Program([orch_func], "test_prog", ir.Span.unknown()))
+        orch_func = _orch_func_from_program(program)
 
         with pytest.raises(RuntimeError, match="Misplaced tensor op.*tensor.full"):
             codegen.generate_orchestration(program, orch_func)
@@ -155,7 +160,10 @@ class TestUnregisteredOpError:
             orch_f.return_type(viewed.type)
             ib.return_stmt(viewed)
         orch_func = orch_f.get_result()
-        program = ir.Program([orch_func], "ReinterpretViewOrchestration", ir.Span.unknown())
+        program = _finalize_for_codegen(
+            ir.Program([orch_func], "ReinterpretViewOrchestration", ir.Span.unknown())
+        )
+        orch_func = _orch_func_from_program(program)
 
         with pytest.raises(ValueError, match="not supported in Orchestration functions.*InCore"):
             codegen.generate_orchestration(program, orch_func)
@@ -377,6 +385,7 @@ class TestArgDirectionsCodegen:
     @staticmethod
     def _generate_orch_direct(program) -> str:
         """Bypass ``_ensure_arg_directions`` so explicit overrides survive."""
+        program = _finalize_for_codegen(program)
         for func in program.functions.values():
             if func.func_type == ir.FunctionType.Orchestration:
                 return codegen.generate_orchestration(program, func).code
@@ -850,6 +859,8 @@ class TestTupleReturnNameHintCollision:
             "TupleNameHintCollisionProgram",
             span,
         )
+        program = _finalize_for_codegen(program)
+        orch = _orch_func_from_program(program)
 
         code = codegen.generate_orchestration(program, orch).code
 

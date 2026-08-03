@@ -909,7 +909,7 @@ def validate_golden(
     Positions where the golden holds ``NaN`` are treated as *don't-care* and are
     excluded from the comparison. Tests use this to mark output regions that the
     kernel leaves undefined by contract — e.g. the area outside a tile's
-    ``valid_shapes``, or an oversized scratch buffer's unused tail. (The runtime
+    ``valid_shape``, or an oversized scratch buffer's unused tail. (The runtime
     no longer zero-fills pure-output buffers, so such regions hold pooled-allocator
     garbage rather than 0.) A golden with no ``NaN`` compares every element, so this
     is fully backward-compatible.

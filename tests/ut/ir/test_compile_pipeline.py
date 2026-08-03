@@ -38,7 +38,7 @@ def test_run_pass_pipeline_orders_outer_before_extra_instruments():
         before_pass=lambda pass_obj, _program: seen.append(("extra", pass_obj.get_name())),
         name="extra",
     )
-    with passes.PassContext([outer_instrument], verification_level=passes.VerificationLevel.NONE):
+    with passes.PassContext([outer_instrument]):
         result = _run_pass_pipeline(
             _scalar_program(),
             operation="lower",

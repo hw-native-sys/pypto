@@ -28,6 +28,7 @@ builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](39-materialize_co
 
 ```python
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
 data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
@@ -35,15 +36,20 @@ data = pld.tensor.allgather(stage, data, signal)
 data = pld.tensor.all_to_all(stage, data, signal)
 ```
 
+`pld.tensor.allreduce` 根据 `mode` kwarg 进行分发：默认 `mode="mesh"` 会 lower 到
+`builtin.tensor.allreduce`，而 `mode="ring"` 会 lower 到
+`builtin.tensor.allreduce_ring`。其他取值将作为用户错误被拒绝。
+
 对于 `allgather` / `all_to_all`，`stage`（TPUT 源）与 `data`（结果）
 必须是两个不同的 window。`allgather` 的 `stage` 只保存本 rank 的单个分片，
 形状为 `[1, SIZE]`；`all_to_all` 的 `stage` 每行携带一个按目的地划分的分片，
 形状为 `[NR, SIZE]`。两种情况下 `data` 都是 peer 推入的 `[NR, SIZE]` 结果窗口。
 
 本 pass 会为每个参与设备生成对应的 `builtin.tensor.*` 调用（如
-`builtin.tensor.allreduce`、`builtin.tensor.barrier`、
-`builtin.tensor.broadcast`、`builtin.tensor.reduce_scatter`、
-`builtin.tensor.allgather`、`builtin.tensor.all_to_all`）。若外层
+`builtin.tensor.allreduce`、`builtin.tensor.allreduce_ring`、
+`builtin.tensor.barrier`、`builtin.tensor.broadcast`、
+`builtin.tensor.reduce_scatter`、`builtin.tensor.allgather`、
+`builtin.tensor.all_to_all`）。若外层
 comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生成顺序
 `for r in pld.system.world_size()` 循环。
 
@@ -61,7 +67,16 @@ comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生�
 `ReduceOp.Sum`、`Max`、`Min` 和 `Prod`，并支持任意正元素数量。它按 256 个
 元素分块，并把 FP16 和 FP32 的 ragged load 范围都对齐到 32 字节，不改变逻辑 tensor shape。
 signal 必须是 INT32 tensor，形状可以是 rank-1 `[world_size]` 或 rank-2
-`[world_size, 1]`；当参与设备数静态可知时，signal 的静态容量必须足够。
+`[world_size, 1]`；当参与设备数静态可知时，signal 的静态容量必须足够。Ring allreduce（`mode="ring"`）
+的 signal 为 rank-2，形状为 `[2 * (NR - 1) + 1, NR]`，其
+`shape[0]` 在 signal 两个维度均为编译期常量时必须恰好等于 `2 * (NR - 1) + 1`；仅
+`shape[0]` 静态可知时则至少为 `2 * (NR - 1) + 1`（两个维度均为动态时无静态检查）。
+当参与设备数静态可知时，signal 的静态容量必须足够。ring allreduce 还要求 `numel(src) % NR == 0`（ring schedule 将 src 划分为 NR 个连续 chunk；余数非零会留下内核无法处理的尾部部分 chunk）。host-ring 的 `src` 形状必须静态已知——动态 extent 会被拒绝，否则运行时 `numel` 不被 `NR` 整除时内核会静默返回未归约的数据。
+
+Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
+`ReduceOp.Max`、`ReduceOp.Min`、`ReduceOp.Prod` 以及 `FP16` 在
+`mode="ring"` 下尚未支持。Ring allreduce 最多支持 16 个参与设备
+（`world_size <= 16`）。
 
 ## Pass 属性
 

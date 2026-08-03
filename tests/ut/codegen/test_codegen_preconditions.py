@@ -54,19 +54,16 @@ def test_orchestration_codegen_precondition_entry_point():
 
     The precondition must be the first thing that runs in
     ``codegen.generate_orchestration`` — before any IR traversal or emission.
-    This smoke test confirms the entry point is wired: a valid program reaches
-    the precondition (which passes for well-formed IR from convert_to_ssa)
-    and proceeds to codegen, which fails later on a missing pass
-    (ExpandMixedKernel) with a distinct error — proving the precondition did
-    NOT block and the codegen pipeline advanced past it.
+    This smoke test confirms the entry point is wired: a program that satisfies
+    all IR-property preconditions (including RuntimeScopesMaterialized) reaches
+    codegen and fails later on a missing pass (ExpandMixedKernel) with a
+    distinct error — proving the precondition barrier did not spuriously block.
 
-    Note: triggering the IR-property checks (SplitIncoreOrch,
-    OrchestrationReferencesResolved, RuntimeScopesMaterialized) from Python
-    tests is currently limited because (a) SplitIncoreOrch is included in
-    convert_to_ssa, (b) OrchestrationReferencesResolved is enforced by the
-    DSL parser, and (c) RuntimeScopesMaterialized lacks a registered verifier.
-    Follow-up work should register a verifier for RuntimeScopesMaterialized
-    and add a targeted failure test.
+    Note: triggering every IR-property check from Python tests is still
+    partially limited because SplitIncoreOrch is included in convert_to_ssa and
+    OrchestrationReferencesResolved is enforced by the DSL parser.
+    RuntimeScopesMaterialized is registered — see
+    test_verify_runtime_scopes_materialized.py for targeted failure tests.
     """
 
     @pl.program
@@ -80,13 +77,15 @@ def test_orchestration_codegen_precondition_entry_point():
             y, _ = pl.submit(self.k, x)
             return y
 
-    program = passes.convert_to_ssa()(Input)
+    program = passes.classify_iter_arg_carry()(
+        passes.materialize_runtime_scopes()(passes.derive_call_directions()(passes.convert_to_ssa()(Input)))
+    )
     for func in program.functions.values():
         if func.func_type == pl.FunctionType.Orchestration:
-            # The precondition passes (properties are satisfied by
-            # convert_to_ssa). Codegen proceeds and fails at
-            # InferFunctionCoreType because ExpandMixedKernel was not run —
-            # proving the precondition did not block execution.
+            # All codegen preconditions pass (including RuntimeScopesMaterialized).
+            # Codegen proceeds and fails at InferFunctionCoreType because
+            # ExpandMixedKernel was not run — proving the precondition did not
+            # block execution.
             with pytest.raises(pypto.InternalError, match="InferFunctionCoreType"):
                 codegen.generate_orchestration(program, func)
             return

@@ -84,6 +84,35 @@ def test_alloc_window_buffer_lhs_is_plain_ptr_var():
     assert var.name_hint == "buf"
 
 
+def test_alloc_window_buffer_rejected_outside_host_function():
+    """``pld.alloc_window_buffer()`` is host-only — calling it from a
+    CORE_GROUP-level function body is a parse error."""
+    with pytest.raises(ParserSyntaxError, match="HOST"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function
+            def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    buf = pld.alloc_window_buffer(1024)  # noqa: F841
+                return x
+
+
+def test_alloc_window_buffer_rejected_in_nested_device_scope_within_host_function():
+    """Even inside a HOST orchestrator, ``pld.alloc_window_buffer()`` must be
+    rejected when nested inside a device-side scope (InCore / SPMD), since
+    the call is not lowerable there."""
+    with pytest.raises(ParserSyntaxError, match="InCore"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    buf = pld.alloc_window_buffer(1024)  # noqa: F841
+                return 0
+
+
 def test_alloc_window_buffer_call_carries_name_kwarg():
     """The op call's kwargs carry the LHS-injected name. No dtype kwarg."""
 

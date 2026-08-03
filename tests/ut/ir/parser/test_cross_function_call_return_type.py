@@ -337,7 +337,7 @@ def test_recursive_tuple_and_tile_return_metadata_are_substituted():
     class Prog:
         @pl.function(type=pl.FunctionType.InCore)
         def load_tile(self, arg: pl.Tensor[[n, 64], pl.FP32]):
-            tile = pl.load(arg, [0, 0], [n, 64], valid_shapes=[n - 1, 64])
+            tile = pl.load(arg, [0, 0], [n, 64], valid_shape=[n - 1, 64])
             status = pl.const(0, pl.INT64)
             return status, (tile,)
 

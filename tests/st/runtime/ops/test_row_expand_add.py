@@ -163,12 +163,12 @@ class TileRowExpandAddCase(PTOTestCase):
                     row_vec: pl.Tensor[[m, row_cols], dtype],
                     out: pl.InOut[pl.Tensor[[m, n], dtype]],
                 ) -> pl.Tensor[[m, n], dtype]:
-                    src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shapes=valid_shape)
+                    src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shape=valid_shape)
                     row_tile: pl.Tile[[m, row_cols], dtype] = pl.load(
                         row_vec,
                         [0, 0],
                         [m, row_cols],
-                        valid_shapes=[valid_rows, row_cols],
+                        valid_shape=[valid_rows, row_cols],
                     )
                     tmp: pl.Tile[[tmp_m, tmp_n], tmp_dtype] = pl.tile.create(
                         [tmp_m, tmp_n], dtype=tmp_dtype, target_memory=pl.MemorySpace.Vec
@@ -196,12 +196,12 @@ class TileRowExpandAddCase(PTOTestCase):
                 row_vec: pl.Tensor[[m, row_cols], dtype],
                 out: pl.InOut[pl.Tensor[[m, n], dtype]],
             ) -> pl.Tensor[[m, n], dtype]:
-                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shapes=valid_shape)
+                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shape=valid_shape)
                 row_tile: pl.Tile[[m, row_cols], dtype] = pl.load(
                     row_vec,
                     [0, 0],
                     [m, row_cols],
-                    valid_shapes=[valid_rows, row_cols],
+                    valid_shape=[valid_rows, row_cols],
                 )
                 result: pl.Tile[[m, n], dtype] = pl.tile.row_expand_add(src_tile, row_tile)
                 return pl.store(result, [0, 0], out)

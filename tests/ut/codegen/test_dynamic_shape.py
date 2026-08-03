@@ -43,7 +43,7 @@ class AddKernelDynamic:
 
 @pl.program
 class AddKernelValidShape:
-    """Add kernel with static tensors but dynamic valid_shapes passed as scalars."""
+    """Add kernel with static tensors but dynamic valid_shape passed as scalars."""
 
     @pl.function(type=pl.FunctionType.InCore)
     def add_kernel(
@@ -55,8 +55,8 @@ class AddKernelValidShape:
         N: pl.Scalar[pl.INDEX],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
         """Loads 128x128 tiles but marks only [M, N] as valid: result = a + b"""
-        a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
-        b_tile = pl.load(b, [0, 0], [128, 128], valid_shapes=[M, N])
+        a_tile = pl.load(a, [0, 0], [128, 128], valid_shape=[M, N])
+        b_tile = pl.load(b, [0, 0], [128, 128], valid_shape=[M, N])
         result = pl.add(a_tile, b_tile)
         out = pl.store(result, [0, 0], output)
         return out
@@ -64,7 +64,7 @@ class AddKernelValidShape:
 
 @pl.program
 class AddKernelValidShapeExpr:
-    """Add kernel with valid_shapes computed from a runtime expression (regression for #707)."""
+    """Add kernel with valid_shape computed from a runtime expression (regression for #707)."""
 
     @pl.function(type=pl.FunctionType.InCore)
     def add_kernel(
@@ -77,8 +77,8 @@ class AddKernelValidShapeExpr:
     ) -> pl.Tensor[[128, 128], pl.FP32]:
         """valid_shape elements come from pl.min(...) — i.e. ir::Call, not ir::Var."""
         valid_m = pl.min(M, N)
-        a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[valid_m, N])
-        b_tile = pl.load(b, [0, 0], [128, 128], valid_shapes=[valid_m, N])
+        a_tile = pl.load(a, [0, 0], [128, 128], valid_shape=[valid_m, N])
+        b_tile = pl.load(b, [0, 0], [128, 128], valid_shape=[valid_m, N])
         result = pl.add(a_tile, b_tile)
         out = pl.store(result, [0, 0], output)
         return out
@@ -181,7 +181,7 @@ def test_add_kernel_dynamic_shape_pto_codegen():
 
 
 def test_add_kernel_valid_shape_pto_codegen():
-    """Test PTO codegen handles load with valid_shapes: tile allocated from shapes, M/N as index scalars."""
+    """Test PTO codegen handles load with valid_shape: tile allocated from shapes, M/N as index scalars."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     func = AddKernelValidShape.get_function("add_kernel")
@@ -200,7 +200,7 @@ def test_add_kernel_valid_shape_pto_codegen():
     assert "shape = [%c128_index, %c128_index]" in mlir_code
     assert "strides = [%c128_index, %c1_index]" in mlir_code
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
-    # partition_view follows valid_shapes (dynamic %arg3, %arg4) so the DMA
+    # partition_view follows valid_shape (dynamic %arg3, %arg4) so the DMA
     # only fetches the valid region from GM. The partition_view type therefore
     # uses dynamic dims and its sizes use the valid_shape SSA values directly.
     assert "partition_tensor_view<?x?xf32>" in mlir_code

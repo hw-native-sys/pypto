@@ -10,7 +10,7 @@
 """Shared helpers for ``pld.*`` DSL wrappers."""
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, overload
 
 from pypto.language.typing import IntLike, Scalar
 from pypto.pypto_core import ir as _ir
@@ -32,6 +32,24 @@ def _unwrap(value: Any) -> Any:
 def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
+
+
+@overload
+def _unwrap_distributed_tensors(op_name: str, *, target: Any) -> tuple[Expr]: ...
+
+
+@overload
+def _unwrap_distributed_tensors(op_name: str, *, signal: Any) -> tuple[Expr]: ...
+
+
+@overload
+def _unwrap_distributed_tensors(op_name: str, *, target: Any, signal: Any) -> tuple[Expr, Expr]: ...
+
+
+@overload
+def _unwrap_distributed_tensors(
+    op_name: str, *, target: Any, signal: Any, recv_counts: Any
+) -> tuple[Expr, Expr, Expr]: ...
 
 
 def _unwrap_distributed_tensors(op_name: str, **named: Any) -> tuple[Expr, ...]:

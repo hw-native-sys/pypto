@@ -589,10 +589,19 @@ class TopDownRetargeter {
     //      input of the call already lives on `target_base`, retyping the
     //      output onto the same buffer creates an in-place execution that
     //      the op cannot handle and fails at runtime.
+    //   4. Ops with a registered *fixed* output memory space (e.g. every
+    //      `tile.add`-style elementwise op is `set_output_memory(Vec)`) when
+    //      the target sits in a different space.  The op physically cannot
+    //      write there, so retyping the LHS would only mint IR that claims a
+    //      Vec-only op produces DDR.  Declining leaves the carry yielding a
+    //      different buffer than its init, which YieldFixupMutator reconciles
+    //      with a real move (see AlignLoopCarriesToInitMutator's contract).
+    //      Same-space targets are unaffected: only the MemRef base moves.
     if (IsOutputMemoryInheritInput(entry)) return false;
     if (HasKwarg(*call, "target_memory") && !TargetMemoryKwargMatches(*call, target_memory)) {
       return false;
     }
+    if (FixedOutputMemoryConflicts(entry, *call, target_memory)) return false;
     if (!entry.IsInplaceSafe() && CallReadsBase(*call, target->base_.get())) return false;
 
     // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
@@ -639,6 +648,22 @@ class TopDownRetargeter {
       return AnyCast<MemorySpace>(v, "kwarg key: target_memory") == *target_memory;
     }
     return false;
+  }
+
+  /// True when the op resolves to a concrete output memory space that differs
+  /// from `target_memory` — i.e. retyping the LHS would claim the op writes
+  /// somewhere it physically cannot.  Ops that defer the choice (the resolver
+  /// returns nullopt: inherit-input and the retargetable `target_memory`-kwarg
+  /// ops) are not constrained here and are handled by their own guards above.
+  static bool FixedOutputMemoryConflicts(const OpRegistryEntry& entry, const Call& call,
+                                         std::optional<MemorySpace> target_memory) {
+    if (!target_memory.has_value()) return false;
+    const auto& spec = entry.GetMemorySpec();
+    if (!spec.has_value() || !spec->deduce_output_memory) return false;
+    // Resolve against the call's own kwargs so a kwarg-driven op reports the
+    // space it actually produces rather than its registered default.
+    auto fixed = spec->deduce_output_memory(call.kwargs_);
+    return fixed.has_value() && *fixed != *target_memory;
   }
 
   /// Retype an IfStmt return_var: recurse into both branches' yield values.

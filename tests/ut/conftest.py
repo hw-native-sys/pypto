@@ -42,9 +42,9 @@ def default_pass_manager():
     """Return the default-strategy PassManager.
 
     Use this in tests that want to run the production pipeline without
-    constructing the manager inline. Strategy-specific tests (covering
-    ``DebugTileOptimization`` etc.) should keep building the manager
-    themselves so the choice stays visible at the test site.
+    constructing the manager inline. Strategy-specific tests should keep
+    building the manager themselves so the choice stays visible at the
+    test site.
     """
     return PassManager.get_strategy(OptimizationStrategy.Default)
 

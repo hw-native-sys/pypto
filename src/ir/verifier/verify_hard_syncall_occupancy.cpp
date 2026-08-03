@@ -29,10 +29,13 @@
 // resolved (AIV / AIC / Group), which is what lets us map SPMD blocks to physical
 // cores per launch shape. It covers every SPMD launch site whose block count it
 // can classify (see below):
-//   - `FunctionType::Spmd` function  (scope-based `with/for pl.spmd`)          [core_num attr]
-//   - `FunctionType::Group` function with a core_num attr (`pl.cluster()`-nested
-//     `pl.spmd`, unwrapped by OutlineClusterScopes)                            [core_num attr]
-//   - a `Submit` node with a core_num (`pl.spmd_submit(..., core_num=N)`)      [Submit::core_num_]
+//   - a `Call` dispatch carrying the launch spec (scope-based `with/for pl.spmd`
+//     and `pl.cluster()`-nested `pl.spmd`, both outlined by
+//     OutlineClusterScopes)                                                    [core_num Call attr]
+//   - a `Submit` node with a core_num (`pl.spmd_submit(..., core_num=N)`,
+//     or an `as tid` scope)                                                    [Submit::core_num_]
+//   - a Function still spelling the spec in its own attrs — no pass produces
+//     this, but hand-written / deserialized IR may                             [core_num Function attr]
 //
 // A launch width is one of:
 //   - a compile-time literal N, checked against the target SoC's physical counts;
@@ -127,6 +130,18 @@ std::vector<FunctionPtr> DirectCallees(const FunctionPtr& fn, const ProgramPtr& 
   for (const auto& call : collector.calls) add(call->op_);
   for (const auto& submit : collector.submits) add(submit->op_);
   return out;
+}
+
+// True when dispatching `fn` launches the kernels its BODY calls, rather than
+// `fn` itself: an outlined Spmd wrapper (scope-based ``with pl.spmd(...)``), or
+// a Group whose body WAS a ``pl.cluster(): with pl.spmd(...)`` region
+// (kAttrSpmdUnwrapped). Everything else — including a mixed-kernel Group reached
+// by ``pl.spmd_submit(self.kernel, ..., core_num=N)`` — is itself the launched
+// kernel, so CheckLaunchedKernel applies its Group / AIC / AIV rules directly.
+bool IsLaunchWrapper(const FunctionPtr& fn) {
+  if (!fn) return false;
+  return fn->func_type_ == FunctionType::Spmd ||
+         (fn->func_type_ == FunctionType::Group && fn->GetAttr<bool>(kAttrSpmdUnwrapped, false));
 }
 
 struct HardSyncall {
@@ -257,6 +272,18 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
  public:
   [[nodiscard]] std::string GetName() const override { return "HardSyncallOccupancy"; }
 
+  // Per-Verify() cache for the hard-syncall walk. Like DirectCallees, this is a
+  // pure function of the kernel, and a kernel dispatched from S launch sites
+  // would otherwise be re-walked S times — the same nested-scan shape the
+  // callee cache closes (pass-complexity.md).
+  using SyncallCache = std::unordered_map<const Function*, std::vector<HardSyncall>>;
+
+  static const std::vector<HardSyncall>& HardSyncallsCached(const FunctionPtr& fn, SyncallCache* cache) {
+    auto [it, inserted] = cache->try_emplace(fn.get());
+    if (inserted) it->second = CollectHardSyncalls(fn);
+    return it->second;
+  }
+
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     // Occupancy depends on the target SoC's physical core counts; without a
@@ -273,34 +300,74 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       if (fn && fn->body_) query_defs.VisitStmt(fn->body_);
     }
 
-    for (const auto& [gv, fn] : program->functions_) {
-      if (!fn) continue;
-
-      // Launch-site functions: a Spmd wrapper (scope-based pl.spmd), or a Group
-      // carrying a core_num attr (a pl.cluster()-nested pl.spmd unwrapped by
-      // OutlineClusterScopes). A Group *without* core_num is a mixed-kernel
-      // wrapper (a launch callee), handled inside CheckLaunchedKernel.
-      const bool is_launch_fn = fn->func_type_ == FunctionType::Spmd ||
-                                (fn->func_type_ == FunctionType::Group && fn->HasAttr("core_num"));
-      if (is_launch_fn) {
-        // sync_start rides as a launch-function attr, emitted only when true by
-        // OutlineHierarchyScopes / OutlineClusterScopes (absent => false).
-        CheckLaunchSite(fn->GetAttr<ExprPtr>("core_num", nullptr), fn->GetAttr<bool>("sync_start", false),
-                        DirectCallees(fn, program), total_vector, total_cube, program, query_defs,
-                        diagnostics);
+    // Memoize the per-function callee walk. ``LaunchedKernels`` is consulted
+    // once per launch SITE (not once per function as the pre-dispatch-carrier
+    // code was), and ``DirectCallees`` is a full body traversal — without a
+    // cache two dispatches to the same wrapper would each re-walk it, which is
+    // the nested-scan shape ``pass-complexity.md`` forbids. Both arguments are
+    // loop-invariant for the whole Verify() run, so the walk is pure and safe
+    // to cache; this keeps the verifier O(N) in IR size regardless of how many
+    // dispatches target the same callee.
+    std::unordered_map<const Function*, std::vector<FunctionPtr>> direct_callee_cache;
+    SyncallCache syncall_cache;
+    auto direct_callees_cached = [&](const FunctionPtr& f) -> const std::vector<FunctionPtr>& {
+      auto [it, inserted] = direct_callee_cache.try_emplace(f.get());
+      if (inserted) it->second = DirectCallees(f, program);
+      return it->second;
+    };
+    // Resolve a dispatch's effective launch spec exactly as orchestration
+    // codegen's EffectiveLaunchSpec does: the dispatch's own spec wins, and the
+    // callee's Function attr is only a fallback for a dispatch that carries
+    // none. Validating the Function attr independently would reject a program
+    // codegen compiles correctly — e.g. a legacy Spmd function with
+    // core_num=24 dispatched from a call carrying core_num=48, sync_start=True.
+    auto check_dispatch = [&](const OpPtr& op, const ExprPtr& own_core_num, bool own_sync_start) {
+      if (!op) return;
+      auto callee = program->GetFunction(op->name_);
+      ExprPtr core_num = own_core_num;
+      bool sync_start = own_sync_start;
+      if (!core_num && callee) {
+        core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+        sync_start = callee->GetAttr<bool>(kAttrSyncStart, false);
       }
+      if (!core_num) return;
+      // A legacy Function-level spec predates kAttrSpmdUnwrapped, so classify
+      // its callee the pre-carrier-move way: a Spmd wrapper or ANY Group
+      // launches its own callees. Gating on the marker would demote an old
+      // cluster-unwrapped Group to a mixed kernel and misjudge its occupancy.
+      const bool legacy_spec = !own_core_num && callee;
+      const bool descend = legacy_spec ? (callee->func_type_ == FunctionType::Spmd ||
+                                          callee->func_type_ == FunctionType::Group)
+                                       : IsLaunchWrapper(callee);
+      std::vector<FunctionPtr> kernels;
+      if (!callee) {
+        kernels = {};
+      } else if (descend) {
+        kernels = direct_callees_cached(callee);
+      } else {
+        kernels = {callee};
+      }
+      CheckLaunchSite(core_num, sync_start, kernels, total_vector, total_cube, program, query_defs,
+                      &syncall_cache, diagnostics);
+    };
 
-      // Submit launch sites: pl.spmd_submit(..., core_num=N) carries the block
-      // count on the Submit node itself (a plain pl.submit leaves core_num_ unset).
-      if (!fn->body_) continue;
+    for (const auto& [gv, fn] : program->functions_) {
+      if (!fn || !fn->body_) continue;
+
       CallSubmitCollector collector;
       collector.VisitStmt(fn->body_);
+
+      // Launch sites. A dispatch carries its spec as kAttrCoreNum /
+      // kAttrSyncStart Call attrs (an outlined ``with pl.spmd(...)``) or in the
+      // first-class Submit fields (``pl.spmd_submit``, or an ``as tid`` scope).
+      // A plain call / submit to a callee with no Function-level spec resolves
+      // to nothing and is skipped.
+      for (const auto& call : collector.calls) {
+        check_dispatch(call->op_, call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr),
+                       call->GetAttr<bool>(kAttrSyncStart, false));
+      }
       for (const auto& submit : collector.submits) {
-        if (!submit->core_num_.has_value() || !submit->op_) continue;
-        auto callee = program->GetFunction(submit->op_->name_);
-        if (!callee) continue;
-        CheckLaunchSite(*submit->core_num_, submit->sync_start_, {callee}, total_vector, total_cube, program,
-                        query_defs, diagnostics);
+        check_dispatch(submit->op_, submit->core_num_.value_or(nullptr), submit->sync_start_);
       }
     }
   }
@@ -325,18 +392,19 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
   static void CheckLaunchSite(const ExprPtr& core_num_expr, bool sync_start,
                               const std::vector<FunctionPtr>& callees, int total_vector, int total_cube,
                               const ProgramPtr& program, const LaunchQueryDefCollector& query_defs,
-                              std::vector<Diagnostic>& diagnostics) {
+                              SyncallCache* syncalls, std::vector<Diagnostic>& diagnostics) {
     if (!core_num_expr) return;
     const LaunchWidth width = ClassifyWidth(core_num_expr, query_defs);
     if (width.kind == LaunchWidthKind::Unknown) return;  // opaque launch count — cannot check statically
     for (const auto& callee : callees) {
-      CheckLaunchedKernel(callee, width, sync_start, total_vector, total_cube, program, diagnostics);
+      CheckLaunchedKernel(callee, width, sync_start, total_vector, total_cube, program, syncalls,
+                          diagnostics);
     }
   }
 
   static void CheckLaunchedKernel(const FunctionPtr& kernel, const LaunchWidth& width, bool sync_start,
                                   int total_vector, int total_cube, const ProgramPtr& program,
-                                  std::vector<Diagnostic>& diagnostics) {
+                                  SyncallCache* syncalls, std::vector<Diagnostic>& diagnostics) {
     if (!kernel) return;
 
     // Standalone AIV kernel: 1 block = 1 AIV core. Only an aiv_only barrier is
@@ -344,7 +412,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
     // launch provides. (A dual-AIV-dispatched AIV kernel is a mixed-kernel lane
     // reached via Group, handled by the Group branch — not a standalone launch.)
     if (kernel->func_type_ == FunctionType::AIV && !kernel->HasAttr("dual_aiv_dispatch")) {
-      for (const auto& hs : CollectHardSyncalls(kernel)) {
+      for (const auto& hs : HardSyncallsCached(kernel, syncalls)) {
         if (hs.core_type != "aiv_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "vector-only (AIV)", "CUBE"), hs.span);
@@ -360,7 +428,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
 
     // Standalone AIC kernel: 1 block = 1 AIC core. Symmetric to the AIV case.
     if (kernel->func_type_ == FunctionType::AIC) {
-      for (const auto& hs : CollectHardSyncalls(kernel)) {
+      for (const auto& hs : HardSyncallsCached(kernel, syncalls)) {
         if (hs.core_type != "aic_only") {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0,
                                    UnsatisfiableMessage(hs.core_type, "cube-only (AIC)", "VECTOR"), hs.span);
@@ -390,7 +458,7 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
         if (!sub || (sub->func_type_ != FunctionType::AIC && sub->func_type_ != FunctionType::AIV)) {
           continue;
         }
-        auto hard_syncalls = CollectHardSyncalls(sub);
+        const auto& hard_syncalls = HardSyncallsCached(sub, syncalls);
         if (!hard_syncalls.empty()) {
           diagnostics.emplace_back(DiagnosticSeverity::Error, "HardSyncallOccupancy", 0, *msg,
                                    hard_syncalls.front().span);

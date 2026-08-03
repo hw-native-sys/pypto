@@ -302,11 +302,12 @@ with ib.function("tensor_example") as f:
 | **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
 | - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
 | - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
+| - | `tile.move` | 在 memory space 之间搬移 tile（`target_memory`）—— 见 [tile.move 的结果 view](#tilemove-的结果-view) |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
-| - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat） |
+| - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
 | - | `tile.reinterpret_view` | 以不同 dtype 对完全相同的字节做零拷贝视图；可选 shape 默认按 layout 推导（仅支持紧密、非分形 tile） |
 | - | `tile.transpose` | 交换 tile 的两个轴 |
@@ -317,6 +318,27 @@ with ib.function("tensor_example") as f:
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（DPS：`dst` 为 in/out）。这是 PyPTO codegen 层形式，下降为 `pto.tscatter` 掩码发射 —— **并非**独立的 pto-isa 指令（与 `tile.gather_mask` 不同）。掩码语义见[掩码模式](#掩码模式)。 |
 
 `tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
+
+### tile.move 的结果 view
+
+推导出的结果 `TileView` 按字段分别取值：
+
+| 字段 | 结果值的来源 |
+| ---- | ------------ |
+| `blayout` / `slayout` | 凡目标 space 自带 layout（`Mat`、`Acc`、`Left`、`Right`、`LeftScale`、`RightScale`），取**目标**的 implicit layout；扁平 space（`Vec`、`Bias` 等）则沿用源 tile 的 effective layout。两者都可由 `blayout` / `slayout` kwarg 覆盖 |
+| `fractal` | **目标** space 的分块（boxing）粒度，绝不取源的：`Acc`（L0C，NZ 分形）为 1024，MX scale tile 为 32，其余为 512 |
+| `valid_shape` / `pad` | 从源带过来 |
+| `stride` / `start_offset` | 丢弃 —— 目标是稠密缓冲区 |
+
+layout 来自目标，因为它描述的是目标缓冲区如何分块，由
+`tile_view_semantics::GetImplicitTileLayout` 提供。`Right` 仍需就地覆盖：L0B 要求
+`blayout=row_major`，而 `[N, 1]` 形状的 implicit `blayout` 是 `col_major`。
+
+`tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
+[类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
+implicit view 一致时会折叠为 `nullopt` —— 这与
+[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile
+刷新的 per-space implicit view 是同一套。
 
 ### reshape 与有效区域（valid region）
 

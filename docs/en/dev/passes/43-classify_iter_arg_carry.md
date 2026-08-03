@@ -24,10 +24,11 @@ to a fixed-extent `PTO2TaskId[N]` fence array. `N` is the constant trip count of
 the `pl.parallel` loop that owns the array; a `Sequential` loop threading that
 array through an inner `pl.parallel` inherits the inner extent.
 
-**When to use**: last pass in the `Default` and `DebugTileOptimization`
-strategies, immediately after
-[`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md). Running last
-means the classified IR is exactly the IR codegen lowers.
+**When to use**: in the `Default` strategy, immediately after
+[`MaterializeRuntimeScopes`](42-materialize_runtime_scopes.md) and immediately
+before [`InsertCommFence`](44-insert_comm_fence.md). Running this late means the
+classified IR is exactly the IR codegen lowers — `InsertCommFence` only adds
+InCore fence ops and never touches Orchestration `ForStmt` iter_args.
 
 ## Alias classes
 

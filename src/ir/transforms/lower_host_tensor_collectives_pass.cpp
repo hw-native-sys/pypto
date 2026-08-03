@@ -42,6 +42,27 @@ namespace ir {
 
 namespace {
 
+static constexpr size_t kMaxSupportedRanks = 16;
+
+[[nodiscard]] std::string GetAllReduceMode(const CallPtr& call) {
+  if (call->HasKwarg("mode")) {
+    return call->GetKwarg<std::string>("mode");
+  }
+  if (call->HasAttr("mode")) {
+    return call->GetAttr<std::string>("mode");
+  }
+  return "mesh";
+}
+
+[[nodiscard]] bool ShouldLowerAllReduceAsRing(const CallPtr& call) {
+  // An absent mode kwarg means the default mesh schedule. Never infer the
+  // schedule from the signal shape.
+  const std::string mode = GetAllReduceMode(call);
+  CHECK_SPAN(mode == "ring" || mode == "mesh", call->span_)
+      << R"(pld.tensor.allreduce mode must be "ring" or "mesh", got ")" << mode << "\"";
+  return mode == "ring";
+}
+
 [[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
   if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
   return func->func_type_ == FunctionType::Orchestration ||
@@ -117,6 +138,87 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       << ") must be at least the participating device count (" << required_slots << ")";
 }
 
+void CheckRingChunkConstraints(const CallPtr& call, const ExprPtr& src_expr, size_t world_size) {
+  auto src_type = As<DistributedTensorType>(src_expr->GetType());
+  INTERNAL_CHECK_SPAN(src_type, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce src must be DistributedTensorType";
+  if (src_type->shape_.empty()) return;
+
+  // The ring kernel partitions src into NR contiguous compile-time chunks
+  // (chunk_elems = numel / NR), so the host-ring path requires a
+  // statically-known src shape.  A dynamic extent would let a runtime numel
+  // that is not divisible by NR reach the kernel, which silently returns
+  // unreduced data instead of failing — reject dynamic host-ring extents here.
+  int64_t src_numel = 1;
+  for (const auto& dim : src_type->shape_) {
+    auto extent = As<ConstInt>(dim);
+    CHECK_SPAN(extent, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce requires a statically-known "
+           "src shape (dynamic host-ring extents are not supported; the ring "
+           "schedule partitions src into NR compile-time chunks)";
+    src_numel *= extent->value_;
+  }
+
+  int64_t nr = static_cast<int64_t>(world_size);
+
+  // Divisibility: the host builtin ring schedule partitions data into NR
+  // contiguous chunks of chunk_elems = numel // NR.  A non-divisible numel
+  // would produce a trailing partial chunk that the kernel cannot handle.
+  CHECK_SPAN(src_numel % nr == 0, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce requires the per-rank data size (product of src shape = "
+      << src_numel << ") to be an exact multiple of the rank count (" << nr << "); got a remainder of "
+      << (src_numel % nr);
+}
+
+void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
+  auto signal_type = As<DistributedTensorType>(signal_expr->GetType());
+  INTERNAL_CHECK_SPAN(signal_type, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce signal must be DistributedTensorType";
+  CHECK_SPAN(signal_type->dtype_ == DataType::INT32, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce signal dtype must be INT32, got "
+      << signal_type->dtype_.ToString();
+  CHECK_SPAN(signal_type->shape_.size() == 2, call->span_)
+      << "LowerHostTensorCollectives: ring allreduce signal must be rank-2 [2*(NR-1) + 1, NR], got rank "
+      << signal_type->shape_.size();
+
+  const auto required_rounds = static_cast<int64_t>(2 * (world_size - 1) + 1);
+  auto sig_rounds = As<ConstInt>(signal_type->shape_[0]);
+  if (sig_rounds) {
+    CHECK_SPAN(sig_rounds->value_ >= required_rounds, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce signal shape[0] (" << sig_rounds->value_
+        << ") must be at least 2*(NR-1) + 1 = " << required_rounds << " for NR = " << world_size;
+  }
+  auto sig_nr = As<ConstInt>(signal_type->shape_[1]);
+  if (sig_nr) {
+    CHECK_SPAN(sig_nr->value_ == static_cast<int64_t>(world_size), call->span_)
+        << "LowerHostTensorCollectives: ring allreduce signal shape[1] (" << sig_nr->value_
+        << ") must equal the participating device count (" << world_size << ")";
+  }
+  if (sig_rounds && sig_nr && sig_nr->value_ > 0) {
+    // Exact match mirrors builtin.tensor.allreduce_ring's type deducer so an
+    // internally-inconsistent signal is rejected here with a clear message
+    // instead of failing later at builtin construction.
+    const auto expected_rounds = 2 * (sig_nr->value_ - 1) + 1;
+    CHECK_SPAN(sig_rounds->value_ == expected_rounds, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce signal shape[0] (" << sig_rounds->value_
+        << ") must equal 2*(NR-1) + 1 = " << expected_rounds << " for NR = " << sig_nr->value_;
+  }
+}
+
+void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size) {
+  if (ShouldLowerAllReduceAsRing(call)) {
+    CheckRingSignalCapacity(call, signal_expr, world_size);
+    CHECK_SPAN(world_size <= kMaxSupportedRanks, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce requires " << static_cast<int>(kMaxSupportedRanks)
+        << " or fewer participating devices, got " << world_size;
+    INTERNAL_CHECK_SPAN(call->args_.size() >= 1, call->span_)
+        << "LowerHostTensorCollectives: ring allreduce requires a src arg";
+    CheckRingChunkConstraints(call, call->args_[0], world_size);
+    return;
+  }
+  CheckStaticSignalCapacity(call, signal_expr, world_size);
+}
+
 [[nodiscard]] CallPtr MakeBuiltinCallWithAttrs(const std::string& builtin_name, const CallPtr& call,
                                                const std::vector<ExprPtr>& args,
                                                const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -143,8 +245,13 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
       {"op", op_value},
       {"dtype", src_type->dtype_},
   };
-  return MakeBuiltinCallWithAttrs("builtin.tensor.allreduce", call, call->args_, kwargs, device,
-                                  std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
+  INTERNAL_CHECK_SPAN(call->args_.size() >= 2, call->span_)
+      << "LowerHostTensorCollectives: expected pld.tensor.allreduce to have an explicit signal by the time "
+         "this pass runs";
+  const char* builtin_name =
+      ShouldLowerAllReduceAsRing(call) ? "builtin.tensor.allreduce_ring" : "builtin.tensor.allreduce";
+  return MakeBuiltinCallWithAttrs(builtin_name, call, call->args_, kwargs, device, std::move(attrs),
+                                  {ArgDirection::InOut, ArgDirection::InOut});
 }
 
 [[nodiscard]] CallPtr MakeBuiltinBarrier(const CallPtr& call, const ExprPtr& device) {
@@ -321,7 +428,11 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
                                   const CommDomainScopeStmtPtr& scope, const Span& span,
                                   const std::vector<std::string>& leading_comments) {
   if (!scope->devices_.empty()) {
-    CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
+    if (IsOp(call, "pld.tensor.allreduce")) {
+      CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
+    } else {
+      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
+    }
     std::vector<StmtPtr> stmts;
     stmts.reserve(scope->devices_.size());
     for (auto device : scope->devices_) {

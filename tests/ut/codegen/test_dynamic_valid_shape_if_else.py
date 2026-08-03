@@ -22,7 +22,7 @@ if/else, then performing a single load+fillpad with that computed length:
       vlen = last_valid_len
   else:
       vlen = full_len
-  s_tile = pl.load(..., valid_shapes=[rows, vlen])
+  s_tile = pl.load(..., valid_shape=[rows, vlen])
   s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
 
 The tile buffer type is uniform (same v_row=?, v_col=?, pad=min) regardless
@@ -41,7 +41,7 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 # ---------------------------------------------------------------------------
-# Program 1: Simple if/else with different valid_shapes (no loop)
+# Program 1: Simple if/else with different valid_shape values (no loop)
 # ---------------------------------------------------------------------------
 
 
@@ -68,7 +68,7 @@ class DynValidShapeIfElse:
         else:
             vlen: pl.Scalar[pl.INDEX] = full_len
         s_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-            data, [0, 0], [64, 64], valid_shapes=[64, vlen], target_memory=pl.MemorySpace.Vec
+            data, [0, 0], [64, 64], valid_shape=[64, vlen], target_memory=pl.MemorySpace.Vec
         )
         s_padded: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
         scaled: pl.Tile[[64, 64], pl.FP32] = pl.mul(s_padded, scale)
@@ -108,7 +108,7 @@ class DynValidShapeLoopIfElse:
             else:
                 vlen: pl.Scalar[pl.INDEX] = block_size
             s_tile: pl.Tile[[64, 64], pl.FP32] = pl.load(
-                sij_buf, [i * 64, 0], [64, 64], valid_shapes=[64, vlen], target_memory=pl.MemorySpace.Vec
+                sij_buf, [i * 64, 0], [64, 64], valid_shape=[64, vlen], target_memory=pl.MemorySpace.Vec
             )
             s_padded: pl.Tile[[64, 64], pl.FP32] = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
             scaled: pl.Tile[[64, 64], pl.FP32] = pl.mul(s_padded, scale)
@@ -202,7 +202,7 @@ def test_if_else_dyn_valid_shape_padded_alloc_has_pad_min(if_else_mlir: str):
 
 
 def test_loop_if_else_dyn_valid_shape_compiles(loop_mlir: str):
-    """Verify the loop + if/else pattern with dynamic valid_shapes compiles."""
+    """Verify the loop + if/else pattern with dynamic valid_shape compiles."""
     assert loop_mlir, "Generated MLIR code should not be empty"
 
 

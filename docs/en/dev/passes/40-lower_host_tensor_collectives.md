@@ -29,6 +29,7 @@ For a host-orchestrator call:
 
 ```python
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
 data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
@@ -36,14 +37,24 @@ data = pld.tensor.allgather(stage, data, signal)
 data = pld.tensor.all_to_all(stage, data, signal)
 ```
 
+`pld.tensor.allreduce` dispatches on its `mode` kwarg: the default
+`mode="mesh"` lowers to `builtin.tensor.allreduce`, while `mode="ring"` lowers
+to `builtin.tensor.allreduce_ring`. Any other value is rejected as a user
+error.
+
 For `allgather` / `all_to_all`, `stage` (TPUT source) and `data` (result)
 must be two distinct windows. For `allgather` the `stage` window holds only
 this rank's single chunk and is `[1, SIZE]`; for `all_to_all` it carries one
 per-destination chunk per row and is `[NR, SIZE]`. In both cases `data` is the
 `[NR, SIZE]` result window peers push into.
-the pass emits the corresponding `builtin.tensor.*` dispatch per participating
-device.  When the surrounding comm-domain scope has an explicit device list,
-the pass emits a `SeqStmts`; otherwise it emits a sequential `for r in
+
+The pass emits the corresponding `builtin.tensor.*` dispatch per participating
+device (including `builtin.tensor.allreduce` /
+`builtin.tensor.allreduce_ring`, `builtin.tensor.barrier`,
+`builtin.tensor.broadcast`, `builtin.tensor.reduce_scatter`,
+`builtin.tensor.allgather`, and `builtin.tensor.all_to_all`). When the
+surrounding comm-domain scope has an explicit device list, the pass emits a
+`SeqStmts`; otherwise it emits a sequential `for r in
 pld.system.world_size()` loop.
 
 Each generated builtin call carries the collective-specific args and kwarg
@@ -63,7 +74,21 @@ positive element counts. It processes 256-element chunks and rounds ragged FP16
 and FP32 load spans to 32 bytes without changing the logical tensor shape.
 Its INT32 signal tensor may be rank-1 `[world_size]` or rank-2
 `[world_size, 1]`, with enough static capacity when the participating device
-count is statically known.
+count is statically known. Ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
+`[2 * (NR - 1) + 1, NR]`, whose `shape[0]` must equal `2 * (NR - 1) + 1` when both
+signal dimensions are compile-time constants, and must be at least
+`2 * (NR - 1) + 1` when only `shape[0]` is statically known (no static check when
+both dims are dynamic). When the participating device count is statically known, the signal
+must have enough static capacity. Ring allreduce additionally requires `numel(src) % NR == 0`
+(the ring schedule partitions src into NR contiguous chunks; a non-zero remainder would leave a
+trailing partial chunk the kernel cannot handle). The host-ring `src` shape must be
+statically known — dynamic extents are rejected, since the kernel would otherwise silently
+return unreduced data when the runtime `numel` is not divisible by `NR`.
+
+Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
+`ReduceOp.Max`, `ReduceOp.Min`, `ReduceOp.Prod`, and `FP16` are not yet available
+with `mode="ring"`. Ring allreduce also supports at most 16 participating
+devices (`world_size <= 16`).
 
 ## Pass properties
 

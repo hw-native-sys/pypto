@@ -10,11 +10,11 @@
 """Dynamic valid_shape examples.
 
 Demonstrates a DSL pattern where the valid length of a tile is a runtime
-scalar (caller-provided) and used inside ``pl.load(..., valid_shapes=...)``
+scalar (caller-provided) and used inside ``pl.load(..., valid_shape=...)``
 to bound the active region of the tile, then padded via
 ``pl.tile.fillpad``::
 
-    tile = pl.load(..., valid_shapes=[rows, vlen])   # vlen is a runtime scalar
+    tile = pl.load(..., valid_shape=[rows, vlen])   # vlen is a runtime scalar
     padded = pl.tile.fillpad(tile, pad_value=PadValue.min)
 
 JIT note
@@ -67,7 +67,7 @@ def dyn_valid_shape(
             data,
             [0, 0],
             [Q_TILE, BLOCK_COL],
-            valid_shapes=[Q_TILE, vlen],
+            valid_shape=[Q_TILE, vlen],
             target_memory=pl.MemorySpace.Vec,
         )
         s_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)

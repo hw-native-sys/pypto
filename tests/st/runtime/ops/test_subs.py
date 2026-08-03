@@ -127,7 +127,7 @@ class TileSubsCase(PTOTestCase):
                 src: pl.Tensor[[m, n], dtype],
                 out: pl.InOut[pl.Tensor[[m, n], dtype]],
             ) -> pl.Tensor[[m, n], dtype]:
-                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shapes=valid_shape)
+                src_tile: pl.Tile[[m, n], dtype] = pl.load(src, [0, 0], [m, n], valid_shape=valid_shape)
                 result: pl.Tile[[m, n], dtype] = pl.tile.subs(src_tile, scalar)
                 return pl.store(result, [0, 0], out)
 
@@ -259,7 +259,7 @@ class TileSubsInt32ScalarCase(PTOTestCase):
                 src: pl.Tensor[[32, 64], pl.FP32],
                 out: pl.InOut[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[32, 64], pl.FP32]:
-                src_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(src, [0, 0], [32, 64], valid_shapes=[20, 47])
+                src_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(src, [0, 0], [32, 64], valid_shape=[20, 47])
                 result: pl.Tile[[32, 64], pl.FP32] = pl.tile.subs(src_tile, pl.const(2, pl.INT32))
                 return pl.store(result, [0, 0], out)
 

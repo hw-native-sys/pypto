@@ -10,7 +10,6 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
-import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1350,40 +1349,68 @@ class TypeResolver:
             hint="Use pl.FP32, pl.INT32, or other supported dtype constants",
         )
 
-    def _warn_on_user_facing_dn_layout(self, layout: "ir.TensorLayout", type_name: str) -> None:
-        """Emit a ``DeprecationWarning`` when the user writes the layout-only DN
-        shorthand on a tensor type annotation (RFC #1300 supplementary 1).
+    def _reject_user_facing_dn_layout(
+        self, layout: "ir.TensorLayout", type_name: str, node: ast.expr
+    ) -> None:
+        """Reject the layout-only DN shorthand on a tensor type annotation.
 
-        Suppressed for ``ir.TensorLayout.ND`` (default, no-op marker) and for
-        explicit ``pl.TensorView(stride=..., layout=DN)`` forms (which carry
-        their own stride and don't rely on the shorthand's implicit coordinate
-        flip). Tile-side layouts are never seen here — Tile annotations route
-        through ``_resolve_tile_annotation_args``.
+        Writing ``pl.Tensor[..., pl.DN]`` requires the user to mentally hold two
+        coordinate systems at once (IR-logical post-view vs. runtime row-major),
+        which is exactly the ambiguity RFC #1300 removes — so the shorthand is
+        not accepted. The marker may also arrive through a variable
+        (``MY = ir.TensorLayout.DN; pl.Tensor[[64, 128], pl.FP32, MY]``), so the
+        message quotes the source spelling rather than assuming ``pl.DN``.
+
+        Only the bare layout marker is rejected. ``ir.TensorLayout.ND`` is the
+        default no-op marker, and an explicit ``pl.TensorView(stride=...,
+        layout=DN)`` carries its own stride, so neither relies on the implicit
+        coordinate flip. Tile-side layouts are never seen here — Tile
+        annotations route through ``_resolve_tile_annotation_args``.
+
+        Raises:
+            ParserTypeError: If ``layout`` is ``ir.TensorLayout.DN``
         """
         if layout != ir.TensorLayout.DN:
             return
-        warnings.warn(
-            f"pl.{type_name}[..., pl.DN] is deprecated (RFC #1300 supplementary 1). "
-            "Writing the DN layout-only shorthand requires the user to mentally hold "
-            "two coordinate systems at once (IR-logical post-view vs. runtime "
-            "row-major), which is exactly the ambiguity RFC #1300 aims to eliminate. "
-            "Three migration patterns cover every DN scenario without writing pl.DN:\n"
+        raise ParserTypeError(
+            f"pl.{type_name}[..., {ast.unparse(node)}] is not supported: the DN "
+            "layout-only shorthand forces two coordinate systems (IR-logical "
+            "post-view vs. runtime row-major) onto one annotation",
+            span=self._get_span(node),
+            hint="Three patterns cover every DN scenario without pl.DN:\n"
             "  * source tensor shape, no layout marker: pl.Tensor[[N, K], pl.FP32]\n"
             "  * derive DN at use site: xt = pl.transpose(x, -2, -1)  # ND -> DN\n"
             "  * inherit DN through slice/reshape from a DN-producing op\n"
-            "If you must express a strided-DN view (e.g. canonical pretty-print "
-            "round-trip), use pl.TensorView(stride=[...], layout=pl.TensorLayout.DN) "
-            "instead — it forces explicit stride and avoids the implicit-coord-flip "
-            "hazard.",
-            DeprecationWarning,
-            stacklevel=4,
+            "For a strided-DN view (e.g. canonical pretty-print round-trip), write "
+            "pl.TensorView(stride=[...], layout=pl.TensorLayout.DN) — it forces an "
+            "explicit stride and avoids the implicit-coord-flip hazard.",
         )
 
-    def resolve_layout(self, layout_node: ast.expr) -> "ir.TensorLayout":
+    def _layout_choices_hint(self, dn_allowed: bool) -> str:
+        """Build the "valid layouts" hint for a layout slot.
+
+        A hint has to name only layouts the *failing slot* accepts. A bare
+        tensor-annotation slot rejects DN (see ``_reject_user_facing_dn_layout``),
+        so listing it there would send the user from one error straight into
+        another.
+
+        Args:
+            dn_allowed: Whether DN is legal in the slot being diagnosed
+
+        Returns:
+            Hint text listing the layouts that slot accepts
+        """
+        names = [name for name in self._LAYOUT_MAP if dn_allowed or name != "DN"]
+        return f"Use a valid layout: {', '.join(f'pl.{name}' for name in names)}"
+
+    def resolve_layout(self, layout_node: ast.expr, dn_allowed: bool = True) -> "ir.TensorLayout":
         """Resolve layout annotation to ir.TensorLayout.
 
         Args:
             layout_node: AST node representing layout (e.g., pl.NZ, NZ, or a variable)
+            dn_allowed: Whether the slot being resolved accepts DN. Only shapes the
+                "valid layouts" hint — a resolved DN is rejected by the caller that
+                forbids it, which can explain the migration in context.
 
         Returns:
             TensorLayout enum value
@@ -1392,6 +1419,7 @@ class TypeResolver:
             ParserTypeError: If layout cannot be resolved
         """
         span = self._get_span(layout_node)
+        choices = self._layout_choices_hint(dn_allowed)
 
         if isinstance(layout_node, ast.Attribute):
             layout_name = layout_node.attr
@@ -1400,7 +1428,7 @@ class TypeResolver:
             raise ParserTypeError(
                 f"Unknown layout: {layout_name}",
                 span=span,
-                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                hint=choices,
             )
 
         if isinstance(layout_node, ast.Name):
@@ -1415,19 +1443,19 @@ class TypeResolver:
                 raise ParserTypeError(
                     f"Layout variable '{layout_name}' must be a TensorLayout, got {type(value).__name__}",
                     span=span,
-                    hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                    hint=choices,
                 )
 
             raise ParserTypeError(
                 f"Unknown layout: {layout_name}",
                 span=span,
-                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                hint=choices,
             )
 
         raise ParserTypeError(
             f"Cannot resolve layout: {ast.unparse(layout_node)}",
             span=span,
-            hint="Use pl.ND, pl.DN, pl.NZ, pl.MX_A_ZZ, or pl.MX_B_NN",
+            hint=choices,
         )
 
     def validate_annotation_consistency(
@@ -1552,7 +1580,8 @@ class TypeResolver:
             pl.Tensor[[32, 64], pl.FP32, my_layout]  # my_layout = ir.TensorLayout.NZ
 
         A layout is widened to a stride-less view carrying it, so every form
-        yields a view.
+        yields a view. ``pl.DN`` is the one layout the slot does not accept —
+        see ``_reject_user_facing_dn_layout``.
 
         Args:
             node: AST node in slot 3 of the annotation
@@ -1562,15 +1591,16 @@ class TypeResolver:
             ir.TensorView instance
 
         Raises:
-            ParserTypeError: If the node is neither a tensor view nor a layout
+            ParserTypeError: If the node is neither a tensor view nor a layout,
+                or if it is the bare ``pl.DN`` layout marker
         """
         if self._is_tensorview_node(node):
             return self._resolve_tensorview(node)
         from_var = self._resolve_tensorview_var_ref(node)
         if from_var is not None:
             return from_var
-        layout = self.resolve_layout(node)
-        self._warn_on_user_facing_dn_layout(layout, type_name)
+        layout = self.resolve_layout(node, dn_allowed=False)
+        self._reject_user_facing_dn_layout(layout, type_name, node)
         return ir.TensorView([], layout)
 
     def _resolve_tensorview_var_ref(self, node: ast.expr) -> "ir.TensorView | None":
@@ -2031,6 +2061,25 @@ class TypeResolver:
         if name not in self._base_ptr_cache:
             self._base_ptr_cache[name] = ir.Var(name, ir.PtrType(), span)
         return self._base_ptr_cache[name]
+
+    def interned_base_ptr(self, name: str) -> "ir.Var | None":
+        """Return the Var already interned for a MemRef base name, if any.
+
+        A signature annotation may name a base Ptr that the body allocates
+        further down (``InitMemRef`` does this whenever a Tile parameter lands
+        in a compiler-allocated buffer). The signature is parsed first, so it
+        interns a Var for the name before the allocation is seen; the body's
+        alloc must then bind that *same* Var, or the parameter's MemRef and the
+        allocation stop sharing an allocation identity and pointer-based
+        aliasing (``MemRef.SameAllocation``) silently breaks.
+
+        Args:
+            name: Base Ptr name to look up
+
+        Returns:
+            The interned Var, or None if no annotation has referenced this name
+        """
+        return getattr(self, "_base_ptr_cache", {}).get(name)
 
     def _try_resolve_memref_base(self, node: ast.expr) -> str | None:
         """Try to resolve the first arg of pl.MemRef as a base name.

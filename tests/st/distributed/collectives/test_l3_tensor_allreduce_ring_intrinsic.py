@@ -127,7 +127,7 @@ def _build_ring_allreduce_program(
                     inp,
                     [0, col],
                     [stage_rows, stage_cols],
-                    valid_shapes=[1, valid],
+                    valid_shape=[1, valid],
                 )
                 data_iter = pl.store(local, [0, col], data_iter)
                 staged_data = pl.yield_(data_iter)
@@ -143,7 +143,7 @@ def _build_ring_allreduce_program(
                     data,
                     [0, col],
                     [stage_rows, stage_cols],
-                    valid_shapes=[1, valid],
+                    valid_shape=[1, valid],
                 )
                 out_iter = pl.store(acc, [0, col], out_iter)
                 staged_out = pl.yield_(out_iter)

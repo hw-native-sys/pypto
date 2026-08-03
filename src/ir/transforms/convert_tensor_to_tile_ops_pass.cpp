@@ -657,13 +657,13 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     const auto& shape_arg = call->args_[1];
     const auto& offset_arg = call->args_[2];
-    ExprPtr valid_shapes = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
+    ExprPtr valid_shape = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
 
     // The consumer-driven load is always natural; a transposed (b_trans/a_trans)
     // operand gets a zero-copy tile.transpose_view at the matmul site instead.
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space}};
     auto load_call =
-        MarkCompilerMatBridge(op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
+        MarkCompilerMatBridge(op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shape},
                                                   load_kwargs, call->span_),
                               req.space);
 

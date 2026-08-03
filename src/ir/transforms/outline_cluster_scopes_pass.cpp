@@ -9,16 +9,21 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -26,6 +31,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -35,11 +41,27 @@ namespace pass {
 
 namespace {
 
-/// Unwrap nested Spmd scopes in a Group function body:
-/// Copy core_num/sync_start from the Spmd scope to the Group function's attrs,
-/// then replace the ScopeStmt(Spmd) with its body. core_num is propagated as
+/// SPMD launch spec lifted out of a Group function's nested ``pl.spmd`` scope,
+/// together with the Group it came from (needed to translate the spec back into
+/// caller scope). ``core_num`` is null when the Group had no nested Spmd scope.
+struct SpmdLaunchSpec {
+  ExprPtr core_num;
+  bool sync_start = false;
+  FunctionPtr group;
+  /// Every Var the Group binds (params + body definitions). ``core_num`` must
+  /// reference none of them once translated into caller scope — see
+  /// ``LaunchSpecStamper::ToCallerScope``.
+  std::unordered_set<const Var*> callee_bound;
+};
+
+/// Unwrap a nested Spmd scope in a Group function body: replace the
+/// ScopeStmt(Spmd) with its body and hand the launch spec back to the caller,
+/// which attaches it to the Group's DISPATCH.
+///
+/// The spec must not stay on the Group (see ``kAttrCoreNum``); what does stay is
+/// the self-contained ``kAttrSpmdUnwrapped`` marker. core_num is propagated as
 /// an ExprPtr — codegen is responsible for evaluating it.
-FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
+FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func, SpmdLaunchSpec* spec_out) {
   class SpmdUnwrapper : public IRMutator {
    public:
     ExprPtr core_num;
@@ -83,12 +105,115 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
 
   auto mutable_func = MutableCopy(group_func);
   mutable_func->body_ = new_body;
-  mutable_func->attrs_.emplace_back("core_num", unwrapper.core_num);
-  if (unwrapper.sync_start.has_value() && *unwrapper.sync_start) {
-    mutable_func->attrs_.emplace_back("sync_start", true);
-  }
+  // Mark the Group as a launch wrapper: dispatching it launches the kernels its
+  // body calls, not the Group itself as a mixed kernel. Self-contained bool —
+  // unlike core_num it references nothing outside this function.
+  mutable_func->attrs_.emplace_back(kAttrSpmdUnwrapped, true);
+  spec_out->core_num = unwrapper.core_num;
+  spec_out->sync_start = unwrapper.sync_start.value_or(false);
   return mutable_func;
 }
+
+/// Attach each unwrapped Group's launch spec to the dispatch that calls it.
+///
+/// The spec is lifted from *inside* the Group, so its Vars are the Group's
+/// params — the cluster outliner already captured the caller's scalars as
+/// params. Translating them back through the dispatch's args (identity mapping,
+/// ``params_[i] <-> args_[i]``) is what makes the attr reference Vars that are
+/// actually live at the call site; without it the printer would emit a
+/// ``__FREE_VAR``-marked name that no scope binds.
+///
+/// Handles ``Submit`` as well as ``Call`` (a ``with pl.cluster() as tid`` scope
+/// outlines to a Submit) — the Submit carries the spec in its first-class
+/// fields, per pass-submit-awareness.
+class LaunchSpecStamper : public IRMutator {
+ public:
+  explicit LaunchSpecStamper(const std::unordered_map<std::string, SpmdLaunchSpec>& specs) : specs_(specs) {}
+
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    auto resolved = Resolve(call, call ? call->args_ : std::vector<ExprPtr>{});
+    if (!resolved) return visited;
+    auto attrs = call->attrs_;
+    attrs.emplace_back(kAttrCoreNum, resolved->first);
+    if (resolved->second) attrs.emplace_back(kAttrSyncStart, true);
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                        call->GetType(), call->span_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto submit = As<Submit>(visited);
+    auto resolved = Resolve(submit, submit ? submit->args_ : std::vector<ExprPtr>{});
+    if (!resolved) return visited;
+    return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                          submit->attrs_, submit->GetType(), submit->span_,
+                                          std::optional<ExprPtr>(resolved->first), resolved->second,
+                                          submit->allow_early_resolve_, submit->predicate_);
+  }
+
+ private:
+  /// Shared Call/Submit prologue: does this dispatch target an unwrapped Group,
+  /// and if so what is its launch spec in THIS caller's Var space?
+  template <typename NodePtr>
+  [[nodiscard]] std::optional<std::pair<ExprPtr, bool>> Resolve(const NodePtr& node,
+                                                                const std::vector<ExprPtr>& args) const {
+    if (!node || !node->op_) return std::nullopt;
+    auto it = specs_.find(node->op_->name_);
+    if (it == specs_.end()) return std::nullopt;
+    return std::make_pair(ToCallerScope(it->second, args), it->second.sync_start);
+  }
+
+  /// Rewrite the callee-scoped ``core_num`` into the caller's Var space via the
+  /// dispatch's positional args. ``Submit::args_`` may be a prefix of
+  /// ``params_`` (pass-submit-awareness rule 5), so bound by the arg count.
+  [[nodiscard]] static ExprPtr ToCallerScope(const SpmdLaunchSpec& spec, const std::vector<ExprPtr>& args) {
+    // Every entry in specs_ is built with its Group attached. Falling back to
+    // the un-translated expression here would silently re-introduce the very
+    // defect this carrier move fixes — a dispatch attr naming a Var bound only
+    // in the callee — so treat a missing Group as the compiler bug it is.
+    INTERNAL_CHECK(spec.group) << "Internal error: launch spec for an unwrapped Group has no Group "
+                                  "attached; core_num cannot be translated into caller scope";
+    const auto& params = spec.group->params_;
+    std::unordered_map<const Var*, ExprPtr> param_to_arg;
+    const size_t n = std::min(params.size(), args.size());
+    for (size_t i = 0; i < n; ++i) {
+      if (params[i] && args[i]) param_to_arg.emplace(params[i].get(), args[i]);
+    }
+    // No mapping to apply — a param-less Group, or a constant core_num that
+    // references nothing. Substitution would be a no-op either way.
+    auto translated =
+        param_to_arg.empty() ? spec.core_num : transform_utils::Substitute(spec.core_num, param_to_arg);
+    RejectCalleeBoundCoreNum(spec, translated);
+    return translated;
+  }
+
+  /// The dispatch's args can only recover a count the cluster *captured* from
+  /// the caller. A count bound by a statement INSIDE ``pl.cluster()`` has no
+  /// corresponding arg, so it would be stamped onto the dispatch still naming a
+  /// Var only the callee binds — the closed-scope violation this carrier move
+  /// exists to remove, reappearing at the call site. Reject it with an
+  /// actionable message instead of emitting an unbound name.
+  static void RejectCalleeBoundCoreNum(const SpmdLaunchSpec& spec, const ExprPtr& translated) {
+    if (spec.callee_bound.empty() || !translated) return;
+    outline_utils::VarDefUseCollector uses;
+    uses.VisitExpr(translated);
+    for (const auto* used : uses.var_uses) {
+      CHECK_SPAN(spec.callee_bound.count(used) == 0, spec.group->span_)
+          << "pl.spmd() block count references '" << used->name_hint_
+          << "', which is defined inside the enclosing pl.cluster(). The block count is evaluated at "
+             "the cluster's launch site, so it must be computed before `with pl.cluster():` and "
+             "captured, e.g.\n"
+             "    n = pl.system.available_cluster_count()\n"
+             "    with pl.cluster():\n"
+             "        with pl.spmd(n):";
+    }
+  }
+
+  const std::unordered_map<std::string, SpmdLaunchSpec>& specs_;
+};
 
 }  // namespace
 
@@ -107,7 +232,8 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
  * 1. Outline ScopeStmt(Cluster) into Function(Group) (first pass)
  * 2. Outline standalone ScopeStmt(Spmd) into Function(Spmd) (second pass)
  * 3. For nested Spmd inside Cluster: unwrap the Spmd scope and propagate
- *    core_num/sync_start as function attrs on the Group
+ *    core_num/sync_start onto the Group's dispatch (only the self-contained
+ *    spmd_unwrapped marker stays on the Group)
  * 4. Parent function type is preserved (not promoted)
  */
 Pass OutlineClusterScopes() {
@@ -146,7 +272,33 @@ Pass OutlineClusterScopes() {
           ScopeKind::Cluster, FunctionType::Group, "_cluster_", program, reserved_func_names);
       auto body_after_cluster = cluster_outliner.VisitStmt(func->body_);
 
-      const auto& cluster_outlined = cluster_outliner.GetOutlinedFunctions();
+      // Unwrap a ``pl.spmd`` nested inside each freshly outlined Group and move
+      // its launch spec onto the dispatch the outliner just synthesised in THIS
+      // body. Done here rather than in a trailing program-wide sweep because
+      // that is the only point where the dispatch is still reachable.
+      auto cluster_outlined = cluster_outliner.GetOutlinedFunctions();
+      std::unordered_map<std::string, SpmdLaunchSpec> group_launch_specs;
+      for (auto& outlined : cluster_outlined) {
+        if (!outlined || outlined->func_type_ != FunctionType::Group) continue;
+        SpmdLaunchSpec spec;
+        outlined = UnwrapNestedSpmd(outlined, &spec);
+        if (!spec.core_num) continue;
+        spec.group = outlined;
+        // Snapshot what the Group binds once, so the per-dispatch scope check
+        // below is a hash lookup rather than a re-walk of the body.
+        for (const auto& param : outlined->params_) {
+          if (param) spec.callee_bound.insert(param.get());
+        }
+        outline_utils::VarDefUseCollector group_defs;
+        if (outlined->body_) group_defs.VisitStmt(outlined->body_);
+        spec.callee_bound.insert(group_defs.var_defs.begin(), group_defs.var_defs.end());
+        group_launch_specs.emplace(outlined->name_, std::move(spec));
+      }
+      if (!group_launch_specs.empty()) {
+        LaunchSpecStamper stamper(group_launch_specs);
+        body_after_cluster = stamper.VisitStmt(body_after_cluster);
+      }
+
       all_outlined_functions.insert(all_outlined_functions.end(), cluster_outlined.begin(),
                                     cluster_outlined.end());
 
@@ -182,13 +334,6 @@ Pass OutlineClusterScopes() {
       auto new_func = MutableCopy(func);
       new_func->body_ = body_after_spmd;
       new_functions.push_back(new_func);
-    }
-
-    // Unwrap nested Spmd scopes in Group functions (Spmd inside Cluster case)
-    for (auto& func : all_outlined_functions) {
-      if (func->func_type_ == FunctionType::Group) {
-        func = UnwrapNestedSpmd(func);
-      }
     }
 
     // Add all outlined functions before the originals

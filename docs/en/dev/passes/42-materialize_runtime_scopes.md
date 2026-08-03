@@ -40,9 +40,11 @@ lets the output round-trip: the inserted `with pl.scope()` blocks parse back onl
 under `auto_scope=False` (the parser rejects hand-placed AUTO scopes in the
 default mode, where the compiler owns placement).
 
-**When to use**: last pass in the `Default` and `DebugTileOptimization`
-strategies, after the final `Simplify`. Running dead last means no other
-transform has to reason about the inserted scope wrappers.
+**When to use**: in the `Default` strategy, immediately after the final
+`Simplify` and before
+[`ClassifyIterArgCarry`](43-classify_iter_arg_carry.md) and
+[`InsertCommFence`](44-insert_comm_fence.md). Running after every rewriting
+transform means none of them has to reason about the inserted scope wrappers.
 
 **Scope**: only `Orchestration` functions are modified. InCore / AIC / AIV /
 Group / Spmd bodies are never scope-wrapped by codegen, so they are returned
@@ -134,3 +136,5 @@ preservation, AUTO-in-default rejection) and
 | Required | `SplitIncoreOrch`, `CallDirectionsResolved` |
 | Produced | `RuntimeScopesMaterialized` |
 | Invalidated | — |
+
+`RuntimeScopesMaterialized` is enforced by a registered property verifier (see [IR Verifier](99-verifier.md)); orchestration codegen is a codegen-entry consumer.

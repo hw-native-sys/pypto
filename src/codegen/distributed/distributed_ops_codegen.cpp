@@ -222,23 +222,43 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_window, "pld.tensor.window") {
 // ============================================================================
 // builtin.tensor.allreduce: compiler-generated host collective chip dispatch.
 // ============================================================================
-REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce, "builtin.tensor.allreduce") {
-  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
-  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce codegen requires DistributedCodegen";
+
+std::string EmitAllReduceLikeDispatch(DistributedCodegen& dist_codegen, const CallPtr& op,
+                                      bool include_reduce_inst) {
   const int reduce_op = op->GetAttr<int>("op");
   const auto dtype = op->GetAttr<DataType>("dtype");
   const auto reduce_variant = GetAllReduceOpVariant(reduce_op);
   const auto dtype_variant = GetAllReduceDTypeVariant(dtype);
   const std::string variant = op->op_->name_ + "__" + reduce_variant.suffix + "__" + dtype_variant.suffix;
 
-  if (dist_codegen->MarkBuiltinEmitted(variant)) {
-    dist_codegen->RecordBuiltinNextLevel(op, variant,
-                                         {{"op_cpp", reduce_variant.cpp},
-                                          {"reduce_inst", reduce_variant.instruction},
-                                          {"dtype_cpp", dtype_variant.cpp}});
+  if (dist_codegen.MarkBuiltinEmitted(variant)) {
+    if (include_reduce_inst) {
+      dist_codegen.RecordBuiltinNextLevel(op, variant,
+                                          {{"op_cpp", reduce_variant.cpp},
+                                           {"reduce_inst", reduce_variant.instruction},
+                                           {"dtype_cpp", dtype_variant.cpp}});
+    } else {
+      dist_codegen.RecordBuiltinNextLevel(op, variant,
+                                          {{"op_cpp", reduce_variant.cpp}, {"dtype_cpp", dtype_variant.cpp}});
+    }
   }
-  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  EmitBuiltinWindowCollectiveDispatch(dist_codegen, op, variant);
   return "";
+}
+
+REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce, "builtin.tensor.allreduce") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce codegen requires DistributedCodegen";
+  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/true);
+}
+
+// ============================================================================
+// builtin.tensor.allreduce_ring: host ring allreduce chip dispatch.
+// ============================================================================
+REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce_ring, "builtin.tensor.allreduce_ring") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce_ring codegen requires DistributedCodegen";
+  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/false);
 }
 
 // ============================================================================

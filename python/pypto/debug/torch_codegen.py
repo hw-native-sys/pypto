@@ -446,9 +446,9 @@ def _pad_scalar(tensor, pad_mode):
     iinfo = torch.iinfo(tensor.dtype)
     return iinfo.min if pad_mode == "min" else iinfo.max
 
-def _mask_valid_region(tensor, shapes, valid_shapes):
+def _mask_valid_region(tensor, shapes, valid_shape):
     shapes_t = _coerce_shape(shapes)
-    valid_t = _coerce_shape(valid_shapes) if valid_shapes is not None else None
+    valid_t = _coerce_shape(valid_shape) if valid_shape is not None else None
     if valid_t is not None:
         if valid_t != shapes_t:
             masked = tensor.new_zeros(shapes_t)
@@ -459,7 +459,7 @@ def _mask_valid_region(tensor, shapes, valid_shapes):
         tensor._pypto_full_shape = shapes_t
     return tensor
 
-def _tile_load(tensor, offsets, shapes, valid_shapes=None):
+def _tile_load(tensor, offsets, shapes, valid_shape=None):
     offsets_t = _coerce_shape(offsets)
     shapes_t = _coerce_shape(shapes)
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
@@ -471,8 +471,8 @@ def _tile_load(tensor, offsets, shapes, valid_shapes=None):
         pad_slices = tuple(slice(0, s) for s in actual_shape)
         padded[pad_slices] = tile
         tile = padded
-    # Use provided valid_shapes or fall back to the physical boundary; cap by actual data bounds.
-    v_shape = _coerce_shape(valid_shapes) if valid_shapes is not None else actual_shape
+    # Use provided valid_shape or fall back to the physical boundary; cap by actual data bounds.
+    v_shape = _coerce_shape(valid_shape) if valid_shape is not None else actual_shape
     v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
     return _mask_valid_region(tile, shapes_t, v_shape)
 
@@ -487,7 +487,7 @@ def _tile_store(tile, offsets, output_tensor, atomic=0):
         output_tensor[slices] = tile[valid_slices]
     return output_tensor
 
-def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
+def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
     offsets_t = _coerce_shape(offsets)
     shapes_t = _coerce_shape(shapes)
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
@@ -499,8 +499,8 @@ def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
         pad_slices = tuple(slice(0, s) for s in sliced.shape)
         padded[pad_slices] = sliced
         sliced = padded
-    if valid_shapes is not None:
-        sliced._pypto_valid_shape = _coerce_shape(valid_shapes)
+    if valid_shape is not None:
+        sliced._pypto_valid_shape = _coerce_shape(valid_shape)
         sliced._pypto_full_shape = shapes_t
     return sliced
 
@@ -638,7 +638,7 @@ def _kw_dtype(kw: dict[str, Any]) -> str:
 
 
 def _handle_tile_load(a: list[str], kw: dict[str, Any]) -> str:
-    # args: [tensor, offsets_tuple, shapes_tuple, valid_shapes_tuple]
+    # args: [tensor, offsets_tuple, shapes_tuple, valid_shape_tuple]
     return f"_tile_load({a[0]}, {a[1]}, {a[2]}, {a[3]})"
 
 
@@ -662,7 +662,7 @@ def _handle_cmp(a: list[str], kw: dict[str, Any]) -> str:
 
 
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
-    # args: [tensor, shapes, offsets] or [tensor, shapes, offsets, valid_shapes]
+    # args: [tensor, shapes, offsets] or [tensor, shapes, offsets, valid_shape]
     if len(a) >= 4:
         return f"_tensor_slice({a[0]}, {a[2]}, {a[1]}, {a[3]})"
     return f"_tensor_slice({a[0]}, {a[2]}, {a[1]})"

@@ -121,7 +121,13 @@ pipe 大小，不标注任何拆分。该检查在更早的
 | -------- | ---- |
 | （传递地）消费了 `tile.aiv_shard` 的结果 | 依构造即处于 half-width 数据流中。 |
 | 纯生成算子——`tile.full` / `tile.ci` / `tile.random`（以及 `tile.create`，它归类为 `SHARED`，本就不会被报告） | 其结果仅是自身属性的函数：不读取任何 tile、不读取内存，因此无论作者写的是什么 extent，per-lane 复制都是正确的。 |
-| 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract`——且其**地址参数**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个）——出现在 `shape` 或 `valid_shape` 中的 lane 引用并不会移动窗口，因此不予接受。 |
+| 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row`——且其**读地址**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅读偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个、`tile.gather_row` 第 3 个即 `src_offset`）——出现在 `shape`、`valid_shape` 或**目的**槽位中的 lane 引用并不会移动窗口，因此不予接受。 |
+
+`tile.gather_row` 是其中的 DMA 情形：它是 DPS，因此带有**两个**偏移，而只有 `src_offset`
+决定两个 lane 是否在做不同的工作。`src_offset` 由 lane 派生意味着每个 lane 各自拉取属于自己
+的散列 GM 行（接受）；若 `src_offset` 与 lane 无关而只有 `dst_offset` 由 lane 派生，则两个
+lane 会把**相同**的行取到同一个全宽累加器的不同槽位（仍会被报告）。参见下文"per-lane 散列
+gather"。
 
 其余归类为 `VECTOR` 的算子都会被报告。有两点需要注意：
 
@@ -139,6 +145,40 @@ pipe 大小，不标注任何拆分。该检查在更早的
 由于区域经由通用的 `BeginScope`/`EndScope` 构建且不被提取，它可**嵌套**在 `pl.range` /
 `pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句，找到并下降每个区域，同时保留
 外围控制流。
+
+### Per-lane 散列 gather
+
+`pl.gather_row` 是唯一能按任意**运行时**偏移读取 GM 的算子，因此它正是把 paged / top-k 行
+集合切分到两个 AIV lane 上的手段——每个 lane 在 UB 中组装 tile 的一半，再由
+`pl.aic_gather` 把重组后的 tile 交给 cube：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
+           optimizations=[pl.cross_core_slot(slot_num=2)]):     # see the ring note below
+    for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+        ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
+        for k in pl.range(64):
+            src = pl.cast(pl.read(idx, [aiv * 64 + k]), pl.INDEX)
+            ub = pl.gather_row(ub, pool, [k, 0], [src, 0], [1, 512])   # lane-derived src_offset
+        kv = pl.aic_gather(ub)                                  # V2C -> [128, 512] in Mat
+    out[0:16, 0:128] = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+```
+
+有两条编写规则使其成立：
+
+- **累加器按半 extent 编写。** `pl.full` 是生成算子，因此无论给它什么 extent 都会被接受，而它
+  本身不会加入 half-width 数据流。gather 是凭其由 lane 派生的 `src_offset` 被接受的；该校验
+  证明的是**意图**而非**范围**，所以此处若写成全 extent 的累加器，gather 回来就会变成
+  `2 x FULL` 并在下游产生形状不匹配。
+- **设置跨核 ring 的大小。** V2C ring 会在消费侧核的内存中预留 `slot_size x slot_num` 字节
+  （V2C 为 L1，C2V 为 UB），其中 `slot_size` 是消费方弹出的**完整** tile——此处为
+  `128 x 512 x 2 = 131072`——而 `slot_num` 对单向流水默认取 **8**。这相当于在 512 KB 的 L1
+  中占用 1 MB，因此默认深度无法表达这种形状；用 `pl.cross_core_slot(slot_num=N)` 调低即可。
+  每次调用只 push 一次的 kernel 至多需要 2。若省略该项，`AllocateMemoryAddr` 会报告溢出并
+  指出被预留的字节数。
+
+注意 `pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
+`Acc`（cube 产出），因此无法对 vector lane 自己产生的值做切分。
 
 ### 区域必须不被 scope 包裹
 

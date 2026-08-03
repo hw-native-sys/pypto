@@ -51,8 +51,8 @@ class TileFmodProgram:
         rhs: pl.Tensor[[M, N], pl.FP32],
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
-        rhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(rhs, [0, 0], [M, N], valid_shapes=[M, N])
+        lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shape=[M, N])
+        rhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(rhs, [0, 0], [M, N], valid_shape=[M, N])
         out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.fmod(lhs_tile, rhs_tile)
         out = pl.store(out_tile, [0, 0], out)
         return out
@@ -79,7 +79,7 @@ def _make_tile_fmods_program(scalar: float):
             lhs: pl.Tensor[[M, N], pl.FP32],
             out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
         ) -> pl.Tensor[[M, N], pl.FP32]:
-            lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
+            lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shape=[M, N])
             out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.fmods(lhs_tile, scalar)
             out = pl.store(out_tile, [0, 0], out)
             return out

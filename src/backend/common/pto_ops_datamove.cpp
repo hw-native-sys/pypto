@@ -430,7 +430,7 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
   // GM source window -> partition_view, then tload into the subview. The
   // partition carries the *transfer extent*, not the static window — same as
   // tile.load, which likewise builds its partition type and sizes from
-  // valid_shapes. GetDimStrings renders a non-ConstInt extent as `?`, which
+  // valid_shape. GetDimStrings renders a non-ConstInt extent as `?`, which
   // TLoadOp::verify accepts on the src partition shape.
   //
   // Narrowing the partition is LOAD-BEARING, not tidiness: on a2a3 the GM->L1

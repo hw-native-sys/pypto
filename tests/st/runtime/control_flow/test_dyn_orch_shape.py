@@ -21,9 +21,9 @@ Scenarios:
 - Scenario 1 — fully dynamic MxN orch: both InCore and orchestration use
   ``pl.Tensor[[M, N], pl.FP32]``; validates ``from_task_arg()`` for
   external tensors with no static shape information in the orch signature.
-- Scenario 2 — dynamic orch + valid_shapes scalars: orchestration uses MxN
+- Scenario 2 — dynamic orch + valid_shape scalars: orchestration uses MxN
   dims; m, n scalars are read from an INT64 tensor via ``pl.tensor.read`` and
-  forwarded to the InCore kernel as valid_shapes.
+  forwarded to the InCore kernel as valid_shape.
 - Scenario 3 — mixed dynamic M / static cols: orchestration uses
   ``pl.Tensor[[M, cols], pl.FP32]`` (M dynamic, cols=16 static); InCore reads
   M via ``pl.tensor.dim`` and iterates in pairs.
@@ -291,7 +291,7 @@ class DynOrchTransposeAddTestCase(PTOTestCase):
 
 
 class DynOrchValidShapeAddTestCase(PTOTestCase):
-    """Test add with dynamic M×N orchestration and valid_shapes from a scalar tensor.
+    """Test add with dynamic M×N orchestration and valid_shape from a scalar tensor.
 
     Orchestration params a, b, c use dynamic M×N dims.  The scalars m, n are
     read at runtime from the INT64 tensor ``vs`` via ``pl.tensor.read``, which
@@ -346,9 +346,9 @@ class DynOrchValidShapeAddTestCase(PTOTestCase):
                 m: pl.Scalar[pl.INDEX],
                 n: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                """Add two tiles with dynamic valid_shapes [m, n]."""
-                a_tile = pl.load(a, [0, 0], [rows, cols], valid_shapes=[m, n])
-                b_tile = pl.load(b, [0, 0], [rows, cols], valid_shapes=[m, n])
+                """Add two tiles with dynamic valid_shape [m, n]."""
+                a_tile = pl.load(a, [0, 0], [rows, cols], valid_shape=[m, n])
+                b_tile = pl.load(b, [0, 0], [rows, cols], valid_shape=[m, n])
                 result = pl.add(a_tile, b_tile)
                 out = pl.store(result, [0, 0], c)
                 return out
@@ -371,7 +371,7 @@ class DynOrchValidShapeAddTestCase(PTOTestCase):
     def compute_expected(self, tensors, params=None):
         vr = int(tensors["vs"][0])
         vc = int(tensors["vs"][1])
-        # Only c[:vr, :vc] is written (valid_shapes-bounded store); outside that
+        # Only c[:vr, :vc] is written (valid_shape-bounded store); outside that
         # region is undefined-by-design -> mark NaN so validate_golden skips it.
         tensors["c"][:] = float("nan")
         tensors["c"][:vr, :vc] = tensors["a"][:vr, :vc] + tensors["b"][:vr, :vc]
@@ -782,7 +782,7 @@ class TestDynOrchShapeOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((32, 32), (16, 16))])
     def test_dyn_orch_valid_shape_add(self, test_runner, shape, valid_shape, platform):
-        """Test add with dynamic M x N orchestration and valid_shapes from INT64 tensor."""
+        """Test add with dynamic M x N orchestration and valid_shape from INT64 tensor."""
         result = test_runner.run(DynOrchValidShapeAddTestCase(shape, valid_shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 

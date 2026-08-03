@@ -13,7 +13,7 @@ Runtime tests for dynamic shape kernels using the PyPTO frontend with PTO backen
 Three scenarios are covered, each parametrized over [(128, 128)]:
 - Dynamic M×N tensor shape dims: trailing index args in codegen, resolved at runtime
   from the concrete input tensors passed by the orchestration function.
-- Static R×C tensors with M, N scalar valid_shapes: shape baked in via closure
+- Static R×C tensors with M, N scalar valid_shape: shape baked in via closure
   variables captured by @pl.function; M and N read via pl.tensor.dim.
 - Dynamic M dim with scf.for loop (step=2, tile rows=2): col count from shape param.
 
@@ -105,11 +105,11 @@ class DynShapeAddTestCase(PTOTestCase):
 
 
 class ValidShapeAddTestCase(PTOTestCase):
-    """Test add kernel with static tensors where valid_shapes are read from an input tensor.
+    """Test add kernel with static tensors where valid_shape is read from an input tensor.
 
     Shape (rows, cols) is the full tile size; valid_shape (valid_rows, valid_cols)
     is the live data region passed at runtime via a [2] INT64 tensor. The kernel
-    loads with valid_shapes=[m, n] so elements outside the valid region are zero.
+    loads with valid_shape=[m, n] so elements outside the valid region are zero.
     Expected result: c[:valid_rows, :valid_cols] = a + b, c elsewhere = 0.
     """
 
@@ -158,9 +158,9 @@ class ValidShapeAddTestCase(PTOTestCase):
                 m: pl.Scalar[pl.INDEX],
                 n: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                """Add two tiles with dynamic valid_shapes [m, n]."""
-                a_tile = pl.load(a, [0, 0], [rows, cols], valid_shapes=[m, n])
-                b_tile = pl.load(b, [0, 0], [rows, cols], valid_shapes=[m, n])
+                """Add two tiles with dynamic valid_shape [m, n]."""
+                a_tile = pl.load(a, [0, 0], [rows, cols], valid_shape=[m, n])
+                b_tile = pl.load(b, [0, 0], [rows, cols], valid_shape=[m, n])
                 result = pl.add(a_tile, b_tile)
                 out = pl.store(result, [0, 0], c)
                 return out
@@ -183,7 +183,7 @@ class ValidShapeAddTestCase(PTOTestCase):
     def compute_expected(self, tensors, params=None):
         vr = tensors["valid_shape"][0]
         vc = tensors["valid_shape"][1]
-        # Only c[:vr, :vc] is written (valid_shapes-bounded store); outside that
+        # Only c[:vr, :vc] is written (valid_shape-bounded store); outside that
         # region is undefined-by-design -> mark NaN so validate_golden skips it.
         tensors["c"][:] = float("nan")
         tensors["c"][:vr, :vc] = tensors["a"][:vr, :vc] + tensors["b"][:vr, :vc]
@@ -277,7 +277,7 @@ class TestDynamicShapeOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((128, 128), (64, 64))])
     def test_valid_shape_add(self, test_runner, shape, valid_shape, platform):
-        """Test add with static tensors and valid_shapes read from an input tensor."""
+        """Test add with static tensors and valid_shape read from an input tensor."""
         result = test_runner.run(ValidShapeAddTestCase(shape, valid_shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 

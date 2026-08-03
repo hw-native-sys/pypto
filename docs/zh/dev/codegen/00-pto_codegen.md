@@ -105,16 +105,16 @@ class MyKernel:
         tile_c = pl.add(tile_a, tile_b)
         pl.store(tile_c, [0, 0], a)
 
-# Compile with PTO backend and DebugTileOptimization (debug only)
+# Compile with PTO backend
 output_dir = compile(
     MyKernel,
-    strategy=OptimizationStrategy.DebugTileOptimization,
+    strategy=OptimizationStrategy.Default,
     backend_type=BackendType.Ascend910B,
 )
 ```
 
 `compile()` 函数会自动应用选定的优化策略, 并根据 `backend_type` 调用相应的代码生成器。
-正常的 PTO 编译应使用 `Default`；`DebugTileOptimization` 只用于调试 pass 流水线。
+`Default` 是唯一的优化策略。
 
 ### 直接访问代码生成器
 
@@ -521,7 +521,7 @@ tile_c = pl.mul(tile_a, tile_b)
   v_col=32,            // Virtual column size (= cols)
   blayout=row_major,   // Block layout (from TileView, default: row_major)
   slayout=none_box,    // Scatter layout (from TileView, default: none_box)
-  fractal=512,         // Fractal size (from TileView, default: 512)
+  fractal=512,         // Fractal size in bytes, not elements (from TileView, default: 512)
   pad=0                // Pad mode as int (from TileView, default: 0/null)
 >
 ```

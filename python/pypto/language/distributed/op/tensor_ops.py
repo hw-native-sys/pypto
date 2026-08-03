@@ -193,7 +193,7 @@ def alloc_window_buffer(  # type: ignore[no-redef]
     * **Shape+dtype convenience overload:**
       ``alloc_window_buffer(shape, *, dtype=..., name=...)`` — ``shape`` is a
       list / tuple of per-rank dimensions.  The byte size is computed
-      automatically as ``product(shape) × dtype.get_byte()`` and the call
+      automatically as ``product(shape) x dtype.get_byte()`` and the call
       normalizes to the canonical byte form.  ``dtype`` is required when
       ``shape`` is a sequence and rejected otherwise.
 
@@ -219,6 +219,17 @@ def alloc_window_buffer(  # type: ignore[no-redef]
         binds it to the LHS as a plain :class:`ir.Var`; passing that Var
         through :func:`window` materialises a :class:`DistributedTensor`
         view.
+
+    .. note::
+
+       This function is callable only inside HOST-level orchestration
+       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
+       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+
+    .. seealso::
+
+       :func:`window` for creating typed DistributedTensor views over an
+       allocated buffer.
 
     Raises:
         ValueError: If ``name`` is empty (the parser must have injected it).
@@ -274,6 +285,11 @@ def window(
 
     Returns:
         A :class:`DistributedTensor` view of the given shape and dtype.
+
+    .. seealso::
+
+       :func:`alloc_window_buffer` for the two-phase ``alloc → window`` pattern.
+
     """
     buf_expr = _unwrap(buf)
     if not isinstance(buf_expr, Expr):
@@ -519,10 +535,36 @@ def allreduce(
         pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum)
         pub = pld.tensor.allreduce(pub, sig, op=pld.ReduceOp.Sum, mode="ring")
 
+        # Mesh mode on the host orchestrator can omit the signal argument:
+        pub = pld.tensor.allreduce(pub, op=pld.ReduceOp.Sum)
+
+    **Signal shape:** host builtins accept rank-1 ``[world_size]`` or rank-2
+    ``[world_size, 1]`` (the compiler-synthesized signal is rank-2). InCore
+    composites take rank-2 ``[nranks, 1]`` for mesh -- the rank count may be
+    dynamic -- and ``[2*(NR-1), NR]`` for ring, where ``NR`` must be a
+    compile-time constant. Both are single-shot per call.
+
+    **Do not reuse the same signal buffer for a back-to-back allreduce**
+    — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
+    for each allreduce call. All allreduce calls in ``for`` and ``while``
+    loops are rejected because the current signal protocol cannot provide a
+    fresh signal for every dynamic iteration. A self-resetting variant is
+    blocked on a runtime fix — tracked in #2156 (that issue's affected areas
+    currently list allgather / reduce_scatter / all_to_all / all_to_all_v;
+    allreduce is not listed there yet but hits the identical signal-lifetime
+    constraint, using ``AtomicAdd(1)``/``WaitGe(1)``).
+
+    .. seealso::
+
+        :func:`alloc_window_buffer` and :func:`window` for buffer allocation
+        and view creation.
+
+    .. rubric:: Implementation Notes
+
     LowerCompositeOps expands the explicit-signal InCore form into either:
     (a) a notify/wait ready barrier followed by UB-sized
     remote_load+accumulate/store chunks for ``mode="mesh"`` (default); or
-    (b) the NCCL-style 2(P−1)-step
+    (b) the NCCL-style 2(P-1)-step
     chunked reduce-scatter + allgather ring schedule for ``mode="ring"``.
     In both modes the kernel sees only the lowered primitives.
     Host-orchestrator code can omit ``signal``
@@ -531,26 +573,27 @@ def allreduce(
     (mesh mode only — ring mode on the HOST rail is delivered by a
     subsequent host builtin).
 
-    Mesh signal shape is ``[NR, 1]``; ring signal shape is
-    ``[2 * (NR − 1), NR]`` (one row per ring round). Both are single-shot
-    per call.
+    Mesh signal shape is ``[NR, 1]``. The InCore ring schedule uses
+    ``[2 * (NR − 1), NR]`` (one row per ring round). The host builtin
+    ring schedule uses ``[2 * (NR − 1) + 1, NR]`` (one extra row for
+    the return barrier). Both are single-shot per call.
+
+    .. note::
+
+        The host-builtin ring schedule currently supports only
+        ``ReduceOp.Sum`` with ``dtype=FP32``.  ``ReduceOp.Max``,
+        ``ReduceOp.Min``, ``ReduceOp.Prod``, and ``FP16`` are not yet
+        available with ``mode="ring"``.
 
     Fully-valid packed mesh targets are viewed as one logical 1D stream and
     processed in chunks of at most 16 KiB. For statically known smaller targets,
     the physical chunk width shrinks to the smallest 32-byte-aligned width that
     covers the target. The final chunk uses ``valid_shape`` so arbitrary element
-    counts do not read or store past the end. Mesh lowering
-    also preserves a packed ND target ``TensorView.valid_shape`` when
-    its valid box can be represented by collapsing leading dimensions to one
-    2D rectangle and fits within one 16-KiB chunk, and reduces only that
-    rectangle with the established single-rectangle path. Oversized partial
-    rectangles, strided targets, DN partial views, and
-    non-representable partial boxes are rejected explicitly.
-    Any symbolic target or partial-valid extent that survives lowering must be
-    runtime-bound by a kernel scalar, loop variable, or physical tensor-shape
-    parameter; a symbol that appears only in type metadata is rejected during
-    PTO codegen. A fully dynamic physical target dimension is bound from that
-    tensor parameter.
+    counts do not read or store past the end.
+
+    See ``docs/en/dev/distributed_ops.md`` and
+    ``docs/en/dev/passes/12-lower_composite_ops.md`` for the mesh partial-valid /
+    symbolic-extent target constraints (unchanged by this PR).
 
     **Mesh barrier protocol:** ``AtomicAdd(1) → WaitGe(1)`` is the ready wave.
     Every reduced chunk then performs ``AtomicAdd(1)`` and waits for the
@@ -571,13 +614,6 @@ def allreduce(
     a ready barrier before remote reads and a read-complete barrier before
     store-back. The monotonic expected values are ``2*chunk_id+1`` and
     ``2*chunk_id+2``. The skipped self column remains zero.
-
-    **Do not reuse the same signal buffer for a back-to-back allreduce**
-    — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
-    for each allreduce call. All allreduce calls in ``for`` and ``while``
-    loops are rejected because the current signal protocol cannot provide a
-    fresh signal for every dynamic iteration. A self-resetting variant is
-    blocked on a runtime fix — PTOAS issue #797.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
@@ -633,13 +669,16 @@ def barrier(
     """Cross-rank barrier synchronisation.
 
     Blocks until all ranks in the comm group have reached the barrier.
-    Uses a window-bound INT32 ``signal`` matrix for cross-rank
-    synchronisation (one slot per rank).  LowerCompositeOps expands this
+    Uses a window-bound INT32 ``signal`` tensor for cross-rank
+    synchronisation.  LowerCompositeOps expands this
     into a notify-all / wait-all sequence.
 
     .. code-block:: python
 
         sig = pld.tensor.barrier(sig)
+
+    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
+    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
 
     **Signal buffer is single-shot per call.**  The lowering uses
     ``Set(1)`` + ``Ge(1)`` — cells go from 0 to 1.  Do not reuse the
@@ -668,8 +707,11 @@ def broadcast(
     """Broadcast root rank's data to all ranks.
 
     After this call returns, every rank's slice of ``target`` holds
-    root's data.  Uses a window-bound INT32 ``signal`` matrix for the
+    root's data.  Uses a window-bound INT32 ``signal`` tensor for the
     cross-rank barrier.
+
+    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
+    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
 
     .. code-block:: python
 
@@ -704,17 +746,21 @@ def allgather(
 ) -> DistributedTensor:
     """All-gather: gather data from all ranks (push-based).
 
-    Unified 3-arg form: ``pld.tensor.allgather(input, target, signal)``.
-    ``input`` is this rank's single ``[1, SIZE]`` chunk; every rank pushes it
+    Unified 3-arg form: ``pld.tensor.allgather(local_data, target, signal)``.
+    ``local_data`` is this rank's single ``[1, SIZE]`` chunk; every rank pushes it
     into every peer's ``target`` row ``my_rank`` via TPUT, then synchronises
     with a notify/wait barrier.  Returns ``target`` in-place (window-as-result
     — same idiom as ``all_to_all`` / ``reduce_scatter`` / ``broadcast``).
 
-    ``input`` must be a DIFFERENT buffer from ``target`` — never pass the same
-    window for both.  On the HOST path ``input`` is a ``[1, SIZE]`` staging
+    ``local_data`` must be a DIFFERENT buffer from ``target`` — never pass the same
+    window for both.  On the HOST path ``local_data`` is a ``[1, SIZE]`` staging
     window populated by an earlier publish step; on the InCore path it is a
     plain :class:`pl.Tensor` ``[1, SIZE]`` — both are accepted.  HOST vs InCore
     is a function-context property resolved by the lowering passes.
+
+    **Signal shape:** host builtins accept rank-1 ``[world_size]`` or rank-2
+    ``[world_size, 1]``. InCore composites take rank-2 ``[nranks, 1]`` -- the
+    rank count may be dynamic.
 
     Args:
         local_data: This rank's single chunk — ``[1, SIZE]`` :class:`pl.Tensor`
@@ -751,6 +797,9 @@ def reduce_scatter(
             data = pl.store(chunk_j, [j, 0], data)
         data = pld.tensor.reduce_scatter(data, sig, op=pld.ReduceOp.Sum)
         # data[my_rank, 0:SIZE] now holds this rank's reduced chunk.
+
+    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
+    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` of shape
@@ -790,6 +839,10 @@ def all_to_all(
     by an earlier InCore step) rather than the InCore composite's plain
     :class:`pl.Tensor` — both are accepted.
 
+    **Signal shape:** host builtins accept rank-1 ``[world_size]`` or rank-2
+    ``[world_size, 1]``. InCore composites take rank-2 ``[nranks, 1]`` -- the
+    rank count may be dynamic.
+
     Args:
         input: [NR, SIZE] Tensor or DistributedTensor with per-destination
             chunks, distinct from ``target``.  ``input[dest, :]`` is the
@@ -797,7 +850,9 @@ def all_to_all(
         target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
             the result in-place.  After the call,
             ``target[src, :]`` holds the chunk received from rank ``src``.
-        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier
+            tensor.  Rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``
+            for host builtins; rank-2 ``[nranks, 1]`` for InCore composites.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).

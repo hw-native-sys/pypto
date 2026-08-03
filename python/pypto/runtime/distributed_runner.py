@@ -471,7 +471,7 @@ def _make_call_config(
         ValueError: a DFX flag is enabled but *dfx_base* is ``None``.
     """
     from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-        CallConfig,
+        CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     )
 
     call_config = CallConfig()

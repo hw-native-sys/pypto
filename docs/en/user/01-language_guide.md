@@ -60,11 +60,11 @@ b: pl.Tensor[[N, K], pl.FP32]
 ```
 
 ```python
-# ⚠️ Deprecated (RFC #1300 supplementary 1):
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
+# ❌ Rejected (RFC #1300 supplementary 1):
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → ParserTypeError at parse time
 ```
 
-> **Why `pl.Tensor[..., pl.DN]` is deprecated.** Writing the DN
+> **Why `pl.Tensor[..., pl.DN]` is rejected.** Writing the DN
 > layout-only shorthand forces you to mentally hold two coordinate systems
 > at once (the IR-logical post-view shape and the runtime row-major shape).
 > Drop the layout marker and write the runtime shape — for matmul B^T,
@@ -621,7 +621,7 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # auto-generated if None
-    strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization
+    strategy=ir.OptimizationStrategy.Default,  # the only optimization strategy
     dump_passes=True,                          # dump IR snapshots under output_dir/passes_dump/
     backend_type=BackendType.Ascend910B,
 )
@@ -630,7 +630,7 @@ output_dir = ir.compile(
 | Parameter | Options | Description |
 | --------- | ------- | ----------- |
 | `program` | `ir.Program` | Required program object (from `@pl.program` or equivalent) |
-| `strategy` | `OptimizationStrategy.Default`, `DebugTileOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes |
+| `strategy` | `OptimizationStrategy.Default` | `Default` = full tensor-oriented pipeline (the only strategy) |
 | `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (`import BackendType` from `pypto.backend`) |
 | `dump_passes` | `True`/`False` | If `True`, write IR snapshots under `<output_dir>/passes_dump/` after each pass (default `True`) |
 | `skip_ptoas` | `True`/`False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
@@ -639,7 +639,9 @@ output_dir = ir.compile(
 
 ### Optimization Pipeline
 
-The `Default` strategy runs these passes in order:
+The `Default` strategy runs the following main stages in order. This is a
+summary, not the full recipe — see the [pass documentation](../dev/passes/00-pass_manager.md)
+for every pass and its exact position:
 
 1. **UnrollLoops** — unroll loop iterations
 2. **CtrlFlowTransform** — rewrite control flow to structured IR

@@ -85,13 +85,13 @@ struct IterArgCarryPlan {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
-  // After ExpandMixedKernel runs (part of every Default / DebugTileOptimization
-  // pipeline), every InCore function reaching codegen has been split into AIC,
-  // AIV, or Group / Spmd wrappers. The two callers of this function
-  // (GenerateFunctionCallCode and GenerateSpmdCallCode) both filter Spmd /
-  // Group out before invoking it. Tests that bypass the pipeline must declare
-  // their kernels with the appropriate AIC / AIV type explicitly so codegen
-  // sees the concrete core type without re-deriving from body memory spaces.
+  // After ExpandMixedKernel runs (part of the Default pipeline), every InCore
+  // function reaching codegen has been split into AIC, AIV, or Group / Spmd
+  // wrappers. The two callers of this function (GenerateFunctionCallCode and
+  // GenerateSpmdCallCode) both filter Spmd / Group out before invoking it.
+  // Tests that bypass the pipeline must declare their kernels with the
+  // appropriate AIC / AIV type explicitly so codegen sees the concrete core
+  // type without re-deriving from body memory spaces.
   switch (func->func_type_) {
     case FunctionType::AIC:
       return CoreType::CUBE;
@@ -2254,18 +2254,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return GenerateExprString(expr);
   }
 
-  // Resolve the effective SPMD launch spec for a dispatch. ``pl.spmd_submit``
-  // carries core_num/sync_start on the Submit, surfaced as Call attrs by
-  // SubmitToCallView; the scope-based ``with pl.spmd`` path carries them on
-  // the Spmd-wrapper function. Prefer the call's own attrs (spmd_submit), then
-  // fall back to the launch function's attrs (scope-based spmd / group).
+  // Resolve the effective SPMD launch spec for a dispatch. The spec rides the
+  // launch site: ``core_num`` / ``sync_start`` Call attrs for an outlined
+  // ``with pl.spmd`` / ``pl.cluster()`` dispatch, or the first-class Submit
+  // fields for ``pl.spmd_submit`` / an ``as tid`` scope (surfaced as Call attrs
+  // by SubmitToCallView). The launch-function fallback is legacy: no pass
+  // produces a Function-level spec any more, but hand-written and deserialized
+  // IR may still spell a constant one.
   [[nodiscard]] std::pair<ExprPtr, bool> EffectiveLaunchSpec(const CallPtr& call,
                                                              const FunctionPtr& launch_func) const {
-    ExprPtr core_num = call->GetAttr<ExprPtr>("core_num", nullptr);
-    bool sync_start = call->GetAttr<bool>("sync_start", false);
+    ExprPtr core_num = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+    bool sync_start = call->GetAttr<bool>(kAttrSyncStart, false);
     if (!core_num && launch_func) {
-      core_num = launch_func->GetAttr<ExprPtr>("core_num", nullptr);
-      sync_start = launch_func->GetAttr<bool>("sync_start", false);
+      core_num = launch_func->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+      sync_start = launch_func->GetAttr<bool>(kAttrSyncStart, false);
     }
     return {core_num, sync_start};
   }

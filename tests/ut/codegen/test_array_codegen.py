@@ -17,14 +17,14 @@ mutations land on the same backing storage.
 
 import pypto.language as pl
 import pytest
+from _orchestration_codegen_common import _finalize_handbuilt_for_codegen
 from pypto import codegen, passes
 from pypto.pypto_core import DataType, ir
 
 
 def _generate_orch(src: str) -> str:
-    """Parse a program, derive call directions, and codegen the orchestration func."""
-    prog = pl.parse_program(src)
-    prog = passes.derive_call_directions()(prog)
+    """Parse a program, run codegen-entry passes, and codegen the orchestration func."""
+    prog = _finalize_handbuilt_for_codegen(pl.parse_program(src))
     for func in prog.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(prog, func).code
@@ -146,12 +146,13 @@ class P:
 
 
 def _classify_carries(program: ir.Program) -> tuple[ir.Program, ir.Function]:
-    """Stamp the iter_arg carry plan codegen reads (a codegen precondition).
+    """Run codegen-entry passes on hand-built orchestration IR.
 
-    Hand-built IR skips the pass pipeline, so ClassifyIterArgCarry has to be run
-    explicitly before ``generate_orchestration``.
+    Hand-built IR skips the pass pipeline, so MaterializeRuntimeScopes and
+    ClassifyIterArgCarry must run explicitly before ``generate_orchestration``.
     """
-    program = passes.classify_iter_arg_carry()(program)
+    with passes.PassContext([]):
+        program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return program, func
@@ -271,6 +272,7 @@ def test_array_create_task_id_uses_invalid_sentinel():
         ib.return_stmt(x)
     orch_func = orch_f.get_result()
     program = ir.Program([orch_func], "test_array_create_task_id", ir.Span.unknown())
+    program, orch_func = _classify_carries(program)
     code = codegen.generate_orchestration(program, orch_func).code
     assert re.search(r"PTO2TaskId\s+\w+\[4\];", code), code
     # Per-slot init with the invalid sentinel — NOT ``= {0};`` (which
@@ -296,6 +298,7 @@ def test_array_create_int_still_uses_zero_init():
         ib.return_stmt(x)
     orch_func = orch_f.get_result()
     program = ir.Program([orch_func], "test_array_create_int", ir.Span.unknown())
+    program, orch_func = _classify_carries(program)
     code = codegen.generate_orchestration(program, orch_func).code
     assert re.search(r"int32_t\s+\w+\[8\]\s*=\s*\{0\};", code), code
 
@@ -319,6 +322,7 @@ def test_array_get_element_task_id_uses_pto2_task_id_type():
         ib.return_stmt(x)
     orch_func = orch_f.get_result()
     program = ir.Program([orch_func], "test_array_get_element_task_id", ir.Span.unknown())
+    program, orch_func = _classify_carries(program)
     code = codegen.generate_orchestration(program, orch_func).code
     # The local for the get_element result must be ``PTO2TaskId``, not ``unknown``.
     assert re.search(r"PTO2TaskId\s+v\s*=\s*\w+\[", code), code

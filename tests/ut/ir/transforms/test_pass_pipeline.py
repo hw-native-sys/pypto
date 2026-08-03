@@ -288,6 +288,7 @@ class TestVerifiedProperties:
         assert props.contains(passes.IRProperty.TypeChecked)
         assert props.contains(passes.IRProperty.MixedKernelExpanded)
         assert props.contains(passes.IRProperty.AllocatedMemoryAddr)
+        assert props.contains(passes.IRProperty.RuntimeScopesMaterialized)
 
     def test_allocated_memory_addr_exists_in_enum(self):
         """AllocatedMemoryAddr is accessible in IRProperty enum."""

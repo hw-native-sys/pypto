@@ -184,7 +184,7 @@ class SoftmaxPrepareTestCase(PTOTestCase):
 class SoftmaxPrepareUnalignedTestCase(PTOTestCase):
     """Test case for softmax_prepare with unaligned valid_len.
 
-    Uses pl.load(..., valid_shapes=[16, valid_len]) + fillpad(pad_value=min)
+    Uses pl.load(..., valid_shape=[16, valid_len]) + fillpad(pad_value=min)
     to handle non-block-aligned KV cache lengths. Columns beyond valid_len
     are padded with -inf before softmax.
     """

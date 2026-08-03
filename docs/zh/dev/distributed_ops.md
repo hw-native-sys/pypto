@@ -318,7 +318,9 @@ host builtin 路径均支持 FP16、FP32，以及任意正元素数量下的
 分块，host builtin 使用 256 元素分块。InCore mesh 和 ring 只把 FP16 remote
 尾块的物理范围向上对齐到 32 字节；host builtin 会把 FP16 和 FP32 的 ragged load
 范围都对齐到 32 字节。两者都保留逻辑 valid shape。host builtin 接受 rank-1
-`[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。
+`[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。Ring 模式
+（`mode="ring"`）在 host orchestrator 中降级为 `builtin.tensor.allreduce_ring`，
+要求显式 rank-2 `[2 * (NR - 1) + 1, NR]` INT32 signal（额外增加一行用于返回屏障）。
 
 ### `pld.system.notify`（TNOTIFY）
 
@@ -386,6 +388,7 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   P=2/P=4）、`test_l3_tensor_allreduce_intrinsic.py`、
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
+  `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
   `test_l3_tensor_all_to_all_v_intrinsic.py`，以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：

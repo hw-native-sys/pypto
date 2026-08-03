@@ -97,11 +97,10 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
     manager = PassManager(OptimizationStrategy.Default)
     names = manager.pass_names
     stop = names.index(last_pass)
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        for pass_obj in manager.passes[: stop + 1]:
-            pipeline = passes.PassPipeline()
-            pipeline.add_pass(pass_obj)
-            program = pipeline.run(program)
+    for pass_obj in manager.passes[: stop + 1]:
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(pass_obj)
+        program = pipeline.run(program)
     return program
 
 
@@ -1387,6 +1386,107 @@ class Bad:
 """
         with pytest.raises(ParserTypeError, match="string literal"):
             pl.parse_program(source)
+
+
+class TestLoopCarryRoundtrip:
+    """A loop-carry init parameter placed in a compiler buffer must stay printable.
+
+    ``InitMemRef`` gives the carry's init parameter the carry buffer's MemRef, and
+    ``MaterializeSemanticAliases`` then folds the carried value onto that same
+    buffer. Both steps put a parameter or a binding in a state the DSL surface
+    syntax has exactly one way to spell, so both used to break the print -> parse
+    -> structural-compare roundtrip the pass pipeline runs under.
+    """
+
+    @staticmethod
+    def _carry_program():
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                seed: pl.Tile[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc_i,) in pl.range(4, init_values=(seed,)):
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                    )
+                    acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+                    r = pl.yield_(acc_next)
+                out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+                return out
+
+        return Before
+
+    def test_signature_memref_base_prints_as_a_string(self, ascend_backend):
+        """A parameter's MemRef base must never print as a bare forward reference.
+
+        Python evaluates the signature before the body binds any name, so a base
+        Ptr that the body allocates has to be spelled as a string there. Emitting
+        the bare identifier made the printed program reparse with ``NameError``.
+        """
+        after = _run_full_pipeline(self._carry_program(), "InitMemRef")
+        printed = after.as_python()
+        param_line = next(line for line in printed.splitlines() if line.lstrip().startswith("seed"))
+        alloc_line = next(line for line in printed.splitlines() if ".alloc(pl.Mem.DDR" in line)
+
+        # The base really is allocated in the body, so the bare name would be a
+        # forward reference in the signature...
+        base = alloc_line.split(":")[0].strip()
+        # ...and the parameter annotation therefore spells it as a string.
+        assert f'pl.MemRef("{base}"' in param_line
+        # The body, where the base *is* bound, keeps the bare-name form.
+        assert f"pl.MemRef({base}," in printed
+
+        # The quoted name must still resolve to the very Var the body allocates:
+        # structural equality ignores MemRefs, so only an identity check catches
+        # a reparse that hands the parameter a second, unrelated allocation.
+        reparsed = pl.parse_program(printed)  # must not raise
+        main = reparsed.get_function("main")
+        assert main is not None
+        assert isinstance(main.body, ir.SeqStmts)
+        alloc = next(s for s in main.body.stmts if isinstance(s, ir.AssignStmt) and s.var.name_hint == base)
+        seed_type = main.params[1].type
+        assert isinstance(seed_type, ir.TileType)
+        assert seed_type.memref is not None
+        assert seed_type.memref.base_ is alloc.var
+
+    def test_fixed_output_op_is_not_retargeted_across_memory_spaces(self, ascend_backend):
+        """A Vec-only producer must keep its Vec buffer even under a DDR carry.
+
+        The carry's init is a Tile parameter, so it lives in DDR, and the carry
+        alias would drag the ``tile.add`` that feeds it onto that DDR buffer.
+        But ``tile.add`` is registered ``set_output_memory(Vec)`` — it cannot
+        write there. Retargeting it anyway would mint IR claiming a Vec-only op
+        produces DDR, and would leave the bound Call's type disagreeing with its
+        Var, a pair the DSL cannot spell (the printer emits only the Var's
+        annotation, so reparsing retypes the Call and the roundtrip compares
+        unequal). Declining leaves the carry yielding a different buffer than
+        its init, which ``YieldFixupMutator`` reconciles with a real move.
+        """
+        after = passes.materialize_semantic_aliases()(_run_full_pipeline(self._carry_program(), "InitMemRef"))
+        main = after.get_function("main")
+        assert main is not None
+        assert isinstance(main.body, ir.SeqStmts)
+        loop = next(s for s in main.body.stmts if isinstance(s, ir.ForStmt))
+        assert isinstance(loop.body, ir.SeqStmts)
+        add_stmt = next(
+            s
+            for s in loop.body.stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.add").name
+        )
+        var_type, value_type = add_stmt.var.type, add_stmt.value.type
+        assert isinstance(var_type, ir.TileType)
+        assert isinstance(value_type, ir.TileType)
+
+        # The op's registered output space wins over the carry's DDR buffer...
+        assert var_type.memory_space == ir.MemorySpace.Vec, "a Vec-only op was dragged into DDR"
+        # ...and the binding stays internally consistent, so it round-trips.
+        assert value_type.memory_space == var_type.memory_space
 
 
 if __name__ == "__main__":

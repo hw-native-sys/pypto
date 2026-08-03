@@ -941,16 +941,15 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("split", static_cast<int>(finder.uniform_mode.value()));
       }
     };
+    // Captured here, attached to the synthesised dispatch below — the launch
+    // spec belongs to the launch site, never to the outlined callee (see
+    // ``kAttrCoreNum`` for why).
+    auto spmd_scope = As<SpmdScopeStmt>(op);
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
       append_slot_num_attr();
       append_windowize_attr();
       append_split_aiv_attr(incore->split_);
-    } else if (auto spmd = As<SpmdScopeStmt>(op)) {
-      outlined_attrs.emplace_back("core_num", spmd->core_num_);
-      if (spmd->sync_start_) {
-        outlined_attrs.emplace_back("sync_start", true);
-      }
     }
     std::optional<Level> outlined_level;
     std::optional<Role> outlined_role;
@@ -1144,10 +1143,15 @@ class ScopeOutliner : public IRMutator {
       if (!arg_dir_override_indices.empty()) {
         submit_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
       }
+      // Launch spec in the first-class Submit fields — the same shape
+      // ``pl.spmd_submit(..., core_num=N)`` produces, so printing / codegen /
+      // verification take one path.
       synthesised_call_expr = std::make_shared<Submit>(
           global_var, call_args, std::move(submit_deps), std::vector<std::pair<std::string, std::any>>{},
           std::move(submit_attrs), call_return_type ? call_return_type : std::make_shared<UnknownType>(),
-          op->span_, /*core_num=*/std::nullopt, /*sync_start=*/false,
+          op->span_,
+          /*core_num=*/spmd_scope ? std::optional<ExprPtr>(spmd_scope->core_num_) : std::nullopt,
+          /*sync_start=*/spmd_scope && spmd_scope->sync_start_,
           /*allow_early_resolve=*/scope_allow_early_resolve,
           /*predicate=*/scope_predicate ? std::optional<ExprPtr>(scope_predicate) : std::nullopt);
     } else {
@@ -1159,6 +1163,15 @@ class ScopeOutliner : public IRMutator {
       }
       if (!arg_dir_override_indices.empty()) {
         call_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
+      }
+      // Launch spec last: the printer emits bespoke keys first and the rest in
+      // ``attrs_`` order, and a reparse rebuilds them in printed order — so
+      // appending keeps the dispatch structurally equal across print -> parse.
+      if (spmd_scope) {
+        call_attrs.emplace_back(kAttrCoreNum, ExprPtr(spmd_scope->core_num_));
+        if (spmd_scope->sync_start_) {
+          call_attrs.emplace_back(kAttrSyncStart, true);
+        }
       }
       if (!call_attrs.empty()) {
         synthesised_call_expr = std::make_shared<Call>(

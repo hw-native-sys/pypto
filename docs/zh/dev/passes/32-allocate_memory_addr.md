@@ -130,6 +130,7 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 alloc 语句被前置到函数体顶层 `SeqStmts`
 - 测试 MemRef 去重的原始指针唯一性
 - 测试无后端配置时的默认策略行为
+- 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
 
 ## 分配策略
 
@@ -171,3 +172,21 @@ class MyBackend : public Backend {
 ```
 
 当未配置后端时（例如在单元测试中），Pass 会自动回退到 `DefaultMemoryAllocatorPolicy`。
+
+## 容量校验
+
+容量检查存在于两处：`AllocateMemoryAddresses` 自身的 in-pass `CHECK`（它掌握唯一精确的 footprint——会计入已声明分配中未绑定的 slot，且不依赖每个 tile 地址都是常量），以及 `AllocatedMemoryAddr` 属性校验器（按内存空间跟踪高水位 `addr + size`）。两者都与 `Backend::GetMemSize(space)` 比较，且都会输出下面这段说明——具体命中哪一个取决于配置，因此该措辞是共享的（`ReservedBytesNote`），而非只写在其中一处。
+
+由于 `system.reserve_buffer` 预留的是一段前导窗口、其后所有 tile 才依次分配，这些字节会计入高水位，但它们**不是** MemRef——在作者能查看的逐 tile 账目中完全不可见。因此当溢出的空间正是为某个 reserve buffer 付费的那个空间时，诊断会显式指出这段窗口。它表述为分配**下界**（`reserved_end_by_space`，即 tile 被放置于其上的对齐后最大末地址），而非“这些 buffer 占用的字节数”：显式指定 base 的 buffer 或对齐空隙都会让下界超过各 buffer 大小之和，而计入本次溢出的正是这个下界。
+
+```text
+Function 'qk_pv_aic': Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes).
+The first 1048576 bytes of that space are reserved by system.reserve_buffer, so tiles
+are allocated above them — this is the cross-core pipe ring. Lower its depth with
+optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the
+tile that crosses the cube/vector boundary
+```
+
+该 ring 大小为 `slot_size x slot_num` 字节，由 `BuildAutomaticPipeSetup`（`src/ir/transforms/utils/cross_core_pipe.cpp`）构建——`slot_size` 是消费方弹出的**完整** tile，`slot_num` 对单向流水默认取 8、双向取 4。这些策略数值刻意不写入诊断信息以免过期；信息中报告的字节数直接取自分配器用作下界的同一个 `ResolveReserveBufferBases` 结果。该 ring 位于**消费侧**核的内存中——V2C（`pl.aic_gather`）为 Mat/L1，C2V（`pl.aiv_shard`）为 Vec/UB——因此该提示只会针对 `GetReserveBufferMemorySpace` 为该函数映射到的空间发出。有两处刻意做了限定：若某函数的 reserve buffer 在 Mat 而溢出发生在 Vec，则只给出基础信息；而 `pl.cross_core_slot` 这条修复建议仅在该 buffer 确实是流水 ring 时才追加。这是**精确**名称匹配而非后缀判断：会用本函数自身的 kernel 名重新调用 `BuildPipeBufferName`（`<kernel>_aic` / `<kernel>_aiv` -> `<kernel>_v2c_slot_buffer`），因为 `pl.reserve_buffer` 接受任意名称，手写的 `scratch_v2c_slot_buffer` 不应被指向一个无法调整它的旋钮。手写的 `pl.reserve_buffer` 仍会得到字节归因，但不会被指向一个无法缩小它的旋钮。
+
+ring 深度刻意**不**自动收缩以适配容量：深度就是跨核流水的深度，静默调小会把一个显式的编译错误变成一次无声的吞吐回退。

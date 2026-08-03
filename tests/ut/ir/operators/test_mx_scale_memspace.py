@@ -270,7 +270,11 @@ class TestMxScaleMemSpaces:
                 result, _ = pl.submit(self.kernel, source)
                 return result
 
-        program = passes.convert_to_ssa()(Input)
+        program = passes.classify_iter_arg_carry()(
+            passes.materialize_runtime_scopes()(
+                passes.derive_call_directions()(passes.convert_to_ssa()(Input))
+            )
+        )
         orchestration = next(
             function
             for function in program.functions.values()

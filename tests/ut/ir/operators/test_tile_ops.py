@@ -9,7 +9,9 @@
 
 """Unit tests for tile operations."""
 
+import inspect
 import math
+from typing import Any, cast
 
 import pypto.language as pl
 import pytest
@@ -31,10 +33,14 @@ def _tile_result_dtype(call: ir.Call) -> DataType:
     return result_type.dtype
 
 
-def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src"):
-    """A tile Var whose tile_view narrows it to `valid_shape`."""
+def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src", **view_kwargs):
+    """A tile Var whose tile_view narrows it to `valid_shape`.
+
+    Extra keyword arguments (blayout, slayout, fractal) are forwarded to the
+    TileView, for callers that need a source with a specific layout.
+    """
     span = ir.Span.unknown()
-    view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad)
+    view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad, **view_kwargs)
     return ir.Var(name, ir.TileType(shape, DataType.FP32, tile_view=view), span)
 
 
@@ -3992,10 +3998,23 @@ class TestTileScalarOperandDtype:
 
 
 class TestTileLoadOp:
-    """Tests for tile.load operation with valid_shapes and TileView."""
+    """Tests for tile.load operation with valid_shape and TileView."""
 
-    def test_load_without_valid_shapes_sets_tileview_from_shapes(self):
-        """When valid_shapes not provided, TileView.valid_shape equals shapes."""
+    def test_load_uses_singular_valid_shape_keyword(self):
+        params = inspect.signature(tile.load).parameters
+        removed_plural = "valid_" + "shapes"
+        assert "valid_shape" in params
+        assert removed_plural not in params
+
+    def test_load_rejects_removed_plural_keyword(self):
+        span = ir.Span.unknown()
+        tensor = ir.Var("a", ir.TensorType([64, 128], DataType.FP32), span)
+        removed_plural = "valid_" + "shapes"
+        with pytest.raises(TypeError, match=rf"unexpected keyword argument '{removed_plural}'"):
+            cast(Any, tile.load)(tensor, [0, 0], [64, 128], **{removed_plural: [32, 128]})
+
+    def test_load_without_valid_shape_sets_tileview_from_shapes(self):
+        """When valid_shape is not provided, TileView.valid_shape equals shapes."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
@@ -4008,15 +4027,15 @@ class TestTileLoadOp:
         assert isinstance(tile_type, ir.TileType)
         assert len(tile_type.get_effective_tile_view().valid_shape) == 2
 
-    def test_load_with_static_valid_shapes_sets_tileview(self):
-        """When valid_shapes provided as static ints, TileView.valid_shape reflects it."""
+    def test_load_with_static_valid_shape_sets_tileview(self):
+        """When valid_shape is provided as static ints, TileView.valid_shape reflects it."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
         tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
         tensor = ir.Var("a", tensor_type, span)
 
-        call = tile.load(tensor, [0, 0], [128, 128], valid_shapes=[64, 128])
+        call = tile.load(tensor, [0, 0], [128, 128], valid_shape=[64, 128])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -4025,8 +4044,8 @@ class TestTileLoadOp:
         # tile shape should still be [128, 128]
         assert len(tile_type.shape) == 2
 
-    def test_load_with_dynamic_valid_shapes_sets_tileview(self):
-        """When valid_shapes provided as symbolic vars, TileView.valid_shape uses them."""
+    def test_load_with_dynamic_valid_shape_sets_tileview(self):
+        """When valid_shape is provided as symbolic vars, TileView.valid_shape uses them."""
         span = ir.Span.unknown()
         dim64 = ir.ConstInt(64, DataType.INT32, span)
         dim128 = ir.ConstInt(128, DataType.INT32, span)
@@ -4035,7 +4054,7 @@ class TestTileLoadOp:
         M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
 
-        call = tile.load(tensor, [0, 0], [64, 128], valid_shapes=[M, N])
+        call = tile.load(tensor, [0, 0], [64, 128], valid_shape=[M, N])
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
@@ -4045,8 +4064,8 @@ class TestTileLoadOp:
         assert tile_type.tile_view.valid_shape[0] is M
         assert tile_type.tile_view.valid_shape[1] is N
 
-    def test_load_via_pl_load_with_valid_shapes(self):
-        """pl.load with valid_shapes propagates TileView to the output tile."""
+    def test_load_via_pl_load_with_valid_shape(self):
+        """pl.load with valid_shape propagates TileView to the output tile."""
 
         @pl.program
         class Prog:
@@ -4057,7 +4076,7 @@ class TestTileLoadOp:
                 M: pl.Scalar[pl.INT64],
                 N: pl.Scalar[pl.INT64],
             ) -> pl.Tile[[128, 128], pl.FP32]:
-                tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shapes=[M, N])
+                tile: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128], valid_shape=[M, N])
                 return tile
 
         # Just verifying it builds without error
@@ -4084,6 +4103,80 @@ class TestTileCreateOp:
 
         assert isinstance(tile_type, ir.TileType)
         assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
+
+
+class TestTileMoveOp:
+    """Tests for tile.move result-view deduction."""
+
+    @staticmethod
+    def _tile_var(space):
+        return ir.Var("t_src", ir.TileType([16, 64], DataType.FP32, None, None, space), ir.Span.unknown())
+
+    @pytest.mark.parametrize(
+        ("space", "expected_fractal"),
+        [
+            (ir.MemorySpace.Vec, 512),
+            (ir.MemorySpace.Mat, 512),
+            (ir.MemorySpace.Acc, 1024),
+        ],
+    )
+    def test_same_space_move_deduces_destination_implicit_view(self, space, expected_fractal):
+        """`fractal` is the destination buffer's boxing granularity, not the
+        TileView default: Acc (L0C) is NZ-boxed at 1024. A move that changes
+        neither space nor layout must therefore deduce exactly the destination's
+        implicit view, which is stored canonically as None. With the default 512
+        an Acc result stays explicit — and since a pass-synthesized move's LHS
+        Var carries no view, the print->parse roundtrip breaks."""
+        call = tile.move(self._tile_var(space), target_memory=space)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.memory_space == space
+        assert call.type.tile_view is None
+        assert call.type.get_effective_tile_view().fractal == expected_fractal
+
+    @pytest.mark.parametrize("source_space", [ir.MemorySpace.Mat, ir.MemorySpace.Vec])
+    def test_move_into_acc_adopts_acc_layout_from_non_acc_source(self, source_space):
+        """A 512-fractal source moved into Acc must report Acc's full NZ view.
+
+        The same-space cases above cannot show this: an Acc source already
+        carries Acc's layout, so they pass even if the result wrongly inherited
+        it from the source instead of taking it from the destination.
+
+        Acc dictates blayout/slayout as well as fractal — a tile living in L0C is
+        NZ-boxed whatever it was moved from — so the deduced view is exactly
+        Acc's implicit view and is stored canonically as None, for any source.
+        """
+        source = self._tile_var(source_space)
+        source_type = source.type
+        assert isinstance(source_type, ir.TileType)
+        assert source_type.get_effective_tile_view().fractal == 512
+
+        call = tile.move(source, target_memory=ir.MemorySpace.Acc)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.memory_space == ir.MemorySpace.Acc
+        assert call.type.tile_view is None
+        eff = call.type.get_effective_tile_view()
+        assert (eff.blayout, eff.slayout, eff.fractal) == (
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            1024,
+        )
+
+    def test_acc_to_vec_move_keeps_vec_fractal(self):
+        """Moving out of Acc must adopt Vec's granularity, not carry 1024 along:
+        the cube->vec pipe un-fractalizes the data during transfer."""
+        call = tile.move(
+            self._tile_var(ir.MemorySpace.Acc),
+            target_memory=ir.MemorySpace.Vec,
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+        )
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.get_effective_tile_view().fractal == 512
+        # row_major/none_box/512 *is* Vec's implicit view — stored canonically.
+        assert call.type.tile_view is None
 
 
 class TestTileScalarOps:
@@ -5228,19 +5321,19 @@ class TestWindowReadValidRegion:
         """A load can never report source padding as real data."""
         src = self._partial_tensor([64, 128], [40, 128])
 
-        call = tile.load(src, [0, 0], [64, 128], valid_shapes=[64, 128])
+        call = tile.load(src, [0, 0], [64, 128], valid_shape=[64, 128])
 
         # The request asked for all 64 rows; only 40 exist.
         assert _valid_of(call.type) == [40, 128]
 
     def test_load_rejects_a_request_that_reads_past_the_source(self):
-        """valid_shapes is what the DMA actually reads, so it must exist."""
+        """valid_shape is what the DMA actually reads, so it must exist."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
         # Claiming 64 valid rows at offset 64 reads to row 128 of a 100-row tensor.
         with pytest.raises(ValueError, match="reads past the end of dimension 0"):
-            tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[64, 128])
+            tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[64, 128])
 
     def test_load_tile_may_overhang_the_source(self):
         """The destination tile is an allocation, so only the read extent must fit."""
@@ -5248,7 +5341,7 @@ class TestWindowReadValidRegion:
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
         # A 64-row tile at offset 64 overhangs, but only 36 rows are read.
-        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[36, 128])
+        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[36, 128])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5260,7 +5353,7 @@ class TestWindowReadValidRegion:
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([100, 128], DataType.FP32), span)
 
-        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shapes=[64, 128], clamp=True)
+        call = tile.load(tensor_var, [64, 0], [64, 128], valid_shape=[64, 128], clamp=True)
 
         # clamp(100 - 64, 0, 64) = 36, intersected with the 64-row request -> 36.
         assert _valid_of(call.type) == [36, 128]
@@ -5281,15 +5374,15 @@ class TestWindowReadValidRegion:
         reparsed = pl.parse(ir.python_print(prog))
         ir.assert_structural_equal(reparsed, prog)
 
-    def test_load_lower_rank_window_keeps_its_valid_shapes(self):
+    def test_load_lower_rank_window_keeps_its_valid_shape(self):
         """A 2D tile out of a 3D tensor is a reinterpreting read, not a rectangle."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([4, 128, 64], DataType.FP32), span)
 
         # Window rank 2 over a rank-3 source: the rule does not apply, so the
-        # requested valid_shapes pass through untouched rather than being
+        # requested valid_shape passes through untouched rather than being
         # intersected against the wrong axes.
-        call = tile.load(tensor_var, [0, 0], [16, 64], valid_shapes=[16, 64])
+        call = tile.load(tensor_var, [0, 0], [16, 64], valid_shape=[16, 64])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5306,7 +5399,7 @@ class TestWindowReadValidRegion:
         tensor_var = ir.Var("a", ir.TensorType([256, 128], DataType.FP32), span)
 
         with pytest.raises(ValueError, match="exceeds the window extent"):
-            tile.load(tensor_var, [0, 0], [64, 128], valid_shapes=[128, 128])
+            tile.load(tensor_var, [0, 0], [64, 128], valid_shape=[128, 128])
 
     def test_load_keeps_the_request_when_the_source_extent_is_undecidable(self):
         """An undecidable source extent is trusted, not folded into a runtime min.
@@ -5326,7 +5419,7 @@ class TestWindowReadValidRegion:
         view = ir.TensorView(stride=[], layout=ir.TensorLayout.ND, valid_shape=[16, src_valid])
         tensor_var = ir.Var("a", ir.TensorType([16, 128], DataType.FP32, tensor_view=view), span)
 
-        call = tile.load(tensor_var, [0, 0], [16, 128], valid_shapes=[16, valid_len])
+        call = tile.load(tensor_var, [0, 0], [16, 128], valid_shape=[16, valid_len])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5334,13 +5427,13 @@ class TestWindowReadValidRegion:
         # The request survives verbatim -- no min() wrapped around SRC_VALID.
         assert result_type.tile_view.valid_shape[1] is valid_len
 
-    def test_load_symbolic_valid_shapes_survive_unchanged(self):
+    def test_load_symbolic_valid_shape_survives_unchanged(self):
         """A symbolic request is trusted: it is the caller's contract, not a guess."""
         span = ir.Span.unknown()
         tensor_var = ir.Var("a", ir.TensorType([64, 128], DataType.FP32), span)
         m = ir.Var("M", ir.ScalarType(DataType.INT64), span)
 
-        call = tile.load(tensor_var, [0, 0], [64, 128], valid_shapes=[m, 128])
+        call = tile.load(tensor_var, [0, 0], [64, 128], valid_shape=[m, 128])
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -5370,6 +5463,198 @@ class TestWindowReadValidRegion:
 
         # rows: clamp(40 - 16, 0, 32) = 24;  cols: clamp(100 - 64, 0, 32) = 32
         assert _valid_of(call.type) == [24, 32]
+
+
+class TestDestinationSpaceLayoutDeduction:
+    """A retargeting op's result layout comes from the DESTINATION memory space.
+
+    tile.move / tile.extract used to deduce the result view against a nullopt
+    memory space and let OpRegistry::Create stamp the real space by rebuilding
+    the TileType -- which re-ran CanonicalizeTileViewInPlace against a different
+    implicit view. Since the collapse to nullopt only fires when the view is
+    fully valid and unpadded, the destination layout silently depended on the
+    tile's valid extent: a fully-valid Vec->Mat move got Mat's boxed NZ layout,
+    while the same move on a ragged tile kept Vec's flat row_major/none_box.
+
+    The layout must depend only on (shape, destination space).
+    """
+
+    # Destination space -> the (blayout, slayout, fractal) a tile living there
+    # must carry. Acc is the one destination with a non-default fractal, so it
+    # also pins that fractal comes from the destination and is never inherited.
+    _BOXED_DESTINATIONS = [
+        (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+        (ir.MemorySpace.Left, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+        (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+        (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+    ]
+
+    @staticmethod
+    def _layout_of(result_type):
+        eff = result_type.get_effective_tile_view()
+        return (eff.blayout, eff.slayout, eff.fractal)
+
+    # --- tile.move ----------------------------------------------------------
+
+    @pytest.mark.parametrize("space,blayout,slayout,fractal", _BOXED_DESTINATIONS)
+    def test_move_layout_is_independent_of_the_source_valid_extent(self, space, blayout, slayout, fractal):
+        """A narrower valid_shape must not change where the result's layout comes from."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([64, 64], DataType.FP32), span)
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        full_layout = self._layout_of(tile.move(full, target_memory=space).type)
+        ragged_layout = self._layout_of(tile.move(ragged, target_memory=space).type)
+
+        assert full_layout == ragged_layout == (blayout, slayout, fractal)
+
+    @pytest.mark.parametrize("space,blayout,slayout,fractal", _BOXED_DESTINATIONS)
+    def test_move_layout_is_independent_of_the_source_pad(self, space, blayout, slayout, fractal):
+        """pad is the other reason a view cannot collapse -- same rule applies."""
+        padded = _partial_tile([64, 64], [64, 64], pad=ir.PadValue.zero)
+
+        assert self._layout_of(tile.move(padded, target_memory=space).type) == (blayout, slayout, fractal)
+
+    def test_move_narrowing_the_source_still_narrows_the_result(self):
+        """Fixing the layout must not drop the valid extent the move carries over."""
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        assert _valid_of(tile.move(ragged, target_memory=ir.MemorySpace.Mat).type) == [64, 48]
+
+    def test_move_to_right_keeps_row_major_for_a_column_vector(self):
+        """L0B needs a RowMajor block layout even where the implicit one is col_major.
+
+        A `[N, 1]` shape infers blayout=col_major, so `Right` is the one
+        destination that still needs an explicit override on top of its implicit
+        layout -- this is the case that justifies keeping it.
+        """
+        span = ir.Span.unknown()
+        col_vector = ir.Var("v", ir.TileType([64, 1], DataType.FP32), span)
+
+        assert self._layout_of(tile.move(col_vector, target_memory=ir.MemorySpace.Right).type) == (
+            ir.TileLayout.row_major,
+            ir.TileLayout.col_major,
+            512,
+        )
+
+    @pytest.mark.parametrize("space", [d[0] for d in _BOXED_DESTINATIONS])
+    def test_move_stamps_the_destination_memory_space(self, space):
+        """The deduced type is a view OF the destination, so it must say so."""
+        result_type = tile.move(_partial_tile([64, 64], [64, 48]), target_memory=space).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memory_space == space
+
+    # Vec and Bias share the space-agnostic implicit layout, so they take the
+    # source-inherited seed. `destination_dictates_layout` compares layouts
+    # rather than naming Vec, so pin both: a future change to either entry in
+    # GetImplicitTileLayout must not silently flip this.
+    @pytest.mark.parametrize("space", [ir.MemorySpace.Vec, ir.MemorySpace.Bias])
+    @pytest.mark.parametrize("valid", [None, [64, 48]], ids=["full-valid", "part-valid"])
+    def test_move_to_a_flat_space_inherits_the_source_layout(self, space, valid):
+        """A flat destination keeps the source's blayout/slayout, whatever its extent."""
+        src = _partial_tile(
+            [64, 64],
+            valid or [64, 64],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+        )
+
+        assert self._layout_of(tile.move(src, target_memory=space).type) == (
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            512,
+        )
+
+    def test_move_explicit_layout_kwargs_still_win(self):
+        """blayout/slayout are user overrides and outrank the destination default."""
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        call = tile.move(
+            ragged,
+            target_memory=ir.MemorySpace.Mat,
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.col_major,
+        )
+
+        assert self._layout_of(call.type)[:2] == (ir.TileLayout.row_major, ir.TileLayout.col_major)
+
+    # --- tile.extract -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "space,blayout,slayout,fractal",
+        [
+            # L0 destinations use the TEXTRACT-side formats, not tile.move's TMOV ones.
+            (ir.MemorySpace.Left, ir.TileLayout.row_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+            (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Vec, ir.TileLayout.row_major, ir.TileLayout.none_box, 512),
+            # Acc is reachable via LowerPipelineLoops; the deducer has no Acc
+            # branch of its own, so this pins that the Acc NZ view (including
+            # fractal 1024) comes from the destination's implicit view.
+            (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+        ],
+    )
+    def test_extract_layout_is_independent_of_the_source_valid_extent(self, space, blayout, slayout, fractal):
+        """Whether the window lands on source padding must not flip the layout."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([64, 256], DataType.FP32), span)
+        ragged = _partial_tile([64, 256], [64, 100])
+
+        # Same window; over the ragged source it straddles the valid edge (cols
+        # 64..96 vs valid 100 -> 32) versus (cols 96..128 -> 4), so the ragged
+        # result cannot collapse to an implicit view.
+        full_layout = self._layout_of(tile.extract(full, 0, 96, shape=[32, 32], target_memory=space).type)
+        ragged_layout = self._layout_of(tile.extract(ragged, 0, 96, shape=[32, 32], target_memory=space).type)
+
+        assert full_layout == ragged_layout == (blayout, slayout, fractal)
+
+    @pytest.mark.parametrize(
+        "space",
+        [ir.MemorySpace.Left, ir.MemorySpace.Right, ir.MemorySpace.Mat, ir.MemorySpace.Vec],
+    )
+    def test_extract_stamps_the_destination_memory_space(self, space):
+        """Same contract as tile.load: the type names the space it is a view of."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([64, 256], DataType.FP32), span)
+
+        result_type = tile.extract(src, 0, 0, shape=[32, 32], target_memory=space).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memory_space == space
+
+    # --- matmul family ------------------------------------------------------
+
+    def test_matmul_family_carries_the_acc_layout_and_space(self):
+        """Every matmul deducer must state the Acc NZ view, not reach it by accident.
+
+        These ops declare `set_output_memory(MemorySpace::Acc)`, and
+        `tile.matmul_bias` in particular used to leave the view at the struct
+        default (row_major/none_box/512) and land on the Acc layout only because a
+        fully-valid view collapses to nullopt and the registry's memory-space
+        stamp re-canonicalized it against Acc's implicit view.
+        """
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 32], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([32, 64], DataType.FP16), span)
+        acc = ir.Var("acc", ir.TileType([16, 64], DataType.FP32), span)
+        bias = ir.Var("bias", ir.TileType([1, 64], DataType.FP32), span)
+        b_lhs = ir.Var("b_lhs", ir.TileType([4, 16, 32], DataType.FP16), span)
+        b_rhs = ir.Var("b_rhs", ir.TileType([4, 32, 64], DataType.FP16), span)
+        b_acc = ir.Var("b_acc", ir.TileType([4, 16, 64], DataType.FP32), span)
+
+        acc_nz = (ir.TileLayout.col_major, ir.TileLayout.row_major, 1024)
+        for name, call in (
+            ("matmul", tile.matmul(lhs, rhs)),
+            ("matmul_acc", tile.matmul_acc(acc, lhs, rhs)),
+            ("matmul_bias", tile.matmul_bias(lhs, rhs, bias)),
+            ("batch_matmul", tile.batch_matmul(b_lhs, b_rhs)),
+            ("batch_matmul_acc", tile.batch_matmul_acc(b_acc, b_lhs, b_rhs)),
+        ):
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType), name
+            assert result_type.memory_space == ir.MemorySpace.Acc, name
+            assert self._layout_of(result_type) == acc_nz, name
 
 
 class TestWriteValidRegionUnion:

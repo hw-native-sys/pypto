@@ -107,16 +107,16 @@ class MyKernel:
         tile_c = pl.add(tile_a, tile_b)
         pl.store(tile_c, [0, 0], a)
 
-# Compile with PTO backend and DebugTileOptimization (debug only)
+# Compile with PTO backend
 output_dir = compile(
     MyKernel,
-    strategy=OptimizationStrategy.DebugTileOptimization,
+    strategy=OptimizationStrategy.Default,
     backend_type=BackendType.Ascend910B,
 )
 ```
 
 The `compile()` function automatically applies the selected optimization strategy and invokes the appropriate codegen based on `backend_type`.
-Use `Default` for normal PTO compilation; `DebugTileOptimization` is intended only for pass-pipeline debugging.
+`Default` is the only optimization strategy.
 
 ### Direct Codegen Access
 
@@ -532,7 +532,7 @@ Generated `alloc_tile` operations derive dtype and dimensions from TileType meta
   v_col=32,            // Virtual column size (= cols)
   blayout=row_major,   // Block layout (from TileView, default: row_major)
   slayout=none_box,    // Scatter layout (from TileView, default: none_box)
-  fractal=512,         // Fractal size (from TileView, default: 512)
+  fractal=512,         // Fractal size in bytes, not elements (from TileView, default: 512)
   pad=0                // Pad mode as int (from TileView, default: 0/null)
 >
 ```

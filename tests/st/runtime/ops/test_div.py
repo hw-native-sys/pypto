@@ -143,8 +143,8 @@ class TileDivCase(PTOTestCase):
                 rhs: pl.Tensor[[m, n], dtype],
                 out: pl.InOut[pl.Tensor[[m, n], dtype]],
             ) -> pl.Tensor[[m, n], dtype]:
-                lhs_tile: pl.Tile[[m, n], dtype] = pl.load(lhs, [0, 0], [m, n], valid_shapes=valid_shape)
-                rhs_tile: pl.Tile[[m, n], dtype] = pl.load(rhs, [0, 0], [m, n], valid_shapes=valid_shape)
+                lhs_tile: pl.Tile[[m, n], dtype] = pl.load(lhs, [0, 0], [m, n], valid_shape=valid_shape)
+                rhs_tile: pl.Tile[[m, n], dtype] = pl.load(rhs, [0, 0], [m, n], valid_shape=valid_shape)
                 result: pl.Tile[[m, n], dtype] = pl.tile.div(
                     lhs_tile, rhs_tile, high_precision=high_precision
                 )

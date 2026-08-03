@@ -12,7 +12,10 @@
 #include "pypto/codegen/codegen_preconditions.h"
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -63,6 +66,32 @@ class DistributedTensorUseCollector : public IRVisitor {
   }
 };
 
+void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const FunctionPtr& func) {
+  FunctionPtr program_func = nullptr;
+  for (const auto& [gv, f] : program->functions_) {
+    if (f && f->name_ == func->name_) {
+      program_func = f;
+      break;
+    }
+  }
+  CHECK_SPAN(program_func != nullptr, func->span_)
+      << "Orchestration function '" << func->name_ << "' is not present in the supplied program";
+
+  if (program_func.get() != func.get()) {
+    std::vector<Diagnostic> diagnostics;
+    diagnostics.emplace_back(
+        DiagnosticSeverity::Error, "RuntimeScopesMaterialized", 0,
+        "Orchestration function '" + func->name_ +
+            "' is a stale handle: IR-transform passes (e.g. MaterializeRuntimeScopes) replace "
+            "Function nodes in the Program. Re-fetch the Function from program after running "
+            "passes before calling generate_orchestration.",
+        func->span_);
+    throw VerificationError(
+        "GenerateOrchestration preconditions — stale function handle for '" + func->name_ + "'",
+        std::move(diagnostics));
+  }
+}
+
 }  // namespace
 
 void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const FunctionPtr& func) {
@@ -91,6 +120,7 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
                     IRProperty::RuntimeScopesMaterialized, IRProperty::IterArgCarryClassified,
                     IRProperty::ReturnParamsExplicit},
       program, "GenerateOrchestration preconditions");
+  VerifyCodegenTargetFunctionMatchesProgram(program, func);
 }
 
 void VerifyDistributedCodegenPreconditions(const ProgramPtr& program) {

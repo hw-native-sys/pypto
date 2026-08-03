@@ -152,12 +152,14 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         platform: Target platform string (e.g. "a2a3sim"). Included in the key
             because compiled artifacts are platform-specific; a cache entry
             compiled for one platform must not be reused for another.
-        strategy: Optimization strategy applied during compilation (an
-            ``OptimizationStrategy`` member, or ``None`` for the JIT default).
+        strategy: Optimization strategy applied during compilation, as an
+            ``OptimizationStrategy`` member. ``None`` is a distinct key value
+            for callers that omit the argument entirely; the JIT never passes
+            it, because ``JITFunction._resolve_compiled()`` normalizes a call
+            without a ``RunConfig`` to ``OptimizationStrategy.Default``.
             Included in the key because the strategy changes the compiled
-            artifact; without it, calling the same kernel with two strategies
-            (an A/B comparison) would return the first-compiled artifact for
-            both.
+            artifact; without it, artifacts compiled under different strategy
+            values would share one cache entry.
         distributed_config: Optional ``DistributedConfig`` forwarded to
             ``ir.compile()`` on the ``@pl.jit.host`` path. Included in the key
             because it is baked into the resulting

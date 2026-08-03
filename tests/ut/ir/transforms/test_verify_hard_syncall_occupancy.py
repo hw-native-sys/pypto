@@ -611,6 +611,48 @@ def _mixed_wrong_query_program():
     return Prog
 
 
+def _legacy_function_attr_program(dispatch_spec: str):
+    """A legacy Function-level launch spec (core_num on a hand-written Spmd wrapper).
+
+    No pass produces this carrier any more — the spec rides the dispatch — but
+    hand-written and deserialized IR can still spell it, so the verifier keeps
+    reading it as a fallback. ``dispatch_spec`` is the literal dispatch suffix,
+    so a caller can either omit a spec (legacy attr applies) or override it.
+    """
+    n, tr, tc = 24, TR, TC
+    return pl.parse(f"""
+import pypto.language as pl
+
+@pl.program
+class LegacyProg:
+    @pl.function(type=pl.FunctionType.InCore)
+    def add(self, a: pl.Tensor[[{n * tr}, {tc}], pl.FP32], b: pl.Tensor[[{n * tr}, {tc}], pl.FP32],
+            out: pl.Out[pl.Tensor[[{n * tr}, {tc}], pl.FP32]]) -> pl.Tensor[[{n * tr}, {tc}], pl.FP32]:
+        i = pl.tile.get_block_idx()
+        o = i * {tr}
+        ta = pl.load(a, [o, 0], [{tr}, {tc}])
+        tb = pl.load(b, [o, 0], [{tr}, {tc}])
+        pl.system.syncall(core_type="aiv_only")
+        out = pl.store(pl.add(ta, tb), [o, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Spmd, attrs={{"core_num": {n}}})
+    def wrap(self, a: pl.Tensor[[{n * tr}, {tc}], pl.FP32], b: pl.Tensor[[{n * tr}, {tc}], pl.FP32],
+             out: pl.Out[pl.Tensor[[{n * tr}, {tc}], pl.FP32]]) -> pl.Tensor[[{n * tr}, {tc}], pl.FP32]:
+        out = self.add(a, b, out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(self,
+                     a: pl.Tensor[[{n * tr}, {tc}], pl.FP32],
+                     b: pl.Tensor[[{n * tr}, {tc}], pl.FP32],
+                     out: pl.Out[pl.Tensor[[{n * tr}, {tc}], pl.FP32]],
+                     ) -> pl.Tensor[[{n * tr}, {tc}], pl.FP32]:
+        out = self.wrap(a, b, out{dispatch_spec})
+        return out
+""")
+
+
 class TestHardSyncallOccupancy:
     """Compile-time occupancy + sync_start check for the hard (FFTS) syncall (issue #1935)."""
 
@@ -710,6 +752,20 @@ class TestHardSyncallOccupancy:
         """available_aiv_count() sizes a mixed launch to the AIV count — rejected."""
         with pytest.raises(pypto.Error, match=r"available_aiv_count\(\).*available_cluster_count\(\)"):
             _run(_mixed_wrong_query_program())
+
+    def test_legacy_function_attr_is_used_when_dispatch_has_no_spec(self):
+        """A Function-level core_num still governs a dispatch that carries none."""
+        with pytest.raises(pypto.Error, match="fill all 48 AIV cores"):
+            _run(_legacy_function_attr_program(""))
+
+    def test_dispatch_spec_overrides_a_legacy_function_attr(self):
+        """The dispatch wins, matching EffectiveLaunchSpec's precedence.
+
+        A stale ``core_num=24`` on the callee must not reject a launch that
+        codegen actually emits as 48 blocks with sync_start — the verifier would
+        otherwise reject a program that compiles and runs correctly.
+        """
+        _run(_legacy_function_attr_program(', attrs={"core_num": 48, "sync_start": True}'))
 
 
 if __name__ == "__main__":

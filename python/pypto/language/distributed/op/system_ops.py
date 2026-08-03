@@ -53,6 +53,18 @@ def world_size() -> Scalar:
     return wrapping lets call sites compose naturally with Python operators
     (``pld.world_size() * 4``, ``pl.range(pld.world_size())``), which the
     parser's ``invoke_dsl`` unwraps back to the underlying Call.
+
+    .. warning::
+
+       This function is callable **only** inside HOST-level orchestration
+       (``level=pl.Level.HOST, role=pl.Role.Orchestrator``). Calling it
+       inside InCore (``type=pl.FunctionType.InCore``) raises a parser error.
+
+    .. seealso::
+
+       :func:`rank` and :func:`nranks` — the per-rank equivalents for InCore
+       kernels, called on a :class:`CommCtx` obtained via
+       :func:`get_comm_ctx`.
     """
     return Scalar(expr=_ir_system.world_size())
 
@@ -127,6 +139,12 @@ def notify(
     so the printed IR (which emits them positionally) round-trips through the
     parser; ``op`` stays keyword-only because it lowers to an IR attr (printed
     as ``op=<int>``), mirroring ``pld.tensor.window``'s ``dtype``.
+
+    .. note::
+
+       ``notify`` names this operand ``target``; the companion ``wait`` names
+       the same logical operand ``signal``. Both refer to the same
+       window-bound signal tensor.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` signal matrix. The

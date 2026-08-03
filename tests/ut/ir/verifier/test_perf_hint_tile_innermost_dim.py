@@ -29,8 +29,12 @@ def reset_backend_around_test():
 def _run_perf_hint_check(program: ir.Program) -> list[passes.Diagnostic]:
     """Run only the TileInnermostDimGranularity check and return its diagnostics.
 
-    The verifier reads the active backend from PassContext, so callers must
-    set up backend + context before invoking this helper.
+    The verifier early-returns without an active PassContext, so a context must
+    exist for the check to fire at all — it comes from the repo conftest's
+    autouse ``pass_verification_context``. The backend is resolved live, so
+    callers only need to select one (``_activate_a5`` / ``_activate_a3``) first.
+    This helper runs no pass pipeline, so the context's verification level never
+    applies — do not wrap calls in a verification-disabling context.
     """
     checks = passes.DiagnosticCheckSet()
     checks.insert(passes.DiagnosticCheck.TileInnermostDimGranularity)
@@ -254,8 +258,7 @@ def test_cube_memory_space_not_flagged_a5():
     """
     _activate_a5()
     program = _make_cube_matmul_program(8, pl.FP32)  # A-Mat innermost = 32B (< 128B)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert perf_hints == []
 
@@ -269,8 +272,7 @@ def test_message_includes_dtype_shape_memory_tuple_a5():
     """The hint echoes the (dtype[innermost], target_memory) tuple it evaluated."""
     _activate_a5()
     program = _make_load_program(16, pl.FP32)  # Vec load, 64B innermost
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     msg = perf_hints[0].message
@@ -345,9 +347,8 @@ def test_dedup_collapses_repeated_site_a3():
             return pl.store(acc, [0, 0], out)
 
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        post = pm.run_passes(LoopLoadProg)
-        diags = _run_perf_hint_check(post)
+    post = pm.run_passes(LoopLoadProg)
+    diags = _run_perf_hint_check(post)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     assert all(d.hint_code == "PH001" for d in perf_hints)

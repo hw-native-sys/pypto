@@ -368,7 +368,9 @@ counts. InCore lowering uses UB-bounded chunks; the host builtin uses
 tail span to 32 bytes. The host builtin rounds ragged FP16 and FP32 load spans
 to 32 bytes. Both preserve the logical valid shape. The host builtin accepts either a
 rank-1 `[world_size]` signal or the synthesized rank-2 `[world_size, 1]`
-signal.
+signal. Ring mode (`mode="ring"`) for the host orchestrator lowers to
+`builtin.tensor.allreduce_ring` and requires an explicit rank-2
+`[2 * (NR - 1) + 1, NR]` INT32 signal (one extra row for the return barrier).
 
 ### `pld.system.notify` (TNOTIFY)
 
@@ -440,6 +442,7 @@ dispatches before the final `Simplify`.
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
+  `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
   `test_l3_tensor_all_to_all_v_intrinsic.py`, and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now

@@ -11,6 +11,7 @@
 3. For 循环范围（start/stop/step）不能是调用
 4. 二元/一元表达式操作数不能是调用
 5. Return 值不能是调用
+6. Yield 值不能是调用
 
 **需要**：TypeChecked、SSAForm 属性 (Property)（通常由前序 Pass 产生；如需在执行前校验 required/produced，请在 `PassContext` 中启用 `VerificationInstrument`）。
 
@@ -49,7 +50,10 @@ program_flat = flatten_pass(program)
 
 - AssignStmt/EvalStmt 之前：直接插入在前面
 - 在 IfStmt/ForStmt 之前：作为外层 `SeqStmts` 中的同级语句插入
+- 在 ReturnStmt/YieldStmt 之前：直接插入在前面。yield 总是其循环 / 分支 body 的末尾语句，因此临时变量会落在该 body **内部** —— 也就是 yield 值真正被计算的地方
 - ScopeStmt 内部（`pl.at()`）：临时变量始终插入在 scope body **内部**，保持执行上下文边界
+
+**为什么 ReturnStmt 和 YieldStmt 也要处理。** 下游 pass 与 codegen 都是通过遍历顶层 `AssignStmt` / `EvalStmt` 来改写操作的。直接留在 `return` 或 `pl.yield_` 里的 Call 对它们不可见：`return call(...)` 曾经在 orchestration codegen 中被静默丢弃；而 `pl.yield_(pl.add(acc, row))` 曾经让其中的 `tensor.add` 得不到转换 —— 与此同时 `ConvertTensorToTileOps` 已把周围的操作数下降为 Tile，最终表现为很靠后的阶段里某个 tensor 层算子拒绝了 `TileType` 参数。
 
 ## 示例
 

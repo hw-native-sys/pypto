@@ -180,7 +180,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type2->shape_);
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -211,7 +211,7 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -702,7 +702,7 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -737,7 +737,7 @@ TypePtr DeduceTileOpTriTileType(const std::vector<ExprPtr>& args,
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
   // TODO(YunjiQin): assumes all src tiles have the same valid_shape; may need refinement
-  // for cases where tiles have different valid_shapes (e.g. after broadcasting).
+  // for cases where tiles have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -772,7 +772,7 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
   CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes";
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs tiles have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs tiles have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -962,7 +962,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type2->shape_);
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
@@ -1025,7 +1025,7 @@ TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
                                   << FormatShape(tile_type2->shape_);
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-  // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
+  // for cases where lhs and rhs have different valid_shape values (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
   InheritTileViewLayout(tile_view, tile_type1);
