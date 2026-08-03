@@ -1416,5 +1416,189 @@ class TestUnifiedOpsTypeErrors:
             unified_ops.batch_matmul(1, 2)  # type: ignore
 
 
+# The unified wrappers accept the union of both levels' kwargs. A kwarg only the
+# *other* dispatch path can honour must raise instead of being dropped — a
+# discarded ``b_trans`` compiles wrong math, and a discarded scratch tile leaves
+# the caller's buffer dead while still consuming UB budget. Only a non-default
+# value raises; spelling out the documented default keeps working.
+_TMP_TILE_REDUCTIONS = [
+    "row_max",
+    "row_sum",
+    "row_min",
+    "row_prod",
+    "col_sum",
+    "row_argmax",
+    "row_argmin",
+    "col_argmax",
+    "col_argmin",
+]
+
+
+def _tile(name: str, shape: list[int], dtype: DataType = DataType.FP16) -> Tile:
+    return Tile(expr=ir.Var(name, ir.TileType(shape, dtype), ir.Span.unknown()))
+
+
+def _tensor(name: str, shape: list[int], dtype: DataType = DataType.FP32) -> Tensor:
+    return Tensor(expr=ir.Var(name, ir.TensorType(shape, dtype), ir.Span.unknown()))
+
+
+class TestUnifiedOpsCrossPathKwargs:
+    """Kwargs only one dispatch path can honour raise instead of being dropped."""
+
+    @pytest.mark.parametrize(
+        "kwarg,remedy",
+        [
+            ("a_trans", "transpose_view"),
+            ("b_trans", "transpose_view"),
+            ("c_matrix_nz", "Acc tile type"),
+        ],
+    )
+    def test_matmul_tile_rejects_tensor_only_flags(self, kwarg, remedy):
+        """Tensor-level matmul flags have no tile equivalent, so they must raise."""
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+        with pytest.raises(TypeError) as exc_info:
+            unified_ops.matmul(lhs, rhs, **{kwarg: True})  # type: ignore[call-overload]
+
+        msg = str(exc_info.value)
+        assert f"'{kwarg}'" in msg
+        assert "not supported for Tile operands" in msg
+        assert remedy in msg
+
+    def test_matmul_tile_accepts_explicit_default_flags(self):
+        """Spelling out the defaults is a no-op and yields plain pl.tile.matmul IR."""
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+
+        unified = unified_ops.matmul(lhs, rhs, a_trans=False, b_trans=False, c_matrix_nz=False)  # type: ignore[call-overload]
+        explicit = pl.tile.matmul(lhs, rhs)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_matmul_tile_accepts_out_dtype_matching_deduction(self):
+        """tile.matmul deduces FP32 for float operands; asking for FP32 is honoured."""
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+
+        unified = unified_ops.matmul(lhs, rhs, out_dtype=DataType.FP32)
+        explicit = pl.tile.matmul(lhs, rhs)
+
+        result_type = unified.unwrap().type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_matmul_tile_rejects_out_dtype_the_accumulator_cannot_produce(self):
+        """The Cube accumulator is fixed at FP32 here, so FP16 must raise, not drop."""
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+        with pytest.raises(TypeError) as exc_info:
+            unified_ops.matmul(lhs, rhs, out_dtype=DataType.FP16)
+
+        msg = str(exc_info.value)
+        assert "out_dtype" in msg
+        assert "fp32" in msg  # names what it actually deduced
+        assert "pl.cast" in msg
+
+    def test_matmul_tile_rejects_unverifiable_int_out_dtype(self):
+        """A raw int dtype code cannot be compared against the deduction, so it raises.
+
+        ``DataType`` exposes no Python int conversion, so an int value cannot be
+        checked against what tile.matmul actually deduced — and skipping the
+        check is the silent drop this guard exists to prevent. The Tile overload
+        already rejects this statically (hence the suppression); the runtime
+        check still matters because the DSL parser reaches the wrapper
+        dynamically.
+        """
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+        with pytest.raises(TypeError, match="out_dtype"):
+            unified_ops.matmul(lhs, rhs, out_dtype=51)  # pyright: ignore[reportArgumentType]
+
+    def test_matmul_tensor_still_honors_all_kwargs(self):
+        """The Tensor path is untouched — every kwarg still reaches tensor.matmul."""
+        # b_trans=True means rhs is [N, K], so [512, 128] against an lhs K of 128.
+        lhs, rhs = _tensor("lhs", [32, 128], DataType.BF16), _tensor("rhs", [512, 128], DataType.BF16)
+
+        unified = unified_ops.matmul(lhs, rhs, out_dtype=DataType.FP32, a_trans=False, b_trans=True)
+        explicit = pl.tensor.matmul(lhs, rhs, DataType.FP32, False, True)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    @pytest.mark.parametrize("kwarg", ["a_trans", "b_trans"])
+    def test_matmul_acc_tile_rejects_transpose_flags(self, kwarg):
+        acc = _tile("acc", [32, 128], DataType.FP32)
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+        with pytest.raises(TypeError) as exc_info:
+            unified_ops.matmul_acc(acc, lhs, rhs, **{kwarg: True})  # type: ignore[call-overload]
+
+        msg = str(exc_info.value)
+        assert f"'{kwarg}'" in msg
+        assert "transpose_view" in msg
+
+    def test_matmul_acc_tile_accepts_explicit_default_flags(self):
+        acc = _tile("acc", [32, 128], DataType.FP32)
+        lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
+
+        unified = unified_ops.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)  # type: ignore[call-overload]
+        explicit = pl.tile.matmul_acc(acc, lhs, rhs)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_rsqrt_tile_rejects_high_precision(self):
+        """tile.rsqrt selects precision by taking a scratch tile, not by a flag."""
+        with pytest.raises(TypeError) as exc_info:
+            unified_ops.rsqrt(_tile("t", [64, 64], DataType.FP32), high_precision=True)  # type: ignore[call-overload]
+
+        msg = str(exc_info.value)
+        assert "'high_precision'" in msg
+        assert "pl.tile.rsqrt(tile, tmp)" in msg
+
+    def test_rsqrt_tile_default_still_lowers(self):
+        t = _tile("t", [64, 64], DataType.FP32)
+
+        unified = unified_ops.rsqrt(t)
+        explicit = pl.tile.rsqrt(t)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_rsqrt_tensor_still_honors_high_precision(self):
+        x = _tensor("x", [64, 64])
+
+        unified = unified_ops.rsqrt(x, high_precision=True)
+        explicit = pl.tensor.rsqrt(x, high_precision=True)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    @pytest.mark.parametrize("op_name", _TMP_TILE_REDUCTIONS)
+    def test_reduction_tensor_path_rejects_tmp_tile(self, op_name):
+        """The conversion pass allocates the scratch, so a user tmp_tile must raise."""
+        x = _tensor("x", [64, 64])
+        tmp = _tile("tmp", [64, 64], DataType.FP32)
+        with pytest.raises(TypeError) as exc_info:
+            getattr(unified_ops, op_name)(x, tmp)  # type: ignore[call-overload]
+
+        msg = str(exc_info.value)
+        assert f"pl.{op_name}" in msg
+        assert "tmp_tile" in msg
+
+    @pytest.mark.parametrize("op_name", _TMP_TILE_REDUCTIONS)
+    def test_reduction_tensor_path_without_tmp_tile_unchanged(self, op_name):
+        """Omitting tmp_tile on the Tensor path still matches pl.tensor.<op>."""
+        x = _tensor("x", [64, 64])
+
+        unified = getattr(unified_ops, op_name)(x)
+        explicit = getattr(pl.tensor, op_name)(x)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_col_sum_tile_path_still_selects_binary_tree(self):
+        """tmp_tile is honoured on the Tile path — it selects binary-tree reduction."""
+        t = _tile("t", [64, 64], DataType.FP32)
+        tmp = _tile("tmp", [64, 64], DataType.FP32)
+
+        unified = unified_ops.col_sum(t, tmp)
+        explicit = pl.tile.col_sum(t, tmp)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        # The binary-tree form is distinguishable from the sequential one.
+        assert not ir.structural_equal(unified.unwrap(), pl.tile.col_sum(t).unwrap())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

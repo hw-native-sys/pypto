@@ -8,6 +8,14 @@ All operations are accessed via `import pypto.language as pl`.
 
 Auto-selects between tensor and tile implementation based on input type.
 
+**Path-specific kwargs raise rather than being dropped.** A few operations take a kwarg that only
+one level can honour — a tensor value has no layout, so `matmul` needs `a_trans` / `b_trans`
+flags, while at tile level transposition is a *type* property expressed with
+`pl.tile.transpose_view(...)`; conversely a tile's scratch buffer must be supplied by the caller,
+while the tensor path has the compiler allocate it. Passing such a kwarg with a non-default value
+to the wrong path raises `TypeError` naming the offending kwarg and the level-appropriate
+alternative. Passing the documented default (e.g. `b_trans=False`) is a no-op and stays accepted.
+
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `add` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | Element-wise addition |
@@ -33,20 +41,21 @@ Auto-selects between tensor and tile implementation based on input type.
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | Reshape to new dimensions |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
 | `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice with offset |
-| `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
-| `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
-| `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
-| `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `row_prod` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise product (tile path requires `tmp_tile`) |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise sum. On Tile, passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. Tensor input lowers to the sequential path. |
+| `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` or `(lhs: Tile, rhs: Tile, out_dtype=None) -> Tile` | Matrix multiplication. `a_trans` / `b_trans` / `c_matrix_nz` are Tensor-only and raise on the Tile path — pass `pl.tile.transpose_view(operand)` instead. `tile.matmul`'s dtype is fixed by the Cube accumulator (FP32 for float operands, INT32 for int), so an `out_dtype` there is accepted only when it matches that deduction and otherwise raises; use `pl.cast` or let `pl.tile.store` narrow on the way to GM |
+| `matmul_acc` | `(acc: Tensor, lhs: Tensor, rhs: Tensor, a_trans=False, b_trans=False) -> Tensor` or `(acc: Tile, lhs: Tile, rhs: Tile) -> Tile` | Matrix multiply with accumulation: `acc += lhs @ rhs`. Same Tensor-only transpose-flag rule as `matmul` |
+| `row_max` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise max. `tmp_tile` is required on the Tile path and rejected on the Tensor path (the scratch is allocated during lowering) |
+| `row_sum` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise sum; same `tmp_tile` rule as `row_max` |
+| `row_min` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise min; same `tmp_tile` rule as `row_max` |
+| `row_prod` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise product; same `tmp_tile` rule as `row_max` |
+| `col_sum` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile \| None = None) -> Tile` | Column-wise sum. On Tile, passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. Tensor input always lowers to the sequential path and rejects `tmp_tile`, since it could not select the requested strategy |
 | `col_max` | `(input: T) -> T` | Column-wise max |
 | `col_min` | `(input: T) -> T` | Column-wise min |
 | `col_prod` | `(input: T) -> T` | Column-wise product |
-| `row_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise argmax (column index of per-row max, int32 output; tile path requires `tmp_tile`) |
-| `row_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise argmin (column index of per-row min, int32 output; tile path requires `tmp_tile`) |
-| `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmax (row index of per-column max, int32 output; tile path requires `tmp_tile`) |
-| `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmin (row index of per-column min, int32 output; tile path requires `tmp_tile`) |
-| `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
+| `row_argmax` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise argmax (column index of per-row max, int32 output); same `tmp_tile` rule as `row_max` |
+| `row_argmin` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Row-wise argmin (column index of per-row min, int32 output); same `tmp_tile` rule as `row_max` |
+| `col_argmax` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Column-wise argmax (row index of per-column max, int32 output); same `tmp_tile` rule as `row_max` |
+| `col_argmin` | `(input: Tensor) -> Tensor` or `(input: Tile, tmp_tile: Tile) -> Tile` | Column-wise argmin (row index of per-column min, int32 output); same `tmp_tile` rule as `row_max` |
+| `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` or `(input: Tile) -> Tile` | Reciprocal square root; `high_precision=True` selects the high-precision path and is Tensor-only. The tile form selects precision by *taking* a scratch tile, so tile callers use `pl.tile.rsqrt(tile, tmp)` and `high_precision=True` with a Tile raises |
 | `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | Tile-only (promoted from `pl.tile.create`, same function object): create tile at specific memory space. See the `pl.tile.create` row for `transpose` / `flat_layout` |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |

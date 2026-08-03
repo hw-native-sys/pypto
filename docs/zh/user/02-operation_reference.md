@@ -8,6 +8,12 @@
 
 根据输入类型自动选择 tensor 或 tile 实现。
 
+**路径专属的关键字参数会报错，而不会被静默丢弃。** 少数操作的某个关键字参数只有一个层级能够兑现：
+tensor 值不携带 layout，因此 `matmul` 需要 `a_trans` / `b_trans` 标志；而在 tile 层，转置是一个*类型*属性，
+用 `pl.tile.transpose_view(...)` 表达。反过来，tile 的临时缓冲区必须由调用方提供，tensor 路径则由编译器分配。
+把这类关键字参数以非默认值传给错误的路径会抛出 `TypeError`，并指明具体参数名与对应层级的替代写法。
+传入文档所述的默认值（例如 `b_trans=False`）是空操作，仍然接受。
+
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
 | `add` | `(lhs: T, rhs: T \| int \| float \| Scalar) -> T` | 逐元素加法 |
@@ -33,20 +39,21 @@
 | `reshape` | `(input: T, shape: Sequence[IntLike]) -> T` | 变形为新维度 |
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | 交换两个轴 |
 | `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | 带偏移的切片 |
-| `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
-| `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | 带累加的矩阵乘法：`acc += lhs @ rhs` |
-| `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
-| `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `row_prod` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行乘积（tile 路径需要 `tmp_tile`） |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列求和；Tile 上传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约；Tensor 输入下沉为顺序归约路径 |
+| `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` 或 `(lhs: Tile, rhs: Tile, out_dtype=None) -> Tile` | 矩阵乘法。`a_trans` / `b_trans` / `c_matrix_nz` 仅 Tensor 可用，在 Tile 路径上会报错 —— 改为传入 `pl.tile.transpose_view(operand)`。`tile.matmul` 的输出 dtype 由 Cube 累加器固定（浮点输入为 FP32，整型输入为 INT32），因此 Tile 路径上的 `out_dtype` 只有与该推导一致时才接受，否则报错；需要其他 dtype 时用 `pl.cast`，或交给 `pl.tile.store` 在写回 GM 时收窄 |
+| `matmul_acc` | `(acc: Tensor, lhs: Tensor, rhs: Tensor, a_trans=False, b_trans=False) -> Tensor` 或 `(acc: Tile, lhs: Tile, rhs: Tile) -> Tile` | 带累加的矩阵乘法：`acc += lhs @ rhs`。转置标志的 Tensor 专属规则与 `matmul` 相同 |
+| `row_max` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行最大值。`tmp_tile` 在 Tile 路径上必填，在 Tensor 路径上会被拒绝（临时 tile 由下沉阶段分配） |
+| `row_sum` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行求和；`tmp_tile` 规则同 `row_max` |
+| `row_min` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行最小值；`tmp_tile` 规则同 `row_max` |
+| `row_prod` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行乘积；`tmp_tile` 规则同 `row_max` |
+| `col_sum` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile \| None = None) -> Tile` | 列求和；Tile 上传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约。Tensor 输入始终下沉为顺序归约路径，因此无法兑现所请求的策略，传入 `tmp_tile` 会被拒绝 |
 | `col_max` | `(input: T) -> T` | 列最大值 |
 | `col_min` | `(input: T) -> T` | 列最小值 |
 | `col_prod` | `(input: T) -> T` | 列乘积 |
-| `row_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行 argmax（每行最大值的列索引，int32 输出；tile 路径需要 `tmp_tile`） |
-| `row_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行 argmin（每行最小值的列索引，int32 输出；tile 路径需要 `tmp_tile`） |
-| `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmax（每列最大值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
-| `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmin（每列最小值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
-| `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
+| `row_argmax` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行 argmax（每行最大值的列索引，int32 输出）；`tmp_tile` 规则同 `row_max` |
+| `row_argmin` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 行 argmin（每行最小值的列索引，int32 输出）；`tmp_tile` 规则同 `row_max` |
+| `col_argmax` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 列 argmax（每列最大值的行索引，int32 输出）；`tmp_tile` 规则同 `row_max` |
+| `col_argmin` | `(input: Tensor) -> Tensor` 或 `(input: Tile, tmp_tile: Tile) -> Tile` | 列 argmin（每列最小值的行索引，int32 输出）；`tmp_tile` 规则同 `row_max` |
+| `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` 或 `(input: Tile) -> Tile` | 倒数平方根；`high_precision=True` 选择高精度路径，仅 Tensor 可用。tile 形式通过*传入*临时 tile 来选择精度，因此 tile 调用方应使用 `pl.tile.rsqrt(tile, tmp)`；对 Tile 传入 `high_precision=True` 会报错 |
 | `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | 在指定内存空间创建 tile（tile-only，与 `pl.tile.create` 为同一个函数对象）。`transpose` / `flat_layout` 说明见下方 `pl.tile.create` 条目 |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量（按源类型分发）。语法糖：`A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | 写入指定索引的标量（按目标类型分发）。语法糖：`A[i, j] = v` |

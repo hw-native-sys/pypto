@@ -70,6 +70,47 @@ class TestWrapperErrorsThroughParser:
                 )
                 return result
 
+    def test_matmul_b_trans_on_tile_operands_raises_at_the_call_site(self):
+        """A Tensor-only matmul flag must not be silently dropped on the Tile path.
+
+        Regression for issue #2264: migrating a kernel's matmul operands from
+        Tensor to Tile (``pl.create_l1`` -> ``pl.create_tile``, tensor slice ->
+        ``pl.load``) changed the dispatch target while the
+        ``pl.matmul(..., b_trans=True)`` line was left untouched. The flag
+        stopped being honoured and, with a square B, compiled ``A @ B`` instead
+        of ``A @ B^T`` with no diagnostic at any stage.
+        """
+        with pytest.raises(InvalidOperationError) as exc_info:
+
+            @pl.function(auto_scope=False)
+            def main(
+                a: pl.Tensor[[32, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                with pl.scope():
+                    at = pl.load(a, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat)
+                    bt = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    # The @overloads already reject this statically ("Argument of
+                    # type Tile cannot be assigned to parameter lhs of type
+                    # Tensor"); suppressed on purpose so the test can prove the
+                    # *runtime* now rejects it too, which is what #2264 was about.
+                    c: pl.Tile[[32, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(
+                        at,  # pyright: ignore[reportArgumentType]
+                        bt,  # pyright: ignore[reportArgumentType]
+                        b_trans=True,
+                        out_dtype=pl.FP32,
+                    )
+                    out = pl.store(c, [0, 0], out)
+                return out
+
+        msg = exc_info.value.message  # type: ignore[attr-defined]
+        assert "pl.matmul" in msg
+        assert "b_trans" in msg
+        # The error must name the tile-level alternative, not just refuse.
+        assert "transpose_view" in msg
+        assert exc_info.value.span is not None  # type: ignore[attr-defined]
+
 
 class TestSpanPropagatesIntoWrapperConstructedNodes:
     """Span pinned by parser surfaces on IR nodes constructed inside wrappers."""
