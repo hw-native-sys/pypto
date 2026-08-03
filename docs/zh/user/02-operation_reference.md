@@ -47,7 +47,7 @@
 | `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmax（每列最大值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
 | `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列 argmin（每列最小值的行索引，int32 输出；tile 路径需要 `tmp_tile`） |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create`） |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | 在指定内存空间创建 tile（tile-only，与 `pl.tile.create` 为同一个函数对象）。`transpose` / `flat_layout` 说明见下方 `pl.tile.create` 条目 |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量（按源类型分发）。语法糖：`A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | 写入指定索引的标量（按目标类型分发）。语法糖：`A[i, j] = v` |
 
@@ -113,7 +113,7 @@
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | 读取指定索引的标量。语法糖：`A[i, j]` |
 | `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | 写入指定索引的标量。语法糖：`A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
-| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | 在指定内存空间创建 tile |
+| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | 在指定内存空间创建 tile。`transpose=True` 分配转置的 Mat（ZN）分形布局，用于 matmul `b_trans` 的 B 操作数——仅支持 2D 且 `target_memory=Mem.Mat`。`flat_layout=True`（仅关键字参数）分配扁平的非分形（`slayout=none_box`）L1 暂存缓冲区——仅支持 `Mem.Mat`，且与 `transpose` 互斥 |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `random` | `(key0, key1, counter0, counter1, counter2, counter3: int \| Scalar, shape: Sequence[int], valid_shape: Sequence[int] \| None = None, dtype: DataType = UINT32, rounds: int = 10) -> Tile` | 用基于计数器的（Philox/ChaCha 风格）伪随机值填充 tile，种子为 64 位 key + 128 位 counter。确定性：相同种子产生相同 tile。可选 `valid_shape`（每维 `<= shape`）只写入有效行/列，其余保持不变。`dtype` ∈ {INT32, UINT32}；`rounds` ∈ {7, 10}。仅支持 2D shape。**仅 A5**（`pto.trandom`） |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | 按指定 pad 值填充无效视图区域；接受 `PadValue.zero/max/min` 枚举，或字面量 `0`、`0.0`、`math.inf`、`-math.inf`（其他值会报错）；Tensor 输入会在 InCore 代码中下沉为 tile fillpad |

@@ -47,7 +47,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `col_argmax` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmax (row index of per-column max, int32 output; tile path requires `tmp_tile`) |
 | `col_argmin` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise argmin (row index of per-column min, int32 output; tile path requires `tmp_tile`) |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
-| `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
+| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | Tile-only (promoted from `pl.tile.create`, same function object): create tile at specific memory space. See the `pl.tile.create` row for `transpose` / `flat_layout` |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> Expr` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
 
@@ -113,7 +113,7 @@ Transfer data between memory hierarchy levels.
 | `read` | `(tile: Tile, indices: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices. Sugar: `A[i, j]` |
 | `write` | `(tile: Tile, indices: IntLike \| Sequence[IntLike], value: Scalar \| Expr) -> Expr` | Write scalar at indices. Sugar: `A[i, j] = v` |
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | Move tile between memory levels (including Vec→Vec) |
-| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
+| `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec, transpose: bool \| None = None, *, flat_layout: bool \| None = None) -> Tile` | Create tile at memory space. `transpose=True` allocates the transposed Mat (ZN) fractal layout for a matmul `b_trans` B-operand — 2D and `target_memory=Mem.Mat` only. `flat_layout=True` (keyword-only) allocates a flat, non-fractal (`slayout=none_box`) L1 staging buffer — `Mem.Mat` only, mutually exclusive with `transpose` |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `random` | `(key0, key1, counter0, counter1, counter2, counter3: int \| Scalar, shape: Sequence[int], valid_shape: Sequence[int] \| None = None, dtype: DataType = UINT32, rounds: int = 10) -> Tile` | Fill a tile with counter-based (Philox/ChaCha-style) pseudo-random values from a 64-bit key + 128-bit counter. Deterministic: same seeds → same tile. Optional `valid_shape` (each dim `<= shape`) writes only the valid rows/cols, leaving the rest untouched. `dtype` ∈ {INT32, UINT32}; `rounds` ∈ {7, 10}. 2D shape only. **A5 only** (`pto.trandom`) |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; accepts the `PadValue.zero/max/min` enum or the literal sugars `0`, `0.0`, `math.inf`, `-math.inf` (other values raise). Tensor inputs lower to tile fillpad in InCore code |

@@ -18,7 +18,7 @@ import pypto.language as pl
 import pypto.language.op as language_op
 import pytest
 from pypto import DataType, ir
-from pypto.language.op import unified_ops
+from pypto.language.op import tile_ops, unified_ops
 from pypto.language.typing import Scalar, Tensor, Tile
 
 
@@ -1076,6 +1076,88 @@ class TestPromotedOps:
         assert language_op.reinterpret_view is unified_ops.reinterpret_view
         assert "reinterpret_view" in pl.__all__
         assert "reinterpret_view" in language_op.__all__
+
+    def test_namespaces_agree_on_shared_names(self):
+        """A DSL name must resolve to one object in ``pl`` and ``pl.op``.
+
+        The parser resolves unified ``pl.<op>`` calls against
+        ``pypto.language.op``, while ``inspect.signature``, IDE autocomplete and
+        docstrings all show what ``pypto.language`` exports. A name bound to two
+        different functions makes the parser reject arguments the visible
+        signature advertises.
+        """
+        divergent = {
+            name: (
+                getattr(getattr(pl, name), "__module__", repr(getattr(pl, name))),
+                getattr(getattr(language_op, name), "__module__", repr(getattr(language_op, name))),
+            )
+            for name in dir(language_op)
+            if not name.startswith("_")
+            and hasattr(pl, name)
+            and getattr(pl, name) is not getattr(language_op, name)
+            and callable(getattr(language_op, name))
+        }
+        assert not divergent, (
+            f"names bound to different objects in pypto.language vs pypto.language.op: {divergent}"
+        )
+
+    def test_create_tile_single_binding(self):
+        """``create_tile`` is the ``tile_ops.create`` alias in both namespaces."""
+        assert pl.create_tile is language_op.create_tile is tile_ops.create
+        assert "create_tile" in pl.__all__
+        assert "create_tile" in language_op.__all__
+
+    def test_promoted_create_tile_transpose(self):
+        """``pl.create_tile(..., transpose=True)`` matches the explicit form.
+
+        ``transpose=True`` is Mat-only (L1) and 2D-only — it allocates the
+        transposed ZN fractal layout for a matmul ``b_trans`` B-operand.
+        """
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def unified(src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[256, 128], pl.BF16]:
+            _t: pl.Tile[[16, 128], pl.BF16] = pl.create_tile(
+                [16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat, transpose=True
+            )
+            return src
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def explicit(src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[256, 128], pl.BF16]:
+            _t: pl.Tile[[16, 128], pl.BF16] = pl.tile.create(
+                [16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat, transpose=True
+            )
+            return src
+
+        ir.assert_structural_equal(unified, explicit)
+        # The kwarg must take effect, not merely be accepted: transpose flips
+        # the sub-block layout to col_major (ZN).
+        assert "slayout=pl.TileLayout.col_major" in unified.as_python()
+
+    def test_promoted_create_tile_flat_layout(self):
+        """``pl.create_tile(..., flat_layout=True)`` matches the explicit form.
+
+        ``flat_layout`` is keyword-only and allocates a flat (non-fractal,
+        ``slayout=none_box``) L1 staging buffer.
+        """
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def unified(src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[256, 128], pl.BF16]:
+            _t: pl.Tile[[16, 128], pl.BF16] = pl.create_tile(
+                [16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat, flat_layout=True
+            )
+            return src
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def explicit(src: pl.Tensor[[256, 128], pl.BF16]) -> pl.Tensor[[256, 128], pl.BF16]:
+            _t: pl.Tile[[16, 128], pl.BF16] = pl.tile.create(
+                [16, 128], dtype=pl.BF16, target_memory=pl.Mem.Mat, flat_layout=True
+            )
+            return src
+
+        ir.assert_structural_equal(unified, explicit)
+        # The kwarg must take effect, not merely be accepted: flat_layout drops
+        # the fractal sub-block boxing.
+        assert "slayout=pl.TileLayout.none_box" in unified.as_python()
 
     def test_promoted_create(self):
         @pl.function

@@ -91,7 +91,6 @@ __all__ = [
     "shr",
     "shrs",
     "set_validshape",
-    "create_tile",
     "read",
     "write",
 ]
@@ -99,7 +98,7 @@ __all__ = [
 from pypto.ir.utils import _get_span_or_capture, resolve_cast_mode
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import MemorySpace, PadValue
+from pypto.pypto_core.ir import PadValue
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -1319,25 +1318,6 @@ def set_validshape(input, valid_rows, valid_cols):
     if isinstance(input, Tile):
         return _tile.set_validshape(input, valid_rows, valid_cols)
     raise TypeError(f"pl.set_validshape: expected Tensor or Tile, got {type(input).__name__}")
-
-
-# ---------------------------------------------------------------------------
-# Tile-only ops promoted to unified namespace
-# ---------------------------------------------------------------------------
-
-
-def create_tile(
-    shape: list[int],
-    dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.Vec,
-) -> Tile:
-    """Create a tile at specific memory space.
-
-    ``target_memory`` defaults to ``Vec`` to match the underlying
-    ``tile.create`` wrapper — direct callers like
-    ``pl.create_tile(shape, dtype)`` (omitting target_memory) keep working.
-    """
-    return _tile.create(shape, dtype, target_memory)
 
 
 # ---------------------------------------------------------------------------

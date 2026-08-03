@@ -66,15 +66,16 @@ from .tensor_ops import (
 from .tensor_ops import ci as arange
 from .tensor_ops import create as create_tensor
 
-# Promoted tile-only ops (accessible as pl.load, etc.). ``abs``,
-# ``create_tile`` and the bitwise family are re-exported below from
-# ``unified_ops`` instead so the unified Tensor/Tile dispatch wins.
+# Promoted tile-only ops (accessible as pl.load, etc.). ``abs`` and the
+# bitwise family are re-exported below from ``unified_ops`` instead so the
+# unified Tensor/Tile dispatch wins.
 from .tile_ops import (
     addc,
     addsc,
     aic_gather,
     aiv_shard,
     cmps,
+    create_tile,
     gemv,
     gemv_acc,
     gemv_bias,
@@ -99,9 +100,11 @@ from .tile_ops import (
 )
 
 # Unified dispatch (overlapping ops). Imported AFTER tile_ops so the
-# unified versions override any same-named imports above (e.g. ``abs``,
-# ``create_tile``) — direct ``pl.abs(tensor)`` users get the unified
-# dispatch rather than the Tile-only path.
+# unified versions override any same-named imports above (e.g. ``abs``) —
+# direct ``pl.abs(tensor)`` users get the unified dispatch rather than the
+# Tile-only path. Only names that genuinely dispatch on Tensor/Tile belong
+# here: a pure forwarder would shadow the tile_ops version with a narrower
+# signature, and the parser resolves ``pl.<op>`` against this namespace.
 from .unified_ops import (
     abs,  # noqa: A004 (intentionally shadows builtin via DSL surface)
     add,
@@ -125,7 +128,6 @@ from .unified_ops import (
     col_prod,
     col_sum,
     concat,
-    create_tile,
     div,
     exp,
     expands,
