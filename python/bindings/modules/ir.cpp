@@ -656,13 +656,15 @@ void BindIR(nb::module_& m) {
            nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
            nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
            nb::arg("pad") = PadValue::null,
-           "Create a tile view; all fields default to empty/null/row_major/none_box/512/null")
+           "Create a tile view; all fields default to empty/null/row_major/none_box/512/null. "
+           "fractal is a size in bytes, not elements.")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
-           "Create a tile view with integer valid_shape and stride, auto-converted to ConstInt")
+           "Create a tile view with integer valid_shape and stride, auto-converted to ConstInt. "
+           "fractal is a size in bytes, not elements.")
       .def_ro("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
       .def_ro("stride", &TileView::stride, "Stride for each dimension")
       .def_ro("start_offset", &TileView::start_offset, "Starting offset")
