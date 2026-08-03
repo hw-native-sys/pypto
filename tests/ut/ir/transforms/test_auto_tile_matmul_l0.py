@@ -639,6 +639,22 @@ def _lower_to_tile_ops(program):
     return program
 
 
+def _assert_unchanged_by_pass(before, after):
+    """Assert ``AutoTileMatmulL0`` left ``before`` structurally unchanged.
+
+    ``after`` is the pass run over the lowered ``before``. The golden is a FRESH
+    prerequisite-only lowering of ``before``: the pass under test never runs on the
+    right-hand side, and the golden is not the same object the pass was handed, so
+    neither a rewrite nor an in-place mutation can cancel out on both sides.
+
+    Use this for the ``..._not_folded`` guards: they assert the pass *declines*
+    to rewrite, so the whole program is the oracle. A substring probe for one op
+    cannot distinguish those cases from each other -- every ``_not_folded`` body
+    prints both ``pl.tile.cast(`` and no ``pl.tile.assemble(``.
+    """
+    ir.assert_structural_equal(after, _lower_to_tile_ops(before))
+
+
 class TestAutoTileMatmulL0MNTiling:
     """M/N output tiling.
 
@@ -3243,10 +3259,12 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 return out
 
         After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
-        printed = ir.python_print(After)
 
-        assert "pl.tile.cast(" in printed, "a non-matmul (store) consumer must keep the Vector cast"
-        assert "pl.tile.assemble(" not in printed, "the fold must not assemble into a Mat scratch"
+        # The pass must decline to rewrite anything: the Vector cast stays and no
+        # Mat-scratch assemble appears. Pinning the whole program (rather than
+        # grepping for those two ops) also catches an unrelated spurious rewrite.
+        # The positive counterpart is test_no_ksplit_cast_folds_to_full_window_assemble.
+        _assert_unchanged_by_pass(Before, After)
 
     def test_nondefault_round_mode_not_folded(self):
         """Guard: a fits-L0c chained cast with a directional round mode (e.g.
@@ -3274,10 +3292,10 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 return out
 
         After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
-        printed = ir.python_print(After)
 
-        assert "pl.tile.cast(" in printed, "a non-default (floor) round mode must keep the Vector cast"
-        assert "pl.tile.assemble(" not in printed, "the floor cast must not fold into a Mat-scratch assemble"
+        # ``floor`` is unfoldable, so the whole chain must survive untouched --
+        # Vector cast kept, no Mat-scratch assemble, and no other rewrite either.
+        _assert_unchanged_by_pass(Before, After)
 
     def test_default_round_mode_not_folded(self):
         """Guard: the cast default mode is ``"round"`` (round-half-*away*), but FIXPIPE's
@@ -3305,10 +3323,10 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
                 return out
 
         After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
-        printed = ir.python_print(After)
 
-        assert "pl.tile.cast(" in printed, "the default (round/ties-away) cast must keep the Vector cast"
-        assert "pl.tile.assemble(" not in printed, "the default cast must not fold into a Mat scratch"
+        # Default ``round`` (ties-away) is not FIXPIPE's ties-even, so the chain
+        # must survive untouched; only an explicit ``rint`` folds onto the cube.
+        _assert_unchanged_by_pass(Before, After)
 
     @pytest.mark.parametrize("backend", [BackendType.Ascend910B, BackendType.Ascend950])
     def test_cast_fold_lowers_cube_only_no_vector(self, backend):
