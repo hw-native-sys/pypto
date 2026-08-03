@@ -349,6 +349,12 @@ class IRPythonPrinter : public IRVisitor {
   // Vars defined in the current function body (for PrintMemRef formatting).
   std::unordered_set<const Var*> body_defined_vars_;
 
+  // True while printing a function signature (parameter annotations and return
+  // types). Body definitions are not in scope there, so a MemRef whose base Ptr
+  // is allocated in the body must print as a string literal rather than a bare
+  // name — see PrintMemRef.
+  bool printing_signature_ = false;
+
   // Free variables of the current function: Vars used in the body that are
   // neither a parameter nor a body-local definition. A well-formed function is
   // a closed scope, so a non-empty set marks malformed IR (e.g. a transform
@@ -2541,6 +2547,12 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     stream_ << "self";
   }
 
+  // Everything from here to the closing ":" is the signature, which Python
+  // evaluates before the body binds any name. Flag it so a MemRef annotation
+  // referring to a body-allocated base Ptr prints its name as a string instead
+  // of an unbound forward reference (see PrintMemRef).
+  printing_signature_ = true;
+
   // Print parameters with type annotations and direction wrappers
   for (size_t i = 0; i < func->params_.size(); ++i) {
     if (i > 0 || emit_self) stream_ << ", ";
@@ -2572,6 +2584,8 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
       stream_ << "]";
     }
   }
+
+  printing_signature_ = false;
 
   stream_ << ":\n";
 
@@ -2938,7 +2952,11 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   // Base Ptrs defined in the function body (by alloc statements) are printed as
   // bare variable references; everything else uses a string literal (forward
   // references in parameter annotations, standalone type printing, etc.).
-  if (body_defined_vars_.count(memref.base_.get())) {
+  //
+  // A signature annotation is exactly such a forward reference: it is emitted
+  // before the body, so even a base Ptr that *is* body-defined is not yet bound
+  // there and must take the string form, or the reparse fails with NameError.
+  if (!printing_signature_ && body_defined_vars_.count(memref.base_.get())) {
     oss << GetVarName(memref.base_.get());
   } else {
     oss << "\"" << GetVarName(memref.base_.get()) << "\"";
