@@ -1869,21 +1869,20 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
 /// Collect the full byte extent of allocations explicitly declared through
 /// one-argument `pl.MemRef(...)` annotations.
 ///
-/// InitMemRef hoists every alloc to the function body's top-level SeqStmts. A
-/// multi-slot declaration is larger than any one member MemRef, so DSA must
+/// InitMemRef hoists every alloc to the function body's top level. When an
+/// allocation exists, prepending it forms a SeqStmts; a function with no
+/// allocation may legitimately retain a singleton body such as ReturnStmt.
+/// A multi-slot declaration is larger than any one member MemRef, so DSA must
 /// take the extent from the alloc statement rather than reconstruct it from
 /// members.
 std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, const Span& span,
                                                        const std::string& consumer) {
-  auto top_level = As<SeqStmts>(body);
-  INTERNAL_CHECK_SPAN(top_level, span)
-      << consumer << " expects a top-level SeqStmts body (InitMemRef normalizes it), got "
-      << (body ? body->TypeName() : "null");
+  INTERNAL_CHECK_SPAN(body, span) << consumer << " expected a non-null function body";
 
   std::map<const Var*, uint64_t> pinned_allocations;
-  for (const auto& stmt : top_level->stmts_) {
+  auto collect = [&](const StmtPtr& stmt) {
     auto base = GetPinnedAllocBase(stmt);
-    if (!base) continue;
+    if (!base) return;
     auto assign = As<AssignStmt>(stmt);
     auto call = assign ? As<Call>(assign->value_) : nullptr;
     auto size = call && call->args_.size() >= 2 ? As<ConstInt>(call->args_[1]) : nullptr;
@@ -1891,6 +1890,12 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
         << consumer << " expected declared allocation '" << base->name_hint_
         << "' to have a positive constant byte extent after InitMemRef";
     pinned_allocations.emplace(base.get(), static_cast<uint64_t>(size->value_));
+  };
+
+  if (auto top_level = As<SeqStmts>(body)) {
+    for (const auto& stmt : top_level->stmts_) collect(stmt);
+  } else {
+    collect(body);
   }
   return pinned_allocations;
 }

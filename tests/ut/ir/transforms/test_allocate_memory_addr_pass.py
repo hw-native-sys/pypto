@@ -283,8 +283,8 @@ def test_allocate_memory_addr_empty_function():
     ir.assert_structural_equal(After, Expected)
 
 
-def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
-    """DSA-RP accepts an InitMemRef output with no top-level statement sequence."""
+def test_allocate_memory_addr_dsa_accepts_singleton_return_body():
+    """Research DSA accepts an InitMemRef output with a singleton body."""
 
     @pl.program
     class Before:
@@ -296,7 +296,7 @@ def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
     func = next(iter(initialized.functions.values()))
     assert isinstance(func.body, ir.ReturnStmt)
 
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA):
         after = passes.allocate_memory_addr()(initialized)
 
     ir.assert_structural_equal(after, initialized)
