@@ -1622,6 +1622,38 @@ class TestLayoutResolution:
         with pytest.raises(ParserTypeError, match="must be a TensorLayout"):
             resolver.resolve_type(node)
 
+    def test_unknown_bare_layout_hint_omits_dn(self):
+        """A bad bare layout must not be told to try ``pl.DN`` — the slot rejects it.
+
+        The hint is the user's next move, so pointing at DN would walk them from
+        this error straight into the DN rejection.
+        """
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, pl.INVALID]", mode="eval").body
+
+        with pytest.raises(ParserTypeError) as exc_info:
+            resolver.resolve_type(node)
+
+        hint = exc_info.value.hint
+        assert hint is not None
+        assert "pl.DN" not in hint
+        assert "pl.NZ" in hint
+
+    def test_unknown_tensorview_layout_hint_keeps_dn(self):
+        """Inside pl.TensorView(layout=...) DN is legal, so the hint still offers it."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64, 128], pl.FP16, pl.TensorView(stride=[128, 1], layout=pl.INVALID)]",
+            mode="eval",
+        ).body
+
+        with pytest.raises(ParserTypeError) as exc_info:
+            resolver.resolve_type(node)
+
+        hint = exc_info.value.hint
+        assert hint is not None
+        assert "pl.DN" in hint
+
     def test_resolve_layout_closure_tensorview_accepted(self):
         """A closure TensorView is a valid slot-3 value, not a rejected layout (issue #2211).
 
@@ -1749,7 +1781,7 @@ class TestLayoutIntegration:
         ],
     )
     def test_parametrized_layout(self, layout, expected):
-        """pytest.mark.parametrize with layout (non-deprecated layouts only)."""
+        """pytest.mark.parametrize with layout (every layout the bare slot accepts)."""
 
         @pl.function
         def func(
@@ -1765,7 +1797,7 @@ class TestLayoutIntegration:
             assert param_type.tensor_view is not None
             assert param_type.tensor_view.layout == expected
 
-    def test_function_with_dn_layout_rejected(self):
+    def test_function_with_dn_param_layout_rejected(self):
         """@pl.function rejects the ``pl.DN`` shorthand (RFC #1300 supplementary 1).
 
         Users should drop the marker, derive DN at use site via
@@ -1777,6 +1809,20 @@ class TestLayoutIntegration:
             @pl.function
             def func(
                 x: pl.Tensor[[16, 1], pl.FP16, pl.DN],
+            ) -> pl.Tensor[[16, 1], pl.FP16]:
+                return x
+
+    def test_function_with_dn_return_layout_rejected(self):
+        """The return annotation is checked too, not just the parameters.
+
+        A parameter carrying DN aborts decoration before the return annotation
+        is ever resolved, so that path needs its own case.
+        """
+        with pytest.raises(ParserTypeError, match=r"pl\.Tensor\[\.\.\., pl\.DN\] is not supported"):
+
+            @pl.function
+            def func(
+                x: pl.Tensor[[16, 1], pl.FP16],
             ) -> pl.Tensor[[16, 1], pl.FP16, pl.DN]:
                 return x
 

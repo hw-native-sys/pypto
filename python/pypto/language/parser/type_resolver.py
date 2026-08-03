@@ -1386,11 +1386,31 @@ class TypeResolver:
             "explicit stride and avoids the implicit-coord-flip hazard.",
         )
 
-    def resolve_layout(self, layout_node: ast.expr) -> "ir.TensorLayout":
+    def _layout_choices_hint(self, dn_allowed: bool) -> str:
+        """Build the "valid layouts" hint for a layout slot.
+
+        A hint has to name only layouts the *failing slot* accepts. A bare
+        tensor-annotation slot rejects DN (see ``_reject_user_facing_dn_layout``),
+        so listing it there would send the user from one error straight into
+        another.
+
+        Args:
+            dn_allowed: Whether DN is legal in the slot being diagnosed
+
+        Returns:
+            Hint text listing the layouts that slot accepts
+        """
+        names = [name for name in self._LAYOUT_MAP if dn_allowed or name != "DN"]
+        return f"Use a valid layout: {', '.join(f'pl.{name}' for name in names)}"
+
+    def resolve_layout(self, layout_node: ast.expr, dn_allowed: bool = True) -> "ir.TensorLayout":
         """Resolve layout annotation to ir.TensorLayout.
 
         Args:
             layout_node: AST node representing layout (e.g., pl.NZ, NZ, or a variable)
+            dn_allowed: Whether the slot being resolved accepts DN. Only shapes the
+                "valid layouts" hint — a resolved DN is rejected by the caller that
+                forbids it, which can explain the migration in context.
 
         Returns:
             TensorLayout enum value
@@ -1399,6 +1419,7 @@ class TypeResolver:
             ParserTypeError: If layout cannot be resolved
         """
         span = self._get_span(layout_node)
+        choices = self._layout_choices_hint(dn_allowed)
 
         if isinstance(layout_node, ast.Attribute):
             layout_name = layout_node.attr
@@ -1407,7 +1428,7 @@ class TypeResolver:
             raise ParserTypeError(
                 f"Unknown layout: {layout_name}",
                 span=span,
-                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                hint=choices,
             )
 
         if isinstance(layout_node, ast.Name):
@@ -1422,19 +1443,19 @@ class TypeResolver:
                 raise ParserTypeError(
                     f"Layout variable '{layout_name}' must be a TensorLayout, got {type(value).__name__}",
                     span=span,
-                    hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                    hint=choices,
                 )
 
             raise ParserTypeError(
                 f"Unknown layout: {layout_name}",
                 span=span,
-                hint=f"Use a valid layout: {', '.join(self._LAYOUT_MAP.keys())}",
+                hint=choices,
             )
 
         raise ParserTypeError(
             f"Cannot resolve layout: {ast.unparse(layout_node)}",
             span=span,
-            hint="Use pl.ND, pl.DN, pl.NZ, pl.MX_A_ZZ, or pl.MX_B_NN",
+            hint=choices,
         )
 
     def validate_annotation_consistency(
@@ -1578,7 +1599,7 @@ class TypeResolver:
         from_var = self._resolve_tensorview_var_ref(node)
         if from_var is not None:
             return from_var
-        layout = self.resolve_layout(node)
+        layout = self.resolve_layout(node, dn_allowed=False)
         self._reject_user_facing_dn_layout(layout, type_name, node)
         return ir.TensorView([], layout)
 
