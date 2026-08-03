@@ -822,10 +822,10 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   declared_alloc_collector.VisitStmt(normalized_func->body_);
   const DeclaredAllocMap& declared_allocs = declared_alloc_collector.buffers;
 
-  // The isolation guarantee is enforced by MemoryReuse, which ptoas replaces
-  // wholesale under memory_planner=PTOAS. Honoring the declaration's allocation
-  // but not its isolation would hand back exactly the coalescing the author
-  // declared it to prevent, so reject the combination rather than degrade quietly.
+  // PyPTO's MemoryReuse and DSA planners both preserve the isolation guarantee.
+  // PTOAS replaces PyPTO memory planning wholesale. Honoring the declaration's
+  // allocation but not its isolation would hand back exactly the coalescing the
+  // author declared it to prevent, so reject the combination rather than degrade quietly.
   //
   // A MULTI-SLOT declaration is the exception: it lowers to a ptoas
   // `pto.alloc_multi_tile` region, and ptoas plans the N slots into disjoint

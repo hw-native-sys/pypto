@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@ enum class AllocationSeparationReason : uint8_t {
   PipelineStage,
   TargetHazard,
   SemanticNoAlias,
+  DeclaredAllocation,
 };
 
 struct AllocationSeparation {
@@ -102,6 +104,10 @@ struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
   std::vector<AllocationSeparation> separations;
   std::vector<PipelineAllocationGroup> pipeline_groups;
+  /// Full byte extent of each author-declared allocation. This can exceed any
+  /// member MemRef when the declaration contains multiple runtime-selected
+  /// slots.
+  std::map<const Var*, uint64_t> declared_allocation_sizes;
 };
 
 /**

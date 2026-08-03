@@ -1111,8 +1111,9 @@ REGISTER_OP("tile.alloc")
     .add_argument("memory_space", "Memory space (int enum value)")
     .add_argument("size", "Size in bytes (scalar)")
     // `pinned` marks an author-declared allocation (one-argument `pl.MemRef`).
-    // MemoryReuse leaves such a buffer's membership exactly as the author wrote
-    // it: it neither packs other tiles into it nor moves its tiles elsewhere.
+    // PyPTO memory planners leave such a buffer's membership exactly as the
+    // author wrote it: they neither pack other tiles into it nor move its tiles
+    // elsewhere.
     .set_attr<bool>("pinned")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,

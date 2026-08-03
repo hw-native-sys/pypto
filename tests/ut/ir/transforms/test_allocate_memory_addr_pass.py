@@ -494,8 +494,9 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
     The 910B Vec UB physical size is 192KB, but only ~184KB is usable: PTO-ISA
     reserves the top ~8KB and silently corrupts any tile placed there (pto-isa#170).
     soc.cpp therefore caps the *safe* Vec UB at 184KB (188416 bytes), so the
-    AllocatedMemoryAddr verifier (which compares the Vec high-water against
-    backend.get_mem_size(Vec)) raises when usage exceeds the safe cap.
+    The allocator's in-pass capacity check (and, for pipelines that reach it,
+    the AllocatedMemoryAddr verifier) compares the Vec high-water against
+    backend.get_mem_size(Vec) and raises when usage exceeds the safe cap.
 
     A single 64x752 FP32 tile is 192512 bytes: above the 184KB safe cap but below
     the 192KB physical size. Under the old 192KB limit it passed; it must now error.
@@ -534,7 +535,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.allocate_memory_addr())
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
-            with pytest.raises(pypto.Error, match=r"Vec buffer usage .* exceeds platform limit"):
+            with pytest.raises(ValueError, match=r"Vec buffer usage .* exceeds platform limit"):
                 pipeline.run(program)
     finally:
         reset_for_testing()

@@ -113,7 +113,8 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 
 `MemoryPlanner.DSA` 会跳过本 pass，但在构造 solver 问题时保留同一契约：
 每个声明式分配都与同一内存空间中的无关分配建立 hard separation。
-Pipeline-intent relaxation 绝不会移除这些 separation。
+多 slot 声明会作为覆盖完整声明范围的单个 buffer，而不是只按一个成员 slot
+的大小建模。Pipeline-intent relaxation 绝不会移除这些 separation。
 
 代价由作者承担：pin 是用容量换并行度，pin 过头的 kernel 会在 `AllocateMemoryAddr` 处硬报错，
 而不是被静默合并回去。

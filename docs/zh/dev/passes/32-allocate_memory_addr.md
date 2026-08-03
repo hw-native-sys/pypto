@@ -177,8 +177,9 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
 启用 `MemoryPlanner.DSA` 时，第 4 步替换为下面的受保护路径：
 
 1. 复用 MemoryReuse 中感知 phi/loop 的生命周期分析，但不运行其机会性 coalescer。
-2. 每个强制 `MemRef.base_` identity 导出一个 buffer。buffer 大小取成员最大值，因此
-   不同大小的值可以在生命周期不同阶段占用该 identity。导出的生命周期采用保守的
+2. 每个强制 `MemRef.base_` identity 导出一个 buffer。buffer 大小通常取成员最大值；
+   作者声明的多 slot 分配则保留完整声明范围。因此不同大小的值可以在生命周期不同
+   阶段占用该 identity。导出的生命周期采用保守的
    allocation hull：从最早的成员定义一直延伸到最晚的成员使用。单个 SSA 成员之间的
    gap 不会被视为物理内存已经失效，因为 loop carry、view 和原地 alias 可能让值跨越
    该 gap 继续存活。只有单独证明每个 hole 中的物理值确实失效后，才能启用
@@ -186,8 +187,9 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
 3. 把 PyPTO statement point 转成半开区间的读/写 event。定义从
    `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
    一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
-4. 导出固定 memory pool、后端容量、前导 reserved range，以及 pipeline clone、后端
-   hazard 和算子专用 no-alias 规则产生的 hard separation pair。每个 requested
+4. 导出固定 memory pool、后端容量、前导 reserved range，以及声明式分配、pipeline
+   clone、后端 hazard 和算子专用 no-alias 规则产生的 hard separation pair。每个
+   声明式分配都与同一内存空间中的无关分配分离。每个 requested
    pipeline stage 首先获得独立 residue，所有 cross-stage member pair 都保持
    hard-separated；每条 separation 都保留其类型化来源。
 5. 保留规范化的 alias class 成员和 pipeline group/stage/residue 数据。provenance
@@ -262,6 +264,10 @@ function 时，PTOAS debug 文本可能交错；除非 PTOAS 输出结构化 fun
 **视图 MemRef（切片）共享同一个 slot**：
 
 共享同一 `base_` Ptr 的 MemRef（根分配加上其 `tile.slice` 视图）会被放入同一个 slot，slot 大小取最大成员的大小，因为每个视图在物理上都是父分配的别名。每个成员保留其在 slot 内的相对偏移：`new_addr = slot_base + member.byte_offset`（即 InitMemRef 计算出的相对偏移）。根位于 `slot_base`；第 `k` 行的视图位于 `slot_base + k * row_stride`。这对于那些视图偏移不会在 codegen 阶段重新推导的链尤为重要——例如对 `tile.slice` 做 `tile.reshape` 不会发出 `pto.subview`，其 `pto.alloc_tile addr` 直接从该 MemRef 偏移读取。
+
+作者声明的 slot 在 DSA 写回时会保留声明元数据。常量 slot 下标会变成常量地址；
+运行时选择的 slot 则保留 `slot_base + runtime_slot_offset` 地址表达式。普通动态 view
+的偏移仍由 PTO subview 操作重新推导，因此这里只写入新 placement 的 base。
 
 后端可以通过 `Backend::CreateMemoryAllocatorPolicy()` 提供自定义 `MemoryAllocatorPolicy` 来覆盖上述默认行为。详见下方[分配策略](#分配策略)章节。
 
