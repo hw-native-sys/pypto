@@ -72,6 +72,10 @@ namespace {
       return ::dsa::SeparationReason::kTargetHazard;
     case AllocationSeparationReason::SemanticNoAlias:
       return ::dsa::SeparationReason::kSemanticNoAlias;
+    case AllocationSeparationReason::StorageLayout:
+      // The standalone schema has no dedicated storage-layout reason. It is
+      // nevertheless an unrelaxable hard separation for every solver.
+      return ::dsa::SeparationReason::kGeneric;
     case AllocationSeparationReason::DeclaredAllocation:
       // The standalone schema has no dedicated declared-allocation reason.
       // It remains an ordinary hard separation to every solver.

@@ -3660,9 +3660,8 @@ class TestStorageLayoutReuseGate:
     eligible for reuse (#1788).
     """
 
-    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
-        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
-
+    @staticmethod
+    def _build_nd_nz_program() -> ir.Program:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -3689,11 +3688,45 @@ class TestStorageLayoutReuseGate:
                 result: pl.Tensor[[64, 64], pl.BF16] = pl.tile.store(tile_nz, [0, 0], out_nz)
                 return result
 
+        return Before
+
+    def test_nd_and_nz_vec_tiles_do_not_reuse(self):
+        """Disjoint-lifetime ND and NZ Vec tiles of equal size keep separate buffers."""
+
+        Before = self._build_nd_nz_program()
         After = _run_pipeline(Before)
         bases = _collect_tile_memref_bases(After)
         assert "tile_nd" in bases and "tile_nz" in bases, f"missing tiles in {bases}"
         assert bases["tile_nd"] != bases["tile_nz"], (
             f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
+        )
+
+    def test_dsa_nd_and_nz_vec_tiles_do_not_overlap(self):
+        """DSA exports the ND/NZ restriction as an unrelaxable hard edge."""
+
+        Before = self._build_nd_nz_program()
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA):
+            After = passes.allocate_memory_addr()(
+                passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+            )
+
+        ranges: dict[str, tuple[int, int]] = {}
+        function = next(iter(After.functions.values()))
+
+        class _RangeCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+                super().visit_assign_stmt(stmt)
+
+        _RangeCollector().visit_stmt(function.body)
+        nd_offset, nd_size = ranges["tile_nd"]
+        nz_offset, nz_size = ranges["tile_nz"]
+        assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
+            f"DSA must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
         )
 
     def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):
