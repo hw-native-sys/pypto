@@ -1842,5 +1842,181 @@ class TestOutlineNoDepArgs:
         )
 
 
+class TestOutlineReboundOutCapture:
+    """A captured ``pl.Out`` tensor the scope rebinds under its own name.
+
+    ``c = pl.store(t, off, c)`` is what the parser emits before ConvertToSSA
+    splits the read from the write, so ``c`` is one Var that is both read and
+    assigned inside the scope. The outlined function must capture it as an
+    ``InOut`` parameter and bind the store result to a *distinct* Var, so the
+    body neither leaves ``c`` free nor rebinds its own parameter.
+
+    These run the pass directly on parser output (no ConvertToSSA) — that is
+    precisely the input shape the flow-insensitive ``var_uses \\ var_defs``
+    partition mishandled.
+    """
+
+    @staticmethod
+    def _outlined(program: ir.Program) -> ir.Function:
+        incore = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore) == 1, f"expected exactly one outlined InCore function, got {len(incore)}"
+        return incore[0]
+
+    @staticmethod
+    def _stmts(func: ir.Function) -> list[ir.Stmt]:
+        body = func.body
+        assert isinstance(body, ir.SeqStmts), f"expected a SeqStmts body, got {type(body).__name__}"
+        return list(body.stmts)
+
+    def test_rebound_out_capture_becomes_inout_param(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    c = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], c)
+                return c
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(Before)
+
+        outlined = self._outlined(After)
+        assert [p.name_hint for p in outlined.params] == ["a", "c"]
+        assert outlined.param_directions[1] == ir.ParamDirection.InOut
+
+        # The captured tensor is threaded through the call site, not dropped.
+        main = After.get_function("main")
+        assert main is not None
+        calls = [
+            s.value
+            for s in self._stmts(main)
+            if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call)
+        ]
+        assert len(calls) == 1, f"expected one outlined-kernel call in main, got {len(calls)}"
+        arg_names = [arg.name_hint for arg in calls[0].args if isinstance(arg, ir.Var)]
+        assert arg_names == ["a", "c"]
+
+    def test_rebound_out_capture_output_round_trips(self):
+        """The whole point: the outlined program survives print -> parse."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    c = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], c)
+                return c
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(Before)
+
+        reparsed = pl.parse_program(ir.python_print(After))
+        ir.assert_structural_equal(reparsed, After)
+
+    def test_rebound_out_capture_in_split_aiv_region_reparses(self):
+        """The originally-reported shape: the region form used to leave ``c`` free.
+
+        Asserts parseability only, not structural equality: a ``pl.split_aiv``
+        region with ``mode=NONE`` stamps the function attr
+        ``split=pl.SplitMode.NONE``, which the parser drops on the way back in.
+        That attr gap is unrelated to the capture fix (it reproduces on the
+        ConvertToSSA-prefixed path too) — see the sibling assertion in
+        ``test_lower_auto_vector_split.py::test_outlined_region_still_lowers_and_stamps``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    base = aiv_id * 64
+                    c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+                return c
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(Before)
+
+        outlined = self._outlined(After)
+        assert [p.name_hint for p in outlined.params] == ["a", "c"]
+        pl.parse_program(ir.python_print(After))
+
+    def test_rebound_out_capture_body_is_single_assignment(self):
+        """Each store binds its own result Var; the parameter is never rebound."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    c = pl.store(pl.exp(pl.load(a, [0, 0], [64, 128])), [0, 0], c)
+                    c = pl.store(pl.exp(pl.load(a, [64, 0], [64, 128])), [64, 0], c)
+                return c
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(Before)
+
+        outlined = self._outlined(After)
+        param_c = outlined.params[1]
+        assigned = [s.var for s in self._stmts(outlined) if isinstance(s, ir.AssignStmt)]
+        assert len(assigned) == 2, f"expected two store results, got {len(assigned)}"
+        assert not any(v.same_as(param_c) for v in assigned), "must not rebind the InOut parameter"
+        assert not assigned[0].same_as(assigned[1]), "repeated stores need distinct result Vars"
+
+        # ...and the unchanged SSAForm verifier accepts the result.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
+            passes.outline_cluster_scopes()(After)
+
+    def test_matches_the_convert_to_ssa_prefixed_result(self):
+        """Outlining parser output agrees with outlining its SSA form.
+
+        The pass declares ``IRProperty::SSAForm`` as a precondition; this pins
+        that honouring the rebound capture produces the same signature shape the
+        SSA path already produced, rather than a second, divergent lowering.
+        """
+
+        def build():
+            @pl.program
+            class Prog:
+                @pl.function
+                def main(
+                    self,
+                    a: pl.Tensor[[128, 128], pl.FP32],
+                    c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+                ) -> pl.Tensor[[128, 128], pl.FP32]:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        c = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], c)
+                    return c
+
+            return Prog
+
+        with passes.PassContext([]):
+            direct = self._outlined(passes.outline_incore_scopes()(build()))
+            via_ssa = self._outlined(passes.outline_incore_scopes()(passes.convert_to_ssa()(build())))
+
+        # ConvertToSSA versions the names (``c`` -> ``c__ssa_v0``), so compare
+        # the base names; the signature itself must otherwise be identical.
+        def base_names(func: ir.Function) -> list[str]:
+            return [p.name_hint.split("__ssa_v")[0] for p in func.params]
+
+        assert base_names(direct) == base_names(via_ssa) == ["a", "c"]
+        assert list(direct.param_directions) == list(via_ssa.param_directions)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -37,7 +37,8 @@ program_outlined = outline_pass(program)
 ## Algorithm
 
 1. **Scan for InCore Scopes**: Find all `InCoreScopeStmt` nodes in Opaque functions
-2. **Analyze Inputs**: Determine external variable references (variables defined outside scope, used inside)
+2. **Analyze Inputs**: Collect the scope's *live-in* set — variables the body reads
+   before it (re)defines them, so their incoming value comes from the caller
 3. **Analyze Outputs**: Determine internal definitions used after scope (variables defined inside, used outside)
 4. **Create Function**: Extract scope body into new `Function(scope_type=InCore)` with:
    - Parameters = input variables
@@ -47,6 +48,38 @@ program_outlined = outline_pass(program)
    - Call to outlined function with input arguments
    - AssignStmt for each output variable
 6. **Add to Program**: Add outlined function to program's function list
+
+**Live-in, not `uses \ defs`**: the input set is computed flow-sensitively
+(`UpwardExposedUseCollector`). A plain set difference is wrong for a captured
+tensor that the body reads *and* rebinds under the same name — the shape the
+parser emits for a `pl.Out` param before `ConvertToSSA` splits it:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    c = pl.store(t, [0, 0], c)   # one Var: read as the store target, then rebound
+```
+
+`c` is in both `var_uses` and `var_defs`, so the difference drops it from the
+parameter list and leaves the read dangling in the outlined body. Treating it as
+live-in makes it an `InOut` parameter, and the `tile.store` result binds a
+distinct Var (`c__store`) so the outlined body never rebinds its own parameter:
+
+```python
+def main_incore_0(a: Tensor[[128, 128], FP32], c: InOut[Tensor[[128, 128], FP32]]):
+    c__store = pl.tile.store(..., c)
+    return c                       # the param — store writes through it in place
+```
+
+On SSA input — the pass's declared `IRProperty::SSAForm` precondition — live-in
+and `uses \ defs` are identical, so this only changes behaviour for IR that
+reaches the pass without that precondition holding. A captured variable rebound
+by anything *other* than a `tile.store` cannot be expressed without real SSA
+construction and is rejected with an internal error naming `ConvertToSSA`.
+
+The distinct result Var is the InCore/Cluster/Spmd outcome. Hierarchy scopes
+skip the store-target export entirely (the buffer is already visible to the
+caller through its InOut parameter), so their body keeps the original rebind —
+the capture still becomes a parameter, which is the part that was broken.
 
 **Param-explicit returns**: the outlined function returns its
 own parameters, not SSA result vars, whenever a tensor output writes through

@@ -41,9 +41,9 @@ Negative tests keep ``pytest.raises``: a rejected transform produces no ``After`
 IR, so Before/Expected does not apply. Their ``Before`` programs are still DSL.
 
 ``_lower`` keeps the print->parse roundtrip instrument ON (see its docstring for
-why property verification is not), so the pass's output is asserted round-trippable
-on every test but one — ``test_outlined_region_still_lowers_and_stamps``, which
-opts out for an upstream reason documented at that test.
+why property verification is not), so the pass's output is asserted
+round-trippable on every test but one — ``test_outlined_region_still_lowers_and_stamps``,
+which opts out over an unrelated attr printer/parser gap documented at that test.
 
 End-to-end DSL coverage of this authoring form lives in
 ``tests/st/codegen/torch/test_torch_codegen_cross_core.py``
@@ -2400,15 +2400,27 @@ def test_outlined_region_still_lowers_and_stamps():
                 c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
             return c
 
-    # This is the one test that cannot use ``_lower``: it must run with the
-    # roundtrip instrument OFF. OutlineIncoreScopes emits an InCore function that
-    # reads and writes ``c`` without declaring it a parameter
-    # (``def main_incore_0(a)`` with a free ``c``), so the outlined program does
-    # not survive print->parse ("Undefined variable 'c'") — verified BEFORE this
-    # pass runs. That is an OutlineIncoreScopes defect, not one of this pass; the
-    # region lowering below is what is under test here.
+    # ``c`` is a captured ``pl.Out`` tensor that the region rebinds under its own
+    # name. OutlineIncoreScopes captures it as an ``InOut`` param (it used to be
+    # left free, which is why this test could not reach the roundtrip instrument
+    # at all); assert that here, since the outlined program is the input this
+    # pass is under test on.
     with passes.PassContext([]):
         outlined = passes.outline_incore_scopes()(Canonical)
+    outlined_incore = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(outlined_incore) == 1, "OutlineIncoreScopes should have produced one InCore function"
+    assert [p.name_hint for p in outlined_incore[0].params] == ["a", "c"], (
+        "the rebound pl.Out capture must be a parameter, not a free variable"
+    )
+    pl.parse_program(ir.python_print(outlined))  # outlined program round-trips
+
+    # Still the one test that cannot use ``_lower``, but for a narrower and
+    # unrelated reason: a ``pl.split_aiv`` region with ``mode=NONE`` stamps the
+    # function attr ``split=pl.SplitMode.NONE``, and the parser drops an explicit
+    # NONE, so print->parse loses that attr and structural equality reports
+    # "Kwargs size mismatch". That is a printer/parser gap on the attr, present
+    # on the ConvertToSSA-prefixed path too and independent of this pass.
+    with passes.PassContext([]):
         after = passes.lower_auto_vector_split()(outlined)
 
     incore = [f for f in after.functions.values() if f.func_type == ir.FunctionType.InCore]

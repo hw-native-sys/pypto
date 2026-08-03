@@ -149,47 +149,217 @@ class SplitAivModeSummaryFinder : public IRVisitor {
  * the original IR uses EvalStmt (discarding the return value), this mutator
  * re-writes it as an AssignStmt so the return value is captured and can be
  * referenced in a subsequent ReturnStmt.
+ *
+ * Three input shapes are handled, all producing a single-assignment result:
+ *
+ * | Input                                    | Output                                     |
+ * | ---------------------------------------- | ------------------------------------------ |
+ * | ``EvalStmt(store(.., tgt))``             | ``AssignStmt(ret, store(.., tgt))``        |
+ * | ``AssignStmt(v, store(.., tgt))``, v≠tgt | keep, plus ``AssignStmt(ret, v)``          |
+ * | ``AssignStmt(tgt, store(.., tgt))``      | ``AssignStmt(ret, store(.., tgt))``        |
+ *
+ * The third row is the read-modify-write shape the parser emits for a captured
+ * ``pl.Out`` tensor before ConvertToSSA splits it (``c = pl.store(t, off, c)``).
+ * Keeping the original assignment there would rebind the outlined function's
+ * own parameter; binding the store result to ``ret`` instead leaves the body
+ * single-assignment. Later reads of the pre-store name still resolve to the
+ * parameter, which is correct: ``tile.store`` writes through its target in
+ * place, so both names denote the same buffer (the same reason OutlineScope
+ * returns the *param* rather than the store result — see #1702).
+ *
+ * When one target is stored to more than once, only the first store binds the
+ * declared ``ret`` Var; each subsequent one gets a fresh Var so the result
+ * never contains a duplicate definition.
  */
 class StoreEvalToAssignMutator : public IRMutator {
  public:
-  explicit StoreEvalToAssignMutator(const std::unordered_map<const Var*, VarPtr>& target_vars)
-      : target_vars_(target_vars) {}
+  /// @param target_vars  store target (body pointer) -> declared result Var
+  /// @param used_names   names already claimed in the outlined function, used
+  ///                     to mint collision-free Vars for repeated stores
+  StoreEvalToAssignMutator(const std::unordered_map<const Var*, VarPtr>& target_vars,
+                           std::unordered_set<std::string> used_names)
+      : target_vars_(target_vars), used_names_(std::move(used_names)) {}
 
  protected:
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    auto call = std::dynamic_pointer_cast<const Call>(op->expr_);
-    if (!call) return op;
-    auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-    if (!opnode || !IsOp(opnode, "tile.store")) {
-      return op;
-    }
-    if (call->args_.size() < 3) return op;
-    auto var = As<Var>(call->args_[2]);
-    if (!var) return op;
-    auto it = target_vars_.find(var.get());
-    if (it == target_vars_.end()) return op;
-    return std::make_shared<AssignStmt>(it->second, call, op->span_);
+    auto store = MatchTrackedStore(op->expr_);
+    if (!store) return op;
+    return std::make_shared<AssignStmt>(NextResultVar(*store), store->call, op->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Handle SSA-converted stores: AssignStmt(buf_1, Call(tile.store, ..., buf_0))
     // The _store_ret var needs to be assigned the store result too.
-    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
-    if (!call) return IRMutator::VisitStmt_(op);
-    auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
-    if (!opnode || !IsOp(opnode, "tile.store")) return IRMutator::VisitStmt_(op);
-    if (call->args_.size() < 3) return IRMutator::VisitStmt_(op);
-    auto var = As<Var>(call->args_[2]);
-    if (!var) return IRMutator::VisitStmt_(op);
-    auto it = target_vars_.find(var.get());
-    if (it == target_vars_.end()) return IRMutator::VisitStmt_(op);
+    auto store = MatchTrackedStore(op->value_);
+    if (!store) return IRMutator::VisitStmt_(op);
+    auto result_var = NextResultVar(*store);
+    if (op->var_.get() == store->target) {
+      // Read-modify-write under the target's own name: replace the assignment
+      // rather than appending to it, so the outlined body never rebinds the
+      // parameter this target becomes.
+      return std::make_shared<AssignStmt>(result_var, store->call, op->span_);
+    }
     // Keep original assignment (buf_1 = store(...)) and add _store_ret = buf_1
-    auto store_ret_assign = std::make_shared<AssignStmt>(it->second, op->var_, op->span_);
+    auto store_ret_assign = std::make_shared<AssignStmt>(result_var, op->var_, op->span_);
     return std::make_shared<SeqStmts>(std::vector<StmtPtr>{op, store_ret_assign}, op->span_);
   }
 
  private:
+  /// One ``tile.store`` whose target this mutator was asked to capture.
+  struct TrackedStore {
+    CallPtr call;            ///< the store call itself
+    const Var* target;       ///< store target (un-substituted body pointer)
+    VarPtr declared_result;  ///< the result Var declared for `target`
+  };
+
+  /// Match `value` against ``Call(tile.store, ..., target)`` for a tracked
+  /// `target`; nullopt for anything else. Both statement forms funnel through
+  /// here so they cannot drift apart on what counts as a store.
+  [[nodiscard]] std::optional<TrackedStore> MatchTrackedStore(const ExprPtr& value) const {
+    auto call = std::dynamic_pointer_cast<const Call>(value);
+    if (!IsOp(call, "tile.store") || call->args_.size() < 3) return std::nullopt;
+    auto target = As<Var>(call->args_[2]);
+    if (!target) return std::nullopt;
+    auto it = target_vars_.find(target.get());
+    if (it == target_vars_.end()) return std::nullopt;
+    return TrackedStore{call, target.get(), it->second};
+  }
+
+  /// Result Var for one store: the declared Var for the target's first store,
+  /// a fresh same-typed Var for every later one.
+  VarPtr NextResultVar(const TrackedStore& store) {
+    const VarPtr& declared = store.declared_result;
+    if (claimed_.insert(store.target).second) {
+      used_names_.insert(declared->name_hint_);
+      return declared;
+    }
+    std::string name = auto_name::GenerateFreshNameLike(declared->name_hint_, used_names_);
+    used_names_.insert(name);
+    return std::make_shared<Var>(name, declared->GetType(), declared->span_);
+  }
+
   std::unordered_map<const Var*, VarPtr> target_vars_;
+  std::unordered_set<std::string> used_names_;
+  std::unordered_set<const Var*> claimed_;
+};
+
+/**
+ * @brief Collect the *upward-exposed* uses of a subtree — variables read
+ *        before the subtree (re)defines them.
+ *
+ * This is the scope's live-in set: every such variable's incoming value is
+ * produced outside the scope, so it must become a parameter of the outlined
+ * function.
+ *
+ * It is strictly more precise than ``var_uses \ var_defs``, which is
+ * flow-insensitive: a tensor that is read *and then rebound under the same
+ * name* — the read-modify-write ``c = pl.store(t, off, c)`` the parser emits
+ * for a captured ``pl.Out`` param before ConvertToSSA splits it — lands in
+ * both sets, so the difference silently drops it from the parameter list and
+ * leaves the read dangling in the outlined body.
+ *
+ * On SSA input the two agree exactly: no Var is defined twice, so a variable
+ * defined inside the body can never also be read ahead of that definition.
+ * The traversal order deliberately mirrors ``VarDefUseCollector`` so the
+ * derived parameter order is unchanged; only *when* a definition is recorded
+ * differs (after the assigned value is visited, matching ``SSAVerifier``).
+ */
+class UpwardExposedUseCollector : public IRVisitor {
+ public:
+  /// Live-in variables in first-read order. Deliberately the only iterable
+  /// view: the membership set behind ``IsExternal`` is unordered, and the
+  /// derived parameter list must stay deterministic.
+  std::vector<const Var*> ordered;
+
+  /// True when `var`'s value on entry to the visited subtree comes from
+  /// outside it — i.e. the subtree captures rather than defines it.
+  [[nodiscard]] bool IsExternal(const Var* var) const { return live_in_.count(var) > 0; }
+
+ protected:
+  // Var and IterArg are handled by separate overrides rather than a shared
+  // ``VisitVarLike_``, mirroring VarDefUseCollector: neither may descend to the
+  // base visitor, because ``IRVisitor::VisitExpr_(IterArgPtr)`` walks the
+  // IterArg's ``initValue_``. That init value belongs to the *enclosing* loop
+  // header, not to whatever reads the IterArg — descending would capture an
+  // outer loop's seed tensor as an extra parameter of the outlined function.
+  void VisitExpr_(const VarPtr& op) override { RecordUse(op.get()); }
+  void VisitExpr_(const IterArgPtr& op) override { RecordUse(op.get()); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    // The assigned value is evaluated before the target is bound.
+    if (op->value_) VisitExpr(op->value_);
+    Define(op->var_);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // iter_arg init values are evaluated in the enclosing scope.
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    Define(op->loop_var_);
+    for (const auto& rv : op->return_vars_) Define(rv);
+    for (const auto& ia : op->iter_args_) Define(ia);
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    for (const auto& rv : op->return_vars_) Define(rv);
+    for (const auto& ia : op->iter_args_) Define(ia);
+    VisitExpr(op->condition_);
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    for (const auto& rv : op->return_vars_) Define(rv);
+    // Walk both arms from the same incoming state so a read on one arm is never
+    // masked by a write on the other, then join on *must*-definitions: a
+    // variable written by only one arm may still carry its incoming value.
+    const std::vector<const Var*> then_new = VisitBranchIsolated(op->then_body_);
+    if (!op->else_body_.has_value()) return;
+    const std::vector<const Var*> else_new = VisitBranchIsolated(*op->else_body_);
+    const std::unordered_set<const Var*> then_set(then_new.begin(), then_new.end());
+    for (const auto* var : else_new) {
+      if (then_set.count(var) > 0) Define(var);
+    }
+  }
+
+ private:
+  void RecordUse(const Var* var) {
+    if (var && defined_.count(var) == 0 && live_in_.insert(var).second) {
+      ordered.push_back(var);
+    }
+  }
+
+  void Define(const VarPtr& var) { Define(var.get()); }
+
+  void Define(const Var* var) {
+    if (var && defined_.insert(var).second) journal_.push_back(var);
+  }
+
+  /// Visit `body`, then roll back every definition it introduced and return
+  /// them. Undoing via the insertion journal (rather than copying ``defined_``
+  /// per arm) keeps the walk linear in the branch's own size; total work is
+  /// O(N * if-nesting depth), i.e. O(N) for the straight-line bodies that
+  /// dominate InCore scopes.
+  std::vector<const Var*> VisitBranchIsolated(const StmtPtr& body) {
+    const size_t mark = journal_.size();
+    VisitStmt(body);
+    std::vector<const Var*> introduced(journal_.begin() + static_cast<std::ptrdiff_t>(mark), journal_.end());
+    for (const auto* var : introduced) defined_.erase(var);
+    journal_.resize(mark);
+    return introduced;
+  }
+
+  std::unordered_set<const Var*> live_in_;  ///< membership view of `ordered`
+  std::unordered_set<const Var*> defined_;
+  std::vector<const Var*> journal_;  ///< insertion order, for branch rollback
 };
 
 /** @brief Visitor to build a symbol table mapping variable pointers to their types and Var objects. */
@@ -556,25 +726,54 @@ class ScopeOutliner : public IRMutator {
       reserved_func_names_->insert(outlined_func_name);
     }
 
-    // Analyze the scope body for inputs and outputs (before recursing).
-    // A single VarDefUseCollector replaces the old VarRefCollector + VarDefCollector pair.
+    // Definitions made by the scope body (before recursing) — the basis for the
+    // output set below, and for the rebind check that follows the input set.
     VarDefUseCollector body_collector;
     body_collector.VisitStmt(op->body_);
 
-    // Inputs: variables used but not defined in the scope.
-    // Iterate in first-encounter order to preserve the callee's parameter ordering.
+    // Store targets present in the scope body. Needed both for the captured
+    // read-modify-write check below and, further down, to decide whether a
+    // post-store alias's original target already appears in output_vars.
+    StoreTargetCollector store_collector;
+    store_collector.VisitStmt(op->body_);
+
+    // Inputs: the scope's live-in set — variables the body reads before it
+    // (re)defines them, so their incoming value comes from the caller.
+    // Deliberately NOT ``var_uses \ var_defs``; see UpwardExposedUseCollector
+    // for why that flow-insensitive difference drops a rebound capture.
+    //
+    // Iterate in first-read order to preserve the callee's parameter ordering.
     // var_objects_ is a pure identity symbol table (never rewritten with
     // renames), so obj_it->second is the same Var that appears in the body —
     // input_vars[i].get() is the body pointer, the key used for both the body
     // substitution and the call-site lookup below.
+    UpwardExposedUseCollector live_in;
+    live_in.VisitStmt(op->body_);
+
     std::vector<VarPtr> input_vars;
-    for (const Var* var_ptr : body_collector.var_uses_ordered) {
-      if (!body_collector.var_defs.count(var_ptr)) {
-        auto obj_it = var_objects_.find(var_ptr);
-        CHECK(obj_it != var_objects_.end())
-            << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
-        input_vars.push_back(obj_it->second);
-      }
+    for (const Var* var_ptr : live_in.ordered) {
+      auto obj_it = var_objects_.find(var_ptr);
+      CHECK(obj_it != var_objects_.end())
+          << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
+      input_vars.push_back(obj_it->second);
+    }
+
+    // A captured variable the body also rebinds is only representable in the
+    // outlined function when the rebind is a ``tile.store`` — that shape gets
+    // an InOut param plus a distinct result Var below (for Hierarchy scopes,
+    // only the InOut param: they skip the store-target export, so the body
+    // keeps the original rebind. Still correct — the capture is a parameter
+    // either way, which is what was broken). Anything else (e.g. a pre-SSA
+    // ``out = pl.assemble(out, ...)``) would need real SSA construction, so
+    // reject it here rather than emit a function that reassigns a variable it
+    // never declared. Unreachable on SSA input, where no live-in variable is
+    // ever assigned inside the body.
+    for (const Var* var_ptr : live_in.ordered) {
+      if (!body_collector.var_defs.count(var_ptr)) continue;
+      INTERNAL_CHECK_SPAN(store_collector.store_targets.count(var_ptr) > 0, op->span_)
+          << "Internal error: scope '" << outlined_func_name << "' captures '" << var_ptr->name_hint_
+          << "' and rebinds it under the same name without a tile.store. The outlining passes "
+             "require SSA form (IRProperty::SSAForm) — run ConvertToSSA first.";
     }
 
     // Outputs: variables defined in the scope AND used after it
@@ -589,12 +788,6 @@ class ScopeOutliner : public IRMutator {
     // to its store target so we don't export the same tensor twice.
     PostStoreAliasCollector post_store_collector;
     post_store_collector.VisitStmt(op->body_);
-
-    // Store targets present in the scope body — used to decide whether a
-    // post-store alias's original target will already appear in output_vars
-    // via the store-target-output pass below.
-    StoreTargetCollector store_collector;
-    store_collector.VisitStmt(op->body_);
 
     // Aliases deferred to the call-site emission: each pair maps a
     // scope-local SSA post-store alias (pointer identity in the scope body)
@@ -611,8 +804,7 @@ class ScopeOutliner : public IRMutator {
       auto alias_it = post_store_collector.alias_to_target.find(var_ptr);
       const Var* target_ptr =
           (alias_it != post_store_collector.alias_to_target.end()) ? alias_it->second : nullptr;
-      if (target_ptr && store_collector.store_targets.count(target_ptr) &&
-          !body_collector.var_defs.count(target_ptr)) {
+      if (target_ptr && store_collector.store_targets.count(target_ptr) && live_in.IsExternal(target_ptr)) {
         auto ext_it = var_objects_.find(target_ptr);
         CHECK(ext_it != var_objects_.end())
             << "Store target " << target_ptr->name_hint_ << " not found in var_objects";
@@ -641,10 +833,14 @@ class ScopeOutliner : public IRMutator {
     //   - body pointer (var_ptr) — kept in store_body_ptrs for the
     //     StoreEvalToAssignMutator, which matches against the un-substituted
     //     scope body where store targets retain their original pointers
+    //
+    // "External" is the live-in test, not ``!var_defs.count(...)``: a target
+    // the body rebinds under its own name (``c = pl.store(t, off, c)``) is
+    // still caller-owned, and dropping it here is what left the read dangling.
     std::unordered_map<const Var*, const Var*> store_body_ptrs;
     if (op->GetScopeKind() != ScopeKind::Hierarchy) {
       for (const Var* var_ptr : store_collector.store_targets) {
-        if (!body_collector.var_defs.count(var_ptr)) {
+        if (live_in.IsExternal(var_ptr)) {
           auto ext_it = var_objects_.find(var_ptr);
           CHECK(ext_it != var_objects_.end())
               << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
@@ -766,7 +962,7 @@ class ScopeOutliner : public IRMutator {
           store_target_vars[body_it->second] = outlined_output_vars[idx];
         }
       }
-      StoreEvalToAssignMutator store_mutator(store_target_vars);
+      StoreEvalToAssignMutator store_mutator(store_target_vars, outlined_used_names);
       pre_sub_body = store_mutator.VisitStmt(pre_sub_body);
     }
 

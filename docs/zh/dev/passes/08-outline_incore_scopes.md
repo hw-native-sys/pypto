@@ -37,7 +37,8 @@ program_outlined = outline_pass(program)
 ## 算法
 
 1. **扫描 InCore 作用域**：在 Opaque 函数中查找所有 `InCoreScopeStmt` 节点
-2. **分析输入**：确定外部变量引用（在作用域外定义、在作用域内使用的变量）
+2. **分析输入**：收集作用域的 *live-in*（活跃入口）集合——作用域体在（重新）定义
+   某变量之前就读取它，说明该变量的入口值来自调用方
 3. **分析输出**：确定在作用域之后仍被使用的内部定义（在作用域内定义、在作用域外使用的变量）
 4. **创建函数**：将作用域体提取为新的 `Function(scope_type=InCore)`，其中：
    - 参数 = 输入变量
@@ -47,6 +48,36 @@ program_outlined = outline_pass(program)
    - 带有输入参数的提取函数调用
    - 每个输出变量对应一个 AssignStmt
 6. **添加到程序**：将提取的函数添加到程序的函数列表中
+
+**使用 live-in 而非 `uses \ defs`**：输入集合按流敏感方式计算
+（`UpwardExposedUseCollector`）。对于「先读取、再以同名重新绑定」的被捕获
+tensor，简单的集合差是错误的——这正是 `ConvertToSSA` 拆分之前，解析器为
+`pl.Out` 参数生成的形态：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    c = pl.store(t, [0, 0], c)   # 同一个 Var：既作为 store 目标被读取，又被重新绑定
+```
+
+`c` 同时出现在 `var_uses` 与 `var_defs` 中，集合差会把它从参数表中剔除，导致
+外提函数体内的读取变成自由变量。将其视为 live-in 后，它成为 `InOut` 参数，而
+`tile.store` 的结果绑定到一个独立的 Var（`c__store`），因此外提函数体永远不会
+重新绑定自身的参数：
+
+```python
+def main_incore_0(a: Tensor[[128, 128], FP32], c: InOut[Tensor[[128, 128], FP32]]):
+    c__store = pl.tile.store(..., c)
+    return c                       # 返回参数——store 就地经由它写回
+```
+
+在 SSA 输入（即本 pass 声明的 `IRProperty::SSAForm` 前置条件）下，live-in 与
+`uses \ defs` 完全一致，因此该行为差异只出现在前置条件未满足就进入本 pass 的
+IR 上。若被捕获变量是被 `tile.store` 之外的方式重新绑定，则无法在不做真正 SSA
+构造的前提下表达，此时会抛出内部错误并提示先运行 `ConvertToSSA`。
+
+「绑定到独立 Var」是 InCore / Cluster / Spmd 的行为。Hierarchy 作用域会完全跳过
+store 目标导出（该缓冲区已经通过 InOut 参数对调用方可见），因此其函数体保留原有的
+重新绑定——被捕获变量仍然会成为参数，而这正是此前出问题的部分。
 
 **参数化显式返回**：只要某个 tensor 输出是经由参数回写
 的，外提函数就返回自身的参数而非 SSA 结果变量——store 目标输出直接返回对应
