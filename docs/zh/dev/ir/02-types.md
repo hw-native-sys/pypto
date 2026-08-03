@@ -196,11 +196,10 @@ TileView：它由 tile shape 以及（如果存在）tile memory space 推导得
 像 `pl.TileView()` 这样的冗余显式默认写法，会与省略写法被视为语义等价，
 并且在 printer 输出时可能统一成规范形式。
 
-由于隐式 view 依赖 memory space，`TileType` 构造函数只会针对传入的 space
-把 view 折叠成 `nullopt`。因此，凡是能确定结果 space 的 `f_deduce_type`，
-**都必须把该 space 传给构造函数**：若先针对 `nullopt` 推导、再由
-`OpRegistry::Create` 补盖 space，view 会被按另一套隐式 layout 重新规范化，
-结果 layout 将取决于 view 是否恰好折叠（即取决于 `valid_shape` 与 `pad`）。
+隐式 view 依赖 memory space，构造函数只会针对传入的 space 把 view 折叠成
+`nullopt`。凡能确定结果 space 的 `f_deduce_type`，**都必须把该 space 传进来**：
+若先针对 `nullopt` 推导、再由 `OpRegistry::Create` 补盖 space，就会按两套不同的
+隐式 layout 规范化两次，结果取决于 view 是否恰好折叠（即 `valid_shape` 与 `pad`）。
 
 ### ArrayType
 

@@ -325,22 +325,20 @@ with ib.function("tensor_example") as f:
 
 | 字段 | 结果值的来源 |
 | ---- | ------------ |
-| `blayout` / `slayout` | 凡目标 space 自带 layout（`Mat`、`Acc`、`Left`、`Right`、`LeftScale`、`RightScale`），一律取**目标**的 implicit layout；对 implicit layout 与 space 无关的扁平 space（`Vec`、`Bias` 等），则沿用源 tile 的 effective layout。两者都可由 `blayout` / `slayout` kwarg 覆盖 |
+| `blayout` / `slayout` | 凡目标 space 自带 layout（`Mat`、`Acc`、`Left`、`Right`、`LeftScale`、`RightScale`），取**目标**的 implicit layout；扁平 space（`Vec`、`Bias` 等）则沿用源 tile 的 effective layout。两者都可由 `blayout` / `slayout` kwarg 覆盖 |
 | `fractal` | **目标** space 的分块（boxing）粒度，绝不取源的：`Acc`（L0C，NZ 分形）为 1024，MX scale tile 为 32，其余为 512 |
 | `valid_shape` / `pad` | 从源带过来 |
 | `stride` / `start_offset` | 丢弃 —— 目标是稠密缓冲区 |
 
-整个 layout 都来自目标，因为它描述的是目标缓冲区如何分块，由
-`tile_view_semantics::GetImplicitTileLayout` 提供（其中 fractal 委托给
-`GetImplicitFractal`）。`Right` 是唯一仍需就地覆盖的目标：L0B 要求
+layout 来自目标，因为它描述的是目标缓冲区如何分块，由
+`tile_view_semantics::GetImplicitTileLayout` 提供。`Right` 仍需就地覆盖：L0B 要求
 `blayout=row_major`，而 `[N, 1]` 形状的 implicit `blayout` 是 `col_major`。
 
-`tile.move` 自己把目标 `memory_space` 打到推导出的类型上，因此 view 只会针对「它实际所属的
-space」规范化一次 —— 当结果 view 与目标 space 的 implicit view 一致时折叠为 `nullopt`，这与
-[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile 刷新的
-per-space implicit view 是同一套。若先针对 `nullopt` 推导、再由 `OpRegistry::Create` 补盖
-space，就会按两套不同的 implicit layout 规范化两次 —— 参见
-[类型](02-types.md#tiletype-and-tileview) 中的 `TileType` 契约。
+`tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
+[类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
+implicit view 一致时会折叠为 `nullopt` —— 这与
+[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile
+刷新的 per-space implicit view 是同一套。
 
 ### reshape 与有效区域（valid region）
 

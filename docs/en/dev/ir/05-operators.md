@@ -333,26 +333,21 @@ The deduced result `TileView` splits by field:
 
 | Field | Source of the result value |
 | ----- | -------------------------- |
-| `blayout` / `slayout` | The **destination** space's implicit layout wherever that space has one of its own (`Mat`, `Acc`, `Left`, `Right`, `LeftScale`, `RightScale`). For the flat spaces (`Vec`, `Bias`, …), whose implicit layout is the space-agnostic one, the source tile's effective layout carries over. A `blayout` / `slayout` kwarg overrides either |
+| `blayout` / `slayout` | The **destination** space's implicit layout wherever it has one of its own (`Mat`, `Acc`, `Left`, `Right`, `LeftScale`, `RightScale`); for the flat spaces (`Vec`, `Bias`, …) the source tile's effective layout carries over. A `blayout` / `slayout` kwarg overrides either |
 | `fractal` | The **destination** space's boxing granularity, never the source's: `Acc` (L0C, NZ-boxed) is 1024, MX scale tiles are 32, everything else 512 |
 | `valid_shape` / `pad` | Carried over from the source |
 | `stride` / `start_offset` | Dropped — the destination is a dense buffer |
 
-The whole layout comes from the destination because it describes how the
-destination buffer is boxed; `tile_view_semantics::GetImplicitTileLayout`
-supplies it (delegating the fractal to `GetImplicitFractal`). `Right` is the one
-destination that still needs a local override: L0B requires `blayout=row_major`
-even for an `[N, 1]` shape, whose implicit `blayout` is `col_major`.
+The layout comes from the destination because it describes how that buffer is
+boxed; `tile_view_semantics::GetImplicitTileLayout` supplies it. `Right` needs a
+local override — L0B requires `blayout=row_major` even for an `[N, 1]` shape,
+whose implicit `blayout` is `col_major`.
 
-`tile.move` stamps the destination `memory_space` onto the deduced type itself,
-so the view is canonicalized once, against the space it is actually a view of —
-a result view matching the destination's implicit view collapses to `nullopt`,
-the same per-space implicit view
+`tile.move` stamps the destination `memory_space` itself (see the `TileType`
+contract in [Types](02-types.md#tiletype)), so a result view matching the
+destination's implicit view collapses to `nullopt` — the same per-space view
 [`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
-retyped tile to. Deducing against `nullopt` and leaving `OpRegistry::Create` to
-stamp the space would canonicalize twice, against two different implicit
-layouts — see the `TileType` contract in
-[Types](02-types.md#tiletype-and-tileview).
+retyped tile to.
 
 ### Reshape and the valid region
 

@@ -202,13 +202,12 @@ memory space. Redundant explicit defaults such as `pl.TileView()` are treated
 as semantically equivalent to the omitted form and may print back in canonical
 syntax.
 
-Because the implicit view depends on the memory space, the `TileType`
-constructor collapses a view to `nullopt` only against the space it is given.
-An `f_deduce_type` that produces a tile in a known space **must pass that space
-to the constructor** — deducing against `nullopt` and letting
-`OpRegistry::Create` stamp the space afterwards re-canonicalizes the view
-against a different implicit layout, so the result would depend on whether the
-view happened to collapse (i.e. on `valid_shape` and `pad`).
+The implicit view depends on the memory space, so the constructor collapses a
+view to `nullopt` only against the space it is given. An `f_deduce_type`
+producing a tile in a known space **must pass that space** — deducing against
+`nullopt` and letting `OpRegistry::Create` stamp it afterwards canonicalizes
+twice, against two different implicit layouts, making the result depend on
+whether the view happened to collapse (i.e. on `valid_shape` and `pad`).
 
 ### ArrayType
 
