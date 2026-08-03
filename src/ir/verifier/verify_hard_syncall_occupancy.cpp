@@ -320,46 +320,59 @@ class HardSyncallOccupancyVerifierImpl : public PropertyVerifier {
       return IsLaunchWrapper(callee) ? direct_callees_cached(callee) : std::vector<FunctionPtr>{callee};
     };
 
+    // Resolve a dispatch's effective launch spec exactly as orchestration
+    // codegen's EffectiveLaunchSpec does: the dispatch's own spec wins, and the
+    // callee's Function attr is only a fallback for a dispatch that carries
+    // none. Validating the Function attr independently would reject a program
+    // codegen compiles correctly — e.g. a legacy Spmd function with
+    // core_num=24 dispatched from a call carrying core_num=48, sync_start=True.
+    auto check_dispatch = [&](const OpPtr& op, const ExprPtr& own_core_num, bool own_sync_start) {
+      if (!op) return;
+      auto callee = program->GetFunction(op->name_);
+      ExprPtr core_num = own_core_num;
+      bool sync_start = own_sync_start;
+      if (!core_num && callee) {
+        core_num = callee->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+        sync_start = callee->GetAttr<bool>(kAttrSyncStart, false);
+      }
+      if (!core_num) return;
+      // A legacy Function-level spec predates kAttrSpmdUnwrapped, so classify
+      // its callee the pre-carrier-move way: a Spmd wrapper or ANY Group
+      // launches its own callees. Gating on the marker would demote an old
+      // cluster-unwrapped Group to a mixed kernel and misjudge its occupancy.
+      const bool legacy_spec = !own_core_num && callee;
+      const bool descend = legacy_spec ? (callee->func_type_ == FunctionType::Spmd ||
+                                          callee->func_type_ == FunctionType::Group)
+                                       : IsLaunchWrapper(callee);
+      std::vector<FunctionPtr> kernels;
+      if (!callee) {
+        kernels = {};
+      } else if (descend) {
+        kernels = direct_callees_cached(callee);
+      } else {
+        kernels = {callee};
+      }
+      CheckLaunchSite(core_num, sync_start, kernels, total_vector, total_cube, program, query_defs,
+                      &syncall_cache, diagnostics);
+    };
+
     for (const auto& [gv, fn] : program->functions_) {
       if (!fn || !fn->body_) continue;
 
       CallSubmitCollector collector;
       collector.VisitStmt(fn->body_);
 
-      // Legacy launch-function carrier: a Function that spells its launch spec
-      // in its own attrs. No pass produces this any more — the spec rides the
-      // dispatch (see kAttrCoreNum) — but hand-written and deserialized IR can
-      // still carry a constant ``core_num`` on the function, so keep reading it.
-      if (fn->HasAttr(kAttrCoreNum)) {
-        // sync_start rides alongside, emitted only when true (absent => false).
-        // Classify exactly as the pre-dispatch-carrier code did: a Spmd wrapper
-        // or ANY Group carrying the attr launches its callees. Legacy IR pre-
-        // dates kAttrSpmdUnwrapped, so gating on that marker here would demote
-        // an old cluster-unwrapped Group to a mixed kernel and misjudge its
-        // occupancy. Other function types are checked as themselves.
-        const bool legacy_wrapper =
-            fn->func_type_ == FunctionType::Spmd || fn->func_type_ == FunctionType::Group;
-        CheckLaunchSite(fn->GetAttr<ExprPtr>(kAttrCoreNum, nullptr), fn->GetAttr<bool>(kAttrSyncStart, false),
-                        legacy_wrapper ? direct_callees_cached(fn) : std::vector<FunctionPtr>{fn},
-                        total_vector, total_cube, program, query_defs, &syncall_cache, diagnostics);
-      }
-
       // Launch sites. A dispatch carries its spec as kAttrCoreNum /
       // kAttrSyncStart Call attrs (an outlined ``with pl.spmd(...)``) or in the
       // first-class Submit fields (``pl.spmd_submit``, or an ``as tid`` scope).
-      // A plain call / submit has neither, so this is a no-op there.
+      // A plain call / submit to a callee with no Function-level spec resolves
+      // to nothing and is skipped.
       for (const auto& call : collector.calls) {
-        auto call_core_num = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
-        if (!call_core_num || !call->op_) continue;
-        CheckLaunchSite(call_core_num, call->GetAttr<bool>(kAttrSyncStart, false),
-                        launched_kernels(program->GetFunction(call->op_->name_)), total_vector, total_cube,
-                        program, query_defs, &syncall_cache, diagnostics);
+        check_dispatch(call->op_, call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr),
+                       call->GetAttr<bool>(kAttrSyncStart, false));
       }
       for (const auto& submit : collector.submits) {
-        if (!submit->core_num_.has_value() || !submit->op_) continue;
-        CheckLaunchSite(*submit->core_num_, submit->sync_start_,
-                        launched_kernels(program->GetFunction(submit->op_->name_)), total_vector, total_cube,
-                        program, query_defs, &syncall_cache, diagnostics);
+        check_dispatch(submit->op_, submit->core_num_.value_or(nullptr), submit->sync_start_);
       }
     }
   }
