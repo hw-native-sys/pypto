@@ -116,8 +116,10 @@ consume each view.
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
-For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to `pl.matmul`, or
-load naturally and apply `pl.tile.transpose_view(...)`.
+The layout-only shorthand `pl.Tensor[..., pl.DN]` is not supported — writing it never gets
+you a DN tensor. For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to
+`pl.matmul`, or derive the transposed view at the use site with `pl.transpose(x, -2, -1)`.
+A slice or reshape of a DN-producing operation inherits DN automatically.
 
 `pl.ND` is the default row-major layout and never needs writing. `pl.NZ` is tile-only — a
 hardware tile layout, never a `pl.Tensor` annotation.
@@ -187,8 +189,7 @@ it — which is a race, not a diagnostic.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **`DeprecationWarning` at parse time about layout** | `pl.Tensor[..., pl.DN]` annotation | Drop the marker, write the runtime shape, pass `b_trans=True` to `pl.matmul` |
-| **Shape mismatch the numbers seem to satisfy** | A DN annotation flipped the coordinate system | Write the source shape; check whether the consumer wanted a `transpose_view` |
+| **`ParserTypeError` about the DN layout-only shorthand** | `pl.Tensor[..., pl.DN]` — removed, it forced two coordinate systems onto one annotation | Write the source shape with no marker; derive DN at the use site with `pl.transpose(x, -2, -1)`; or inherit it through a slice/reshape of a DN-producing op |
 | **Results wrong only when two tasks overlap** | A read-write buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
 | **Reading an `Out` parameter returns garbage** | `Out` promises write-before-read | Use `pl.InOut[...]` if the prior contents matter |
 | **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) for multi-hop pairs |

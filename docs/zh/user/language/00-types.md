@@ -97,7 +97,7 @@ x = arr[i]              # array.get_element
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
-矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或者按自然布局 load 之后用 `pl.tile.transpose_view(...)`。
+只写布局的简写 `pl.Tensor[..., pl.DN]` 不被支持 —— 写了也拿不到 DN 张量。矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或在使用处用 `pl.transpose(x, -2, -1)` 导出转置视图。对产生 DN 的算子做切片或 reshape，会自动继承 DN。
 
 `pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 只用于 tile —— 那是硬件 tile 布局，永远不做 `pl.Tensor` 注解。
 
@@ -143,8 +143,7 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **解析期出现布局相关的 `DeprecationWarning`** | 用了 `pl.Tensor[..., pl.DN]` 注解 | 去掉标记，写运行期 shape，给 `pl.matmul` 传 `b_trans=True` |
-| **数字看起来对得上却报 shape 不匹配** | DN 注解翻转了坐标系 | 写源 shape；确认消费方要的是不是 `transpose_view` |
+| **报 DN layout-only shorthand 的 `ParserTypeError`** | `pl.Tensor[..., pl.DN]` —— 已移除，它把两套坐标系压进了一条注解 | 写源 shape、不带标记；在使用处用 `pl.transpose(x, -2, -1)` 导出 DN；或让它从产生 DN 的算子经切片/reshape 继承 |
 | **只有两个任务重叠时结果才出错** | 读写缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
 | **读 `Out` 参数读到垃圾** | `Out` 承诺的是先写后读 | 若此前内容有意义，改用 `pl.InOut[...]` |
 | **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) |
