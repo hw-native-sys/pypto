@@ -12,16 +12,17 @@
 Runs without a device or the ``simpler`` package by patching the module-level
 setup helpers in :mod:`pypto.runtime.distributed_runner`, so construction does
 no real compile/fork. The tests cover both ordinary prepared dispatch and the
-persistent contract: one ``Worker.run`` fence per request, retained per-program
-domains, and a complete synchronous cleanup boundary for every caller-visible
-request.
+persistent contract: bounded asynchronous submission, retained per-program
+domains, handle-owned input lifetimes, and complete cleanup before publication.
 """
 
+import gc
 import importlib.util
 import json
 import sys
 import threading
 import weakref
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -41,6 +42,7 @@ from pypto.runtime.bench import (
     _L3_SWIMLANE_TIMING_END,
 )
 from pypto.runtime.distributed_runner import (
+    DistributedRunHandle,
     DistributedWorker,
     _assemble_chip_callables,
     _clear_dfx_dispatch_dirs,
@@ -66,6 +68,46 @@ def _fake_compiled(param_infos, output_indices):
     return compiled
 
 
+class _ImmediateNativeHandle:
+    """Minimal Simpler RunHandle stand-in used by prepared-worker tests."""
+
+    done = True
+
+    def result(self, timeout=None):
+        del timeout
+
+
+class _ControlledNativeHandle:
+    """RunHandle stand-in with an explicit terminal-completion gate."""
+
+    def __init__(
+        self,
+        error: BaseException | None = None,
+        on_result: Callable[[], None] | None = None,
+    ) -> None:
+        self._terminal = threading.Event()
+        self.result_started = threading.Event()
+        self.error = error
+        self._on_result = on_result
+
+    @property
+    def done(self) -> bool:
+        return self._terminal.is_set()
+
+    def complete(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self._terminal.set()
+
+    def result(self, timeout=None):
+        self.result_started.set()
+        if not self._terminal.wait(timeout):
+            raise TimeoutError("native handle timed out")
+        if self._on_result is not None:
+            self._on_result()
+        if self.error is not None:
+            raise self.error
+
+
 @pytest.fixture
 def patched_setup():
     """Patch every setup helper so DistributedWorker() does no real work.
@@ -78,6 +120,7 @@ def patched_setup():
     worker._live_domains = {}
     # Device-memory ops route through the Orchestrator facade (worker._orch).
     worker._orch.malloc.return_value = 0xDEAD0000
+    worker.submit.side_effect = lambda fn: (fn(worker._orch, None, None), _ImmediateNativeHandle())[1]
 
     mod = "pypto.runtime.distributed_runner"
     chip_callables = ({"chip_orch": object()}, "rt_name", False)
@@ -90,6 +133,7 @@ def patched_setup():
         patch(f"{mod}._register_callables", return_value=({}, {"chip_orch": 0})) as register,
         patch(f"{mod}._make_call_config", return_value=MagicMock(name="CallConfig")) as make_call_config,
         patch(f"{mod}._dispatch") as dispatch,
+        patch(f"{mod}._submit_dispatch", return_value=_ImmediateNativeHandle()) as submit_dispatch,
     ):
         yield {
             "worker": worker,
@@ -101,6 +145,7 @@ def patched_setup():
             "register": register,
             "make_call_config": make_call_config,
             "dispatch": dispatch,
+            "submit_dispatch": submit_dispatch,
         }
 
 
@@ -125,39 +170,181 @@ class TestSetupOnce:
         rt(a, b)
 
         # Setup still once; dispatch ran per call.
-        assert m["dispatch"].call_count == 3
+        assert m["submit_dispatch"].call_count == 3
         m["assemble"].assert_called_once()
         m["construct"].assert_called_once()
         assert m["worker"].init.call_count == 1
         rt.close()
 
 
+class TestAsyncDispatchHandle:
+    def test_submit_returns_handle_and_retires_frame_on_result(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        m["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+
+        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        assert isinstance(handle, DistributedRunHandle)
+        assert handle.done is False
+        assert len(rt._active_dispatch_handles) == 1
+        native.complete()
+        handle.result()
+        assert handle.done is True
+        assert not rt._active_dispatch_handles
+        assert all(not frame.in_use for frame in rt._dispatch_frames)
+        rt.close()
+
+    def test_timeout_keeps_frame_owned_until_later_completion(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        m["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        with pytest.raises(TimeoutError):
+            handle.result(timeout=0.0)
+        assert handle.done is False
+        assert any(frame.in_use for frame in rt._dispatch_frames)
+        with pytest.raises(ValueError, match="non-negative finite"):
+            handle.result(timeout=-1.0)
+
+        native.complete()
+        handle.result()
+        assert all(not frame.in_use for frame in rt._dispatch_frames)
+        rt.close()
+
+    def test_handle_keeps_input_alive_until_completion(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        m["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+        arg = torch.zeros((16, 16), dtype=torch.float32).share_memory_()
+        arg_ref = weakref.ref(arg)
+
+        handle = rt.submit(compiled, arg)
+        m["submit_dispatch"].reset_mock()
+        del arg
+        gc.collect()
+        assert arg_ref() is not None
+
+        native.complete()
+        handle.result()
+        gc.collect()
+        assert arg_ref() is None
+        rt.close()
+
+    def test_third_submit_drains_oldest_before_allocating_metadata(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        natives = [_ControlledNativeHandle() for _ in range(3)]
+        m["submit_dispatch"].side_effect = natives
+        rt = DistributedWorker(compiled)
+        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        first = rt.submit(compiled, arg)
+        second = rt.submit(compiled, arg)
+        assert m["make_call_config"].call_count == 3  # prepare + two accepted dispatches
+
+        third_result: list[DistributedRunHandle] = []
+        third_error: list[BaseException] = []
+
+        def submit_third() -> None:
+            try:
+                third_result.append(rt.submit(compiled, arg))
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                third_error.append(exc)
+
+        caller = threading.Thread(target=submit_third)
+        caller.start()
+        assert natives[0].result_started.wait(timeout=2)
+        # Backpressure happens before a CallConfig or frame-local tensor map is
+        # created for the third dispatch.
+        assert m["make_call_config"].call_count == 3
+        assert not third_result
+
+        natives[0].complete()
+        caller.join(timeout=2)
+        assert not caller.is_alive()
+        assert not third_error
+        assert len(third_result) == 1
+        assert first.done is True
+        assert m["make_call_config"].call_count == 4
+
+        natives[1].complete()
+        natives[2].complete()
+        second.result()
+        third_result[0].result()
+        rt.close()
+
+    def test_failed_handle_recycles_frame_and_caches_error(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        failed = _ControlledNativeHandle()
+        m["submit_dispatch"].return_value = failed
+        rt = DistributedWorker(compiled)
+        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+        failed.complete(RuntimeError("dispatch failed"))
+
+        with pytest.raises(RuntimeError, match="dispatch failed"):
+            handle.result()
+        with pytest.raises(RuntimeError, match="dispatch failed"):
+            handle.result()
+        assert all(not frame.in_use for frame in rt._dispatch_frames)
+        rt.close()
+
+    def test_close_drains_outstanding_handle_before_worker_close(self, patched_setup):
+        m = patched_setup
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        m["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+        rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+
+        closed = threading.Event()
+        closer = threading.Thread(target=lambda: (rt.close(), closed.set()))
+        closer.start()
+        assert native.result_started.wait(timeout=2)
+        assert not closed.is_set()
+        m["worker"].close.assert_not_called()
+
+        native.complete()
+        closer.join(timeout=2)
+        assert closed.is_set()
+        m["worker"].close.assert_called_once_with()
+        with pytest.raises(RuntimeError, match="after close"):
+            rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+
+
 class TestPerTaskRingSizing:
     """A per-dispatch ``RunConfig`` sizes that dispatch's runtime ring buffers.
 
     ``_make_call_config`` runs once at construction to build the program's
-    shared baseline. With no per-dispatch ``config`` that baseline is reused
-    (no rebuild); a ``RunConfig`` triggers a fresh rebuild from the program's
-    ``DistributedConfig`` plus the ring overrides, for this dispatch only.
+    prewarm baseline. Every accepted asynchronous dispatch receives a fresh
+    snapshot; a ``RunConfig`` adds that dispatch's overrides.
     """
 
-    # ``_dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, ...)``
+    # ``_submit_dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, ...)``
     _CALL_CONFIG_ARG = 5
 
-    def test_no_config_reuses_prepared_baseline(self, patched_setup):
+    def test_no_config_snapshots_prepared_baseline(self, patched_setup):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled)
         # Construction builds the baseline exactly once.
         assert m["make_call_config"].call_count == 1
         baseline = m["make_call_config"].return_value
+        fresh = MagicMock(name="FreshCallConfig")
+        m["make_call_config"].return_value = fresh
 
         rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 
-        # No per-dispatch config → baseline reused, no rebuild, and the prepared
-        # config is what reaches _dispatch.
-        assert m["make_call_config"].call_count == 1
-        assert m["dispatch"].call_args.args[self._CALL_CONFIG_ARG] is baseline
+        assert m["make_call_config"].call_count == 2
+        assert fresh is not baseline
+        assert m["submit_dispatch"].call_args.args[self._CALL_CONFIG_ARG] is fresh
         rt.close()
 
     def test_per_dispatch_config_rebuilds_call_config(self, patched_setup):
@@ -177,7 +364,9 @@ class TestPerTaskRingSizing:
         assert rebuild.args[0] is compiled._distributed_config
         assert rebuild.args[1] is rc
         # The freshly built config (not None) is what reaches _dispatch.
-        assert m["dispatch"].call_args.args[self._CALL_CONFIG_ARG] is m["make_call_config"].return_value
+        assert (
+            m["submit_dispatch"].call_args.args[self._CALL_CONFIG_ARG] is m["make_call_config"].return_value
+        )
         rt.close()
 
     def test_run_method_forwards_per_dispatch_config(self, patched_setup):
@@ -215,9 +404,10 @@ class TestPreparedSwimlaneTwoPass:
         timing_call_config = MagicMock(name="TimingCallConfig")
         m["make_call_config"].side_effect = [deps_call_config, timing_call_config]
         events: list[str] = []
-        m["dispatch"].side_effect = lambda *args: events.append(
-            "deps" if args[self._CALL_CONFIG_ARG] is deps_call_config else "timing"
-        )
+        m["submit_dispatch"].side_effect = lambda *args: (
+            events.append("deps" if args[self._CALL_CONFIG_ARG] is deps_call_config else "timing"),
+            _ImmediateNativeHandle(),
+        )[1]
 
         run_config = RunConfig(
             platform="a2a3",
@@ -239,8 +429,8 @@ class TestPreparedSwimlaneTwoPass:
             rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
 
         assert events == ["clear", "deps", "timing", "collect"]
-        assert m["dispatch"].call_count == 2
-        assert all(call.args[0] is m["worker"] for call in m["dispatch"].call_args_list)
+        assert m["submit_dispatch"].call_count == 2
+        assert all(call.args[0] is m["worker"] for call in m["submit_dispatch"].call_args_list)
         assert m["construct"].call_count == 1
         assert m["worker"].init.call_count == 1
         clear.assert_called_once_with(tmp_path / "dfx_outputs")
@@ -287,8 +477,8 @@ class TestPreparedSwimlaneTwoPass:
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
             rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
 
-        m["dispatch"].assert_called_once()
-        assert m["dispatch"].call_args.args[self._CALL_CONFIG_ARG] is call_config
+        m["submit_dispatch"].assert_called_once()
+        assert m["submit_dispatch"].call_args.args[self._CALL_CONFIG_ARG] is call_config
         m["make_call_config"].assert_called_once_with(
             compiled._distributed_config,
             run_config,
@@ -309,7 +499,7 @@ class TestPreparedSwimlaneTwoPass:
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
             rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
 
-        m["dispatch"].assert_called_once()
+        m["submit_dispatch"].assert_called_once()
         m["make_call_config"].assert_called_once_with(
             compiled._distributed_config,
             run_config,
@@ -326,15 +516,18 @@ class TestPreparedSwimlaneTwoPass:
         rt = DistributedWorker(compiled)
 
         # Exercise _dispatch_prepared's persistent branch without starting a
-        # background thread: each call into _dispatch_persistent is the
-        # synchronous request/fence used by the real dispatcher.
+        # background thread: the two-pass fallback still fences both requests.
         rt._persistent = True
         m["make_call_config"].reset_mock()
         deps_call_config = MagicMock(name="DepsCallConfig")
         timing_call_config = MagicMock(name="TimingCallConfig")
         m["make_call_config"].side_effect = [deps_call_config, timing_call_config]
         with (
-            patch.object(rt, "_dispatch_persistent") as dispatch_persistent,
+            patch.object(
+                rt,
+                "_submit_persistent",
+                return_value=_ImmediateNativeHandle(),
+            ) as submit_persistent,
             patch("pypto.runtime.distributed_runner._collect_l3_swimlane"),
         ):
             rt(
@@ -342,7 +535,7 @@ class TestPreparedSwimlaneTwoPass:
                 config=RunConfig(platform="a2a3", enable_l2_swimlane=True),
             )
 
-        assert [call.args[2] for call in dispatch_persistent.call_args_list] == [
+        assert [call.args[2] for call in submit_persistent.call_args_list] == [
             deps_call_config,
             timing_call_config,
         ]
@@ -388,13 +581,18 @@ class TestArenaPrewarm:
 
 class TestPerCallValidation:
     def test_accepts_device_tensor(self, patched_setup):
+        submitted_tensors: dict[str, Any] = {}
+
+        def submit_dispatch(*args):
+            submitted_tensors.update(args[2])
+            return _ImmediateNativeHandle()
+
+        patched_setup["submit_dispatch"].side_effect = submit_dispatch
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
         rt(DeviceTensor(0x1000, (128, 128), torch.float32), DeviceTensor(0x2000, (128, 128), torch.float32))
-        patched_setup["dispatch"].assert_called_once()
-        # The merged tensors dict (5th positional arg of _dispatch) carries the inputs by name.
-        tensors = patched_setup["dispatch"].call_args.args[2]
-        assert set(tensors) == {"a", "b"}
+        patched_setup["submit_dispatch"].assert_called_once()
+        assert set(submitted_tensors) == {"a", "b"}
         rt.close()
 
     def test_accepts_shared_host_torch_tensor(self, patched_setup):
@@ -402,7 +600,7 @@ class TestPerCallValidation:
         rt = DistributedWorker(compiled)
         host_a = torch.zeros(128, 128, dtype=torch.float32).share_memory_()
         rt(host_a, DeviceTensor(0x2000, (128, 128), torch.float32))
-        patched_setup["dispatch"].assert_called_once()
+        patched_setup["submit_dispatch"].assert_called_once()
         rt.close()
 
     def test_rejects_non_shared_host_torch_tensor(self, patched_setup):
@@ -453,12 +651,18 @@ class TestPerCallValidation:
     def test_scalar_param_forwarded_as_is(self, patched_setup):
         # Scalar params (shape=None, e.g. seq_len) bypass tensor validation and
         # are forwarded verbatim to the entry — common in serving dispatch.
+        submitted_tensors: dict[str, Any] = {}
+
+        def submit_dispatch(*args):
+            submitted_tensors.update(args[2])
+            return _ImmediateNativeHandle()
+
+        patched_setup["submit_dispatch"].side_effect = submit_dispatch
         scalar = _ParamInfo(name="seq_len", direction=ParamDirection.In, shape=None, dtype=DataType.FP32)
         compiled = _fake_compiled([scalar, _param("kv", [16, 16])], [])
         rt = DistributedWorker(compiled)
         rt(7, DeviceTensor(0x1000, (16, 16), torch.float32))
-        tensors = patched_setup["dispatch"].call_args.args[2]
-        assert tensors["seq_len"] == 7
+        assert submitted_tensors["seq_len"] == 7
         rt.close()
 
     def test_rejects_wrong_arg_count(self, patched_setup):
@@ -932,8 +1136,8 @@ class TestWorkerConstruction:
 class TestExplicitDispatchAPI:
     """The new ``run`` / ``register`` surface that mirrors ChipWorker.
 
-    DistributedWorker.run() is an alias for ``__call__`` (existing dispatch
-    path). register() returns a :class:`RegistrationHandle` whose call
+    DistributedWorker.run() and ``__call__`` are blocking submit/result
+    compositions. register() returns a :class:`RegistrationHandle` whose call
     delegates to run().
     """
 
@@ -946,7 +1150,7 @@ class TestExplicitDispatchAPI:
         a = torch.zeros(4).share_memory_()
         b = torch.zeros(4).share_memory_()
         rt.run(compiled, a, b)
-        patched_setup["dispatch"].assert_called_once()
+        patched_setup["submit_dispatch"].assert_called_once()
 
         # register() returns a usable handle.
         rt2 = DistributedWorker(compiled)
@@ -988,9 +1192,9 @@ class TestExplicitDispatchAPI:
         b = torch.zeros(4).share_memory_()
 
         h = rt.register(compiled)
-        patched_setup["dispatch"].reset_mock()
+        patched_setup["submit_dispatch"].reset_mock()
         h(a, b)
-        patched_setup["dispatch"].assert_called_once()
+        patched_setup["submit_dispatch"].assert_called_once()
         rt.close()
 
     def test_close_marks_handle_closed(self, patched_setup):
@@ -1131,9 +1335,9 @@ class TestMultiProgram:
         b = torch.zeros(8).share_memory_()
 
         rt.run(prog_b, b)
-        assert m["dispatch"].call_args.args[1] is entry_b
+        assert m["submit_dispatch"].call_args.args[1] is entry_b
         rt.run(prog_a, a)
-        assert m["dispatch"].call_args.args[1] is entry_a
+        assert m["submit_dispatch"].call_args.args[1] is entry_a
         rt.close()
 
     def test_num_sub_workers_is_max_across_programs(self, patched_setup):
@@ -1176,7 +1380,7 @@ class TestMultiProgram:
         rt = DistributedWorker([prog])
         assert rt._multi_program is False
         rt(torch.zeros(4).share_memory_())
-        patched_setup["dispatch"].assert_called_once()
+        patched_setup["submit_dispatch"].assert_called_once()
         rt.close()
 
     def test_call_raises_in_multi_program_mode(self, patched_setup):
@@ -1189,6 +1393,13 @@ class TestMultiProgram:
 
     def test_shared_device_tensor_across_programs(self, patched_setup):
         m = patched_setup
+        submitted_tensors: list[dict[str, Any]] = []
+
+        def submit_dispatch(*args):
+            submitted_tensors.append(dict(args[2]))
+            return _ImmediateNativeHandle()
+
+        m["submit_dispatch"].side_effect = submit_dispatch
         # Both programs take a same-shaped KV param; one resident DeviceTensor
         # is dispatched through both (the serving KV-cache sharing contract).
         prog_a = _fake_compiled([_param("kv", [16, 16])], [])
@@ -1199,9 +1410,9 @@ class TestMultiProgram:
         rt.run(prog_a, kv)
         rt.run(prog_b, kv)
 
-        assert m["dispatch"].call_count == 2
-        for call in m["dispatch"].call_args_list:
-            assert call.args[2]["kv"] is kv  # same pointer in both tensor maps
+        assert m["submit_dispatch"].call_count == 2
+        for tensors in submitted_tensors:
+            assert tensors["kv"] is kv  # same pointer in both tensor maps
         rt.close()
 
     def test_register_each_program_returns_handle(self, patched_setup):
@@ -1222,9 +1433,9 @@ class TestMultiProgram:
 
         # Each handle dispatches its own program's state.
         h_a(torch.zeros(4).share_memory_())
-        assert m["dispatch"].call_args.args[1] is entry_a
+        assert m["submit_dispatch"].call_args.args[1] is entry_a
         h_b(torch.zeros(8).share_memory_())
-        assert m["dispatch"].call_args.args[1] is entry_b
+        assert m["submit_dispatch"].call_args.args[1] is entry_b
 
         # close() marks every program's handle closed and tears down the one worker.
         rt.close()
@@ -2032,7 +2243,7 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
         seen_handles: list[Any] = []
         window_size = (1 << 20) + 17
         m["load_entry"].return_value = (_persistent_entry(window_size, seen_handles), None)
@@ -2045,7 +2256,7 @@ class TestPersistentDistributedWorker:
         rt(arg)
         rt.close()
 
-        assert m["worker"].run.call_count == 2
+        assert m["worker"].submit.call_count == 2
         assert [call["name"] for call in orch.allocate_calls] == ["p0:comm_d0"]
         assert len(seen_handles) == 2
         assert seen_handles[0] is seen_handles[1]
@@ -2067,7 +2278,7 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
         seen_handles: list[Any] = []
         m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -2082,7 +2293,7 @@ class TestPersistentDistributedWorker:
         assert len(orch.allocate_calls) == 1
         assert seen_handles[0] is seen_handles[1]
         assert orch.copy_calls == []
-        assert m["worker"].run.call_count == 2
+        assert m["worker"].submit.call_count == 2
 
     def test_task_args_stay_alive_through_request_drain(self, patched_setup):
         m = patched_setup
@@ -2115,13 +2326,14 @@ class TestPersistentDistributedWorker:
             assert task_args_ref is not None
             assert task_args_ref() is not None
 
-        def worker_run(fn):
-            fn(orch, None, None)
-            # The request-owned keepalive stays populated until Worker.run's
-            # completion fence and cleanup return.
-            assert_task_args_alive()
+        native = _ControlledNativeHandle(on_result=assert_task_args_alive)
 
-        m["worker"].run.side_effect = worker_run
+        def worker_submit(fn):
+            fn(orch, None, None)
+            native.complete()
+            return native
+
+        m["worker"].submit.side_effect = worker_submit
         m["load_entry"].return_value = (entry, None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
@@ -2129,8 +2341,8 @@ class TestPersistentDistributedWorker:
         rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 
         assert task_args_ref is not None
-        # Once the synchronous request boundary has drained, the keepalive is
-        # cleared instead of retaining every request for the worker lifetime.
+        # Once the caller waits the handle, its bounded frame releases the
+        # request keepalive instead of retaining it for the worker lifetime.
         assert task_args_ref() is None
         rt.close()
 
@@ -2138,7 +2350,7 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
         seen_a: list[Any] = []
         seen_b: list[Any] = []
         m["load_entry"].side_effect = [
@@ -2161,7 +2373,7 @@ class TestPersistentDistributedWorker:
         rt.run(compiled_a, arg)
         rt.close()
 
-        assert m["worker"].run.call_count == 3
+        assert m["worker"].submit.call_count == 3
         assert [call["name"] for call in orch.allocate_calls] == ["p0:comm_d0", "p1:comm_d0"]
         assert seen_a[0] is seen_a[1]
         assert seen_a[0] is not seen_b[0]
@@ -2178,7 +2390,7 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
@@ -2196,7 +2408,7 @@ class TestPersistentDistributedWorker:
     def test_unfreed_domain_release_reaches_close(self, patched_setup):
         m = patched_setup
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
@@ -2213,7 +2425,7 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
 
         def failing_entry(
             orch,
@@ -2246,15 +2458,15 @@ class TestPersistentDistributedWorker:
             rt(arg)
         rt.close()
 
-        # The failing request's Worker.run completes before the error reaches
-        # the caller, then dispatcher teardown releases the retained domain.
+        # The failed submission reaches the caller before close releases the
+        # retained domain.
         assert orch.handles[0].release_count == 1
-        assert m["worker"].run.call_count == 1
+        assert m["worker"].submit.call_count == 1
 
-    def test_dispatch_error_keeps_teardown_error_as_context(self, patched_setup):
+    def test_dispatch_error_reports_later_teardown_error_during_close(self, patched_setup):
         m = patched_setup
         orch = _PersistentOrch(m["worker"])
-        m["worker"].run.side_effect = lambda fn: fn(orch, None, None)
+        m["worker"].submit.side_effect = lambda fn: (fn(orch, None, None), _ImmediateNativeHandle())[1]
 
         def failing_entry(
             orch,
@@ -2276,31 +2488,27 @@ class TestPersistentDistributedWorker:
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
 
-        with pytest.raises(RuntimeError, match="persistent dispatch failed") as exc_info:
+        with pytest.raises(RuntimeError, match="persistent dispatch failed"):
             rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 
-        assert isinstance(exc_info.value.__context__, RuntimeError)
-        assert str(exc_info.value.__context__) == "persistent teardown failed"
-        rt.close()
+        # A prior accepted handle may still use the retained domain, so domain
+        # teardown stays at close instead of being pulled into submission error
+        # handling. Both failures remain observable at their owning boundary.
+        with pytest.raises(RuntimeError, match="persistent teardown failed"):
+            rt.close()
 
     def test_dispatch_error_waits_for_request_worker_cleanup(self, patched_setup):
         m = patched_setup
         m["worker"]._live_domains = {}
-        orch = _PersistentOrch(m["worker"])
         request_finalizer_started = threading.Event()
         allow_request_finalizer_to_finish = threading.Event()
+        native = _ControlledNativeHandle()
 
-        def worker_run(fn):
-            try:
-                fn(orch, None, None)
-            except BaseException:
-                # Model the interval between orchestration failing and this
-                # request's Worker.run fence/cleanup finally completing.
-                request_finalizer_started.set()
-                assert allow_request_finalizer_to_finish.wait(timeout=2)
-                raise
+        def worker_submit(fn):
+            del fn
+            return native
 
-        m["worker"].run.side_effect = worker_run
+        m["worker"].submit.side_effect = worker_submit
 
         def failing_entry(
             orch,
@@ -2333,12 +2541,14 @@ class TestPersistentDistributedWorker:
 
         caller = threading.Thread(target=call_worker)
         caller.start()
-        assert request_finalizer_started.wait(timeout=2)
-        # A failing entry may already have submitted device work. Its caller
-        # must not observe completion while Worker.run is still finalizing it.
+        assert native.result_started.wait(timeout=2)
+        request_finalizer_started.set()
+        # A failing request may already have submitted device work. Its caller
+        # must not observe completion while the native handle is still finalizing.
         assert not caller_done.is_set()
 
         allow_request_finalizer_to_finish.set()
+        native.complete(RuntimeError("persistent dispatch failed before cleanup"))
         caller.join(timeout=2)
         assert not caller.is_alive()
         assert caller_done.is_set()

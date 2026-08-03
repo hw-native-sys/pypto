@@ -27,6 +27,7 @@ directly via `DistributedWorker(compiled)`, importable from
 | `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
 | `rt(x, y, z)` | Single dispatch — coerces args, calls host_orch. |
 | `rt.run(compiled, x, y, z)` | Multi-program dispatch — selects the target program. |
+| `rt.submit(compiled, x, y, z)` | Bounded asynchronous dispatch — returns a `DistributedRunHandle`. |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | Allocate a worker-resident `DeviceTensor`. `init` copies from host (one-time H2D). |
 | `rt.free_tensor(tensor)` | Release a `DeviceTensor`. |
 | `rt.alloc_stacked_tensor(host_w)` | Shard host_w along dim 0 — shard `i` uploaded to card `i`. Returns `StackedDeviceTensor`. |
@@ -49,6 +50,34 @@ directly via `DistributedWorker(compiled)`, importable from
   retained windows are zeroed between requests (a correctness-vs-overhead
   trade-off). See `docs/en/dev/06-persistent-l3.md`.
 - **`extra_compiled`** — see "Several Programs on One Worker" below.
+
+### Bounded Asynchronous Dispatch
+
+`DistributedWorker.submit(compiled, *args)` returns a
+`DistributedRunHandle` after Simpler accepts the dispatch. When the backend
+supports asynchronous execution, the caller can prepare host work for the next
+request while the current request is still running. `run()` and `rt(...)`
+remain blocking compatibility wrappers.
+
+The worker owns exactly two reusable dispatch metadata frames. The first two
+submissions may be in flight together; a third `submit()` waits for the oldest
+handle before it constructs or publishes another dispatch. Each handle
+snapshots its runtime configuration and retains its arguments and generated
+task metadata until completion.
+
+```python
+with compiled.prepare() as rt:
+    first = rt.submit(compiled, input_a, weight, output_a)
+    second = rt.submit(compiled, input_b, weight, output_b)
+    first.result()
+    second.result()
+```
+
+Overlapping dispatches require distinct mutable input and output buffers. Do
+not modify or release those buffers before the corresponding `result()`
+returns. Read-only resident weights may be shared. Closing the worker drains
+all accepted handles in FIFO order. Diagnostic two-pass swimlane capture stays
+synchronous and returns an already-completed handle.
 
 ## DeviceTensor
 
