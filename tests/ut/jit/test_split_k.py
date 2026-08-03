@@ -98,6 +98,57 @@ def test_split_k_matmul_emits_atomic_add_store():
     assert "pto.tmatmul" in mlir, f"expected a matmul in the per-core kernel:\n{mlir}"
 
 
+def _orch_level_atomic_program():
+    """Split-K with the atomic assemble dedented OUT of the CORE_GROUP scope.
+
+    Identical to ``_split_k_program`` except the ``pl.assemble`` sits at the
+    orchestration level. There is no orchestration instruction that can perform
+    an atomic combine, and the atomic kwarg also blocks the create+assemble fold
+    that would otherwise point the kernel's output at a view of ``c`` — so the
+    partial products would land in a discarded per-iteration scratch buffer.
+    """
+
+    @jit
+    def orch_level_atomic(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+        for ks in pl.parallel(0, _SPLIT):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
+                k0 = ks * _KS
+                a_k = a[:, k0 : k0 + _KS]
+                b_k = b[k0 : k0 + _KS, :]
+                partial = pl.matmul(a_k, b_k, out_dtype=pl.FP32)
+            c = pl.assemble(c, partial, [0, 0], atomic=pl.AtomicType.Add)
+        return c
+
+    return orch_level_atomic
+
+
+def test_orchestration_level_atomic_assemble_rejected():
+    """An atomic assemble outside the CORE_GROUP scope is a compile error, not a silent drop."""
+    torch = pytest.importorskip("torch")
+    post = _orch_level_atomic_program().lower(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
+    orch = next(f for f in post.functions.values() if f.func_type == ir.FunctionType.Orchestration)
+    with pytest.raises(ValueError, match=r"pl\.at\(level=pl\.Level\.CORE_GROUP"):
+        codegen.generate_orchestration(post, orch)
+
+
+def test_atomic_assemble_without_tile_source_rejected():
+    """An in-scope tensor-into-tensor atomic assemble has no store to carry the combine.
+
+    (The sibling tile-target case is covered by
+    ``tests/ut/codegen/test_pto_codegen_ops.py::test_atomic_add_tile_target_rejected``.)
+    """
+    torch = pytest.importorskip("torch")
+
+    @jit
+    def atomic_tensor_to_tensor(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="copy"):
+            c = pl.assemble(c, a, [0, 0], atomic=pl.AtomicType.Add)
+        return c
+
+    with pytest.raises(ValueError, match=r"requires a tile source"):
+        atomic_tensor_to_tensor.lower(torch.randn(_M, _N), torch.empty(_M, _N))
+
+
 def _split_k_bf16_program():
     """Split-K matmul accumulating directly into a bf16 output (no fp32 scratch).
 

@@ -17,7 +17,6 @@ and verifies the generated orchestration code.
 
 import warnings
 
-import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -2844,7 +2843,7 @@ class TestTensorAssembleAtomicCodegen:
                 out = pl.assemble(out, target, [0, 0])
                 return out
 
-        with pytest.raises(pypto.InternalError, match="global-memory destination"):
+        with pytest.raises(ValueError, match="global-memory destination"):
             self._generate_mlir(Prog)
 
 

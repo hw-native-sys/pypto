@@ -1708,7 +1708,11 @@ def assemble(
         span: Optional source span for debugging (auto-captured if not provided)
         atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite) or
             1 (``kAdd``, atomic-add into the global-memory target). The kwarg is
-            omitted entirely when 0 so non-atomic assembles are unchanged.
+            omitted entirely when 0 so non-atomic assembles are unchanged. ``kAdd``
+            requires a tile source stored into a global-memory target, i.e. an
+            assemble inside an InCore (``pl.at(level=pl.Level.CORE_GROUP, ...)``)
+            function; it has no lowering at the orchestration level and is rejected
+            there.
 
     Returns:
         Call expression for tensor assembly

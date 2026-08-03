@@ -510,13 +510,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
         }
 
         if (source_tile_type && target_tile_type) {
-          INTERNAL_CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
+          CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
           auto assemble_call = op_reg.Create("tile.assemble", {target, source, offset}, span);
           return ConversionResult{assemble_call};
         }
 
         if (target_tile_type && !source_tile_type) {
-          INTERNAL_CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
+          CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
           // A window (DistributedTensorType) source stages into the tile target
           // through the same local tile.load path as a plain tensor (issue #1694).
           auto source_tensor_type = AsTensorTypeLike(source->GetType());
@@ -534,6 +534,16 @@ void OpConversionRegistry::RegisterMemoryOps() {
           auto assemble_call = op_reg.Create("tile.assemble", {target, source_tile_var, offset}, span);
           return ConversionResult{std::move(prologue), assemble_call};
         }
+
+        // Neither target nor source is a tile: the assemble stays a tensor-level op,
+        // so there is no store to carry the atomic combine and the kwarg would be
+        // forwarded to a node that has no consumer for it. Same user-facing
+        // limitation as the orchestration-level guard in HandleTensorAssembleAssign.
+        CHECK_SPAN(!atomic_add, span)
+            << "tensor.assemble with atomic=AtomicType.Add requires a tile source stored into a "
+               "global-memory target: the source must be an on-chip compute result (the split-K "
+               "partial product), not a plain tensor. This assemble copies one tensor into "
+               "another, so there is no store to carry the atomic combine.";
 
         if (kwargs.empty()) {
           return ConversionResult{op_reg.Create("tensor.assemble", args, span)};

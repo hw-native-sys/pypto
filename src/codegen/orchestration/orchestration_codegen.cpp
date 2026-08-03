@@ -40,6 +40,7 @@
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -3805,6 +3806,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
     INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
         << "Internal error: tensor.assemble expects 3 arguments";
+
+    // An orchestration-level assemble emits no write of its own: it aliases the LHS to
+    // the target and relies on the producing InCore kernel having stored straight into
+    // the target's view. No orchestration instruction can perform an atomic combine —
+    // and an atomic assemble is exactly the case FuseCreateAssembleToSlice refuses to
+    // fold (folding would drop the combine mode), so the direct-into-target view is
+    // never set up either. The partial products would land in a per-iteration scratch
+    // buffer that is then discarded, leaving the output tensor untouched.
+    const int atomic = call->GetKwarg<int>("atomic", static_cast<int>(AtomicType::kNone));
+    CHECK_SPAN(atomic == static_cast<int>(AtomicType::kNone), call->span_)
+        << "pl.assemble(..., atomic=pl.AtomicType.Add) is only supported inside an InCore "
+           "function — typically a pl.at(level=pl.Level.CORE_GROUP, ...) scope — where it "
+           "lowers to an atomic-add tile.store into global memory. This assemble sits at the "
+           "orchestration level, where no atomic-combine instruction exists. Move it inside "
+           "the scope that produces the partial result.";
 
     std::string target_name = GenerateExprString(call->args_[0]);
     target_name = GetExternalTensorName(target_name);
