@@ -1786,11 +1786,13 @@ def assemble(
             target at ``offset`` — used for split-K, where several cores
             accumulate partial products into one output. Only valid inside an
             InCore function — typically a ``pl.at(level=pl.Level.CORE_GROUP, ...)``
-            scope — where the write lowers to an atomic-add global-memory store
-            (the target must be a function output tensor). An atomic assemble into
-            an on-chip tile, or one written outside the scope at the orchestration
-            level, is rejected at compile time: no orchestration instruction can
-            combine atomically.
+            scope — where ``source`` lowers to an on-chip tile (a compute result)
+            and the write lowers to an atomic-add store into a global-memory
+            target (a function output tensor). Every other form is rejected at
+            compile time: a tensor-to-tensor assemble has no store to carry the
+            combine, an assemble into an on-chip tile has no global-memory
+            destination, and at the orchestration level no atomic-combine
+            instruction exists at all.
 
             NOTE: atomic-add accumulation order across cores is not fixed, so
             floating-point results are non-deterministic. The target must be

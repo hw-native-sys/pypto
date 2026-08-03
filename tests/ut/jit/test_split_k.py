@@ -131,6 +131,39 @@ def test_orchestration_level_atomic_assemble_rejected():
         codegen.generate_orchestration(post, orch)
 
 
+def test_orchestration_level_plain_assemble_still_folds():
+    """The guard is atomic-only: a non-atomic orchestration assemble keeps folding to an alias.
+
+    Byte-identical to ``_orch_level_atomic_program`` minus the ``atomic`` kwarg.
+    Without it ``FuseCreateAssembleToSlice`` folds the assemble away and the
+    kernel's output tensor becomes a view of ``c``, so codegen must still
+    succeed and emit ``ext_c.view(...)`` rather than a discarded scratch alloc.
+    """
+    torch = pytest.importorskip("torch")
+
+    @jit
+    def orch_level_plain(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+        for ks in pl.parallel(0, _SPLIT):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
+                k0 = ks * _KS
+                a_k = a[:, k0 : k0 + _KS]
+                b_k = b[k0 : k0 + _KS, :]
+                partial = pl.matmul(a_k, b_k, out_dtype=pl.FP32)
+            c = pl.assemble(c, partial, [0, 0])
+        return c
+
+    post = orch_level_plain.lower(torch.randn(_M, _K), torch.randn(_K, _N), torch.empty(_M, _N))
+    orch = next(f for f in post.functions.values() if f.func_type == ir.FunctionType.Orchestration)
+    code = codegen.generate_orchestration(post, orch).code
+
+    assert "ext_c.view(" in code, (
+        f"non-atomic orchestration assemble must fold into a view of the target:\n{code}"
+    )
+    assert "alloc_tensors(" not in code, (
+        f"the kernel output must alias ext_c, not a discarded scratch buffer:\n{code}"
+    )
+
+
 def test_atomic_assemble_without_tile_source_rejected():
     """An in-scope tensor-into-tensor atomic assemble has no store to carry the combine.
 
