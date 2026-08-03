@@ -841,10 +841,39 @@ class RetypeApplier : public IRMutator {
     if (rit != rewrites_.end()) {
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, rit->second, op->var_->span_);
       var_substitution_[op->var_] = new_var;
-      return IRMutator::VisitStmt_(op);
+      return FollowVarMemorySpace(IRMutator::VisitStmt_(op));
     }
     if (auto followed = FollowRetargetedViewInput(op)) return followed;
     return IRMutator::VisitStmt_(op);
+  }
+
+  /// Carry a retarget that crossed memory spaces onto the bound Call's own type.
+  ///
+  /// A retarget rewrites the LHS Var's type but leaves the RHS Call's type as
+  /// the op originally inferred it. That is harmless while the retarget stays
+  /// inside one memory space (only the MemRef base moves, and a Call type
+  /// carries no MemRef), but a cross-space retarget — e.g. a Vec compute result
+  /// folded onto a DDR loop-carry buffer by MaterializeSemanticAliases — leaves
+  /// the Call claiming the old space while its Var claims the new one.
+  ///
+  /// That pair is not expressible in the DSL: printing emits a single
+  /// annotation (the Var's) and the parser then retypes the Call to match it
+  /// (ast_parser `override_type`), so the mismatch shows up as a print→parse
+  /// roundtrip failure. Keep the two in step here instead.
+  StmtPtr FollowVarMemorySpace(const StmtPtr& stmt) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) return stmt;
+    auto call = As<Call>(assign->value_);
+    if (!call) return stmt;
+    auto var_tile = As<TileType>(assign->var_->GetType());
+    auto call_tile = As<TileType>(call->GetType());
+    if (!var_tile || !call_tile) return stmt;
+    const auto var_space = var_tile->memory_space_;
+    if (!var_space.has_value() || call_tile->memory_space_ == var_space) return stmt;
+    auto new_type = CloneTypeWithMemRef(call->GetType(), GetTypeMemRef(call->GetType()), var_space);
+    auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_,
+                                           std::move(new_type), call->span_);
+    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
   }
 
   /// Re-anchor an inherit-input view (tile.transpose_view / reshape / slice /

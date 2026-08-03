@@ -1388,5 +1388,75 @@ class Bad:
             pl.parse_program(source)
 
 
+class TestLoopCarryRoundtrip:
+    """A loop-carry init parameter placed in a compiler buffer must stay printable.
+
+    ``InitMemRef`` gives the carry's init parameter the carry buffer's MemRef, and
+    ``MaterializeSemanticAliases`` then folds the carried value onto that same
+    buffer. Both steps put a parameter or a binding in a state the DSL surface
+    syntax has exactly one way to spell, so both used to break the print -> parse
+    -> structural-compare roundtrip the pass pipeline runs under.
+    """
+
+    @staticmethod
+    def _carry_program():
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                seed: pl.Tile[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc_i,) in pl.range(4, init_values=(seed,)):
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.load(
+                        a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                    )
+                    acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+                    r = pl.yield_(acc_next)
+                out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+                return out
+
+        return Before
+
+    def test_signature_memref_base_prints_as_a_string(self, ascend_backend):
+        """A parameter's MemRef base must never print as a bare forward reference.
+
+        Python evaluates the signature before the body binds any name, so a base
+        Ptr that the body allocates has to be spelled as a string there. Emitting
+        the bare identifier made the printed program reparse with ``NameError``.
+        """
+        after = _run_full_pipeline(self._carry_program(), "InitMemRef")
+        printed = after.as_python()
+        param_line = next(line for line in printed.splitlines() if line.lstrip().startswith("seed"))
+        alloc_line = next(line for line in printed.splitlines() if ".alloc(pl.Mem.DDR" in line)
+
+        # The base really is allocated in the body, so the bare name would be a
+        # forward reference in the signature...
+        base = alloc_line.split(":")[0].strip()
+        # ...and the parameter annotation therefore spells it as a string.
+        assert f'pl.MemRef("{base}"' in param_line
+        # The body, where the base *is* bound, keeps the bare-name form.
+        assert f"pl.MemRef({base}," in printed
+
+        pl.parse_program(printed)  # must not raise
+
+    def test_retarget_across_memory_spaces_retypes_the_call(self, ascend_backend):
+        """A cross-space retarget must move the bound Call's type too.
+
+        ``MaterializeSemanticAliases`` folds the Vec compute result onto the DDR
+        carry buffer. Rewriting only the LHS Var left the Call claiming Vec, a
+        pair the printer cannot spell: it emits the Var's annotation and the
+        parser then retypes the Call to match, so the roundtrip compared unequal.
+        """
+        after = passes.materialize_semantic_aliases()(_run_full_pipeline(self._carry_program(), "InitMemRef"))
+        loop = next(s for s in after.get_function("main").body.stmts if isinstance(s, ir.ForStmt))
+        add_stmt = next(s for s in loop.body.stmts if "add" in str(getattr(s, "value", "")))
+
+        assert add_stmt.var.type.memory_space == ir.MemorySpace.DDR, "carry did not retarget to DDR"
+        assert add_stmt.value.type.memory_space == add_stmt.var.type.memory_space
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
