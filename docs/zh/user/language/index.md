@@ -18,8 +18,9 @@
 | [函数与程序](01-functions.md) | `@pl.jit` 家族、`@pl.function`、`@pl.program`、`@pl.inline`、跨函数调用、外部 kernel |
 | [控制流](02-control-flow.md) | `pl.range` / `parallel` / `unroll` / `pipeline` / `while_`、循环携带值、`yield_`、`cond`、SSA |
 | [内存与数据搬运](03-memory.md) | 内存空间、`load` / `store` / `move`、`valid_shape` 与 `fillpad`、片上常驻 |
-| [作用域与任务](04-scopes-and-tasks.md) | `at` / `cluster` / `spmd` / `split_aiv`、运行时作用域、`submit` 与 `deps=`、`predicate=`、`no_dep` |
-| [编译期指令](05-directives.md) | `static_print` / `static_assert`、`dump_tag` / `dumps=`、`const`、`pl.array`、下标语法糖、闭包捕获 |
+| [作用域与放置](04-scopes.md) | `at` / `cluster` / `spmd` / `split_aiv` —— 代码在哪里执行 |
+| [编译期指令](05-directives.md) | `static_print` / `static_assert`、`const` |
+| [语言语法](06-syntax.md) | 下标语法糖、Python 运算符、闭包捕获 |
 
 ## 阅读顺序
 
@@ -28,11 +29,11 @@
 ```text
 00-types ──► 01-functions ──┬─► 02-control-flow
                             ├─► 03-memory
-                            ├─► 04-scopes-and-tasks   ← 如果你此前只写过单 kernel，
+                            ├─► 04-scopes   ← 如果你此前只写过单 kernel，
                             └─► 05-directives           这一页的缺口最大
 ```
 
-[作用域与任务](04-scopes-and-tasks.md) 是多数读者在别处找不到对应材料的一页：它讲工作如何被放置到核上，以及运行时真正执行的那张任务图是怎么成形的。
+[作用域与放置](04-scopes.md) 是多数读者在别处找不到对应材料的一页：它讲工作如何被放置到核上，以及运行时真正执行的那张任务图是怎么成形的。
 
 ## 另请参阅
 

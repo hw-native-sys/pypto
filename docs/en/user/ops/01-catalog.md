@@ -176,7 +176,7 @@ covering this is not written yet; the mechanics are in
 | `no_dep` | `pl.` | Exclude one argument of one task from dependency tracking |
 | `dump_tag` | `pl.` | Mark a tensor for selective dump |
 
-See [Scopes and Tasks](../language/04-scopes-and-tasks.md).
+See [Scopes and Placement](../language/04-scopes.md).
 
 ## Arrays
 

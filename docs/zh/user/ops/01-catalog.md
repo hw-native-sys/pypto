@@ -165,7 +165,7 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | `no_dep` | `pl.` | 让单个任务的单个实参退出依赖跟踪 |
 | `dump_tag` | `pl.` | 标记张量做选择性 dump |
 
-见 [作用域与任务](../language/04-scopes-and-tasks.md)。
+见 [作用域与放置](../language/04-scopes.md)。
 
 ## 数组
 

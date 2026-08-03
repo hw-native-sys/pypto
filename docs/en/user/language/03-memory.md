@@ -7,15 +7,37 @@ edges of a tile that is not full.
 
 ## Concept
 
-Tile-level code names buffers because the hardware has distinct ones. The six on-chip
-spaces are **separate buffers, not a nesting**: `Left` is not a region inside `Mat`, and
-`Acc` is not inside `Right`. Data moves *between* them, and which moves are legal is a
-hardware property, not a compiler policy.
+```text
+                 off-chip                          AI Core
+              ┌────────────┐   ┌──────────────────────────────────────────────┐
+              │            │   │                                              │
+              │            │   │   Cube unit (AIC)         Vector unit (AIV)  │
+              │            │   │  ┌──────────────┐        ┌─────────────────┐ │
+              │    DDR     │   │  │ Left  (L0A)  │        │                 │ │
+              │            │   │  │ Right (L0B)  │        │   Vec  (UB)     │ │
+              │ pl.Tensor  │   │  │ Acc   (L0C)  │        │                 │ │
+              │  lives     │   │  │ Bias         │        │                 │ │
+              │  here      │   │  └──────▲───────┘        └────────▲────────┘ │
+              │            │   │         │ pl.move                 │          │
+              │            │   │  ┌──────┴─────────────────────────┴────────┐ │
+              │            │   │  │              Mat  (L1)                  │ │
+              │            │   │  └──────────────────▲──────────────────────┘ │
+              └─────┬──────┘   └─────────────────────┼────────────────────────┘
+                    │                                │
+                    └────────  pl.load / pl.store  ──┴──►  Vec or Mat only
+```
 
-One constraint carries most of the consequences: **a DDR-facing load can only land in
-`Vec` or `Mat`.** The matmul operand spaces (`Left`, `Right`) and the accumulator (`Acc`)
-are reachable only by a `pl.move` from `Mat` or `Vec`, or by `pl.matmul` writing `Acc`.
-That is why the matmul path has an explicit two-step shape and elementwise code does not.
+> Placeholder until a proper Ascend 910 floorplan is available.
+
+The six on-chip spaces are **separate buffers, not a nesting**: `Left` is not a region
+inside `Mat`, and `Acc` is not inside `Right`. Data moves *between* them, and which moves
+are legal is a hardware property, not a compiler policy.
+
+One constraint carries most of the consequences, and the diagram shows it: **a DDR-facing
+load can only land in `Vec` or `Mat`.** The matmul operand spaces (`Left`, `Right`) and the
+accumulator (`Acc`) are reachable only by a `pl.move` from `Mat` or `Vec`, or by
+`pl.matmul` writing `Acc`. That is why the matmul path has an explicit two-step shape and
+elementwise code does not.
 
 The second recurring idea is the **valid shape**. A tile has an allocated shape and,
 optionally, a smaller region that holds meaningful data. Operations that read past the
@@ -153,7 +175,7 @@ covering how to drive them is not written yet.
 ## See Also
 
 - [Types](00-types.md) — `Tensor` versus `Tile`, and what a dtype's `get_byte()` is for.
-- [Scopes and Tasks](04-scopes-and-tasks.md) — cross-core buffers and ring depth.
+- [Scopes and Placement](04-scopes.md) — where the code runs, and cross-core ring depth.
 - [Operations](../ops/01-catalog.md) — the movement, reduction, and broadcast families.
 - [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) — the pass that inserts moves you did not write.
 - [MemoryReuse](../../dev/passes/31-memory_reuse.md) — how buffers are shared across lifetimes.

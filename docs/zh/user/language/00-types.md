@@ -21,7 +21,7 @@ Shape 默认是静态的，在解析期检查。`pl.dynamic()` 让某一维退�
 ```python
 import pypto.language as pl
 
-M = pl.dynamic("M")                       # symbolic dimension, fixed per compilation
+M = pl.dynamic("M")                       # an axis whose extent varies at run time
 
 @pl.jit.incore
 def scale_rows(
@@ -61,7 +61,7 @@ def scale_rows(
 | `pl.FP8E8M0` | 8 | MX 块缩放指数 |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | 海思浮点格式 |
 | `pl.INDEX` | 64 | 索引运算 —— 循环变量、维度 |
-| `pl.TASK_ID` | — | `pl.submit` 返回的生产者句柄，见 [作用域与任务](04-scopes-and-tasks.md) |
+| `pl.TASK_ID` | — | 已派发任务的生产者句柄 |
 
 `dtype.get_byte()` 返回元素的字节数。只要字节数是算出来的而不是写死的字面量，就用它 —— 把元素个数传到期望字节数的地方是一次**静默的欠分配**。
 
@@ -81,7 +81,7 @@ nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 
 `pl.TaskId` 是 `pl.Scalar[pl.TASK_ID]` 的便捷别名。
 
-`pl.Array` 通常是创建出来的而不是注解出来的 —— 数组不跨函数边界，所以注解形式很少见。见 [编译期指令 § 数组](05-directives.md#数组)。
+`pl.Array` 通常是创建出来的而不是注解出来的 —— 数组不跨函数边界，所以注解形式很少见。更新是函数式的：它产生一个新的数组值并重绑该名字，因此循环内的数组赋值和其他携带值一样是一个携带值。
 
 ```python
 arr = pl.array.create(16, pl.INT32)
@@ -97,19 +97,23 @@ x = arr[i]              # array.get_element
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
+矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或者按自然布局 load 之后用 `pl.tile.transpose_view(...)`。
+
+`pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 只用于 tile —— 那是硬件 tile 布局，永远不做 `pl.Tensor` 注解。
+
+当一个张量的行不连续时 —— 大缓冲区里的一个窗口、外部传进来的跨步切片 —— 用 `pl.TensorView` 描述它，把 stride 显式写出来，而不是留给推断：
+
 ```python
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]       # ⚠️ deprecated — DeprecationWarning at parse time
+view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[16, 64])
 ```
 
-DN 简写被弃用，是因为它逼着你同时在脑子里维护两套坐标系：IR 逻辑上的 post-view shape 和运行期行主序 shape。矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或者按自然布局 load 之后用 `pl.tile.transpose_view(...)`。对一个产生 DN 的算子做切片，切片会自动继承父布局。
-
-`pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 只用于 tile —— 那是硬件 tile 布局，永远不做 `pl.Tensor` 注解。若确实要在 IR 层构造 DN 张量（测试夹具、printed IR 往返），优先用 `pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)`：它强制 stride 显式化，避开隐式坐标翻转。
+只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
 剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。当前限制：MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`；MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`、`view`）与 MX `remote_load` 会被拒绝；尚不支持 MX 矩阵乘。
 
 ### 动态 shape
 
-`pl.dynamic(name)` 创建一个符号维度。同一个 `DynVar` 对象在多处注解中使用时指的是同一维 —— 复用这个对象，不要在表示同一个值时再造一个同名的。
+`pl.dynamic(name)` 用来标注**编译时未知、且每次启动都可能不同**的轴 —— 随请求变化的 batch、解码过程中不断增长的序列长度。该维的尺寸成为运行期的值，因此一份编译产物服务这个轴的所有取值：动态维在 JIT 缓存 key 里折叠为 `None`，尺寸变化不会触发重编译。
 
 ```python
 M = pl.dynamic("M")
@@ -119,7 +123,9 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
     ...
 ```
 
-放弃的东西：编译器本可以从这个尺寸做出的任何决策。分块选择、展开因子、静态边界检查都会因此失去信息。所以只在这一维**确实每次启动都不同**时才让它动态 —— 不要为了少写一个数字而用它。
+同一个 `DynVar` 对象在多处注解中使用时指的是同一维 —— 复用这个对象，不要在表示同一个值时再造一个同名的。
+
+确实固定的维度就保持静态。静态尺寸是编译器能据以规划的数字 —— 分块选择、展开因子、静态边界检查 —— 动态维则把这个信息藏了起来。
 
 ### 参数方向
 
@@ -129,9 +135,7 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
 | Out | `x: pl.Out[pl.Tensor[...]]` | 只写不读。排在此前的读者与写者之后 |
 | InOut | `x: pl.InOut[pl.Tensor[...]]` | 都有。与一切触碰它的任务之间都有序 |
 
-方向是 `DeriveCallDirections` 传播、`AutoDeriveTaskDependencies` 读取来构建依赖图的东西。把一个 `InOut` 缓冲区声明成 `Out`，等于告诉运行时"在本任务写它之前不需要等任何人" —— 这是一个竞态，不是一条诊断。
-
-若要声明某个实参**不参与**依赖跟踪（例如兄弟任务写的是互不相交的区域），请在调用点用 `pl.no_dep(t)`，而不是弱化方向。见 [作用域与任务 § 退出依赖跟踪](04-scopes-and-tasks.md#退出依赖跟踪)。
+方向是编译器用来给任务之间定序的依据。把一个 `InOut` 缓冲区声明成 `Out`，等于告诉运行时"在本任务写它之前不需要等任何人" —— 这是一个竞态，不是一条诊断。
 
 ## Edge Cases
 

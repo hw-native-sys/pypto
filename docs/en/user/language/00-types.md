@@ -33,7 +33,7 @@ out of that, at the cost of everything the compiler could have concluded from kn
 ```python
 import pypto.language as pl
 
-M = pl.dynamic("M")                       # symbolic dimension, fixed per compilation
+M = pl.dynamic("M")                       # an axis whose extent varies at run time
 
 @pl.jit.incore
 def scale_rows(
@@ -73,7 +73,7 @@ def scale_rows(
 | `pl.FP8E8M0` | 8 | MX block-scale exponent |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | Hisilicon float formats |
 | `pl.INDEX` | 64 | Index arithmetic — loop variables, dimensions |
-| `pl.TASK_ID` | — | Producer handle from `pl.submit`; see [Scopes and Tasks](04-scopes-and-tasks.md) |
+| `pl.TASK_ID` | — | Producer handle for a launched task |
 
 `dtype.get_byte()` returns the element size in bytes. Use it whenever a byte count is
 computed rather than written as a literal — a raw element count passed where bytes are
@@ -96,7 +96,9 @@ nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 `pl.TaskId` is a convenience alias for `pl.Scalar[pl.TASK_ID]`.
 
 `pl.Array` is normally created rather than annotated — arrays do not cross function
-boundaries, so the annotation form is rare. See [Directives § arrays](05-directives.md#arrays).
+boundaries, so the annotation form is rare. The update is functional — it produces a new
+array value and rebinds the name, so an array assignment inside a loop is a carried value
+like any other.
 
 ```python
 arr = pl.array.create(16, pl.INT32)
@@ -114,21 +116,23 @@ consume each view.
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
-```python
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]       # ⚠️ deprecated — DeprecationWarning at parse time
-```
-
-The DN shorthand is deprecated because it forces you to hold two coordinate systems in
-your head at once: the IR-logical post-view shape and the runtime row-major shape. For a
-transposed matmul operand, pass `a_trans=True` / `b_trans=True` to `pl.matmul`, or load
-naturally and apply `pl.tile.transpose_view(...)`. A slice of a DN-producing operation
-inherits the parent's layout automatically.
+For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to `pl.matmul`, or
+load naturally and apply `pl.tile.transpose_view(...)`.
 
 `pl.ND` is the default row-major layout and never needs writing. `pl.NZ` is tile-only — a
-hardware tile layout, never a `pl.Tensor` annotation. To build a
-DN tensor deliberately at the IR level (test fixtures, round-tripping printed IR), prefer
-`pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)`, which forces the stride to be
-explicit and avoids the implicit coordinate flip.
+hardware tile layout, never a `pl.Tensor` annotation.
+
+When a tensor's rows are not contiguous — a window into a larger buffer, a strided slice
+handed in from outside — describe it with `pl.TensorView`, which makes the strides explicit
+instead of leaving them to be inferred:
+
+```python
+view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[16, 64])
+```
+
+`layout=` is required whenever any of `stride`, `valid_shape`, or `pad` is given.
+`pl.TensorLayout` is the enum those layout constants come from — `pl.ND` is
+`pl.TensorLayout.ND`.
 
 `pl.MX_A_ZZ` and `pl.MX_B_NN` are the two remaining layout constants. They tag the **GM
 scale tensor** of an MX (microscaling) operand on Ascend950 — `MX_A_ZZ` for the left/A
@@ -141,9 +145,11 @@ MX `remote_load` are rejected, and MX matmul is not supported yet.
 
 ### Dynamic shapes
 
-`pl.dynamic(name)` creates a symbolic dimension. The same `DynVar` object used in several
-annotations refers to the same dimension — reuse the object, do not create a second one
-with the same name if you mean the same value.
+`pl.dynamic(name)` marks an axis whose extent is **not known when the kernel is compiled
+and may differ from one launch to the next** — a batch that varies with the request, a
+sequence length that grows as decoding proceeds. The extent becomes a run-time value, so
+one compiled program serves every size that axis takes: dynamic dimensions collapse to
+`None` in the JIT cache key, and changing the extent does not trigger a recompile.
 
 ```python
 M = pl.dynamic("M")
@@ -153,9 +159,12 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
     ...
 ```
 
-What you give up: any decision the compiler would have made from the extent. Tiling
-choices, unroll factors, and static bound checks all lose information, so make a dimension
-dynamic because it genuinely varies per launch — not to avoid writing a number down.
+The same `DynVar` object used in several annotations refers to the same dimension — reuse
+the object, do not create a second one with the same name if you mean the same value.
+
+Keep a dimension static when it really is fixed. A static extent is a number the compiler
+can plan around — tiling choices, unroll factors, static bound checks — and a dynamic one
+withholds it.
 
 ### Parameter directions
 
@@ -165,15 +174,9 @@ dynamic because it genuinely varies per launch — not to avoid writing a number
 | Out | `x: pl.Out[pl.Tensor[...]]` | Written, not read. Orders after prior readers and writers |
 | InOut | `x: pl.InOut[pl.Tensor[...]]` | Both. Orders against everything touching it |
 
-Directions are what `DeriveCallDirections` propagates and what
-`AutoDeriveTaskDependencies` reads to build the dependency graph. Declaring an `InOut`
-buffer as `Out` tells the runtime nothing needs to finish before this task writes it —
-which is a race, not a diagnostic.
-
-To assert that a specific argument should *not* participate in dependency tracking (for
-example, sibling tasks writing disjoint regions), use `pl.no_dep(t)` at the call site
-rather than weakening the direction. See
-[Scopes and Tasks § opting out](04-scopes-and-tasks.md#opting-out-of-dependency-tracking).
+Directions are what the compiler reads to order tasks against each other. Declaring an
+`InOut` buffer as `Out` tells the runtime nothing needs to finish before this task writes
+it — which is a race, not a diagnostic.
 
 ## Edge Cases
 

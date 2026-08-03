@@ -25,8 +25,9 @@ through that alias.
 | [Functions and Programs](01-functions.md) | `@pl.jit` family, `@pl.function`, `@pl.program`, `@pl.inline`, cross-function calls, external kernels |
 | [Control Flow](02-control-flow.md) | `pl.range` / `parallel` / `unroll` / `pipeline` / `while_`, carried values, `yield_`, `cond`, SSA |
 | [Memory and Data Movement](03-memory.md) | the memory spaces, `load` / `store` / `move`, `valid_shape` and `fillpad`, L1 residency |
-| [Scopes and Tasks](04-scopes-and-tasks.md) | `at` / `cluster` / `spmd` / `split_aiv`, runtime scopes, `submit` and `deps=`, `predicate=`, `no_dep` |
-| [Directives](05-directives.md) | `static_print` / `static_assert`, `dump_tag` / `dumps=`, `const`, `pl.array`, subscript sugar, closure capture |
+| [Scopes and Placement](04-scopes.md) | `at` / `cluster` / `spmd` / `split_aiv` — where work runs |
+| [Compile-Time Directives](05-directives.md) | `static_print` / `static_assert`, `const` |
+| [Language Syntax](06-syntax.md) | Subscript sugar, Python operators, closure capture |
 
 ## Reading order
 
@@ -36,11 +37,11 @@ other page assumes both. After that the pages are independent:
 ```text
 00-types ──► 01-functions ──┬─► 02-control-flow
                             ├─► 03-memory
-                            ├─► 04-scopes-and-tasks   ← the widest gap if you are
+                            ├─► 04-scopes   ← the widest gap if you are
                             └─► 05-directives           coming from single-kernel code
 ```
 
-[Scopes and Tasks](04-scopes-and-tasks.md) is the page most readers have not seen
+[Scopes and Placement](04-scopes.md) is the page most readers have not seen
 equivalent material for elsewhere: it covers how work is placed on cores and how the
 task graph the runtime executes is shaped.
 

@@ -173,8 +173,9 @@ nav:
           - en/user/language/01-functions.md
           - en/user/language/02-control-flow.md
           - en/user/language/03-memory.md
-          - en/user/language/04-scopes-and-tasks.md
+          - en/user/language/04-scopes.md
           - en/user/language/05-directives.md
+          - en/user/language/06-syntax.md
       - Operations:
           - en/user/ops/index.md
           - en/user/ops/00-dispatch.md

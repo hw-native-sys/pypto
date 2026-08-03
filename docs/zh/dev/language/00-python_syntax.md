@@ -468,7 +468,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 > `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
 > [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
-示例参见 [作用域与任务](../../user/language/04-scopes-and-tasks.md)。
+示例参见 [作用域与放置](../../user/language/04-scopes.md)。
 
 ### 手工依赖原语
 

@@ -164,7 +164,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 `@pl.function(strict_ssa=True)` makes the parser reject a rebind instead, which is
 occasionally useful for catching unintended shadowing. It also disables the
 `dst[...] = src` subscript-write sugar, which works by rebinding — see
-[Directives § subscript sugar](05-directives.md#subscript-sugar).
+[Directives § subscript sugar](06-syntax.md#subscript-sugar).
 
 The pipeline runs [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) early, so
 non-SSA source is normal input, not a compatibility mode.
@@ -192,7 +192,7 @@ non-SSA source is normal input, not a compatibility mode.
 ## See Also
 
 - [Types](00-types.md) — what the carried values are.
-- [Scopes and Tasks](04-scopes-and-tasks.md) — `pl.parallel` under a manual scope, and array-carry barrier semantics.
+- [Scopes and Placement](04-scopes.md) — the placement scopes these loops sit inside.
 - [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) — the conversion this page's rules come from.
 - [UnrollLoops](../../dev/passes/02-unroll_loops.md) — what `pl.unroll` becomes.
 - [LowerPipelineLoops](../../dev/passes/26-lower_pipeline_loops.md) — what `pl.pipeline` becomes.

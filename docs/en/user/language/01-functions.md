@@ -9,31 +9,26 @@ functions call each other.
 
 A decorator does not wrap your function — it **parses its source**. The body never
 executes as Python. That single fact explains most of what follows: why closure variables
-behave the way they do, why `pl.submit` raises if you call it outside a decorated
-function, and why an error in a kernel body is reported at parse time with a line number
+behave the way they do, why `pl.yield_` is meaningful only inside one, and why an error in a kernel body is reported at parse time with a line number
 rather than at call time with a traceback.
 
-There are two authoring styles, and they produce the same IR.
+**`@pl.jit` is how you write PyPTO kernels.** Types come from the arguments at the first
+call, the function specializes, and sub-functions are discovered automatically — you call
+them by name and the decorator finds them. It is what `examples/` uses and what the rest
+of this manual uses.
 
-**`@pl.jit`** writes kernels as plain functions. Types come from the arguments at the
-first call, the function specializes, and sub-functions are discovered automatically.
-This is the style `examples/` uses and the style this manual uses everywhere except this
-page.
+You will also meet `@pl.function` inside `@pl.program`: a class where each method is one
+IR function and calls between them are written `self.other(...)`. That form is a
+one-to-one transcription of the IR, and it exists mainly for writing compiler test cases,
+where a test needs to state a program's exact shape without ever running it. As a user you
+do not need it — [the section below](#plfunction-and-plprogram) is there for when you
+read a compiler test or a piece of printed IR.
 
-**`@pl.function` inside `@pl.program`** declares everything up front: the class is the
-program, each method is a function, and calls between them are written `self.other(...)`.
-Reach for it when you want the program's shape stated explicitly, or when a tool needs
-the IR without ever calling the kernel.
-
-Which one you pick does not change what the compiler sees. `@pl.jit` specializes into
-`@pl.program` source — you can print it.
-
-## Quickstart: the same program, both ways
+## Quickstart: an entry point and a device kernel
 
 ```python
 import pypto.language as pl
 
-# --- jit style -------------------------------------------------------------
 @pl.jit.incore
 def add_kernel(
     a: pl.Tensor[[128, 128], pl.FP32],
@@ -53,25 +48,15 @@ def entry(
     return out
 ```
 
-```python
-# --- program style ---------------------------------------------------------
-@pl.program
-class Adder:
-    @pl.function(type=pl.FunctionType.InCore)
-    def add_kernel(self, a, b, out): ...
+| Line | What it does |
+| ---- | ------------ |
+| `@pl.jit.incore` | Marks a device kernel — the execution plane, where operators live |
+| `@pl.jit` | Marks the chip-level entry point — the control plane, which dispatches |
+| `add_kernel(a, b, out)` | A plain call; the decorator discovers the callee and wires it in |
+| `out: pl.Out[...]` | Declares the direction, which is how the compiler orders this task |
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def entry(self, a, b, out):
-        out = self.add_kernel(a, b, out)     # explicit cross-function call
-        return out
-```
-
-| Aspect | `@pl.jit` | `@pl.program` |
-| ------ | --------- | ------------- |
-| Function kind | From the decorator variant | From `type=` |
-| Sub-function wiring | Discovered from the body | Written as `self.method(...)` |
-| Types | Specialized from the first call's arguments | Declared in annotations |
-| Getting the IR | `entry.lower(*args)`, or `entry.compile(*args)` then `compiled.program.as_python()` | `Adder.as_python()` |
+To read the IR this becomes, call `entry.lower(*args)` for the post-pass `ir.Program`, or
+`entry.compile(*args)` and print `compiled.program.as_python()`.
 
 ## Mechanics
 
@@ -153,12 +138,33 @@ does. Call `lower(*args)` for the post-pass `ir.Program`, or `compile(*args)` an
 
 **3. `compile()` takes the kernel's own arguments, not compile options.** Compile-time
 knobs go through `config=RunConfig(...)`. A stray `compile(skip_ptoas=True)` is bound
-against the kernel's signature and raises `TypeError: got an unexpected keyword argument`. `@pl.jit` detects whether `ptoas` is available on its own, so
-`skip_ptoas` is not something you need to pass.
+against the kernel's signature and raises `TypeError: got an unexpected keyword argument`.
+`@pl.jit` detects whether `ptoas` is available on its own, so `skip_ptoas` is not something
+you need to pass.
 
 ### `@pl.function` and `@pl.program`
 
-`@pl.function` parses one function; `type=` names its plane:
+You reach for this form when writing a compiler test case, not when writing a kernel. It
+describes the IR one-to-one: the class is the program, each method is a function, and the
+call graph is written out rather than discovered. `@pl.jit` specializes into exactly this
+shape — printing a compiled program shows you `@pl.program` source.
+
+```python
+@pl.program
+class Adder:
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(self, a, b, out): ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, a, b, out):
+        out = self.add_kernel(a, b, out)     # explicit cross-function call
+        return out
+```
+
+Every method takes `self` (it is stripped from the IR), and `Adder` becomes an
+`ir.Program` — not a Python class you can instantiate. `Adder.as_python()` prints it.
+
+`type=` names the plane each function belongs to:
 
 | Function type | Plane | Typical use |
 | ------------- | ----- | ----------- |
@@ -166,10 +172,6 @@ against the kernel's signature and raises `TypeError: got an unexpected keyword 
 | `InCore` | Execution | Load / compute / store kernel |
 | `Orchestration` | Control | Creates tensors, dispatches InCore tasks |
 | `Inline` | none | Spliced at every call site; leaves no function behind |
-
-`@pl.program` groups functions into a compilable program. Every method takes `self` (it is
-stripped from the IR), cross-function calls are `self.method(...)`, and the decorated
-class becomes an `ir.Program` — not a Python class you can instantiate.
 
 A standalone `@pl.function` called from inside a `@pl.program` is added to the program as
 a separate function. `@pl.inline` (and `@pl.jit.inline`) instead expand at the call site
@@ -183,15 +185,6 @@ def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 
 The decorated object is a `pl.InlineFunction` — a template the parser splices, not a
 function you can call from Python.
-
-### Runtime scope placement
-
-By default the compiler inserts AUTO runtime scopes (`PTO2_SCOPE`) for you. Pass
-`auto_scope=False` to place them by hand with `with pl.scope():` — accepted on `@pl.jit`,
-`@pl.jit.host` and `@pl.jit.inline`, rejected on `.incore` / `.opaque` (they outline into
-separate kernels). Inline bodies are spliced into the caller, so their hand-placed scopes
-land there. See [Scopes and Tasks](04-scopes-and-tasks.md) and
-[MaterializeRuntimeScopes](../../dev/passes/42-materialize_runtime_scopes.md).
 
 ### Splitting compile from dispatch
 
@@ -241,7 +234,7 @@ A hand-written C++ kernel can be called like any other function. See
 ## See Also
 
 - [Control Flow](02-control-flow.md) — loops and conditionals inside these bodies.
-- [Scopes and Tasks](04-scopes-and-tasks.md) — `pl.at`, runtime scopes, and dispatching tasks.
+- [Scopes and Placement](04-scopes.md) — `pl.at` and the other placement scopes.
 - [Quickstart](../02-quickstart.md) — the same decorators in a worked example.
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) — how `Inline` bodies are spliced.
 - [Integrating Hand-Written C++ Kernels](../../dev/language/01-external-kernels.md) — calling external kernels.

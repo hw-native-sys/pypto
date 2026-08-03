@@ -131,7 +131,7 @@ result = pl.mul(x, 2.0)
 result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 ```
 
-`@pl.function(strict_ssa=True)` 会让解析器改为拒绝重绑，偶尔可用于捕捉无意的变量遮蔽。它同时会禁用 `dst[...] = src` 下标写语法糖 —— 那个糖正是靠重绑实现的，见 [编译期指令 § 下标语法糖](05-directives.md#下标语法糖)。
+`@pl.function(strict_ssa=True)` 会让解析器改为拒绝重绑，偶尔可用于捕捉无意的变量遮蔽。它同时会禁用 `dst[...] = src` 下标写语法糖 —— 那个糖正是靠重绑实现的，见 [编译期指令 § 下标语法糖](06-syntax.md#下标语法糖)。
 
 流水线很早就会跑 [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md)，所以非 SSA 源码是正常输入，不是兼容模式。
 
@@ -155,7 +155,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 ## See Also
 
 - [类型](00-types.md) —— 携带值到底是什么。
-- [作用域与任务](04-scopes-and-tasks.md) —— manual scope 下的 `pl.parallel`，以及 array-carry 的栅栏语义。
+- [作用域与放置](04-scopes.md) —— 包含这些循环的放置作用域。
 - [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) —— 本页规则的来源。
 - [UnrollLoops](../../dev/passes/02-unroll_loops.md) —— `pl.unroll` 变成什么。
 - [LowerPipelineLoops](../../dev/passes/26-lower_pipeline_loops.md) —— `pl.pipeline` 变成什么。

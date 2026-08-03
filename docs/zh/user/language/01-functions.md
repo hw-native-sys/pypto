@@ -6,22 +6,17 @@
 
 ## Concept
 
-装饰器不是包装你的函数 —— 它**解析你的源码**。函数体从不作为 Python 执行。这一个事实解释了后面大部分内容：闭包变量为什么是那样的行为、`pl.submit` 为什么在被装饰函数之外调用会抛异常、以及 kernel 体里的错误为什么在解析期带行号报出来，而不是调用时给你一条 traceback。
+装饰器不是包装你的函数 —— 它**解析你的源码**。函数体从不作为 Python 执行。这一个事实解释了后面大部分内容：闭包变量为什么是那样的行为、`pl.yield_` 为什么只有写在被装饰函数里才有意义、以及 kernel 体里的错误为什么在解析期带行号报出来，而不是调用时给你一条 traceback。
 
-有两种写法，产生同样的 IR。
+**写 PyPTO kernel 就用 `@pl.jit`。** 类型来自首次调用时的实参，函数随之特化，子函数自动被发现 —— 你按名字调用，装饰器负责找到它们。`examples/` 用的是这种写法，本手册其余部分也一律用它。
 
-**`@pl.jit`** 把 kernel 写成普通函数。类型来自首次调用时的实参，函数随之特化，子函数自动被发现。`examples/` 用的是这种写法，本手册除本页外也一律用它。
+你还会遇到 `@pl.program` 里的 `@pl.function`：一个类，每个方法是一个 IR 函数，函数间调用写成 `self.other(...)`。那种形式是 IR 的一比一转写，主要用于**编写编译器测试用例** —— 测试需要在不运行的前提下把程序的确切形状写出来。作为用户你不需要它，[下面那一节](#plfunction-与-plprogram)是为你读编译器测试或读 printed IR 时准备的。
 
-**`@pl.program` 里的 `@pl.function`** 把一切前置声明清楚：类就是程序，每个方法是一个函数，函数间调用写成 `self.other(...)`。当你希望程序结构被显式写出来，或者某个工具需要在不调用 kernel 的情况下拿到 IR 时，用它。
-
-选哪个不影响编译器看到的东西。`@pl.jit` 特化成的就是 `@pl.program` 源码 —— 你可以把它打印出来。
-
-## Quickstart：同一个程序的两种写法
+## Quickstart：一个入口和一个设备 kernel
 
 ```python
 import pypto.language as pl
 
-# --- jit style -------------------------------------------------------------
 @pl.jit.incore
 def add_kernel(
     a: pl.Tensor[[128, 128], pl.FP32],
@@ -41,25 +36,14 @@ def entry(
     return out
 ```
 
-```python
-# --- program style ---------------------------------------------------------
-@pl.program
-class Adder:
-    @pl.function(type=pl.FunctionType.InCore)
-    def add_kernel(self, a, b, out): ...
+| 行 | 作用 |
+| -- | ---- |
+| `@pl.jit.incore` | 标记设备 kernel —— 执行面，算子住在这里 |
+| `@pl.jit` | 标记芯片级入口 —— 控制面，负责派发 |
+| `add_kernel(a, b, out)` | 一次普通调用；装饰器会发现被调方并接进来 |
+| `out: pl.Out[...]` | 声明方向，编译器据此给任务定序 |
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def entry(self, a, b, out):
-        out = self.add_kernel(a, b, out)     # explicit cross-function call
-        return out
-```
-
-| 对比项 | `@pl.jit` | `@pl.program` |
-| ------ | --------- | ------------- |
-| 函数类别 | 由装饰器变体决定 | 由 `type=` 决定 |
-| 子函数连接 | 从函数体自动发现 | 写成 `self.method(...)` |
-| 类型 | 由首次调用的实参特化 | 在注解里声明 |
-| 拿到 IR | `entry.lower(*args)`，或 `entry.compile(*args)` 后取 `compiled.program.as_python()` | `Adder.as_python()` |
+想看它变成的 IR：调 `entry.lower(*args)` 拿 Pass 后的 `ir.Program`，或调 `entry.compile(*args)` 后打印 `compiled.program.as_python()`。
 
 ## Mechanics
 
@@ -131,7 +115,23 @@ def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP3
 
 ### `@pl.function` 与 `@pl.program`
 
-`@pl.function` 解析单个函数；`type=` 指明它所在的面：
+写编译器测试用例时才会用到这种形式，写 kernel 时不会。它一比一地描述 IR：类就是程序，每个方法是一个函数，调用图是写出来的而非发现出来的。`@pl.jit` 特化成的正是这个形状 —— 打印一个编译好的程序，看到的就是 `@pl.program` 源码。
+
+```python
+@pl.program
+class Adder:
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(self, a, b, out): ...
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, a, b, out):
+        out = self.add_kernel(a, b, out)     # explicit cross-function call
+        return out
+```
+
+每个方法都要有 `self`（会从 IR 中剥离），而 `Adder` 会变成 `ir.Program` —— 不再是一个你能实例化的 Python 类。用 `Adder.as_python()` 打印它。
+
+`type=` 指明每个函数所在的面：
 
 | 函数类型 | 面 | 典型用途 |
 | -------- | -- | -------- |
@@ -139,8 +139,6 @@ def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP3
 | `InCore` | 执行面 | load / compute / store kernel |
 | `Orchestration` | 控制面 | 创建张量、派发 InCore 任务 |
 | `Inline` | 无 | 在每个调用点展开，不留下函数 |
-
-`@pl.program` 把若干函数组成可编译程序。每个方法都要有 `self`（会从 IR 中剥离），跨函数调用写作 `self.method(...)`，被装饰的类会变成 `ir.Program` —— 不再是一个你能实例化的 Python 类。
 
 在 `@pl.program` 内部调用一个独立的 `@pl.function`，它会作为一个独立函数被加入该程序。而 `@pl.inline`（以及 `@pl.jit.inline`）则在调用点展开，不留下函数。
 
@@ -151,10 +149,6 @@ def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 ```
 
 被装饰的对象是一个 `pl.InlineFunction` —— 供解析器展开的模板，而不是你能从 Python 调用的函数。
-
-### 运行时作用域的放置
-
-默认情况下编译器为你插入 AUTO 运行时作用域（`PTO2_SCOPE`）。传 `auto_scope=False` 可以改用 `with pl.scope():` 手工放置 —— `@pl.jit`、`@pl.jit.host`、`@pl.jit.inline` 接受它，`.incore` / `.opaque` 拒绝（它们会被 outline 成独立 kernel）。inline 体会被拼接进调用方，因此其中手工放置的作用域落在调用方。见 [作用域与任务](04-scopes-and-tasks.md) 与 [MaterializeRuntimeScopes](../../dev/passes/42-materialize_runtime_scopes.md)。
 
 ### 把编译与派发拆开
 
@@ -190,7 +184,7 @@ print("artifacts in:", compiled.output_dir)
 ## See Also
 
 - [控制流](02-control-flow.md) —— 这些函数体里的循环与条件。
-- [作用域与任务](04-scopes-and-tasks.md) —— `pl.at`、运行时作用域与任务派发。
+- [作用域与放置](04-scopes.md) —— `pl.at` 与其余放置作用域。
 - [快速上手](../02-quickstart.md) —— 同样的装饰器在一个完整例子里的用法。
 - [InlineFunctions](../../dev/passes/01-inline_functions.md) —— `Inline` 体如何被拼接。
 - [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md) —— 调用外部 kernel。
