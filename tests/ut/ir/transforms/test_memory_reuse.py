@@ -3740,20 +3740,32 @@ class TestStorageLayoutReuseGate:
             f"ND and NZ Vec tiles must not share a MemRef; both bound to {bases['tile_nd']}"
         )
 
-    def test_dsa_rp_nd_and_nz_vec_tiles_do_not_overlap(self):
-        """DSA-RP exports the ND/NZ restriction as an unrelaxable hard edge."""
+    def test_dsa_nd_and_nz_vec_tiles_do_not_overlap(self):
+        """DSA exports the ND/NZ restriction as an unrelaxable hard edge."""
 
         Before = self._build_nd_nz_program()
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA):
             After = passes.allocate_memory_addr()(
                 passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
             )
 
-        ranges = _collect_allocated_tile_ranges(After)
+        ranges: dict[str, tuple[int, int]] = {}
+        function = next(iter(After.functions.values()))
+
+        class _RangeCollector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+                super().visit_assign_stmt(stmt)
+
+        _RangeCollector().visit_stmt(function.body)
         nd_offset, nd_size = ranges["tile_nd"]
         nz_offset, nz_size = ranges["tile_nz"]
         assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
-            f"DSA-RP must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
+            f"DSA must physically separate ND {ranges['tile_nd']} and NZ {ranges['tile_nz']} Vec tiles"
         )
 
     def test_same_nz_family_different_fractal_vec_tiles_can_reuse(self):

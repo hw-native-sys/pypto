@@ -3361,6 +3361,43 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     }
   }
 
+  // Vec ND and NZ layouts cannot occupy the same bytes even when their
+  // ordinary lifetimes are disjoint. DSA bypasses MemoryReuse, so reproduce
+  // its AreVecNdNzCompatible correctness gate as hard separations. Enumerate
+  // only the cross-class pairs that could otherwise reuse storage.
+  std::vector<size_t> vec_nd_intervals;
+  std::vector<size_t> vec_nz_intervals;
+  for (size_t index = 0; index < intervals.size(); ++index) {
+    const LifetimeInterval& interval = intervals[index];
+    if (interval.memory_space != MemorySpace::Vec) continue;
+    const auto tile_type = As<TileType>(interval.variable->GetType());
+    if (!tile_type) continue;
+    const TileView view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+    (IsNzLikeBlayout(view.blayout) ? vec_nz_intervals : vec_nd_intervals).push_back(index);
+  }
+  auto add_disjoint_layout_pairs = [&intervals, &add_separation](std::vector<size_t> earlier,
+                                                                 std::vector<size_t> later) {
+    std::sort(earlier.begin(), earlier.end(), [&intervals](size_t lhs, size_t rhs) {
+      return std::pair{intervals[lhs].last_use_point, lhs} < std::pair{intervals[rhs].last_use_point, rhs};
+    });
+    std::sort(later.begin(), later.end(), [&intervals](size_t lhs, size_t rhs) {
+      return std::pair{intervals[lhs].def_point, lhs} < std::pair{intervals[rhs].def_point, rhs};
+    });
+
+    size_t eligible = 0;
+    for (size_t later_index : later) {
+      while (eligible < earlier.size() &&
+             intervals[earlier[eligible]].last_use_point <= intervals[later_index].def_point) {
+        ++eligible;
+      }
+      for (size_t prior = 0; prior < eligible; ++prior) {
+        add_separation(earlier[prior], later_index, AllocationSeparationReason::StorageLayout);
+      }
+    }
+  };
+  add_disjoint_layout_pairs(vec_nd_intervals, vec_nz_intervals);
+  add_disjoint_layout_pairs(vec_nz_intervals, vec_nd_intervals);
+
   HazardInputs hazard;
   if (NeedsLoadTpopHazardGuard(func)) {
     HazardInputCollector collector;
