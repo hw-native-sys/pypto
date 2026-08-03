@@ -65,6 +65,11 @@ x: pl.Tensor[[32, 64], pl.FP32, pl.NZ]      # 布局，内联
 y: pl.Tensor[[32, 64], pl.FP32, STRIDED]    # 视图，通过变量
 ```
 
+在 `@pl.jit` 下只支持 **布局 (layout)** 这一种写法。特化会依据记录的
+shape/dtype/layout 重新生成注解，而 `pl.TensorView` 在该记录中没有对应字段——
+传入时会抛出 `TypeError` 并指明参数名，而不是丢弃 stride。这类 kernel 请改用
+`@pl.function`，它直接解析注解本身。
+
 ### 内存引用 (MemRef)
 
 ```python

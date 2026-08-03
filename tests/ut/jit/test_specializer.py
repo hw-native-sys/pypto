@@ -21,11 +21,13 @@ from pypto.jit.specializer import (
     Specializer,
     TensorMeta,
     _BodyTransformer,
+    _build_tensor_annotation,
     _classify_params,
     _collect_annotation_dynamic_dims,
     _collect_dynamic_dims,
     _collect_dynvar_names,
     _infer_return_type,
+    _layout_str,
     specialize,
 )
 from pypto.pypto_core import DataType, ir
@@ -1675,7 +1677,17 @@ class TestSpecializerInlineDeprecation:
 
 
 class TestSpecializerSourceMap:
-    """specialize() builds a generated→original line map (issue #1612)."""
+    """specialize() builds a generated→original line map (issue #1612).
+
+    The map covers each function's signature line plus its body statements. The
+    signature entry is what lets an annotation-level parse error (e.g. a
+    rejected layout) report against the user's file instead of the generated
+    source, so these tests assert on the two kinds separately.
+    """
+
+    #: Original file line of the ``def`` in each fixture below: the source
+    #: starts at the decorator (``orig_start_line``) with ``def`` one line down.
+    _DEF_LINE = 101
 
     def _meta(self) -> TensorMeta:
         return TensorMeta(shape=(32, 32), dtype=DataType.FP32)
@@ -1706,10 +1718,15 @@ class TestSpecializerSourceMap:
         spec.specialize()
         source_map = spec.source_map
 
-        assert source_map, "expected a non-empty source map"
-        assert all(f == "/real/kernel.py" for f, _, _ in source_map.values())
-        # Dedented body lines 3,4,5 + (orig_start_line - 1) = 102,103,104.
-        assert sorted(line for _, line, _ in source_map.values()) == [102, 103, 104]
+        # Exact multiset: the signature line at column 0 (so annotation errors
+        # land in the user's file) plus dedented body lines 3,4,5 +
+        # (orig_start_line - 1), each indented one level inside the function.
+        assert sorted(source_map.values()) == [
+            ("/real/kernel.py", self._DEF_LINE, 0),
+            ("/real/kernel.py", 102, 4),
+            ("/real/kernel.py", 103, 4),
+            ("/real/kernel.py", 104, 4),
+        ]
 
     def test_no_real_file_yields_empty_map(self):
         """Without on-disk source (orig_file=None), no mapping is produced."""
@@ -1758,8 +1775,9 @@ class TestSpecializerSourceMap:
         spec = Specializer("Gen", [ctx])
         spec.specialize()
         # The body collapses to a synthesized `pass`; it must not be mapped, and
-        # in particular must not point at the decorator line (100).
-        assert spec.source_map == {}
+        # in particular must not point at the decorator line (100). Only the
+        # signature line remains.
+        assert list(spec.source_map.values()) == [("/real/kernel.py", self._DEF_LINE, 0)]
 
 
 # ---------------------------------------------------------------------------
@@ -1975,6 +1993,65 @@ class TestArrayParamAnnotation:
         # `len(...)` is unavailable without builtins -> eval fails -> no Array
         # annotation is emitted for `x` (best-effort, no execution, no crash).
         assert "x: pl.Array" not in out
+
+
+class TestTensorLayoutAnnotation:
+    """The annotation's layout slot must survive specialization.
+
+    ``TensorMeta`` used to carry only shape and dtype, so ``pl.Tensor[[...],
+    dtype, pl.NZ]`` regenerated as a plain two-slot annotation — the layout was
+    dropped without a word and the parameter silently became ND.
+    """
+
+    def test_layout_str_renders_dsl_constant(self):
+        assert _layout_str(ir.TensorLayout.NZ) == "pl.NZ"
+        assert _layout_str(ir.TensorLayout.MX_A_ZZ) == "pl.MX_A_ZZ"
+
+    def test_layout_str_omits_nd(self):
+        """ND is what an absent slot already means — emitting it is noise."""
+        assert _layout_str(ir.TensorLayout.ND) is None
+
+    def test_annotation_carries_layout(self):
+        meta = TensorMeta((64, 128), DataType.FP16, layout=ir.TensorLayout.NZ)
+        assert _build_tensor_annotation(meta, is_out=False) == "pl.Tensor[[64, 128], pl.FP16, pl.NZ]"
+
+    def test_annotation_without_layout_unchanged(self):
+        """The two-slot form must stay byte-identical — no trailing slot."""
+        meta = TensorMeta((64, 128), DataType.FP16)
+        assert _build_tensor_annotation(meta, is_out=False) == "pl.Tensor[[64, 128], pl.FP16]"
+
+    def test_annotation_layout_survives_out_wrapper(self):
+        meta = TensorMeta((64, 128), DataType.FP16, layout=ir.TensorLayout.NZ)
+        assert _build_tensor_annotation(meta, is_out=True) == "pl.Out[pl.Tensor[[64, 128], pl.FP16, pl.NZ]]"
+
+    def test_annotation_layout_with_dynamic_dim(self):
+        """A DynDim shape and a layout coexist — both slots render."""
+        meta = TensorMeta(
+            (DynDim(name="M", literal="M", static_bound=64), 128),
+            DataType.FP16,
+            layout=ir.TensorLayout.NZ,
+        )
+        assert _build_tensor_annotation(meta, is_out=False) == "pl.Tensor[[M, 128], pl.FP16, pl.NZ]"
+
+    def test_specialized_source_keeps_layout(self):
+        """End to end: the generated @pl.function source carries the slot."""
+        ctx = _make_ctx(
+            source=textwrap.dedent(
+                """
+                def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                    return c
+                """
+            ),
+            param_names=["a", "c"],
+            tensor_meta={
+                "a": TensorMeta((64, 128), DataType.FP16, layout=ir.TensorLayout.NZ),
+                "c": TensorMeta((64, 128), DataType.FP16),
+            },
+        )
+        out = specialize("_T", [ctx])
+        assert "a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]" in out
+        # The un-annotated param keeps the plain two-slot form.
+        assert "c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]" in out
 
 
 if __name__ == "__main__":

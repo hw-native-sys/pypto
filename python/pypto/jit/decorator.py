@@ -189,6 +189,7 @@ def _build_tensor_meta(
     extents: Sequence[int],
     dtype: DataType,
     dyn_dims: dict[int, DynDim] | None = None,
+    layout: _ir.TensorLayout | None = None,
 ) -> TensorMeta:
     """Build a :class:`TensorMeta` from per-dim extents and a resolved dtype.
 
@@ -198,6 +199,10 @@ def _build_tensor_meta(
     Shared by the torch-tensor path (:func:`_extract_tensor_meta`, extent = the
     real tensor dim) and the signature path (:meth:`JITFunction._bind_args_from_signature`,
     extent = the static annotation dim or a placeholder for dynamic dims).
+
+    ``layout`` is the annotation's third slot. It never comes from a runtime
+    tensor — a torch tensor carries no PyPTO layout — so both paths read it
+    from the same place, the parameter's annotation.
     """
     dyn = dyn_dims or {}
     shape: list[ShapeDim] = []
@@ -208,15 +213,119 @@ def _build_tensor_meta(
             shape.append(extent)
         else:
             shape.append(DynDim(name=bound.name, literal=bound.literal, static_bound=extent))
-    return TensorMeta(shape=tuple(shape), dtype=dtype)
+    return TensorMeta(shape=tuple(shape), dtype=dtype, layout=layout)
 
 
 def _extract_tensor_meta(
     tensor: Any,
     dyn_dims: dict[int, DynDim] | None = None,
+    layout: _ir.TensorLayout | None = None,
 ) -> TensorMeta:
-    """Extract TensorMeta from a torch.Tensor (shape/dtype only — no data read)."""
-    return _build_tensor_meta(tensor.shape, _torch_dtype_to_pypto(tensor.dtype), dyn_dims)
+    """Extract TensorMeta from a torch.Tensor (shape/dtype only — no data read).
+
+    ``layout`` comes from the parameter's annotation, not the tensor: torch has
+    no notion of a PyPTO layout, so the annotation is the only source.
+    """
+    return _build_tensor_meta(tensor.shape, _torch_dtype_to_pypto(tensor.dtype), dyn_dims, layout)
+
+
+def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
+    """Resolve one parameter annotation, evaluating the string form if needed.
+
+    ``from __future__ import annotations`` in the *user's* module leaves every
+    annotation as a string; ``ann_ns`` (from :func:`_func_name_lookup`) is the
+    namespace to evaluate it in.
+
+    Args:
+        annotation: Raw ``inspect.Parameter.annotation``
+        ann_ns: Namespace for string annotations, or None to leave them as-is
+
+    Returns:
+        The resolved annotation object, or the original string when it cannot
+        be evaluated
+    """
+    if not isinstance(annotation, str) or ann_ns is None:
+        return annotation
+    try:
+        # Trusted input: the kernel's own annotation source, evaluated in its
+        # own globals+closure namespace (same as Python would).
+        return eval(annotation, ann_ns)  # noqa: S307
+    except Exception:  # noqa: BLE001 - leave as string; callers treat it as "cannot infer"
+        return annotation
+
+
+def _annotation_namespace(func: Any, sig: inspect.Signature) -> dict[str, Any] | None:
+    """Namespace for resolving ``func``'s string annotations, or None if unneeded."""
+    if any(isinstance(p.annotation, str) for n, p in sig.parameters.items() if n != "self"):
+        return _func_name_lookup(func)
+    return None
+
+
+def _annotation_layout(annotation: Any, param_name: str, func_name: str) -> _ir.TensorLayout | None:
+    """Read the layout slot off an already-resolved tensor annotation.
+
+    ``pl.Tensor[[...], dtype, pl.NZ]`` evaluates to a ``Tensor`` instance whose
+    ``layout`` holds the third slot; the two-slot form leaves it None.
+
+    Args:
+        annotation: Resolved parameter annotation (any object — non-tensor
+            annotations simply carry no layout)
+        param_name: Parameter the annotation belongs to, for diagnostics
+        func_name: Enclosing kernel name, for diagnostics
+
+    Returns:
+        The annotated layout, or None when the annotation declares none
+
+    Raises:
+        TypeError: If the slot holds a ``pl.TensorView`` — specialization has
+            nowhere to carry it, and silently dropping it would mis-declare the
+            parameter
+    """
+    layout = getattr(annotation, "layout", None)
+    if layout is None or isinstance(layout, _ir.TensorLayout):
+        return layout
+    # ``Tensor.__getitem__`` routes any non-MemRef third element into ``layout``,
+    # so a pl.TensorView(...) lands here. TensorMeta has no field for it, and a
+    # dropped stride is silently wrong code — refuse instead. This is reachable
+    # from the DN rejection's own migration hint, so the message has to be plain.
+    raise TypeError(
+        f"@pl.jit function {func_name!r}: parameter {param_name!r} annotates a "
+        f"{type(layout).__name__} in its layout slot, which @pl.jit does not yet "
+        f"support — it would be dropped and the parameter compiled as ND. Use a "
+        f"plain layout (e.g. pl.NZ), or declare the kernel with @pl.function, "
+        f"which resolves the annotation directly."
+    )
+
+
+def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
+    """Map parameter name → annotated layout, for params that declare one.
+
+    The torch-argument path derives shape and dtype from the passed tensors, so
+    it never looks at annotations — but a layout has no runtime counterpart to
+    read, making the annotation its only source. This recovers it. Also used to
+    recover a dep function's own declarations, which no caller argument carries.
+
+    Args:
+        func: The Python function whose annotations to read
+        func_name: Name to use in diagnostics
+
+    Returns:
+        Layout per parameter name; parameters without one are absent
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return {}
+    ann_ns = _annotation_namespace(func, sig)
+
+    layouts: dict[str, _ir.TensorLayout] = {}
+    for name, param in sig.parameters.items():
+        if name == "self":
+            continue
+        layout = _annotation_layout(_resolve_annotation(param.annotation, ann_ns), name, func_name)
+        if layout is not None:
+            layouts[name] = layout
+    return layouts
 
 
 def _signature_tensor_meta(
@@ -224,13 +333,15 @@ def _signature_tensor_meta(
     dtype: DataType,
     dyn_for_param: dict[int, DynDim],
     dynvar_cls: type,
+    param_name: str = "",
+    func_name: str = "",
 ) -> TensorMeta:
     """Build TensorMeta from a shaped ``pl.Tensor[[...], dtype]`` annotation.
 
     Static dims use the annotation integer; dynamic dims (``pl.dynamic`` /
     ``bind_dynamic``) get a placeholder extent because the specialized program
     remains extent-independent. ``dynvar_cls`` is the lazily-imported ``DynVar``
-    type.
+    type. ``param_name`` / ``func_name`` only feed diagnostics.
     """
     shape = annotation.shape
     extents = [
@@ -241,7 +352,8 @@ def _signature_tensor_meta(
     for i, dim in enumerate(shape):
         if isinstance(dim, dynvar_cls) and i not in dyn_dims:
             dyn_dims[i] = DynDim(name=dim.name, literal=dim.name, static_bound=0)
-    return _build_tensor_meta(extents, dtype, dyn_dims)
+    layout = _annotation_layout(annotation, param_name, func_name)
+    return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 
 
 def _signature_scalar_value(
@@ -662,7 +774,7 @@ def _subscript_slice_meta(
             extent = stop - start if isinstance(start, int) and isinstance(stop, int) else None
         dims.append(extent if extent is not None else parent)
     dims.extend(src_meta.shape[len(indices) :])  # trailing implicit ``:``
-    return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
+    return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
 
 
 def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
@@ -991,6 +1103,12 @@ def _extract_local_tensor_metas(
         shape = _resolve_shape(shape_node)
         if shape is None:
             return None
+        # A reshape re-groups the dims a layout describes, so the source layout
+        # need not hold on the result — but claiming ND instead would be the
+        # same silent mis-declaration. Decline the meta and let _build_params
+        # raise its clear "missing type annotation" error.
+        if src_meta.layout not in (None, _ir.TensorLayout.ND):
+            return None
         return TensorMeta(shape=shape, dtype=src_meta.dtype)
 
     def _slice_meta(call: ast.Call) -> TensorMeta | None:
@@ -1015,7 +1133,7 @@ def _extract_local_tensor_metas(
             # consumes a narrowed view (see examples/models/04_paged_attention.py).
             # If the parent dim is itself a DynDim, it propagates through.
             dims.append(v if v is not None else parent_dim)
-        return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
+        return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype, layout=src_meta.layout)
 
     dep_io = _scan_dep_io(func, caller_func_type)
 
@@ -1202,6 +1320,9 @@ def _resolve_dep_call_metadata(
                     dep_tensor_meta[dep_param] = TensorMeta(
                         shape=base_meta.shape[caller_arg.drop :],
                         dtype=base_meta.dtype,
+                        # Layout describes the trailing dims, so dropping
+                        # leading ones leaves it intact.
+                        layout=base_meta.layout,
                     )
                 continue
             if caller_arg in all_tensor_meta:
@@ -1234,9 +1355,33 @@ def _resolve_dep_call_metadata(
             new_shape[i] = DynDim(name=dyn.name, literal=dyn.literal, static_bound=existing)
             changed = True
         if changed:
-            dep_tensor_meta[dep_param] = TensorMeta(shape=tuple(new_shape), dtype=meta.dtype)
+            dep_tensor_meta[dep_param] = TensorMeta(
+                shape=tuple(new_shape), dtype=meta.dtype, layout=meta.layout
+            )
+
+    _overlay_dep_declared_layouts(dep, dep_tensor_meta)
 
     return dep_tensor_meta, dep_scalar_values, dep_scalar_dtypes
+
+
+def _overlay_dep_declared_layouts(dep: JITFunction, dep_tensor_meta: dict[str, TensorMeta]) -> None:
+    """Fill in layouts a dep declares itself, in place.
+
+    Nothing on the caller side carries them — an argument's meta reflects the
+    *caller's* annotation — so without this a dep declaring
+    ``pl.Tensor[[...], pl.NZ]`` under a caller that declares none compiles as
+    ND, silently. The caller wins on conflict, matching how the DynDim overlay
+    only fills what the caller left plain.
+
+    Args:
+        dep: The dep whose own annotations to read
+        dep_tensor_meta: Per-parameter meta to update in place
+    """
+    for dep_param, dep_layout in _param_layouts(dep._func, dep.__name__).items():
+        meta = dep_tensor_meta.get(dep_param)
+        if meta is None or meta.layout is not None:
+            continue
+        dep_tensor_meta[dep_param] = TensorMeta(shape=meta.shape, dtype=meta.dtype, layout=dep_layout)
 
 
 # ---------------------------------------------------------------------------
@@ -1601,13 +1746,18 @@ class JITFunction:
             self._func, param_names, deps, callers_by_id, call_args_cache
         )
         entry_dyn_map = per_func_dyn_maps[id(self._func)]
+        # A layout has no runtime counterpart on a torch tensor, so it comes
+        # from the annotation even on this path.
+        param_layouts = _param_layouts(self._func, self.__name__)
         tensor_meta: dict[str, TensorMeta] = {}
         scalar_values: dict[str, int | float | bool] = {}
         scalar_dtypes: dict[str, DataType] = {}
 
         for name, value in arguments.items():
             if _is_tensor(value):
-                tensor_meta[name] = _extract_tensor_meta(value, entry_dyn_map.get(name))
+                tensor_meta[name] = _extract_tensor_meta(
+                    value, entry_dyn_map.get(name), param_layouts.get(name)
+                )
             elif isinstance(value, (int, float, bool)):
                 scalar_values[name] = value
 
@@ -1694,7 +1844,12 @@ class JITFunction:
                 if annotation.shape is None or annotation.dtype is None:
                     raise TypeError(bare_msg)
                 tensor_meta[name] = _signature_tensor_meta(
-                    annotation, annotation.dtype, entry_dyn_map.get(name, {}), DynVar
+                    annotation,
+                    annotation.dtype,
+                    entry_dyn_map.get(name, {}),
+                    DynVar,
+                    param_name=name,
+                    func_name=self.__name__,
                 )
                 continue
             if isinstance(annotation, type) and issubclass(annotation, Tensor):
@@ -1833,6 +1988,7 @@ class JITFunction:
             param_names=specialization.param_names,
             tensor_shapes={n: m.static_shape() for n, m in specialization.tensor_meta.items()},
             tensor_dtypes={n: m.dtype for n, m in specialization.tensor_meta.items()},
+            tensor_layouts={n: m.layout for n, m in specialization.tensor_meta.items()},
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },

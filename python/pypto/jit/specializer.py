@@ -46,6 +46,7 @@ from typing import Any, cast
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import TensorLayout
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -83,10 +84,16 @@ class TensorMeta:
         shape: Per-dim entries. Each entry is either a static ``int`` or a
             :class:`DynDim` capturing a JIT-time-bound dynamic dim.
         dtype: DataType resolved from the torch tensor.
+        layout: Layout the user wrote in the annotation's third slot
+            (``pl.Tensor[[...], dtype, pl.NZ]``), or None when the annotation
+            omits it. Carried so the regenerated ``@pl.function`` source keeps
+            the slot the user wrote — a dropped layout would silently downgrade
+            the parameter to ND.
     """
 
     shape: tuple[ShapeDim, ...]
     dtype: DataType
+    layout: TensorLayout | None = None
 
     def static_shape(self) -> tuple[int, ...]:
         """Concrete shape tuple — DynDim dims collapse to their static_bound."""
@@ -231,6 +238,34 @@ def _dtype_str(dt: DataType) -> str:
     if dt not in _DTYPE_TO_PL:
         raise ValueError(f"Unsupported DataType: {dt}")
     return _DTYPE_TO_PL[dt]
+
+
+# TensorLayout → pl.XXX string mapping, for regenerating an annotation's
+# third slot. ND is absent on purpose: it is the default the slot means when
+# omitted, so emitting it would only add noise.
+_LAYOUT_TO_PL: dict[TensorLayout, str] = {
+    TensorLayout.DN: "pl.DN",
+    TensorLayout.NZ: "pl.NZ",
+    TensorLayout.MX_A_ZZ: "pl.MX_A_ZZ",
+    TensorLayout.MX_B_NN: "pl.MX_B_NN",
+}
+
+
+def _layout_str(layout: TensorLayout) -> str | None:
+    """Render a layout to its ``pl.<NAME>`` annotation form.
+
+    Returns:
+        The ``pl.<NAME>`` source form, or None when the layout needs no slot
+        (ND — what an omitted slot already means).
+
+    Raises:
+        ValueError: If the layout has no DSL constant to render
+    """
+    if layout == TensorLayout.ND:
+        return None
+    if layout not in _LAYOUT_TO_PL:
+        raise ValueError(f"Unsupported TensorLayout: {layout}")
+    return _LAYOUT_TO_PL[layout]
 
 
 def _array_dtype_str(dt: DataType) -> str:
@@ -421,15 +456,25 @@ def _build_tensor_annotation(
     generated ``@pl.function`` source declares the same ``ir.ParamDirection``
     the user wrote.
 
+    A non-ND ``meta.layout`` is emitted as the third slot, so the layout the
+    user annotated survives into the generated source. Whether that layout is
+    legal in a bare slot is the type resolver's call, not ours — ``pl.DN``, for
+    instance, is rejected there with a migration hint.
+
     Returns:
         Annotation string such as ``pl.Tensor[[M, 128], pl.FP32]``,
+        ``pl.Tensor[[64, 128], pl.FP16, pl.NZ]``,
         ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``,
         ``pl.InOut[pl.Tensor[[128, 128], pl.FP32]]``, or
         ``pld.DistributedTensor[[256], pl.INT8]``.
     """
     dims = [d.name if isinstance(d, DynDim) else str(d) for d in meta.shape]
     head = "pld.DistributedTensor" if is_distributed else "pl.Tensor"
-    inner = f"{head}[[{', '.join(dims)}], {_dtype_str(meta.dtype)}]"
+    slots = [f"[{', '.join(dims)}]", _dtype_str(meta.dtype)]
+    layout_slot = _layout_str(meta.layout) if meta.layout is not None else None
+    if layout_slot is not None:
+        slots.append(layout_slot)
+    inner = f"{head}[{', '.join(slots)}]"
     if is_inout:
         return f"pl.InOut[{inner}]"
     return f"pl.Out[{inner}]" if is_out else inner
@@ -1424,6 +1469,32 @@ def _dfs_stmts(node: ast.AST) -> list[ast.stmt]:
     return result
 
 
+def _find_func_def(tree: ast.AST, func_name: str) -> ast.FunctionDef | None:
+    """The ``FunctionDef`` named ``func_name`` anywhere under ``tree``."""
+    return next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+
+
+def _original_def_line(ctx: SpecializeContext) -> int | None:
+    """Line of the ``def`` inside a context's dedented source, 1-based.
+
+    ``ctx.orig_start_line`` points at the function's *first decorator*, so the
+    ``def`` itself sits some lines below it. Callers add
+    ``orig_start_line - 1`` to convert to an absolute file line.
+
+    Args:
+        ctx: The specialization context whose source to inspect
+
+    Returns:
+        The 1-based line of the ``def``, or None if the source cannot be parsed
+    """
+    try:
+        tree = ast.parse(textwrap.dedent(ctx.source))
+    except SyntaxError:
+        return None
+    node = _find_func_def(tree, ctx.func_name)
+    return None if node is None else node.lineno
+
+
 class Specializer:
     """Transform a collection of SpecializeContext objects into @pl.program source.
 
@@ -1565,10 +1636,23 @@ class Specializer:
             gen_func = gen_funcs.get(ctx.func_name)
             if ctx.orig_file is None or gen_func is None:
                 continue
+            # The signature line carries the parameter annotations, so an
+            # annotation-level parse error (e.g. a rejected layout) reports
+            # there — map it too, or such errors would point at the generated
+            # source instead of the user's file.
+            orig_def_line = _original_def_line(ctx)
+            if orig_def_line is not None:
+                out[gen_func.lineno] = (
+                    ctx.orig_file,
+                    orig_def_line + ctx.orig_start_line - 1,
+                    ctx.orig_col_offset,
+                )
             gen_stmts = _dfs_stmts(gen_func)
             # Reparsing the unparsed transform must preserve statement count and
-            # DFS order; if it somehow diverges, skip this function rather than
-            # emit a wrong mapping (its spans then fall back to generated coords).
+            # DFS order; if it somehow diverges, skip this function's *statement*
+            # mappings rather than emit wrong ones (those spans then fall back to
+            # generated coords). The signature entry above is independent of the
+            # body, so it stands either way.
             if len(gen_stmts) != len(orig_positions):
                 continue
             for gen_stmt, (orig_line, orig_col) in zip(gen_stmts, orig_positions, strict=True):
@@ -1586,9 +1670,8 @@ class Specializer:
         # Parse the source to AST
         src = textwrap.dedent(ctx.source)
         tree = ast.parse(src)
-        func_def = next(
-            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == ctx.func_name
-        )
+        func_def = _find_func_def(tree, ctx.func_name)
+        assert func_def is not None, f"specialize: no def named {ctx.func_name!r} in its own source"
 
         # Classify parameters
         out_params, inout_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(

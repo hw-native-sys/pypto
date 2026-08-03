@@ -32,6 +32,7 @@ from pypto.pypto_core import DataType
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
+    from pypto.pypto_core.ir import TensorLayout
     from pypto.pypto_core.passes import MemoryPlanner
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
@@ -54,11 +55,17 @@ class TensorCacheInfo:
         name: Parameter name.
         shape: Shape tuple with None for dynamic dimensions.
         dtype: DataType of the tensor.
+        layout: Annotated tensor layout, or None when the annotation omits it.
+            Included because a layout may reach the annotation through a
+            closure variable (``L = pl.NZ; ... pl.Tensor[[...], pl.FP32, L]``),
+            leaving the source text — and thus ``source_hash`` — unchanged
+            while the compiled artifact differs.
     """
 
     name: str
     shape: tuple[int | None, ...]
     dtype: DataType
+    layout: "TensorLayout | None" = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     analyze_auto_scopes_for_deps: bool = False,
     memory_planner: "MemoryPlanner | None" = None,
     enable_pypto_l0c_double_buffer: bool = False,
+    tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -145,6 +153,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         param_names: Ordered list of all parameter names (preserves arg order).
         tensor_shapes: Concrete shape per tensor parameter name.
         tensor_dtypes: DataType per tensor parameter name.
+        tensor_layouts: Annotated layout per tensor parameter name, where the
+            annotation declares one. See :class:`TensorCacheInfo.layout` for
+            why the layout has to split the key on its own.
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
@@ -194,7 +205,14 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         keyed_shape = tuple(
             None if (name, i) in dynamic_dims else dim for i, dim in enumerate(concrete_shape)
         )
-        tensor_infos.append(TensorCacheInfo(name=name, shape=keyed_shape, dtype=tensor_dtypes[name]))
+        tensor_infos.append(
+            TensorCacheInfo(
+                name=name,
+                shape=keyed_shape,
+                dtype=tensor_dtypes[name],
+                layout=(tensor_layouts or {}).get(name),
+            )
+        )
 
     scalar_infos = []
     for name in param_names:

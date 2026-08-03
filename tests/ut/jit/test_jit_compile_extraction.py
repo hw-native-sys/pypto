@@ -21,6 +21,7 @@ import pytest
 from pypto.ir import OptimizationStrategy
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
+from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import ir, passes
 from pypto.runtime.runner import RunConfig
 
@@ -404,6 +405,120 @@ class TestCompileFromSignature:
         assert tensor_meta["a"].dynamic_dim_indices() == {0}
         assert tensor_meta["a"].static_shape()[1] == 64
         assert tensor_meta["a"].dtype == pl.FP32
+
+
+@jit
+def _nz_kernel(a: pl.Tensor[[64, 128], pl.FP16, pl.NZ], c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+    M, N = a.shape
+    t = pl.load(a, [0, 0], [M, N])
+    pl.store(t, [0, 0], c)
+    return c
+
+
+@jit
+def _dn_kernel(a: pl.Tensor[[64, 128], pl.FP16, pl.DN], c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+    M, N = a.shape
+    t = pl.load(a, [0, 0], [M, N])
+    pl.store(t, [0, 0], c)
+    return c
+
+
+class TestAnnotationLayoutReachesTheProgram:
+    """The layout slot of a @pl.jit parameter annotation must reach the IR.
+
+    JIT specialization regenerates each annotation from ``TensorMeta`` rather
+    than reusing the user's source. ``TensorMeta`` carried only shape and dtype,
+    so the slot was dropped: ``pl.NZ`` silently became ND, and ``pl.DN`` — which
+    the type resolver rejects — was never even seen, so it neither errored nor
+    took effect.
+    """
+
+    def _entry_param_type(self, kernel):
+        _, _, tm, sv, sd, dyn = kernel._bind_args_from_signature({})
+        program = kernel._compile_to_program(tm, sv, sd, dyn, pl)
+        return list(program.functions.values())[0].params[0].type
+
+    def test_nz_layout_reaches_the_param_type(self):
+        param_type = self._entry_param_type(_nz_kernel)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_unannotated_layout_stays_absent(self):
+        """The plain two-slot form must not gain a view."""
+        _, _, tm, sv, sd, dyn = _nz_kernel._bind_args_from_signature({})
+        program = _nz_kernel._compile_to_program(tm, sv, sd, dyn, pl)
+        out_param = list(program.functions.values())[0].params[1]
+        assert out_param.type.tensor_view is None
+
+    def test_dn_layout_is_rejected(self):
+        """DN reaches the resolver now, so its rejection applies here too."""
+        with pytest.raises(ParserTypeError, match=r"pl\.Tensor\[\.\.\., pl\.DN\] is not supported"):
+            self._entry_param_type(_dn_kernel)
+
+    def test_dn_rejection_points_at_the_user_source(self):
+        """The span must name this test file, not the generated ``<jit:...>``."""
+        with pytest.raises(ParserTypeError) as exc_info:
+            self._entry_param_type(_dn_kernel)
+
+        span = exc_info.value.span
+        assert span is not None
+        assert span["filename"].endswith("test_jit_compile_extraction.py")
+
+
+@jit.incore
+def _nz_dep(a: pl.Tensor[[64, 128], pl.FP16, pl.NZ], c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+    M, N = a.shape
+    t = pl.load(a, [0, 0], [M, N])
+    pl.store(t, [0, 0], c)
+    return c
+
+
+@jit
+def _calls_nz_dep(a: pl.Tensor[[64, 128], pl.FP16], c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+    c = _nz_dep(a, c)
+    return c
+
+
+class TestDepDeclaredLayout:
+    """A dep's own layout declaration has no caller-side counterpart.
+
+    The caller's argument meta reflects the *caller's* annotation, so a dep
+    declaring ``pl.Tensor[[...], pl.NZ]`` while the entry declares none would
+    otherwise compile as ND — the same silent downgrade, one call deeper.
+    """
+
+    def test_dep_layout_survives_when_caller_declares_none(self):
+        _, _, tm, sv, sd, dyn = _calls_nz_dep._bind_args_from_signature({})
+        program = _calls_nz_dep._compile_to_program(tm, sv, sd, dyn, pl)
+        views = [
+            p.type.tensor_view
+            for f in program.functions.values()
+            for p in f.params
+            if getattr(p.type, "tensor_view", None) is not None
+        ]
+        assert any(v.layout == ir.TensorLayout.NZ for v in views)
+
+
+class TestUnsupportedLayoutSlot:
+    """A ``pl.TensorView`` in the slot must be refused, never dropped.
+
+    ``TensorMeta`` has nowhere to carry a view, and a dropped stride is silent
+    wrong code. The DN rejection's own hint points users at this spelling, so
+    the refusal has to be explicit rather than a quiet ND.
+    """
+
+    def test_tensorview_slot_raises(self):
+        strided = pl.TensorView(stride=[256, 1], layout=ir.TensorLayout.ND)
+
+        @jit
+        def kernel(a: pl.Tensor[[64, 128], pl.FP16, strided], c: pl.Out[pl.Tensor[[64, 128], pl.FP16]]):
+            M, N = a.shape
+            t = pl.load(a, [0, 0], [M, N])
+            pl.store(t, [0, 0], c)
+            return c
+
+        with pytest.raises(TypeError, match="does not yet support"):
+            kernel._bind_args_from_signature({})
 
 
 if __name__ == "__main__":

@@ -66,6 +66,12 @@ x: pl.Tensor[[32, 64], pl.FP32, pl.NZ]      # layout, inline
 y: pl.Tensor[[32, 64], pl.FP32, STRIDED]    # view, by variable
 ```
 
+Under `@pl.jit` only the **layout** spelling is supported. Specialization
+regenerates each annotation from the shape/dtype/layout it recorded, and a
+`pl.TensorView` has no slot in that record — passing one raises a `TypeError`
+naming the parameter rather than dropping the stride. Declare such a kernel
+with `@pl.function`, which resolves the annotation directly.
+
 ### Memory References (MemRef)
 
 ```python
