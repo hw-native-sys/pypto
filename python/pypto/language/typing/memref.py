@@ -126,12 +126,39 @@ class MemRef(_IrMemRef):
     def __init__(self, span: Span = ..., slots: int = ...) -> None: ...
     @overload
     def __init__(self, name: str, span: Span = ..., slots: int = ...) -> None: ...
+    # The resolved forms take ``slots`` / ``slot`` too: a MemRef stays slot k of an
+    # N-slot allocation after InitMemRef has folded the index into the offset, and
+    # `pl.MemRef(base, offset, size, slots=N)[k]` is what the printer emits for one.
     @overload
-    def __init__(self, base: Var, byte_offset: _ByteOffset, size: int, span: Span = ...) -> None: ...
+    def __init__(
+        self,
+        base: Var,
+        byte_offset: _ByteOffset,
+        size: int,
+        span: Span = ...,
+        slots: int = ...,
+        slot: "Expr | int | Scalar | None" = ...,
+    ) -> None: ...
     @overload
-    def __init__(self, base: str, byte_offset: _ByteOffset, size: int, span: Span = ...) -> None: ...
+    def __init__(
+        self,
+        base: str,
+        byte_offset: _ByteOffset,
+        size: int,
+        span: Span = ...,
+        slots: int = ...,
+        slot: "Expr | int | Scalar | None" = ...,
+    ) -> None: ...
     @overload
-    def __init__(self, base: PtrType, byte_offset: _ByteOffset, size: int, span: Span = ...) -> None: ...
+    def __init__(
+        self,
+        base: PtrType,
+        byte_offset: _ByteOffset,
+        size: int,
+        span: Span = ...,
+        slots: int = ...,
+        slot: "Expr | int | Scalar | None" = ...,
+    ) -> None: ...
     @overload
     def __init__(self, addr: int, size: int, id: int, span: Span = ...) -> None: ...
     @overload

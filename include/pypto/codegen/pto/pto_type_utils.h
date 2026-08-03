@@ -48,8 +48,10 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
                                     bool v_col_dynamic = false);
 
 /// The slot-count bounds ptoas's `!pto.multi_tile_buf` verifier enforces
-/// (`MAX_MULTI_BUFFER_NUM = 16`); a declaration outside them keeps the ordinary
-/// one-alloc-per-slot lowering.
+/// (`MAX_MULTI_BUFFER_NUM = 16`). Under the PTOAS memory planner a declaration
+/// outside them is rejected — falling back to one alloc per slot would let ptoas
+/// plan the slots on top of each other. The ordinary one-alloc-per-slot lowering
+/// is the PyPTO planner's path, where the baked addresses keep them apart.
 inline constexpr uint64_t kMinMultiTileBufSlots = 2;
 inline constexpr uint64_t kMaxMultiTileBufSlots = 16;
 

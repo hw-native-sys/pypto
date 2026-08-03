@@ -133,6 +133,36 @@ class TilePhiBaseCollector : public ir::IRVisitor {
   }
 };
 
+// The (valid_row, valid_col) extents a tile declares, when both are compile-time.
+//
+// Same source of truth as ComputeAllocTileFields — the author's valid_shape when
+// there is one, the physical shape otherwise — but as values rather than emitted
+// SSA, because a multi-buffer region states ONE valid extent for all its slots and
+// therefore has to compare them before declaring it. The tile_buf type string
+// cannot stand in for this comparison: it deliberately renders `v_row=?, v_col=?`,
+// so two slots differing only in valid_shape print identically.
+std::optional<std::pair<int64_t, int64_t>> StaticValidExtents(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  const std::vector<ir::ExprPtr>* dims = nullptr;
+  if (const auto& tile_view = tile_type->tile_view_;
+      tile_view.has_value() && !tile_view->valid_shape.empty()) {
+    dims = &tile_view->valid_shape;
+  } else if (!tile_type->shape_.empty()) {
+    dims = &tile_type->shape_;
+  }
+  if (dims == nullptr || dims->empty()) return std::nullopt;
+
+  std::vector<int64_t> extents;
+  for (size_t i = 0; i < dims->size() && i < 2; ++i) {
+    auto const_dim = As<ir::ConstInt>((*dims)[i]);
+    if (!const_dim) return std::nullopt;
+    extents.push_back(const_dim->value_);
+  }
+  // Match ExtractTileTypeInfo: a 1-D tile is rows=1, cols=shape[0].
+  if (dims->size() == 1) return std::make_pair(static_cast<int64_t>(1), extents[0]);
+  return std::make_pair(extents[0], extents[1]);
+}
+
 // Memory spaces ptoas accepts for a `!pto.multi_tile_buf` slot. The multi-buffer
 // design ships with local vec / mat support; `acc` compiles as well (verified
 // against ptoas 0.54). Every other space — gm above all — keeps the ordinary
@@ -1246,38 +1276,6 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   return fields;
 }
 
-bool PTOCodegen::TryComputeStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type,
-                                            std::string* valid_row_ssa, std::string* valid_col_ssa) {
-  // Same source of truth as ComputeAllocTileFields: the author's valid_shape when
-  // there is one, the physical shape otherwise.
-  const std::vector<ir::ExprPtr>* dims = nullptr;
-  if (const auto& tile_view = tile_type->tile_view_;
-      tile_view.has_value() && !tile_view->valid_shape.empty()) {
-    dims = &tile_view->valid_shape;
-  } else if (!tile_type->shape_.empty()) {
-    dims = &tile_type->shape_;
-  }
-  if (dims == nullptr) return false;
-
-  std::vector<int64_t> extents;
-  for (size_t i = 0; i < dims->size() && i < 2; ++i) {
-    auto const_dim = As<ir::ConstInt>((*dims)[i]);
-    if (!const_dim) return false;
-    extents.push_back(const_dim->value_);
-  }
-  if (extents.empty()) return false;
-
-  if (dims->size() == 1) {
-    // Match ExtractTileTypeInfo: a 1-D tile is rows=1, cols=shape[0].
-    *valid_row_ssa = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-    *valid_col_ssa = GetOrEmitConstant(extents[0], DataType::INDEX);
-    return true;
-  }
-  *valid_row_ssa = GetOrEmitConstant(extents[0], DataType::INDEX);
-  *valid_col_ssa = GetOrEmitConstant(extents[1], DataType::INDEX);
-  return true;
-}
-
 void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   fs_.multi_buffer_regions.clear();
   fs_.multi_buffer_region_order.clear();
@@ -1298,29 +1296,38 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   struct Candidate {
     uint64_t count = 1;
     std::string slot_type_str;
-    std::shared_ptr<const ir::TileType> slot_tile_type;
-    ir::VarPtr reference_tile;  ///< The first slot-selecting tile: geometry + diagnostic anchor
+    std::optional<std::pair<int64_t, int64_t>> extents;  ///< The valid extent all slots must share
+    ir::VarPtr first_tile;                               ///< Diagnostic anchor: the first tile seen
+    ir::VarPtr reference_tile;                           ///< The first slot-selecting tile: geometry
     std::string blocker;
   };
   std::map<const ir::Var*, Candidate> candidates;
   std::vector<const ir::Var*> discovery_order;
 
-  // Pass 1: find the slotted allocations and take each one's geometry from the
-  // first tile that actually selects a slot. Reading it from whichever tile came
-  // first instead would make the outcome depend on discovery order — an unslotted
-  // binding seen first would fix the count at 1 and skip the checks below, which
-  // is the silent degradation they exist to prevent.
+  // Pass 1: find the slotted allocations, and take each one's geometry from the
+  // first tile that actually *selects* a slot. A tile that binds the allocation
+  // whole is still recorded (pass 2 rejects the allocation for it) but must not
+  // supply the baseline — it names no slot, so its type says nothing about what
+  // the slots hold. Reading geometry from whichever tile came first would also
+  // make the outcome depend on discovery order.
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     auto memref = ir::GetDefinedMemRef(tile_type);
     if (memref->slot_count_ <= 1) continue;
     const ir::Var* base = memref->base_.get();
     auto [it, fresh] = candidates.try_emplace(base);
-    if (!fresh) continue;
-    discovery_order.push_back(base);
-    it->second.count = memref->slot_count_;
-    it->second.slot_type_str = GetTileBufTypeStringFromTileType(tile_type);
-    it->second.slot_tile_type = tile_type;
-    it->second.reference_tile = tile_var;
+    Candidate& candidate = it->second;
+    if (fresh) {
+      discovery_order.push_back(base);
+      candidate.first_tile = tile_var;
+      // Count comes from any binding — they all read it off one declaration, and
+      // InitMemRef has already rejected a disagreement — so the diagnostic below
+      // states the declared count even when no tile selects a slot.
+      candidate.count = memref->slot_count_;
+    }
+    if (candidate.reference_tile || !memref->slot_index_.has_value() || !*memref->slot_index_) continue;
+    candidate.slot_type_str = GetTileBufTypeStringFromTileType(tile_type);
+    candidate.extents = StaticValidExtents(tile_type);
+    candidate.reference_tile = tile_var;
   }
   if (candidates.empty()) return;
 
@@ -1335,6 +1342,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     Candidate& candidate = it->second;
     if (!candidate.blocker.empty()) continue;  // first reason wins
     const std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+    // Compared separately from the type string, which renders `v_row=?, v_col=?`
+    // by design: the region declares ONE valid extent for every slot, so two slots
+    // that print alike but differ in valid_shape would silently give one of them
+    // the other's extent.
+    const auto extents = StaticValidExtents(tile_type);
 
     if (!memref->slot_index_.has_value() || !*memref->slot_index_) {
       candidate.blocker = "tile '" + tile_var->name_hint_ + "' binds it without selecting a slot";
@@ -1346,6 +1358,15 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
                           std::to_string(candidate.count);
     } else if (type_str != candidate.slot_type_str) {
       candidate.blocker = "its slots hold differently shaped tiles, and ptoas slots are uniform";
+    } else if (!extents.has_value()) {
+      candidate.blocker = "tile '" + tile_var->name_hint_ +
+                          "' has a runtime valid shape, and a region declares one static extent for "
+                          "all its slots";
+    } else if (extents != candidate.extents) {
+      candidate.blocker =
+          "its slots declare different valid shapes (" + std::to_string(candidate.extents->first) + "x" +
+          std::to_string(candidate.extents->second) + " and " + std::to_string(extents->first) + "x" +
+          std::to_string(extents->second) + "), and a region declares one valid extent for all of them";
     } else if (!IsMultiBufferMemorySpace(tile_type->memory_space_)) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
@@ -1355,23 +1376,21 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
 
   for (const ir::Var* base : discovery_order) {
     Candidate& candidate = candidates.at(base);
-
-    // The slots share one valid extent, so it is emitted once on the region. Only
-    // a static extent can be: the region is declared in the function head, where a
-    // runtime `valid_row` SSA is not yet in scope.
-    MultiBufferRegion region;
-    if (candidate.blocker.empty() &&
-        !TryComputeStaticValidShape(candidate.slot_tile_type, &region.valid_row_ssa, &region.valid_col_ssa)) {
-      candidate.blocker = "its slots have a runtime valid shape, which a region cannot declare once";
-    }
     // Degrading to one alloc_tile per slot would silently undo the separation the
     // author declared — ptoas would be free to plan the slots on top of each
     // other. Say what is unsupported instead.
-    CHECK_SPAN(candidate.blocker.empty(), candidate.reference_tile->span_)
+    CHECK_SPAN(candidate.blocker.empty(), candidate.first_tile->span_)
         << "The declared allocation 'pl.MemRef(\"" << base->name_hint_ << "\", slots=" << candidate.count
         << ")' cannot be lowered to a ptoas multi-buffer region because " << candidate.blocker
         << ". Under memory_planner=PTOAS the slots have no other way to stay apart — adjust the "
            "declaration, or compile with the default PyPTO memory planner.";
+
+    // The valid extent is stated once on the region: pass 2 established that every
+    // slot agrees on it, and that it is static — the region is declared in the
+    // function head, where a runtime extent's SSA value is not yet in scope.
+    MultiBufferRegion region;
+    region.valid_row_ssa = GetOrEmitConstant(candidate.extents->first, DataType::INDEX);
+    region.valid_col_ssa = GetOrEmitConstant(candidate.extents->second, DataType::INDEX);
     region.count = candidate.count;
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);

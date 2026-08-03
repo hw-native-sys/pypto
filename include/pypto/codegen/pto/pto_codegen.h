@@ -815,19 +815,6 @@ class PTOCodegen : public CodegenBase {
   void PlanMultiBufferRegions(const ir::FunctionPtr& func);
 
   /**
-   * @brief The `valid_row` / `valid_col` operands for `tile_type`, as constants.
-   *
-   * The same source of truth as ComputeAllocTileFields (tile_view.valid_shape when
-   * populated, the physical shape otherwise), restricted to compile-time extents:
-   * the caller declares a buffer in the function head, where a runtime extent's
-   * SSA value is not yet in scope.
-   *
-   * @return false, leaving the outputs untouched, when any extent is dynamic
-   */
-  bool TryComputeStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type,
-                                  std::string* valid_row_ssa, std::string* valid_col_ssa);
-
-  /**
    * @brief The multi-buffer region `memref` takes a slot of, or null.
    */
   [[nodiscard]] const MultiBufferRegion* GetMultiBufferRegion(const ir::MemRefPtr& memref) const;

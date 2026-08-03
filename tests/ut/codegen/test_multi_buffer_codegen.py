@@ -37,6 +37,7 @@ SINGLE = pl.MemRef()
 TOO_MANY = pl.MemRef(slots=17)
 MIXED_SHAPES = pl.MemRef(slots=2)
 MIXED_BINDING = pl.MemRef(slots=2)
+MIXED_VALID = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -111,6 +112,31 @@ class MixedSlotShapes:
         small: pl.Tile[[32, 32], pl.FP32, MIXED_SHAPES[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
         r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
         return r_big, r_small
+
+
+@pl.program
+class MixedSlotValidShapes:
+    """Slots of one physical shape but different valid extents.
+
+    The tile_buf type string renders `v_row=?, v_col=?` by design, so these two
+    slots print identically — yet the region states one valid extent for both, and
+    the second slot would silently take the first's.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, MIXED_VALID[0], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [64, 64], valid_shape=[64, 64], target_memory=pl.MemorySpace.Vec
+        )
+        t1: pl.Tile[[64, 64], pl.FP32, MIXED_VALID[1], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [64, 64], valid_shape=[32, 64], target_memory=pl.MemorySpace.Vec
+        )
+        t2: pl.Tile[[64, 64], pl.FP32] = pl.add(t0, t1)
+        return pl.store(t2, [0, 0], output)
 
 
 @pl.program
@@ -287,9 +313,15 @@ class TestUnsupportedShapesAreLoud:
         [
             (TooManySlots, "17"),
             (MixedSlotShapes, "differently shaped tiles"),
+            (MixedSlotValidShapes, "different valid shapes"),
             (UnsubscriptedBinding, "without selecting a slot"),
         ],
-        ids=["slot-count-out-of-range", "non-uniform-slot-type", "unsubscripted-binding"],
+        ids=[
+            "slot-count-out-of-range",
+            "non-uniform-slot-type",
+            "non-uniform-valid-shape",
+            "unsubscripted-binding",
+        ],
     )
     def test_blocked_shape_names_itself(self, program, reason):
         with pytest.raises(ValueError, match=reason):
@@ -297,8 +329,13 @@ class TestUnsupportedShapesAreLoud:
 
     @pytest.mark.parametrize(
         "program",
-        [TooManySlots, MixedSlotShapes, UnsubscriptedBinding],
-        ids=["slot-count-out-of-range", "non-uniform-slot-type", "unsubscripted-binding"],
+        [TooManySlots, MixedSlotShapes, MixedSlotValidShapes, UnsubscriptedBinding],
+        ids=[
+            "slot-count-out-of-range",
+            "non-uniform-slot-type",
+            "non-uniform-valid-shape",
+            "unsubscripted-binding",
+        ],
     )
     def test_pypto_planner_accepts_them_all(self, program):
         """None of these are errors in themselves — only ptoas cannot describe them."""
@@ -317,8 +354,14 @@ class TestSlotGeometrySurvivesInitMemRef:
         assert all(mr.slot_index_ is not None for mr in slots), (
             "a resolved slot must still name the slot it selects"
         )
-        # ...and the offset is still resolved, as before.
-        assert {mr.byte_offset_.value for mr in slots} == {0, 64 * 64 * 4}
+        # ...and the offset is still resolved, as before. A constant slot index
+        # folds to a constant offset, which is what keeps the ordinary
+        # static-address path unchanged for it.
+        offsets = [mr.byte_offset_ for mr in slots]
+        assert all(isinstance(off, ir.ConstInt) for off in offsets), (
+            f"a constant slot index must fold to a constant offset, got {offsets}"
+        )
+        assert {off.value for off in offsets if isinstance(off, ir.ConstInt)} == {0, 64 * 64 * 4}
 
     def test_resolved_slot_round_trips_through_the_printer(self):
         """A post-InitMemRef dump reparses as the same slot, not a bare offset.
