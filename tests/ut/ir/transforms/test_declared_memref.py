@@ -1451,11 +1451,24 @@ class TestLoopCarryRoundtrip:
         parser then retypes the Call to match, so the roundtrip compared unequal.
         """
         after = passes.materialize_semantic_aliases()(_run_full_pipeline(self._carry_program(), "InitMemRef"))
-        loop = next(s for s in after.get_function("main").body.stmts if isinstance(s, ir.ForStmt))
-        add_stmt = next(s for s in loop.body.stmts if "add" in str(getattr(s, "value", "")))
+        main = after.get_function("main")
+        assert main is not None
+        assert isinstance(main.body, ir.SeqStmts)
+        loop = next(s for s in main.body.stmts if isinstance(s, ir.ForStmt))
+        assert isinstance(loop.body, ir.SeqStmts)
+        add_stmt = next(
+            s
+            for s in loop.body.stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.add").name
+        )
+        var_type, value_type = add_stmt.var.type, add_stmt.value.type
+        assert isinstance(var_type, ir.TileType)
+        assert isinstance(value_type, ir.TileType)
 
-        assert add_stmt.var.type.memory_space == ir.MemorySpace.DDR, "carry did not retarget to DDR"
-        assert add_stmt.value.type.memory_space == add_stmt.var.type.memory_space
+        assert var_type.memory_space == ir.MemorySpace.DDR, "carry did not retarget to DDR"
+        assert value_type.memory_space == var_type.memory_space
 
 
 if __name__ == "__main__":
