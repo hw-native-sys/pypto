@@ -68,6 +68,43 @@ class IfPhiPassThroughProgram:
         return pl.store(r, [0, 0], out)
 
 
+@pl.program
+class DynamicValidMatmulIfPhiProgram:
+    """A matmul if-phi whose logical M extent is computed in the function body.
+
+    PTO tile-phi handles must dominate both branches, so their ``alloc_tile`` is
+    emitted at the function head.  The body-local ``valid_rows`` SSA value does
+    not dominate that declaration; codegen must allocate the physical box at the
+    head and restore the logical valid shape immediately before the ``scf.if``.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        lhs: pl.Tensor[[16, 128], pl.BF16],
+        rhs: pl.Tensor[[128, 32], pl.BF16],
+        rows: pl.Scalar[pl.INDEX],
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        valid_rows = pl.min(rows, 16)
+        lhs_mat = pl.load(
+            lhs,
+            [0, 0],
+            [16, 128],
+            valid_shape=[valid_rows, 128],
+            target_memory=pl.MemorySpace.Mat,
+        )
+        rhs_mat = pl.load(rhs, [0, 0], [128, 32], target_memory=pl.MemorySpace.Mat)
+        lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+        rhs_right = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+        if flag == 0:
+            result = pl.matmul(lhs_left, rhs_right)
+        else:
+            result = pl.matmul(lhs_left, rhs_right)
+        return pl.store(result, [0, 0], out)
+
+
 def _ptoas_pto(program) -> str:
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
@@ -75,6 +112,18 @@ def _ptoas_pto(program) -> str:
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     return codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span), emit_tile_addr=False)
+
+
+def _planner_pto(program, planner: passes.MemoryPlanner) -> str:
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    func = next(f for f in optimized.functions.values() if f.name == "kernel")
+    return codegen.PTOCodegen().generate(
+        _ir.Program([func], "kernel", optimized.span),
+        emit_tile_addr=planner == passes.MemoryPlanner.PYPTO,
+    )
 
 
 def _sole_line(mlir: str, needle: str) -> str:
@@ -125,6 +174,33 @@ def test_if_phi_pass_through_branch_copies_into_phi_handle():
     # phi handle via tmov, so the post-if store never reads an uninitialised buffer.
     movs = [ln for ln in mlir.splitlines() if "pto.tmov" in ln and f"outs({phi}" in ln]
     assert len(movs) == 1, f"pass-through branch must tmov into the phi handle {phi}:\n{mlir}"
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_dynamic_valid_matmul_if_phi_restores_shape_at_lexical_site(planner):
+    """A body-local valid extent must not escape into the head alloc declaration."""
+    mlir = _planner_pto(DynamicValidMatmulIfPhiProgram, planner)
+    lines = mlir.splitlines()
+
+    store = next(ln for ln in lines if "pto.tstore" in ln)
+    phi = _first_group(r"pto\.tstore ins\((%[A-Za-z0-9_]+)", store)
+    alloc_index, alloc = next((i, ln) for i, ln in enumerate(lines) if f"{phi} = pto.alloc_tile" in ln)
+    set_index, set_shape = next(
+        (i, ln) for i, ln in enumerate(lines) if ln.strip().startswith(f"pto.set_validshape {phi},")
+    )
+    if_index = next(i for i, ln in enumerate(lines) if "scf.if" in ln)
+
+    # The head declaration uses the full 16x32 physical box, not the body-local
+    # valid_rows SSA value.  The latter is restored after its defining scalar op
+    # and before either branch writes the phi handle.
+    assert "valid_row = %c16_index" in alloc, f"phi head alloc must use physical M=16:\n{mlir}"
+    logical_row = _first_group(rf"pto\.set_validshape {re.escape(phi)}, (%[A-Za-z0-9_]+),", set_shape)
+    defining_indices = [i for i, ln in enumerate(lines) if ln.lstrip().startswith(f"{logical_row} =")]
+    assert len(defining_indices) == 1, f"expected one definition of {logical_row}:\n{mlir}"
+    assert alloc_index < defining_indices[0] < set_index < if_index, (
+        "the dynamic valid row must be defined before lexical shape restoration, "
+        f"while the physical phi alloc remains head-declared:\n{mlir}"
+    )
 
 
 @pl.program

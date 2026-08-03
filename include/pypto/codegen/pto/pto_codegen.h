@@ -737,11 +737,17 @@ class PTOCodegen : public CodegenBase {
    *
    * The result is always dynamic (`v_row=?, v_col=?`) and carries explicit
    * `valid_row` / `valid_col` operands lowered from `tile_type->tile_view_.valid_shape`
-   * when present, falling back to `tile_type->shape_` otherwise.
+   * when present, falling back to `tile_type->shape_` otherwise. Head-declared
+   * control-flow buffers may request the physical shape so their declaration
+   * does not reference a body-local valid-shape SSA value; codegen restores the
+   * logical valid shape at the control-flow site before the buffer is used.
    *
    * @param tile_type Tile type carrying shape/tile_view/memref metadata.
+   * @param use_physical_valid_shape Use `shape_`, ignoring an explicit logical
+   *        `tile_view_.valid_shape`, for the alloc operands.
    */
-  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type);
+  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type,
+                                         bool use_physical_valid_shape = false);
 
   /**
    * @brief The tile_buf handle already bound to the buffer `memref` denotes.

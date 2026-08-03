@@ -21,6 +21,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -243,6 +244,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<bool> returns_via_scf(op->return_vars_.size(), false);
     std::vector<std::string> scf_return_names;
     std::vector<std::string> scf_return_types;
+    std::vector<std::pair<std::string, AllocTileFields>> deferred_tile_valid_shapes;
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
@@ -255,10 +257,24 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
-        // Reuse the same alloc_tile rules as EmitAllocTileForVar so this
-        // deferred alloc emits a dynamic-validShape `pto.alloc_tile` with
-        // explicit valid_row / valid_col operands.
-        AllocTileFields fields = ComputeAllocTileFields(tile_type);
+        // A tile phi handle is declared in the function head so it dominates
+        // both branches and every post-if read. A dynamic valid_shape may be
+        // computed only in the surrounding loop/body, however, and therefore
+        // cannot be an operand of that head declaration. Declare such a handle
+        // with its physical box and restore the logical valid shape here,
+        // immediately before the if uses it.
+        AllocTileFields logical_fields = ComputeAllocTileFields(tile_type);
+        bool has_dynamic_valid_shape = false;
+        if (const auto& tile_view = tile_type->tile_view_; tile_view.has_value()) {
+          for (const auto& dim : tile_view->valid_shape) {
+            if (dim && !As<ir::ConstInt>(dim)) {
+              has_dynamic_valid_shape = true;
+              break;
+            }
+          }
+        }
+        AllocTileFields alloc_fields =
+            has_dynamic_valid_shape ? ComputeAllocTileFields(tile_type, true) : logical_fields;
         // Under PTOAS no `addr` is baked, so variables denoting the same buffer
         // must share ONE tile_buf handle — two addr-less allocs are two
         // independent buffers to ptoas PlanMemory. When the phi's MemRef is
@@ -273,16 +289,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already
           // emitted it before this region.
-          DeclareTileBufAtHead(ret_name, fields);
+          DeclareTileBufAtHead(ret_name, alloc_fields);
         } else {
-          ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
-                                     fields.valid_row_ssa, fields.valid_col_ssa);
+          ret_name = AllocNewTileBuf(alloc_fields.type_str, return_var->name_hint_, alloc_fields.addr_ssa,
+                                     alloc_fields.valid_row_ssa, alloc_fields.valid_col_ssa);
           // This head-declared handle is the phi buffer. Under PTOAS the branch
           // producers are re-bound to it (see emit_branch, fix #1956); mark it
           // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
           if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
         }
         BindVarToMlir(return_var, ret_name);
+        if (has_dynamic_valid_shape) {
+          deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));
+        }
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
         // Tensors and on-core arrays are mutable references mutated in place
         // (pl.assemble lowers to a tile store into the backing memref; arrays
@@ -300,6 +319,13 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
 
     CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
+
+    for (const auto& [tile_buf, fields] : deferred_tile_valid_shapes) {
+      INTERNAL_CHECK_SPAN(!fields.valid_row_ssa.empty() && !fields.valid_col_ssa.empty(), op->span_)
+          << "Internal error: dynamic IfStmt tile return_var requires both valid_shape operands";
+      Emit("pto.set_validshape " + tile_buf + ", " + fields.valid_row_ssa + ", " + fields.valid_col_ssa +
+           " : " + fields.type_str);
+    }
 
     if (!scf_return_names.empty()) {
       Emit(JoinCommaSep(scf_return_names) + " = scf.if " + condition + " -> (" +
