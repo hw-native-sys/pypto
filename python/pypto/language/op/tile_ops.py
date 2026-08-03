@@ -251,8 +251,8 @@ def alloc(
         memory_space: Target memory space (e.g. ``pl.Mem.Vec``)
         size: Allocation size in bytes
         pinned: True when the author declared this allocation via a
-            one-argument ``pl.MemRef(...)``. PyPTO memory planners then keep
-            its membership isolated from other allocations.
+            one-argument ``pl.MemRef(...)``. PyPTO memory planners then leave
+            its membership untouched instead of packing other tiles into it.
 
     Returns:
         Opaque ``PtrType`` sentinel (unused at runtime)

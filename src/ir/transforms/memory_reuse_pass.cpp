@@ -1866,19 +1866,43 @@ void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pin
   }
 }
 
-/// Collect allocation bases explicitly declared through one-argument
-/// `pl.MemRef(...)` annotations. InitMemRef hoists their alloc statements to
-/// the function body's top-level SeqStmts.
-std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
-                                             const std::string& consumer) {
+/// Collect the full byte extent of allocations explicitly declared through
+/// one-argument `pl.MemRef(...)` annotations.
+///
+/// InitMemRef hoists every alloc to the function body's top-level SeqStmts. A
+/// multi-slot declaration is larger than any one member MemRef, so DSA must
+/// take the extent from the alloc statement rather than reconstruct it from
+/// members.
+std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, const Span& span,
+                                                       const std::string& consumer) {
   auto top_level = As<SeqStmts>(body);
   INTERNAL_CHECK_SPAN(top_level, span)
       << consumer << " expects a top-level SeqStmts body (InitMemRef normalizes it), got "
       << (body ? body->TypeName() : "null");
 
-  std::set<const Var*> pinned_bases;
+  std::map<const Var*, uint64_t> pinned_allocations;
   for (const auto& stmt : top_level->stmts_) {
-    if (auto base = GetPinnedAllocBase(stmt)) pinned_bases.insert(base.get());
+    auto base = GetPinnedAllocBase(stmt);
+    if (!base) continue;
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    auto size = call && call->args_.size() >= 2 ? As<ConstInt>(call->args_[1]) : nullptr;
+    INTERNAL_CHECK_SPAN(size && size->value_ > 0, stmt->span_)
+        << consumer << " expected declared allocation '" << base->name_hint_
+        << "' to have a positive constant byte extent after InitMemRef";
+    pinned_allocations.emplace(base.get(), static_cast<uint64_t>(size->value_));
+  }
+  return pinned_allocations;
+}
+
+/// Collect the allocation bases declared by the author through `pl.MemRef`.
+std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
+                                             const std::string& consumer) {
+  const auto allocations = CollectPinnedAllocSizes(body, span, consumer);
+  std::set<const Var*> pinned_bases;
+  for (const auto& [base, size] : allocations) {
+    static_cast<void>(size);
+    pinned_bases.insert(base);
   }
   return pinned_bases;
 }
@@ -3208,8 +3232,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  const std::set<const Var*> pinned_bases =
-      CollectPinnedAllocBases(new_body, func->span_, "MemoryReuse");
+  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(new_body, func->span_, "MemoryReuse");
 
   ValidateDeclaredAllocs(new_body, pinned_bases, analysis_result.var_liveness);
 
@@ -3286,11 +3309,22 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 // is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
 AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   auto analysis = ComputeLifetimes(func->body_);
-  const std::set<const Var*> pinned_bases =
-      CollectPinnedAllocBases(func->body_, func->span_, "DSA");
+  const auto pinned_allocations = CollectPinnedAllocSizes(func->body_, func->span_, "DSA");
+  std::set<const Var*> pinned_bases;
+  for (const auto& [base, size] : pinned_allocations) {
+    static_cast<void>(size);
+    pinned_bases.insert(base);
+  }
   ValidateDeclaredAllocs(func->body_, pinned_bases, analysis.var_liveness);
   AllocationPlan plan;
   plan.intervals = std::move(analysis.lifetimes);
+  plan.declared_allocation_sizes = pinned_allocations;
+  for (LifetimeInterval& interval : plan.intervals) {
+    auto memref = GetTypeMemRef(interval.variable->GetType());
+    if (!memref.has_value() || !memref.value()) continue;
+    const auto declared = pinned_allocations.find(memref.value()->base_.get());
+    if (declared != pinned_allocations.end()) interval.size = std::max(interval.size, declared->second);
+  }
   const auto& intervals = plan.intervals;
 
   // The portable schema represents hard exclusions as explicit index pairs.
@@ -3318,11 +3352,11 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   }
   // A declared allocation is closed: only values explicitly bound to its base
   // may occupy it. DSA skips MemoryReuse, so encode that contract as hard
-  // generic separations from every other allocation in the same memory space.
+  // typed separations from every other allocation in the same memory space.
   for (size_t pinned : pinned_intervals) {
     for (size_t other = 0; other < intervals.size(); ++other) {
       if (other != pinned && intervals[other].memory_space == intervals[pinned].memory_space) {
-        add_separation(pinned, other, AllocationSeparationReason::Generic);
+        add_separation(pinned, other, AllocationSeparationReason::DeclaredAllocation);
       }
     }
   }

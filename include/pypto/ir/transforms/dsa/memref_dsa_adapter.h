@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -48,6 +49,7 @@ using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 struct ExportedProblem {
   ::dsa::StructuredProblemDocument document;
   std::unordered_map<const Var*, ::dsa::BufferId> buffer_id_by_base;
+  std::set<const Var*> declared_allocation_bases;
 };
 
 /**

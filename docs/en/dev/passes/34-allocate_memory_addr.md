@@ -210,8 +210,9 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
 1. Reuse the phi/loop-aware lifetime analysis from MemoryReuse without running
    its opportunistic coalescer.
 2. Export one buffer per mandatory `MemRef.base_` identity. The buffer size is
-   the largest member size, so differently sized values may occupy that identity
-   over its lifetime. The exported lifetime is the conservative allocation hull
+   the largest member size, except that an author-declared multi-slot allocation
+   retains its full declared extent. Differently sized values may occupy an
+   identity over its lifetime. The exported lifetime is the conservative allocation hull
    from the earliest member definition through the latest member use. Individual
    SSA-member gaps are not treated as physical dead time: loop carries, views,
    and in-place aliases can preserve a value across such a gap. Multi-interval
@@ -221,10 +222,11 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    with no later read receives one write event. Consequently, an input's final
    read may share an address with the result written by that statement.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
-   hard separation pairs for pipeline clones, backend hazards, and op-specific
-   no-alias rules. Every requested pipeline stage initially receives a distinct
-   residue, and every cross-stage member pair is hard-separated. Each
-   separation retains its typed source.
+   hard separation pairs for declared allocations, pipeline clones, backend
+   hazards, and op-specific no-alias rules. Every declared allocation is
+   separated from unrelated allocations in its memory space. Every requested
+   pipeline stage initially receives a distinct residue, and every cross-stage
+   member pair is hard-separated. Each separation retains its typed source.
 5. Retain normalized alias-class members and pipeline group/stage/residue data.
    This provenance does not change placement by itself.
 6. When explicitly enabled, recognize potential false physical dependencies.
@@ -312,6 +314,12 @@ function key.
 **View MemRefs (slices) share one slot**:
 
 MemRefs that share the same `base_` Ptr (a root allocation plus its `tile.slice` views) are co-located in a single slot sized by the largest member, since every view physically aliases its parent. Each member keeps its own relative offset within the slot: `new_addr = slot_base + member.byte_offset` (the relative offset InitMemRef computed). The root sits at `slot_base`; a view at row `k` sits at `slot_base + k * row_stride`. This matters for chains where a view's offset is not re-derived at codegen — e.g. a `tile.reshape` of a `tile.slice` does not emit `pto.subview`, so its `pto.alloc_tile addr` is read directly from this MemRef offset.
+
+Author-declared slots retain the declaration metadata during DSA writeback.
+Constant slot indices become constant addresses, while a runtime-selected slot
+keeps `slot_base + runtime_slot_offset` as an address expression. Ordinary
+dynamic view offsets are still re-derived by their PTO subview operation and
+therefore receive only the newly placed base here.
 
 Backends can override these defaults by supplying a custom `MemoryAllocatorPolicy` via `Backend::CreateMemoryAllocatorPolicy()`. See [Allocation Policy](#allocation-policy) below.
 

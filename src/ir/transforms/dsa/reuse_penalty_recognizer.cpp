@@ -217,6 +217,8 @@ RecognizedMemoryClass ClassifyMemory(MemorySpace space) {
     case MemorySpace::Right:
     case MemorySpace::Acc:
     case MemorySpace::Bias:
+    case MemorySpace::LeftScale:
+    case MemorySpace::RightScale:
       return RecognizedMemoryClass::L0;
     case MemorySpace::ScalarLocal:
       return RecognizedMemoryClass::Scalar;

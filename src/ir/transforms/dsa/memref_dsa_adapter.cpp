@@ -72,6 +72,10 @@ namespace {
       return ::dsa::SeparationReason::kTargetHazard;
     case AllocationSeparationReason::SemanticNoAlias:
       return ::dsa::SeparationReason::kSemanticNoAlias;
+    case AllocationSeparationReason::DeclaredAllocation:
+      // The standalone schema has no dedicated declared-allocation reason.
+      // It remains an ordinary hard separation to every solver.
+      return ::dsa::SeparationReason::kGeneric;
   }
   return ::dsa::SeparationReason::kGeneric;
 }
@@ -130,6 +134,10 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   INTERNAL_CHECK(func != nullptr) << "BuildStructuredProblem cannot analyze a null function";
 
   ExportedProblem exported;
+  for (const auto& [base, size] : allocation_plan.declared_allocation_sizes) {
+    static_cast<void>(size);
+    exported.declared_allocation_bases.insert(base);
+  }
   exported.document.profile = ::dsa::BenchmarkProfile::kPyptoHardV1;
   exported.document.instance = func->name_;
   exported.document.metadata = {
@@ -520,34 +528,36 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
     INTERNAL_CHECK_SPAN(placement->pool == ToPoolId(memory_space), old_memref->span_)
         << "DSA writeback changed fixed memory pool for buffer " << buffer->second;
 
-    int64_t relative_offset = 0;
-    if (const auto relative = As<ConstInt>(old_memref->byte_offset_)) relative_offset = relative->value_;
-    INTERNAL_CHECK_SPAN(relative_offset >= 0, old_memref->span_)
-        << "DSA writeback encountered a negative relative MemRef offset";
-    const uint64_t relative = static_cast<uint64_t>(relative_offset);
-    INTERNAL_CHECK_SPAN(
-        placement->offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - relative,
-        old_memref->span_)
-        << "DSA writeback address exceeds PyPTO's signed INT64 address representation";
+    ExprPtr address;
+    if (const auto relative = As<ConstInt>(old_memref->byte_offset_)) {
+      INTERNAL_CHECK_SPAN(relative->value_ >= 0, old_memref->span_)
+          << "DSA writeback encountered a negative relative MemRef offset";
+      const uint64_t relative_value = static_cast<uint64_t>(relative->value_);
+      INTERNAL_CHECK_SPAN(
+          placement->offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - relative_value,
+          old_memref->span_)
+          << "DSA writeback address exceeds PyPTO's signed INT64 address representation";
+      address = std::make_shared<ConstInt>(static_cast<int64_t>(placement->offset + relative_value),
+                                           DataType::INT64, Span::unknown());
+    } else if (exported.declared_allocation_bases.count(old_memref->base_.get()) != 0) {
+      INTERNAL_CHECK_SPAN(placement->offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                          old_memref->span_)
+          << "DSA writeback address exceeds PyPTO's signed INT64 address representation";
+      auto base = std::make_shared<ConstInt>(static_cast<int64_t>(placement->offset), DataType::INDEX,
+                                             Span::unknown());
+      address = std::make_shared<Add>(base, old_memref->byte_offset_, DataType::INDEX, Span::unknown());
+    } else {
+      // Ordinary dynamic view offsets are re-derived by their PTO subview op;
+      // only declared runtime slots carry their expression into alloc_tile.
+      address = std::make_shared<ConstInt>(static_cast<int64_t>(placement->offset), DataType::INT64,
+                                           Span::unknown());
+    }
 
-    auto address = std::make_shared<ConstInt>(static_cast<int64_t>(placement->offset + relative),
-                                              DataType::INT64, Span::unknown());
     auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, std::move(address),
-                                               old_memref->size_, old_memref->span_);
+                                               old_memref->size_, old_memref->span_, old_memref->is_pinned_,
+                                               old_memref->slot_count_, old_memref->slot_index_);
     replacements.emplace_back(old_memref.get(), std::move(new_memref));
   }
-
-  std::sort(replacements.begin(), replacements.end(),
-            [](const std::pair<const MemRef*, MemRefPtr>& first,
-               const std::pair<const MemRef*, MemRefPtr>& second) {
-              const auto first_offset = As<ConstInt>(first.second->byte_offset_);
-              const auto second_offset = As<ConstInt>(second.second->byte_offset_);
-              INTERNAL_CHECK(first_offset != nullptr && second_offset != nullptr)
-                  << "DSA writeback produced a non-constant address";
-              return first_offset->value_ != second_offset->value_
-                         ? first_offset->value_ < second_offset->value_
-                         : first.second->name_hint_ < second.second->name_hint_;
-            });
   return replacements;
 }
 

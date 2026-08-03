@@ -137,8 +137,10 @@ instead of once per pair.) Concretely:
 
 `MemoryPlanner.DSA` skips this pass, but preserves the same contract when it
 constructs the solver problem: every declared allocation receives hard
-separations from unrelated allocations in its memory space. Pipeline-intent
-relaxation never removes those separations.
+separations from unrelated allocations in its memory space. A multi-slot
+declaration is represented by one buffer covering its full declared extent,
+not merely the size of one member slot. Pipeline-intent relaxation never
+removes those separations.
 
 The cost is the author's to manage: pinning trades capacity for parallelism, and an
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
