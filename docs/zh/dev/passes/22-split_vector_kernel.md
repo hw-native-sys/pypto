@@ -107,13 +107,19 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
 
 lane 1 重放将其 tile `valid_shape` 置零以不产生可见写入，但其保留的 AIC↔AIV `tpush`
 仍通过共享 GM FIFO 槽移动数据，由单一 cube 消费者整列弹出。在 codegen 侧
-（`EmitSplitTpushTransportValidShape`，`pto_ops_common.cpp`），用 `set_validshape`
+（`EmitTpushTransportValidShape`，`pto_ops_crosscore.cpp`），用 `set_validshape`
 收窄了 `valid_shape` 的无拆分双 AIV 生产者必须传输**整列 box**，否则消费者会读到
 `valid_col` 之后的陈旧槽列。无拆分路径**仅加宽列并保留行 `valid_shape`**：subblock 0
 的真实推送携带整列 box，而 subblock 1 的 `valid_shape=[0, 0]` 重放**完全不传输**
 （静态 0 行推送不移动数据），因此它保持真正的 0 行无操作，而非把垃圾行赛入 subblock 0
 的槽。检测开关是 `PTOCodegen::IsDualAivDispatchFunction()`，读取本 pass 的
 `dual_aiv_dispatch` 属性。
+
+普通无拆分 `Acc -> Vec` 推送也有相关的 C2V 传输要求。当累加器带有部分逻辑
+`valid_shape` 时，codegen 会在 `tpush` 前将两个维度临时加宽到物理 NZ box，并在推送后
+恢复逻辑形状。这样可避免不完整的 FIFO 槽让 vector 消费者保留陈旧数据，同时保证
+`tpop` 及下游操作仍使用部分逻辑形状。完整形状的累加器和无拆分 `Vec -> Mat` 推送不受
+影响。
 
 ## 示例
 

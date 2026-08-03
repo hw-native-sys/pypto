@@ -122,7 +122,7 @@ AIV, and `attrs["dual_aiv_dispatch"]` is true.
 The lane-1 replay zeroes its tile `valid_shape` so it produces no visible
 writes, but the AIC↔AIV `tpush` it keeps still moves data through the shared GM
 FIFO slot the single cube consumer pops in full. On the codegen side
-(`EmitSplitTpushTransportValidShape`, `pto_ops_common.cpp`) a no-split dual-AIV
+(`EmitTpushTransportValidShape`, `pto_ops_crosscore.cpp`) a no-split dual-AIV
 producer that narrowed its `valid_shape` with `set_validshape` must transport
 the **full column box**, or the consumer reads stale slot columns past
 `valid_col`. The no-split path widens **columns only and preserves the row
@@ -132,6 +132,14 @@ statically 0-row push moves no data), so it stays a true 0-row no-op rather than
 racing garbage rows into subblock 0's slot. The detection lever is
 `PTOCodegen::IsDualAivDispatchFunction()`, which reads this pass's
 `dual_aiv_dispatch` attribute.
+
+Plain no-split `Acc -> Vec` pushes have a related C2V transport requirement.
+When the accumulator has a partial logical `valid_shape`, codegen temporarily
+widens both dimensions to the physical NZ box for `tpush`, then restores the
+logical shape. This prevents an incomplete FIFO slot from leaving stale data in
+the vector consumer while preserving the partial shape on `tpop` and downstream
+operations. Full-shape accumulators and no-split `Vec -> Mat` pushes are
+unchanged.
 
 ## Examples
 

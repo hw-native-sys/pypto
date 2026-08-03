@@ -706,7 +706,7 @@ class TestCrossCoreTpushTpopCodegen:
         to the box shape; consumer-side localisation through
         LocalizeValidDimForSplit clamps the logical valid_shape back to
         the truthful per-subblock extent. See
-        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        src/backend/common/pto_ops_crosscore.cpp::EmitTpushTransportValidShape.
         """
         transport_valid_shape = ", %c16_index, %c16_index :"
         span = ir.Span.unknown()
@@ -819,6 +819,95 @@ class TestCrossCoreTpushTpopCodegen:
             f"Expected tpush to use the aliased source tile, got:\n{tpush_line}"
         )
 
+    @pytest.mark.parametrize(
+        ("backend_type", "normalize_transport"),
+        [(BackendType.Ascend910B, True), (BackendType.Ascend950, False)],
+        ids=["a2a3-full-box", "a5-logical-shape"],
+    )
+    def test_no_split_partial_acc_tpush_transport_by_backend(self, backend_type, normalize_transport):
+        """A2/A3 no-split Acc-to-Vec transport must carry the full physical box.
+
+        A partial accumulator result still occupies a full NZ box. Sending only
+        its logical valid columns leaves the C2V FIFO slot incomplete, so the
+        vector consumer can observe its previous local-buffer contents instead
+        of the matmul result. The transport temporarily widens the tile to its
+        physical shape and restores the logical valid shape after the push. A5
+        uses a different transport and keeps the logical shape unchanged.
+        """
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        rows = ir.ConstInt(16, pl.INDEX, span)
+        cols = ir.ConstInt(32, pl.INDEX, span)
+        valid_cols = ir.ConstInt(24, pl.INDEX, span)
+        source = ir.Var("source", ir.TensorType([16, 32], pl.FP32), span)
+
+        memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), 16 * 32 * 4, 0)
+        tile_view = ir.TileView(
+            valid_shape=[rows, valid_cols],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        tile_type = ir.TileType([rows, cols], pl.FP32, memref, tile_view, ir.MemorySpace.Acc)
+        partial_acc = ir.Var("partial_acc", tile_type, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shape = ir.MakeTuple([rows, cols], span)
+        valid_shape = ir.MakeTuple([rows, valid_cols], span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    partial_acc,
+                    ir.Call(
+                        ir.Op("tile.load"),
+                        [source, offsets, shape, valid_shape],
+                        {"target_memory": ir.MemorySpace.Acc},
+                        tile_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.EvalStmt(
+                    ir.Call(
+                        ir.Op("tile.tpush_to_aiv"),
+                        [partial_acc],
+                        {"split": 0},
+                        ir.UnknownType(),
+                        span,
+                    ),
+                    span,
+                ),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "partial_acc_push",
+            [(source, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIC,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "partial_acc_push_program", span))
+        lines = [line.strip() for line in mlir_code.splitlines()]
+        set_validshape_lines = [line for line in lines if "pto.set_validshape" in line]
+        tpush_index = next(i for i, line in enumerate(lines) if "pto.tpush_to_aiv" in line)
+
+        if not normalize_transport:
+            assert set_validshape_lines == []
+            return
+
+        assert len(set_validshape_lines) == 2, (
+            "Expected full-box transport normalization and logical restore, got:\n"
+            + "\n".join(set_validshape_lines)
+        )
+        assert ", %c16_index, %c32_index :" in set_validshape_lines[0]
+        assert ", %c16_index, %c24_index :" in set_validshape_lines[1]
+        assert lines.index(set_validshape_lines[0]) < tpush_index < lines.index(set_validshape_lines[1])
+
     def test_no_split_dual_aiv_tpush_widens_cols_preserves_rows(self):
         """No-split dual-AIV tpush widens COLUMNS to the box but PRESERVES rows.
 
@@ -834,7 +923,7 @@ class TestCrossCoreTpushTpopCodegen:
         stays a true 0-row no-op instead of racing garbage rows into subblock
         0's slot. Genuine split==1/2 paths widen both axes; plain split==0
         without ``dual_aiv_dispatch`` emits no transport at all. See
-        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        src/backend/common/pto_ops_crosscore.cpp::EmitTpushTransportValidShape.
         """
         span = ir.Span.unknown()
         memory_space = ir.MemorySpace.Vec
@@ -958,10 +1047,10 @@ class TestCrossCoreTpushTpopCodegen:
         (0, 0). A col-widening transport for a 0-row push moves no data yet
         (on 910B) perturbs the shared-slot dual-AIV merge -- emitting one
         regressed the cross_core_v2c_nosplit golden. So when the producer's
-        transport rows are statically 0, EmitSplitTpushTransportValidShape
+        transport rows are statically 0, EmitTpushTransportValidShape
         skips the transport entirely; only the real, non-zero-row subblock-0
         push gets it. See
-        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        src/backend/common/pto_ops_crosscore.cpp::EmitTpushTransportValidShape.
         """
         span = ir.Span.unknown()
         memory_space = ir.MemorySpace.Vec
