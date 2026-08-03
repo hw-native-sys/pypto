@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
@@ -31,6 +32,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -69,7 +71,8 @@ dsa::Interval ConvertLifetime(const LifetimeInterval& lifetime) {
 PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allocation_plan,
                              const MemoryAllocatorPolicy& policy,
                              const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
-                             const std::unordered_map<MemorySpace, uint64_t>& pool_caps) {
+                             const std::unordered_map<MemorySpace, uint64_t>& pool_caps,
+                             const backend::Backend* backend) {
   INTERNAL_CHECK(func != nullptr) << "DSA-RP cannot analyze a null function";
 
   PreparedProblem prepared;
@@ -159,7 +162,10 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
   }
 
   std::map<BufferPair, uint64_t> penalty_weights;
-  for (const RecognizedReusePenalty& penalty : RecognizeReusePenalties(func, allocation_plan)) {
+  const std::vector<RecognizedReusePenalty> recognized =
+      backend != nullptr ? RecognizeReusePenalties(func, allocation_plan, *backend)
+                         : std::vector<RecognizedReusePenalty>{};
+  for (const RecognizedReusePenalty& penalty : recognized) {
     INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
                    penalty.second_interval < buffer_by_interval.size())
         << "DSA-RP recognizer returned an out-of-range interval";

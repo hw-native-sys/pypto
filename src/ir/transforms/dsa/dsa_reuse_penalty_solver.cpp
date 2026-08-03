@@ -30,6 +30,11 @@ namespace ir {
 namespace dsa {
 namespace {
 
+// The explicit DSA-RP input can contain Theta(B^2) lifetime conflicts and
+// penalty relations for B buffers. BuildSearchSpace materializes that graph in
+// O(B^2 + E) time; this is an output-sensitive exception used only by the
+// opt-in DSA-RP planner, not an implicit nested scan over arbitrary IR nodes.
+
 using NodePair = std::pair<size_t, size_t>;
 
 struct SearchNode {

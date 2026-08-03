@@ -30,7 +30,7 @@ enum PipeType : int {
   M,     ///< Matrix Unit
   V,     ///< Vector Unit
   S,     ///< Scalar Unit
-  FIX,   ///< Fix Pipe (L0C -> UB)
+  FIX,   ///< Fix Pipe (L0C writeback)
   ALL    ///< All Pipes
 };
 

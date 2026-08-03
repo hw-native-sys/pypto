@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
@@ -62,32 +63,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-/**
- * @brief Result of lifetime computation
- */
-struct LifetimeAnalysisResult {
-  std::vector<LifetimeInterval> lifetimes;
-  std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
-  // var -> per-(scf.if, slot) phi family ids (see LifetimeAnalyzer).
-  std::map<const Var*, std::set<int>> phi_family_ids;
-  // var -> its individual [def, last_use] interval (with phi/loop extension), for
-  // the precise per-var pairwise interference check in the reuse packer.
-  std::map<const Var*, std::pair<int, int>> var_liveness;
-  /// Pipeline-stage membership per reuse-interval representative
-  /// (``LifetimeInterval::variable``), read from the defining ``Call``'s
-  /// ``pipeline_membership`` attr, parsed once into ``(group, stage)`` pairs so
-  /// the O(N²) reuse packer never re-parses strings. Empty for non-pipelined
-  /// tiles. Consumed by ``IdentifyReuseOpportunities`` to forbid cross-stage
-  /// buffer coalescing.
-  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
-  /// Subset of ``pipeline_membership`` keys whose tile is produced by a *load*
-  /// (``tile.load`` / ``tile.read``) rather than a compute op. Cross-stage reuse
-  /// is forbidden whenever *either* tile is a load (a load buffer must stay
-  /// private for ping-pong); compute↔compute cross-stage reuse is allowed so the
-  /// bulk of intermediates can still coalesce and fit the on-chip budget.
-  std::set<const Var*> pipeline_load_tiles;
-};
 
 /**
  * @brief Collect all Var nodes referenced in an expression.
@@ -1308,7 +1283,7 @@ class LifetimeAnalyzer : public IRVisitor {
  * Walks ALL statements
  * including those inside nested control flow (IfStmt/ForStmt/WhileStmt bodies).
  */
-LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
+LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body) {
   std::vector<LifetimeInterval> lifetimes;
 
   // Step 1: Walk full IR tree to collect variable defs, uses, and ordering
@@ -1515,10 +1490,7 @@ static bool IsLegalTileViewOp(const OpPtr& op) {
          IsOp(op, "tile.reinterpret_view") || IsOp(op, "tensor.slice");
 }
 
-struct HazardInputs {
-  std::unordered_set<const Var*> load_derived;  ///< tile.load outputs + view descendants
-  std::unordered_set<const Var*> reads_tpop;    ///< vars whose def consumes a tpop_from_aic value
-};
+using HazardInputs = AllocationHazardInputs;
 
 class HazardInputCollector : public IRVisitor {
  public:
@@ -1588,7 +1560,7 @@ class HazardInputCollector : public IRVisitor {
 // the output from sharing a buffer with.  Enforcement resolves each operand to
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
-using ForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
+using ForbidAliasMap = AllocationForbidAliasMap;
 
 // Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
 // has no MemRef yet).  View ops share their source's base, so a view and its
@@ -1871,18 +1843,6 @@ std::map<const Var*, uint64_t> CollectPinnedAllocSizes(const StmtPtr& body, cons
     pinned_allocations.emplace(base.get(), static_cast<uint64_t>(size->value_));
   }
   return pinned_allocations;
-}
-
-/// Collect the allocation bases declared by the author through `pl.MemRef`.
-std::set<const Var*> CollectPinnedAllocBases(const StmtPtr& body, const Span& span,
-                                             const std::string& consumer) {
-  const auto allocations = CollectPinnedAllocSizes(body, span, consumer);
-  std::set<const Var*> pinned_bases;
-  for (const auto& [base, size] : allocations) {
-    static_cast<void>(size);
-    pinned_bases.insert(base);
-  }
-  return pinned_bases;
 }
 
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
@@ -3158,7 +3118,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   StmtPtr new_body = func->body_;
 
   // Step 1: Compute lifetimes by walking full IR tree
-  auto analysis_result = ComputeLifetimes(new_body);
+  auto analysis_result = AnalyzeAllocationLifetimes(new_body);
 
   if (analysis_result.lifetimes.empty()) {
     LOG_DEBUG << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
@@ -3170,19 +3130,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
-  const bool needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
-  HazardInputs hazard;
-  if (needs_load_tpop_hazard_guard) {
-    HazardInputCollector collector;
-    collector.VisitStmt(new_body);
-    hazard = collector.Take();
-  }
-
-  // Per-operand no-alias map (e.g. tile.sel's mask/tmp must not share the
-  // output's buffer). Op-semantic, not backend-gated, so always collected.
-  ForbidAliasCollector forbid_collector(analysis_result.var_sharing_groups);
-  forbid_collector.VisitStmt(new_body);
-  ForbidAliasMap forbid_alias = forbid_collector.Take();
+  const AllocationConstraintAnalysis constraint_analysis =
+      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+  const HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
+  const ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
   // Per-space reserved end (the SpaceFootprint reserved_start for the exact fit check). Only meaningful
   // with a configured backend; empty otherwise ⇒ reserved_start defaults to 0.
@@ -3202,9 +3153,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(new_body, func->span_, "MemoryReuse");
-
-  ValidateDeclaredAllocs(new_body, pinned_bases, analysis_result.var_liveness);
+  const std::set<const Var*>& pinned_bases = constraint_analysis.declared_allocation_bases;
 
   std::vector<Diagnostic> hints;
   auto reuse_map = IdentifyReuseOpportunities(
@@ -3269,207 +3218,38 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
 }  // namespace
 
-AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
-  auto analysis = ComputeLifetimes(func->body_);
-  const auto pinned_allocations = CollectPinnedAllocSizes(func->body_, func->span_, "DSA-RP");
-  std::set<const Var*> pinned_bases;
-  for (const auto& [base, size] : pinned_allocations) {
+AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
+                                                          const LifetimeAnalysisResult& lifetimes,
+                                                          const char* consumer) {
+  AllocationConstraintAnalysis result;
+  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
+  for (const auto& [base, size] : result.declared_allocation_sizes) {
     static_cast<void>(size);
-    pinned_bases.insert(base);
+    result.declared_allocation_bases.insert(base);
   }
-  ValidateDeclaredAllocs(func->body_, pinned_bases, analysis.var_liveness);
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
 
-  AllocationPlan plan;
-  plan.intervals = std::move(analysis.lifetimes);
-  plan.declared_allocation_sizes = pinned_allocations;
-  // DSA places the physical allocation identity, whose extent must cover every
-  // mandatory alias/view in the sharing group. Keep this correction local to
-  // DSA-RP so the legacy MemoryReuse heuristic retains its established sizing.
-  for (LifetimeInterval& interval : plan.intervals) {
-    uint64_t allocation_size = interval.size;
-    const auto sharing = analysis.var_sharing_groups.find(interval.variable);
-    if (sharing != analysis.var_sharing_groups.end()) {
-      for (const VarPtr& member : sharing->second) {
-        const auto tile_type = As<TileType>(member->GetType());
-        INTERNAL_CHECK_SPAN(tile_type != nullptr && tile_type->memref_.has_value(), member->span_)
-            << "Expected every allocation sharing-group member to carry a MemRef";
-        allocation_size = std::max(allocation_size, GetDefinedMemRef(tile_type)->size_);
-      }
-    }
-    const auto representative_memref = GetTypeMemRef(interval.variable->GetType());
-    if (representative_memref.has_value() && representative_memref.value()) {
-      const auto declared = pinned_allocations.find(representative_memref.value()->base_.get());
-      if (declared != pinned_allocations.end()) allocation_size = std::max(allocation_size, declared->second);
-    }
-    interval.size = allocation_size;
-  }
-  const auto& intervals = plan.intervals;
-
-  // Pair-producing analyses below are indexed by pipeline group, statement
-  // point, or MemRef base. Their cost is O(N log N + E log E), where E is the
-  // number of hard relations materialized in the DSA problem.
-  std::map<std::pair<size_t, size_t>, std::set<AllocationSeparationReason>> separation_reasons;
-  auto add_separation = [&separation_reasons](size_t first, size_t second,
-                                              AllocationSeparationReason reason) {
-    if (first == second) return;
-    if (second < first) std::swap(first, second);
-    separation_reasons[{first, second}].insert(reason);
-  };
-
-  std::unordered_map<const Var*, size_t> base_to_index;
-  std::vector<size_t> pinned_intervals;
-  for (size_t index = 0; index < intervals.size(); ++index) {
-    auto memref = GetTypeMemRef(intervals[index].variable->GetType());
-    if (memref.has_value() && memref.value()) {
-      base_to_index[memref.value()->base_.get()] = index;
-      if (pinned_bases.count(memref.value()->base_.get()) != 0) {
-        pinned_intervals.push_back(index);
-      }
+  for (const LifetimeInterval& interval : lifetimes.lifetimes) {
+    if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
+      result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
     }
   }
-  // A declared allocation is closed: it may contain only the values the
-  // author explicitly bound to its base. DSA-RP skips MemoryReuse, so encode
-  // that same isolation contract directly as hard separations from every
-  // other allocation identity in the memory space. Members explicitly bound
-  // to one base already form one interval and were validated for co-liveness
-  // above. The nested scan is output-sensitive O(N + E): this explicit-pair
-  // model must materialize every emitted declared-allocation relation.
-  for (size_t pinned : pinned_intervals) {
-    for (size_t other = 0; other < intervals.size(); ++other) {
-      if (other != pinned && intervals[other].memory_space == intervals[pinned].memory_space) {
-        add_separation(pinned, other, AllocationSeparationReason::DeclaredAllocation);
-      }
-    }
-  }
-  // Vec ND and NZ layouts cannot occupy the same physical bytes even when
-  // their ordinary lifetimes are disjoint: the resulting in-place layout adapt
-  // silently mis-transfers on A5. Emit the same correctness relation enforced
-  // by legacy MemoryReuse as an unrelaxable DSA hard separation.
-  //
-  // Enumerate only lifetime-compatible cross-class pairs. Each directional
-  // sweep sorts one class by end and the other by start, then performs work
-  // only for relations it emits: O(N log N + E), where E is the number of
-  // StorageLayout separations.
-  std::vector<size_t> vec_nd_intervals;
-  std::vector<size_t> vec_nz_intervals;
-  for (size_t index = 0; index < intervals.size(); ++index) {
-    const auto layout_class = GetVecNzLayoutClass(intervals[index].variable);
-    if (!layout_class.has_value()) continue;
-    (*layout_class ? vec_nz_intervals : vec_nd_intervals).push_back(index);
-  }
-  auto add_disjoint_layout_pairs = [&intervals, &add_separation](std::vector<size_t> earlier,
-                                                                 std::vector<size_t> later) {
-    std::sort(earlier.begin(), earlier.end(), [&intervals](size_t lhs, size_t rhs) {
-      const auto lhs_key = std::pair{intervals[lhs].last_use_point, lhs};
-      const auto rhs_key = std::pair{intervals[rhs].last_use_point, rhs};
-      return lhs_key < rhs_key;
-    });
-    std::sort(later.begin(), later.end(), [&intervals](size_t lhs, size_t rhs) {
-      const auto lhs_key = std::pair{intervals[lhs].def_point, lhs};
-      const auto rhs_key = std::pair{intervals[rhs].def_point, rhs};
-      return lhs_key < rhs_key;
-    });
 
-    size_t eligible = 0;
-    for (size_t later_index : later) {
-      while (eligible < earlier.size() &&
-             intervals[earlier[eligible]].last_use_point <= intervals[later_index].def_point) {
-        ++eligible;
-      }
-      for (size_t prior = 0; prior < eligible; ++prior) {
-        add_separation(earlier[prior], later_index, AllocationSeparationReason::StorageLayout);
-      }
-    }
-  };
-  add_disjoint_layout_pairs(vec_nd_intervals, vec_nz_intervals);
-  add_disjoint_layout_pairs(vec_nz_intervals, vec_nd_intervals);
-
-  const bool needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
-  HazardInputs hazard;
-  if (needs_load_tpop_hazard_guard) {
+  result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
+  if (result.needs_load_tpop_hazard_guard) {
     HazardInputCollector collector;
     collector.VisitStmt(func->body_);
-    hazard = collector.Take();
+    result.target_hazard_inputs = collector.Take();
   }
-  ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
+
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);
-  const ForbidAliasMap forbid_alias = forbid_collector.Take();
+  result.forbid_alias = forbid_collector.Take();
+  return result;
+}
 
-  // Preserve the requested software-pipeline depth as hard separations first.
-  // The DSA-RP driver alone may later relax these typed relations under
-  // capacity pressure.
-  using GroupKey = std::pair<MemorySpace, int32_t>;
-  std::map<GroupKey, std::map<int32_t, std::vector<size_t>>> group_members;
-  for (size_t index = 0; index < intervals.size(); ++index) {
-    const LifetimeInterval& interval = intervals[index];
-    const auto membership = analysis.pipeline_membership.find(interval.variable.get());
-    if (membership == analysis.pipeline_membership.end()) continue;
-    for (const auto& [group, stage] : membership->second) {
-      const GroupKey key{interval.memory_space, group};
-      group_members[key][stage].push_back(index);
-    }
-  }
-  for (const auto& group_entry : group_members) {
-    const auto& members_by_stage = group_entry.second;
-    for (auto first_bucket = members_by_stage.begin(); first_bucket != members_by_stage.end();
-         ++first_bucket) {
-      auto second_bucket = std::next(first_bucket);
-      for (; second_bucket != members_by_stage.end(); ++second_bucket) {
-        for (size_t first : first_bucket->second) {
-          for (size_t second : second_bucket->second) {
-            add_separation(first, second, AllocationSeparationReason::PipelineStage);
-          }
-        }
-      }
-    }
-  }
-
-  // Backend-specific split-AIV load + tpop hazard. The indices are bucketed by
-  // the one statement point at which the illegal in-place touch can occur.
-  if (needs_load_tpop_hazard_guard) {
-    std::map<int, std::vector<size_t>> writers_by_def;
-    std::map<int, std::vector<size_t>> inputs_by_last_use;
-    for (size_t index = 0; index < intervals.size(); ++index) {
-      const LifetimeInterval& interval = intervals[index];
-      if (hazard.reads_tpop.count(interval.variable.get()) != 0) {
-        writers_by_def[interval.def_point].push_back(index);
-      }
-      if (hazard.load_derived.count(interval.variable.get()) != 0) {
-        inputs_by_last_use[interval.last_use_point].push_back(index);
-      }
-    }
-    for (const auto& [point, writers] : writers_by_def) {
-      const auto inputs = inputs_by_last_use.find(point);
-      if (inputs == inputs_by_last_use.end()) continue;
-      for (size_t writer : writers) {
-        for (size_t input : inputs->second) {
-          add_separation(writer, input, AllocationSeparationReason::TargetHazard);
-        }
-      }
-    }
-  }
-
-  // Op-semantic no-alias constraints resolve operands through allocation-base
-  // identity. No opportunistic reuse chain exists before DSA-RP runs.
-  for (size_t index = 0; index < intervals.size(); ++index) {
-    const auto forbidden = forbid_alias.find(intervals[index].variable.get());
-    if (forbidden == forbid_alias.end()) continue;
-    for (const VarPtr& operand : forbidden->second) {
-      auto memref = GetTypeMemRef(operand->GetType());
-      if (!memref.has_value() || !memref.value()) continue;
-      const auto found = base_to_index.find(memref.value()->base_.get());
-      if (found != base_to_index.end()) {
-        add_separation(index, found->second, AllocationSeparationReason::SemanticNoAlias);
-      }
-    }
-  }
-
-  plan.separations.reserve(separation_reasons.size());
-  for (const auto& [indices, reasons] : separation_reasons) {
-    plan.separations.push_back({indices.first, indices.second,
-                                std::vector<AllocationSeparationReason>(reasons.begin(), reasons.end())});
-  }
-  return plan;
+LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
+  return AnalyzeAllocationLifetimesImpl(func_body);
 }
 
 namespace pass {

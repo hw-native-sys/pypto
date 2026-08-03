@@ -42,14 +42,15 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
 #include "pypto/ir/transforms/dsa/memref_dsa_adapter.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
-#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
@@ -497,12 +498,13 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
     const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs) {
-  const AllocationPlan allocation_plan = ComputeAllocationPlan(func);
+  const dsa_adapter::AllocationPlan allocation_plan = dsa_adapter::BuildDsaAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
   std::unordered_map<MemorySpace, uint64_t> pool_caps;
-  if (backend::BackendConfig::IsConfigured()) {
-    const backend::Backend* active_backend = backend::GetBackend();
+  const backend::Backend* active_backend =
+      backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+  if (active_backend != nullptr) {
     for (const LifetimeInterval& lifetime : allocation_plan.intervals) {
       if (pool_caps.count(lifetime.memory_space) != 0) continue;
       const uint64_t capacity = active_backend->GetMemSize(lifetime.memory_space);
@@ -510,8 +512,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
     }
   }
 
-  const dsa_adapter::PreparedProblem prepared =
-      dsa_adapter::BuildProblem(func, allocation_plan, policy, reserved_end_by_space, pool_caps);
+  const dsa_adapter::PreparedProblem prepared = dsa_adapter::BuildProblem(
+      func, allocation_plan, policy, reserved_end_by_space, pool_caps, active_backend);
   if (prepared.strict_problem.buffers.empty()) return {};
 
   const dsa::CanonicalGreedySolver solver;
@@ -593,8 +595,8 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
     // (a runtime slot index).
     PinnedAllocCollector pinned_collector;
     pinned_collector.VisitStmt(func->body_);
-    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy,
-                                           pinned_collector.alloc_sizes, func->name_);
+    memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes,
+                                           func->name_);
   }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {

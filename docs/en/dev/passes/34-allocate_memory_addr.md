@@ -87,15 +87,25 @@ and a conservative half-open lifetime. The problem has:
   A multi-slot declaration is placed as one buffer covering its full declared
   extent, while each member retains its constant or runtime-selected slot offset;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
-  built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
+  built-in recognizer identifies as a cross-pipe WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
   lower reuse cost.
 
 Recognition is conservative. It requires complete access information,
-full-allocation handoff endpoints, and a verified initial write. Same-resource,
-partial-view, or uncertain cases receive no penalty. Source/destination memory
-classes identify abstract execution resources; the recognizer does not invoke
-or simulate ptoas.
+full-allocation handoff endpoints, and a verified initial write. Same-pipe,
+partial-view, or uncertain cases receive no penalty. The active backend maps
+each supported executable call to a hardware pipe from its operation, resolved
+source/destination memory spaces, and the selected SoC's direct memory graph;
+an op-specific backend hook handles routes that are not uniquely inferable.
+Unsupported or ambiguous routes are skipped. The recognizer consumes that backend metadata
+and does not duplicate an architecture route table, invoke ptoas, or simulate
+its synchronization pass.
+
+The explicit pair model is output-sensitive. With `B` reusable buffers, a
+kernel can contain `Theta(B^2)` lifetime conflicts or candidate penalty pairs,
+so recognition and solver graph construction are quadratic in the worst case.
+This documented complexity exception is confined to the opt-in `DSA_RP`
+planner; the default planner is unchanged.
 
 Canonical greedy tries offset zero, reserved-range ends, and aligned tops of
 already placed hard or soft neighbors. For each buffer it chooses the candidate
@@ -194,6 +204,8 @@ Pass AllocateMemoryAddr();
 
 - `MemRefCollectorVisitor` collects unique MemRefs from TileType variables
 - `AllocateMemoryAddresses` assigns sequential aligned addresses per memory space using a `MemoryAllocatorPolicy`
+- `dsa_adapter::BuildDsaAllocationPlan` derives conservative lifetimes and
+  mandatory separations in `src/ir/transforms/dsa/allocation_plan.cpp`
 - `dsa_adapter::BuildProblem` derives the narrow in-memory DSA-RP model
 - `dsa::CanonicalGreedySolver` searches capacity-fitting placements and
   `dsa::ValidateSolution` independently checks the result
@@ -220,7 +232,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
 - Tests DSA-RP geometry, capacity, hard constraints, penalty activation,
   deterministic canonical-greedy placement, and independent validation
-- Tests promoted and filtered cross-resource reuse hazards
+- Tests exact pre-solver recognized-edge sets as well as their final placement geometry
+- Characterizes that canonical-greedy `kNoFit` is a bounded-search result, not an infeasibility proof
 
 ## Allocation Policy
 

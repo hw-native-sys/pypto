@@ -22,10 +22,13 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
-#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 
 namespace pypto {
+namespace backend {
+class Backend;
+}
 namespace ir {
 
 class MemoryAllocatorPolicy;
@@ -54,7 +57,7 @@ struct PreparedProblem {
 [[nodiscard]] PreparedProblem BuildProblem(
     const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,
     const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
-    const std::unordered_map<MemorySpace, uint64_t>& pool_caps);
+    const std::unordered_map<MemorySpace, uint64_t>& pool_caps, const backend::Backend* backend);
 
 /**
  * @brief Remove only pipeline-only hard relations and price the newly legal reuse.

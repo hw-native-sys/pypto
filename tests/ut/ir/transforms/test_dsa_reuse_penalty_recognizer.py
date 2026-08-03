@@ -9,13 +9,28 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, ir, passes, testing
+from pypto.backend import BackendType
 
 
 def _plan_with_dsa_rp(program):
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
         initialized = passes.init_mem_ref()(program)
         return passes.allocate_memory_addr()(initialized)
+
+
+def _recognized_edges(program) -> set[tuple[str, str, int]]:
+    """Inspect recognizer output before placement or solver tie-breaking."""
+    initialized = passes.init_mem_ref()(program)
+    function = next(iter(initialized.functions.values()))
+    return {
+        (edge["first_name"], edge["second_name"], edge["cost"])
+        for edge in testing.recognize_dsa_reuse_penalties(function)
+    }
+
+
+def _recognized_pairs(program) -> set[frozenset[str]]:
+    return {frozenset((first, second)) for first, second, _cost in _recognized_edges(program)}
 
 
 def _tile_ranges(program) -> dict[str, tuple[int, int]]:
@@ -49,7 +64,7 @@ def _overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
     return first_offset < second_offset + second_size and second_offset < first_offset + first_size
 
 
-def test_dsa_rp_recognizes_cross_resource_war():
+def test_dsa_rp_recognizes_cross_pipe_war(ascend_backend):
     """A terminal Vector read followed by an inbound-DMA write is penalized."""
 
     @pl.program
@@ -66,11 +81,16 @@ def test_dsa_rp_recognizes_cross_resource_war():
             next_value = pl.load(input_b, [0, 0], [64, 64])
             return pl.store(next_value, [0, 0], output)
 
+    assert _recognized_edges(Before) == {
+        ("prior", "_consumed", 1),
+        ("prior", "next_value", 1),
+        ("_consumed", "next_value", 1),
+    }
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_dsa_rp_recognizes_cross_resource_waw():
+def test_dsa_rp_recognizes_cross_pipe_waw(ascend_backend):
     """A Vector write followed by an inbound-DMA write is penalized."""
 
     @pl.program
@@ -85,11 +105,12 @@ def test_dsa_rp_recognizes_cross_resource_waw():
             next_value = pl.load(input_b, [0, 0], [64, 64])
             return pl.store(next_value, [0, 0], output)
 
+    assert _recognized_edges(Before) == {("_prior", "next_value", 1)}
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["_prior"], ranges["next_value"])
 
 
-def test_dsa_rp_does_not_penalize_same_resource_handoff():
+def test_dsa_rp_does_not_penalize_same_pipe_handoff(ascend_backend):
     """Two Vector writes remain free to share one lifetime-compatible slot."""
 
     @pl.program
@@ -103,6 +124,7 @@ def test_dsa_rp_does_not_penalize_same_resource_handoff():
             next_value = pl.tile.full([64, 64], dtype=pl.FP32, value=1.0)
             return pl.store(next_value, [0, 0], output)
 
+    assert _recognized_edges(Before) == set()
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert ranges["_prior"] == ranges["next_value"]
 
@@ -126,7 +148,7 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
     assert not _overlap(ranges["source"], ranges["result"])
 
 
-def test_dsa_rp_does_not_promote_partial_handoff_endpoint():
+def test_dsa_rp_does_not_promote_partial_handoff_endpoint(ascend_backend):
     """A consumer of only half an allocation does not create a whole-buffer edge."""
 
     @pl.program
@@ -144,6 +166,7 @@ def test_dsa_rp_does_not_promote_partial_handoff_endpoint():
             next_value = pl.load(input_b, [0, 0], [64, 64])
             return pl.store(next_value, [0, 0], output)
 
+    assert frozenset(("prior", "next_value")) not in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert _overlap(ranges["prior"], ranges["next_value"])
 
@@ -402,7 +425,7 @@ def test_dsa_rp_scalar_subrange_read_stays_unpenalized():
     assert _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_dsa_rp_recognizes_nested_cross_resource_handoff():
+def test_dsa_rp_recognizes_nested_cross_pipe_handoff():
     """Nested loop accesses participate in distance-zero recognition."""
 
     @pl.program
@@ -472,8 +495,8 @@ def test_dsa_rp_rejects_mutually_exclusive_branch_handoff():
     assert _overlap(ranges["branch_prior"], ranges["_branch_next"])
 
 
-def test_dsa_rp_keeps_logically_ordered_cross_resource_handoff():
-    """SSA reachability does not prove completion order across resources."""
+def test_dsa_rp_keeps_logically_ordered_cross_pipe_handoff():
+    """SSA reachability does not prove completion order across pipes."""
 
     @pl.program
     class Before:
@@ -493,7 +516,7 @@ def test_dsa_rp_keeps_logically_ordered_cross_resource_handoff():
     assert not _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_dsa_rp_recognizes_l1_to_l0_route():
+def test_dsa_rp_recognizes_l1_to_l0_route(ascend_backend):
     """A Mat buffer drained to L0 is separated from a later inbound load."""
 
     @pl.program
@@ -514,11 +537,12 @@ def test_dsa_rp_recognizes_l1_to_l0_route():
             result = pl.matmul(prior_l0, rhs_l0)
             return pl.store(result, [0, 0], output)
 
+    assert frozenset(("prior", "_later")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["prior"], ranges["_later"])
 
 
-def test_dsa_rp_recognizes_l0_to_l1_route():
+def test_dsa_rp_recognizes_l0_to_l1_route(ascend_backend):
     """A full Acc-to-Mat assemble is separated from a later inbound load."""
 
     @pl.program
@@ -542,48 +566,81 @@ def test_dsa_rp_recognizes_l0_to_l1_route():
             _later = pl.load(later_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
             return pl.store(source, [0, 0], output)
 
+    # Assemble writes the target allocation in place, so the edge is keyed by
+    # that allocation's representative rather than the SSA result name.
+    assert frozenset(("target", "_later")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["_assembled"], ranges["_later"])
+
+
+@pytest.mark.parametrize(
+    ("ascend_backend", "expect_edge"),
+    [(BackendType.Ascend910B, False), (BackendType.Ascend950, True)],
+    indirect=["ascend_backend"],
+)
+def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, expect_edge):
+    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            lhs_input: pl.Tensor[[16, 16], pl.BF16],
+            rhs_input: pl.Tensor[[16, 16], pl.BF16],
+            later_input: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            lhs_l1 = pl.load(lhs_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs_l1 = pl.load(rhs_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs_l0 = pl.tile.move(lhs_l1, target_memory=pl.Mem.Left)
+            rhs_l0 = pl.tile.move(rhs_l1, target_memory=pl.Mem.Right)
+            product = pl.matmul(lhs_l0, rhs_l0)
+            _moved = pl.tile.move(product, target_memory=pl.Mem.Vec)
+            _consumed = pl.add(_moved, _moved)
+            later = pl.load(later_input, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            return pl.store(later, [0, 0], output)
+
+    pair = frozenset(("_moved", "_consumed"))
+    assert (pair in _recognized_pairs(Before)) is expect_edge
 
 
 @pytest.mark.parametrize("consume_view", [False, True])
 def test_dsa_rp_reinterpret_view_is_metadata_only(consume_view):
     """The view adds no access; an actual consumer still records the aliased base."""
 
-    if consume_view:
+    @pl.program
+    class ConsumeView:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            prior = pl.load(input_a, [0, 0], [64, 64])
+            viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
+            _consumed = pl.add(viewed, viewed)
+            next_value = pl.load(input_b, [0, 0], [64, 64])
+            return pl.store(next_value, [0, 0], output)
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV)
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                prior = pl.load(input_a, [0, 0], [64, 64])
-                viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
-                _consumed = pl.add(viewed, viewed)
-                next_value = pl.load(input_b, [0, 0], [64, 64])
-                return pl.store(next_value, [0, 0], output)
+    @pl.program
+    class IgnoreView:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            prior = pl.load(input_a, [0, 0], [64, 64])
+            _viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
+            next_value = pl.load(input_b, [0, 0], [64, 64])
+            return pl.store(next_value, [0, 0], output)
 
-    else:
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV)
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                prior = pl.load(input_a, [0, 0], [64, 64])
-                _viewed: pl.Tile[[64, 64], pl.INT32] = pl.tile.reinterpret_view(prior, dtype=pl.INT32)
-                next_value = pl.load(input_b, [0, 0], [64, 64])
-                return pl.store(next_value, [0, 0], output)
-
-    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    program = ConsumeView if consume_view else IgnoreView
+    ranges = _tile_ranges(_plan_with_dsa_rp(program))
+    assert ("_consumed" in ranges) is consume_view
     assert _overlap(ranges["prior"], ranges["next_value"]) is not consume_view
 
 

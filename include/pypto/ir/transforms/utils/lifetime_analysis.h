@@ -12,20 +12,21 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_LIFETIME_ANALYSIS_H_
 
-#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto {
 namespace ir {
 
 /**
- * @brief Lifetime interval for one physical allocation identity.
+ * @brief Conservative lifetime of one physical allocation identity.
  *
  * Views and mandatory aliases that share one base MemRef are represented by a
  * single interval. Opportunistic reuse between different intervals remains a
@@ -39,36 +40,22 @@ struct LifetimeInterval {
   uint64_t size;
 };
 
-enum class AllocationSeparationReason : uint8_t {
-  PipelineStage,
-  TargetHazard,
-  SemanticNoAlias,
-  StorageLayout,
-  DeclaredAllocation,
-};
-
-struct AllocationSeparation {
-  size_t first;
-  size_t second;
-  std::vector<AllocationSeparationReason> reasons;
+/**
+ * @brief Shared result of allocation-lifetime analysis.
+ */
+struct LifetimeAnalysisResult {
+  std::vector<LifetimeInterval> lifetimes;
+  std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
+  std::map<const Var*, std::set<int>> phi_family_ids;
+  std::map<const Var*, std::pair<int, int>> var_liveness;
+  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
+  std::set<const Var*> pipeline_load_tiles;
 };
 
 /**
- * @brief Compiler-derived inputs shared by DSA placement and hazard recognition.
+ * @brief Analyze conservative allocation lifetimes and alias families.
  */
-struct AllocationPlan {
-  std::vector<LifetimeInterval> intervals;
-  std::vector<AllocationSeparation> separations;
-  /// Full byte extent of each author-declared allocation. This can exceed any
-  /// member MemRef when the declaration contains multiple runtime-selected
-  /// slots.
-  std::map<const Var*, uint64_t> declared_allocation_sizes;
-};
-
-/**
- * @brief Compute conservative allocation lifetimes and mandatory separations.
- */
-[[nodiscard]] AllocationPlan ComputeAllocationPlan(const FunctionPtr& func);
+[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body);
 
 }  // namespace ir
 }  // namespace pypto

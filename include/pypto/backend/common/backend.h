@@ -218,14 +218,22 @@ class Backend {
   /**
    * @brief Infer pipeline type for a specific call
    *
-   * First checks for per-call inference function, then applies default logic:
-   * - If all TileType args have Vec memref → PipeType::V
-   * - Otherwise → PipeType::S
+   * First queries TryInferPipe(), then applies the legacy Vec/scalar fallback
+   * for callers that do not require an exact hardware premise.
    *
    * @param call The call expression to infer pipe for
    * @return Inferred pipeline type
    */
   [[nodiscard]] ir::PipeType InferPipe(const ir::CallPtr& call) const;
+
+  /**
+   * @brief Infer the exact asynchronous execution pipe when backend metadata proves it.
+   *
+   * Unlike InferPipe(), this query never applies the legacy scalar/vector
+   * fallback. Analyses that use pipe identity as a correctness or performance
+   * premise must treat std::nullopt conservatively.
+   */
+  [[nodiscard]] std::optional<ir::PipeType> TryInferPipe(const ir::CallPtr& call) const;
 
   /**
    * @brief Get backend-specific operator information

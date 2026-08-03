@@ -76,6 +76,8 @@ REGISTER_OP("tile.<op_name>")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    // physical execution-memory contract (required for executable TileOps):
+    .functional_execution_memory_access()
     // type deduction:
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -89,6 +91,27 @@ REGISTER_OP("tile.<op_name>")
 - **All TileOps must set memory spaces** — `ValidateTileOps()` checks at load time
 - Memory spaces: `Vec`, `Left`, `Right`, `Acc`, `Unknown`
 - Use shared deduction helpers when possible (e.g. `DeduceTileOpElementwiseBinaryType`)
+
+#### Execution-memory access and pipe metadata
+
+Memory-space constraints describe where values live; they do not say whether an
+operator actually reads or writes those allocations when the kernel executes.
+Every new TileOp must classify that separately:
+
+- Use `.functional_execution_memory_access()` when the emitted PTO operation
+  physically reads its tile operands and/or writes its tile results.
+- Use `.no_execution_memory_access()` for declarations and metadata-only views
+  that emit no physical access.
+- Leave the default `Unknown` only for an intentionally unmodeled effect such as
+  a partial/subrange or destination-passing access. Explain the omission in a
+  comment and add a test proving the conservative consumer behavior.
+
+The DSA reuse-hazard recognizer also needs the exact execution pipe. If a new
+operator's source/destination memory route does not determine a unique pipe in
+`Backend::TryInferPipe`, register backend-specific `.f_infer_pipe(...)`
+metadata together with PTO codegen. Do not duplicate architecture route tables
+inside an IR transform. Add a direct recognizer test when the new op should
+create or suppress a reuse-penalty edge.
 
 ### A2: Python IR Wrapper
 
@@ -355,6 +378,8 @@ For complete code templates and detailed examples, see [reference.md](reference.
 ## Checklist Before Commit
 
 - [ ] C++ op registered with `REGISTER_OP` and correct category/memory spaces
+- [ ] Execution-memory access is marked functional/no-access (or Unknown is justified and tested)
+- [ ] Exact backend pipe inference exists when the source/destination route is not uniquely inferable
 - [ ] New `.cpp` added to `CMakeLists.txt` if created
 - [ ] Python IR wrapper in `ir/op/{tile,tensor}_ops.py`
 - [ ] Python DSL wrapper in `language/op/{tile,tensor}_ops.py`

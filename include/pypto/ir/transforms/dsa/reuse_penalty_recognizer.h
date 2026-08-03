@@ -17,9 +17,12 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
-#include "pypto/ir/transforms/utils/lifetime_analysis.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 
 namespace pypto {
+namespace backend {
+class Backend;
+}
 namespace ir {
 namespace dsa_adapter {
 
@@ -39,16 +42,18 @@ struct RecognizedReusePenalty {
  * @brief Recognize the compiler's built-in DSA reuse-penalty policy.
  *
  * The recognizer emits one unit-weight relation per buffer pair for which
- * physical reuse can introduce a cross-resource WAR or WAW handoff. It requires
+ * physical reuse can introduce a cross-pipe WAR or WAW handoff. It requires
  * a complete access set, full-allocation handoff endpoints, and a verified
- * initial write. Same-resource, partial-view, structurally ambiguous, and
+ * initial write. Same-pipe, partial-view, structurally ambiguous, and
  * uncertain handoffs remain unpenalized.
  *
- * Recognition is target-independent: source and destination memory classes
- * identify an abstract execution resource; no PTOAS schedule is simulated.
+ * The active backend supplies execution-pipe classification for supported
+ * operation and direct-memory-route combinations. The recognizer does not
+ * invoke or simulate ptoas, and skips calls whose backend pipe or physical
+ * access contract is unknown.
  */
 [[nodiscard]] std::vector<RecognizedReusePenalty> RecognizeReusePenalties(
-    const FunctionPtr& func, const AllocationPlan& allocation_plan);
+    const FunctionPtr& func, const AllocationPlan& allocation_plan, const backend::Backend& backend);
 
 }  // namespace dsa_adapter
 }  // namespace ir

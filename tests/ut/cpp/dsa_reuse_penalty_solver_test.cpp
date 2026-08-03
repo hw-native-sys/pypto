@@ -56,6 +56,26 @@ void TestFeasiblePackingAndTemporalConflict() {
           "solver result must pass independent validation");
 }
 
+void TestNoFitDoesNotProveInfeasibility() {
+  dsa::DsaProblem problem;
+  problem.pools = {{0, 16, {}}};
+  problem.buffers = {
+      {0, 6, 2, 0, {3, 5}}, {1, 6, 2, 0, {2, 7}}, {2, 4, 4, 0, {4, 5}},
+      {3, 8, 4, 0, {0, 3}}, {4, 2, 2, 0, {5, 7}}, {5, 1, 1, 0, {5, 10}},
+  };
+
+  // Independently verified strict witness. Canonical greedy's bounded order
+  // set misses it; kNoFit therefore means search failure, not infeasibility.
+  dsa::DsaSolution witness;
+  witness.offsets = {{0, 4}, {1, 10}, {2, 0}, {3, 0}, {4, 0}, {5, 2}};
+  Require(dsa::ValidateSolution(problem, witness).empty(),
+          "strict witness must prove that the characterization instance fits");
+
+  const dsa::DsaResult result = dsa::CanonicalGreedySolver().Solve(problem);
+  Require(result.status == dsa::SolveStatus::kNoFit && !result.solution.has_value(),
+          "bounded canonical greedy is expected to miss the strict witness");
+}
+
 void TestExplicitHardSeparation() {
   dsa::DsaProblem problem;
   problem.pools = {{0, 128, {}}};
@@ -298,6 +318,7 @@ void TestIndependentValidationRejectsCorruption() {
 int main() {
   try {
     TestFeasiblePackingAndTemporalConflict();
+    TestNoFitDoesNotProveInfeasibility();
     TestExplicitHardSeparation();
     TestWeightedPenaltyAvoidance();
     TestCapacityNoFit();

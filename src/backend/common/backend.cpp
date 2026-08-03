@@ -40,6 +40,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
@@ -443,16 +444,144 @@ const BackendTileLayoutSpec* Backend::GetTileLayoutSpec(const std::string& op_na
   return &*info->tile_layout_spec;
 }
 
+namespace {
+
+std::optional<ir::MemorySpace> GetTypeMemorySpace(const ir::TypePtr& type) {
+  if (!type) return std::nullopt;
+  const auto shaped = ir::As<ir::ShapedType>(type);
+  return shaped ? shaped->GetMemorySpace() : std::nullopt;
+}
+
+void CollectPipeMemorySpaces(const ir::TypePtr& type, std::vector<ir::MemorySpace>* spaces) {
+  if (!type || spaces == nullptr) return;
+  if (const auto space = GetTypeMemorySpace(type)) {
+    spaces->push_back(*space);
+    return;
+  }
+  if (const auto tuple = ir::As<ir::TupleType>(type)) {
+    for (const ir::TypePtr& element : tuple->types_) CollectPipeMemorySpaces(element, spaces);
+  }
+}
+
+std::optional<ir::MemorySpace> UniquePipeMemorySpace(std::vector<ir::MemorySpace> spaces) {
+  if (spaces.empty()) return std::nullopt;
+  std::sort(spaces.begin(), spaces.end());
+  spaces.erase(std::unique(spaces.begin(), spaces.end()), spaces.end());
+  return spaces.size() == 1 ? std::optional<ir::MemorySpace>(spaces.front()) : std::nullopt;
+}
+
+bool IsL0Memory(ir::MemorySpace space) {
+  return space == ir::MemorySpace::Left || space == ir::MemorySpace::Right || space == ir::MemorySpace::Acc ||
+         space == ir::MemorySpace::Bias || space == ir::MemorySpace::LeftScale ||
+         space == ir::MemorySpace::RightScale;
+}
+
+bool HasDirectMemoryRoute(const Backend& backend, ir::MemorySpace source, ir::MemorySpace destination) {
+  const auto& graph = backend.GetSoC().GetMemoryGraph();
+  const auto outgoing = graph.find(source);
+  return outgoing != graph.end() &&
+         std::find(outgoing->second.begin(), outgoing->second.end(), destination) != outgoing->second.end();
+}
+
+std::optional<ir::PipeType> InferTransferPipe(const Backend& backend, ir::MemorySpace source,
+                                              ir::MemorySpace destination) {
+  using Pipe = ir::PipeType;
+  if (!HasDirectMemoryRoute(backend, source, destination)) return std::nullopt;
+
+  if (source == ir::MemorySpace::DDR &&
+      (destination == ir::MemorySpace::Vec || destination == ir::MemorySpace::Mat)) {
+    return Pipe::MTE2;
+  }
+  if ((source == ir::MemorySpace::Vec || source == ir::MemorySpace::Mat) &&
+      destination == ir::MemorySpace::DDR) {
+    return Pipe::MTE3;
+  }
+  if (source == ir::MemorySpace::Acc &&
+      (destination == ir::MemorySpace::DDR || destination == ir::MemorySpace::Mat ||
+       destination == ir::MemorySpace::Vec)) {
+    return Pipe::FIX;
+  }
+  if (source == ir::MemorySpace::Mat && IsL0Memory(destination)) return Pipe::MTE1;
+  // A5's memory graph contains Vec->Mat; A2/A3's does not. PTOAS lowers
+  // the A5 V2C insertion route on MTE3.
+  if (source == ir::MemorySpace::Vec && destination == ir::MemorySpace::Mat) return Pipe::MTE3;
+  return std::nullopt;
+}
+
+std::optional<ir::PipeType> InferCommonPtoPipe(const Backend& backend, const ir::CallPtr& call) {
+  using Pipe = ir::PipeType;
+
+  std::vector<ir::MemorySpace> result_spaces;
+  CollectPipeMemorySpaces(call->GetType(), &result_spaces);
+  const std::optional<ir::MemorySpace> result_space = UniquePipeMemorySpace(std::move(result_spaces));
+
+  std::vector<ir::MemorySpace> input_spaces;
+  for (const ir::ExprPtr& argument : call->args_) {
+    if (const auto space = GetTypeMemorySpace(argument->GetType())) {
+      input_spaces.push_back(*space);
+    }
+  }
+
+  if (ir::IsOp(call, "tile.move")) {
+    if (!result_space || input_spaces.size() != 1) return std::nullopt;
+    const ir::MemorySpace source = input_spaces.front();
+    if (source == *result_space && source != ir::MemorySpace::DDR && source != ir::MemorySpace::ScalarLocal) {
+      // PTOAS executes same-space TMOV on the Vector pipe, including the
+      // materialized same-L0 moves used by yield repair.
+      return Pipe::V;
+    }
+    return InferTransferPipe(backend, source, *result_space);
+  }
+
+  if (result_space && *result_space == ir::MemorySpace::ScalarLocal) return Pipe::S;
+
+  if (result_space && *result_space != ir::MemorySpace::DDR) {
+    if (std::find(input_spaces.begin(), input_spaces.end(), ir::MemorySpace::DDR) != input_spaces.end()) {
+      return InferTransferPipe(backend, ir::MemorySpace::DDR, *result_space);
+    }
+    std::vector<ir::MemorySpace> transfer_sources;
+    for (ir::MemorySpace memory : input_spaces) {
+      if (memory != ir::MemorySpace::DDR && memory != ir::MemorySpace::ScalarLocal &&
+          memory != *result_space) {
+        transfer_sources.push_back(memory);
+      }
+    }
+    if (const auto source = UniquePipeMemorySpace(std::move(transfer_sources))) {
+      if (const auto pipe = InferTransferPipe(backend, *source, *result_space)) return pipe;
+    }
+    const bool all_ub = *result_space == ir::MemorySpace::Vec &&
+                        std::all_of(input_spaces.begin(), input_spaces.end(), [](ir::MemorySpace memory) {
+                          return memory == ir::MemorySpace::Vec || memory == ir::MemorySpace::ScalarLocal;
+                        });
+    if (all_ub) return Pipe::V;
+    const bool all_l0 =
+        IsL0Memory(*result_space) && std::all_of(input_spaces.begin(), input_spaces.end(),
+                                                 [](ir::MemorySpace memory) { return IsL0Memory(memory); });
+    if (all_l0) return Pipe::M;
+  }
+
+  if (result_space && *result_space == ir::MemorySpace::DDR) {
+    std::vector<ir::MemorySpace> local_inputs;
+    for (ir::MemorySpace memory : input_spaces) {
+      if (memory != ir::MemorySpace::DDR && memory != ir::MemorySpace::ScalarLocal) {
+        local_inputs.push_back(memory);
+      }
+    }
+    if (const auto source = UniquePipeMemorySpace(std::move(local_inputs))) {
+      return InferTransferPipe(backend, *source, ir::MemorySpace::DDR);
+    }
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
   CHECK(call != nullptr) << "InferPipe received null call";
   CHECK(call->op_ != nullptr) << "InferPipe received call with null op";
-  // 1. Check per-op inference function
-  const auto* info = GetOpInfo(call->op_->name_);
-  if (info && info->infer_pipe_func) {
-    return (*info->infer_pipe_func)(call);
-  }
+  if (const auto exact = TryInferPipe(call)) return *exact;
 
-  // 2. Default logic: all TileType args with Vec memref → V, else S
+  // Legacy fallback for callers that do not require an exact hardware premise.
   bool has_tile = false;
   for (const auto& arg : call->args_) {
     if (auto tile = ir::As<ir::TileType>(arg->GetType())) {
@@ -464,6 +593,14 @@ ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
     }
   }
   return has_tile ? ir::PipeType::V : ir::PipeType::S;
+}
+
+std::optional<ir::PipeType> Backend::TryInferPipe(const ir::CallPtr& call) const {
+  CHECK(call != nullptr) << "TryInferPipe received null call";
+  CHECK(call->op_ != nullptr) << "TryInferPipe received call with null op";
+  const auto* info = GetOpInfo(call->op_->name_);
+  if (info && info->infer_pipe_func) return (*info->infer_pipe_func)(call);
+  return InferCommonPtoPipe(*this, call);
 }
 
 // ========== BackendOpRegistryEntry Implementation ==========

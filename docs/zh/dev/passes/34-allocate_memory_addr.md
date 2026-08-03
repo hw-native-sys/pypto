@@ -77,13 +77,20 @@ buffer，带有字节大小、对齐和保守的半开生命周期。问题包�
   存储布局和请求的流水线 stage 分离等**硬约束**；作者声明的 `pl.MemRef`
   分配还会与同一内存空间中的其他所有分配建立硬分离。多 slot 声明会作为覆盖完整
   声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移；
-- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨资源 WAR 或 WAW
+- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW
   handoff，则加入**单位权重软边**；
 - 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。
 
 识别规则是保守的：它要求完整访问信息、覆盖整个分配的 handoff 端点，以及经验证的
-首次写入。相同资源、部分 view 或不确定情形不加惩罚。源/目标内存类别用于识别抽象
-执行资源；recognizer 不调用也不模拟 ptoas。
+首次写入。相同 pipe、部分 view 或不确定情形不加惩罚。当前 backend 根据算子、已解析的
+源/目标 memory space 和所选 SoC 的直接 memory graph，将每个受支持的可执行 call
+映射到硬件 pipe；不能唯一推导的 route 由算子专属的 backend hook 处理。不受支持或
+有歧义的 route 会被跳过。recognizer 只消费这些 backend 元数据，不在 IR
+transform 中重复维护架构 route 表，也不调用或模拟 ptoas 的同步 pass。
+
+显式 pair 模型是 output-sensitive 的：对于 `B` 个可复用 buffer，一个 kernel 最坏可包含
+`Theta(B^2)` 个生命周期冲突或候选 penalty pair，因此 recognizer 与 solver graph 构造
+最坏为二次复杂度。该复杂度例外仅限 opt-in 的 `DSA_RP` planner；默认 planner 不变。
 
 Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软邻居的对齐顶部。
 每个 buffer 先选择增量惩罚最低的候选，再选最低地址。它评估多种确定性顺序，并保留
@@ -172,6 +179,8 @@ Pass AllocateMemoryAddr();
 
 - `MemRefCollectorVisitor` 从 TileType 变量中收集唯一的 MemRef
 - `AllocateMemoryAddresses` 使用 `MemoryAllocatorPolicy` 在每个内存空间内分配顺序对齐的地址
+- `dsa_adapter::BuildDsaAllocationPlan` 在
+  `src/ir/transforms/dsa/allocation_plan.cpp` 中推导保守生命周期和强制 separation
 - `dsa_adapter::BuildProblem` 构建精简的进程内 DSA-RP 模型
 - `dsa::CanonicalGreedySolver` 搜索满足容量的放置，
   `dsa::ValidateSolution` 独立验证结果
@@ -198,7 +207,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
 - 测试 DSA-RP 几何、容量、硬约束、惩罚激活、确定性 canonical-greedy 放置、
   以及独立验证
-- 测试被提升和被过滤的跨资源复用 hazard
+- 直接测试 solver 之前的精确 recognizer edge 集合，并测试最终放置几何
+- 刻画 canonical-greedy `kNoFit` 只是有界搜索结果，而不是不可行性证明
 
 ## 分配策略
 

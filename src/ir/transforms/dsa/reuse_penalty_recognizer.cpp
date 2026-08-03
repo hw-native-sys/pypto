@@ -16,7 +16,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
 #include <map>
 #include <optional>
 #include <unordered_map>
@@ -24,17 +23,19 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/utils/lifetime_analysis.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -45,46 +46,25 @@ namespace dsa_adapter {
 namespace {
 
 // Complexity is O(N log N + E), where N is IR/allocation input size and E is
-// the number of fixed-resource candidate relations examined. Access collection
+// the number of cross-pipe candidate relations examined. Access collection
 // and summary construction are linear. Structured control paths receive
 // constant-size IDs during traversal, so sorting lifetimes and path-bucket
 // maintenance cost O(N log N). Candidate enumeration visits only
-// lifetime-compatible allocations in a different fixed resource bucket; each
-// pair is visited at most a constant number of times because the resource set
-// is fixed. No access-pair antichain or per-pair dependency walk is performed.
+// lifetime-compatible allocations in a different backend pipe bucket. E can be
+// quadratic in the number of reusable allocations. This output-sensitive
+// exception is inherent in the opt-in explicit pairwise DSA-RP model: a kernel
+// can genuinely produce Theta(B^2) penalty edges for B buffers. No access-pair
+// antichain or per-pair dependency walk is performed beyond materializing those
+// relations.
 
 enum class AccessKind : uint8_t {
   Read,
   Write,
 };
 
-enum class MemoryClass : uint8_t {
-  External,
-  Ub,
-  L1,
-  L0,
-  Scalar,
-};
+constexpr size_t kResourceCount = static_cast<size_t>(PipeType::ALL) + 1;
 
-enum class AccessResource : uint8_t {
-  InboundDma,
-  OutboundDma,
-  L0ToExternal,
-  L1ToL0,
-  L0ToL1,
-  UbToL1,
-  L1ToUb,
-  UbToL0,
-  L0ToUb,
-  VectorCompute,
-  MatrixCompute,
-  ScalarAccess,
-  Count,
-};
-
-constexpr size_t kResourceCount = static_cast<size_t>(AccessResource::Count);
-
-size_t ResourceIndex(AccessResource resource) { return static_cast<size_t>(resource); }
+size_t ResourceIndex(PipeType resource) { return static_cast<size_t>(resource); }
 
 struct StructuredPath {
   size_t id = 0;
@@ -99,7 +79,7 @@ struct StructuredPath {
 
 struct AccessEndpoint {
   size_t global_order = 0;
-  AccessResource resource = AccessResource::ScalarAccess;
+  PipeType resource = PipeType::S;
   AccessKind access_kind = AccessKind::Read;
   StructuredPath path;
   bool full_allocation = false;
@@ -145,60 +125,6 @@ std::optional<MemorySpace> GetMemorySpace(const VarPtr& var) {
   return var ? GetMemorySpace(var->GetType()) : std::nullopt;
 }
 
-MemoryClass ClassifyMemory(MemorySpace space) {
-  switch (space) {
-    case MemorySpace::DDR:
-      return MemoryClass::External;
-    case MemorySpace::Vec:
-      return MemoryClass::Ub;
-    case MemorySpace::Mat:
-      return MemoryClass::L1;
-    case MemorySpace::Left:
-    case MemorySpace::Right:
-    case MemorySpace::Acc:
-    case MemorySpace::Bias:
-    case MemorySpace::LeftScale:
-    case MemorySpace::RightScale:
-      return MemoryClass::L0;
-    case MemorySpace::ScalarLocal:
-      return MemoryClass::Scalar;
-  }
-  INTERNAL_UNREACHABLE << "Unknown memory space in DSA reuse-hazard classification";
-}
-
-std::optional<AccessResource> LookupTransferResource(MemoryClass source, MemoryClass destination) {
-  using Memory = MemoryClass;
-  using Resource = AccessResource;
-  if (source == Memory::External && (destination == Memory::Ub || destination == Memory::L1)) {
-    return Resource::InboundDma;
-  }
-  if ((source == Memory::Ub || source == Memory::L1) && destination == Memory::External) {
-    return Resource::OutboundDma;
-  }
-  if (source == Memory::L0 && destination == Memory::External) {
-    return Resource::L0ToExternal;
-  }
-  if (source == Memory::L1 && destination == Memory::L0) {
-    return Resource::L1ToL0;
-  }
-  if (source == Memory::L0 && destination == Memory::L1) {
-    return Resource::L0ToL1;
-  }
-  if (source == Memory::Ub && destination == Memory::L1) {
-    return Resource::UbToL1;
-  }
-  if (source == Memory::L1 && destination == Memory::Ub) {
-    return Resource::L1ToUb;
-  }
-  if (source == Memory::Ub && destination == Memory::L0) {
-    return Resource::UbToL0;
-  }
-  if (source == Memory::L0 && destination == Memory::Ub) {
-    return Resource::L0ToUb;
-  }
-  return std::nullopt;
-}
-
 bool SameAllocation(const VarPtr& first, const VarPtr& second) {
   const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
   const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
@@ -226,122 +152,6 @@ bool HasSameEffectiveLayout(const VarPtr& first, const VarPtr& second) {
          first_view.fractal == second_view.fractal;
 }
 
-void CollectMemoryClasses(const TypePtr& type, std::vector<MemoryClass>* classes) {
-  if (!type || classes == nullptr) return;
-  if (const auto space = GetMemorySpace(type)) {
-    classes->push_back(ClassifyMemory(*space));
-    return;
-  }
-  if (const auto tuple = As<TupleType>(type)) {
-    for (const TypePtr& element : tuple->types_) CollectMemoryClasses(element, classes);
-  }
-}
-
-std::optional<MemoryClass> UniqueMemoryClass(std::vector<MemoryClass> classes) {
-  if (classes.empty()) return std::nullopt;
-  std::sort(classes.begin(), classes.end());
-  classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
-  return classes.size() == 1 ? std::optional<MemoryClass>(classes.front()) : std::nullopt;
-}
-
-std::optional<AccessResource> ClassifyOperationResource(const CallPtr& call,
-                                                        const std::vector<VarPtr>& results) {
-  if (!call) return std::nullopt;
-  using Memory = MemoryClass;
-  using Resource = AccessResource;
-
-  std::vector<Memory> result_classes;
-  for (const VarPtr& result : results) {
-    CollectMemoryClasses(result ? result->GetType() : nullptr, &result_classes);
-  }
-  if (result_classes.empty()) CollectMemoryClasses(call->GetType(), &result_classes);
-  const std::optional<Memory> result_class = UniqueMemoryClass(std::move(result_classes));
-
-  std::vector<std::pair<VarPtr, Memory>> inputs;
-  bool has_scalar_input = false;
-  for (const ExprPtr& argument : call->args_) {
-    const VarPtr var = AsVarLike(argument);
-    const auto space = GetMemorySpace(var);
-    if (space) {
-      inputs.emplace_back(var, ClassifyMemory(*space));
-    } else if (var && As<ScalarType>(var->GetType())) {
-      has_scalar_input = true;
-    }
-  }
-
-  // PTOAS assigns same-domain tmov operations to PIPE_V, including L0-to-L0
-  // moves. Cross-domain moves use their source/destination transfer route.
-  // Model tile.move explicitly instead of letting the generic all-L0 fallback
-  // classify it as matrix compute.
-  if (IsOp(call, "tile.move")) {
-    if (!result_class || inputs.size() != 1) return std::nullopt;
-    const Memory source = inputs.front().second;
-    if (source == *result_class && source != Memory::External && source != Memory::Scalar) {
-      return Resource::VectorCompute;
-    }
-    return LookupTransferResource(source, *result_class);
-  }
-
-  const auto scalar_result = std::find_if(results.begin(), results.end(), [](const VarPtr& result) {
-    return result && As<ScalarType>(result->GetType());
-  });
-  if (scalar_result != results.end()) {
-    const auto local = std::find_if(inputs.begin(), inputs.end(), [](const auto& input) {
-      return input.second != Memory::External && input.second != Memory::Scalar;
-    });
-    if (local != inputs.end()) {
-      return Resource::ScalarAccess;
-    }
-  }
-
-  if (result_class && *result_class != Memory::External && has_scalar_input &&
-      std::any_of(inputs.begin(), inputs.end(), [&](const auto& input) {
-        return input.second == *result_class &&
-               std::any_of(results.begin(), results.end(),
-                           [&](const VarPtr& result) { return SameAllocation(input.first, result); });
-      })) {
-    return Resource::ScalarAccess;
-  }
-
-  if (result_class && *result_class != Memory::External) {
-    if (std::any_of(inputs.begin(), inputs.end(),
-                    [](const auto& input) { return input.second == Memory::External; })) {
-      return LookupTransferResource(Memory::External, *result_class);
-    }
-    std::vector<Memory> local_inputs;
-    for (const auto& [var, memory] : inputs) {
-      static_cast<void>(var);
-      if (memory != Memory::External && memory != Memory::Scalar) local_inputs.push_back(memory);
-    }
-    std::vector<Memory> transfer_sources;
-    std::copy_if(local_inputs.begin(), local_inputs.end(), std::back_inserter(transfer_sources),
-                 [&](Memory memory) { return memory != *result_class; });
-    if (const auto source = UniqueMemoryClass(std::move(transfer_sources))) {
-      if (const auto transfer = LookupTransferResource(*source, *result_class)) return transfer;
-    }
-    const bool all_ub =
-        *result_class == Memory::Ub && std::all_of(local_inputs.begin(), local_inputs.end(),
-                                                   [](Memory memory) { return memory == Memory::Ub; });
-    if (all_ub) return Resource::VectorCompute;
-    const bool all_l0 =
-        *result_class == Memory::L0 && std::all_of(local_inputs.begin(), local_inputs.end(),
-                                                   [](Memory memory) { return memory == Memory::L0; });
-    if (all_l0) return Resource::MatrixCompute;
-  }
-
-  if (result_class && *result_class == Memory::External) {
-    std::vector<Memory> local_inputs;
-    for (const auto& [var, memory] : inputs) {
-      static_cast<void>(var);
-      if (memory != Memory::External && memory != Memory::Scalar) local_inputs.push_back(memory);
-    }
-    if (const auto source = UniqueMemoryClass(std::move(local_inputs))) {
-      return LookupTransferResource(*source, Memory::External);
-    }
-  }
-  return std::nullopt;
-}
-
 using TupleResultElements = std::unordered_map<const Var*, std::map<int, VarPtr>>;
 
 class TupleResultCollector : public IRVisitor {
@@ -365,10 +175,11 @@ class TupleResultCollector : public IRVisitor {
 class AccessCollector : public IRVisitor {
  public:
   AccessCollector(const AllocationPlan& plan, std::unordered_map<const Var*, size_t> interval_by_base,
-                  TupleResultElements tuple_results)
+                  TupleResultElements tuple_results, const backend::Backend& backend)
       : plan_(plan),
         interval_by_base_(std::move(interval_by_base)),
         tuple_results_(std::move(tuple_results)),
+        backend_(backend),
         summaries_(plan.intervals.size()) {}
 
   void Collect(const StmtPtr& body) { VisitStmt(body); }
@@ -573,7 +384,7 @@ class AccessCollector : public IRVisitor {
       return;
     }
 
-    const std::optional<AccessResource> resource = ClassifyOperationResource(call, results);
+    const std::optional<PipeType> resource = backend_.TryInferPipe(call);
     if (!resource) {
       Poison(reads, writes);
       return;
@@ -593,6 +404,7 @@ class AccessCollector : public IRVisitor {
   const AllocationPlan& plan_;
   std::unordered_map<const Var*, size_t> interval_by_base_;
   TupleResultElements tuple_results_;
+  const backend::Backend& backend_;
   std::vector<AllocationAccessSummary> summaries_;
   size_t global_order_ = 0;
   size_t next_path_id_ = 1;
@@ -646,7 +458,8 @@ struct ResourceBuckets {
 }  // namespace
 
 std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& func,
-                                                            const AllocationPlan& allocation_plan) {
+                                                            const AllocationPlan& allocation_plan,
+                                                            const backend::Backend& backend) {
   if (!func || allocation_plan.intervals.empty()) return {};
 
   std::unordered_map<const Var*, size_t> interval_by_base;
@@ -658,7 +471,8 @@ std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& f
 
   TupleResultCollector tuple_result_collector;
   tuple_result_collector.VisitStmt(func->body_);
-  AccessCollector collector(allocation_plan, std::move(interval_by_base), tuple_result_collector.Elements());
+  AccessCollector collector(allocation_plan, std::move(interval_by_base), tuple_result_collector.Elements(),
+                            backend);
   collector.Collect(func->body_);
 
   std::vector<std::optional<CompactAccessSummary>> compact_summaries;

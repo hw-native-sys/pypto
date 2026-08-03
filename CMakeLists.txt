@@ -152,6 +152,7 @@ set(PYPTO_SOURCES
     src/ir/arith/int_set.cpp
 
     # IR - Transforms
+    src/ir/transforms/dsa/allocation_plan.cpp
     src/ir/transforms/dsa/dsa_reuse_penalty_solver.cpp
     src/ir/transforms/dsa/memref_dsa_adapter.cpp
     src/ir/transforms/dsa/reuse_penalty_recognizer.cpp
