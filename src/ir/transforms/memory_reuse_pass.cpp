@@ -589,10 +589,19 @@ class TopDownRetargeter {
     //      input of the call already lives on `target_base`, retyping the
     //      output onto the same buffer creates an in-place execution that
     //      the op cannot handle and fails at runtime.
+    //   4. Ops with a registered *fixed* output memory space (e.g. every
+    //      `tile.add`-style elementwise op is `set_output_memory(Vec)`) when
+    //      the target sits in a different space.  The op physically cannot
+    //      write there, so retyping the LHS would only mint IR that claims a
+    //      Vec-only op produces DDR.  Declining leaves the carry yielding a
+    //      different buffer than its init, which YieldFixupMutator reconciles
+    //      with a real move (see AlignLoopCarriesToInitMutator's contract).
+    //      Same-space targets are unaffected: only the MemRef base moves.
     if (IsOutputMemoryInheritInput(entry)) return false;
     if (HasKwarg(*call, "target_memory") && !TargetMemoryKwargMatches(*call, target_memory)) {
       return false;
     }
+    if (FixedOutputMemoryConflicts(entry, *call, target_memory)) return false;
     if (!entry.IsInplaceSafe() && CallReadsBase(*call, target->base_.get())) return false;
 
     // Unconstrained: check liveness, then plan retype.  (Skipped for if-phi
@@ -639,6 +648,22 @@ class TopDownRetargeter {
       return AnyCast<MemorySpace>(v, "kwarg key: target_memory") == *target_memory;
     }
     return false;
+  }
+
+  /// True when the op resolves to a concrete output memory space that differs
+  /// from `target_memory` — i.e. retyping the LHS would claim the op writes
+  /// somewhere it physically cannot.  Ops that defer the choice (the resolver
+  /// returns nullopt: inherit-input and the retargetable `target_memory`-kwarg
+  /// ops) are not constrained here and are handled by their own guards above.
+  static bool FixedOutputMemoryConflicts(const OpRegistryEntry& entry, const Call& call,
+                                         std::optional<MemorySpace> target_memory) {
+    if (!target_memory.has_value()) return false;
+    const auto& spec = entry.GetMemorySpec();
+    if (!spec.has_value() || !spec->deduce_output_memory) return false;
+    // Resolve against the call's own kwargs so a kwarg-driven op reports the
+    // space it actually produces rather than its registered default.
+    auto fixed = spec->deduce_output_memory(call.kwargs_);
+    return fixed.has_value() && *fixed != *target_memory;
   }
 
   /// Retype an IfStmt return_var: recurse into both branches' yield values.
@@ -841,39 +866,10 @@ class RetypeApplier : public IRMutator {
     if (rit != rewrites_.end()) {
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, rit->second, op->var_->span_);
       var_substitution_[op->var_] = new_var;
-      return FollowVarMemorySpace(IRMutator::VisitStmt_(op));
+      return IRMutator::VisitStmt_(op);
     }
     if (auto followed = FollowRetargetedViewInput(op)) return followed;
     return IRMutator::VisitStmt_(op);
-  }
-
-  /// Carry a retarget that crossed memory spaces onto the bound Call's own type.
-  ///
-  /// A retarget rewrites the LHS Var's type but leaves the RHS Call's type as
-  /// the op originally inferred it. That is harmless while the retarget stays
-  /// inside one memory space (only the MemRef base moves, and a Call type
-  /// carries no MemRef), but a cross-space retarget — e.g. a Vec compute result
-  /// folded onto a DDR loop-carry buffer by MaterializeSemanticAliases — leaves
-  /// the Call claiming the old space while its Var claims the new one.
-  ///
-  /// That pair is not expressible in the DSL: printing emits a single
-  /// annotation (the Var's) and the parser then retypes the Call to match it
-  /// (ast_parser `override_type`), so the mismatch shows up as a print→parse
-  /// roundtrip failure. Keep the two in step here instead.
-  StmtPtr FollowVarMemorySpace(const StmtPtr& stmt) {
-    auto assign = As<AssignStmt>(stmt);
-    if (!assign) return stmt;
-    auto call = As<Call>(assign->value_);
-    if (!call) return stmt;
-    auto var_tile = As<TileType>(assign->var_->GetType());
-    auto call_tile = As<TileType>(call->GetType());
-    if (!var_tile || !call_tile) return stmt;
-    const auto var_space = var_tile->memory_space_;
-    if (!var_space.has_value() || call_tile->memory_space_ == var_space) return stmt;
-    auto new_type = CloneTypeWithMemRef(call->GetType(), GetTypeMemRef(call->GetType()), var_space);
-    auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_,
-                                           std::move(new_type), call->span_);
-    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
   }
 
   /// Re-anchor an inherit-input view (tile.transpose_view / reshape / slice /

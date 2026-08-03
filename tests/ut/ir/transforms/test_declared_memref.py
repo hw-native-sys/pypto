@@ -1440,15 +1440,31 @@ class TestLoopCarryRoundtrip:
         # The body, where the base *is* bound, keeps the bare-name form.
         assert f"pl.MemRef({base}," in printed
 
-        pl.parse_program(printed)  # must not raise
+        # The quoted name must still resolve to the very Var the body allocates:
+        # structural equality ignores MemRefs, so only an identity check catches
+        # a reparse that hands the parameter a second, unrelated allocation.
+        reparsed = pl.parse_program(printed)  # must not raise
+        main = reparsed.get_function("main")
+        assert main is not None
+        assert isinstance(main.body, ir.SeqStmts)
+        alloc = next(s for s in main.body.stmts if isinstance(s, ir.AssignStmt) and s.var.name_hint == base)
+        seed_type = main.params[1].type
+        assert isinstance(seed_type, ir.TileType)
+        assert seed_type.memref is not None
+        assert seed_type.memref.base_ is alloc.var
 
-    def test_retarget_across_memory_spaces_retypes_the_call(self, ascend_backend):
-        """A cross-space retarget must move the bound Call's type too.
+    def test_fixed_output_op_is_not_retargeted_across_memory_spaces(self, ascend_backend):
+        """A Vec-only producer must keep its Vec buffer even under a DDR carry.
 
-        ``MaterializeSemanticAliases`` folds the Vec compute result onto the DDR
-        carry buffer. Rewriting only the LHS Var left the Call claiming Vec, a
-        pair the printer cannot spell: it emits the Var's annotation and the
-        parser then retypes the Call to match, so the roundtrip compared unequal.
+        The carry's init is a Tile parameter, so it lives in DDR, and the carry
+        alias would drag the ``tile.add`` that feeds it onto that DDR buffer.
+        But ``tile.add`` is registered ``set_output_memory(Vec)`` — it cannot
+        write there. Retargeting it anyway would mint IR claiming a Vec-only op
+        produces DDR, and would leave the bound Call's type disagreeing with its
+        Var, a pair the DSL cannot spell (the printer emits only the Var's
+        annotation, so reparsing retypes the Call and the roundtrip compares
+        unequal). Declining leaves the carry yielding a different buffer than
+        its init, which ``YieldFixupMutator`` reconciles with a real move.
         """
         after = passes.materialize_semantic_aliases()(_run_full_pipeline(self._carry_program(), "InitMemRef"))
         main = after.get_function("main")
@@ -1467,7 +1483,9 @@ class TestLoopCarryRoundtrip:
         assert isinstance(var_type, ir.TileType)
         assert isinstance(value_type, ir.TileType)
 
-        assert var_type.memory_space == ir.MemorySpace.DDR, "carry did not retarget to DDR"
+        # The op's registered output space wins over the carry's DDR buffer...
+        assert var_type.memory_space == ir.MemorySpace.Vec, "a Vec-only op was dragged into DDR"
+        # ...and the binding stays internally consistent, so it round-trips.
         assert value_type.memory_space == var_type.memory_space
 
 

@@ -1316,7 +1316,12 @@ class ASTParser:
             and self._is_printed_alloc_call(stmt.value)
         ):
             value_expr = self._parse_printed_alloc_call(stmt.value)
-            ptr_var = ir.Var(var_name, ir.PtrType(), span)
+            # Adopt the Var a signature annotation already interned for this
+            # name. A parameter's MemRef may name a base Ptr allocated here, and
+            # the signature parses first; minting a second Var would leave the
+            # parameter's MemRef pointing at a different allocation identity
+            # than the alloc that defines it.
+            ptr_var = self.type_resolver.interned_base_ptr(var_name) or ir.Var(var_name, ir.PtrType(), span)
             self.builder.emit(ir.AssignStmt(ptr_var, value_expr, span))
             self.scope_manager.define_var(var_name, ptr_var, span=span)
             return

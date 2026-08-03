@@ -2032,6 +2032,25 @@ class TypeResolver:
             self._base_ptr_cache[name] = ir.Var(name, ir.PtrType(), span)
         return self._base_ptr_cache[name]
 
+    def interned_base_ptr(self, name: str) -> "ir.Var | None":
+        """Return the Var already interned for a MemRef base name, if any.
+
+        A signature annotation may name a base Ptr that the body allocates
+        further down (``InitMemRef`` does this whenever a Tile parameter lands
+        in a compiler-allocated buffer). The signature is parsed first, so it
+        interns a Var for the name before the allocation is seen; the body's
+        alloc must then bind that *same* Var, or the parameter's MemRef and the
+        allocation stop sharing an allocation identity and pointer-based
+        aliasing (``MemRef.SameAllocation``) silently breaks.
+
+        Args:
+            name: Base Ptr name to look up
+
+        Returns:
+            The interned Var, or None if no annotation has referenced this name
+        """
+        return getattr(self, "_base_ptr_cache", {}).get(name)
+
     def _try_resolve_memref_base(self, node: ast.expr) -> str | None:
         """Try to resolve the first arg of pl.MemRef as a base name.
 
