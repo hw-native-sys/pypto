@@ -91,14 +91,14 @@ class TestWrapperErrorsThroughParser:
                 with pl.scope():
                     at = pl.load(a, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat)
                     bt = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                    # The @overloads already reject this statically ("Argument of
-                    # type Tile cannot be assigned to parameter lhs of type
-                    # Tensor"); suppressed on purpose so the test can prove the
-                    # *runtime* now rejects it too, which is what #2264 was about.
+                    # The Tile @overload already rejects this statically
+                    # ("Literal[True] is not assignable to Literal[False]");
+                    # suppressed on purpose so the test can prove the *runtime*
+                    # now rejects it too, which is what #2264 was about.
                     c: pl.Tile[[32, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(
-                        at,  # pyright: ignore[reportArgumentType]
-                        bt,  # pyright: ignore[reportArgumentType]
-                        b_trans=True,
+                        at,
+                        bt,
+                        b_trans=True,  # pyright: ignore[reportArgumentType]
                         out_dtype=pl.FP32,
                     )
                     out = pl.store(c, [0, 0], out)

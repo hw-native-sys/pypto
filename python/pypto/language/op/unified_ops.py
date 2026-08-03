@@ -16,7 +16,7 @@ or ``pl.tile.add``.
 """
 
 from collections.abc import Sequence
-from typing import Any, NoReturn, TypeVar, overload
+from typing import Any, Literal, NoReturn, TypeVar, overload
 
 __all__ = [
     "add",
@@ -147,6 +147,11 @@ def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
 # Only a non-default value raises — spelling out the documented default keeps
 # working.
 # ---------------------------------------------------------------------------
+
+# The ``@overload`` declarations mirror that rule with ``Literal[False]`` /
+# ``None`` defaults on the path that cannot honour a kwarg: the documented
+# default still type-checks, while a non-default value is rejected statically as
+# well as at runtime.
 
 # Remedies for kwargs the Tile dispatch path cannot honour. Module constants so
 # the guarded call sites stay one line per kwarg.
@@ -537,7 +542,7 @@ def sqrt(input: T) -> T:
 @overload
 def rsqrt(input: Tensor, high_precision: bool = ...) -> Tensor: ...
 @overload
-def rsqrt(input: Tile) -> Tile: ...
+def rsqrt(input: Tile, high_precision: Literal[False] = ...) -> Tile: ...
 def rsqrt(input, high_precision: bool = False):
     """Element-wise reciprocal square root, dispatched by input type.
 
@@ -860,7 +865,14 @@ def matmul(
     c_matrix_nz: bool = ...,
 ) -> Tensor: ...
 @overload
-def matmul(lhs: Tile, rhs: Tile, out_dtype: DataType | None = ...) -> Tile: ...
+def matmul(
+    lhs: Tile,
+    rhs: Tile,
+    out_dtype: DataType | None = ...,
+    a_trans: Literal[False] = ...,
+    b_trans: Literal[False] = ...,
+    c_matrix_nz: Literal[False] = ...,
+) -> Tile: ...
 
 
 def matmul(
@@ -931,7 +943,13 @@ def matmul_acc(
     b_trans: bool = ...,
 ) -> Tensor: ...
 @overload
-def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile: ...
+def matmul_acc(
+    acc: Tile,
+    lhs: Tile,
+    rhs: Tile,
+    a_trans: Literal[False] = ...,
+    b_trans: Literal[False] = ...,
+) -> Tile: ...
 
 
 def matmul_acc(
@@ -966,7 +984,7 @@ def matmul_acc(
 
 
 @overload
-def row_max(input: Tensor) -> Tensor: ...
+def row_max(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_max(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_max(input, tmp_tile: Tile | None = None):
@@ -991,7 +1009,7 @@ def row_max(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def row_sum(input: Tensor) -> Tensor: ...
+def row_sum(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_sum(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_sum(input, tmp_tile: Tile | None = None):
@@ -1016,7 +1034,7 @@ def row_sum(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def row_min(input: Tensor) -> Tensor: ...
+def row_min(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_min(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_min(input, tmp_tile: Tile | None = None):
@@ -1041,7 +1059,7 @@ def row_min(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def row_prod(input: Tensor) -> Tensor: ...
+def row_prod(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_prod(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_prod(input, tmp_tile: Tile | None = None):
@@ -1066,7 +1084,7 @@ def row_prod(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def col_sum(input: Tensor) -> Tensor: ...
+def col_sum(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def col_sum(input: Tile, tmp_tile: Tile | None = ...) -> Tile: ...
 def col_sum(input, tmp_tile: Tile | None = None):
@@ -1123,7 +1141,7 @@ def col_prod(input: T) -> T:
 
 
 @overload
-def row_argmax(input: Tensor) -> Tensor: ...
+def row_argmax(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_argmax(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_argmax(input, tmp_tile: Tile | None = None):
@@ -1146,7 +1164,7 @@ def row_argmax(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def row_argmin(input: Tensor) -> Tensor: ...
+def row_argmin(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def row_argmin(input: Tile, tmp_tile: Tile) -> Tile: ...
 def row_argmin(input, tmp_tile: Tile | None = None):
@@ -1169,7 +1187,7 @@ def row_argmin(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def col_argmax(input: Tensor) -> Tensor: ...
+def col_argmax(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def col_argmax(input: Tile, tmp_tile: Tile) -> Tile: ...
 def col_argmax(input, tmp_tile: Tile | None = None):
@@ -1189,7 +1207,7 @@ def col_argmax(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def col_argmin(input: Tensor) -> Tensor: ...
+def col_argmin(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
 @overload
 def col_argmin(input: Tile, tmp_tile: Tile) -> Tile: ...
 def col_argmin(input, tmp_tile: Tile | None = None):

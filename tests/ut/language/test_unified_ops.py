@@ -1468,7 +1468,7 @@ class TestUnifiedOpsCrossPathKwargs:
         """Spelling out the defaults is a no-op and yields plain pl.tile.matmul IR."""
         lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
 
-        unified = unified_ops.matmul(lhs, rhs, a_trans=False, b_trans=False, c_matrix_nz=False)  # type: ignore[call-overload]
+        unified = unified_ops.matmul(lhs, rhs, a_trans=False, b_trans=False, c_matrix_nz=False)
         explicit = pl.tile.matmul(lhs, rhs)
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
@@ -1535,7 +1535,7 @@ class TestUnifiedOpsCrossPathKwargs:
         acc = _tile("acc", [32, 128], DataType.FP32)
         lhs, rhs = _tile("lhs", [32, 128]), _tile("rhs", [128, 128])
 
-        unified = unified_ops.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)  # type: ignore[call-overload]
+        unified = unified_ops.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)
         explicit = pl.tile.matmul_acc(acc, lhs, rhs)
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
@@ -1553,6 +1553,15 @@ class TestUnifiedOpsCrossPathKwargs:
         t = _tile("t", [64, 64], DataType.FP32)
 
         unified = unified_ops.rsqrt(t)
+        explicit = pl.tile.rsqrt(t)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_rsqrt_tile_accepts_explicit_default_high_precision(self):
+        """Spelling out the default is a no-op the overloads must also accept."""
+        t = _tile("t", [64, 64], DataType.FP32)
+
+        unified = unified_ops.rsqrt(t, high_precision=False)
         explicit = pl.tile.rsqrt(t)
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
@@ -1583,6 +1592,16 @@ class TestUnifiedOpsCrossPathKwargs:
         x = _tensor("x", [64, 64])
 
         unified = getattr(unified_ops, op_name)(x)
+        explicit = getattr(pl.tensor, op_name)(x)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    @pytest.mark.parametrize("op_name", _TMP_TILE_REDUCTIONS)
+    def test_reduction_tensor_path_accepts_explicit_none_tmp_tile(self, op_name):
+        """Passing the default explicitly stays legal — only a real tile raises."""
+        x = _tensor("x", [64, 64])
+
+        unified = getattr(unified_ops, op_name)(x, None)
         explicit = getattr(pl.tensor, op_name)(x)
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
