@@ -275,6 +275,25 @@ def test_allocate_memory_addr_empty_function():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
+    """DSA-RP accepts an InitMemRef output with no top-level statement sequence."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+            return output
+
+    initialized = passes.init_mem_ref()(Before)
+    func = next(iter(initialized.functions.values()))
+    assert isinstance(func.body, ir.ReturnStmt)
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+        after = passes.allocate_memory_addr()(initialized)
+
+    ir.assert_structural_equal(after, initialized)
+
+
 def test_allocate_memory_addr_allocs_are_prepended_to_body():
     """Alloc statements are prepended as direct children of the top-level SeqStmts before tile ops."""
 
