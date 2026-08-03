@@ -409,30 +409,38 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
 
-  // blayout/slayout follow the source — a move preserves the logical layout —
-  // but `fractal` is the destination buffer's boxing granularity, not a source
-  // property, so it comes from the destination space. See
+  // A move retargets the tile, so where the destination has a layout of its own
+  // (Mat/Acc/L0/scale are boxed) that layout -- not the source's -- is what the
+  // result carries.  Seeding blayout/slayout from the source instead recovered
+  // the destination layout only as a side effect of canonicalizing against
+  // nullopt here and re-canonicalizing against the real space in
+  // OpRegistry::Create, which only fires when the view collapses (valid_shape ==
+  // shape and pad null) -- so the result layout silently depended on the tile's
+  // valid extent.
+  //
+  // Where the destination's layout coincides with the space-agnostic one (Vec
+  // and the other flat spaces) that double canonicalization was a no-op, so
+  // those keep the source's blayout/slayout: a Mat->Vec move deliberately
+  // carries the source's layout today.  fractal is never inherited -- it is the
+  // destination buffer's boxing granularity.  See
   // docs/en/dev/ir/05-operators.md "Result view of tile.move".
-  TileView tile_view;
-  tile_view.blayout = source_view.blayout;
-  tile_view.slayout = source_view.slayout;
-  tile_view.fractal = tile_view_semantics::GetImplicitFractal(space);
+  const auto dst_layout = tile_view_semantics::GetImplicitTileLayout(input_shape, space);
+  const bool destination_dictates_layout =
+      dst_layout != tile_view_semantics::GetImplicitTileLayout(input_shape, std::nullopt);
 
-  // Hardcoded layout for Left/Right/scale (hardware requirements; their fractal
-  // already comes from the destination-implicit seed above)
-  if (space == MemorySpace::Left) {
-    tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
-    tile_view.slayout = TileLayout::row_major;
-  } else if (space == MemorySpace::Right) {
+  TileView tile_view;
+  tile_view_semantics::SetTileLayout(tile_view, dst_layout);
+  if (!destination_dictates_layout) {
+    tile_view.blayout = source_view.blayout;
+    tile_view.slayout = source_view.slayout;
+  }
+
+  // Right is the one destination whose ISA layout is not its implicit one: L0B
+  // requires a RowMajor block layout for TMATMUL even on an [N,1] shape, whose
+  // implicit blayout is col_major.  Left and the scale spaces need no override --
+  // GetImplicitTileLayout already returns their ISA layouts.
+  if (space == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
-    tile_view.slayout = TileLayout::col_major;
-  } else if (space == MemorySpace::LeftScale) {
-    // fractal is already kMXScaleFractal via the destination-implicit seed above.
-    tile_view.blayout = TileLayout::row_major;
-    tile_view.slayout = TileLayout::row_major;
-  } else if (space == MemorySpace::RightScale) {
-    tile_view.blayout = TileLayout::col_major;
-    tile_view.slayout = TileLayout::col_major;
   }
 
   // Ordinary destinations permit explicit layouts. Scale destinations have
@@ -485,14 +493,9 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // Stamp memory_space_ only for MX scale destinations. Stamping Mat/Left/Right
-  // here skips InferTileMemorySpace's tile_view refresh to the destination's
-  // implicit layout and regresses existing Vec↔Mat / matmul / rmsnorm paths.
-  if (space == MemorySpace::LeftScale || space == MemorySpace::RightScale) {
-    return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view, space);
-  }
-  // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // Stamp memory_space_ for every destination so the view is canonicalized once,
+  // against the space it is actually a view of (same contract as tile.load).
+  return std::make_shared<TileType>(output_shape, out_dtype, std::nullopt, tile_view, space);
 }
 
 TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
@@ -595,18 +598,16 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   if (flat_layout) {
     creation_space = MemorySpace::Mat;
   } else if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
-    tile_view.blayout = TileLayout::col_major;
-    tile_view.slayout = TileLayout::row_major;
-    tile_view.fractal = 1024;
+    // Acc's boxed NZ layout, stamped so the view is canonicalized against the
+    // space it is a view of rather than against nullopt (see 02-types.md).
+    tile_view_semantics::SetTileLayout(
+        tile_view, tile_view_semantics::GetImplicitTileLayout(tile_shape, MemorySpace::Acc));
+    creation_space = MemorySpace::Acc;
   } else if (transpose_layout) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
-  } else if (tile_shape.size() == 2) {
-    auto rows_const = As<ConstInt>(tile_shape[0]);
-    auto cols_const = As<ConstInt>(tile_shape[1]);
-    if (rows_const && cols_const && rows_const->value_ > 1 && cols_const->value_ == 1) {
-      tile_view.blayout = TileLayout::col_major;
-    }
+  } else {
+    tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(tile_shape);
   }
   tile_view.valid_shape = tile_shape;
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view, creation_space);

@@ -81,19 +81,6 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
   return product;
 }
 
-TileLayout InferTileLayoutFromShape(const std::vector<ExprPtr>& shape) {
-  if (shape.size() != 2) {
-    return TileLayout::row_major;
-  }
-
-  auto rows_const = As<ConstInt>(shape[0]);
-  auto cols_const = As<ConstInt>(shape[1]);
-  if (!rows_const || !cols_const) {
-    return TileLayout::row_major;
-  }
-  return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
-}
-
 /**
  * @brief Validate that all elements of a TupleType are ScalarType with an index-like dtype
  *
@@ -257,7 +244,7 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     tile_view.fractal = src_v.fractal;
     tile_view.pad = src_v.pad;
   } else {
-    tile_view.blayout = InferTileLayoutFromShape(new_shape);
+    tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
   }
   tile_view.valid_shape = valid_shape;
 
@@ -340,7 +327,7 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
                                source_view.blayout == TileLayout::row_major, args[0]->span_, "tile.reshape");
   tile_view.pad = source_view.pad;
 
-  tile_view.blayout = InferTileLayoutFromShape(new_shape);
+  tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -751,27 +738,33 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
       "ISA TEXTRACT bounds are hard, so the window must fit inside the source tile",
       /*span=*/args[0]->span_,
   });
-  tile_view.blayout = InferTileLayoutFromShape(dst_shape);
+  // The destination memory dictates the layout, so seed from its implicit view.
+  // The default mirrors `set_output_memory_from_kwarg("target_memory", Vec)`
+  // registered below; since this deducer now always stamps the space itself,
+  // that registry fallback is unreachable for tile.extract and the two only have
+  // to agree on the default.
+  const MemorySpace target = GetKwargOr<MemorySpace>(kwargs, "target_memory", MemorySpace::Vec);
+
+  tile_view_semantics::SetTileLayout(tile_view,
+                                     tile_view_semantics::GetImplicitTileLayout(dst_shape, target));
 
   // Override blayout/slayout for L0-resident destinations to match the
   // architectural layouts the A2/A3 `pto.textract` codegen verifier
-  // expects.  Mat/other targets keep the inferred default.  These
+  // expects.  Mat/other targets keep the destination's implicit layout.  These
   // hardcoded layouts mirror the L0A/L0B formats the hardware imposes on
   // TEXTRACT outputs (and differ from `tile.move`'s TMOV-side L0 formats).
-  for (const auto& [k, v] : kwargs) {
-    if (k != "target_memory") continue;
-    auto target = AnyCast<MemorySpace>(v, "kwarg key: target_memory");
-    if (target == MemorySpace::Left) {
-      tile_view.blayout = TileLayout::row_major;
-      tile_view.slayout = TileLayout::row_major;
-    } else if (target == MemorySpace::Right) {
-      tile_view.blayout = TileLayout::row_major;
-      tile_view.slayout = TileLayout::col_major;
-    }
-    break;
+  if (target == MemorySpace::Left) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+  } else if (target == MemorySpace::Right) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::col_major;
   }
 
-  return std::make_shared<TileType>(dst_shape, src_type->dtype_, std::nullopt, tile_view);
+  // Canonicalize the view once, against the space it is actually a view of --
+  // not against nullopt, which would let OpRegistry::Create re-interpret a
+  // collapsed view under a different space's implicit layout.
+  return std::make_shared<TileType>(dst_shape, src_type->dtype_, std::nullopt, tile_view, target);
 }
 
 REGISTER_OP("tile.extract")

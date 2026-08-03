@@ -315,7 +315,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
 | **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
-| - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |
+| - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat). The result's layout comes from `target_memory`'s implicit view, except `Left`/`Right`, which take the TEXTRACT-side L0 formats (these differ from `tile.move`'s TMOV-side ones) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match). Carries the source's `valid_shape` through without widening it — see [Reshape and the valid region](#reshape-and-the-valid-region) |
 | - | `tile.reinterpret_view` | Zero-copy view with a different dtype and the same exact bytes; optional shape uses layout-aware inference (packed flat tiles only) |
 | - | `tile.transpose` | Swap two axes of a tile |
@@ -333,19 +333,26 @@ The deduced result `TileView` splits by field:
 
 | Field | Source of the result value |
 | ----- | -------------------------- |
-| `blayout` / `slayout` | The source tile's effective view — a move preserves the logical layout — unless the destination is `Left` / `Right` / `LeftScale` / `RightScale` (hardware-fixed) or a `blayout` / `slayout` kwarg overrides it |
+| `blayout` / `slayout` | The **destination** space's implicit layout wherever that space has one of its own (`Mat`, `Acc`, `Left`, `Right`, `LeftScale`, `RightScale`). For the flat spaces (`Vec`, `Bias`, …), whose implicit layout is the space-agnostic one, the source tile's effective layout carries over. A `blayout` / `slayout` kwarg overrides either |
 | `fractal` | The **destination** space's boxing granularity, never the source's: `Acc` (L0C, NZ-boxed) is 1024, MX scale tiles are 32, everything else 512 |
 | `valid_shape` / `pad` | Carried over from the source |
 | `stride` / `start_offset` | Dropped — the destination is a dense buffer |
 
-`fractal` comes from the destination because it describes how the destination
-buffer is boxed; `tile_view_semantics::GetImplicitFractal` supplies it. It is
-also what makes a same-space, same-layout move canonical:
-`OpRegistry::Create` stamps `memory_space` onto the deduced type, so a result
-view matching the destination's implicit view collapses to `nullopt` — the same
-per-space implicit view
+The whole layout comes from the destination because it describes how the
+destination buffer is boxed; `tile_view_semantics::GetImplicitTileLayout`
+supplies it (delegating the fractal to `GetImplicitFractal`). `Right` is the one
+destination that still needs a local override: L0B requires `blayout=row_major`
+even for an `[N, 1]` shape, whose implicit `blayout` is `col_major`.
+
+`tile.move` stamps the destination `memory_space` onto the deduced type itself,
+so the view is canonicalized once, against the space it is actually a view of —
+a result view matching the destination's implicit view collapses to `nullopt`,
+the same per-space implicit view
 [`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
-retyped tile to.
+retyped tile to. Deducing against `nullopt` and leaving `OpRegistry::Create` to
+stamp the space would canonicalize twice, against two different implicit
+layouts — see the `TileType` contract in
+[Types](02-types.md#tiletype-and-tileview).
 
 ### Reshape and the valid region
 

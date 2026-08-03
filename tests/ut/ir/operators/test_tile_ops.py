@@ -33,10 +33,14 @@ def _tile_result_dtype(call: ir.Call) -> DataType:
     return result_type.dtype
 
 
-def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src"):
-    """A tile Var whose tile_view narrows it to `valid_shape`."""
+def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src", **view_kwargs):
+    """A tile Var whose tile_view narrows it to `valid_shape`.
+
+    Extra keyword arguments (blayout, slayout, fractal) are forwarded to the
+    TileView, for callers that need a source with a specific layout.
+    """
     span = ir.Span.unknown()
-    view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad)
+    view = ir.TileView(valid_shape=valid_shape, stride=[], start_offset=None, pad=pad, **view_kwargs)
     return ir.Var(name, ir.TileType(shape, DataType.FP32, tile_view=view), span)
 
 
@@ -4130,23 +4134,18 @@ class TestTileMoveOp:
         assert call.type.tile_view is None
         assert call.type.get_effective_tile_view().fractal == expected_fractal
 
-    @pytest.mark.parametrize(
-        ("source_space", "view_stored"),
-        [
-            # Mat's layout triple differs from Acc's only in fractal, so adopting
-            # the destination's 1024 lands exactly on Acc's implicit view.
-            (ir.MemorySpace.Mat, False),
-            # Vec's blayout/slayout follow the source, so the view stays explicit —
-            # but fractal is still the destination's.
-            (ir.MemorySpace.Vec, True),
-        ],
-    )
-    def test_move_into_acc_adopts_acc_fractal_from_non_acc_source(self, source_space, view_stored):
-        """A 512-fractal source moved into Acc must report Acc's 1024.
+    @pytest.mark.parametrize("source_space", [ir.MemorySpace.Mat, ir.MemorySpace.Vec])
+    def test_move_into_acc_adopts_acc_layout_from_non_acc_source(self, source_space):
+        """A 512-fractal source moved into Acc must report Acc's full NZ view.
 
-        The same-space cases above cannot show this: an Acc source already has
-        fractal 1024, so they pass even if the result wrongly inherited it from
-        the source instead of taking it from the destination."""
+        The same-space cases above cannot show this: an Acc source already
+        carries Acc's layout, so they pass even if the result wrongly inherited
+        it from the source instead of taking it from the destination.
+
+        Acc dictates blayout/slayout as well as fractal — a tile living in L0C is
+        NZ-boxed whatever it was moved from — so the deduced view is exactly
+        Acc's implicit view and is stored canonically as None, for any source.
+        """
         source = self._tile_var(source_space)
         source_type = source.type
         assert isinstance(source_type, ir.TileType)
@@ -4156,8 +4155,13 @@ class TestTileMoveOp:
 
         assert isinstance(call.type, ir.TileType)
         assert call.type.memory_space == ir.MemorySpace.Acc
-        assert (call.type.tile_view is not None) == view_stored
-        assert call.type.get_effective_tile_view().fractal == 1024
+        assert call.type.tile_view is None
+        eff = call.type.get_effective_tile_view()
+        assert (eff.blayout, eff.slayout, eff.fractal) == (
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            1024,
+        )
 
     def test_acc_to_vec_move_keeps_vec_fractal(self):
         """Moving out of Acc must adopt Vec's granularity, not carry 1024 along:
@@ -5459,6 +5463,198 @@ class TestWindowReadValidRegion:
 
         # rows: clamp(40 - 16, 0, 32) = 24;  cols: clamp(100 - 64, 0, 32) = 32
         assert _valid_of(call.type) == [24, 32]
+
+
+class TestDestinationSpaceLayoutDeduction:
+    """A retargeting op's result layout comes from the DESTINATION memory space.
+
+    tile.move / tile.extract used to deduce the result view against a nullopt
+    memory space and let OpRegistry::Create stamp the real space by rebuilding
+    the TileType -- which re-ran CanonicalizeTileViewInPlace against a different
+    implicit view. Since the collapse to nullopt only fires when the view is
+    fully valid and unpadded, the destination layout silently depended on the
+    tile's valid extent: a fully-valid Vec->Mat move got Mat's boxed NZ layout,
+    while the same move on a ragged tile kept Vec's flat row_major/none_box.
+
+    The layout must depend only on (shape, destination space).
+    """
+
+    # Destination space -> the (blayout, slayout, fractal) a tile living there
+    # must carry. Acc is the one destination with a non-default fractal, so it
+    # also pins that fractal comes from the destination and is never inherited.
+    _BOXED_DESTINATIONS = [
+        (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+        (ir.MemorySpace.Left, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+        (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+        (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+    ]
+
+    @staticmethod
+    def _layout_of(result_type):
+        eff = result_type.get_effective_tile_view()
+        return (eff.blayout, eff.slayout, eff.fractal)
+
+    # --- tile.move ----------------------------------------------------------
+
+    @pytest.mark.parametrize("space,blayout,slayout,fractal", _BOXED_DESTINATIONS)
+    def test_move_layout_is_independent_of_the_source_valid_extent(self, space, blayout, slayout, fractal):
+        """A narrower valid_shape must not change where the result's layout comes from."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([64, 64], DataType.FP32), span)
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        full_layout = self._layout_of(tile.move(full, target_memory=space).type)
+        ragged_layout = self._layout_of(tile.move(ragged, target_memory=space).type)
+
+        assert full_layout == ragged_layout == (blayout, slayout, fractal)
+
+    @pytest.mark.parametrize("space,blayout,slayout,fractal", _BOXED_DESTINATIONS)
+    def test_move_layout_is_independent_of_the_source_pad(self, space, blayout, slayout, fractal):
+        """pad is the other reason a view cannot collapse -- same rule applies."""
+        padded = _partial_tile([64, 64], [64, 64], pad=ir.PadValue.zero)
+
+        assert self._layout_of(tile.move(padded, target_memory=space).type) == (blayout, slayout, fractal)
+
+    def test_move_narrowing_the_source_still_narrows_the_result(self):
+        """Fixing the layout must not drop the valid extent the move carries over."""
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        assert _valid_of(tile.move(ragged, target_memory=ir.MemorySpace.Mat).type) == [64, 48]
+
+    def test_move_to_right_keeps_row_major_for_a_column_vector(self):
+        """L0B needs a RowMajor block layout even where the implicit one is col_major.
+
+        A `[N, 1]` shape infers blayout=col_major, so `Right` is the one
+        destination that still needs an explicit override on top of its implicit
+        layout -- this is the case that justifies keeping it.
+        """
+        span = ir.Span.unknown()
+        col_vector = ir.Var("v", ir.TileType([64, 1], DataType.FP32), span)
+
+        assert self._layout_of(tile.move(col_vector, target_memory=ir.MemorySpace.Right).type) == (
+            ir.TileLayout.row_major,
+            ir.TileLayout.col_major,
+            512,
+        )
+
+    @pytest.mark.parametrize("space", [d[0] for d in _BOXED_DESTINATIONS])
+    def test_move_stamps_the_destination_memory_space(self, space):
+        """The deduced type is a view OF the destination, so it must say so."""
+        result_type = tile.move(_partial_tile([64, 64], [64, 48]), target_memory=space).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memory_space == space
+
+    # Vec and Bias share the space-agnostic implicit layout, so they take the
+    # source-inherited seed. `destination_dictates_layout` compares layouts
+    # rather than naming Vec, so pin both: a future change to either entry in
+    # GetImplicitTileLayout must not silently flip this.
+    @pytest.mark.parametrize("space", [ir.MemorySpace.Vec, ir.MemorySpace.Bias])
+    @pytest.mark.parametrize("valid", [None, [64, 48]], ids=["full-valid", "part-valid"])
+    def test_move_to_a_flat_space_inherits_the_source_layout(self, space, valid):
+        """A flat destination keeps the source's blayout/slayout, whatever its extent."""
+        src = _partial_tile(
+            [64, 64],
+            valid or [64, 64],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+        )
+
+        assert self._layout_of(tile.move(src, target_memory=space).type) == (
+            ir.TileLayout.col_major,
+            ir.TileLayout.row_major,
+            512,
+        )
+
+    def test_move_explicit_layout_kwargs_still_win(self):
+        """blayout/slayout are user overrides and outrank the destination default."""
+        ragged = _partial_tile([64, 64], [64, 48])
+
+        call = tile.move(
+            ragged,
+            target_memory=ir.MemorySpace.Mat,
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.col_major,
+        )
+
+        assert self._layout_of(call.type)[:2] == (ir.TileLayout.row_major, ir.TileLayout.col_major)
+
+    # --- tile.extract -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "space,blayout,slayout,fractal",
+        [
+            # L0 destinations use the TEXTRACT-side formats, not tile.move's TMOV ones.
+            (ir.MemorySpace.Left, ir.TileLayout.row_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Right, ir.TileLayout.row_major, ir.TileLayout.col_major, 512),
+            (ir.MemorySpace.Mat, ir.TileLayout.col_major, ir.TileLayout.row_major, 512),
+            (ir.MemorySpace.Vec, ir.TileLayout.row_major, ir.TileLayout.none_box, 512),
+            # Acc is reachable via LowerPipelineLoops; the deducer has no Acc
+            # branch of its own, so this pins that the Acc NZ view (including
+            # fractal 1024) comes from the destination's implicit view.
+            (ir.MemorySpace.Acc, ir.TileLayout.col_major, ir.TileLayout.row_major, 1024),
+        ],
+    )
+    def test_extract_layout_is_independent_of_the_source_valid_extent(self, space, blayout, slayout, fractal):
+        """Whether the window lands on source padding must not flip the layout."""
+        span = ir.Span.unknown()
+        full = ir.Var("full", ir.TileType([64, 256], DataType.FP32), span)
+        ragged = _partial_tile([64, 256], [64, 100])
+
+        # Same window; over the ragged source it straddles the valid edge (cols
+        # 64..96 vs valid 100 -> 32) versus (cols 96..128 -> 4), so the ragged
+        # result cannot collapse to an implicit view.
+        full_layout = self._layout_of(tile.extract(full, 0, 96, shape=[32, 32], target_memory=space).type)
+        ragged_layout = self._layout_of(tile.extract(ragged, 0, 96, shape=[32, 32], target_memory=space).type)
+
+        assert full_layout == ragged_layout == (blayout, slayout, fractal)
+
+    @pytest.mark.parametrize(
+        "space",
+        [ir.MemorySpace.Left, ir.MemorySpace.Right, ir.MemorySpace.Mat, ir.MemorySpace.Vec],
+    )
+    def test_extract_stamps_the_destination_memory_space(self, space):
+        """Same contract as tile.load: the type names the space it is a view of."""
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TileType([64, 256], DataType.FP32), span)
+
+        result_type = tile.extract(src, 0, 0, shape=[32, 32], target_memory=space).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.memory_space == space
+
+    # --- matmul family ------------------------------------------------------
+
+    def test_matmul_family_carries_the_acc_layout_and_space(self):
+        """Every matmul deducer must state the Acc NZ view, not reach it by accident.
+
+        These ops declare `set_output_memory(MemorySpace::Acc)`, and
+        `tile.matmul_bias` in particular used to leave the view at the struct
+        default (row_major/none_box/512) and land on the Acc layout only because a
+        fully-valid view collapses to nullopt and the registry's memory-space
+        stamp re-canonicalized it against Acc's implicit view.
+        """
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 32], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([32, 64], DataType.FP16), span)
+        acc = ir.Var("acc", ir.TileType([16, 64], DataType.FP32), span)
+        bias = ir.Var("bias", ir.TileType([1, 64], DataType.FP32), span)
+        b_lhs = ir.Var("b_lhs", ir.TileType([4, 16, 32], DataType.FP16), span)
+        b_rhs = ir.Var("b_rhs", ir.TileType([4, 32, 64], DataType.FP16), span)
+        b_acc = ir.Var("b_acc", ir.TileType([4, 16, 64], DataType.FP32), span)
+
+        acc_nz = (ir.TileLayout.col_major, ir.TileLayout.row_major, 1024)
+        for name, call in (
+            ("matmul", tile.matmul(lhs, rhs)),
+            ("matmul_acc", tile.matmul_acc(acc, lhs, rhs)),
+            ("matmul_bias", tile.matmul_bias(lhs, rhs, bias)),
+            ("batch_matmul", tile.batch_matmul(b_lhs, b_rhs)),
+            ("batch_matmul_acc", tile.batch_matmul_acc(b_acc, b_lhs, b_rhs)),
+        ):
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType), name
+            assert result_type.memory_space == ir.MemorySpace.Acc, name
+            assert self._layout_of(result_type) == acc_nz, name
 
 
 class TestWriteValidRegionUnion:

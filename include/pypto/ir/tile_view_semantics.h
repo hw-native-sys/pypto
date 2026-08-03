@@ -82,43 +82,76 @@ inline uint64_t GetImplicitFractal(const std::optional<MemorySpace>& memory_spac
   }
 }
 
-/// Build the implicit TileView semantics represented by omitted Python syntax.
-inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
-                                    const std::optional<MemorySpace>& memory_space = std::nullopt) {
-  TileView implicit_view;
-  implicit_view.valid_shape = shape;
-  implicit_view.blayout = InferImplicitTileLayoutFromShape(shape);
-  implicit_view.fractal = GetImplicitFractal(memory_space);
+/// The layout half of a TileView: the fields determined by (shape, memory
+/// space) rather than by the data the tile holds. Kept separate from TileView so
+/// a caller needing only the layout can skip building (and copying) a whole view.
+struct TileLayoutSpec {
+  TileLayout blayout = TileLayout::row_major;
+  TileLayout slayout = TileLayout::none_box;
+  uint64_t fractal = TileView{}.fractal;
+};
+
+inline bool operator==(const TileLayoutSpec& lhs, const TileLayoutSpec& rhs) {
+  return lhs.blayout == rhs.blayout && lhs.slayout == rhs.slayout && lhs.fractal == rhs.fractal;
+}
+inline bool operator!=(const TileLayoutSpec& lhs, const TileLayoutSpec& rhs) { return !(lhs == rhs); }
+
+/// The layout a tile of @p shape implicitly carries when it lives in
+/// @p memory_space -- the single source of truth for the space->layout table.
+/// An absent space yields the space-agnostic (flat) layout. Delegates the
+/// fractal to GetImplicitFractal so the two cannot drift.
+inline TileLayoutSpec GetImplicitTileLayout(const std::vector<ExprPtr>& shape,
+                                            const std::optional<MemorySpace>& memory_space = std::nullopt) {
+  TileLayoutSpec layout;
+  layout.blayout = InferImplicitTileLayoutFromShape(shape);
+  layout.fractal = GetImplicitFractal(memory_space);
 
   if (memory_space.has_value()) {
     switch (*memory_space) {
       case MemorySpace::Mat:
       case MemorySpace::Left:
-        implicit_view.blayout = TileLayout::col_major;
-        implicit_view.slayout = TileLayout::row_major;
+        layout.blayout = TileLayout::col_major;
+        layout.slayout = TileLayout::row_major;
         break;
       case MemorySpace::Right:
-        implicit_view.slayout = TileLayout::col_major;
+        layout.slayout = TileLayout::col_major;
         break;
       case MemorySpace::LeftScale:
         // ISA TileLeftScale: RowMajor / RowMajor.
-        implicit_view.blayout = TileLayout::row_major;
-        implicit_view.slayout = TileLayout::row_major;
+        layout.blayout = TileLayout::row_major;
+        layout.slayout = TileLayout::row_major;
         break;
       case MemorySpace::RightScale:
         // ISA TileRightScale: ColMajor / ColMajor.
-        implicit_view.blayout = TileLayout::col_major;
-        implicit_view.slayout = TileLayout::col_major;
+        layout.blayout = TileLayout::col_major;
+        layout.slayout = TileLayout::col_major;
         break;
       case MemorySpace::Acc:
-        implicit_view.blayout = TileLayout::col_major;
-        implicit_view.slayout = TileLayout::row_major;
+        layout.blayout = TileLayout::col_major;
+        layout.slayout = TileLayout::row_major;
         break;
       default:
         break;
     }
   }
 
+  return layout;
+}
+
+/// Overwrite only @p view's layout fields, leaving valid_shape / stride /
+/// start_offset / pad (which describe the data, not the memory) untouched.
+inline void SetTileLayout(TileView& view, const TileLayoutSpec& layout) {
+  view.blayout = layout.blayout;
+  view.slayout = layout.slayout;
+  view.fractal = layout.fractal;
+}
+
+/// Build the implicit TileView semantics represented by omitted Python syntax.
+inline TileView GetImplicitTileView(const std::vector<ExprPtr>& shape,
+                                    const std::optional<MemorySpace>& memory_space = std::nullopt) {
+  TileView implicit_view;
+  implicit_view.valid_shape = shape;
+  SetTileLayout(implicit_view, GetImplicitTileLayout(shape, memory_space));
   return implicit_view;
 }
 

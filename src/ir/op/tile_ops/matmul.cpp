@@ -30,6 +30,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -91,15 +92,16 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N]
   std::vector<ExprPtr> output_shape = {m_dim, n_dim};
 
-  // Acc layout: Nz. fractal is the inner box size in *bytes* — 16 rows x
-  // (1024 / dtype_bytes / 16) cols, i.e. a 16x16 box for the 4-byte (FP32/INT32) accumulator.
+  // Acc layout (Nz), taken from the destination space's implicit layout rather
+  // than a hand-written triple. fractal is the inner box size in *bytes* — 16
+  // rows x (1024 / dtype_bytes / 16) cols, i.e. a 16x16 box for the 4-byte
+  // (FP32/INT32) accumulator.
   TileView tile_view;
-  tile_view.blayout = TileLayout::col_major;
-  tile_view.slayout = TileLayout::row_major;
-  tile_view.fractal = 1024;
+  tile_view_semantics::SetTileLayout(
+      tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
   tile_view.valid_shape = output_shape;
 
-  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
 
 TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
@@ -181,15 +183,13 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N] (same as accumulator)
   std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
 
-  // Acc layout: Nz. fractal is the inner box size in *bytes* — 16 rows x
-  // (1024 / dtype_bytes / 16) cols, i.e. a 16x16 box for the 4-byte (FP32/INT32) accumulator.
+  // Acc layout (Nz) — as in tile.matmul, from the destination's implicit layout.
   TileView tile_view;
-  tile_view.blayout = TileLayout::col_major;
-  tile_view.slayout = TileLayout::row_major;
-  tile_view.fractal = 1024;
+  tile_view_semantics::SetTileLayout(
+      tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
   tile_view.valid_shape = output_shape;
 
-  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
 
 TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
@@ -254,9 +254,15 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible bias data type, but got "
                       << lhs_rhs_dtype->ToString() << " and " << bias_type->dtype_.ToString();
 
+  // Acc layout (Nz) — as in tile.matmul. This deducer previously left the view at
+  // the struct default (row_major/none_box) and reached the Acc layout only
+  // because a fully-valid view collapses to nullopt and the registry's
+  // memory-space stamp re-canonicalized it against Acc's implicit view.
   TileView tile_view;
+  tile_view_semantics::SetTileLayout(
+      tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
   tile_view.valid_shape = output_shape;
-  return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
 
 // ============================================================================
