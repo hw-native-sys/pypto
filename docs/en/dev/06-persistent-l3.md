@@ -17,13 +17,14 @@ The persistent path is opt-in. The default `prepare()` behavior is unchanged.
 
 ## Lifecycle
 
-The PyPTO worker starts one background dispatcher and sends requests to it
-through a Python queue. Every request executes inside its own Simpler
-`Worker.run()` completion fence. The first use of a generated CommDomain
-allocates its physical window; later calls receive a retained lease for the
-same handle. Closing the prepared worker stops the dispatcher and releases all
-retained domains. Request or domain-release errors are propagated to the
-caller instead of being silently discarded by the background thread.
+Each PyPTO submission builds its persistent orchestration synchronously in the
+calling thread and calls Simpler `Worker.submit()` directly. The returned
+`DistributedRunHandle` owns that request until its native completion fence and
+cleanup finish. The first use of a generated CommDomain allocates its physical
+window; later calls receive a retained lease for the same handle. Closing the
+prepared worker stops admission, drains every published handle, and then
+releases all retained domains. Request and domain-release errors are propagated
+to the caller.
 
 Generated HOST orchestration entries accept an internal `_domain_provider`
 keyword. Normal dispatch leaves it unset and continues to call
@@ -77,13 +78,17 @@ Domains are isolated by `(compiled program, generated domain name)`. Prefill's
 generated names match. All prepared programs still must satisfy the normal
 platform, runtime, and device-ID compatibility checks.
 
-Requests execute serially through one queue. Persistent mode does not make one
-worker execute multiple L3 DAGs concurrently.
+Graph construction remains serialized by `DistributedWorker.submit()` and
+Simpler. Once accepted, persistent runs follow the same bounded asynchronous
+dispatch contract as ordinary runs: up to two PyPTO metadata frames may be
+published, while the backend's negotiated depth determines how many device
+runs can actually overlap.
 
 ## Runtime dependency
 
-This implementation does not modify Simpler. Each queued request uses the
-public `Worker.run()` completion boundary. PyPTO detaches retained CommDomains
+This implementation does not modify Simpler. Each request uses the public
+`Worker.submit()` boundary, and its native handle remains attached to PyPTO's
+bounded dispatch handle until completion. PyPTO detaches retained CommDomains
 from Simpler's per-run release set and releases them when the prepared worker
 closes. That retention currently depends on Simpler's private Worker-level
 live-domain registry and active run-resource journal (`_live_domains` and

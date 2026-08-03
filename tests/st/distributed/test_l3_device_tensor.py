@@ -12,14 +12,16 @@
 The L3 analogue of ``tests/st/runtime/framework_and_models/test_device_tensor.py``: prepare a
 reusable handle once, upload a static weight to a worker-resident DeviceTensor
 via ``rt.alloc_tensor`` (once), then dispatch multiple times reusing both the
-handle (no re-setup) and the resident weight.
+handle (no re-setup) and the resident weight. Three dispatches use distinct
+mutable IO buffers: the first two occupy the bounded asynchronous metadata
+frames, and the third waits for the oldest frame before reuse.
 
 Per-call IO uses shared-memory host tensors allocated **before** ``prepare()``
 and reused in place — the forked chip worker reads/writes them through the
 inherited shared mapping, so the output is read straight back from ``host_out``
 (no ``copy_from``). Only the weight is device-resident
-(``Tensor.child_memory=True``). This mirrors the runtime's
-``child_memory`` example.
+(``Tensor.child_memory=True``). This mirrors the runtime's ``child_memory``
+example while exercising the public asynchronous dispatch contract.
 
 Computation: ``f = a + b``, with ``b`` resident across both dispatches.
 """
@@ -71,17 +73,17 @@ class L3AddProgram:
 
 
 class TestL3DeviceTensorReuse:
-    """prepare() once, allocate resident weight once, dispatch many."""
+    """Prepare once, retain one weight, and submit through two bounded frames."""
 
     def test_resident_weight_reused_across_dispatches(self, test_config, device_ids):
-        """``f = a + b`` over two dispatches; ``b`` uploaded once and reused.
+        """``f = a + b`` over three bounded submissions; ``b`` is uploaded once.
 
         Verifies that:
         1. ``rt.alloc_tensor(init=host_b)`` populates a resident buffer
            (otherwise the kernel would compute ``a + 0``).
-        2. The resident weight (``child_memory=True``) survives across both
-           ``rt(...)`` dispatches without re-upload.
-        3. The handle reuses its Worker — setup is not repeated per call.
+        2. Two submissions can own distinct mutable IO frames concurrently.
+        3. A third submission drains the oldest frame before bounded reuse.
+        4. The resident weight survives every dispatch without re-upload.
         """
         if not device_ids:
             pytest.skip("L3 DeviceTensor test needs at least one device")
@@ -98,20 +100,30 @@ class TestL3DeviceTensorReuse:
 
         # Shared-memory host buffers MUST be allocated before prepare() so the
         # forked chip worker inherits their mappings: host_b is the resident
-        # weight's upload source; host_a / host_out are the per-call IO buffers
-        # (reused in place across dispatches).
-        host_a = torch.zeros((128, 128), dtype=torch.float32).share_memory_()
-        host_out = torch.zeros((128, 128), dtype=torch.float32).share_memory_()
+        # weight's upload source. Every overlapping dispatch owns a distinct
+        # mutable input/output pair until its handle publishes completion.
+        host_inputs = [
+            torch.full((128, 128), value, dtype=torch.float32).share_memory_() for value in (2.0, 7.0, 11.0)
+        ]
+        host_outputs = [torch.zeros((128, 128), dtype=torch.float32).share_memory_() for _ in host_inputs]
         host_b = torch.full((128, 128), 3.0, dtype=torch.float32).share_memory_()
 
         with compiled.prepare() as rt:
             weight = rt.alloc_tensor((128, 128), torch.float32, init=host_b)  # uploaded once
             try:
-                for host_a_val, expect_val in ((2.0, 5.0), (7.0, 10.0)):
-                    host_a.fill_(host_a_val)  # refresh per-call input in place
-                    host_out.zero_()
-                    rt(host_a, weight, host_out)  # reuses Worker + resident weight
+                first = rt.submit(compiled, host_inputs[0], weight, host_outputs[0])
+                second = rt.submit(compiled, host_inputs[1], weight, host_outputs[1])
+                # Both metadata frames are now owned. This call waits for the
+                # oldest handle before it constructs and publishes dispatch 3.
+                third = rt.submit(compiled, host_inputs[2], weight, host_outputs[2])
 
+                for handle, host_out, expect_val in zip(
+                    (first, second, third),
+                    host_outputs,
+                    (5.0, 10.0, 14.0),
+                    strict=True,
+                ):
+                    handle.result()
                     expected = torch.full((128, 128), expect_val, dtype=torch.float32)
                     torch.testing.assert_close(host_out, expected, rtol=1e-5, atol=1e-5)
             finally:
