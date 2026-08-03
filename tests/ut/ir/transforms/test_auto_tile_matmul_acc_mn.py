@@ -313,7 +313,7 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
                 rhs,
                 [0, 0],
                 [384, 288],
-                valid_shapes=[384, 272],
+                valid_shape=[384, 272],
                 target_memory=pl.Mem.Mat,
             )
             product: pl.Tile[
@@ -367,7 +367,7 @@ def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
                 rhs,
                 [0, 0],
                 [384, 288],
-                valid_shapes=[384, valid_n],
+                valid_shape=[384, valid_n],
                 target_memory=pl.Mem.Mat,
             )
             product: pl.Tile[
