@@ -82,9 +82,11 @@ static bool EmitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen&
                                          int split) {
   auto source_tile_type = GetTpushTileType(op->args_[0]);
   const auto source_memory = source_tile_type ? source_tile_type->GetMemorySpace() : std::nullopt;
-  const bool no_split_acc_to_vec = split == 0 && codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3" &&
-                                   op->op_->name_ == "tile.tpush_to_aiv" && source_memory.has_value() &&
-                                   *source_memory == ir::MemorySpace::Acc;
+  const bool marked_full_box_transport = op->GetKwarg<bool>("_full_box_transport", false);
+  const bool no_split_acc_to_vec =
+      split == 0 && codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3" &&
+      op->op_->name_ == "tile.tpush_to_aiv" &&
+      (marked_full_box_transport || (source_memory.has_value() && *source_memory == ir::MemorySpace::Acc));
 
   // split == 0 normally means no cross-core split: the single consumer reads
   // exactly the producer's (possibly narrowed) valid_shape, so no full-box
@@ -257,6 +259,19 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << op_name << " requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
   auto [valid_row, valid_col] = codegen.GetCurrentResultTpopValidShapeOperands();
+  const bool full_box_transport = split == 0 && std::string_view(target) == "aic" &&
+                                  codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3" &&
+                                  op->GetKwarg<bool>("_full_box_transport", false);
+  if (full_box_transport) {
+    // A2/A3 C2V uses a fixed-size GM slot.  A partial logical tpop would copy
+    // only part of the slot and make the NZ-to-ND conversion use that partial
+    // extent.  Omit the optional operands so the raw FIFO tile receives the
+    // full physical box; its IR type still carries the logical valid_shape for
+    // downstream allocations.  Do not set_validshape on the raw tpop tile:
+    // PTOAS rejects that operation on FIFO-backed values.
+    valid_row.clear();
+    valid_col.clear();
+  }
 
   std::ostringstream oss;
   oss << result_buf << " = pto.tpop_from_" << target;

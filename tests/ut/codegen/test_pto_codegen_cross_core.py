@@ -908,6 +908,62 @@ class TestCrossCoreTpushTpopCodegen:
         assert ", %c16_index, %c24_index :" in set_validshape_lines[1]
         assert lines.index(set_validshape_lines[0]) < tpush_index < lines.index(set_validshape_lines[1])
 
+    @pytest.mark.parametrize(
+        ("backend_type", "normalize_transport"),
+        [(BackendType.Ascend910B, True), (BackendType.Ascend950, False)],
+        ids=["a2a3-full-box", "a5-logical-shape"],
+    )
+    def test_no_split_partial_c2v_tpop_transport_by_backend(self, backend_type, normalize_transport):
+        """A2/A3 no-split C2V pop must receive the full physical box.
+
+        The A2/A3 pipe moves a fixed-size slot.  Passing the logical partial
+        shape to tpop copies only part of that slot and makes the NZ-to-ND
+        conversion use the wrong extent.  The raw FIFO tile cannot be narrowed
+        with set_validshape, so tpop receives the full box while the result's IR
+        type continues to carry the logical shape for downstream operations.
+        A5 keeps the logical tpop operands.
+        """
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, pl.INDEX, span)
+        cols = ir.ConstInt(32, pl.INDEX, span)
+        valid_cols = ir.ConstInt(24, pl.INDEX, span)
+        tile_view = ir.TileView(
+            valid_shape=[rows, valid_cols],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.none_box,
+            fractal=512,
+        )
+        tile_type = ir.TileType([rows, cols], pl.FP32, None, tile_view, ir.MemorySpace.Vec)
+        popped = ir.Var("popped", tile_type, span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    popped,
+                    ir.Call(
+                        ir.Op("tile.tpop_from_aic"),
+                        [],
+                        {"split": 0, "_full_box_transport": True},
+                        tile_type,
+                        span,
+                    ),
+                    span,
+                )
+            ],
+            span,
+        )
+        func = ir.Function("partial_c2v_pop", [], [], body, span, ir.FunctionType.AIV)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "partial_c2v_pop_program", span))
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+
+        if normalize_transport:
+            assert "pto.tpop_from_aic {split = 0}" in tpop_line
+            assert "pto.set_validshape" not in mlir_code
+        else:
+            assert "pto.tpop_from_aic(%c16_index, %c24_index) {split = 0}" in tpop_line
+
     def test_no_split_dual_aiv_tpush_widens_cols_preserves_rows(self):
         """No-split dual-AIV tpush widens COLUMNS to the box but PRESERVES rows.
 

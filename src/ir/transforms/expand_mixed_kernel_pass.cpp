@@ -347,12 +347,18 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0) {
-  return {{"split", std::any(split)}};
+std::vector<std::pair<std::string, std::any>> MakeSplitKwargs(int split = 0,
+                                                              bool full_box_transport = false) {
+  std::vector<std::pair<std::string, std::any>> kwargs{{"split", std::any(split)}};
+  if (full_box_transport) {
+    kwargs.emplace_back("_full_box_transport", std::any(true));
+  }
+  return kwargs;
 }
 
-CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0) {
-  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split), span);
+CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0,
+                    bool full_box_transport = false) {
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, full_box_transport), span);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
@@ -373,6 +379,22 @@ CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr
     kwargs.emplace_back("slayout", std::any(eff.slayout));
   }
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
+}
+
+bool NeedsFullBoxC2VTransport(const core_affinity::CVBoundaryMove& boundary) {
+  if (boundary.direction != CVDirection::CUBE_TO_VECTOR) {
+    return false;
+  }
+  auto source_type = std::dynamic_pointer_cast<const TileType>(boundary.source_tile->GetType());
+  if (!source_type) {
+    return false;
+  }
+  const auto source_memory = source_type->GetMemorySpace();
+  if (!source_memory.has_value() || *source_memory != MemorySpace::Acc) {
+    return false;
+  }
+  const auto source_view = tile_view_semantics::GetEffectiveTileView(*source_type);
+  return !tile_view_semantics::ShapeExprListsEquivalent(source_type->shape_, source_view.valid_shape);
 }
 
 // ============================================================================
@@ -707,6 +729,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // names the other lane whenever this side is the producer.
         const MemorySpace xfer_ms = GetBoundaryTpopMemory(side);
         const int op_split = bm.op_driven ? bm.split : 0;
+        const bool full_box_transport = NeedsFullBoxC2VTransport(bm);
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
@@ -749,7 +772,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
-              CreateTpush(push_op, push_source, stmt->span_, op_split), stmt->span_));
+              CreateTpush(push_op, push_source, stmt->span_, op_split, full_box_transport), stmt->span_));
         } else {
           // Op-driven pop: the half/full shape comes from the op result type and
           // the memory from this side's transfer memory; the explicit follow-on
@@ -805,10 +828,13 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             }
           }
           tpop_var_remap[tpop_var.get()] = tpop_var;
-          // tile.move boundary tpops carry no split kwarg here (assigned later by
-          // SplitVectorKernel); op-driven tpops stamp the op's split now.
-          auto pop_kwargs =
-              bm.op_driven ? MakeSplitKwargs(op_split) : std::vector<std::pair<std::string, std::any>>{};
+          // tile.move boundary tpops normally carry no split kwarg here (it is
+          // assigned later by SplitVectorKernel).  The full-box transport marker
+          // is round-tripped through the DSL together with an explicit split=0;
+          // SplitVectorKernel still overwrites it when the function is split.
+          auto pop_kwargs = bm.op_driven || full_box_transport
+                                ? MakeSplitKwargs(op_split, full_box_transport)
+                                : std::vector<std::pair<std::string, std::any>>{};
           result.push_back(std::make_shared<AssignStmt>(
               tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, pop_kwargs), stmt->span_));
           if (needs_post_move) {

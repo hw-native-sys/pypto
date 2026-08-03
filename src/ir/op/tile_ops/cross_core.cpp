@@ -187,9 +187,13 @@ TypePtr DeduceSplitReshapeTensor(const std::vector<ExprPtr>& args,
 
   // Valid shape: TensorView::valid_shape if set, otherwise the static shape
   // (mirrors GetValidShape for tiles).
-  std::vector<ExprPtr> valid = (tensor_type->tensor_view_ && !tensor_type->tensor_view_->valid_shape.empty())
-                                   ? tensor_type->tensor_view_->valid_shape
-                                   : tensor_type->shape_;
+  std::vector<ExprPtr> valid = tensor_type->shape_;
+  if (const auto& tensor_view = tensor_type->tensor_view_; tensor_view.has_value()) {
+    const auto& view = tensor_view.value();
+    if (!view.valid_shape.empty()) {
+      valid = view.valid_shape;
+    }
+  }
   auto reshaped =
       ReshapeSplitAxis(tensor_type->shape_, std::move(valid), axis, halve, op_name, args[0]->span_);
 
@@ -229,6 +233,7 @@ REGISTER_OP("tile.tpush_to_aiv")
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
     .set_attr<int>("id")
+    .set_attr<bool>("_full_box_transport")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -253,6 +258,7 @@ REGISTER_OP("tile.tpop_from_aic")
     .no_argument()
     .set_attr<int>("split")
     .set_attr<int>("id")
+    .set_attr<bool>("_full_box_transport")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 

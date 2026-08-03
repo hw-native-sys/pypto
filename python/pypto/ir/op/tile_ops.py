@@ -2719,7 +2719,14 @@ def _resolve_tpop_type(
     return None
 
 
-def tpush_to_aiv(tile: Expr, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
+def tpush_to_aiv(
+    tile: Expr,
+    *,
+    split: int,
+    id: int | None = None,
+    _full_box_transport: bool = False,
+    span: Span | None = None,
+) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
     Args:
@@ -2732,6 +2739,8 @@ def tpush_to_aiv(tile: Expr, *, split: int, id: int | None = None, span: Span | 
     kwargs = {"split": split}
     if id is not None:
         kwargs["id"] = id
+    if _full_box_transport:
+        kwargs["_full_box_transport"] = True
     return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], kwargs, actual_span)
 
 
@@ -2786,6 +2795,7 @@ def tpop_from_aic(
     dtype: DataType | None = None,
     split: int = 0,
     id: int | None = None,
+    _full_box_transport: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -2803,6 +2813,8 @@ def tpop_from_aic(
     kwargs = {"split": split}
     if id is not None:
         kwargs["id"] = id
+    if _full_box_transport:
+        kwargs["_full_box_transport"] = True
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aic")
         return _ir_core.Call(op, [], kwargs, resolved_type, actual_span)

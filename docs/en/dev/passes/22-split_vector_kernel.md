@@ -136,10 +136,13 @@ racing garbage rows into subblock 0's slot. The detection lever is
 Plain no-split `Acc -> Vec` pushes have a related C2V transport requirement.
 When the accumulator has a partial logical `valid_shape`, codegen temporarily
 widens both dimensions to the physical NZ box for `tpush`, then restores the
-logical shape. This prevents an incomplete FIFO slot from leaving stale data in
-the vector consumer while preserving the partial shape on `tpop` and downstream
-operations. Full-shape accumulators and no-split `Vec -> Mat` pushes are
-unchanged.
+logical shape. `ExpandMixedKernel` marks the paired `tpop_from_aic` so A2/A3
+also receives the full physical box; passing the partial extent to `tpop` would
+copy only part of the fixed-size GM slot and use the wrong NZ-to-ND conversion
+extent. The tpop result's IR type still carries the partial logical shape, so
+downstream allocations remain narrowed without applying `set_validshape` to the
+raw FIFO tile. Full-shape accumulators, A5, and no-split `Vec -> Mat` transfers
+are unchanged.
 
 ## Examples
 

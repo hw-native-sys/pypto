@@ -117,9 +117,11 @@ lane 1 重放将其 tile `valid_shape` 置零以不产生可见写入，但其�
 
 普通无拆分 `Acc -> Vec` 推送也有相关的 C2V 传输要求。当累加器带有部分逻辑
 `valid_shape` 时，codegen 会在 `tpush` 前将两个维度临时加宽到物理 NZ box，并在推送后
-恢复逻辑形状。这样可避免不完整的 FIFO 槽让 vector 消费者保留陈旧数据，同时保证
-`tpop` 及下游操作仍使用部分逻辑形状。完整形状的累加器和无拆分 `Vec -> Mat` 推送不受
-影响。
+恢复逻辑形状。`ExpandMixedKernel` 会标记与之配对的 `tpop_from_aic`，使 A2/A3 也按
+完整物理 box 接收；若将部分范围传给 `tpop`，固定大小的 GM 槽只会复制一部分，并以错误
+范围执行 NZ 到 ND 的转换。tpop 结果的 IR 类型仍携带部分逻辑形状，因此下游分配保持收窄，
+且无需对原始 FIFO tile 调用 `set_validshape`。完整形状的累加器、A5 以及无拆分
+`Vec -> Mat` 传输不受影响。
 
 ## 示例
 
