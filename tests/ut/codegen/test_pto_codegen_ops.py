@@ -3144,9 +3144,7 @@ class TestPipeBarrierCodegen:
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.barrier <PIPE_ALL>" in mlir, (
-            f"pto.barrier <PIPE_ALL> not found in MLIR:\n{mlir}"
-        )
+        assert "pto.barrier <PIPE_ALL>" in mlir, f"pto.barrier <PIPE_ALL> not found in MLIR:\n{mlir}"
 
     def test_bar_v_emits_pipe_v_barrier(self):
         """pl.system.bar_v() emits pto.barrier <PIPE_V>."""
@@ -3165,9 +3163,7 @@ class TestPipeBarrierCodegen:
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.barrier <PIPE_V>" in mlir, (
-            f"pto.barrier <PIPE_V> not found in MLIR:\n{mlir}"
-        )
+        assert "pto.barrier <PIPE_V>" in mlir, f"pto.barrier <PIPE_V> not found in MLIR:\n{mlir}"
 
     def test_bar_m_emits_pipe_m_barrier(self):
         """pl.system.bar_m() emits pto.barrier <PIPE_M>."""
@@ -3186,9 +3182,7 @@ class TestPipeBarrierCodegen:
                 return updated
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.barrier <PIPE_M>" in mlir, (
-            f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
-        )
+        assert "pto.barrier <PIPE_M>" in mlir, f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
 
 
 def _cmo_cacheinvalid_line(mlir: str) -> str:
