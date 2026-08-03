@@ -21,7 +21,6 @@ Kernel examples — single-kernel programs, ordered by complexity.
   09_dyn_valid_shape.py — dynamic valid_shape via if/else and loop patterns
   10_split_k.py        — split-K matmul (parallel K reduction, atomic-add)
   11_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
-  12_matmul_valid_shape.py — matmul with a padded physical tile and static valid_shape
 """
 
 import importlib
@@ -38,7 +37,6 @@ _ALIASES = {
     "assemble": "08_assemble",
     "dyn_valid_shape": "09_dyn_valid_shape",
     "auto_tile_matmul": "11_auto_tile_matmul",
-    "matmul_valid_shape": "12_matmul_valid_shape",
 }
 
 for _alias, _numbered in _ALIASES.items():

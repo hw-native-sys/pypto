@@ -105,10 +105,6 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
-对于二维 `tile.matmul`，结果保留物理 `[M, N]` 形状，并从对应的输出轴推导有效区域：
-`[lhs.valid_shape[0], rhs.valid_shape[1]]`。因此静态的部分有效 M 或 N 范围可以穿过矩阵乘，
-同时不会缩小按硬件要求装箱的累加器 tile。
-
 在 tile 层，`tile.batch_matmul` 为 `TileType` 操作数提供批量语义。它接受 rank >= 2 的
 tile，广播前导批量维度，并保持与 `tile.matmul` 相同的纯操作数接口风格。如果批量操作数
 需要转置语义，可以通过两种等价方式表达：在输入上显式使用 `tile.transpose(...)`，或在

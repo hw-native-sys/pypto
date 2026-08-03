@@ -1518,31 +1518,6 @@ class TestMatmulOperations:
             f"matmul_acc_64 failed: max diff = {(c - expected).abs().max().item()}"
         )
 
-    def test_matmul_valid_shape(self, test_config):
-        from examples.kernels.matmul_valid_shape import (  # noqa: PLC0415
-            TILE_M,
-            VALID_M,
-            K,
-            N,
-            matmul_valid_shape,
-        )
-
-        matmul_valid_shape._cache.clear()
-        torch.manual_seed(0)
-        a = torch.randn(VALID_M, K, dtype=torch.float32)
-        b = torch.randn(K, N, dtype=torch.float32)
-        sentinel = 17.0
-        output = torch.full((TILE_M, N), sentinel, dtype=torch.float32)
-        expected = output.clone()
-        matmul_valid_shape(a, b, output, config=test_config)
-        expected[:VALID_M] = torch.matmul(a, b)
-        assert torch.equal(output[VALID_M:], torch.full_like(output[VALID_M:], sentinel)), (
-            "rows outside valid_shape were modified"
-        )
-        assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3), (
-            f"matmul_valid_shape failed: max diff = {(output - expected).abs().max().item()}"
-        )
-
     @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)

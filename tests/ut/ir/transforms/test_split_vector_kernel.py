@@ -271,8 +271,8 @@ class TestSplitVectorKernelNoSplitA2A3:
         load_type = ir.TileType([16, 16], pl.FP32, None, load_view, ir.MemorySpace.Vec)
         loaded = ir.Var("loaded", load_type, span)
         # Canonical 4-operand tile.load ([tensor, offsets, shapes, valid_shape])
-        # with the target_memory kwarg used by this fixture. Matching the canonical
-        # operand and kwarg arity is what lets the
+        # with the full kwarg set the DSL/IR builder emits (target_memory +
+        # transpose). Matching the canonical operand/kwarg arity is what lets the
         # hand-built body survive the print->parse roundtrip verifier.
         load_call = ir.Call(
             ir.Op("tile.load"),

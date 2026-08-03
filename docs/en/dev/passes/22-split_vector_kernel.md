@@ -122,7 +122,7 @@ AIV, and `attrs["dual_aiv_dispatch"]` is true.
 The lane-1 replay zeroes its tile `valid_shape` so it produces no visible
 writes, but the AIC↔AIV `tpush` it keeps still moves data through the shared GM
 FIFO slot the single cube consumer pops in full. On the codegen side
-(`EmitTpushTransportValidShape`, `pto_ops_crosscore.cpp`) a no-split dual-AIV
+(`EmitSplitTpushTransportValidShape`, `pto_ops_common.cpp`) a no-split dual-AIV
 producer that narrowed its `valid_shape` with `set_validshape` must transport
 the **full column box**, or the consumer reads stale slot columns past
 `valid_col`. The no-split path widens **columns only and preserves the row
@@ -132,17 +132,6 @@ statically 0-row push moves no data), so it stays a true 0-row no-op rather than
 racing garbage rows into subblock 0's slot. The detection lever is
 `PTOCodegen::IsDualAivDispatchFunction()`, which reads this pass's
 `dual_aiv_dispatch` attribute.
-
-Plain no-split `Acc -> Vec` pushes have a related C2V transport requirement.
-When the accumulator has a partial logical `valid_shape`, codegen temporarily
-widens both dimensions to the physical NZ box for `tpush`, then restores the
-logical shape. `ExpandMixedKernel` marks the paired `tpop_from_aic` so A2/A3
-also receives the full physical box; passing the partial extent to `tpop` would
-copy only part of the fixed-size GM slot and use the wrong NZ-to-ND conversion
-extent. The tpop result's IR type still carries the partial logical shape, so
-downstream allocations remain narrowed without applying `set_validshape` to the
-raw FIFO tile. Full-shape accumulators, A5, and no-split `Vec -> Mat` transfers
-are unchanged.
 
 ## Examples
 

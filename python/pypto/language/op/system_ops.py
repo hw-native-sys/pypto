@@ -267,22 +267,9 @@ def cacheinvalid(
     return _ir_ops.cacheinvalid(tensor.unwrap(), shp, off, span=span)
 
 
-def tpush_to_aiv(
-    tile: Tile,
-    *,
-    split: int,
-    id: int | None = None,
-    _full_box_transport: bool = False,
-    span: Span | None = None,
-) -> Call:
+def tpush_to_aiv(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe."""
-    return _ir_ops.tpush_to_aiv(
-        tile.unwrap(),
-        split=split,
-        id=id,
-        _full_box_transport=_full_box_transport,
-        span=span,
-    )
+    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, id=id, span=span)
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
@@ -310,7 +297,6 @@ def tpop_from_aic(
     dtype: DataType | None = None,
     split: int = 0,
     id: int | None = None,
-    _full_box_transport: bool = False,
     span: Span | None = None,
 ) -> Tile:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -322,14 +308,7 @@ def tpop_from_aic(
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    call = _ir_ops.tpop_from_aic(
-        shape=shape,
-        dtype=dtype,
-        split=split,
-        id=id,
-        _full_box_transport=_full_box_transport,
-        span=span,
-    )
+    call = _ir_ops.tpop_from_aic(shape=shape, dtype=dtype, split=split, id=id, span=span)
     return Tile(expr=call)
 
 

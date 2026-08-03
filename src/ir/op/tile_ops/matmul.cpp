@@ -97,9 +97,7 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
   tile_view.fractal = 1024;
-  const auto lhs_valid_shape = GetValidShape(lhs_type);
-  const auto rhs_valid_shape = GetValidShape(rhs_type);
-  tile_view.valid_shape = {lhs_valid_shape[0], rhs_valid_shape[1]};
+  tile_view.valid_shape = output_shape;
 
   return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }

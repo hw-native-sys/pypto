@@ -11,9 +11,9 @@
 Runtime tests for dynamic shape kernels using the PyPTO frontend with PTO backend.
 
 Three scenarios are covered, each parametrized over [(128, 128)]:
-- Dynamic M x N tensor shape dims: trailing index args in codegen, resolved at runtime
+- Dynamic M×N tensor shape dims: trailing index args in codegen, resolved at runtime
   from the concrete input tensors passed by the orchestration function.
-- Static R x C tensors with M, N scalar valid_shape: shape baked in via closure
+- Static R×C tensors with M, N scalar valid_shape: shape baked in via closure
   variables captured by @pl.function; M and N read via pl.tensor.dim.
 - Dynamic M dim with scf.for loop (step=2, tile rows=2): col count from shape param.
 

@@ -291,9 +291,9 @@ class DynOrchTransposeAddTestCase(PTOTestCase):
 
 
 class DynOrchValidShapeAddTestCase(PTOTestCase):
-    """Test add with dynamic M x N orchestration and valid_shape from a scalar tensor.
+    """Test add with dynamic M×N orchestration and valid_shape from a scalar tensor.
 
-    Orchestration params a, b, c use dynamic M x N dims.  The scalars m, n are
+    Orchestration params a, b, c use dynamic M×N dims.  The scalars m, n are
     read at runtime from the INT64 tensor ``vs`` via ``pl.tensor.read``, which
     generates ``orch[idx].data<void>()`` scalar extraction in the C++ code.
     Expected result: c[:valid_rows, :valid_cols] = a + b, c elsewhere = 0.

@@ -18,7 +18,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -27,7 +26,6 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
@@ -77,23 +75,12 @@ static std::shared_ptr<const ir::TileType> GetTpushTileType(const ExprPtr& tile_
   return As<ir::TileType>(tile_expr->GetType());
 }
 
-static bool EmitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen& codegen,
-                                         const std::string& tile_buf, const std::string& tile_type,
-                                         int split) {
-  auto source_tile_type = GetTpushTileType(op->args_[0]);
-  const auto source_memory = source_tile_type ? source_tile_type->GetMemorySpace() : std::nullopt;
-  const bool marked_full_box_transport = op->GetKwarg<bool>("_full_box_transport", false);
-  const bool no_split_acc_to_vec =
-      split == 0 && codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3" &&
-      op->op_->name_ == "tile.tpush_to_aiv" &&
-      (marked_full_box_transport || (source_memory.has_value() && *source_memory == ir::MemorySpace::Acc));
-
+static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                              const std::string& tile_buf, const std::string& tile_type,
+                                              int split) {
   // split == 0 normally means no cross-core split: the single consumer reads
   // exactly the producer's (possibly narrowed) valid_shape, so no full-box
-  // transport is needed. Acc-to-Vec is an exception: the A2/A3 C2V pipe moves
-  // the accumulator's full physical NZ box, so a partial logical shape must be
-  // widened for transport or the consumer can retain stale local-buffer data.
-  // The 910B no-split dual-AIV dispatch path is another exception
+  // transport is needed. BUT the 910B no-split dual-AIV dispatch path
   // (function attr `dual_aiv_dispatch`) runs the producer on TWO AIV subblocks
   // that share one FIFO slot while the single cube consumer pops the FULL
   // slot. If the producer narrowed its valid_shape (e.g. set_validshape on a
@@ -102,10 +89,11 @@ static bool EmitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen&
   // still transport the full box, exactly as for split==1/2 — this extends
   // PR #1454's fix to the split==0 dual-dispatch case.
   const bool dual_aiv_no_split = (split == 0) && codegen.IsDualAivDispatchFunction();
-  if ((split == 0 && !dual_aiv_no_split && !no_split_acc_to_vec) || tile_buf.empty() || tile_type.empty()) {
+  if ((split == 0 && !dual_aiv_no_split) || tile_buf.empty() || tile_type.empty()) {
     return false;
   }
 
+  auto source_tile_type = GetTpushTileType(op->args_[0]);
   if (!source_tile_type || source_tile_type->shape_.size() < 2) {
     return false;
   }
@@ -225,7 +213,7 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  const bool restore_valid_shape = EmitTpushTransportValidShape(op, codegen, tile_buf, tile_type, split);
+  const bool restore_valid_shape = EmitSplitTpushTransportValidShape(op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_" << target << "(" << tile_buf;
@@ -259,19 +247,6 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << op_name << " requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
   auto [valid_row, valid_col] = codegen.GetCurrentResultTpopValidShapeOperands();
-  const bool full_box_transport = split == 0 && std::string_view(target) == "aic" &&
-                                  codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3" &&
-                                  op->GetKwarg<bool>("_full_box_transport", false);
-  if (full_box_transport) {
-    // A2/A3 C2V uses a fixed-size GM slot.  A partial logical tpop would copy
-    // only part of the slot and make the NZ-to-ND conversion use that partial
-    // extent.  Omit the optional operands so the raw FIFO tile receives the
-    // full physical box; its IR type still carries the logical valid_shape for
-    // downstream allocations.  Do not set_validshape on the raw tpop tile:
-    // PTOAS rejects that operation on FIFO-backed values.
-    valid_row.clear();
-    valid_col.clear();
-  }
 
   std::ostringstream oss;
   oss << result_buf << " = pto.tpop_from_" << target;
