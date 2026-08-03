@@ -83,6 +83,8 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
 
 namespace {
 
+// Slots per ring. Mirrors cross_core_pipe.cpp's GetSlotNumForDirMask and PTOAS's own
+// derivation; only used when initialize_pipe carries no explicit slot_num attribute.
 int GetGMPipeSlotCount(int dir_mask) {
   const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
   if (dir_mask == bidirectional) {
@@ -94,10 +96,20 @@ int GetGMPipeSlotCount(int dir_mask) {
   return 0;
 }
 
+// Number of independent rings in the GM workspace. A bidirectional pipe is TWO rings, laid
+// out back to back: on a2a3 the C2V ring starts at the workspace base and the V2C ring at
+// base + slot_num * slot_size. Sizing a bidirectional pipe as a single ring leaves the entire
+// V2C ring past the end of the allocation.
+int GetGMPipeRingCount(int dir_mask) {
+  const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
+  return dir_mask == bidirectional ? 2 : 1;
+}
+
 }  // namespace
 
 int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const FunctionPtr& root_func) {
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
+  std::map<std::pair<int, int>, int> slot_num_by_pipe;
 
   std::unordered_set<std::string> visited_funcs;
   std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
@@ -114,8 +126,15 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
         const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        const int slot_num = call->GetKwarg<int>("slot_num", 0);
         if (dir_mask > 0 && slot_size > 0) {
           const auto key = std::make_pair(pipe_id, dir_mask);
+          if (slot_num > 0) {
+            auto [nit, ninserted] = slot_num_by_pipe.emplace(key, slot_num);
+            CHECK(ninserted || nit->second == slot_num)
+                << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+                << " uses inconsistent slot_num values: " << nit->second << " and " << slot_num;
+          }
           auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
           CHECK(inserted || it->second == slot_size)
               << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
@@ -158,12 +177,17 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
   int64_t total_bytes = 0;
   for (const auto& [key, slot_size] : slot_size_by_pipe) {
     const int dir_mask = key.second;
-    const int slot_count = GetGMPipeSlotCount(dir_mask);
+    // Honour an explicit slot_num when the pipe carries one; otherwise fall back to the
+    // dir_mask-derived default that PTOAS would pick.
+    auto num_it = slot_num_by_pipe.find(key);
+    const int slot_count = num_it != slot_num_by_pipe.end() ? num_it->second : GetGMPipeSlotCount(dir_mask);
+    const int ring_count = GetGMPipeRingCount(dir_mask);
     CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
-    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() -
-                             static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size))
+    const int64_t pipe_bytes =
+        static_cast<int64_t>(ring_count) * static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size);
+    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() - pipe_bytes)
         << "GM slot buffer size overflow while sizing frontend pipe id " << key.first;
-    total_bytes += static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size);
+    total_bytes += pipe_bytes;
   }
 
   if (total_bytes == 0) {
