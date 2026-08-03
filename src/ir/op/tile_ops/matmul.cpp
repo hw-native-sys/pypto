@@ -31,6 +31,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -83,16 +84,13 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
         << " and rhs K=" << physical_k_rhs_const->value_;
   }
 
-  // The logical computation windows must match as well.
-  auto k_lhs_const = As<ConstInt>(k_dim_lhs);
-  auto k_rhs_const = As<ConstInt>(k_dim_rhs);
-
-  if (k_lhs_const && k_rhs_const) {
-    CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-        << "The operator " << op_name
-        << " requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
-        << " and rhs K=" << k_rhs_const->value_;
-  }
+  // PTO takes M/K from lhs and N from rhs. The rhs may expose a wider valid K
+  // window than lhs (for example a physically padded GM-to-Mat load), but it
+  // must contain every K element PTO will read.
+  CHECK(ProveValidExtentLessEqual(k_dim_lhs, k_dim_rhs) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(k_dim_lhs)
+      << " and rhs K=" << PythonPrint(k_dim_rhs);
 
   // A2A3 only support float or int32_t output, and input type must be same
   CHECK(lhs_type->dtype_ == rhs_type->dtype_)
@@ -186,34 +184,22 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
         << " and rhs K=" << physical_k_rhs_const->value_;
   }
 
-  // Verify logical valid dimensions match.
-  auto m_acc_const = As<ConstInt>(m_dim_acc);
-  auto m_lhs_const = As<ConstInt>(lhs_valid[0]);
-  auto n_acc_const = As<ConstInt>(n_dim_acc);
-  auto n_rhs_const = As<ConstInt>(rhs_valid[1]);
-  auto k_lhs_const = As<ConstInt>(lhs_valid[1]);
-  auto k_rhs_const = As<ConstInt>(rhs_valid[0]);
-
-  if (m_acc_const && m_lhs_const) {
-    CHECK(m_acc_const->value_ == m_lhs_const->value_)
-        << "The operator " << op_name
-        << " requires matching M dimensions, but got acc M=" << m_acc_const->value_
-        << " and lhs M=" << m_lhs_const->value_;
-  }
-
-  if (n_acc_const && n_rhs_const) {
-    CHECK(n_acc_const->value_ == n_rhs_const->value_)
-        << "The operator " << op_name
-        << " requires matching N dimensions, but got acc N=" << n_acc_const->value_
-        << " and rhs N=" << n_rhs_const->value_;
-  }
-
-  if (k_lhs_const && k_rhs_const) {
-    CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-        << "The operator " << op_name
-        << " requires matching K dimensions, but got lhs K=" << k_lhs_const->value_
-        << " and rhs K=" << k_rhs_const->value_;
-  }
+  // PTO derives the computed M/K/N rectangle from lhs/lhs/rhs. The in-place
+  // accumulator and rhs K window may be larger, but must contain that complete
+  // rectangle. Unknown symbolic relations remain legal, matching the previous
+  // static-only validation while rejecting every provably out-of-bounds case.
+  CHECK(ProveValidExtentLessEqual(lhs_valid[0], m_dim_acc) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires acc valid M to cover lhs valid M, but got acc M=" << PythonPrint(m_dim_acc)
+      << " and lhs M=" << PythonPrint(lhs_valid[0]);
+  CHECK(ProveValidExtentLessEqual(rhs_valid[1], n_dim_acc) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires acc valid N to cover rhs valid N, but got acc N=" << PythonPrint(n_dim_acc)
+      << " and rhs N=" << PythonPrint(rhs_valid[1]);
+  CHECK(ProveValidExtentLessEqual(lhs_valid[1], rhs_valid[0]) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
+      << " and rhs K=" << PythonPrint(rhs_valid[0]);
 
   // A2A3 only support float or int32_t output, and input type must be same
   CHECK(lhs_type->dtype_ == rhs_type->dtype_)

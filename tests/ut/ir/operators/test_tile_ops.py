@@ -2092,6 +2092,142 @@ class TestTileMatMulOps:
         with pytest.raises(ValueError, match="matching physical inner dimensions"):
             tile.matmul(lhs, rhs)
 
+    def test_matmul_allows_rhs_valid_k_to_contain_lhs_valid_k(self):
+        """PTO reads lhs valid K and permits a wider valid window on rhs."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                dims(16, 256),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(16, 255)),
+            ),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(
+                dims(256, 16),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(256, 16)),
+            ),
+            span,
+        )
+
+        result = tile.matmul(lhs, rhs).type
+        assert isinstance(result, ir.TileType)
+        assert _const_values(result.shape) == [16, 16]
+        assert _valid_of(result) == [16, 16]
+
+    def test_matmul_rejects_rhs_valid_k_smaller_than_lhs(self):
+        """The rhs valid K window must contain every lhs K element PTO reads."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                dims(16, 256),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(16, 256)),
+            ),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(
+                dims(256, 16),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(255, 16)),
+            ),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="rhs valid K to cover lhs valid K"):
+            tile.matmul(lhs, rhs)
+
+    def test_matmul_acc_allows_acc_valid_shape_to_contain_product(self):
+        """PTO may update a smaller product rectangle inside a wider accumulator."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        acc = ir.Var(
+            "acc",
+            ir.TileType(
+                dims(16, 32),
+                DataType.FP32,
+                tile_view=ir.TileView(valid_shape=dims(16, 32)),
+            ),
+            span,
+        )
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(
+                dims(16, 16),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(16, 16)),
+            ),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(
+                dims(16, 32),
+                DataType.FP16,
+                tile_view=ir.TileView(valid_shape=dims(16, 24)),
+            ),
+            span,
+        )
+
+        result = tile.matmul_acc(acc, lhs, rhs).type
+        assert isinstance(result, ir.TileType)
+        assert _const_values(result.shape) == [16, 32]
+        assert _valid_of(result) == [16, 32]
+
+    @pytest.mark.parametrize(
+        ("acc_valid", "lhs_valid", "rhs_valid", "message"),
+        [
+            ((15, 32), (16, 16), (16, 24), "acc valid M"),
+            ((16, 23), (16, 16), (16, 24), "acc valid N"),
+            ((16, 32), (16, 16), (15, 24), "rhs valid K"),
+        ],
+    )
+    def test_matmul_acc_rejects_valid_shape_not_containing_product(
+        self, acc_valid, lhs_valid, rhs_valid, message
+    ):
+        """Each PTO-computed extent must fit its corresponding valid window."""
+        span = ir.Span.unknown()
+
+        def dims(*values):
+            return [ir.ConstInt(value, DataType.INDEX, span) for value in values]
+
+        acc = ir.Var(
+            "acc",
+            ir.TileType(dims(16, 32), DataType.FP32, tile_view=ir.TileView(valid_shape=dims(*acc_valid))),
+            span,
+        )
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType(dims(16, 16), DataType.FP16, tile_view=ir.TileView(valid_shape=dims(*lhs_valid))),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType(dims(16, 32), DataType.FP16, tile_view=ir.TileView(valid_shape=dims(*rhs_valid))),
+            span,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            tile.matmul_acc(acc, lhs, rhs)
+
     @pytest.mark.parametrize(
         ("acc_shape", "lhs_shape", "rhs_shape", "message"),
         [

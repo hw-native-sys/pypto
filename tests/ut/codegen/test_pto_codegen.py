@@ -315,6 +315,89 @@ def test_pto_codegen_mat_tile_uses_col_major_blayout():
         assert "slayout=row_major" in line, f"Expected row_major slayout for Mat tile, got: {line}"
 
 
+def test_pto_codegen_matmul_accepts_rhs_valid_k_containment():
+    """Codegen accepts lhs K=255 inside a physically compatible rhs K=256 window."""
+
+    @pl.program
+    class AsymmetricMatmulProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            lhs: pl.Tensor[[16, 256], pl.FP16],
+            rhs: pl.Tensor[[256, 16], pl.FP16],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            lhs_mat: pl.Tile[
+                [16, 256],
+                pl.FP16,
+                pl.MemorySpace.Mat,
+                pl.TileView(valid_shape=[16, 255]),
+            ] = pl.load(
+                lhs,
+                [0, 0],
+                [16, 256],
+                valid_shape=[16, 255],
+                target_memory=pl.MemorySpace.Mat,
+            )
+            rhs_mat: pl.Tile[[256, 16], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                rhs, [0, 0], [256, 16], target_memory=pl.MemorySpace.Mat
+            )
+            lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+            rhs_right = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+            result: pl.Tile[
+                [16, 16],
+                pl.FP32,
+                pl.MemorySpace.Acc,
+                pl.TileView(valid_shape=[16, 16]),
+            ] = pl.matmul(lhs_left, rhs_right)
+            return pl.store(result, [0, 0], output)
+
+    mlir_code = _generate_default_mlir(AsymmetricMatmulProgram)
+    assert "pto.tmatmul" in mlir_code
+
+
+def test_pto_codegen_matmul_acc_accepts_acc_valid_shape_containment():
+    """Codegen accepts a valid N=24 product accumulated into valid N=32."""
+
+    @pl.program
+    class AsymmetricMatmulAccProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            lhs: pl.Tensor[[16, 16], pl.FP16],
+            seed_rhs: pl.Tensor[[16, 32], pl.FP16],
+            partial_rhs: pl.Tensor[[16, 32], pl.FP16],
+            output: pl.Tensor[[16, 32], pl.FP32],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            lhs_mat: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+            )
+            seed_rhs_mat: pl.Tile[[16, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                seed_rhs, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat
+            )
+            partial_rhs_mat: pl.Tile[
+                [16, 32],
+                pl.FP16,
+                pl.MemorySpace.Mat,
+                pl.TileView(valid_shape=[16, 24]),
+            ] = pl.load(
+                partial_rhs,
+                [0, 0],
+                [16, 32],
+                valid_shape=[16, 24],
+                target_memory=pl.MemorySpace.Mat,
+            )
+            lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+            seed_right = pl.move(seed_rhs_mat, target_memory=pl.MemorySpace.Right)
+            partial_right = pl.move(partial_rhs_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(lhs_left, seed_right)
+            result = pl.matmul_acc(acc, lhs_left, partial_right)
+            return pl.store(result, [0, 0], output)
+
+    mlir_code = _generate_default_mlir(AsymmetricMatmulAccProgram)
+    assert "pto.tmatmul.acc" in mlir_code
+
+
 def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     """Test that shared MemRef tiles emit one alloc_tile and preserve merged TileView info."""
     span = ir.Span.unknown()

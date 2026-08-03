@@ -303,6 +303,16 @@ class PTOCodegen : public CodegenBase {
   std::pair<std::string, std::string> GetCurrentResultTpopValidShapeOperands();
 
   /**
+   * @brief Get the TileType of the current assignment result, if any.
+   *
+   * Backend emitters use this alongside the result buffer/type helpers when an
+   * operation's transport shape differs temporarily from its logical shape.
+   */
+  std::shared_ptr<const ir::TileType> GetCurrentResultTileType() const {
+    return fs_.current_result_tile_type;
+  }
+
+  /**
    * @brief Get tile_buf type string directly from a TileType
    *
    * Unlike GetTileBufTypeString(memref), this uses the shape/layout from the
@@ -598,7 +608,7 @@ class PTOCodegen : public CodegenBase {
    * box (carrying its fillpad'd columns) while PRESERVING the row
    * `valid_shape[0]`: subblock 0's real push stays full and subblock 1's
    * 0-row replay stays a no-op. Genuine `split==1/2` paths widen both axes --
-   * see `EmitSplitTpushTransportValidShape`.
+   * see `EmitTpushTransportValidShape`.
    */
   [[nodiscard]] bool IsDualAivDispatchFunction() const;
 

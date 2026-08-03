@@ -105,6 +105,13 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+For 2D `tile.matmul`, the physical boxed K dimensions must match. PTO derives
+the contraction extent from the lhs valid K, so that extent may be smaller than
+the rhs valid K but must be contained by it. `tile.matmul_acc` likewise keeps
+exact physical M/N/K box compatibility while allowing the accumulator's valid
+M/N rectangle and the rhs valid K extent to contain the smaller rectangle PTO
+computes from lhs M/K and rhs N.
+
 At the tile layer, `tile.batch_matmul` provides batched semantics for
 `TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
 dimensions, and keeps the same operand-only interface style as `tile.matmul`.

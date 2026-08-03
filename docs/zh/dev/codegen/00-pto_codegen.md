@@ -183,9 +183,11 @@ print(pto_code)
 - `id` 是可选属性。省略时 PTOAS 默认使用 frontend pipe id `0`。只有手写多条独立 frontend pipe 时才需要显式 `id`；自动生成的双向 mixed-kernel setup 会保持单条 `dir_mask = 3` pipe。
 - 如果被 push 的 tile 通过动态 `valid_row` / `valid_col` operand 分配，或经
   `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
-  tile handle。对于 split `tpush`，codegen 会临时使用完整的非切分传输维度（上下
-  切分使用完整 `cols`，左右切分使用完整 `rows`），随后恢复 producer tile 的逻辑
-  valid shape；消费侧动态 tpop operand 仍携带后续计算和 store 使用的逻辑范围。
+  tile handle。对于 split `tpush`，codegen 会临时使用完整物理传输 box，随后恢复
+  producer tile 的逻辑 valid shape；消费侧动态 tpop operand 仍携带后续计算和 store
+  使用的逻辑范围。部分有效的无切分 Acc-to-Vec 传输也会让 TPUSH 和 TPOP 使用完整物理
+  box，因为 Cube-to-Vector FIFO 按物理 box stride 搬运；传输两侧随后立即恢复逻辑
+  valid shape。
 - 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
 - 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局

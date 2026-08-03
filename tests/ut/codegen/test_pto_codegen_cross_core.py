@@ -494,8 +494,8 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v_col=?" in tpop_line
         assert "pto.alloc_tile" not in mlir_code
 
-    def test_tpop_dynamic_valid_shape_keeps_static_counterpart_operand(self):
-        """If one tpop valid_shape dim is dynamic, the other dim is still passed explicitly."""
+    def test_tpop_no_split_acc_to_vec_uses_box_then_restores_dynamic_valid_shape(self):
+        """A partial no-split C2V pop transports the box, then restores its logical shape."""
         span = ir.Span.unknown()
         valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
         tile_view = ir.TileView(valid_shape=[ir.ConstInt(8, pl.INT64, span), valid_col])
@@ -517,11 +517,14 @@ class TestCrossCoreTpushTpopCodegen:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_static_row_program", span))
-        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+        lines = [line.strip() for line in mlir_code.splitlines()]
+        tpop_line = next(line for line in lines if "pto.tpop_from_aic" in line)
+        restore_line = next(line for line in lines if "pto.set_validshape" in line)
 
-        assert "pto.tpop_from_aic(%c8_index, %arg0) {split = 0}" in tpop_line
+        assert "pto.tpop_from_aic(%c16_index, %c64_index) {split = 0}" in tpop_line
         assert "v_row=?" in tpop_line
         assert "v_col=?" in tpop_line
+        assert ", %c8_index, %arg0 :" in restore_line
 
     def test_tpop_static_non_full_valid_shape_operands(self):
         """Static tpop valid_shape smaller than physical shape should emit explicit operands."""
@@ -682,6 +685,96 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v_row=?" in tpush_line and "v_col=?" in tpush_line, (
             f"Expected tpush to follow main's always-dynamic alloc_tile type annotation, got:\n{tpush_line}"
         )
+
+    def test_no_split_acc_to_vec_uses_full_box_for_tpush_and_tpop(self):
+        """A partial Acc payload crosses the no-split C2V FIFO as one full physical box."""
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        rows = ir.ConstInt(16, pl.INDEX, span)
+        cols = ir.ConstInt(32, pl.INDEX, span)
+        valid_cols = ir.ConstInt(24, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shape = ir.MakeTuple([rows, cols], span)
+        valid_shape = ir.MakeTuple([rows, valid_cols], span)
+
+        src = ir.Var("src", ir.TensorType([16, 32], pl.FP32), span)
+        acc_memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, pl.INT64, span), 16 * 32 * 4, 0)
+        acc_type = ir.TileType(
+            [rows, cols],
+            pl.FP32,
+            acc_memref,
+            ir.TileView(valid_shape=[rows, valid_cols]),
+            ir.MemorySpace.Acc,
+        )
+        acc_tile = ir.Var("acc_tile", acc_type, span)
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [src, offsets, shape, valid_shape],
+            {"target_memory": ir.MemorySpace.Acc},
+            acc_type,
+            span,
+        )
+        push_call = ir.Call(
+            ir.Op("tile.tpush_to_aiv"),
+            [acc_tile],
+            {"split": 0},
+            ir.UnknownType(),
+            span,
+        )
+        producer = ir.Function(
+            "partial_acc_producer",
+            [(src, ir.ParamDirection.In)],
+            [],
+            ir.SeqStmts(
+                [ir.AssignStmt(acc_tile, load_call, span), ir.EvalStmt(push_call, span)],
+                span,
+            ),
+            span,
+            ir.FunctionType.AIC,
+        )
+
+        vec_type = ir.TileType(
+            [rows, cols],
+            pl.FP32,
+            None,
+            ir.TileView(valid_shape=[rows, valid_cols]),
+            ir.MemorySpace.Vec,
+        )
+        popped = ir.Var("popped", vec_type, span)
+        pop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, vec_type, span)
+        consumer = ir.Function(
+            "partial_vec_consumer",
+            [],
+            [],
+            ir.SeqStmts([ir.AssignStmt(popped, pop_call, span)], span),
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(
+            ir.Program([producer, consumer], "partial_acc_to_vec_program", span)
+        )
+        producer_code = _extract_func_section(mlir_code, "partial_acc_producer")
+        consumer_code = _extract_func_section(mlir_code, "partial_vec_consumer")
+
+        producer_lines = [line.strip() for line in producer_code.splitlines()]
+        push_index = next(i for i, line in enumerate(producer_lines) if "pto.tpush_to_aiv" in line)
+        producer_validshape = [
+            (i, line) for i, line in enumerate(producer_lines) if "pto.set_validshape" in line
+        ]
+        assert len(producer_validshape) == 2
+        assert producer_validshape[0][0] < push_index < producer_validshape[1][0]
+        assert ", %c16_index, %c32_index :" in producer_validshape[0][1]
+        assert ", %c16_index, %c24_index :" in producer_validshape[1][1]
+
+        consumer_lines = [line.strip() for line in consumer_code.splitlines()]
+        pop_index = next(i for i, line in enumerate(consumer_lines) if "pto.tpop_from_aic" in line)
+        restore_index = next(i for i, line in enumerate(consumer_lines) if "pto.set_validshape" in line)
+        assert "pto.tpop_from_aic(%c16_index, %c32_index) {split = 0}" in consumer_lines[pop_index]
+        assert pop_index < restore_index
+        assert ", %c16_index, %c24_index :" in consumer_lines[restore_index]
 
     @pytest.mark.parametrize(
         (

@@ -75,12 +75,12 @@ static std::shared_ptr<const ir::TileType> GetTpushTileType(const ExprPtr& tile_
   return As<ir::TileType>(tile_expr->GetType());
 }
 
-static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen& codegen,
-                                              const std::string& tile_buf, const std::string& tile_type,
-                                              int split) {
-  // split == 0 normally means no cross-core split: the single consumer reads
-  // exactly the producer's (possibly narrowed) valid_shape, so no full-box
-  // transport is needed. BUT the 910B no-split dual-AIV dispatch path
+static bool EmitTpushTransportValidShape(const char* target, const CallPtr& op, codegen::PTOCodegen& codegen,
+                                         const std::string& tile_buf, const std::string& tile_type,
+                                         int split) {
+  // split == 0 normally means no cross-core split. Two physical FIFO cases
+  // still require a box-normalized transport: partial Acc->Vec payloads and
+  // the 910B no-split dual-AIV dispatch path. The latter
   // (function attr `dual_aiv_dispatch`) runs the producer on TWO AIV subblocks
   // that share one FIFO slot while the single cube consumer pops the FULL
   // slot. If the producer narrowed its valid_shape (e.g. set_validshape on a
@@ -88,15 +88,17 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
   // and feed garbage into the consumer's matmul. So for that mode we must
   // still transport the full box, exactly as for split==1/2 — this extends
   // PR #1454's fix to the split==0 dual-dispatch case.
-  const bool dual_aiv_no_split = (split == 0) && codegen.IsDualAivDispatchFunction();
-  if ((split == 0 && !dual_aiv_no_split) || tile_buf.empty() || tile_type.empty()) {
-    return false;
-  }
-
   auto source_tile_type = GetTpushTileType(op->args_[0]);
   if (!source_tile_type || source_tile_type->shape_.size() < 2) {
     return false;
   }
+  const bool dual_aiv_no_split = (split == 0) && codegen.IsDualAivDispatchFunction();
+  const bool acc_to_vec_no_split = (split == 0) && std::string_view(target) == "aiv" &&
+                                   source_tile_type->GetMemorySpace() == ir::MemorySpace::Acc;
+  if ((split == 0 && !dual_aiv_no_split && !acc_to_vec_no_split) || tile_buf.empty() || tile_type.empty()) {
+    return false;
+  }
+
   const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
   if (tile_view.valid_shape.size() < 2) {
     return false;
@@ -113,6 +115,18 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
   const auto& valid_shape = tile_view.valid_shape;
   ExprPtr transport_row = shape[0];
   ExprPtr transport_col = shape[1];
+
+  // A no-split Acc->Vec FIFO slot is laid out using the source's physical box.
+  // Both dimensions therefore need to be full for TPUSH, even though later
+  // vector compute/store must continue to see the narrower logical shape. An
+  // empty tile remains an empty protocol operation and must not be widened.
+  if (acc_to_vec_no_split) {
+    for (const auto& valid_dim : valid_shape) {
+      if (auto dim_const = As<ir::ConstInt>(valid_dim); dim_const && dim_const->value_ == 0) {
+        return false;
+      }
+    }
+  }
 
   // For the 910B no-split dual-AIV path there is NO genuine cross-core row
   // split: subblock 0 runs the full computation while subblock 1 is a
@@ -213,7 +227,8 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  const bool restore_valid_shape = EmitSplitTpushTransportValidShape(op, codegen, tile_buf, tile_type, split);
+  const bool restore_valid_shape =
+      EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_" << target << "(" << tile_buf;
@@ -246,20 +261,49 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   std::string result_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << op_name << " requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
-  auto [valid_row, valid_col] = codegen.GetCurrentResultTpopValidShapeOperands();
+  auto [logical_row, logical_col] = codegen.GetCurrentResultTpopValidShapeOperands();
+
+  // PTO's no-split Cube->Vector FIFO copies the physical Acc box. Give TPOP
+  // that same full-box extent, then restore the logical result shape before
+  // any vector consumer sees it. Keep a statically empty replay empty: the
+  // dual-AIV no-split path uses such a replay only to balance the pipe.
+  auto result_tile_type = codegen.GetCurrentResultTileType();
+  bool statically_empty = false;
+  if (result_tile_type) {
+    const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+    for (const auto& valid_dim : result_view.valid_shape) {
+      if (auto dim_const = As<ir::ConstInt>(valid_dim); dim_const && dim_const->value_ == 0) {
+        statically_empty = true;
+      }
+    }
+  }
+  const bool use_full_box = std::string_view(target) == "aic" && split == 0 && !logical_row.empty() &&
+                            !logical_col.empty() && !statically_empty && result_tile_type &&
+                            result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec &&
+                            result_tile_type->shape_.size() >= 2;
+  std::string transport_row = logical_row;
+  std::string transport_col = logical_col;
+  if (use_full_box) {
+    transport_row = EmitIndexOperand(codegen, result_tile_type->shape_[0], "tpop transport row");
+    transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
+  }
 
   std::ostringstream oss;
   oss << result_buf << " = pto.tpop_from_" << target;
-  if (!valid_row.empty() || !valid_col.empty()) {
-    INTERNAL_CHECK_SPAN(!valid_row.empty() && !valid_col.empty(), op->span_)
+  if (!transport_row.empty() || !transport_col.empty()) {
+    INTERNAL_CHECK_SPAN(!transport_row.empty() && !transport_col.empty(), op->span_)
         << "Internal error: " << op_name << " dynamic valid_shape requires both valid_row and valid_col";
-    oss << "(" << valid_row << ", " << valid_col << ")";
+    oss << "(" << transport_row << ", " << transport_col << ")";
   }
   oss << " " << FormatFrontendPipeAttrs(op, split);
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
+  if (use_full_box) {
+    codegen.Emit("pto.set_validshape " + result_buf + ", " + logical_row + ", " + logical_col + " : " +
+                 result_type);
+  }
 
   return "";
 }
