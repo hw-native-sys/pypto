@@ -1159,7 +1159,7 @@ class TestPadValue:
 
     def test_module_null_alias_remains_pad_value(self):
         """Adding CompactMode must not overwrite the existing public ir.null alias."""
-        assert ir.null is ir.PadValue.null
+        assert getattr(ir, "null") is ir.PadValue.null
 
     def test_pad_equality(self):
         """Test PadValue enum equality and inequality."""
@@ -1459,9 +1459,11 @@ class TestIRBuilderHelpers:
         )
 
         assert tv.compact == ir.CompactMode.normal
-        assert tv.start_offset.span.filename == span.filename
-        assert tv.start_offset.span.begin_line == span.begin_line
-        assert tv.start_offset.span.begin_column == span.begin_column
+        start_offset = tv.start_offset
+        assert start_offset is not None
+        assert start_offset.span.filename == span.filename
+        assert start_offset.span.begin_line == span.begin_line
+        assert start_offset.span.begin_column == span.begin_column
 
     def test_builder_tensor_type(self):
         """Test IRBuilder.tensor_type() helper."""
