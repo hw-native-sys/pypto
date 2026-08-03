@@ -129,7 +129,9 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
 
   // The matmul output tile uses the hardware's native accumulator layout:
   // - blayout=col_major, slayout=row_major: hardware's column-major block / row-major sub-block
-  // - fractal=1024: 32x32 sub-tile fractal size (standard for this hardware's matrix unit)
+  // - fractal=1024: inner box size in *bytes* — 16 rows x (1024 / dtype_bytes / 16) cols,
+  //   i.e. a 16x16 box for the 4-byte (FP32/INT32) accumulator (standard for this
+  //   hardware's matrix unit)
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
@@ -261,7 +263,8 @@ TypePtr DeduceTileBatchMatMulAccType(const std::vector<ExprPtr>& args,
   // Output shape = acc shape (in-place accumulation).
   std::vector<ExprPtr> output_shape = acc_shape;
 
-  // Acc layout (Nz) — same as 2D matmul_acc.
+  // Acc layout (Nz) — same as 2D matmul_acc; fractal is a byte size (see
+  // DeduceTileBatchMatMulType above).
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;

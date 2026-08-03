@@ -521,7 +521,7 @@ tile_c = pl.mul(tile_a, tile_b)
   v_col=32,            // Virtual column size (= cols)
   blayout=row_major,   // Block layout (from TileView, default: row_major)
   slayout=none_box,    // Scatter layout (from TileView, default: none_box)
-  fractal=512,         // Fractal size (from TileView, default: 512)
+  fractal=512,         // Fractal size in bytes, not elements (from TileView, default: 512)
   pad=0                // Pad mode as int (from TileView, default: 0/null)
 >
 ```

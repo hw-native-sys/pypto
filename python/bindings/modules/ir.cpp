@@ -668,7 +668,12 @@ void BindIR(nb::module_& m) {
       .def_ro("start_offset", &TileView::start_offset, "Starting offset")
       .def_ro("blayout", &TileView::blayout, "Block layout")
       .def_ro("slayout", &TileView::slayout, "Scatter layout")
-      .def_ro("fractal", &TileView::fractal, "Fractal size")
+      .def_ro("fractal", &TileView::fractal,
+              "Fractal size in bytes (not elements). In a boxed (NZ/ZN) layout the inner box is "
+              "M0 = 16 rows by fractal / dtype_bytes / M0 cols; the two matmul-path values are "
+              "16x16 boxes: 512 (Mat/Left/Right operand, FP16) and 1024 (Acc accumulator, "
+              "FP32/INT32). MX scale tiles carry 32, the MX block size (1-byte scale dtype, so "
+              "bytes and elements coincide).")
       .def_ro("pad", &TileView::pad, "Pad mode")
       .def(
           "__eq__", [](const TileView& self, const TileView& other) { return self == other; },

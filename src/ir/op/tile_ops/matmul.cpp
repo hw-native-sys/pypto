@@ -91,7 +91,8 @@ TypePtr DeduceTileMatMulType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N]
   std::vector<ExprPtr> output_shape = {m_dim, n_dim};
 
-  // Acc layout: Nz
+  // Acc layout: Nz. fractal is the inner box size in *bytes* — 16 rows x
+  // (1024 / dtype_bytes / 16) cols, i.e. a 16x16 box for the 4-byte (FP32/INT32) accumulator.
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;
@@ -180,7 +181,8 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   // Output shape is [M, N] (same as accumulator)
   std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
 
-  // Acc layout: Nz
+  // Acc layout: Nz. fractal is the inner box size in *bytes* — 16 rows x
+  // (1024 / dtype_bytes / 16) cols, i.e. a 16x16 box for the 4-byte (FP32/INT32) accumulator.
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
   tile_view.slayout = TileLayout::row_major;

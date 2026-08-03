@@ -620,7 +620,15 @@ class TileView:
     """Scatter layout."""
 
     fractal: Final[int]
-    """Fractal size."""
+    """Fractal size in bytes (not elements).
+
+    In a boxed (NZ/ZN) layout the inner box is ``M0 = 16`` rows by
+    ``fractal / dtype_bytes / M0`` columns, so the same byte value describes a
+    different element geometry per dtype. The two matmul-path values are both
+    16x16 boxes: ``512`` (Mat/Left/Right operand, 16x16 FP16) and ``1024``
+    (Acc accumulator, 16x16 FP32/INT32). MX scale tiles (LeftScale/RightScale)
+    instead carry ``32``, the MX block size of one shared exponent per 32
+    elements; the scale dtype is 1 byte, so bytes and elements coincide there."""
 
     pad: Final[PadValue]
     """Pad mode."""
@@ -643,7 +651,7 @@ class TileView:
             start_offset: Starting offset (Expr/int/Scalar, int auto-converted to ConstInt; None allowed)
             blayout: Block layout (default: row_major)
             slayout: Scatter layout (default: none_box)
-            fractal: Fractal size (default: 512)
+            fractal: Fractal size in bytes, not elements (default: 512)
             pad: Pad mode (default: null)
         """
 

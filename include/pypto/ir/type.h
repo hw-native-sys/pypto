@@ -266,6 +266,17 @@ TileLayout StringToTileLayout(const std::string& str);
  * stride, start offset, block layout, scatter layout, fractal size,
  * and pad mode. This is used by TileType to track how a tile views
  * its underlying memory.
+ *
+ * @note `fractal` is a size **in bytes**, not an element count. In a boxed
+ *       (NZ/ZN) layout the inner box is `M0 = 16` rows by
+ *       `fractal / dtype_bytes / M0` columns, so the same byte value describes
+ *       a different element geometry per dtype — see the `box_cols`
+ *       computation in `src/backend/common/pto_ops_datamove.cpp`. The two
+ *       matmul-path values are both 16x16 boxes: `512` (Mat/Left/Right
+ *       operand, 16x16 FP16) and `1024` (Acc accumulator, 16x16 FP32/INT32).
+ *       MX scale tiles (LeftScale/RightScale) instead carry `kMXScaleFractal`
+ *       = 32, the MX block size of one shared exponent per 32 elements; the
+ *       scale dtype is 1 byte, so bytes and elements coincide there.
  */
 struct TileView {
   std::vector<ExprPtr> valid_shape;            ///< Valid shape dimensions
@@ -273,7 +284,7 @@ struct TileView {
   ExprPtr start_offset;                        ///< Starting offset
   TileLayout blayout = TileLayout::row_major;  ///< Block layout
   TileLayout slayout = TileLayout::none_box;   ///< Scatter layout
-  uint64_t fractal = 512;                      ///< Fractal size
+  uint64_t fractal = 512;                      ///< Fractal size in bytes (not elements)
   PadValue pad = PadValue::null;               ///< Pad mode
 
   /**
@@ -289,7 +300,7 @@ struct TileView {
    * @param start_offset Starting offset
    * @param blayout Block layout
    * @param slayout Scatter layout
-   * @param fractal Fractal size
+   * @param fractal Fractal size in bytes (not elements)
    * @param pad Pad mode
    */
   TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset,
@@ -311,7 +322,7 @@ struct TileView {
    * @param start_offset Starting offset
    * @param blayout Block layout
    * @param slayout Scatter layout
-   * @param fractal Fractal size
+   * @param fractal Fractal size in bytes (not elements)
    * @param pad Pad mode
    */
   TileView(const std::vector<int64_t>& valid_shape, const std::vector<int64_t>& stride, ExprPtr start_offset,
