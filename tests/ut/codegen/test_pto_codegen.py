@@ -2395,8 +2395,8 @@ class TestColumnVectorCodegen:
                 # Explicit DN view with the canonical-packed strides for shape
                 # [16, 1] (stride[-2]=1, stride[-1]=shape[-2]=16). Using the
                 # explicit TensorView form (RFC #1300 supplementary 1 escape
-                # hatch) instead of the deprecated pl.Tensor[..., pl.DN]
-                # shorthand. This test specifically verifies the
+                # hatch) — the pl.Tensor[..., pl.DN] shorthand is not
+                # accepted. This test specifically verifies the
                 # column-vector DN codegen path, so the DN view is the test
                 # subject — not a load-time alias.
                 col_vec: pl.Tensor[

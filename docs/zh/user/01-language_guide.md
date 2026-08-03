@@ -57,11 +57,11 @@ b: pl.Tensor[[N, K], pl.FP32]
 ```
 
 ```python
-# ⚠️ 已弃用（RFC #1300 补充 1）：
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期触发 DeprecationWarning
+# ❌ 不支持（RFC #1300 补充 1）：
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期抛 ParserTypeError
 ```
 
-> **为什么弃用 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景给 `pl.matmul` 传 `b_trans=True`（或 `a_trans=True`），或自然 load 后用 `pl.tile.transpose_view(...)`（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
+> **为什么不支持 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景给 `pl.matmul` 传 `b_trans=True`（或 `a_trans=True`），或自然 load 后用 `pl.tile.transpose_view(...)`（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
 
 如需 NZ（硬件 tile layout），写 `pl.Tile[..., pl.NZ]` —— NZ 是 tile-only，不允许作为 TensorType annotation。`pl.NZ` 常量保留用于 tile annotation 和 IR 内部使用。
 

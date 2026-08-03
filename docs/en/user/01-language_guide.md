@@ -60,11 +60,11 @@ b: pl.Tensor[[N, K], pl.FP32]
 ```
 
 ```python
-# ⚠️ Deprecated (RFC #1300 supplementary 1):
-b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
+# ❌ Rejected (RFC #1300 supplementary 1):
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → ParserTypeError at parse time
 ```
 
-> **Why `pl.Tensor[..., pl.DN]` is deprecated.** Writing the DN
+> **Why `pl.Tensor[..., pl.DN]` is rejected.** Writing the DN
 > layout-only shorthand forces you to mentally hold two coordinate systems
 > at once (the IR-logical post-view shape and the runtime row-major shape).
 > Drop the layout marker and write the runtime shape — for matmul B^T,
