@@ -276,8 +276,13 @@ def tpush_to_aiv(
     span: Span | None = None,
 ) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe."""
-    kwargs = {"_full_box_transport": True} if _full_box_transport else {}
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, id=id, span=span, **kwargs)
+    return _ir_ops.tpush_to_aiv(
+        tile.unwrap(),
+        split=split,
+        id=id,
+        _full_box_transport=_full_box_transport,
+        span=span,
+    )
 
 
 def tpush_to_aic(tile: Tile, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
@@ -317,8 +322,14 @@ def tpop_from_aic(
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
-    kwargs = {"_full_box_transport": True} if _full_box_transport else {}
-    call = _ir_ops.tpop_from_aic(shape=shape, dtype=dtype, split=split, id=id, span=span, **kwargs)
+    call = _ir_ops.tpop_from_aic(
+        shape=shape,
+        dtype=dtype,
+        split=split,
+        id=id,
+        _full_box_transport=_full_box_transport,
+        span=span,
+    )
     return Tile(expr=call)
 
 
