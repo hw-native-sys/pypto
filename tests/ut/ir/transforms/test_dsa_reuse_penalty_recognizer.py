@@ -563,6 +563,33 @@ def test_accumulate_ops_declare_functional_access(op_name):
     assert testing.get_execution_memory_access_evidence(op_name) == "functional"
 
 
+def test_matmul_acc_functional_access_does_not_poison_allocation(ascend_backend):
+    """A full-access accumulator op preserves later edge recognition for its Acc allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            target_input: pl.Tensor[[16, 16], pl.FP32],
+            lhs_input: pl.Tensor[[16, 16], pl.BF16],
+            rhs_input: pl.Tensor[[16, 16], pl.BF16],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            target = pl.load(target_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs_l1 = pl.load(lhs_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs_l1 = pl.load(rhs_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs_l0 = pl.tile.move(lhs_l1, target_memory=pl.Mem.Left)
+            rhs_l0 = pl.tile.move(rhs_l1, target_memory=pl.Mem.Right)
+            acc = pl.matmul(lhs_l0, rhs_l0)
+            acc_updated = pl.matmul_acc(acc, lhs_l0, rhs_l0)
+            _assembled = pl.tile.assemble(target, acc_updated, [0, 0])
+            later_acc = pl.matmul(lhs_l0, rhs_l0)
+            return pl.store(later_acc, [0, 0], output)
+
+    assert frozenset(("acc", "later_acc")) in _recognized_pairs(Before)
+
+
 def test_dsa_rp_places_on_chip_tile_parameter(ascend_backend):
     """Tile parameters are entry-live allocation identities, not body definitions."""
 
