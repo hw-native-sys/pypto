@@ -115,8 +115,7 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
              << " stages=" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Body)].pipeline_stages
              << "/" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Stats)].pipeline_stages
              << "/" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Apply)].pipeline_stages
-             << " split=" << plan.reduction_split.factor << " peak_ub=" << plan.chunk_peak_ub_bytes
-             << " full_peak_ub=" << plan.full_peak_ub_bytes
+             << " peak_ub=" << plan.chunk_peak_ub_bytes << " full_peak_ub=" << plan.full_peak_ub_bytes
              << " compute_cycles=" << plan.modeled_compute_cycles
              << " transfer_cycles=" << plan.modeled_transfer_cycles
              << " modeled_cycles=" << plan.modeled_cycles;

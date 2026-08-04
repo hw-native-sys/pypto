@@ -624,16 +624,16 @@ def test_unified_broadcasts_normalize_to_explicit_row_and_column_ops():
 )
 def test_all_supported_reduction_directions_and_kinds_are_admitted(program, op):
     structure = _structure(_run_auto_tile(program))
-    assert structure.spmd >= 1
+    assert structure.spmd == 1
     assert structure.ops[op] >= 1
     assert structure.ops["tensor.assemble"] >= 1
 
 
-def test_aligned_terminal_col_sum_uses_seed_then_atomic_partials():
+def test_aligned_terminal_col_sum_remains_one_non_atomic_kernel():
     structure = _structure(_run_auto_tile(ColSumProgram))
-    assert structure.spmd == 2
-    assert structure.ops["tensor.full"] == 1
-    assert structure.atomic_stores == 1
+    assert structure.spmd == 1
+    assert structure.ops["tensor.full"] == 0
+    assert structure.atomic_stores == 0
 
 
 def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():

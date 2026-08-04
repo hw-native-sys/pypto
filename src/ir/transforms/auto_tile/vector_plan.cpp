@@ -350,8 +350,6 @@ bool LexicographicallyBetter(const VectorSchedulePlan& lhs, const VectorSchedule
   if (lhs.work_units != rhs.work_units) return lhs.work_units < rhs.work_units;
   if (lhs.tile_h != rhs.tile_h) return lhs.tile_h > rhs.tile_h;
   if (lhs.tile_w != rhs.tile_w) return lhs.tile_w > rhs.tile_w;
-  if (lhs.reduction_split.factor != rhs.reduction_split.factor)
-    return lhs.reduction_split.factor < rhs.reduction_split.factor;
   return std::tie(lhs.m_partition.parts, lhs.n_partition.parts) <
          std::tie(rhs.m_partition.parts, rhs.n_partition.parts);
 }
@@ -693,59 +691,10 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
 
     if (!feasible) continue;
 
-    if (candidate.kind == VectorScheduleKind::Materialized && graph.ops.size() >= 1 &&
-        graph.ops.back().kind == VectorOpKind::ColSum && graph.required_outputs.size() == 1 &&
-        graph.required_output_ops[0] == graph.ops.size() - 1 && iteration_cols % candidate.tile_w == 0 &&
-        candidate.n_partition.num_big == 0 &&
-        candidate.tile_w * DTypeBytes(graph.tensors[graph.required_outputs[0]].dtype) >=
-            hardware_.dma_alignment_bytes) {
-      const int64_t max_split =
-          std::min<int64_t>(hardware_.vector_cores / candidate.work_units, iteration_rows / 16);
-      for (int64_t split = 2; split <= max_split; ++split) {
-        if (iteration_rows % (16 * split) != 0) continue;
-        const int64_t split_tasks = candidate.work_units * split;
-        const int64_t seed_tasks = candidate.work_units;
-        const int64_t partial_rows = iteration_rows / split;
-        const int64_t split_peak = PeakBytes(graph, all_ops, partial_rows, candidate.tile_w, all_outputs, {},
-                                             true, hardware_.dma_alignment_bytes, 1);
-        if (split_peak > hardware_.ub_bytes) continue;
-        const double split_compute =
-            WaveCompute(ComputeCycles(graph, all_ops, partial_rows, candidate.tile_w, 1, split_tasks,
-                                      hardware_.vector_register_bytes),
-                        split_tasks, hardware_.vector_cores);
-        const double seed_compute =
-            WaveCompute(kPerTaskCycles * static_cast<double>(seed_tasks), seed_tasks, hardware_.vector_cores);
-        const double body_in_bytes =
-            BoundaryInputBytes(graph, candidate.phases[PhaseIndex(VectorPhase::Body)], partial_rows,
-                               candidate.tile_w, 1, split_tasks);
-        const double body_out_bytes = OutputBytes(graph, all_outputs, 1, candidate.tile_w, 1, split_tasks);
-        const double seed_out_bytes = OutputBytes(graph, all_outputs, 1, candidate.tile_w, 1, seed_tasks);
-        const double body_transfer = TransferCycles(body_in_bytes, kGmToUbGiBps,
-                                                    std::min<int64_t>(split_tasks, hardware_.vector_cores)) +
-                                     TransferCycles(body_out_bytes, kUbToGmGiBps,
-                                                    std::min<int64_t>(split_tasks, hardware_.vector_cores));
-        const double seed_transfer = TransferCycles(seed_out_bytes, kUbToGmGiBps,
-                                                    std::min<int64_t>(seed_tasks, hardware_.vector_cores));
-        const double split_latency = split_compute + body_transfer + seed_compute + seed_transfer;
-        if (split_latency < latency) {
-          latency = split_latency;
-          candidate.reduction_split = {true, split, partial_rows, seed_tasks};
-          candidate.chunk_peak_ub_bytes = std::max(
-              split_peak, candidate.tile_w * DTypeBytes(graph.tensors[graph.required_outputs[0]].dtype));
-          candidate.modeled_compute_cycles = split_compute + seed_compute;
-          candidate.modeled_transfer_cycles = body_transfer + seed_transfer;
-        }
-      }
-    }
-
-    const int64_t body_tasks = candidate.work_units * candidate.reduction_split.factor;
-    const int64_t seed_tasks =
-        candidate.reduction_split.present ? candidate.reduction_split.seed_work_units : 0;
-    latency += kPerTaskCycles * static_cast<double>(body_tasks + seed_tasks);
+    const int64_t body_tasks = candidate.work_units;
+    latency += kPerTaskCycles * static_cast<double>(body_tasks);
     latency += kKernelFillCycles *
-               static_cast<double>(
-                   (body_tasks + hardware_.vector_cores - 1) / hardware_.vector_cores +
-                   (seed_tasks > 0 ? (seed_tasks + hardware_.vector_cores - 1) / hardware_.vector_cores : 0));
+               static_cast<double>((body_tasks + hardware_.vector_cores - 1) / hardware_.vector_cores);
     candidate.modeled_cycles = latency;
     candidate.feasible = true;
     if (!best.feasible || LexicographicallyBetter(candidate, best)) best = std::move(candidate);

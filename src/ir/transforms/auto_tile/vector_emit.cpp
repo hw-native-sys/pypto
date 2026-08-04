@@ -102,6 +102,10 @@ class VectorEmitter {
         EmitSoftmax(body);
         break;
     }
+    const size_t kernel_count = static_cast<size_t>(std::count_if(
+        body.begin(), body.end(), [](const StmtPtr& stmt) { return As<SpmdScopeStmt>(stmt) != nullptr; }));
+    INTERNAL_CHECK_SPAN(kernel_count == 1, span_)
+        << "Internal error: AutoTile must emit exactly one SPMD kernel, got " << kernel_count;
     body.push_back(OriginalReturn());
 
     std::vector<VarPtr> params = graph_.function->params_;
@@ -240,18 +244,6 @@ class VectorEmitter {
               << "Internal error: reduction stats descriptor has no operations";
         }
         break;
-    }
-    if (plan_.reduction_split.present) {
-      INTERNAL_CHECK_SPAN(
-          plan_.kind == VectorScheduleKind::Materialized && graph_.reduced_axis == 2 &&
-              plan_.n_partition.num_big == 0 && plan_.reduction_split.factor > 1 &&
-              plan_.reduction_split.partial_extent * plan_.reduction_split.factor == graph_.iteration_rows &&
-              plan_.reduction_split.seed_work_units == plan_.work_units,
-          span_)
-          << "Internal error: AutoTile column-split descriptor is inconsistent";
-    } else {
-      INTERNAL_CHECK_SPAN(plan_.reduction_split.factor == 1, span_)
-          << "Internal error: AutoTile non-split descriptor has a split factor";
     }
   }
 
@@ -423,10 +415,6 @@ class VectorEmitter {
   }
 
   void EmitMaterialized(std::vector<StmtPtr>& outer) {
-    if (plan_.reduction_split.present) {
-      EmitColumnSplit(outer);
-      return;
-    }
     auto index = std::make_shared<Var>(Fresh("region"), std::make_shared<ScalarType>(DataType::INDEX), span_);
     const auto [row, col] = RegionOffset(index);
     std::vector<StmtPtr> body;
@@ -736,44 +724,6 @@ class VectorEmitter {
                    {graph_.ops[graph_.softmax.sum_op].output, running_sum}},
                   body);
     outer.push_back(WrapSpmd(region, std::move(body), plan_.work_units, graph_.function->name_, span_));
-  }
-
-  void EmitColumnSplit(std::vector<StmtPtr>& outer) {
-    INTERNAL_CHECK_SPAN(graph_.required_outputs.size() == 1 && graph_.reduced_axis == 2, span_)
-        << "Internal error: AutoTile column split has an invalid graph";
-    const size_t output = graph_.required_outputs.front();
-    const VectorTensor& result = graph_.tensors[output];
-    auto& registry = OpRegistry::GetInstance();
-
-    auto seed_index =
-        std::make_shared<Var>(Fresh("seed"), std::make_shared<ScalarType>(DataType::INDEX), span_);
-    ExprPtr seed_col = MakeMul(seed_index, Index(plan_.tile_w, span_), span_);
-    auto zero = std::make_shared<ConstFloat>(0.0, result.dtype, span_);
-    auto full = registry.Create("tensor.full", {IndexTuple({1, plan_.tile_w}, span_), zero},
-                                {{"dtype", result.dtype}}, span_);
-    auto zero_tile = std::make_shared<Var>(Fresh("zero"), full->GetType(), span_);
-    auto seed_store = registry.Create(
-        "tensor.assemble", {outputs_.at(output), zero_tile, Pair(Index(0, span_), seed_col, span_)}, span_);
-    auto seeded = std::make_shared<Var>(Fresh("seeded"), seed_store->GetType(), span_);
-    std::vector<StmtPtr> seed_body{std::make_shared<AssignStmt>(zero_tile, full, span_),
-                                   std::make_shared<AssignStmt>(seeded, seed_store, span_)};
-    outer.push_back(WrapSpmd(seed_index, std::move(seed_body), plan_.reduction_split.seed_work_units,
-                             graph_.function->name_ + "_seed", span_));
-
-    auto index = std::make_shared<Var>(Fresh("split"), std::make_shared<ScalarType>(DataType::INDEX), span_);
-    ExprPtr split_index = MakeFloorMod(index, Index(plan_.reduction_split.factor, span_), span_);
-    ExprPtr free_index = MakeFloorDiv(index, Index(plan_.reduction_split.factor, span_), span_);
-    ExprPtr row = MakeMul(split_index, Index(plan_.reduction_split.partial_extent, span_), span_);
-    ExprPtr col = PartitionOffset(free_index, plan_.n_partition);
-    std::vector<StmtPtr> body;
-    std::unordered_map<size_t, VarPtr> onchip;
-    VarPtr partial = Replay(plan_.phases[PhaseIndex(VectorPhase::Body)], plan_.reduction_split.partial_extent,
-                            plan_.tile_w, row, col, true, body, onchip);
-    auto atomic = registry.Create("tensor.assemble", {seeded, partial, Pair(Index(0, span_), col, span_)},
-                                  {{"atomic", 1}}, span_);
-    body.push_back(std::make_shared<AssignStmt>(graph_.tensors[output].var, atomic, span_));
-    outer.push_back(WrapSpmd(index, std::move(body), plan_.work_units * plan_.reduction_split.factor,
-                             graph_.function->name_, span_));
   }
 };
 

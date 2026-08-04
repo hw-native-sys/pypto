@@ -75,13 +75,6 @@ struct VectorPhasePlan {
   int pipeline_stages = 1;
 };
 
-struct VectorReductionSplitPlan {
-  bool present = false;
-  int64_t factor = 1;
-  int64_t partial_extent = 0;
-  int64_t seed_work_units = 0;
-};
-
 struct VectorSchedulePlan {
   bool feasible = false;
   VectorScheduleKind kind = VectorScheduleKind::Materialized;
@@ -105,7 +98,6 @@ struct VectorSchedulePlan {
   int64_t full_chunks = 0;
   int64_t tail = 0;
   std::array<VectorPhasePlan, 4> phases;
-  VectorReductionSplitPlan reduction_split;
   double modeled_cycles = std::numeric_limits<double>::infinity();
   double modeled_compute_cycles = 0.0;
   double modeled_transfer_cycles = 0.0;
