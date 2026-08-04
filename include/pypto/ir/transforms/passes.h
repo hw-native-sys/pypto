@@ -836,8 +836,8 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
 /**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
  *
- * After the selected memory planner has finalized MemRefs, two TileType
- * variables can share the same MemRef and the same TileBufSignature — in that
+ * After InitMemRef and MaterializeSemanticAliases have finalized allocation
+ * identities, two TileType variables can share the same MemRef and the same TileBufSignature — in that
  * case the `tile.reshape` connecting them is a no-op at the PTO level. This pass rewrites such
  * `lhs = tile.reshape(rhs, shape)` AssignStmts into plain `lhs = rhs`,
  * removing the reshape Call. PTO codegen previously dropped the emission
@@ -845,7 +845,9 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes = false);
  *
  * Requirements:
  * - InCore-type functions only (Opaque/Orchestration are unaffected)
- * - Must run after AllocateMemoryAddr so planner-specific MemRef decisions are finalized
+ * - Must run after semantic alias materialization; PyPTO-owned planners also
+ *   run AllocateMemoryAddr first, while PTOAS keeps the finalized root identity
+ *   and assigns physical addresses later
  */
 Pass FoldNoOpReshape();
 

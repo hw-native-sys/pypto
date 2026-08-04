@@ -6,11 +6,12 @@ IR before PTO codegen.
 
 ## Overview
 
-After the selected memory planner finalizes MemRefs, the LHS and RHS of a
-`tile.reshape` may already point at the same `MemRef` root *and* carry identical
+After `InitMemRef` and `MaterializeSemanticAliases` finalize allocation
+identities, the LHS and RHS of a `tile.reshape` may already point at the same
+`MemRef` root *and* carry identical
 `TileBufSignature`s. In that case the reshape is a no-op at the PTO level —
 the per-var alloc model has pre-declared LHS with the same shape, layout,
-fractal, valid-shape and pad as RHS, and they share a memory address. There
+fractal, valid-shape and pad as RHS, and they share one allocation identity. There
 is nothing for `pto.treshape` to do.
 
 Historically PTO codegen detected this case at emission time and silently
@@ -37,15 +38,16 @@ cases, knowing the no-op cases were already removed upstream.
 - `IRProperty::IncoreTileOps` — InCore functions use tile types
 - `IRProperty::HasMemRefs` — `MemRef` slots populated by `InitMemRef`
 - `IRProperty::TileOps2D` — tile ops are at most 2D
-- The pass requires `AllocateMemoryAddr` to have run so planner-specific
-  view-merging decisions are reflected on the canonical alloc — otherwise LHS
-  and RHS may not yet share a `MemRef` even though they should.
+- `MaterializeSemanticAliases` must have finalized semantics-required sharing.
+  `PYPTO` and `DSA_RP` run `AllocateMemoryAddr` before this pass; `PTOAS`
+  deliberately skips address assignment, but the same-root identity is already
+  sufficient because ptoas must place both values in one allocation.
 - Only InCore-type functions (`InCore`, `AIC`, `AIV`) are scanned; Opaque
   and Orchestration functions are returned unchanged.
 
 **When to use**: 35th pass in the `Default` strategy, immediately after
-`AllocateMemoryAddr` (so planner-specific
-`MemRef` decisions are finalized) and before
+the selected planner's memory stage (`AllocateMemoryAddr`
+when PyPTO owns placement, otherwise the finalized semantic aliases) and before
 `FuseCreateAssembleToSlice`.
 
 ## API
@@ -99,7 +101,7 @@ whose LHS/RHS differ in any of those four ways — those cases require real
 
 ```python
 # Before pass (TileBufSignature equal on both sides; same MemRef R after
-# the selected memory planner)
+# semantic alias materialization and any PyPTO-owned placement)
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(x, out):
     a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec, MemRef(R)] = pl.tile.load(x, ...)

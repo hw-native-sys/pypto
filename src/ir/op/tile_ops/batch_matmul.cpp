@@ -292,6 +292,7 @@ REGISTER_OP("tile.batch_matmul")
 
 REGISTER_OP("tile.batch_matmul_acc")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description(
         "Batch matrix multiplication with accumulation: acc = acc + lhs @ rhs (with batch broadcast)")
     .add_argument("acc", "Accumulator tile (TileType, at least 2D)")

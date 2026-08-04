@@ -1002,7 +1002,17 @@ class LifetimeAnalyzer : public IRVisitor {
     std::map<const Var*, std::set<int>> phi_family_ids;
   };
 
-  Result Analyze(const StmtPtr& func_body) {
+  Result Analyze(const StmtPtr& func_body, const std::vector<VarPtr>& entry_vars = {}) {
+    // Function parameters have no defining AssignStmt. Seed Tile parameters at
+    // the entry point so function-wide allocation planning includes their
+    // MemRefs and body uses extend their lifetimes normally.
+    for (const VarPtr& var : entry_vars) {
+      const auto tile_type = As<TileType>(var->GetType());
+      if (!tile_type || !tile_type->memref_.has_value()) continue;
+      ordered_defs_.push_back(var);
+      var_def_order_[var] = current_order_;
+    }
+
     // Phase 1: Walk IR tree
     if (func_body) {
       VisitStmt(func_body);
@@ -1283,12 +1293,13 @@ class LifetimeAnalyzer : public IRVisitor {
  * Walks ALL statements
  * including those inside nested control flow (IfStmt/ForStmt/WhileStmt bodies).
  */
-LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body) {
+LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
+                                                      const std::vector<VarPtr>& entry_vars = {}) {
   std::vector<LifetimeInterval> lifetimes;
 
   // Step 1: Walk full IR tree to collect variable defs, uses, and ordering
   LifetimeAnalyzer analyzer;
-  auto result = analyzer.Analyze(func_body);
+  auto result = analyzer.Analyze(func_body, entry_vars);
 
   if (result.ordered_defs.empty()) {
     return {lifetimes, {}};
@@ -3255,6 +3266,11 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
 
 LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
   return AnalyzeAllocationLifetimesImpl(func_body);
+}
+
+LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func) {
+  INTERNAL_CHECK(func != nullptr) << "Cannot analyze allocation lifetimes for a null function";
+  return AnalyzeAllocationLifetimesImpl(func->body_, func->params_);
 }
 
 namespace pass {

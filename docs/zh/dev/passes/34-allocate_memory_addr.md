@@ -1,10 +1,11 @@
 # AllocateMemoryAddr Pass
 
-为已有的 alloc 操作分配实际内存地址。
+为已有分配所支持的 MemRef 分配实际内存地址。
 
 ## 概述
 
-该 Pass 为非 DDR 的 MemRef 分配具体地址，并原地更新已有的 `tile.alloc` 语句。
+该 Pass 为非 DDR 的 MemRef 分配具体地址。`tile.alloc` 语句声明分配根和大小，
+因此其 Ptr 结果与 Call 参数保持不变；带地址的 MemRef 位于 tile 和 tensor 类型上。
 它还会在 PTO codegen 之前解析 `system.reserve_buffer(base=AUTO)`。地址放置由
 `MemoryPlanner` 选择：
 
@@ -19,7 +20,7 @@
 - 在每个独立内存空间内分配对齐地址
 - `DSA_RP` 在满足容量的放置中保持正确性约束并最小化已识别的高代价复用
 - 更新所有变量类型 (Type) 中的 MemRef 地址
-- 使用分配的地址更新 `tile.alloc` 语句参数
+- 保留 `tile.alloc` 指针声明，同时更新所有 MemRef 使用点
 
 **使用时机**：代码生成前的最后一个内存管理 pass。`PYPTO` 下它在
 `MemoryReuse` 之后运行；`DSA_RP` 下跳过 `MemoryReuse`，本 pass 直接消费
@@ -65,7 +66,6 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
    - `DSA_RP`：构建下述进程内问题并运行 canonical greedy。
 4. **原地更新**：使用 `MemRefUpdateMutator` 完成以下操作：
    - 将变量类型（TileType/TensorType）中的旧 MemRef 引用替换为包含实际地址的新 MemRef
-   - 更新已有的 `tile.alloc` `AssignStmt`：替换左值 MemRef 并更新 Call 表达式 (Expression) 中的 addr 参数
    - 把 `system.reserve_buffer` 的 kwargs 改写为显式 `base`
 
 ### DSA-RP 策略
@@ -133,10 +133,10 @@ Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软�
 
 ```python
 # SeqStmts [
-mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)   # addr=-1 (unallocated)
-mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)   # addr=-1 (unallocated)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
+mem_vec_0: Ptr = tile.alloc(Vec, 16384)
+mem_vec_1: Ptr = tile.alloc(Vec, 16384)
+tile_a: Tile[[64, 64], FP32, MemRef(mem_vec_0, -1, 16384)] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, MemRef(mem_vec_1, -1, 16384)] = tile.add(tile_a, ...)
 # ]
 ```
 
@@ -144,10 +144,10 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 
 ```python
 # SeqStmts [
-mem_vec_0: MemRefType = tile.alloc(Vec, 0, 16384, 0)      # addr=0
-mem_vec_1: MemRefType = tile.alloc(Vec, 16384, 16384, 1)   # addr=16384 (aligned)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
+mem_vec_0: Ptr = tile.alloc(Vec, 16384)  # 声明保持不变
+mem_vec_1: Ptr = tile.alloc(Vec, 16384)  # 声明保持不变
+tile_a: Tile[[64, 64], FP32, MemRef(mem_vec_0, 0, 16384)] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, MemRef(mem_vec_1, 16384, 16384)] = tile.add(tile_a, ...)
 # ]
 ```
 
@@ -155,16 +155,16 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 
 ```python
 # Before:
-mem_vec_0: MemRefType = tile.alloc(Vec, -1, 2048, 0)
-mem_left_1: MemRefType = tile.alloc(Left, -1, 2048, 1)
-mem_right_2: MemRefType = tile.alloc(Right, -1, 2048, 2)
-mem_acc_3: MemRefType = tile.alloc(Acc, -1, 2048, 3)
+mem_vec_0: Ptr = tile.alloc(Vec, 2048)
+mem_left_1: Ptr = tile.alloc(Left, 2048)
+mem_right_2: Ptr = tile.alloc(Right, 2048)
+mem_acc_3: Ptr = tile.alloc(Acc, 2048)
 
 # After (each space starts from addr=0):
-mem_vec_0: MemRefType = tile.alloc(Vec, 0, 2048, 0)
-mem_left_1: MemRefType = tile.alloc(Left, 0, 2048, 1)
-mem_right_2: MemRefType = tile.alloc(Right, 0, 2048, 2)
-mem_acc_3: MemRefType = tile.alloc(Acc, 0, 2048, 3)
+tile_vec: Tile[..., MemRef(mem_vec_0, 0, 2048)] = ...
+tile_left: Tile[..., MemRef(mem_left_1, 0, 2048)] = ...
+tile_right: Tile[..., MemRef(mem_right_2, 0, 2048)] = ...
+tile_acc: Tile[..., MemRef(mem_acc_3, 0, 2048)] = ...
 ```
 
 ## 实现
@@ -184,7 +184,8 @@ Pass AllocateMemoryAddr();
 - `dsa_adapter::BuildProblem` 构建精简的进程内 DSA-RP 模型
 - `dsa::CanonicalGreedySolver` 搜索满足容量的放置，
   `dsa::ValidateSolution` 独立验证结果
-- `MemRefUpdateMutator` 在一次遍历中同时更新变量类型和 `tile.alloc` 语句参数
+- `MemRefUpdateMutator` 在一次遍历中更新变量与表达式类型中的 MemRef，并改写已解析的
+  `system.reserve_buffer` base；`tile.alloc` 保持为指针与大小声明
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

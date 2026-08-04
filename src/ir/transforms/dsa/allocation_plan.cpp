@@ -36,7 +36,7 @@ namespace ir {
 namespace dsa_adapter {
 
 AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
-  LifetimeAnalysisResult analysis = AnalyzeAllocationLifetimes(func->body_);
+  LifetimeAnalysisResult analysis = AnalyzeAllocationLifetimes(func);
   const AllocationConstraintAnalysis constraints = AnalyzeAllocationConstraints(func, analysis, "DSA-RP");
 
   AllocationPlan plan;

@@ -200,8 +200,8 @@ class AccessCollector : public IRVisitor {
   void VisitStmt_(const ReturnStmtPtr& op) override {
     for (const ExprPtr& value : op->value_) {
       RecordCall(As<Call>(value), nullptr);
-      ++global_order_;
     }
+    ++global_order_;
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {

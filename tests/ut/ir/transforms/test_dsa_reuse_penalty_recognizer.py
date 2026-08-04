@@ -33,20 +33,38 @@ def _recognized_pairs(program) -> set[frozenset[str]]:
     return {frozenset((first, second)) for first, second, _cost in _recognized_edges(program)}
 
 
+def _find_call(program, op_name: str) -> ir.Call:
+    function = next(iter(program.functions.values()))
+    calls: list[ir.Call] = []
+
+    class _CallCollector(ir.IRVisitor):
+        def visit_call(self, call):  # type: ignore[override]
+            if call.op.name == op_name:
+                calls.append(call)
+            super().visit_call(call)
+
+    _CallCollector().visit_stmt(function.body)
+    assert len(calls) == 1
+    return calls[0]
+
+
 def _tile_ranges(program) -> dict[str, tuple[int, int]]:
     function = next(iter(program.functions.values()))
     result: dict[str, tuple[int, int]] = {}
+
+    def record(var):
+        tile_type = var.type
+        if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+            offset = tile_type.memref.byte_offset_
+            assert isinstance(offset, ir.ConstInt)
+            result[var.name_hint] = (offset.value, tile_type.memref.size_)
 
     def visit(stmt):
         if isinstance(stmt, ir.SeqStmts):
             for child in stmt.stmts:
                 visit(child)
         elif isinstance(stmt, ir.AssignStmt):
-            tile_type = stmt.var.type
-            if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
-                offset = tile_type.memref.byte_offset_
-                assert isinstance(offset, ir.ConstInt)
-                result[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+            record(stmt.var)
         elif isinstance(stmt, (ir.ForStmt, ir.WhileStmt)):
             visit(stmt.body)
         elif isinstance(stmt, ir.IfStmt):
@@ -54,6 +72,8 @@ def _tile_ranges(program) -> dict[str, tuple[int, int]]:
             if stmt.else_body is not None:
                 visit(stmt.else_body)
 
+    for param in function.params:
+        record(param)
     visit(function.body)
     return result
 
@@ -171,7 +191,7 @@ def test_dsa_rp_does_not_promote_partial_handoff_endpoint(ascend_backend):
     assert _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_dsa_rp_vec_to_vec_tile_move_uses_vector_resource():
+def test_dsa_rp_vec_to_vec_tile_move_uses_vector_resource(ascend_backend):
     """A materialized Vec-to-Vec move is a Vector access, not an unknown op."""
 
     @pl.program
@@ -188,11 +208,12 @@ def test_dsa_rp_vec_to_vec_tile_move_uses_vector_resource():
             next_value = pl.load(input_b, [0, 0], [32, 32])
             return pl.store(next_value, [0, 0], output)
 
+    assert frozenset(("_moved", "next_value")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["_moved"], ranges["next_value"])
 
 
-def test_dsa_rp_acc_to_acc_tile_move_uses_vector_resource():
+def test_dsa_rp_acc_to_acc_tile_move_uses_vector_resource(ascend_backend):
     """PTOAS executes a materialized same-L0 tmov on the Vector pipe."""
 
     @pl.program
@@ -213,6 +234,7 @@ def test_dsa_rp_acc_to_acc_tile_move_uses_vector_resource():
             next_value = pl.matmul(lhs_l0, rhs_l0)
             return pl.store(next_value, [0, 0], output)
 
+    assert frozenset(("_moved", "next_value")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["_moved"], ranges["next_value"])
 
@@ -425,7 +447,7 @@ def test_dsa_rp_scalar_subrange_read_stays_unpenalized():
     assert _overlap(ranges["prior"], ranges["next_value"])
 
 
-def test_dsa_rp_recognizes_nested_cross_pipe_handoff():
+def test_dsa_rp_recognizes_nested_cross_pipe_handoff(ascend_backend):
     """Nested loop accesses participate in distance-zero recognition."""
 
     @pl.program
@@ -444,6 +466,7 @@ def test_dsa_rp_recognizes_nested_cross_pipe_handoff():
             result = pl.tile.full([64, 64], dtype=pl.FP32, value=2.0)
             return pl.store(result, [0, 0], output)
 
+    assert frozenset(("prior", "_next_value")) in _recognized_pairs(Before)
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["prior"], ranges["_next_value"])
 
@@ -514,6 +537,48 @@ def test_dsa_rp_keeps_logically_ordered_cross_pipe_handoff():
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["prior"], ranges["next_value"])
+
+
+def test_no_access_operation_has_no_exact_pipe(ascend_backend):
+    """Declarations cannot acquire a synthetic execution resource."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            created = pl.tile.create([16, 16], dtype=pl.FP32)
+            return pl.store(created, [0, 0], output)
+
+    call = _find_call(Before, "tile.create")
+    assert testing.get_execution_memory_access_evidence("tile.create") == "no_access"
+    assert testing.try_infer_pipe(call) is None
+
+
+@pytest.mark.parametrize("op_name", ["tile.matmul_acc", "tile.gemv_acc", "tile.batch_matmul_acc"])
+def test_accumulate_ops_declare_functional_access(op_name):
+    """Accumulator ops expose their complete read/write contract to the recognizer."""
+    assert testing.get_execution_memory_access_evidence(op_name) == "functional"
+
+
+def test_dsa_rp_places_on_chip_tile_parameter(ascend_backend):
+    """Tile parameters are entry-live allocation identities, not body definitions."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            tile_param: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec],
+        ) -> pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec]:
+            result = pl.add(tile_param, tile_param)
+            return result
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert set(ranges) >= {"tile_param", "result"}
+    assert ranges["tile_param"][0] >= 0
 
 
 def test_dsa_rp_recognizes_l1_to_l0_route(ascend_backend):

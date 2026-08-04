@@ -5,10 +5,11 @@
 
 ## 概述
 
-所选内存规划器完成 MemRef 决策之后，`tile.reshape` 的 LHS 与 RHS 可能已经指向
-同一个 `MemRef` 根，并且具有相同的 `TileBufSignature`。在这种情况下，该 reshape 在
+`InitMemRef` 与 `MaterializeSemanticAliases` 完成分配身份之后，`tile.reshape` 的
+LHS 与 RHS 可能已经指向同一个 `MemRef` 根，并且具有相同的 `TileBufSignature`。
+在这种情况下，该 reshape 在
 PTO 层面是 no-op —— 按 var 分配的模型已经为 LHS 预声明了与 RHS 相同的 shape、layout、
-fractal、valid-shape 与 pad，并共享同一块内存地址。`pto.treshape` 在此无事可做。
+fractal、valid-shape 与 pad，并共享同一个分配身份。`pto.treshape` 在此无事可做。
 
 历史上 PTO codegen 在发射阶段识别这种情况并通过 peephole 静默丢弃 `pto.treshape`
 那一行。这把一个 IR 到 IR 的优化藏在了 codegen 层；该 Pass 把这种优化挪到它该在的
@@ -33,13 +34,15 @@ PTO codegen 之后对所有幸存的 `tile.reshape` 都做 1:1 翻译，因为 n
 - `IRProperty::IncoreTileOps` —— InCore 函数使用 tile 类型
 - `IRProperty::HasMemRefs` —— `MemRef` 槽已由 `InitMemRef` 填充
 - `IRProperty::TileOps2D` —— tile op 至多 2D
-- 该 Pass 必须在 `AllocateMemoryAddr` 之后运行，让规划器特定的 view 合并决策反映在
-  规范 alloc 上 —— 否则即便逻辑上应共享，LHS 与 RHS 也可能尚未指向同一个 `MemRef`。
+- `MaterializeSemanticAliases` 必须先完成语义要求的共享。`PYPTO` 与 `DSA_RP`
+  在该 Pass 前运行 `AllocateMemoryAddr`；`PTOAS` 会故意跳过地址分配，但同根身份已经
+  足够，因为 ptoas 必须把两者放在同一个分配中。
 - 仅扫描 InCore 类型函数（`InCore`、`AIC`、`AIV`）；Opaque 与 Orchestration
   函数原样返回。
 
-**使用时机**：紧随 `AllocateMemoryAddr` 之后（保证规划器特定的 `MemRef`
-决策已经定型），先于 `FuseCreateAssembleToSlice`。
+**使用时机**：在所选规划器的内存阶段之后（PyPTO 负责放置时为
+`AllocateMemoryAddr`，否则为已经定型的语义别名），先于
+`FuseCreateAssembleToSlice`。
 
 ## API
 
@@ -86,7 +89,7 @@ program_folded = fold_pass(program)
 ### MemRef 合并后的 trivial reshape
 
 ```python
-# Pass 之前（双方 TileBufSignature 相同；所选内存规划器完成后双方共享 MemRef R）
+# Pass 之前（双方 TileBufSignature 相同；语义别名及可选的 PyPTO 放置完成后共享 MemRef R）
 @pl.function(type=pl.FunctionType.InCore)
 def kernel(x, out):
     a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec, MemRef(R)] = pl.tile.load(x, ...)

@@ -540,10 +540,11 @@ struct MatmulTiling {
   /// True when the chooser picked dbC=2 (double-buffered L0C): the accumulator is
   /// budgeted at L0C/2 so two co-live [m, n] Acc tiles fit, and BuildFullKPipelined
   /// tags the moving loop with kPipelineDoubleBufferCAttr so CanonicalizeIOOrder
-  /// floats the drains past the next matmul, keeping the two tiles co-live.  With
+  /// floats the drains past the next matmul, keeping the two tiles co-live.
   /// Under PTOAS, InitMemRef keeps the overlapping-live-range buffers distinct
-  /// and ptoas places them. Under the PyPTO opt-in, the flat depth-2 pipeline
-  /// membership prevents MemoryReuse from coalescing them. Set from
+  /// and ptoas places them. Under PYPTO, flat depth-2 pipeline membership keeps
+  /// MemoryReuse from coalescing them; DSA_RP consumes the same relation as a
+  /// strict placement separation before its capacity fallback. Set from
   /// L0TileResult::double_buffer_c; only true for full-K tiles (see the assert
   /// in AnalyzeMatmul).
   bool double_buffer_c = false;
@@ -755,16 +756,15 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // skipped, InitMemRef keeps the buffers distinct, and ptoas assigns their
   // physical offsets.
   //
-  // Under the PyPTO planner dbC=2 is an experimental opt-in (PassContext flag,
-  // default OFF). It now works there because the pipeline-membership tagger gives
-  // the dbC accumulator a *flat depth-2* membership — only the moving (dbC) loop
-  // tags it; enclosing loops skip it since the cube serializes MADs — so
-  // MemoryReuse's capacity gate (#1475) allocates exactly the two co-live L0C
-  // buffers instead of over-coalescing the pair (its former behaviour, which
-  // shrank the tile to L0C/2 with no second buffer). Kept default-off pending
-  // device validation of the numerics + drain-hidden win. The co-live emit is
-  // gated on the chooser's `double_buffer_c` result below, which tags the moving
-  // loop with kPipelineDoubleBufferCAttr.
+  // Under the PyPTO-owned planners dbC=2 is an experimental opt-in (PassContext
+  // flag, default OFF). The pipeline-membership tagger gives the dbC accumulator
+  // a *flat depth-2* membership — only the moving (dbC) loop tags it; enclosing
+  // loops skip it since the cube serializes MADs. PYPTO's MemoryReuse uses that
+  // relation to keep two buffers, while DSA_RP initially exports it as a strict
+  // separation. Kept default-off pending device validation of the numerics +
+  // drain-hidden win. The co-live emit is gated on the chooser's
+  // `double_buffer_c` result below, which tags the moving loop with
+  // kPipelineDoubleBufferCAttr.
   //
   // KNOWN-FRAGILE (experimental): this reads the memory planner from the *mutable*
   // mid-pipeline PassContext, so dbC=2 behaviour depends on run-time context state
@@ -1708,11 +1708,11 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     // stronger double_buffer_c attr, which floats *both* stores below *both*
     // matmuls (matmul c, matmul c₁, store c, store c₁) so the two [m, n] Acc tiles
     // stay co-live; the chooser budgeted them at L0C/2 so both fit. Under PTOAS,
-    // MemoryReuse is skipped and ptoas places the distinct live ranges. Under
-    // the PyPTO opt-in, flat depth-2 pipeline membership keeps MemoryReuse from
-    // coalescing the pair. In both cases tile i's FIXPIPE drain overlaps tile
-    // i+1's MAD. The moving-operand extract is double-buffered (Load tier,
-    // hoisted) in both schedules.
+    // ptoas places the distinct live ranges. Under PYPTO, flat depth-2 pipeline
+    // membership keeps MemoryReuse from coalescing the pair; DSA_RP initially
+    // exports it as a strict separation. In all cases tile i's FIXPIPE drain
+    // overlaps tile i+1's MAD. The moving-operand extract is double-buffered
+    // (Load tier, hoisted) in both schedules.
     std::vector<std::pair<std::string, std::any>> inner_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2},
                                                                  {kPipelineOverlapStoresAttr, false}};
     // Only dbC=2 loops carry the attr (absent ⇒ false), so non-dbC=2 emit is

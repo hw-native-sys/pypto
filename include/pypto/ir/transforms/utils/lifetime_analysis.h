@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/stmt.h"
 
@@ -56,6 +57,15 @@ struct LifetimeAnalysisResult {
  * @brief Analyze conservative allocation lifetimes and alias families.
  */
 [[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body);
+
+/**
+ * @brief Analyze allocation lifetimes, including on-chip Tile parameters.
+ *
+ * Function parameters are live on entry and have no defining AssignStmt in the
+ * body. Function-wide allocation planners must use this overload so those
+ * allocation identities participate in placement and writeback.
+ */
+[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func);
 
 }  // namespace ir
 }  // namespace pypto

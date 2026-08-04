@@ -108,7 +108,6 @@ def _run_dsa_rp_pipeline(program: ir.Program) -> ir.Program:
     """Run the allocation passes with DSA-RP owning placement."""
     with passes.PassContext(
         [],
-        passes.VerificationLevel.NONE,
         memory_planner=passes.MemoryPlanner.DSA_RP,
     ):
         return passes.allocate_memory_addr()(

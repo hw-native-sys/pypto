@@ -26,10 +26,12 @@
 #include <utility>
 
 #include "../module.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
@@ -126,6 +128,32 @@ nb::list RecognizeDsaReusePenaltiesForTesting(const ir::FunctionPtr& func) {
   return result;
 }
 
+/**
+ * @brief Return exact backend pipe inference for a Call, or None.
+ */
+nb::object TryInferPipeForTesting(const ir::CallPtr& call) {
+  const auto pipe = backend::BackendConfig::GetBackend()->TryInferPipe(call);
+  if (!pipe) return nb::none();
+  return nb::int_(static_cast<int>(*pipe));
+}
+
+/**
+ * @brief Return an operation's registered execution-memory-access evidence.
+ */
+std::string GetExecutionMemoryAccessEvidenceForTesting(const std::string& op_name) {
+  const auto& registry = ir::OpRegistry::GetInstance();
+  CHECK(registry.IsRegistered(op_name)) << "Unknown operation '" << op_name << "'";
+  switch (registry.GetEntry(op_name).GetExecutionMemoryAccessEvidence()) {
+    case ir::ExecutionMemoryAccessEvidence::Unknown:
+      return "unknown";
+    case ir::ExecutionMemoryAccessEvidence::Functional:
+      return "functional";
+    case ir::ExecutionMemoryAccessEvidence::NoAccess:
+      return "no_access";
+  }
+  INTERNAL_UNREACHABLE << "Unknown execution-memory-access evidence";
+}
+
 // ============================================================================
 // Module binding
 // ============================================================================
@@ -166,6 +194,12 @@ void BindTesting(nb::module_& m) {
 
   testing.def("recognize_dsa_reuse_penalties", &RecognizeDsaReusePenaltiesForTesting, nb::arg("function"),
               "Return recognized DSA-RP edges without running placement");
+
+  testing.def("try_infer_pipe", &TryInferPipeForTesting, nb::arg("call"),
+              "Return the exact backend pipe for a Call, or None");
+
+  testing.def("get_execution_memory_access_evidence", &GetExecutionMemoryAccessEvidenceForTesting,
+              nb::arg("op_name"), "Return an operation's execution-memory-access evidence");
 }
 
 }  // namespace python

@@ -35,6 +35,24 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
+def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, int]]:
+    """Collect constant addressed Tile MemRefs from a transformed program."""
+    ranges: dict[str, tuple[int, int]] = {}
+    function = next(iter(program.functions.values()))
+
+    class _RangeCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            tile_type = stmt.var.type
+            if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                offset = tile_type.memref.byte_offset_
+                assert isinstance(offset, ir.ConstInt)
+                ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
+            super().visit_assign_stmt(stmt)
+
+    _RangeCollector().visit_stmt(function.body)
+    return ranges
+
+
 class TestBasic:
     """Core reuse logic: chain reuse, producer-consumer, size/shape, transitive conflicts."""
 
@@ -3727,19 +3745,7 @@ class TestStorageLayoutReuseGate:
                 passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
             )
 
-        ranges: dict[str, tuple[int, int]] = {}
-        function = next(iter(After.functions.values()))
-
-        class _RangeCollector(ir.IRVisitor):
-            def visit_assign_stmt(self, stmt):  # type: ignore[override]
-                tile_type = stmt.var.type
-                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
-                    offset = tile_type.memref.byte_offset_
-                    assert isinstance(offset, ir.ConstInt)
-                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
-                super().visit_assign_stmt(stmt)
-
-        _RangeCollector().visit_stmt(function.body)
+        ranges = _collect_allocated_tile_ranges(After)
         nd_offset, nd_size = ranges["tile_nd"]
         nz_offset, nz_size = ranges["tile_nz"]
         assert nd_offset + nd_size <= nz_offset or nz_offset + nz_size <= nd_offset, (
@@ -3887,19 +3893,7 @@ class TestAscend910BLoadTpopHazard:
         finally:
             backend.reset_for_testing()
 
-        ranges: dict[str, tuple[int, int]] = {}
-        function = next(iter(after.functions.values()))
-
-        class _RangeCollector(ir.IRVisitor):
-            def visit_assign_stmt(self, stmt):  # type: ignore[override]
-                tile_type = stmt.var.type
-                if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
-                    offset = tile_type.memref.byte_offset_
-                    assert isinstance(offset, ir.ConstInt)
-                    ranges[stmt.var.name_hint] = (offset.value, tile_type.memref.size_)
-                super().visit_assign_stmt(stmt)
-
-        _RangeCollector().visit_stmt(function.body)
+        ranges = _collect_allocated_tile_ranges(after)
         previous_offset, previous_size = ranges["down_prev"]
         next_offset, next_size = ranges["down_next"]
         assert previous_offset + previous_size <= next_offset or next_offset + next_size <= previous_offset, (

@@ -598,6 +598,12 @@ ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
 std::optional<ir::PipeType> Backend::TryInferPipe(const ir::CallPtr& call) const {
   CHECK(call != nullptr) << "TryInferPipe received null call";
   CHECK(call->op_ != nullptr) << "TryInferPipe received call with null op";
+  const auto& registry = ir::OpRegistry::GetInstance();
+  if (registry.IsRegistered(call->op_->name_) &&
+      registry.GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() ==
+          ir::ExecutionMemoryAccessEvidence::NoAccess) {
+    return std::nullopt;
+  }
   const auto* info = GetOpInfo(call->op_->name_);
   if (info && info->infer_pipe_func) return (*info->infer_pipe_func)(call);
   return InferCommonPtoPipe(*this, call);

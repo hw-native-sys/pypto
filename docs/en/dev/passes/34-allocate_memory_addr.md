@@ -1,11 +1,13 @@
 # AllocateMemoryAddr Pass
 
-Assigns real memory addresses to existing alloc operations.
+Assigns real memory addresses to MemRefs backed by existing allocations.
 
 ## Overview
 
-This pass allocates concrete memory addresses for non-DDR MemRefs and updates
-the existing `tile.alloc` statements in place. It also resolves
+This pass allocates concrete memory addresses for non-DDR MemRefs. The
+`tile.alloc` statements declare allocation roots and sizes, so their pointer
+results and Call arguments remain unchanged; addressed MemRefs live on tile and
+tensor types. The pass also resolves
 `system.reserve_buffer(base=AUTO)` before PTO code generation. Address
 placement is selected by `MemoryPlanner`:
 
@@ -22,7 +24,7 @@ placement is selected by `MemoryPlanner`:
 - Under `DSA_RP`, preserve correctness constraints and minimize recognized
   costly reuse among capacity-fitting placements
 - Update MemRef addresses in all variable types
-- Update `tile.alloc` statement arguments with the allocated addresses
+- Preserve `tile.alloc` pointer declarations while updating every MemRef use
 
 **When to use**: Final memory-management pass before code generation. Under
 `PYPTO` it runs after `MemoryReuse`; under `DSA_RP`, `MemoryReuse` is skipped
@@ -71,7 +73,6 @@ compile(program, memory_planner=passes.MemoryPlanner.DSA_RP)
      greedy.
 4. **Update in place**: Use `MemRefUpdateMutator` to:
    - Replace old MemRef references in variable types (TileType/TensorType) with new MemRefs containing real addresses
-   - Update existing `tile.alloc` `AssignStmt`s: replace LHS MemRef and update addr argument in the Call expression
    - Rewrite `system.reserve_buffer` kwargs with the resolved explicit `base`
 
 ### DSA-RP policy
@@ -158,10 +159,10 @@ Backends can override these defaults by supplying a custom `MemoryAllocatorPolic
 
 ```python
 # SeqStmts [
-mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)   # addr=-1 (unallocated)
-mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)   # addr=-1 (unallocated)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
+mem_vec_0: Ptr = tile.alloc(Vec, 16384)
+mem_vec_1: Ptr = tile.alloc(Vec, 16384)
+tile_a: Tile[[64, 64], FP32, MemRef(mem_vec_0, -1, 16384)] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, MemRef(mem_vec_1, -1, 16384)] = tile.add(tile_a, ...)
 # ]
 ```
 
@@ -169,10 +170,10 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 
 ```python
 # SeqStmts [
-mem_vec_0: MemRefType = tile.alloc(Vec, 0, 16384, 0)      # addr=0
-mem_vec_1: MemRefType = tile.alloc(Vec, 16384, 16384, 1)   # addr=16384 (aligned)
-tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
-tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
+mem_vec_0: Ptr = tile.alloc(Vec, 16384)  # unchanged declaration
+mem_vec_1: Ptr = tile.alloc(Vec, 16384)  # unchanged declaration
+tile_a: Tile[[64, 64], FP32, MemRef(mem_vec_0, 0, 16384)] = tile.load(...)
+tile_b: Tile[[64, 64], FP32, MemRef(mem_vec_1, 16384, 16384)] = tile.add(tile_a, ...)
 # ]
 ```
 
@@ -180,16 +181,16 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 
 ```python
 # Before:
-mem_vec_0: MemRefType = tile.alloc(Vec, -1, 2048, 0)
-mem_left_1: MemRefType = tile.alloc(Left, -1, 2048, 1)
-mem_right_2: MemRefType = tile.alloc(Right, -1, 2048, 2)
-mem_acc_3: MemRefType = tile.alloc(Acc, -1, 2048, 3)
+mem_vec_0: Ptr = tile.alloc(Vec, 2048)
+mem_left_1: Ptr = tile.alloc(Left, 2048)
+mem_right_2: Ptr = tile.alloc(Right, 2048)
+mem_acc_3: Ptr = tile.alloc(Acc, 2048)
 
 # After (each space starts from addr=0):
-mem_vec_0: MemRefType = tile.alloc(Vec, 0, 2048, 0)
-mem_left_1: MemRefType = tile.alloc(Left, 0, 2048, 1)
-mem_right_2: MemRefType = tile.alloc(Right, 0, 2048, 2)
-mem_acc_3: MemRefType = tile.alloc(Acc, 0, 2048, 3)
+tile_vec: Tile[..., MemRef(mem_vec_0, 0, 2048)] = ...
+tile_left: Tile[..., MemRef(mem_left_1, 0, 2048)] = ...
+tile_right: Tile[..., MemRef(mem_right_2, 0, 2048)] = ...
+tile_acc: Tile[..., MemRef(mem_acc_3, 0, 2048)] = ...
 ```
 
 ## Implementation
@@ -209,7 +210,9 @@ Pass AllocateMemoryAddr();
 - `dsa_adapter::BuildProblem` derives the narrow in-memory DSA-RP model
 - `dsa::CanonicalGreedySolver` searches capacity-fitting placements and
   `dsa::ValidateSolution` independently checks the result
-- `MemRefUpdateMutator` updates both variable types and `tile.alloc` statement arguments in a single traversal
+- `MemRefUpdateMutator` updates MemRefs in variable and expression types and
+  rewrites resolved `system.reserve_buffer` bases in one traversal; `tile.alloc`
+  remains a pointer-and-size declaration
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 

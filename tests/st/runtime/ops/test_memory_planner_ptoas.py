@@ -609,12 +609,14 @@ class TestMemoryPlannerPtoas:
         result = test_runner.run(ColVecIfPhiCarryCase(planner))
         assert result.passed, f"colvec if-phi carry ({_planner_tag(planner)}) failed: {result.error}"
 
-    def test_multi_buffer_colive_slots_run_under_pypto(self, test_runner):
-        # Two co-live slots are a legal program — the baked-address path runs it
-        # correctly. This is the control for the PTOAS refusal below: what is being
-        # rejected there is the lowering, not the source.
-        result = test_runner.run(MultiBufferCoLiveCase(MemoryPlanner.PYPTO))
-        assert result.passed, f"multi-buffer co-live (pypto) failed: {result.error}"
+    @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP], ids=_planner_tag)
+    def test_multi_buffer_colive_slots_run_under_pypto_planners(self, test_runner, planner):
+        # Two co-live slots are a legal program — both PyPTO-owned address
+        # planners preserve the declared region and its per-slot offsets. This
+        # controls the PTOAS refusal below: the unsupported part is that
+        # lowering, not the source program.
+        result = test_runner.run(MultiBufferCoLiveCase(planner))
+        assert result.passed, f"multi-buffer co-live ({_planner_tag(planner)}) failed: {result.error}"
 
     def test_multi_buffer_colive_slots_rejected_under_ptoas(self):
         # ptoas 0.54 emits the per-slot WAR pair only for the first multi_tile_get
