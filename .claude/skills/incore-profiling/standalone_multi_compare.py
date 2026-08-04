@@ -109,16 +109,24 @@ def _validate_cases(case_dirs: dict[str, Path]) -> tuple[dict[str, Any], list[st
 
 
 def _compare_all_outputs(
-    dumps: dict[str, Path], outputs: list[str], expected_dir: Path | None
-) -> dict[str, dict[str, str]]:
-    hashes: dict[str, dict[str, str]] = {}
+    dumps: dict[str, list[Path]], outputs: list[str], expected_dir: Path | None
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, list[str]]]]:
+    stable_hashes: dict[str, dict[str, str]] = {}
+    run_hashes: dict[str, dict[str, list[str]]] = {}
     for output in outputs:
         output_hashes: dict[str, str] = {}
-        for name, dump in dumps.items():
-            path = dump / f"{output}.bin"
-            if not path.is_file():
-                raise FileNotFoundError(f"standalone output dump is missing {path}")
-            output_hashes[name] = pair._sha256(path)
+        output_run_hashes: dict[str, list[str]] = {}
+        for name, repetitions in dumps.items():
+            hashes: list[str] = []
+            for dump in repetitions:
+                path = dump / f"{output}.bin"
+                if not path.is_file():
+                    raise FileNotFoundError(f"standalone output dump is missing {path}")
+                hashes.append(pair._sha256(path))
+            if len(set(hashes)) != 1:
+                raise ValueError(f"standalone output is nondeterministic for {name}/{output}.bin")
+            output_hashes[name] = hashes[0]
+            output_run_hashes[name] = hashes
         if len(set(output_hashes.values())) != 1:
             raise ValueError(f"standalone outputs differ for ABI buffer {output}.bin")
         if expected_dir is not None:
@@ -129,8 +137,9 @@ def _compare_all_outputs(
             if expected_hash not in set(output_hashes.values()):
                 raise ValueError(f"standalone output differs from captured output for {output}.bin")
             output_hashes["captured_expected"] = expected_hash
-        hashes[output] = output_hashes
-    return hashes
+        stable_hashes[output] = output_hashes
+        run_hashes[output] = output_run_hashes
+    return stable_hashes, run_hashes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -144,10 +153,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
+    parser.add_argument("--correctness-repetitions", type=int, default=3)
     args = parser.parse_args(argv)
 
-    if args.warmup <= 0 or args.rounds <= 0 or args.timeout <= 0 or args.bootstrap_samples <= 0:
-        parser.error("warmup, rounds, timeout, and bootstrap-samples must be positive")
+    if (
+        args.warmup <= 0
+        or args.rounds <= 0
+        or args.timeout <= 0
+        or args.bootstrap_samples <= 0
+        or args.correctness_repetitions <= 1
+    ):
+        parser.error(
+            "warmup, rounds, timeout, and bootstrap-samples must be positive; "
+            "correctness-repetitions must be at least 2"
+        )
     case_dirs = _variant_map(args.case, "case")
     if len(case_dirs) < 2:
         parser.error("at least two --case NAME=PATH arguments are required")
@@ -174,20 +193,23 @@ def main(argv: list[str] | None = None) -> int:
             raise FileNotFoundError(f"standalone NPU executable not found: {executable}")
 
     args.output_root.mkdir(parents=True, exist_ok=True)
-    dumps: dict[str, Path] = {}
+    dumps: dict[str, list[Path]] = {}
     for name in case_dirs:
-        dump = args.output_root / "correctness" / name
-        pair._run_variant(
-            executables[name],
-            case_dirs[name],
-            args.output_root / "correctness" / f"{name}.tsv",
-            device_id=args.device_id,
-            warmup=1,
-            rounds=1,
-            timeout=args.timeout,
-            dump_dir=dump,
-        )
-        dumps[name] = dump
+        repetitions: list[Path] = []
+        for repetition in range(args.correctness_repetitions):
+            dump = args.output_root / "correctness" / name / f"run{repetition}"
+            pair._run_variant(
+                executables[name],
+                case_dirs[name],
+                args.output_root / "correctness" / name / f"run{repetition}.tsv",
+                device_id=args.device_id,
+                warmup=1,
+                rounds=1,
+                timeout=args.timeout,
+                dump_dir=dump,
+            )
+            repetitions.append(dump)
+        dumps[name] = repetitions
 
     expected_dirs = [case / "captured_expected" for case in case_dirs.values()]
     expected_dir: Path | None = None
@@ -199,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_hashes = {pair._sha256(path / f"{output}.bin") for path in expected_dirs}
             if len(expected_hashes) != 1:
                 raise ValueError(f"captured expectations differ for {output}.bin")
-    output_hashes = _compare_all_outputs(dumps, outputs, expected_dir)
+    output_hashes, correctness_run_hashes = _compare_all_outputs(dumps, outputs, expected_dir)
 
     names = list(case_dirs)
     orders = balanced_orders(names)
@@ -235,8 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         "device_id": args.device_id,
         "warmup_per_process": args.warmup,
         "rounds_per_process": args.rounds,
+        "correctness_repetitions": args.correctness_repetitions,
         "balanced_orders": [list(order) for order in orders],
         "compared_output_hashes": output_hashes,
+        "correctness_run_hashes": correctness_run_hashes,
         "block_medians_us": block_medians,
         "summary": summary,
     }

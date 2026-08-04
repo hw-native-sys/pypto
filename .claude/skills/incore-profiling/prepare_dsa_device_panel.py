@@ -35,6 +35,28 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _corpus_file_stem(instance: str) -> str:
+    """Mirror PyPTO's replay filename normalization."""
+    encoded = instance.encode("utf-8")
+    suffix = "".join(
+        chr(value)
+        if (
+            ord("0") <= value <= ord("9")
+            or ord("A") <= value <= ord("Z")
+            or ord("a") <= value <= ord("z")
+            or value in b"-_."
+        )
+        else f"_{value:02x}"
+        for value in encoded
+    )
+    return f"pypto_{suffix or 'unnamed'}"
+
+
+def replay_solution_filename(instance: str) -> str:
+    """Return the exact filename consumed by ``dsa_solution_dir`` replay."""
+    return f"{_corpus_file_stem(instance)}.dsa.solution.json"
+
+
 def load_panel(path: Path, *, enforce_protocol: bool = True) -> dict[str, Any]:
     panel = json.loads(path.read_text(encoding="utf-8"))
     if panel.get("schema_version") != 1:
@@ -90,6 +112,10 @@ def freeze_panel(panel_path: Path, panel: dict[str, Any]) -> dict[str, Any]:
         kernel["reuse_penalties"] = len(
             document.get("problem", {}).get("cost_model", {}).get("reuse_penalties", [])
         )
+        instance = document.get("instance")
+        if not isinstance(instance, str):
+            raise ValueError(f"kernel {kernel['tag']} problem has no string instance")
+        kernel["replay_solution_filename"] = replay_solution_filename(instance)
     return frozen
 
 
@@ -138,8 +164,10 @@ def main(argv: list[str] | None = None) -> int:
         arm_root = args.output_root / "solutions" / tag
         arm_root.mkdir(parents=True)
         for arm, _ in ARMS:
-            solution = arm_root / f"{arm}.solution.json"
-            result_path = arm_root / f"{arm}.result.json"
+            replay_dir = arm_root / arm
+            replay_dir.mkdir()
+            solution = replay_dir / kernel["replay_solution_filename"]
+            result_path = replay_dir / "solver-result.json"
             completed = subprocess.run(
                 solver_command(args.dsa_bench, problem, solution, result_path, arm),
                 text=True,
@@ -147,27 +175,30 @@ def main(argv: list[str] | None = None) -> int:
                 check=False,
                 timeout=args.timeout,
             )
-            (arm_root / f"{arm}.stderr.txt").write_text(completed.stderr, encoding="utf-8")
-            if completed.returncode not in {0, 2}:
+            (replay_dir / "solver-stderr.txt").write_text(completed.stderr, encoding="utf-8")
+            if completed.returncode != 0:
                 raise RuntimeError(
                     f"{tag}/{arm} failed with exit code {completed.returncode}:\n{completed.stderr}"
                 )
             result = json.loads(result_path.read_text(encoding="utf-8"))
-            fingerprint = ""
-            solution_sha = ""
-            if solution.is_file():
-                solution_document = json.loads(solution.read_text(encoding="utf-8"))
-                fingerprint = str(solution_document["problem_fingerprint"])
-                fingerprints[tag].add(fingerprint)
-                solution_sha = _sha256(solution)
-                placements = sorted(
-                    solution_document["placements"], key=lambda placement: int(placement["buffer"])
+            if result.get("status") != "feasible" or int(result.get("capacity_overflow", -1)) != 0:
+                raise RuntimeError(
+                    f"{tag}/{arm} did not produce a capacity-feasible placement: "
+                    f"status={result.get('status')!r}, "
+                    f"capacity_overflow={result.get('capacity_overflow')!r}"
                 )
-                placement_sha = hashlib.sha256(
-                    json.dumps(placements, separators=(",", ":"), sort_keys=True).encode()
-                ).hexdigest()
-            else:
-                placement_sha = ""
+            if not solution.is_file():
+                raise RuntimeError(f"{tag}/{arm} did not write replay solution {solution}")
+            solution_document = json.loads(solution.read_text(encoding="utf-8"))
+            fingerprint = str(solution_document["problem_fingerprint"])
+            fingerprints[tag].add(fingerprint)
+            solution_sha = _sha256(solution)
+            placements = sorted(
+                solution_document["placements"], key=lambda placement: int(placement["buffer"])
+            )
+            placement_sha = hashlib.sha256(
+                json.dumps(placements, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest()
             rows.append(
                 {
                     "tag": tag,
@@ -181,13 +212,17 @@ def main(argv: list[str] | None = None) -> int:
                     "problem_fingerprint": fingerprint,
                     "solution_sha256": solution_sha,
                     "placement_sha256": placement_sha,
-                    "solution": str(solution) if solution.is_file() else "",
+                    "solution": str(solution),
+                    "replay_dir": str(replay_dir),
                 }
             )
 
     mismatched = [tag for tag, values in fingerprints.items() if len(values) > 1]
     if mismatched:
         raise RuntimeError(f"solver arms produced mismatched problem fingerprints: {mismatched}")
+    missing = [tag for tag, values in fingerprints.items() if len(values) != 1]
+    if missing:
+        raise RuntimeError(f"solver arms did not produce one common problem fingerprint: {missing}")
     columns = list(rows[0])
     with (args.output_root / "solver-results.tsv").open("w", encoding="utf-8", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=columns, delimiter="\t")
