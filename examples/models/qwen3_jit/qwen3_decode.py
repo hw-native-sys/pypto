@@ -18,7 +18,7 @@ Run with::
     python -m examples.models.qwen3_jit.qwen3_decode
 
 (For numerical validation against a PyTorch golden, see
-``qwen3_32b_decode.py`` from the upstream pypto-lib repository.)
+``models/qwen3_32b/decode.py`` from the upstream pypto-lib repository.)
 """
 
 import pypto.language as pl

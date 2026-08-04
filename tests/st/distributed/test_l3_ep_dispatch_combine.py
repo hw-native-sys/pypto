@@ -10,7 +10,7 @@
 """L3 distributed st: N-rank EP dispatch + local_expert + combine — 1:1 PyPTO
 port of ``runtime/examples/workers/l3/ep_dispatch_combine``.
 
-Runs at real DeepSeek-V4 FLASH MoE scale (pypto-lib/models/deepseek/v4):
+Runs at real DeepSeek-V4 FLASH MoE scale (pypto-lib/models/deepseek_v4_flash_mtp):
 T=128, TOPK=6, D=4096, L=16 local experts per rank, R=192 receive cap.
 
 This is a structural port of the C++ runtime example. The three AIV kernels
@@ -66,7 +66,7 @@ import torch
 from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
-# Real DeepSeek-V4 FLASH MoE shapes (pypto-lib/models/deepseek/v4) — must
+# Real DeepSeek-V4 FLASH MoE shapes (pypto-lib/models/deepseek_v4_flash_mtp) — must
 # mirror the runtime example's constants. ``N_RANKS`` is supplied per-test via
 # ``_build_ep_dispatch_combine_program(n_ranks)``; everything below is
 # rank-count-independent. T = DECODE_BATCH*DECODE_SEQ, TOPK = experts/tok,

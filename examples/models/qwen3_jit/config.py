@@ -10,7 +10,7 @@
 """Shape and tiling constants for Qwen3-32B single-layer decode.
 
 Centralised so every kernel file imports the same values. Mirrors the
-constants from the upstream ``qwen3_32b_decode.py`` reference."""
+constants from the upstream ``models/qwen3_32b/decode.py`` reference."""
 
 # ─── Model dimensions ───
 BATCH = 16

@@ -15,7 +15,7 @@ Typical usage:
     --build-dir build_output/Qwen3Decode_20260514_195003 --target a2a3
 
   python .claude/skills/incore-profiling/incore_profile.py \
-    --case models/qwen3/14b/qwen3_14b_decode.py --target a2a3 \
+    --case models/qwen3_14b/decode_fwd.py --target a2a3 \
     --task-submit --task-device auto \
     --run-env PTO2_RING_TASK_WINDOW=131072 \
     --run-env PTO2_RING_DEP_POOL=131072 \
