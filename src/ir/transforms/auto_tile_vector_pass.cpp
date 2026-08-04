@@ -58,7 +58,12 @@ class CalledFunctionCollector : public IRVisitor {
   std::unordered_set<std::string> called_;
 };
 
-auto_tile::VectorHardware ReadVectorHardware(const Span& span) {
+struct VectorTargetContext {
+  auto_tile::VectorHardware hardware;
+  const backend::BackendHandler* handler = nullptr;
+};
+
+VectorTargetContext ReadVectorTarget(const Span& span) {
   CHECK_SPAN(backend::BackendConfig::IsConfigured(), span)
       << "AutoTile requires an explicitly configured backend";
   const backend::Backend* backend = backend::GetBackend();
@@ -68,16 +73,17 @@ auto_tile::VectorHardware ReadVectorHardware(const Span& span) {
   CHECK_SPAN(handler != nullptr, span) << "AutoTile could not obtain the active backend handler";
   const std::optional<backend::VectorAutoTileTarget> target = handler->GetVectorAutoTileTarget();
   CHECK_SPAN(target.has_value(), span) << "AutoTile vector scheduling currently supports Ascend910B only";
-  auto_tile::VectorHardware hardware;
-  hardware.vector_cores = backend->GetCoreCount(CoreType::VECTOR);
-  hardware.ub_bytes = static_cast<int64_t>(backend->GetMemSize(MemorySpace::Vec));
-  hardware.dma_alignment_bytes = target->dma_alignment_bytes;
-  hardware.vector_register_bytes = target->vector_register_bytes;
-  CHECK_SPAN(hardware.vector_cores > 0 && hardware.ub_bytes > 0 && hardware.dma_alignment_bytes > 0 &&
-                 hardware.vector_register_bytes > 0,
+  VectorTargetContext result;
+  result.handler = handler;
+  result.hardware.vector_cores = backend->GetCoreCount(CoreType::VECTOR);
+  result.hardware.ub_bytes = static_cast<int64_t>(backend->GetMemSize(MemorySpace::Vec));
+  result.hardware.dma_alignment_bytes = target->dma_alignment_bytes;
+  result.hardware.vector_register_bytes = target->vector_register_bytes;
+  CHECK_SPAN(result.hardware.vector_cores > 0 && result.hardware.ub_bytes > 0 &&
+                 result.hardware.dma_alignment_bytes > 0 && result.hardware.vector_register_bytes > 0,
              span)
       << "AutoTile could not derive the " << target->model_name << " vector topology";
-  return hardware;
+  return result;
 }
 
 ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
@@ -97,12 +103,13 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
     }
     CHECK_SPAN(function->func_type_ == FunctionType::Opaque, function->span_)
         << "AutoTile must run on a tensor-level Opaque function before scope outlining";
-    auto_tile::VectorAdmissionResult admission = auto_tile::AdmitVectorGraph(function, program);
+    const VectorTargetContext target = ReadVectorTarget(function->span_);
+    auto_tile::VectorAdmissionResult admission =
+        auto_tile::AdmitVectorGraph(function, program, target.handler->GetTcvtAdjacency());
     if (!admission.supported && admission.failure != nullptr) std::rethrow_exception(admission.failure);
     CHECK_SPAN(admission.supported, function->span_) << "AutoTile cannot admit the entire marked function";
     const auto_tile::VectorGraph& graph = admission.graph;
-    const auto_tile::VectorSchedulePlan plan =
-        auto_tile::VectorPlanner910B(ReadVectorHardware(function->span_)).Plan(graph);
+    const auto_tile::VectorSchedulePlan plan = auto_tile::VectorPlanner910B(target.hardware).Plan(graph);
     CHECK_SPAN(plan.feasible, function->span_)
         << "AutoTile cannot realize the entire marked function as one capacity-safe Ascend910B vector kernel";
     FunctionPtr emitted = auto_tile::EmitVectorSchedule(graph, plan, calls.called());

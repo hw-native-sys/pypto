@@ -11,10 +11,12 @@
 #include "src/ir/transforms/auto_tile/vector_graph.h"
 
 #include <algorithm>
+#include <any>
 #include <optional>
 #include <unordered_set>
 #include <utility>
 
+#include "pypto/backend/common/tcvt_path.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -150,7 +152,8 @@ std::string BroadcastEmissionOp(const CallPtr& call, VectorGeometry geometry) {
   return call->op_->name_;
 }
 
-VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPtr& program) {
+VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPtr& program,
+                                    const backend::TcvtAdjacency& cast_table) {
   (void)program;
   CHECK_SPAN(function != nullptr && function->body_ != nullptr, function ? function->span_ : Span::unknown())
       << "AutoTile requires a function body";
@@ -210,8 +213,6 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
     const OpDescriptor& descriptor = *admission.descriptor;
 
     const size_t output = register_tensor(assign->var_, false);
-    CHECK_SPAN(producer.emplace(assign->var_.get(), graph.ops.size()).second, assign->span_)
-        << "AutoTile requires SSA tensor definitions";
     VectorOp op;
     op.stmt = assign;
     op.call = call;
@@ -289,7 +290,57 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
                  call->span_)
           << "AutoTile broadcast division supports FP16 and FP32 only";
     }
-    graph.ops.push_back(std::move(op));
+    if (IsOp(call, "tensor.cast")) {
+      const DataType source_dtype = graph.tensors[op.inputs.front()].dtype;
+      const std::vector<DataType> cast_path =
+          backend::FindTcvtPath(cast_table, source_dtype, output_type->dtype_);
+      CHECK_SPAN(!cast_path.empty(), call->span_)
+          << "AutoTile found no native cast path from " << source_dtype.ToString() << " to "
+          << output_type->dtype_.ToString();
+      size_t source_tensor = op.inputs.front();
+      VarPtr source_var = graph.tensors[source_tensor].var;
+      for (size_t hop = 0; hop < cast_path.size(); ++hop) {
+        const bool final_hop = hop + 1 == cast_path.size();
+        std::vector<std::pair<std::string, std::any>> kwargs = call->kwargs_;
+        for (auto& [key, value] : kwargs) {
+          if (key == "target_type") value = cast_path[hop];
+        }
+        CallPtr native_call =
+            As<Call>(OpRegistry::GetInstance().Create("tensor.cast", {source_var}, kwargs, call->span_));
+        INTERNAL_CHECK_SPAN(native_call != nullptr, call->span_)
+            << "Internal error: AutoTile failed to construct a native tensor.cast hop";
+        VarPtr target_var;
+        size_t target_tensor;
+        if (final_hop) {
+          target_var = assign->var_;
+          target_tensor = output;
+        } else {
+          target_var = std::make_shared<Var>(
+              assign->var_->name_hint_ + "_cast_" + cast_path[hop].ToString() + "_" + std::to_string(hop),
+              native_call->GetType(), assign->span_);
+          target_tensor = register_tensor(target_var, false);
+        }
+        auto native_stmt = std::make_shared<AssignStmt>(target_var, native_call, assign->span_);
+        VectorOp native_op;
+        native_op.stmt = native_stmt;
+        native_op.call = native_call;
+        native_op.emission_op = "tensor.cast";
+        native_op.kind = VectorOpKind::Elementwise;
+        native_op.primitive = VectorPrimitive::Cast;
+        native_op.geometry = VectorGeometry::Flat;
+        native_op.inputs = {source_tensor};
+        native_op.output = target_tensor;
+        CHECK_SPAN(producer.emplace(target_var.get(), graph.ops.size()).second, assign->span_)
+            << "AutoTile requires SSA tensor definitions";
+        graph.ops.push_back(std::move(native_op));
+        source_tensor = target_tensor;
+        source_var = target_var;
+      }
+    } else {
+      CHECK_SPAN(producer.emplace(assign->var_.get(), graph.ops.size()).second, assign->span_)
+          << "AutoTile requires SSA tensor definitions";
+      graph.ops.push_back(std::move(op));
+    }
   }
 
   CHECK_SPAN(return_stmt != nullptr && !return_stmt->value_.empty(), function->span_)
@@ -413,10 +464,11 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
 
 }  // namespace
 
-VectorAdmissionResult AdmitVectorGraph(const FunctionPtr& function, const ProgramPtr& program) {
+VectorAdmissionResult AdmitVectorGraph(const FunctionPtr& function, const ProgramPtr& program,
+                                       const backend::TcvtAdjacency& cast_table) {
   VectorAdmissionResult result;
   try {
-    result.graph = BuildVectorGraphOrThrow(function, program);
+    result.graph = BuildVectorGraphOrThrow(function, program, cast_table);
     result.supported = true;
   } catch (const pypto::Error& error) {
     result.reason = error.what();

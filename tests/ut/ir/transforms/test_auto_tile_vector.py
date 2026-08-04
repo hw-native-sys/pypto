@@ -288,6 +288,30 @@ class ReductionInt8OutputProgram:
 
 
 @pl.program
+class NativeCastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_output(self, x: pl.Tensor[[128, 512], pl.FP32]) -> pl.Tensor[[128, 512], pl.FP16]:
+        out: pl.Tensor[[128, 512], pl.FP16] = pl.cast(x, pl.FP16)
+        return out
+
+
+@pl.program
+class Bf16ToFp16CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_output(self, x: pl.Tensor[[48, 47000], pl.BF16]) -> pl.Tensor[[48, 47000], pl.FP16]:
+        out: pl.Tensor[[48, 47000], pl.FP16] = pl.cast(x, pl.FP16)
+        return out
+
+
+@pl.program
+class Fp16ToBf16CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_output(self, x: pl.Tensor[[128, 512], pl.FP16]) -> pl.Tensor[[128, 512], pl.BF16]:
+        out: pl.Tensor[[128, 512], pl.BF16] = pl.cast(x, pl.BF16)
+        return out
+
+
+@pl.program
 class RaggedPointwiseProgram:
     @pl.function(attrs={"auto_tile": True})
     def ragged(self, x: pl.Tensor[[130, 66], pl.FP32]) -> pl.Tensor[[130, 66], pl.FP32]:
@@ -586,8 +610,43 @@ def test_terminal_fp32_to_int8_uses_dtype_exact_tiling():
         after = _run_auto_tile(program)
         structure = _structure(after)
         assert structure.spmd == 1
-        assert structure.ops["tensor.cast"] >= 1
+        # Reduction schedules replay the same two-hop path in both full-chunk
+        # and tail regions, so static IR can contain more than two calls.
+        assert structure.ops["tensor.cast"] >= 2
+        assert structure.ops["tensor.cast"] % 2 == 0
         assert structure.ops["tensor.assemble"] >= 1
+
+
+@pytest.mark.parametrize(
+    ("program", "expected_targets"),
+    [
+        (NativeCastProgram, [pl.FP16]),
+        (Bf16ToFp16CastProgram, [pl.FP32, pl.FP16]),
+        (Fp16ToBf16CastProgram, [pl.FP32, pl.BF16]),
+        (Int8OutputProgram, [pl.FP16, pl.INT8]),
+    ],
+)
+def test_cast_plans_contain_the_complete_native_910b_conversion_path(program, expected_targets):
+    class CastTargets(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.targets: list[ir.DataType] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == "tensor.cast":
+                self.targets.append(op.kwargs["target_type"])
+            super().visit_call(op)
+
+    after = _run_auto_tile(program)
+    casts = CastTargets()
+    casts.visit_program(after)
+    assert casts.targets == expected_targets
+    assert _structure(after).spmd == 1
+    tiled = passes.outline_hierarchy_scopes()(after)
+    tiled = passes.outline_incore_scopes()(tiled)
+    tiled = passes.outline_cluster_scopes()(tiled)
+    tiled = passes.convert_tensor_to_tile_ops()(tiled)
+    ir.assert_structural_equal(passes.legalize_tile_cast()(tiled), tiled)
 
 
 @pytest.mark.parametrize(
@@ -671,6 +730,9 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         SoftmaxProgram,
         Int8OutputProgram,
         ReductionInt8OutputProgram,
+        NativeCastProgram,
+        Bf16ToFp16CastProgram,
+        Fp16ToBf16CastProgram,
         ColSumProgram,
         ColMaxProgram,
     ],

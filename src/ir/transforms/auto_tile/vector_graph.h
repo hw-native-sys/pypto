@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -123,7 +124,8 @@ struct VectorAdmissionResult {
 
 /** Analyze a function without mutating it. Unsupported graphs return a diagnostic instead of a partial graph.
  */
-[[nodiscard]] VectorAdmissionResult AdmitVectorGraph(const FunctionPtr& function, const ProgramPtr& program);
+[[nodiscard]] VectorAdmissionResult AdmitVectorGraph(const FunctionPtr& function, const ProgramPtr& program,
+                                                     const backend::TcvtAdjacency& cast_table);
 
 [[nodiscard]] int64_t DTypeBytes(const DataType& dtype);
 [[nodiscard]] std::pair<int64_t, int64_t> StaticTensorShape(const TypePtr& type);
