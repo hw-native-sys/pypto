@@ -17,6 +17,37 @@ CMake，所以一条普通的 `pip install` 就能完成全部工作。
 | 把 kernel 编译成生成的 C++ | 除安装外无需其他。**ptoas**（单独分发，版本固定在 `toolchain/versions.env`）负责其中的汇编步骤；`@pl.jit` 会检测它是否存在，不存在时自动跳过该步骤 |
 | 运行已编译的 kernel | 运行时，加一块 NPU 或模拟器平台 |
 
+### 可选的 AI agent skills
+
+[pypto-skills](https://github.com/hw-native-sys/pypto-skills) marketplace 提供了一组插件，
+让受支持的 AI 编程 agent 掌握项目的公共工作流。这些插件安装到 agent 中，与 PyPTO Python
+包的安装相互独立：
+
+| 插件 | 适用对象 | 包含的工作流 |
+| ---- | -------- | ------------ |
+| `pypto-user` | PyPTO 用户 | 生成 IR trace、分析 in-core kernel 性能 |
+| `pypto-developer` | PyPTO 贡献者 | Git、PR、issue 与分支管理工作流 |
+
+Codex 安装方式：
+
+```bash
+codex plugin marketplace add hw-native-sys/pypto-skills
+codex plugin add pypto-user@pypto-skills
+
+# 可选：同时安装贡献者工作流
+codex plugin add pypto-developer@pypto-skills
+```
+
+Claude Code 安装方式：
+
+```bash
+claude plugin marketplace add hw-native-sys/pypto-skills
+claude plugin install pypto-user@pypto-skills
+
+# 可选：同时安装贡献者工作流
+claude plugin install pypto-developer@pypto-skills
+```
+
 下面的验证步骤刻意只停留在第一行。
 
 ## Quickstart

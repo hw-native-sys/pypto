@@ -19,6 +19,37 @@ knowing about before you follow a command that needs them:
 | Compile a kernel to generated C++ | Nothing beyond the install. **ptoas** (distributed separately, versions pinned in `toolchain/versions.env`) adds the assembly step; `@pl.jit` detects whether it is present and skips that step when it is not |
 | Run a compiled kernel | The runtime plus an NPU or a simulator platform |
 
+### Optional AI agent skills
+
+The [pypto-skills](https://github.com/hw-native-sys/pypto-skills) marketplace provides
+plugins that teach supported AI coding agents the project's common workflows. These
+plugins are installed into the agent, independently of the PyPTO Python package:
+
+| Plugin | Intended for | Included workflows |
+| ------ | ------------ | ------------------ |
+| `pypto-user` | PyPTO users | Generate IR traces and profile in-core kernels |
+| `pypto-developer` | PyPTO contributors | Git, pull request, issue, and branch workflows |
+
+For Codex:
+
+```bash
+codex plugin marketplace add hw-native-sys/pypto-skills
+codex plugin add pypto-user@pypto-skills
+
+# Optional: add contributor workflows too
+codex plugin add pypto-developer@pypto-skills
+```
+
+For Claude Code:
+
+```bash
+claude plugin marketplace add hw-native-sys/pypto-skills
+claude plugin install pypto-user@pypto-skills
+
+# Optional: add contributor workflows too
+claude plugin install pypto-developer@pypto-skills
+```
+
 The verification below deliberately stays in the first row.
 
 ## Quickstart
