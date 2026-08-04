@@ -962,6 +962,7 @@ REGISTER_OP("tile.create")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
     .set_attr<bool>("flat_layout")
+    .no_execution_memory_access()
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")
@@ -1110,8 +1111,9 @@ REGISTER_OP("tile.alloc")
     .add_argument("memory_space", "Memory space (int enum value)")
     .add_argument("size", "Size in bytes (scalar)")
     // `pinned` marks an author-declared allocation (one-argument `pl.MemRef`).
-    // MemoryReuse leaves such a buffer's membership exactly as the author wrote
-    // it: it neither packs other tiles into it nor moves its tiles elsewhere.
+    // PyPTO memory planners leave such a buffer's membership exactly as the
+    // author wrote it: they neither pack other tiles into it nor move its tiles
+    // elsewhere.
     .set_attr<bool>("pinned")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,

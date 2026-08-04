@@ -30,6 +30,10 @@ from pypto import ir, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserTypeError
 
+requires_dsa = pytest.mark.skipif(
+    not passes.is_dsa_solver_available(), reason="PyPTO was built without PYPTO_ENABLE_DSA_SOLVER"
+)
+
 
 def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
     """Map every TileType assignment's var name to its MemRef."""
@@ -102,6 +106,14 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
         pipeline.add_pass(pass_obj)
         program = pipeline.run(program)
     return program
+
+
+def _run_dsa_pipeline(program: ir.Program) -> ir.Program:
+    """Run the allocation passes with the standalone DSA planner."""
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA):
+        return passes.allocate_memory_addr()(
+            passes.materialize_semantic_aliases()(passes.init_mem_ref()(program))
+        )
 
 
 class TestBinding:
@@ -477,6 +489,14 @@ class TestSlots:
         ]
         assert rotated, "the runtime slot address folded to a constant"
 
+        if passes.is_dsa_solver_available():
+            dsa_rotated = [
+                mr
+                for mr in _tile_memrefs(_run_dsa_pipeline(Before)).values()
+                if not isinstance(mr.byte_offset_, ir.ConstInt)
+            ]
+            assert dsa_rotated, "DSA folded the runtime slot address to a constant"
+
     def test_unsubscripted_declaration_is_unchanged(self):
         """A declaration with one slot behaves exactly as before slots existed."""
         scratch = pl.MemRef()
@@ -564,18 +584,26 @@ class TestSlots:
 
         # Driven directly: AllocateMemoryAddr only runs on InCore functions, and the
         # Default strategy skips it entirely under the PTOAS planner.
-        after = passes.allocate_memory_addr()(_run_memory_pipeline(Before))
-        ranges = _tile_byte_ranges(after)
-        assert len(ranges) >= 4, f"expected addressed tiles, got {ranges}"
-        # Slot 1 must sit inside its own allocation's reservation, so nothing on a
-        # different base may overlap it.
-        for name_a, base_a, start_a, end_a in ranges:
-            for name_b, base_b, start_b, end_b in ranges:
-                if base_a >= base_b:
+        placements = {"PYPTO": passes.allocate_memory_addr()(_run_memory_pipeline(Before))}
+        if passes.is_dsa_solver_available():
+            placements["DSA"] = _run_dsa_pipeline(Before)
+        for planner, after in placements.items():
+            ranges = _tile_byte_ranges(after)
+            assert len(ranges) >= 4, f"{planner}: expected addressed tiles, got {ranges}"
+            declared_ranges = [(start, end) for _, base, start, end in ranges if base == "aaa"]
+            assert len(declared_ranges) == 2, f"{planner}: expected both declared slots, got {ranges}"
+            declared = (
+                min(start for start, _ in declared_ranges),
+                max(end for _, end in declared_ranges),
+            )
+            # Unbound DSA buffers may legally reuse one another. Only compare
+            # them with the full closed extent of the declared allocation.
+            for name, base, start, end in ranges:
+                if base == "aaa":
                     continue
-                assert not (start_a < end_b and start_b < end_a), (
-                    f"{name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
-                    f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
+                assert not (start < declared[1] and declared[0] < end), (
+                    f"{planner}: {name} [{start}, {end}) on '{base}' overlaps "
+                    f"declared allocation 'aaa' {declared}"
                 )
 
     def test_slots_round_trip(self):
@@ -999,6 +1027,29 @@ class TestReuseControl:
         assert bases["t0"] == bases["t2"] == "ping"
         assert bases["t1"] == "pong"
 
+    @requires_dsa
+    def test_dsa_preserves_legal_explicit_sharing(self, ascend_backend):
+        """DSA accepts non-co-live values explicitly sharing one allocation."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("pong"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("ping"), pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        memrefs = _tile_memrefs(_run_dsa_pipeline(Before))
+        assert memrefs["t0"].base_.name_hint == memrefs["t2"].base_.name_hint == "ping"
+        assert memrefs["t1"].base_.name_hint == "pong"
+        assert _const_offset(memrefs["t0"]) == _const_offset(memrefs["t2"])
+        assert _const_offset(memrefs["t0"]) != _const_offset(memrefs["t1"])
+
     def test_unbound_tiles_never_join_a_declared_alloc(self, ascend_backend):
         """An unbound tile packs with other unbound tiles, never into a declared one."""
 
@@ -1019,6 +1070,34 @@ class TestReuseControl:
         assert bases["mine"] == "mine"
         assert bases["free0"] != "mine"
         assert bases["free1"] != "mine"
+
+    @requires_dsa
+    def test_dsa_keeps_declared_ranges_isolated(self, ascend_backend):
+        """DSA keeps declared allocations apart from all unrelated buffers."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t0: pl.Tile[[64, 64], pl.FP32, pl.MemRef("in_buf"), pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                t1: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mid_buf"), pl.Mem.Vec] = pl.exp(t0)
+                t2: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t1)
+                return pl.store(t2, [0, 0], out)
+
+        memrefs = _tile_memrefs(_run_dsa_pipeline(Before))
+
+        def allocation_range(memref: ir.MemRef) -> tuple[int, int]:
+            begin = _const_offset(memref)
+            return begin, begin + memref.size_
+
+        ranges = [allocation_range(memrefs[name]) for name in ("t0", "t1", "t2")]
+        for index, first in enumerate(ranges):
+            for second in ranges[index + 1 :]:
+                assert first[1] <= second[0] or second[1] <= first[0]
 
 
 class TestPipeline:
@@ -1292,7 +1371,7 @@ class Collide:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
@@ -1307,6 +1386,9 @@ class Collide:
 
         with pytest.raises(ValueError, match="live at the same time"):
             _run_memory_pipeline(Before)
+        if passes.is_dsa_solver_available():
+            with pytest.raises(ValueError, match="live at the same time"):
+                _run_dsa_pipeline(Before)
 
     def test_rejects_mixed_memory_space(self):
         """One allocation lives in one memory space; bound tiles must agree."""

@@ -52,7 +52,11 @@ from harness.core.test_runner import (  # noqa: E402
     start_pipeline,
 )
 from pypto import LogLevel  # noqa: E402
-from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level  # noqa: E402
+from pypto.pypto_core import (  # noqa: E402
+    _clear_thread_log_level,
+    _set_thread_log_level,
+    passes,
+)
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
@@ -112,6 +116,65 @@ def pytest_addoption(parser):
         default="Default",
         choices=["Default"],
         help="Optimization strategy for PyPTO pass pipeline (default: Default)",
+    )
+    parser.addoption(
+        "--memory-planner",
+        action="store",
+        default="pypto",
+        choices=["pypto", "dsa", "ptoas"],
+        help="Suite-wide on-chip memory planner (default: pypto)",
+    )
+    parser.addoption(
+        "--dsa-export-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test schema-v1 DSA corpus exports",
+    )
+    parser.addoption(
+        "--dsa-solution-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test fingerprinted DSA placement replay",
+    )
+    parser.addoption(
+        "--dsa-reuse-penalty-recognizer",
+        action="store",
+        choices=["disabled", "quadratic"],
+        default="disabled",
+        help="Experimental DSA reuse-hazard recognizer (default: disabled).",
+    )
+    parser.addoption(
+        "--dsa-reference-placement",
+        action="store",
+        choices=["default", "compact", "loose"],
+        default="default",
+        help="Experimental controlled DSA placement endpoint (default: default).",
+    )
+    parser.addoption(
+        "--dsa-reference-target",
+        action="store",
+        default=None,
+        help="Exact function selected when --dsa-reference-placement=loose.",
+    )
+    parser.addoption(
+        "--ptoas-sync-summary-dir",
+        action="store",
+        default=None,
+        help="Optional base directory for per-test PTOAS InsertSync JSONL summaries",
+    )
+    parser.addoption(
+        "--fuzz-count",
+        action="store",
+        default=10,
+        type=int,
+        help="Number of fuzz test iterations (default: 10)",
+    )
+    parser.addoption(
+        "--fuzz-seed",
+        action="store",
+        default=None,
+        type=int,
+        help="Random seed for fuzz tests (default: random)",
     )
     parser.addoption(
         "--kernels-dir",
@@ -422,6 +485,15 @@ def test_config(request) -> RunConfig:
 
     platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
     fallback_platform = platform_filter[0] if platform_filter else "a2a3"
+    memory_planner = {
+        "pypto": passes.MemoryPlanner.PYPTO,
+        "dsa": passes.MemoryPlanner.DSA,
+        "ptoas": passes.MemoryPlanner.PTOAS,
+    }[request.config.getoption("--memory-planner")]
+    if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
+        raise pytest.UsageError(
+            "--memory-planner=dsa requires a PyPTO build configured with PYPTO_ENABLE_DSA_SOLVER"
+        )
 
     return RunConfig(
         platform=fallback_platform,
@@ -436,6 +508,20 @@ def test_config(request) -> RunConfig:
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
         enable_scope_stats=request.config.getoption("--enable-scope-stats"),
         analyze_auto_scopes_for_deps=request.config.getoption("--analyze-auto-scopes-for-deps"),
+        memory_planner=memory_planner,
+        dsa_export_dir=request.config.getoption("--dsa-export-dir"),
+        dsa_solution_dir=request.config.getoption("--dsa-solution-dir"),
+        dsa_reuse_penalty_recognizer={
+            "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
+            "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
+        }[request.config.getoption("--dsa-reuse-penalty-recognizer")],
+        dsa_reference_placement={
+            "default": passes.DsaReferencePlacement.DEFAULT,
+            "compact": passes.DsaReferencePlacement.COMPACT,
+            "loose": passes.DsaReferencePlacement.LOOSE,
+        }[request.config.getoption("--dsa-reference-placement")],
+        dsa_reference_target=request.config.getoption("--dsa-reference-target"),
+        ptoas_sync_summary_dir=request.config.getoption("--ptoas-sync-summary-dir"),
     )
 
 
@@ -810,6 +896,28 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
     enable_scope_stats: bool = session.config.getoption("--enable-scope-stats")
     analyze_auto_scopes_for_deps: bool = session.config.getoption("--analyze-auto-scopes-for-deps")
+    memory_planner = {
+        "pypto": passes.MemoryPlanner.PYPTO,
+        "dsa": passes.MemoryPlanner.DSA,
+        "ptoas": passes.MemoryPlanner.PTOAS,
+    }[session.config.getoption("--memory-planner")]
+    dsa_export_dir: str | None = session.config.getoption("--dsa-export-dir")
+    dsa_solution_dir: str | None = session.config.getoption("--dsa-solution-dir")
+    dsa_reuse_penalty_recognizer = {
+        "disabled": passes.DsaReusePenaltyRecognizer.DISABLED,
+        "quadratic": passes.DsaReusePenaltyRecognizer.QUADRATIC,
+    }[session.config.getoption("--dsa-reuse-penalty-recognizer")]
+    dsa_reference_placement = {
+        "default": passes.DsaReferencePlacement.DEFAULT,
+        "compact": passes.DsaReferencePlacement.COMPACT,
+        "loose": passes.DsaReferencePlacement.LOOSE,
+    }[session.config.getoption("--dsa-reference-placement")]
+    dsa_reference_target: str | None = session.config.getoption("--dsa-reference-target")
+    ptoas_sync_summary_dir: str | None = session.config.getoption("--ptoas-sync-summary-dir")
+    if memory_planner == passes.MemoryPlanner.DSA and not passes.is_dsa_solver_available():
+        raise pytest.UsageError(
+            "--memory-planner=dsa requires a PyPTO build configured with PYPTO_ENABLE_DSA_SOLVER"
+        )
 
     # ── determine cache directory ─────────────────────────────────────────────
     save_kernels: bool = session.config.getoption("--save-kernels")
@@ -872,6 +980,13 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             pypto_log_level=pypto_log_level,
             compile_workers=max_workers,
             device_pool=device_pool,
+            memory_planner=memory_planner,
+            dsa_export_dir=dsa_export_dir,
+            dsa_solution_dir=dsa_solution_dir,
+            dsa_reuse_penalty_recognizer=dsa_reuse_penalty_recognizer,
+            dsa_reference_placement=dsa_reference_placement,
+            dsa_reference_target=dsa_reference_target,
+            ptoas_sync_summary_dir=ptoas_sync_summary_dir,
             enable_l2_swimlane=enable_l2_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,

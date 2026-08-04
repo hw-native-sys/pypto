@@ -6,26 +6,28 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Generate a standalone camodel (msprof op-simulator) testcase for ONE PTOAS kernel.
+"""Generate a standalone simulator or real-NPU testcase for one PTOAS kernel.
 
 This is the **profiling-focused** testcase generator for the incore-profiling skill.
-It is a drop-in replacement for the legacy PTOAS validation-harness generator:
-same CLI, same output files, but ~10x smaller because it does ONE job — produce a
-buildable+runnable sim testcase so the camodel can time the kernel — and drops the
-entire correctness-validation machinery (golden compare, ULP tolerances, scatter/
-gather/mrgsort special-casing, runtime int-expression buffer-size inference).
+It produces a buildable standalone testcase without the legacy validation
+harness's golden-comparison special cases. The kernel ABI comes from PTOAS C++;
+the sibling PTO supplies baseline tensor sizes. Pure NPU cases refine those
+sizes from the generated ``GlobalTensor`` accesses, including partition offsets,
+loop bounds, and SPMD block coverage.
 
-Why it can be small: buffer sizes come straight from the sibling ``<kernel>.pto``'s
-``make_tensor_view`` shape constants (static), instead of being inferred from the
-compiled C++ kernel's runtime pointer arithmetic. The kernel ABI (name, arg types,
-order) comes from the one ``__global__``/``_aic`` declaration line in the ``.cpp``.
+Simulator mode sizes buffers from the sibling ``.pto`` and uses synthetic data.
+NPU mode accepts deterministic synthetic ABI inputs, caller-supplied input
+files, or one exact pure-kernel invocation reconstructed from PyPTO's level-2
+argument dump. Synthetic inputs avoid full-model DFX capture for large kernels;
+exact scalar ABI values remain mandatory.
 
 It emits, at ``<output-root>/ptoas/<testcase>/``:
   - ``<testcase>_kernel.cpp`` : the input .cpp + a compat preamble (+ a merged
     ``__global__`` dispatcher for mixed cube+vector kernels).
-  - ``launch.cpp``            : host->device launch shim (``<<<1, …>>>`` single core).
-  - ``main.cpp``             : alloc -> read input bins -> Launch -> sync.
-  - ``CMakeLists.txt``        : builds ``<testcase>_sim`` against the camodel.
+  - ``launch.cpp``            : host launch shim (sim defaults to one core;
+    NPU uses the captured block count).
+  - ``main.cpp``             : simulator launch or ACL event-timed NPU loop.
+  - ``CMakeLists.txt``        : builds ``<testcase>_sim`` and/or ``*_npu``.
   - ``golden.py``            : writes input ``vN.bin`` (zeros for ints, random for floats).
 
 Profiling is data-independent for per-instruction cost, so input *values* are
@@ -35,9 +37,20 @@ tensors wired in afterwards — see the skill's "Caveats".
 """
 
 import argparse
+import hashlib
+import importlib.util
+import json
+import math
 import re
+import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import numpy as np
+from standalone_extent_analysis import ExtentAnalysis, analyze_pointer_extents
 
 # ── Type maps: .pto pointee / C++ type -> (host C type, numpy dtype) ──────────
 # host type sizes the .bin and the host-side buffers; bf16/half are carried as
@@ -61,6 +74,33 @@ _CPP_TO_NP = {
 # Fallback sizes (elements) when a shape can't be read statically from the .pto.
 _DEFAULT_DYNAMIC = 256  # for make_tensor_view shape = [%argN] (runtime-sized, e.g. seq_lens)
 _DEFAULT_SCRATCH = 1 << 20  # GM pointers with no make_tensor_view (e.g. the cube<->vector pipe slot)
+_CPP_BYTE_SIZES = {
+    "int32_t": 4,
+    "float": 4,
+    "bfloat16_t": 2,
+    "__bf16": 2,
+    "half": 2,
+    "aclFloat16": 2,
+    "uint16_t": 2,
+    "int16_t": 2,
+    "int8_t": 1,
+    "uint8_t": 1,
+    "uint32_t": 4,
+    "int64_t": 8,
+    "uint64_t": 8,
+}
+_SYNTHETIC_INTEGER_DTYPES = {
+    "int8_t": np.int8,
+    "uint8_t": np.uint8,
+    "int16_t": np.int16,
+    "uint16_t": np.uint16,
+    "int32_t": np.int32,
+    "uint32_t": np.uint32,
+    "int64_t": np.int64,
+    "uint64_t": np.uint64,
+}
+_SYNTHETIC_SEED = 19
+_SYNTHETIC_CHUNK_ELEMENTS = 1 << 20
 
 
 def host_type(cpp_type: str) -> str:
@@ -75,6 +115,16 @@ def is_integer_np(dt: str) -> bool:
     return dt.startswith("np.int") or dt.startswith("np.uint")
 
 
+def byte_size(cpp_type: str) -> int:
+    """Return the host representation size for one kernel ABI element."""
+    try:
+        return _CPP_BYTE_SIZES[cpp_type]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported pointer element type {cpp_type!r}; add its byte size before importing real inputs"
+        ) from exc
+
+
 # ── Parse the kernel C++ signature (the launch ABI) ──────────────────────────
 class Param:
     """One kernel parameter: a GM pointer or a scalar tail arg."""
@@ -83,6 +133,130 @@ class Param:
         self.cpp_type = cpp_type
         self.name = name
         self.is_ptr = is_ptr
+
+
+@dataclass(frozen=True)
+class DumpSelection:
+    """One pure-kernel dispatch to reconstruct from an argument dump."""
+
+    manifest: Path
+    func_id: int
+    task_id: str | None = None
+    task_occurrence: int | None = None
+
+
+@dataclass(frozen=True)
+class InvocationProfile:
+    """Portable inputs and launch metadata for one standalone kernel."""
+
+    block_dim: int
+    input_dir: Path | None
+    synthetic_seed: int | None
+    scalar_values: dict[str, str]
+    pointer_fills: dict[str, int | float]
+    outputs: list[str]
+    source_path: Path
+
+
+def _profile_number(value: Any, *, context: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{context} must be a finite JSON number, got {value!r}")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{context} must be finite, got {value!r}")
+    return value
+
+
+def _load_profile_input(path: Path, input_spec: Any) -> tuple[Path | None, int | None]:
+    if not isinstance(input_spec, dict):
+        raise ValueError(f"{path}: input must describe either synthetic or files input")
+    input_kind = input_spec.get("kind")
+    if input_kind == "synthetic":
+        if set(input_spec) - {"kind", "seed"}:
+            raise ValueError(f"{path}: synthetic input accepts only kind and seed")
+        seed = input_spec.get("seed", _SYNTHETIC_SEED)
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError(f"{path}: synthetic seed must be a nonnegative integer")
+        return None, seed
+    if input_kind == "files":
+        if set(input_spec) - {"kind", "directory"}:
+            raise ValueError(f"{path}: files input accepts only kind and directory")
+        directory = input_spec.get("directory", ".")
+        if not isinstance(directory, str) or not directory:
+            raise ValueError(f"{path}: files input directory must be a nonempty string")
+        return (path.parent / directory).resolve(), None
+    raise ValueError(f"{path}: input kind must be 'synthetic' or 'files', got {input_kind!r}")
+
+
+def _load_profile_values(path: Path, raw_values: Any, *, field: str) -> dict[str, int | float]:
+    if not isinstance(raw_values, dict):
+        raise ValueError(f"{path}: {field} must be an object")
+    values: dict[str, int | float] = {}
+    for name, value in raw_values.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*", name):
+            raise ValueError(f"{path}: invalid {field} parameter name {name!r}")
+        values[name] = _profile_number(value, context=f"{path}: {field} {name}")
+    return values
+
+
+def _load_profile_outputs(path: Path, raw_outputs: Any) -> list[str]:
+    if not isinstance(raw_outputs, list) or not all(
+        isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name) for name in raw_outputs
+    ):
+        raise ValueError(f"{path}: outputs must be a list of ABI parameter names")
+    if len(raw_outputs) != len(set(raw_outputs)):
+        raise ValueError(f"{path}: outputs contains duplicate ABI parameter names")
+    return raw_outputs
+
+
+def load_invocation_profile(path: Path) -> InvocationProfile:
+    """Load a schema-v1 portable standalone invocation profile.
+
+    Args:
+        path: JSON profile to load.
+
+    Returns:
+        Validated launch metadata and input configuration.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError(f"{path} is not a schema-v1 standalone invocation profile")
+    allowed = {
+        "schema_version",
+        "block_dim",
+        "input",
+        "scalars",
+        "pointer_fills",
+        "outputs",
+    }
+    unknown = sorted(set(document) - allowed)
+    if unknown:
+        raise ValueError(f"{path} contains unknown invocation-profile fields: {unknown}")
+
+    block_dim = document.get("block_dim", 1)
+    if isinstance(block_dim, bool) or not isinstance(block_dim, int) or block_dim <= 0:
+        raise ValueError(f"{path}: block_dim must be a positive integer, got {block_dim!r}")
+
+    input_dir, synthetic_seed = _load_profile_input(path, document.get("input"))
+    scalar_numbers = _load_profile_values(path, document.get("scalars", {}), field="scalar")
+    scalar_values = {name: repr(value) for name, value in scalar_numbers.items()}
+    pointer_fills = _load_profile_values(
+        path,
+        document.get("pointer_fills", {}),
+        field="pointer fill",
+    )
+    if pointer_fills and synthetic_seed is None:
+        raise ValueError(f"{path}: pointer_fills require synthetic input")
+    outputs = _load_profile_outputs(path, document.get("outputs", []))
+
+    return InvocationProfile(
+        block_dim=block_dim,
+        input_dir=input_dir,
+        synthetic_seed=synthetic_seed,
+        scalar_values=scalar_values,
+        pointer_fills=pointer_fills,
+        outputs=outputs,
+        source_path=path.resolve(),
+    )
 
 
 def _split_params(blob: str) -> list[str]:
@@ -125,6 +299,165 @@ def parse_cpp(cpp_text: str) -> tuple[str, bool, list[Param]]:
         "no '__global__ AICORE void <name>', bare 'AICORE void <name>', "
         "or '<name>_aic' decl found in kernel .cpp"
     )
+
+
+def _load_ptoas_generator(ptoas_root: Path) -> tuple[ModuleType, Path, str]:
+    """Load PTOAS's canonical validation generator for mixed-kernel wrapping."""
+    script = ptoas_root / "test" / "npu_validation" / "scripts" / "generate_testcase.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"PTOAS mixed-kernel generator not found: {script}")
+    spec = importlib.util.spec_from_file_location("_pypto_ptoas_validation_generator", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load PTOAS mixed-kernel generator: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for symbol in ("_describe_kernel_source", "_append_mixed_kernel_wrapper"):
+        if not callable(getattr(module, symbol, None)):
+            raise RuntimeError(f"PTOAS generator lacks required mixed-kernel helper {symbol}: {script}")
+    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+    return module, script, digest
+
+
+# The standalone case launches a normal mixed global kernel, not PyPTO's
+# tensormap runtime ``kernel_entry(int64_t *args)`` ABI. Therefore the CCE
+# direct-launch builtins are authoritative here. In the real PyPTO runtime the
+# wrapper instead uses get_*_id(args), because that scheduler carries logical
+# identities in its dispatch payload and its raw subblock register can be stale.
+_PTO_IDENTITY_BUILTINS = {
+    "__pypto_spmd_block_idx": "get_block_idx()",
+    "__pypto_spmd_block_num": "get_block_num()",
+    "__pypto_spmd_subblock_idx": "get_subblockid()",
+}
+
+
+def _raw_function_params(function_text: str, function_name: str) -> list[str]:
+    match = re.search(
+        rf"\bAICORE\s+void\s+{re.escape(function_name)}\s*\(([^)]*)\)",
+        function_text,
+    )
+    if match is None:
+        raise ValueError(f"cannot find PTOAS function signature for {function_name}")
+    return _split_params(match.group(1))
+
+
+def _pto_function_param_names(pto_text: str, function_name: str) -> list[str]:
+    match = re.search(
+        rf"func\.func\s+@{re.escape(function_name)}\s*\((.*?)\)\s*(?:attributes|->|\{{)",
+        pto_text,
+        re.S,
+    )
+    if match is None:
+        raise ValueError(f"cannot find PTO function signature for {function_name}")
+    return re.findall(r"%([A-Za-z_]\w*)\s*:", match.group(1))
+
+
+def _external_mixed_abi_and_identity_bindings(
+    pto_text: str,
+    name: str,
+    aic_text: str,
+    aiv_text: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Split user ABI parameters from PyPTO's trailing runtime identities."""
+    sides = []
+    for suffix, function_text in (("aic", aic_text), ("aiv", aiv_text)):
+        function_name = f"{name}_{suffix}"
+        raw_params = _raw_function_params(function_text, function_name)
+        pto_names = _pto_function_param_names(pto_text, function_name)
+        if len(raw_params) != len(pto_names):
+            raise ValueError(
+                f"PTO/PTOAS parameter count differs for {function_name}: "
+                f"{len(pto_names)} != {len(raw_params)}"
+            )
+        first_identity = next(
+            (index for index, param_name in enumerate(pto_names) if param_name in _PTO_IDENTITY_BUILTINS),
+            len(pto_names),
+        )
+        suffix_names = pto_names[first_identity:]
+        unsupported = [param_name for param_name in suffix_names if param_name not in _PTO_IDENTITY_BUILTINS]
+        if unsupported:
+            raise ValueError(
+                f"runtime identity parameters must form a recognized trailing suffix in {function_name}: "
+                f"{unsupported}"
+            )
+        sides.append((raw_params, pto_names, first_identity))
+
+    aic_raw, _, aic_user_count = sides[0]
+    aiv_raw, _, aiv_user_count = sides[1]
+    if aic_user_count != aiv_user_count:
+        raise ValueError(f"mixed AIC/AIV user ABI lengths differ: {aic_user_count} != {aiv_user_count}")
+    external = aiv_raw[:aiv_user_count]
+    aic_types = [(_parse_param(p).cpp_type, _parse_param(p).is_ptr) for p in aic_raw[:aic_user_count]]
+    aiv_types = [(_parse_param(p).cpp_type, _parse_param(p).is_ptr) for p in external]
+    if aic_types != aiv_types:
+        raise ValueError("mixed AIC/AIV user ABI types differ")
+
+    bindings: dict[str, str] = {}
+    for raw_params, pto_names, first_identity in sides:
+        for raw_param, identity_name in zip(raw_params[first_identity:], pto_names[first_identity:]):
+            variable = _parse_param(raw_param).name
+            builtin = _PTO_IDENTITY_BUILTINS[identity_name]
+            previous = bindings.setdefault(variable, builtin)
+            if previous != builtin:
+                raise ValueError(f"PTOAS variable {variable} maps to conflicting runtime identities")
+    return external, bindings
+
+
+def _bind_mixed_runtime_identities(
+    wrapped: str,
+    name: str,
+    external_params: list[str],
+    bindings: dict[str, str],
+) -> str:
+    """Bind PyPTO's synthetic identity suffix to direct-launch CCE builtins."""
+    pattern = re.compile(
+        rf'(?P<head>extern\s+"C"\s+__global__\s+AICORE\s+void\s+{re.escape(name)})'
+        r"\s*\([^)]*\)\s*\{"
+    )
+    declarations = "".join(
+        f"\n  int32_t {variable} = static_cast<int32_t>({builtin});" for variable, builtin in bindings.items()
+    )
+    replacement = rf"\g<head>({', '.join(external_params)}) {{{declarations}"
+    rewritten, count = pattern.subn(replacement, wrapped, count=1)
+    if count != 1:
+        raise RuntimeError("cannot rewrite PTOAS mixed wrapper launch ABI")
+    return rewritten
+
+
+def _prepare_mixed_group(
+    cpp_text: str, pto_text: str, ptoas_root: Path
+) -> tuple[str, list[Param], str, dict[str, str]]:
+    """Create the same mixed AIC/AIV group wrapper used by PTOAS validation."""
+    module, script, digest = _load_ptoas_generator(ptoas_root)
+    info = module._describe_kernel_source(cpp_text)
+    if info.get("kind") != "mixed":
+        raise ValueError(f"PTOAS did not classify the input as a mixed AIC/AIV kernel: {script}")
+    raw_params = info.get("raw_params")
+    if not isinstance(raw_params, list) or not raw_params:
+        raise ValueError(f"PTOAS mixed-kernel description has no launch ABI: {script}")
+    name = info["kernel_name"]
+    external_params, identity_bindings = _external_mixed_abi_and_identity_bindings(
+        pto_text,
+        name,
+        info["aic_text"],
+        info["aiv_text"],
+    )
+    wrapped = module._append_mixed_kernel_wrapper(
+        cpp_text,
+        name,
+        raw_params,
+        info["aic_text"],
+        info["aiv_text"],
+    )
+    wrapped = _bind_mixed_runtime_identities(wrapped, name, external_params, identity_bindings)
+    if not re.search(rf'extern\s+"C"\s+__global__\s+AICORE\s+void\s+{re.escape(name)}\s*\(', wrapped):
+        raise RuntimeError("PTOAS mixed-kernel wrapper did not emit the expected global entry")
+    provenance = {
+        "kind": "ptoas_validation_group_wrapper",
+        "generator": str(script.resolve()),
+        "generator_sha256": digest,
+        "identity_source": "direct_launch_builtins",
+    }
+    return name, [_parse_param(param) for param in external_params], wrapped, provenance
 
 
 # ── Parse the sibling .pto for static buffer sizes ───────────────────────────
@@ -285,6 +618,141 @@ cleanup:
 }
 """
 
+_NPU_BENCHMARK_MAIN_TEMPLATE = """\
+#include "test_common.h"
+#include "acl/acl.h"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <vector>
+
+using namespace PtoTestCommon;
+
+#define ACL_CHECK(expr)                                                                          \\
+    do {                                                                                         \\
+        const aclError _ret = (expr);                                                            \\
+        if (_ret != ACL_SUCCESS) {                                                               \\
+            std::fprintf(stderr, "[ERROR] %s failed: %d (%s:%d)\\n", #expr, (int)_ret, __FILE__, __LINE__); \\
+            const char *_recent = aclGetRecentErrMsg();                                          \\
+            if (_recent != nullptr && _recent[0] != '\\0') {                                      \\
+                std::fprintf(stderr, "[ERROR] RecentErrMsg: %s\\n", _recent);                     \\
+            }                                                                                    \\
+            rc = 1;                                                                              \\
+            goto cleanup;                                                                        \\
+        }                                                                                        \\
+    } while (0)
+
+@LAUNCH_DECL@
+
+static int PositiveEnv(const char *name, int defaultValue) {
+    const char *raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\\0') return defaultValue;
+    const int value = std::atoi(raw);
+    if (value <= 0) {
+        std::fprintf(stderr, "[ERROR] %s must be positive, got %s\\n", name, raw);
+        return -1;
+    }
+    return value;
+}
+
+static bool WriteBinary(const std::string &path, const void *data, size_t size) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) return false;
+    output.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+    return output.good();
+}
+
+int main() {
+@PARAM_DECLS@
+
+    int rc = 0;
+    bool aclInited = false;
+    bool deviceSet = false;
+    int deviceId = 0;
+    aclrtStream stream = nullptr;
+    const int warmup = PositiveEnv("PYPTO_BENCH_WARMUP", 10);
+    const int rounds = PositiveEnv("PYPTO_BENCH_ROUNDS", 100);
+    const char *timingPath = std::getenv("PYPTO_BENCH_OUTPUT");
+    const char *dumpDir = std::getenv("PYPTO_BENCH_DUMP_DIR");
+    std::vector<aclrtEvent> startEvents;
+    std::vector<aclrtEvent> endEvents;
+    std::vector<float> elapsedUs;
+
+    if (warmup <= 0 || rounds <= 0) return 2;
+    startEvents.assign(static_cast<size_t>(rounds), nullptr);
+    endEvents.assign(static_cast<size_t>(rounds), nullptr);
+    elapsedUs.assign(static_cast<size_t>(rounds), 0.0F);
+
+    ACL_CHECK(aclInit(nullptr));
+    aclInited = true;
+    if (const char *envDevice = std::getenv("ACL_DEVICE_ID")) {
+        deviceId = std::atoi(envDevice);
+    }
+    ACL_CHECK(aclrtSetDevice(deviceId));
+    deviceSet = true;
+    ACL_CHECK(aclrtCreateStream(&stream));
+
+@ALLOC@
+@READ_INPUTS@
+
+    for (int i = 0; i < warmup; ++i) {
+@COPY_TO_DEVICE@
+        @LAUNCH_CALL@
+        ACL_CHECK(aclrtSynchronizeStream(stream));
+    }
+
+    for (int i = 0; i < rounds; ++i) {
+@COPY_TO_DEVICE@
+        ACL_CHECK(aclrtCreateEvent(&startEvents[static_cast<size_t>(i)]));
+        ACL_CHECK(aclrtCreateEvent(&endEvents[static_cast<size_t>(i)]));
+        ACL_CHECK(aclrtRecordEvent(startEvents[static_cast<size_t>(i)], stream));
+        @LAUNCH_CALL@
+        ACL_CHECK(aclrtRecordEvent(endEvents[static_cast<size_t>(i)], stream));
+        ACL_CHECK(aclrtSynchronizeEvent(endEvents[static_cast<size_t>(i)]));
+        float elapsedMs = 0.0F;
+        ACL_CHECK(aclrtEventElapsedTime(&elapsedMs, startEvents[static_cast<size_t>(i)],
+                                       endEvents[static_cast<size_t>(i)]));
+        elapsedUs[static_cast<size_t>(i)] = elapsedMs * 1000.0F;
+    }
+
+@COPY_FROM_DEVICE@
+
+    {
+        const std::string outputPath = timingPath != nullptr ? timingPath : "timings.tsv";
+        std::ofstream timing(outputPath);
+        if (!timing) {
+            std::fprintf(stderr, "[ERROR] cannot open timing output %s\\n", outputPath.c_str());
+            rc = 1;
+            goto cleanup;
+        }
+        timing << "sample\\telapsed_us\\n";
+        for (size_t i = 0; i < elapsedUs.size(); ++i) timing << i << '\\t' << elapsedUs[i] << '\\n';
+    }
+
+    if (dumpDir != nullptr && dumpDir[0] != '\\0') {
+@WRITE_OUTPUTS@
+    }
+
+cleanup:
+    for (aclrtEvent event : startEvents) {
+        if (event != nullptr) aclrtDestroyEvent(event);
+    }
+    for (aclrtEvent event : endEvents) {
+        if (event != nullptr) aclrtDestroyEvent(event);
+    }
+@FREE@
+    if (stream != nullptr) {
+        aclrtDestroyStream(stream);
+        stream = nullptr;
+    }
+    if (deviceSet) aclrtResetDevice(deviceId);
+    if (aclInited) aclFinalize();
+    return rc;
+}
+"""
+
 _CMAKE_TEMPLATE = """\
 cmake_minimum_required(VERSION 3.16)
 set(CMAKE_C_COMPILER bisheng)
@@ -297,7 +765,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT DEFINED SOC_VERSION)
     set(SOC_VERSION Ascend910)
 endif()
-option(ENABLE_SIM_GOLDEN "Build Ascend simulator (camodel) executable" ON)
+option(ENABLE_SIM_GOLDEN "Build Ascend simulator (camodel) executable" @SIM_DEFAULT@)
+option(ENABLE_NPU_BENCHMARK "Build real-device standalone benchmark executable" @NPU_DEFAULT@)
 
 if(NOT DEFINED ENV{ASCEND_HOME_PATH})
     message(FATAL_ERROR "Cannot find ASCEND_HOME_PATH, please source the CANN set_env.sh.")
@@ -351,6 +820,17 @@ if(ENABLE_SIM_GOLDEN)
         @TESTCASE@_kernel runtime_camodel
         stdc++ ascendcl m tiling_api platform c_sec dl nnopbase)
 endif()
+
+if(ENABLE_NPU_BENCHMARK)
+    add_executable(@TESTCASE@_npu main.cpp)
+    target_compile_options(@TESTCASE@_npu PRIVATE ${CMAKE_CPP_COMPILE_OPTIONS})
+    target_include_directories(@TESTCASE@_npu PRIVATE
+        ${PTO_ISA_ROOT}/include ${PTO_ISA_ROOT}/tests/common)
+    target_link_directories(@TESTCASE@_npu PUBLIC ${ASCEND_HOME_PATH}/lib64)
+    target_link_libraries(@TESTCASE@_npu PRIVATE
+        @TESTCASE@_kernel runtime stdc++ ascendcl m c_sec dl pthread)
+    set_target_properties(@TESTCASE@_npu PROPERTIES BUILD_RPATH "$ORIGIN")
+endif()
 """
 
 _GOLDEN_TEMPLATE = """\
@@ -367,7 +847,14 @@ if __name__ == "__main__":
 """
 
 
-def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param]) -> str:
+def emit_kernel_cpp(
+    cpp_text: str,
+    name: str,
+    is_mixed: bool,
+    params: list[Param],
+    *,
+    mixed_group_wrapped: bool = False,
+) -> str:
     """Compat preamble + the original kernel + (mixed) a merged __global__ dispatcher.
 
     For a mixed kernel the standalone ``<name>_aic`` / ``<name>_aiv`` are
@@ -391,7 +878,7 @@ def emit_kernel_cpp(cpp_text: str, name: str, is_mixed: bool, params: list[Param
     out = _PREAMBLE + "\n" + cpp_text
     if not is_mixed and not has_global_entry:
         out += f'\n\nextern "C" __global__ AICORE void {name}({decl}) {{\n  {name}_impl({call});\n}}\n'
-    if is_mixed:
+    if is_mixed and not mixed_group_wrapped:
         # The AIV side of a mixed kernel may take extra trailing scalar args
         # beyond the AIC launch ABI (e.g. block-partition offsets the runtime
         # derives per AIV subblock). The synthesized single-core dispatcher has
@@ -431,12 +918,25 @@ def emit_launch_cpp(name: str, params: list[Param]) -> str:
     return (
         _PREAMBLE
         + f'\nextern "C" __global__ AICORE void {name}({dev_decl});\n\n'
-        + f"void {launch_name}({host_params}, void *stream) {{\n"
-        + f"    {name}<<<1, nullptr, stream>>>({casts});\n}}\n"
+        + f"void {launch_name}({host_params}, void *stream, uint32_t blockDim) {{\n"
+        + f"    {name}<<<blockDim, nullptr, stream>>>({casts});\n}}\n"
     )
 
 
-def emit_main_cpp(name: str, params: list[Param], counts: dict[str, int]) -> str:
+def _scalar_literal(param: Param, scalar_values: dict[str, str]) -> str:
+    value = scalar_values.get(param.name, "1")
+    if not re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", value):
+        raise ValueError(f"scalar value for {param.name!r} must be a numeric literal, got {value!r}")
+    return f"static_cast<{param.cpp_type}>({value})"
+
+
+def emit_main_cpp(
+    name: str,
+    params: list[Param],
+    counts: dict[str, int],
+    scalar_values: dict[str, str],
+    block_dim: int,
+) -> str:
     launch_name = "Launch" + name[:1].upper() + name[1:]
     ptrs = [p for p in params if p.is_ptr]
     scalars = [p for p in params if not p.is_ptr]
@@ -460,19 +960,98 @@ def emit_main_cpp(name: str, params: list[Param], counts: dict[str, int]) -> str
         free.append(f"    if ({n}Device) aclrtFree({n}Device);")
         free.append(f"    if ({n}Host) aclrtFreeHost({n}Host);")
     for p in scalars:
-        decls.append(f"    {p.cpp_type} {p.name} = 1;")  # safe default (matches legacy)
+        decls.append(f"    {p.cpp_type} {p.name} = {_scalar_literal(p, scalar_values)};")
 
     launch_args = ", ".join((f"{p.name}Device" if p.is_ptr else p.name) for p in params)
     launch_decl_params = ", ".join(
         (f"{host_type(p.cpp_type)} *{p.name}" if p.is_ptr else f"{p.cpp_type} {p.name}") for p in params
     )
     text = _MAIN_TEMPLATE
-    text = text.replace("@LAUNCH_DECL@", f"void {launch_name}({launch_decl_params}, void *stream);")
+    text = text.replace(
+        "@LAUNCH_DECL@", f"void {launch_name}({launch_decl_params}, void *stream, uint32_t blockDim);"
+    )
     text = text.replace("@PARAM_DECLS@", "\n".join(decls))
     text = text.replace("@ALLOC@", "\n".join(alloc))
     text = text.replace("@READ_INPUTS@", "\n".join(reads))
     text = text.replace("@COPY_TO_DEVICE@", "\n".join(copy))
-    text = text.replace("@LAUNCH_CALL@", f"{launch_name}({launch_args}, stream);")
+    text = text.replace("@LAUNCH_CALL@", f"{launch_name}({launch_args}, stream, {block_dim});")
+    text = text.replace("@FREE@", "\n".join(free))
+    return text
+
+
+def emit_npu_benchmark_main_cpp(
+    name: str,
+    params: list[Param],
+    counts: dict[str, int],
+    scalar_values: dict[str, str],
+    block_dim: int,
+) -> str:
+    """Emit a real-device runner that records one device-event duration per launch."""
+    launch_name = "Launch" + name[:1].upper() + name[1:]
+    ptrs = [p for p in params if p.is_ptr]
+    scalars = [p for p in params if not p.is_ptr]
+
+    decls: list[str] = []
+    alloc: list[str] = []
+    reads: list[str] = []
+    copy_to_device: list[str] = []
+    copy_from_device: list[str] = []
+    writes: list[str] = []
+    free: list[str] = []
+    for p in ptrs:
+        host = host_type(p.cpp_type)
+        name_part = p.name
+        decls.extend(
+            [
+                f"    size_t elemCount_{name_part} = {counts[name_part]};",
+                f"    size_t fileSize_{name_part} = elemCount_{name_part} * sizeof({host});",
+                f"    {host} *{name_part}Host = nullptr;",
+                f"    {host} *{name_part}Device = nullptr;",
+            ]
+        )
+        alloc.append(f"    ACL_CHECK(aclrtMallocHost((void **)(&{name_part}Host), fileSize_{name_part}));")
+        alloc.append(
+            f"    ACL_CHECK(aclrtMalloc((void **)&{name_part}Device, fileSize_{name_part}, "
+            "ACL_MEM_MALLOC_HUGE_FIRST));"
+        )
+        reads.append(
+            f'    ReadFile("./{name_part}.bin", fileSize_{name_part}, {name_part}Host, fileSize_{name_part});'
+        )
+        copy_to_device.append(
+            f"        ACL_CHECK(aclrtMemcpy({name_part}Device, fileSize_{name_part}, {name_part}Host, "
+            f"fileSize_{name_part}, ACL_MEMCPY_HOST_TO_DEVICE));"
+        )
+        copy_from_device.append(
+            f"    ACL_CHECK(aclrtMemcpy({name_part}Host, fileSize_{name_part}, {name_part}Device, "
+            f"fileSize_{name_part}, ACL_MEMCPY_DEVICE_TO_HOST));"
+        )
+        writes.append(
+            f'        if (!WriteBinary(std::string(dumpDir) + "/{name_part}.bin", '
+            f"{name_part}Host, fileSize_{name_part})) {{"
+        )
+        writes.append(f'            std::fprintf(stderr, "[ERROR] cannot write output {name_part}.bin\\n");')
+        writes.extend(["            rc = 1;", "            goto cleanup;", "        }"])
+        free.append(f"    if ({name_part}Device) aclrtFree({name_part}Device);")
+        free.append(f"    if ({name_part}Host) aclrtFreeHost({name_part}Host);")
+    for p in scalars:
+        decls.append(f"    {p.cpp_type} {p.name} = {_scalar_literal(p, scalar_values)};")
+
+    launch_args = ", ".join((f"{p.name}Device" if p.is_ptr else p.name) for p in params)
+    launch_decl_params = ", ".join(
+        (f"{host_type(p.cpp_type)} *{p.name}" if p.is_ptr else f"{p.cpp_type} {p.name}") for p in params
+    )
+    launch_call = f"{launch_name}({launch_args}, stream, {block_dim});"
+    text = _NPU_BENCHMARK_MAIN_TEMPLATE
+    text = text.replace(
+        "@LAUNCH_DECL@", f"void {launch_name}({launch_decl_params}, void *stream, uint32_t blockDim);"
+    )
+    text = text.replace("@PARAM_DECLS@", "\n".join(decls))
+    text = text.replace("@ALLOC@", "\n".join(alloc))
+    text = text.replace("@READ_INPUTS@", "\n".join(reads))
+    text = text.replace("@COPY_TO_DEVICE@", "\n".join(copy_to_device))
+    text = text.replace("@LAUNCH_CALL@", launch_call)
+    text = text.replace("@COPY_FROM_DEVICE@", "\n".join(copy_from_device))
+    text = text.replace("@WRITE_OUTPUTS@", "\n".join(writes))
     text = text.replace("@FREE@", "\n".join(free))
     return text
 
@@ -492,7 +1071,383 @@ def emit_golden(params: list[Param], counts: dict[str, int]) -> str:
     return _GOLDEN_TEMPLATE.replace("@INPUT_GENERATE@", "\n".join(lines))
 
 
-def generate(input_cpp: Path, testcase: str, output_root: Path, aicore_arch: str) -> Path:
+def _synthetic_chunk(cpp_type: str, count: int, rng: np.random.Generator) -> np.ndarray:
+    """Create bounded deterministic data represented in the kernel ABI type."""
+    if cpp_type in {"bfloat16_t", "__bf16"}:
+        fp32 = rng.uniform(-0.125, 0.125, size=count).astype(np.float32)
+        return (fp32.view(np.uint32) >> 16).astype(np.uint16)
+    if cpp_type in {"half", "aclFloat16"}:
+        return rng.uniform(-0.125, 0.125, size=count).astype(np.float16)
+    if cpp_type == "float":
+        return rng.uniform(-0.125, 0.125, size=count).astype(np.float32)
+    dtype = _SYNTHETIC_INTEGER_DTYPES.get(cpp_type)
+    if dtype is not None:
+        # Zero is a deterministic conservative default, not a proof of valid
+        # control flow. Callers must override pointers whose values are shifted,
+        # use sentinels, or otherwise select data-dependent addresses.
+        return np.zeros(count, dtype=dtype)
+    raise ValueError(f"unsupported synthetic-input ABI type {cpp_type!r}")
+
+
+def _constant_chunk(cpp_type: str, count: int, value: int | float) -> np.ndarray:
+    """Create one constant chunk represented in the kernel ABI type."""
+    if cpp_type in {"bfloat16_t", "__bf16"}:
+        fp32 = np.full(count, value, dtype=np.float32)
+        return (fp32.view(np.uint32) >> 16).astype(np.uint16)
+    if cpp_type in {"half", "aclFloat16"}:
+        return np.full(count, value, dtype=np.float16)
+    if cpp_type == "float":
+        return np.full(count, value, dtype=np.float32)
+    dtype = _SYNTHETIC_INTEGER_DTYPES.get(cpp_type)
+    if dtype is None:
+        raise ValueError(f"unsupported constant-fill ABI type {cpp_type!r}")
+    if not isinstance(value, int):
+        raise ValueError(f"integer pointer type {cpp_type} requires an integer fill, got {value!r}")
+    info = np.iinfo(dtype)
+    if value < info.min or value > info.max:
+        raise ValueError(f"fill {value} is outside {cpp_type} range [{info.min}, {info.max}]")
+    return np.full(count, value, dtype=dtype)
+
+
+def _write_synthetic_inputs(
+    output_dir: Path,
+    params: list[Param],
+    counts: dict[str, int],
+    *,
+    seed: int,
+    pointer_fills: dict[str, int | float] | None = None,
+) -> None:
+    """Write deterministic finite ABI inputs without retaining large tensors in RAM."""
+    pointer_fills = pointer_fills or {}
+    pointer_names = {param.name for param in params if param.is_ptr}
+    unknown = sorted(set(pointer_fills) - pointer_names)
+    if unknown:
+        raise ValueError(f"pointer fills name parameters absent from the kernel ABI: {unknown}")
+    rng = np.random.default_rng(seed)
+    for param in params:
+        if not param.is_ptr:
+            continue
+        remaining = counts[param.name]
+        path = output_dir / f"{param.name}.bin"
+        with path.open("wb") as stream:
+            while remaining:
+                count = min(remaining, _SYNTHETIC_CHUNK_ELEMENTS)
+                chunk = (
+                    _constant_chunk(param.cpp_type, count, pointer_fills[param.name])
+                    if param.name in pointer_fills
+                    else _synthetic_chunk(param.cpp_type, count, rng)
+                )
+                stream.write(chunk.tobytes())
+                remaining -= count
+
+
+def _copy_real_inputs(
+    input_dir: Path,
+    output_dir: Path,
+    params: list[Param],
+    counts: dict[str, int],
+) -> None:
+    if not input_dir.is_dir():
+        raise FileNotFoundError(f"real-input directory does not exist: {input_dir}")
+    for param in params:
+        if not param.is_ptr:
+            continue
+        source = input_dir / f"{param.name}.bin"
+        if not source.is_file():
+            raise FileNotFoundError(f"real-input directory is missing ABI buffer {source.name}: {input_dir}")
+        item_size = byte_size(param.cpp_type)
+        file_size = source.stat().st_size
+        if file_size == 0 or file_size % item_size != 0:
+            raise ValueError(
+                f"input {source} has {file_size} bytes, which is not a positive multiple of "
+                f"the {item_size}-byte ABI type {param.cpp_type}"
+            )
+        actual_elements = file_size // item_size
+        required_elements = counts[param.name]
+        if actual_elements < required_elements:
+            raise ValueError(
+                f"input {source} has {actual_elements} elements, but the generated kernel may access "
+                f"{required_elements}; provide the full physical buffer, not only the logical tile view"
+            )
+        counts[param.name] = actual_elements
+        shutil.copy2(source, output_dir / source.name)
+
+
+def _integer_scalar_values(params: list[Param], scalar_values: dict[str, str]) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for param in params:
+        if param.is_ptr or param.cpp_type not in _SYNTHETIC_INTEGER_DTYPES:
+            continue
+        raw = scalar_values[param.name]
+        try:
+            values[param.name] = int(raw, 0)
+        except ValueError as error:
+            raise ValueError(
+                f"integer scalar {param.name} must be an exact integer literal for physical-span "
+                f"analysis, got {raw!r}"
+            ) from error
+    return values
+
+
+def _infer_physical_extents(
+    cpp_text: str,
+    pto_text: str,
+    function_name: str,
+    params: list[Param],
+    scalar_values: dict[str, str],
+) -> ExtentAnalysis:
+    pto_names = _pto_function_param_names(pto_text, function_name)
+    if len(pto_names) != len(params):
+        raise ValueError(
+            f"PTO/PTOAS parameter count differs for {function_name}: {len(pto_names)} != {len(params)}"
+        )
+    spmd_block_index = None
+    if "__pypto_spmd_block_idx" in pto_names:
+        spmd_block_index = params[pto_names.index("__pypto_spmd_block_idx")].name
+    analysis = analyze_pointer_extents(
+        cpp_text,
+        {param.name for param in params if param.is_ptr},
+        _integer_scalar_values(params, scalar_values),
+        spmd_block_index=spmd_block_index,
+    )
+    if analysis.unresolved:
+        details = "; ".join(analysis.unresolved)
+        raise ValueError(
+            "cannot prove full physical input spans from PTOAS-generated C++; "
+            f"unresolved pointer expressions: {details}"
+        )
+    return analysis
+
+
+def _parse_scalar_assignments(assignments: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for assignment in assignments:
+        name, separator, value = assignment.partition("=")
+        if not separator or not name or not value:
+            raise ValueError(f"scalar assignment must have the form NAME=VALUE, got {assignment!r}")
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            raise ValueError(f"invalid scalar parameter name {name!r}")
+        if name in values:
+            raise ValueError(f"scalar parameter {name!r} was specified more than once")
+        values[name] = value
+    return values
+
+
+def _validate_input_source(
+    *,
+    run_mode: str,
+    input_dir: Path | None,
+    dump_selection: DumpSelection | None,
+    synthetic_seed: int | None,
+) -> None:
+    """Validate the mutually-exclusive standalone input modes."""
+    synthetic_inputs = synthetic_seed is not None
+    input_sources = sum((input_dir is not None, dump_selection is not None, synthetic_inputs))
+    if input_sources > 1:
+        raise ValueError("input_dir, args_dump, and synthetic_inputs are mutually exclusive")
+    if synthetic_inputs and run_mode != "npu":
+        raise ValueError("synthetic_inputs is only supported for real-NPU standalone cases")
+    if synthetic_seed is not None and synthetic_seed < 0:
+        raise ValueError(f"synthetic_seed must be nonnegative, got {synthetic_seed}")
+    if run_mode == "npu" and input_sources == 0:
+        raise ValueError(
+            "real-NPU standalone cases require one input source: input_dir, args_dump, or synthetic_inputs"
+        )
+
+
+def _select_dump_task(
+    entries: list[dict],
+    func_id: int,
+    *,
+    task_id: str | None,
+    task_occurrence: int | None,
+) -> tuple[str, list[dict]]:
+    """Select one pure-kernel dispatch from an args-dump manifest."""
+    matching = [entry for entry in entries if entry.get("func_id") == [func_id]]
+    task_ids = sorted({str(entry.get("task_id")) for entry in matching})
+    if task_id is not None:
+        if task_id not in task_ids:
+            raise ValueError(f"args dump has no pure func_id={func_id} dispatch with task_id={task_id}")
+        selected = task_id
+    elif task_occurrence is not None:
+        if task_occurrence < 0 or task_occurrence >= len(task_ids):
+            raise ValueError(
+                f"task occurrence {task_occurrence} is outside the {len(task_ids)} "
+                f"pure func_id={func_id} dispatches"
+            )
+        selected = task_ids[task_occurrence]
+    elif len(task_ids) == 1:
+        selected = task_ids[0]
+    else:
+        raise ValueError(
+            f"func_id={func_id} has {len(task_ids)} pure dispatches; select one with "
+            "--task-id or --task-occurrence"
+        )
+    return selected, [entry for entry in matching if entry.get("task_id") == selected]
+
+
+def _usable_dump_entry(entry: dict, *, context: str) -> None:
+    if entry.get("truncated"):
+        raise ValueError(f"{context} is truncated")
+    if entry.get("overwritten"):
+        raise ValueError(f"{context} was overwritten in the dump ring")
+    if entry.get("arg_index_ambiguous"):
+        raise ValueError(f"{context} has an ambiguous ABI argument index")
+    if not entry.get("is_contiguous"):
+        raise ValueError(f"{context} is non-contiguous; standalone reconstruction would change its layout")
+
+
+def _dump_entry(entries: list[dict], arg_index: int, *, kind: str, stage: str) -> dict | None:
+    matches = [
+        entry
+        for entry in entries
+        if entry.get("arg_index") == arg_index and entry.get("kind") == kind and entry.get("stage") == stage
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"selected dispatch has duplicate {stage} {kind} records for ABI arg {arg_index}")
+    return matches[0] if matches else None
+
+
+def _payload_slice(payload: bytes, entry: dict, *, context: str, expected_size: int | None = None) -> bytes:
+    _usable_dump_entry(entry, context=context)
+    begin = int(entry.get("bin_offset", -1))
+    size = int(entry.get("bin_size", -1))
+    if begin < 0 or size <= 0 or begin + size > len(payload):
+        raise ValueError(f"{context} references an invalid payload slice")
+    if expected_size is not None and size != expected_size:
+        raise ValueError(f"{context} has {size} bytes, expected {expected_size}")
+    return payload[begin : begin + size]
+
+
+def _extract_dump_tensor(
+    task_entries: list[dict],
+    payload: bytes,
+    out_dir: Path,
+    param: Param,
+    arg_index: int,
+    task_id: str,
+) -> tuple[int, str]:
+    before = _dump_entry(task_entries, arg_index, kind="tensor", stage="before_dispatch")
+    after = _dump_entry(task_entries, arg_index, kind="tensor", stage="after_completion")
+    record = before or after
+    if record is None:
+        raise ValueError(f"args dump is missing tensor ABI arg {arg_index} ({param.name})")
+    context = f"task {task_id} tensor arg {arg_index} ({param.name})"
+    _usable_dump_entry(record, context=context)
+    role = str(record.get("role"))
+    if role not in {"input", "output", "inout"}:
+        raise ValueError(f"{context} has invalid role {role!r}")
+    if role in {"input", "inout"} and before is None:
+        raise ValueError(f"{context} has no before_dispatch payload")
+    if before is None:
+        raw = bytes(int(record.get("bin_size", 0)))
+    else:
+        raw = _payload_slice(payload, before, context=context)
+    item_size = byte_size(param.cpp_type)
+    if not raw or len(raw) % item_size:
+        raise ValueError(
+            f"{context} has {len(raw)} bytes, incompatible with {param.cpp_type} ({item_size} bytes)"
+        )
+    (out_dir / f"{param.name}.bin").write_bytes(raw)
+
+    expected_dir = out_dir / "captured_expected"
+    expected_dir.mkdir(exist_ok=True)
+    if role == "input":
+        # A read-only ABI input must remain unchanged after the standalone call.
+        (expected_dir / f"{param.name}.bin").write_bytes(raw)
+    else:
+        if after is None:
+            raise ValueError(f"{context} has no after_completion payload for correctness checking")
+        expected = _payload_slice(payload, after, context=context, expected_size=len(raw))
+        (expected_dir / f"{param.name}.bin").write_bytes(expected)
+    return len(raw) // item_size, role
+
+
+def _extract_dump_scalar(task_entries: list[dict], param: Param, arg_index: int) -> str:
+    scalar = _dump_entry(task_entries, arg_index, kind="scalar", stage="before_dispatch")
+    if scalar is None or "value" not in scalar:
+        raise ValueError(f"args dump is missing scalar ABI arg {arg_index} ({param.name})")
+    value = scalar["value"]
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    raise ValueError(f"scalar ABI arg {arg_index} ({param.name}) has non-numeric value {value!r}")
+
+
+def _extract_dump_invocation(
+    selection: DumpSelection,
+    out_dir: Path,
+    params: list[Param],
+    counts: dict[str, int],
+) -> tuple[dict[str, str], dict]:
+    """Materialize one exact pure-kernel invocation from a level-2 args dump."""
+    manifest_path = selection.manifest
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = manifest.get("args")
+    bin_name = manifest.get("bin_file")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"args dump has no entries: {manifest_path}")
+    if not isinstance(bin_name, str) or not bin_name:
+        raise ValueError("args dump has no payload file; capture with enable_dump_args=2")
+    bin_path = manifest_path.parent / bin_name
+    if not bin_path.is_file():
+        raise FileNotFoundError(f"args-dump payload does not exist: {bin_path}")
+
+    selected_task, task_entries = _select_dump_task(
+        entries,
+        selection.func_id,
+        task_id=selection.task_id,
+        task_occurrence=selection.task_occurrence,
+    )
+    payload = bin_path.read_bytes()
+    scalar_values: dict[str, str] = {}
+    roles: dict[str, str] = {}
+
+    for arg_index, param in enumerate(params):
+        if param.is_ptr:
+            counts[param.name], role = _extract_dump_tensor(
+                task_entries,
+                payload,
+                out_dir,
+                param,
+                arg_index,
+                selected_task,
+            )
+            roles[param.name] = role
+        else:
+            scalar_values[param.name] = _extract_dump_scalar(task_entries, param, arg_index)
+
+    capture = {
+        "task_id": selected_task,
+        "func_id": selection.func_id,
+        "roles": roles,
+        "recommended_outputs": sorted(name for name, role in roles.items() if role in {"output", "inout"}),
+    }
+    return scalar_values, capture
+
+
+def generate(  # noqa: PLR0912, PLR0913
+    input_cpp: Path,
+    testcase: str,
+    output_root: Path,
+    aicore_arch: str,
+    *,
+    run_mode: str = "sim",
+    block_dim: int = 1,
+    input_dir: Path | None = None,
+    scalar_values: dict[str, str] | None = None,
+    dump_selection: DumpSelection | None = None,
+    synthetic_seed: int | None = None,
+    pointer_fills: dict[str, int | float] | None = None,
+    recommended_outputs: list[str] | None = None,
+    invocation_profile: Path | None = None,
+    ptoas_root: Path | None = None,
+) -> Path:
+    if run_mode not in {"sim", "npu"}:
+        raise ValueError(f"run_mode must be 'sim' or 'npu', got {run_mode!r}")
+    if block_dim <= 0:
+        raise ValueError(f"block_dim must be positive, got {block_dim}")
     cpp_text = input_cpp.read_text(encoding="utf-8")
     pto_path = input_cpp.with_suffix(".pto")
     if not pto_path.is_file():
@@ -500,8 +1455,19 @@ def generate(input_cpp: Path, testcase: str, output_root: Path, aicore_arch: str
             f"sibling .pto not found next to the kernel: {pto_path}. "
             "The .pto carries the static tensor shapes used for buffer sizing."
         )
+    pto_text = pto_path.read_text(encoding="utf-8")
     name, is_mixed, params = parse_cpp(cpp_text)
-    pto_sizes = parse_pto_sizes(pto_path.read_text(encoding="utf-8"))
+    mixed_wrapper: dict[str, str] | None = None
+    mixed_group_wrapped = False
+    if run_mode == "npu" and is_mixed:
+        if ptoas_root is None:
+            raise ValueError(
+                "real-device mixed AIC/AIV timing requires --ptoas-root so the canonical PTOAS "
+                "group wrapper is used"
+            )
+        name, params, cpp_text, mixed_wrapper = _prepare_mixed_group(cpp_text, pto_text, ptoas_root)
+        mixed_group_wrapped = True
+    pto_sizes = parse_pto_sizes(pto_text)
 
     counts: dict[str, int] = {}
     for i, p in enumerate(params):
@@ -510,16 +1476,147 @@ def generate(input_cpp: Path, testcase: str, output_root: Path, aicore_arch: str
 
     out_dir = output_root / "ptoas" / testcase
     out_dir.mkdir(parents=True, exist_ok=True)
+    _validate_input_source(
+        run_mode=run_mode,
+        input_dir=input_dir,
+        dump_selection=dump_selection,
+        synthetic_seed=synthetic_seed,
+    )
+    capture: dict | None = None
+    captured_scalars: dict[str, str] = {}
+    if dump_selection is not None:
+        captured_scalars, capture = _extract_dump_invocation(
+            dump_selection,
+            out_dir,
+            params,
+            counts,
+        )
+    scalar_values = scalar_values or {}
+    conflicting_scalars = {
+        name
+        for name in set(scalar_values) & set(captured_scalars)
+        if scalar_values[name] != captured_scalars[name]
+    }
+    if conflicting_scalars:
+        raise ValueError(
+            f"explicit scalar values disagree with the captured invocation: {sorted(conflicting_scalars)}"
+        )
+    scalar_values = {**captured_scalars, **scalar_values}
+    scalar_names = {param.name for param in params if not param.is_ptr}
+    unknown_scalars = sorted(set(scalar_values) - scalar_names)
+    if unknown_scalars:
+        raise ValueError(f"scalar values name parameters absent from the kernel ABI: {unknown_scalars}")
+    missing_scalars = sorted(scalar_names - set(scalar_values))
+    if run_mode == "npu" and missing_scalars:
+        raise ValueError(
+            "real-NPU standalone cases require every scalar ABI argument explicitly; "
+            f"missing: {missing_scalars}"
+        )
+    extent_analysis: ExtentAnalysis | None = None
+    if run_mode == "npu" and not is_mixed and dump_selection is None:
+        extent_analysis = _infer_physical_extents(
+            cpp_text,
+            pto_text,
+            name,
+            params,
+            scalar_values,
+        )
+        for pointer, extent in extent_analysis.pointers.items():
+            counts[pointer] = max(counts[pointer], extent.required_elements)
+    if input_dir is not None:
+        _copy_real_inputs(input_dir, out_dir, params, counts)
+    if synthetic_seed is not None:
+        _write_synthetic_inputs(
+            out_dir,
+            params,
+            counts,
+            seed=synthetic_seed,
+            pointer_fills=pointer_fills,
+        )
+    elif pointer_fills:
+        raise ValueError("pointer fills require synthetic inputs")
+    recommended_outputs = recommended_outputs or []
+    pointer_names = {param.name for param in params if param.is_ptr}
+    unknown_outputs = sorted(set(recommended_outputs) - pointer_names)
+    if unknown_outputs:
+        raise ValueError(f"recommended outputs name non-pointer ABI parameters: {unknown_outputs}")
     (out_dir / f"{testcase}_kernel.cpp").write_text(
-        emit_kernel_cpp(cpp_text, name, is_mixed, params), encoding="utf-8"
+        emit_kernel_cpp(
+            cpp_text,
+            name,
+            is_mixed,
+            params,
+            mixed_group_wrapped=mixed_group_wrapped,
+        ),
+        encoding="utf-8",
     )
     (out_dir / "launch.cpp").write_text(emit_launch_cpp(name, params), encoding="utf-8")
-    (out_dir / "main.cpp").write_text(emit_main_cpp(name, params, counts), encoding="utf-8")
+    main_cpp = (
+        emit_npu_benchmark_main_cpp(name, params, counts, scalar_values, block_dim)
+        if run_mode == "npu"
+        else emit_main_cpp(name, params, counts, scalar_values, block_dim)
+    )
+    (out_dir / "main.cpp").write_text(main_cpp, encoding="utf-8")
+    sim_default = "ON" if run_mode == "sim" else "OFF"
+    npu_default = "ON" if run_mode == "npu" else "OFF"
     (out_dir / "CMakeLists.txt").write_text(
-        _CMAKE_TEMPLATE.replace("@TESTCASE@", testcase).replace("@AICORE_ARCH@", aicore_arch),
+        _CMAKE_TEMPLATE.replace("@TESTCASE@", testcase)
+        .replace("@AICORE_ARCH@", aicore_arch)
+        .replace("@SIM_DEFAULT@", sim_default)
+        .replace("@NPU_DEFAULT@", npu_default),
         encoding="utf-8",
     )
     (out_dir / "golden.py").write_text(emit_golden(params, counts), encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "testcase": testcase,
+        "kernel": name,
+        "run_mode": run_mode,
+        "aicore_arch": aicore_arch,
+        "block_dim": block_dim,
+        "mixed": is_mixed,
+        **({"mixed_runner": mixed_wrapper} if mixed_wrapper is not None else {}),
+        **(
+            {
+                "input_source": {
+                    "kind": "synthetic",
+                    "seed": synthetic_seed,
+                    **({"pointer_fills": pointer_fills} if pointer_fills else {}),
+                }
+            }
+            if synthetic_seed is not None
+            else {}
+        ),
+        **({"recommended_outputs": recommended_outputs} if recommended_outputs else {}),
+        **(
+            {
+                "invocation_profile": {
+                    "path": invocation_profile.name,
+                    "sha256": hashlib.sha256(invocation_profile.read_bytes()).hexdigest(),
+                }
+            }
+            if invocation_profile is not None
+            else {}
+        ),
+        **({"capture": capture} if capture is not None else {}),
+        **({"physical_extent_analysis": extent_analysis.manifest()} if extent_analysis is not None else {}),
+        "parameters": [
+            {
+                "name": param.name,
+                "cpp_type": param.cpp_type,
+                "kind": "pointer" if param.is_ptr else "scalar",
+                **(
+                    {"elements": counts[param.name]}
+                    if param.is_ptr
+                    else {"value": scalar_values.get(param.name, "1")}
+                ),
+            }
+            for param in params
+        ],
+    }
+    (out_dir / "standalone_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return out_dir
 
 
@@ -528,13 +1625,119 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input", required=True, help="PTOAS kernel .cpp (.pto sibling read for buffer sizes)")
     ap.add_argument("--testcase", required=True, help="Testcase name, e.g. <func>_msprof")
     ap.add_argument("--output-root", required=True, help="Root dir; case -> <root>/ptoas/<testcase>/")
-    ap.add_argument("--run-mode", default="sim", choices=["sim", "npu"], help="CLI compat (sim only)")
+    ap.add_argument(
+        "--run-mode",
+        default="sim",
+        choices=["sim", "npu"],
+        help="emit an op-simulator case or a real-device event-timed benchmark",
+    )
     ap.add_argument("--soc-version", default="Ascend910B1", help="CLI compat (cmake -DSOC_VERSION)")
     ap.add_argument("--aicore-arch", default="dav-c220", help="--cce-aicore-arch (a2a3 / a5)")
+    ap.add_argument("--block-dim", type=int, default=1, help="exact launch block dimension")
+    ap.add_argument(
+        "--invocation-profile",
+        type=Path,
+        help="schema-v1 portable inputs, exact scalars, launch dimension, and output names",
+    )
+    ap.add_argument(
+        "--ptoas-root",
+        type=Path,
+        help="PTOAS checkout supplying its canonical mixed AIC/AIV group wrapper",
+    )
+    ap.add_argument(
+        "--input-dir",
+        type=Path,
+        help="directory containing one real <ABI-name>.bin file per pointer argument",
+    )
+    ap.add_argument(
+        "--synthetic-inputs",
+        action="store_true",
+        help="write deterministic bounded ABI inputs directly (NPU mode; no model args dump)",
+    )
+    ap.add_argument(
+        "--synthetic-seed",
+        type=int,
+        default=_SYNTHETIC_SEED,
+        help=f"seed used by --synthetic-inputs (default: {_SYNTHETIC_SEED})",
+    )
+    ap.add_argument(
+        "--scalar",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="exact scalar-tail argument; repeat for multiple scalars",
+    )
+    ap.add_argument(
+        "--args-dump",
+        type=Path,
+        help="args_dump.json from an enable_dump_args=2 run (small workloads only)",
+    )
+    ap.add_argument("--func-id", type=int, help="kernel func_id to extract from --args-dump")
+    ap.add_argument("--task-id", help="exact task dispatch ID to extract from --args-dump")
+    ap.add_argument(
+        "--task-occurrence",
+        type=int,
+        help="zero-based task occurrence when the selected func_id was dispatched more than once",
+    )
     args = ap.parse_args(argv)
 
     arch = args.aicore_arch or "dav-c220"
-    out_dir = generate(Path(args.input), args.testcase, Path(args.output_root), arch)
+    profile = (
+        load_invocation_profile(args.invocation_profile) if args.invocation_profile is not None else None
+    )
+    if profile is not None:
+        conflicting = []
+        if args.input_dir is not None:
+            conflicting.append("--input-dir")
+        if args.synthetic_inputs:
+            conflicting.append("--synthetic-inputs")
+        if args.scalar:
+            conflicting.append("--scalar")
+        if args.args_dump is not None:
+            conflicting.append("--args-dump")
+        if args.block_dim != 1:
+            conflicting.append("--block-dim")
+        if conflicting:
+            ap.error(f"--invocation-profile cannot be combined with {', '.join(conflicting)}")
+        scalar_values = profile.scalar_values
+        block_dim = profile.block_dim
+        input_dir = profile.input_dir
+        synthetic_seed = profile.synthetic_seed
+        pointer_fills = profile.pointer_fills
+        recommended_outputs = profile.outputs
+    else:
+        scalar_values = _parse_scalar_assignments(args.scalar)
+        block_dim = args.block_dim
+        input_dir = args.input_dir
+        synthetic_seed = args.synthetic_seed if args.synthetic_inputs else None
+        pointer_fills = {}
+        recommended_outputs = []
+    dump_selection = None
+    if args.args_dump is not None:
+        if args.func_id is None:
+            ap.error("--func-id is required with --args-dump")
+        dump_selection = DumpSelection(
+            args.args_dump,
+            args.func_id,
+            task_id=args.task_id,
+            task_occurrence=args.task_occurrence,
+        )
+    out_dir = generate(
+        Path(args.input),
+        args.testcase,
+        Path(args.output_root),
+        arch,
+        run_mode=args.run_mode,
+        block_dim=block_dim,
+        input_dir=input_dir,
+        scalar_values=scalar_values,
+        dump_selection=dump_selection,
+        synthetic_seed=synthetic_seed,
+        pointer_fills=pointer_fills,
+        recommended_outputs=recommended_outputs,
+        invocation_profile=args.invocation_profile,
+        ptoas_root=args.ptoas_root,
+    )
     print(f"[gen_profiling_case] wrote testcase -> {out_dir}")
     return 0
 

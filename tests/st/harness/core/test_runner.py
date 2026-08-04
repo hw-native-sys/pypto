@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.pypto_core import LogLevel, _set_thread_log_level
+from pypto.pypto_core.passes import DsaReferencePlacement, DsaReusePenaltyRecognizer, MemoryPlanner
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
@@ -288,6 +289,7 @@ def _compile_for_cache(
     work_dir: Path,
     dump_passes: bool,
     analyze_auto_scopes_for_deps: bool,
+    codegen_only: bool,
 ) -> None:
     """Compile one test case into *work_dir* (called from thread pool).
 
@@ -313,13 +315,23 @@ def _compile_for_cache(
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=test_case.get_memory_planner(),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
+        dsa_export_dir=test_case.get_dsa_export_dir(),
+        dsa_solution_dir=test_case.get_dsa_solution_dir(),
+        dsa_reuse_penalty_recognizer=test_case.get_dsa_reuse_penalty_recognizer(),
+        dsa_reference_placement=test_case.get_dsa_reference_placement(),
+        dsa_reference_target=test_case.get_dsa_reference_target(),
+        ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
+        skip_ptoas=codegen_only,
     )
     # External kernels are referenced in the manifest at their original path
     # (not copied into the artifact), so accept them even when no kernel .cpp is
     # generated under kernels/.
     config_path = work_dir / "kernel_config.py"
     kernels_in_manifest = config_path.exists() and '"func_id"' in config_path.read_text()
-    if not list((work_dir / "kernels").rglob("*.cpp")) and not kernels_in_manifest:
+    generated_kernels = list((work_dir / "kernels").rglob("*.cpp"))
+    if codegen_only:
+        generated_kernels.extend((work_dir / "kernels").rglob("*.pto"))
+    if not generated_kernels and not kernels_in_manifest:
         raise ValueError(f"No kernels generated for {test_case.get_name()}")
     if not list((work_dir / "orchestration").glob("*.cpp")):
         raise ValueError(
@@ -364,7 +376,13 @@ def _fused_compile_task(
     work_dir = cache_dir / _cache_key(tc, resolved)
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        _compile_for_cache(tc, work_dir, dump_passes, analyze_auto_scopes_for_deps)
+        _compile_for_cache(
+            tc,
+            work_dir,
+            dump_passes,
+            analyze_auto_scopes_for_deps,
+            bool(_pipeline_ctx.get("codegen_only")),
+        )
         # Codegen-only runs skip assembly: the .so is never loaded by the
         # execute task (see _fused_execute_task) and assembling here would
         # both waste work and race on PTO_ISA_ROOT (start_pipeline skips
@@ -953,6 +971,13 @@ def start_pipeline(  # noqa: PLR0913
     pypto_log_level: LogLevel,
     compile_workers: int,
     device_pool: "queue.Queue[int]",
+    memory_planner: MemoryPlanner | None = None,
+    dsa_export_dir: str | None = None,
+    dsa_solution_dir: str | None = None,
+    dsa_reuse_penalty_recognizer: DsaReusePenaltyRecognizer | None = None,
+    dsa_reference_placement: DsaReferencePlacement | None = None,
+    dsa_reference_target: str | None = None,
+    ptoas_sync_summary_dir: str | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     enable_l2_swimlane: bool = False,
     enable_dump_args: int = 0,
@@ -1038,6 +1063,15 @@ def start_pipeline(  # noqa: PLR0913
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
+        tc.inherit_session_compile_config(
+            memory_planner,
+            dsa_export_dir,
+            dsa_solution_dir,
+            dsa_reuse_penalty_recognizer,
+            dsa_reference_placement,
+            dsa_reference_target,
+            ptoas_sync_summary_dir,
+        )
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
     group_items = list(groups.items())
@@ -1198,6 +1232,15 @@ class TestRunner:
         Returns:
             RunResult with pass/fail status and details.
         """
+        test_case.inherit_session_compile_config(
+            self.config.memory_planner,
+            self.config.dsa_export_dir,
+            self.config.dsa_solution_dir,
+            self.config.dsa_reuse_penalty_recognizer,
+            self.config.dsa_reference_placement,
+            self.config.dsa_reference_target,
+            self.config.ptoas_sync_summary_dir,
+        )
         resolved_platform = _resolve_platform(self.config.platform, test_case)
         cache_k = _cache_key(test_case, resolved_platform)
         cfut = _compile_futures.get(cache_k)
@@ -1327,6 +1370,13 @@ class TestRunner:
                 analyze_auto_scopes_for_deps=self.config.analyze_auto_scopes_for_deps,
                 memory_planner=test_case.get_memory_planner(),
                 enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
+                dsa_export_dir=test_case.get_dsa_export_dir(),
+                dsa_solution_dir=test_case.get_dsa_solution_dir(),
+                dsa_reuse_penalty_recognizer=test_case.get_dsa_reuse_penalty_recognizer(),
+                dsa_reference_placement=test_case.get_dsa_reference_placement(),
+                dsa_reference_target=test_case.get_dsa_reference_target(),
+                ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
+                skip_ptoas=self.config.codegen_only,
             )
 
             # External kernels are referenced in the manifest at their original
@@ -1334,7 +1384,10 @@ class TestRunner:
             # kernel .cpp is generated under kernels/.
             config_path = work_dir / "kernel_config.py"
             kernels_in_manifest = config_path.exists() and '"func_id"' in config_path.read_text()
-            if not list((work_dir / "kernels").rglob("*.cpp")) and not kernels_in_manifest:
+            generated_kernels = list((work_dir / "kernels").rglob("*.cpp"))
+            if self.config.codegen_only:
+                generated_kernels.extend((work_dir / "kernels").rglob("*.pto"))
+            if not generated_kernels and not kernels_in_manifest:
                 raise ValueError(f"No kernels generated for {test_name}")
             if not list((work_dir / "orchestration").glob("*.cpp")):
                 raise ValueError(
