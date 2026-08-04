@@ -337,9 +337,10 @@ Two properties matter:
   iteration *i*'s load overlapping iteration *i-1*'s compute.
 
 `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
-cannot describe (slots holding differently shaped tiles, a space other than Vec /
-Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as a phi,
-a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape, because
+cannot describe (slots holding differently shaped tiles, slots declaring
+different valid shapes, a space other than Vec / Mat / Acc, a runtime valid
+shape, a slot carried out of an `if` or loop as a phi, a count outside ptoas's
+`[2, 16]`) is a `ValueError` naming the shape, because
 falling back to per-slot `alloc_tile` would let ptoas plan the slots on top of each
 other. Under `PYPTO` no region is emitted at all: at `--pto-level=level3` ptoas
 does not fold its per-slot address fan-out, so the region form would lose the slot

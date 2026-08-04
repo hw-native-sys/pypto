@@ -324,8 +324,9 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
   ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
 
 `PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
-不一致、内存空间不属于 Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if`
-或循环、槽位数不在 ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
+不一致、各槽位声明的 valid shape 不一致、内存空间不属于 Vec / Mat / Acc、valid shape 是运行期
+值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在 ptoas 的 `[2, 16]` 内）会报 `ValueError`
+并指明具体形态，因为回退成逐槽位
 `alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。`PYPTO` 模式下则完全不发射区域：
 在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，区域形式反而会丢掉它赖以存在的
 槽位分析（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
