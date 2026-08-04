@@ -20,6 +20,21 @@ result that matches the PYPTO result proves the must-alias handoff is correct.
 The loop-carried accumulator is the regression case: without
 ``MaterializeSemanticAliases`` the addr-less allocs would be planned into
 distinct ptoas buffers and the accumulation would be silently lost.
+
+The multi-buffer cases cover the other direction — a declared allocation PTOAS is
+told to keep *apart*. ``pl.MemRef(slots=N)`` becomes one ``pto.alloc_multi_tile``
+region plus a ``pto.multi_tile_get`` per use, so ptoas plans the slots and derives
+per-slot synchronization from the slot index. Under PYPTO the same source keeps
+the baked-address ``alloc_tile`` path (see ``test_memref_slots.py``), so running
+both planners against one golden is what shows the region form is equivalent.
+
+The double-buffer case is the shape the region form exists for — one slot live per
+iteration — and its golden checks the WAR edge ptoas derives from the slot index.
+Two slots live at once inside a loop is **rejected** under PTOAS: ptoas 0.54 guards
+only the first ``multi_tile_get`` of an iteration, so the second is read while the
+next iteration overwrites it. That was measured wrong on device before codegen
+started refusing it, and ``MultiBufferCoLiveProgram`` is the case that pins the
+refusal.
 """
 
 from typing import Any
@@ -29,6 +44,10 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto import backend as _backend
+from pypto import ir
+from pypto.backend import BackendType
+from pypto.backend.pto_backend import PartialCodegenError
 from pypto.pypto_core.passes import MemoryPlanner
 
 
@@ -166,6 +185,183 @@ class ColVecIfPhiCarryProgram:
         return out
 
 
+# Vec multi-buffer: STEPS row tiles of [TR, TC] fp32 — 16 KB per slot.
+_MB_TR, _MB_TC = 64, 64
+_MB_STEPS = 4
+_MB_ROWS = _MB_TR * _MB_STEPS
+
+# Acc multi-buffer: [M, K] @ [K, N] in NT column tiles. One fp32 slot is
+# M * _MB_TN * 4 = 16 KB, so the pair fits L0C with room to spare.
+_MB_M, _MB_K, _MB_N = 64, 64, 256
+_MB_TN = 64
+_MB_NT = _MB_N // _MB_TN
+
+MULTI_BUF_COLIVE = pl.MemRef(slots=2)
+MULTI_BUF_ACC = pl.MemRef(slots=2)
+MULTI_BUF_CONST = pl.MemRef(slots=2)
+
+
+@pl.program
+class MultiBufferCoLiveProgram:
+    """Two UB slots co-live per iteration — rejected under PTOAS, correct under PYPTO.
+
+    ptoas derives the per-slot WAR guard only for the first ``multi_tile_get`` of a
+    region in an iteration; with two co-live slots the second load is unguarded and
+    the next iteration overwrites the slot while this one is still reading it.
+    Measured wrong on device (ptoas 0.54): ``out`` came back as ``a[block i+1] +
+    a[block i]`` instead of ``a + b``. Codegen therefore refuses the shape, and this
+    kernel is the ST that pins that refusal — under PYPTO the same source is fine.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        b: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32]:
+        for i in pl.range(_MB_STEPS):
+            lo: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, MULTI_BUF_COLIVE[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * _MB_TR, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+            )
+            hi: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, MULTI_BUF_COLIVE[(i + 1) % 2], pl.Mem.Vec] = pl.load(
+                b, [i * _MB_TR, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+            )
+            # Both slots are still live here — collapse them and `lo` is gone.
+            s: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.add(lo, hi)
+            out = pl.store(s, [i * _MB_TR, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        b: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32]:
+        out = self.kernel(a, b, out)
+        return out
+
+
+MULTI_BUF_DB = pl.MemRef(slots=2)
+
+
+@pl.program
+class MultiBufferDoubleBufferProgram:
+    """The ping-pong the region form exists for: ONE slot live per iteration.
+
+    Iteration i loads into slot ``i % 2`` and consumes it; iteration i+1 loads into
+    the other slot while i's add is still running. The correctness gate is the WAR
+    edge — if i+1's load lands in a slot before i's add has read it, the sum is
+    wrong — so the golden checks the per-slot synchronization, not just addressing.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        seed: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.load(
+            a, [0, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+        )
+        for i, (acc,) in pl.range(1, _MB_STEPS, init_values=(seed,)):
+            t: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, MULTI_BUF_DB[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * _MB_TR, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+            )
+            nxt: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.add(acc, t)
+            r = pl.yield_(nxt)
+        out = pl.store(r, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_MB_ROWS, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        out = self.kernel(a, out)
+        return out
+
+
+@pl.program
+class MultiBufferConstSlotProgram:
+    """The same allocation selected by two *constant* slots, both co-live.
+
+    A constant index folds to a `ConstInt`, so this is the case where the region's
+    operand is an `arith.constant` rather than a `remsi` — one region still backs
+    both, and the two halves must not share storage.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_MB_TR, _MB_TC], pl.FP32],
+        b: pl.Tensor[[_MB_TR, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        lo: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, MULTI_BUF_CONST[0], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+        )
+        hi: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, MULTI_BUF_CONST[1], pl.Mem.Vec] = pl.load(
+            b, [0, 0], [_MB_TR, _MB_TC], target_memory=pl.Mem.Vec
+        )
+        s: pl.Tile[[_MB_TR, _MB_TC], pl.FP32, pl.Mem.Vec] = pl.sub(lo, hi)
+        out = pl.store(s, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_MB_TR, _MB_TC], pl.FP32],
+        b: pl.Tensor[[_MB_TR, _MB_TC], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]],
+    ) -> pl.Tensor[[_MB_TR, _MB_TC], pl.FP32]:
+        out = self.kernel(a, b, out)
+        return out
+
+
+@pl.program
+class MultiBufferAccProgram:
+    """The L0C double buffer — the Acc memory space of a region, one slot per iteration.
+
+    Acc is the third space `IsMultiBufferMemorySpace` admits, and the only one whose
+    slots are written by MAD and drained by FIXPIPE rather than MTE2/V. The golden
+    checks that WAR edge: if iteration i+1's matmul lands in a slot before iteration
+    i's store has drained it, the column tile is wrong.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[_MB_M, _MB_K], pl.FP32],
+        b: pl.Tensor[[_MB_K, _MB_N], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_M, _MB_N], pl.FP32]],
+    ) -> pl.Tensor[[_MB_M, _MB_N], pl.FP32]:
+        la: pl.Tile[[_MB_M, _MB_K], pl.FP32, pl.Mem.Mat] = pl.load(
+            a, [0, 0], [_MB_M, _MB_K], target_memory=pl.Mem.Mat
+        )
+        for i in pl.range(_MB_NT):
+            lb: pl.Tile[[_MB_K, _MB_TN], pl.FP32, pl.Mem.Mat] = pl.load(
+                b, [0, i * _MB_TN], [_MB_K, _MB_TN], target_memory=pl.Mem.Mat
+            )
+            # One L0C slot live per iteration: iteration i+1's MAD into the other
+            # slot overlaps iteration i's FIXPIPE drain out of this one.
+            cur: pl.Tile[[_MB_M, _MB_TN], pl.FP32, MULTI_BUF_ACC[i % 2], pl.Mem.Acc] = pl.tile.matmul(la, lb)
+            out = pl.store(cur, [0, i * _MB_TN], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[_MB_M, _MB_K], pl.FP32],
+        b: pl.Tensor[[_MB_K, _MB_N], pl.FP32],
+        out: pl.Out[pl.Tensor[[_MB_M, _MB_N], pl.FP32]],
+    ) -> pl.Tensor[[_MB_M, _MB_N], pl.FP32]:
+        out = self.kernel(a, b, out)
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Test cases (parametrized by memory planner)
 # ---------------------------------------------------------------------------
@@ -267,6 +463,115 @@ class ColVecIfPhiCarryCase(PTOTestCase):
         tensors["acc"][:] = torch.from_numpy(s.astype(np.float32))
 
 
+def _ramp(rows: int, cols: int, scale: float, bias: float) -> torch.Tensor:
+    """Per-element distinct values, so a wrong slot *or* a wrong row is visible.
+
+    A constant fill would let a kernel that read the wrong tile still match."""
+    n = rows * cols
+    return (torch.arange(n, dtype=torch.float32).reshape(rows, cols) * scale + bias) / n
+
+
+class MultiBufferCoLiveCase(PTOTestCase):
+    """Two co-live UB slots — runnable under PYPTO, refused by PTOAS codegen."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_multi_buffer_colive_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_MB_ROWS, _MB_TC], DataType.FP32, init_value=_ramp(_MB_ROWS, _MB_TC, 1.0, 0.0)),
+            TensorSpec("b", [_MB_ROWS, _MB_TC], DataType.FP32, init_value=_ramp(_MB_ROWS, _MB_TC, -3.0, 7.0)),
+            TensorSpec("out", [_MB_ROWS, _MB_TC], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MultiBufferCoLiveProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        tensors["out"][:] = tensors["a"] + tensors["b"]
+
+
+class MultiBufferDoubleBufferCase(PTOTestCase):
+    """One slot live per iteration, run under the given memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_multi_buffer_db_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_MB_ROWS, _MB_TC], DataType.FP32, init_value=_ramp(_MB_ROWS, _MB_TC, 1.0, 0.0)),
+            TensorSpec("out", [_MB_TR, _MB_TC], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MultiBufferDoubleBufferProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        a = tensors["a"]
+        acc = a[0:_MB_TR, :].clone()
+        for i in range(1, _MB_STEPS):
+            acc += a[i * _MB_TR : (i + 1) * _MB_TR, :]
+        tensors["out"][:] = acc
+
+
+class MultiBufferConstSlotCase(PTOTestCase):
+    """Two constant slots of one region, run under the given memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_multi_buffer_const_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_MB_TR, _MB_TC], DataType.FP32, init_value=_ramp(_MB_TR, _MB_TC, 1.0, 0.0)),
+            TensorSpec("b", [_MB_TR, _MB_TC], DataType.FP32, init_value=_ramp(_MB_TR, _MB_TC, -3.0, 7.0)),
+            TensorSpec("out", [_MB_TR, _MB_TC], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MultiBufferConstSlotProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        # Subtraction, not addition: `a - b` and `b - a` differ, so a swapped slot
+        # is caught as well as a collapsed one.
+        tensors["out"][:] = tensors["a"] - tensors["b"]
+
+
+class MultiBufferAccCase(PTOTestCase):
+    """Rotating L0C slots, run under the given memory planner."""
+
+    def __init__(self, memory_planner: MemoryPlanner | None = None, *, platform=None, config=None):
+        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        self._mp = memory_planner
+
+    def get_name(self) -> str:
+        return f"memplan_multi_buffer_acc_{_planner_tag(self._mp)}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [_MB_M, _MB_K], DataType.FP32, init_value=_ramp(_MB_M, _MB_K, 1.0, 0.0)),
+            TensorSpec("b", [_MB_K, _MB_N], DataType.FP32, init_value=_ramp(_MB_K, _MB_N, 2.0, -1.0)),
+            TensorSpec("out", [_MB_M, _MB_N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MultiBufferAccProgram
+
+    def compute_expected(self, tensors, params=None) -> None:
+        tensors["out"][:] = tensors["a"] @ tensors["b"]
+
+
 # ---------------------------------------------------------------------------
 # pytest wrappers
 # ---------------------------------------------------------------------------
@@ -298,6 +603,46 @@ class TestMemoryPlannerPtoas:
         # not the shared ``[1, N]`` op-result buffer.
         result = test_runner.run(ColVecIfPhiCarryCase(planner))
         assert result.passed, f"colvec if-phi carry ({_planner_tag(planner)}) failed: {result.error}"
+
+    def test_multi_buffer_colive_slots_run_under_pypto(self, test_runner):
+        # Two co-live slots are a legal program — the baked-address path runs it
+        # correctly. This is the control for the PTOAS refusal below: what is being
+        # rejected there is the lowering, not the source.
+        result = test_runner.run(MultiBufferCoLiveCase(MemoryPlanner.PYPTO))
+        assert result.passed, f"multi-buffer co-live (pypto) failed: {result.error}"
+
+    def test_multi_buffer_colive_slots_rejected_under_ptoas(self):
+        # ptoas 0.54 emits the per-slot WAR pair only for the first multi_tile_get
+        # of an iteration, so the second slot is read while the next iteration
+        # overwrites it — measured wrong on device. Refuse rather than miscompile.
+        #
+        # Asserted here through the real `ir.compile` entry point, which surfaces a
+        # kernel's ValueError as PartialCodegenError; the exact reason string is
+        # pinned in tests/ut/codegen/test_multi_buffer_codegen.py.
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with pytest.raises(PartialCodegenError):
+            ir.compile(MultiBufferCoLiveProgram, memory_planner=MemoryPlanner.PTOAS)
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_multi_buffer_double_buffer(self, test_runner, planner):
+        # The shape the region form exists for: one slot live per iteration, so the
+        # WAR edge between iteration i's add and i+1's load into the other slot is
+        # what the golden checks.
+        result = test_runner.run(MultiBufferDoubleBufferCase(planner))
+        assert result.passed, f"multi-buffer double buffer ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_multi_buffer_constant_slots(self, test_runner, planner):
+        # Constant slot indices share one region; the two halves must stay apart.
+        result = test_runner.run(MultiBufferConstSlotCase(planner))
+        assert result.passed, f"multi-buffer const slots ({_planner_tag(planner)}) failed: {result.error}"
+
+    @pytest.mark.parametrize("planner", _PLANNERS, ids=_planner_tag)
+    def test_multi_buffer_acc_rotating_slots(self, test_runner, planner):
+        # The Acc (L0C) space of a region: MAD writes the slot, FIXPIPE drains it.
+        result = test_runner.run(MultiBufferAccCase(planner))
+        assert result.passed, f"multi-buffer acc ({_planner_tag(planner)}) failed: {result.error}"
 
 
 if __name__ == "__main__":

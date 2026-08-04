@@ -324,12 +324,22 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
   ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
 
 `PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
-不一致、各槽位声明的 valid shape 不一致、内存空间不属于 Vec / Mat / Acc、valid shape 是运行期
-值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在 ptoas 的 `[2, 16]` 内）会报 `ValueError`
-并指明具体形态，因为回退成逐槽位
-`alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。`PYPTO` 模式下则完全不发射区域：
-在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，区域形式反而会丢掉它赖以存在的
-槽位分析（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
+不一致、各槽位声明的 valid shape 不一致、循环内有两个槽位同时活跃、内存空间不属于
+Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在
+ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
+`alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。
+
+**每轮迭代只用一个槽位。** 共活槽位被拒绝，不是因为 ptoas 无法为它*定型*，而是无法为它
+*同步*：ptoas 0.54 只为一轮迭代中的**第一个** `multi_tile_get` 推导逐槽位 WAR 保护；有两个时，
+第二个 load 前面不会发出任何 `wait_flag`，于是下一轮迭代会在本轮还在读该槽位时覆盖它。真机上
+实测算错，因此代码生成直接拒绝该形态并指向 PyPTO planner——那里由固化地址和 PyPTO 自己发射的
+同步来处理。直线代码不受影响：没有循环就没有跨迭代复用需要保护。已报
+[PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)；修好后放宽只需改
+`PlanMultiBufferRegions` 里一个条件。
+
+`PYPTO` 模式下则完全不发射区域：在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，
+区域形式反而会丢掉它赖以存在的槽位分析
+（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
 
 ### 加载操作转换
 

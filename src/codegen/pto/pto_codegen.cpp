@@ -133,6 +133,58 @@ class TilePhiBaseCollector : public ir::IRVisitor {
   }
 };
 
+// Allocations with two or more slots selected inside one loop body.
+//
+// ptoas derives the per-slot WAR guard from the slot expression, but only for the
+// FIRST `multi_tile_get` of a region in an iteration: given two co-live slots it
+// emits the dynamic `wait_flag`/`set_flag` pair for one and leaves the other load
+// unguarded, so the next iteration's write into that slot races the current
+// iteration's read of it. Measured on ptoas 0.54 (`--enable-insert-sync`,
+// `--pto-level=level2`, a3) — the kernel is silently wrong on device, not slow.
+// Filed as hw-native-sys/PTOAS#1118.
+//
+// The ping-pong the region form exists for takes ONE slot per iteration, and that
+// shape is guarded correctly. So the co-live shape is rejected rather than
+// miscompiled, and the author is pointed at the PyPTO planner, whose baked
+// addresses and PyPTO-emitted sync handle it. Straight-line code is untouched:
+// with no loop there is no cross-iteration reuse to guard.
+class CoLiveSlotCollector : public ir::IRVisitor {
+ public:
+  std::set<const ir::Var*> bases;  ///< Allocations with >= 2 slots live in one loop body
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const ir::WhileStmtPtr& op) override { VisitLoop(op); }
+
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    if (loop_depth_ > 0) {
+      if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+        const auto memref = ir::GetDefinedMemRef(tile_type);
+        if (memref->slot_count_ > 1 && memref->slot_index_.has_value() && *memref->slot_index_) {
+          // Second slot-selecting tile on this allocation in the same loop body.
+          if (!per_loop_seen_.insert(memref->base_.get()).second) bases.insert(memref->base_.get());
+        }
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& op) {
+    // Each loop body counts on its own: two slots in *sibling* loops are never
+    // live together, and a nested loop's own body is the iteration that matters.
+    auto saved = std::move(per_loop_seen_);
+    per_loop_seen_.clear();
+    ++loop_depth_;
+    ir::IRVisitor::VisitStmt_(op);
+    --loop_depth_;
+    per_loop_seen_ = std::move(saved);
+  }
+
+  int loop_depth_ = 0;
+  std::set<const ir::Var*> per_loop_seen_;
+};
+
 // The (valid_row, valid_col) extents a tile declares, when both are compile-time.
 //
 // Same source of truth as ComputeAllocTileFields — the author's valid_shape when
@@ -1287,7 +1339,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   if (emit_tile_addr_) return;
 
   TilePhiBaseCollector phi_collector;
-  if (func->body_) phi_collector.VisitStmt(func->body_);
+  CoLiveSlotCollector colive_collector;
+  if (func->body_) {
+    phi_collector.VisitStmt(func->body_);
+    colive_collector.VisitStmt(func->body_);
+  }
 
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
@@ -1386,6 +1442,12 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
       candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
+    } else if (colive_collector.bases.count(memref->base_.get()) != 0) {
+      candidate.blocker =
+          "two of its slots are live at once inside a loop, and ptoas guards only the first slot "
+          "selected in an iteration — the second would be read while the next iteration overwrites "
+          "it (ptoas 0.54). Take one slot per iteration, which is the shape the region form "
+          "accelerates";
     }
   }
 

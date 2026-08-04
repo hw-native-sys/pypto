@@ -338,14 +338,26 @@ Two properties matter:
 
 `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
 cannot describe (slots holding differently shaped tiles, slots declaring
-different valid shapes, a space other than Vec / Mat / Acc, a runtime valid
-shape, a slot carried out of an `if` or loop as a phi, a count outside ptoas's
-`[2, 16]`) is a `ValueError` naming the shape, because
-falling back to per-slot `alloc_tile` would let ptoas plan the slots on top of each
-other. Under `PYPTO` no region is emitted at all: at `--pto-level=level3` ptoas
-does not fold its per-slot address fan-out, so the region form would lose the slot
-analysis it exists for
-([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
+different valid shapes, two slots live at once inside a loop, a space other than
+Vec / Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as
+a phi, a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape,
+because falling back to per-slot `alloc_tile` would let ptoas plan the slots on
+top of each other.
+
+**One slot per iteration.** The co-live rejection is not a shape ptoas fails to
+*type* — it is one it fails to *synchronize*. ptoas 0.54 derives the per-slot WAR
+guard only for the first `multi_tile_get` of an iteration; given two, the second
+load is emitted with no `wait_flag`, so the next iteration overwrites that slot
+while the current one still reads it. Measured wrong on device, so codegen refuses
+the shape and points at the PyPTO planner, whose baked addresses and PyPTO-emitted
+sync handle it. Straight-line code is unaffected — with no loop there is no
+cross-iteration reuse to guard. Filed as
+[PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118); lifting the
+restriction is one condition in `PlanMultiBufferRegions`.
+
+Under `PYPTO` no region is emitted at all: at `--pto-level=level3` ptoas does not
+fold its per-slot address fan-out, so the region form would lose the slot analysis
+it exists for ([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
 
 ### Load Operation Transformation
 

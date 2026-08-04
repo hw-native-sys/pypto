@@ -39,6 +39,8 @@ MIXED_SHAPES = pl.MemRef(slots=2)
 MIXED_BINDING = pl.MemRef(slots=2)
 MIXED_VALID = pl.MemRef(slots=2)
 RUNTIME_VALID = pl.MemRef(slots=2)
+CO_LIVE = pl.MemRef(slots=2)
+SIBLING_LOOPS = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -138,6 +140,65 @@ class MixedSlotValidShapes:
         )
         t2: pl.Tile[[64, 64], pl.FP32] = pl.add(t0, t1)
         return pl.store(t2, [0, 0], output)
+
+
+@pl.program
+class CoLiveSlotsInLoop:
+    """Two slots of one allocation live at the same time inside a loop.
+
+    ptoas 0.54 derives the per-slot WAR guard only for the first `multi_tile_get`
+    of an iteration: the second load is emitted with no `wait_flag`, so the next
+    iteration overwrites that slot while this one still reads it. Measured wrong on
+    device, so the region is refused rather than miscompiled — the ping-pong the
+    region form accelerates takes one slot per iteration.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        b: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+    ) -> pl.Tensor[[256, 64], pl.FP32]:
+        for i in pl.range(4):
+            lo: pl.Tile[[64, 64], pl.FP32, CO_LIVE[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            hi: pl.Tile[[64, 64], pl.FP32, CO_LIVE[(i + 1) % 2], pl.Mem.Vec] = pl.load(
+                b, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            s: pl.Tile[[64, 64], pl.FP32] = pl.add(lo, hi)
+            output = pl.store(s, [i * 64, 0], output)
+        return output
+
+
+@pl.program
+class SequentialSlotsInSiblingLoops:
+    """One slot per loop body, in two sibling loops — never live together.
+
+    The blocker is per loop body, not per function: two slots that cannot be live
+    at the same time still describe a region.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+    ) -> pl.Tensor[[256, 64], pl.FP32]:
+        for i in pl.range(2):
+            lo: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[i % 2], pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            s0: pl.Tile[[64, 64], pl.FP32] = pl.exp(lo)
+            output = pl.store(s0, [i * 64, 0], output)
+        for j in pl.range(2):
+            hi: pl.Tile[[64, 64], pl.FP32, SIBLING_LOOPS[j % 2], pl.Mem.Vec] = pl.load(
+                a, [128 + j * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            s1: pl.Tile[[64, 64], pl.FP32] = pl.exp(hi)
+            output = pl.store(s1, [128 + j * 64, 0], output)
+        return output
 
 
 @pl.program
@@ -286,6 +347,16 @@ class TestPtoasPlannerEmitsMultiBuffer:
         slots = {get.split("[")[1].split("]")[0] for get in gets}
         assert len(slots) == 2, f"the two slots must be distinct:\n{mlir}"
 
+    def test_sibling_loops_each_taking_one_slot_still_form_a_region(self):
+        """The co-live blocker is per loop body, not per function.
+
+        Two slots that can never be live together — one per sibling loop — still
+        describe a region; only slots co-live in one iteration are refused.
+        """
+        mlir = _codegen(SequentialSlotsInSiblingLoops, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 2, mlir
+
     def test_slot_tiles_take_no_alloc_tile(self):
         """A slot is taken from the region, never allocated beside it."""
         mlir = _codegen(ConstantSlots, passes.MemoryPlanner.PTOAS)
@@ -341,6 +412,7 @@ class TestUnsupportedShapesAreLoud:
             (MixedSlotShapes, "differently shaped tiles"),
             (MixedSlotValidShapes, "different valid shapes"),
             (RuntimeValidShapeSlots, "runtime valid shape"),
+            (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
             (UnsubscriptedBinding, "without selecting a slot"),
         ],
         ids=[
@@ -348,6 +420,7 @@ class TestUnsupportedShapesAreLoud:
             "non-uniform-slot-type",
             "non-uniform-valid-shape",
             "runtime-valid-shape",
+            "co-live-slots-in-loop",
             "unsubscripted-binding",
         ],
     )
@@ -362,6 +435,7 @@ class TestUnsupportedShapesAreLoud:
             MixedSlotShapes,
             MixedSlotValidShapes,
             RuntimeValidShapeSlots,
+            CoLiveSlotsInLoop,
             UnsubscriptedBinding,
         ],
         ids=[
@@ -369,6 +443,7 @@ class TestUnsupportedShapesAreLoud:
             "non-uniform-slot-type",
             "non-uniform-valid-shape",
             "runtime-valid-shape",
+            "co-live-slots-in-loop",
             "unsubscripted-binding",
         ],
     )

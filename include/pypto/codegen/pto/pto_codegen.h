@@ -804,9 +804,12 @@ class PTOCodegen : public CodegenBase {
    * constant slots). See hw-native-sys/PTOAS#1106.
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
-   * the slots share one tile_buf type and one static valid extent, the memory
-   * space is a local one ptoas supports for multi_tile_buf (vec / mat / acc), and
-   * the count is within ptoas's `[2, 16]`.
+   * the slots share one tile_buf type and one static valid extent, at most one of
+   * them is live per loop iteration, the memory space is a local one ptoas supports
+   * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
+   *
+   * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
+   * typing one — see CoLiveSlotCollector.
    *
    * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
    * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top
