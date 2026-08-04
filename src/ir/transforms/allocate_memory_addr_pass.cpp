@@ -239,10 +239,12 @@ class MemRefUpdateMutator : public IRMutator {
 
 /// Author-declared (`pinned=True`) allocations in a body: base Ptr -> reserved bytes.
 ///
-/// InitMemRef deliberately drops `is_pinned_` / `slot_index_` from the MemRefs it
-/// resolves — slots exist only until they are resolved — so by this pass the only
-/// remaining record of an author's declaration is its alloc statement. Two things
-/// here depend on it:
+/// InitMemRef clears `is_pinned_` on the MemRefs it resolves — the declaration is
+/// resolved, and the flag is what confines MemRef rebuilds to the window before
+/// this pass. It keeps `slot_count_` / `slot_index_`, but those describe one slot,
+/// not the declaration: no resolved MemRef states the reserved size. So by this
+/// pass the only record of the allocation *as a whole* is its alloc statement.
+/// Two things here depend on it:
 ///
 ///  * a declared allocation is the one place a *dynamic* address is meaningful;
 ///  * it is the one place the allocation is deliberately **larger than any single

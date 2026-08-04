@@ -804,10 +804,15 @@ class PTOCodegen : public CodegenBase {
    * constant slots). See hw-native-sys/PTOAS#1106.
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
-   * the slots share one tile_buf type, the memory space is a local one ptoas
-   * supports for multi_tile_buf (vec / mat / acc), and the count is within
-   * ptoas's `[2, 16]`. Anything else falls back to the ordinary `alloc_tile`
-   * path, unchanged.
+   * the slots share one tile_buf type and one static valid extent, the memory
+   * space is a local one ptoas supports for multi_tile_buf (vec / mat / acc), and
+   * the count is within ptoas's `[2, 16]`.
+   *
+   * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
+   * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top
+   * of each other, which is the one thing the declaration exists to prevent. The
+   * ordinary `alloc_tile` path is reached only when no region is planned at all —
+   * under the PyPTO planner, or for an allocation that declares no slots.
    *
    * @param func The function being generated (scanned for tile phis, which take a
    *             head-declared handle a per-use slot cannot provide)
@@ -825,7 +830,10 @@ class PTOCodegen : public CodegenBase {
    * Emitted where the ordinary `alloc_tile` would be — at the tile's definition —
    * so a runtime slot index (`l0c[i % 2]`) is read inside the loop that names it.
    *
-   * @return false when `memref` is not a slot of an eligible region
+   * @return false when no region was planned for `memref`'s allocation — it
+   *         declares no slots, or the PyPTO planner is in use. An allocation that
+   *         declares slots this planner cannot describe never reaches here:
+   *         PlanMultiBufferRegions has already raised.
    */
   bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
 
@@ -971,6 +979,8 @@ class PTOCodegen : public CodegenBase {
       memref_identity_type.clear();
       memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
+      multi_buffer_regions.clear();
+      multi_buffer_region_order.clear();
 
       current_function.reset();
       current_result_var.reset();

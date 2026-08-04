@@ -99,7 +99,7 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
 // loop-carried iter_arg. Under the PTOAS planner those take a handle declared in
 // the function head (see pto_control_flow_codegen.cpp), which a per-use
 // `pto.multi_tile_get` cannot supply: a runtime slot index is not in scope there.
-// An allocation whose slots feed one keeps the ordinary alloc_tile lowering.
+// An allocation whose slots feed one is therefore rejected, not degraded.
 class TilePhiBaseCollector : public ir::IRVisitor {
  public:
   std::set<const ir::Var*> bases;
@@ -165,8 +165,8 @@ std::optional<std::pair<int64_t, int64_t>> StaticValidExtents(
 
 // Memory spaces ptoas accepts for a `!pto.multi_tile_buf` slot. The multi-buffer
 // design ships with local vec / mat support; `acc` compiles as well (verified
-// against ptoas 0.54). Every other space — gm above all — keeps the ordinary
-// alloc_tile lowering rather than risking a ptoas verifier error at compile time.
+// against ptoas 0.54). A slotted allocation in any other space — gm above all —
+// is rejected here rather than left to fail in the ptoas verifier.
 bool IsMultiBufferMemorySpace(std::optional<ir::MemorySpace> space) {
   return space.has_value() &&
          (*space == ir::MemorySpace::Vec || *space == ir::MemorySpace::Mat || *space == ir::MemorySpace::Acc);
@@ -1496,8 +1496,10 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   // A slot of a declared multi-slot allocation is taken from its region rather
   // than allocated: one `pto.alloc_multi_tile` backs all N, and this use selects
-  // one. Falls through to the ordinary alloc_tile when the allocation was not
-  // eligible (see PlanMultiBufferRegions).
+  // one. Falls through to the ordinary alloc_tile when no region was planned for
+  // the allocation — it declares no slots, or the PyPTO planner is in use. A
+  // slotted allocation this planner cannot describe never gets this far; see
+  // PlanMultiBufferRegions.
   if (TryEmitMultiTileGet(ir::GetDefinedMemRef(tile_type), tile_buf, tile_var->span_)) {
     return;
   }
