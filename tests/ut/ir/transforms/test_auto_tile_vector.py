@@ -199,6 +199,17 @@ class MultiOutputProgram:
 
 
 @pl.program
+class MaterializedMultiOutputProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def materialized(
+        self, x: pl.Tensor[[1, 64], pl.FP32]
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        a: pl.Tensor[[1, 64], pl.FP32] = pl.mul(x, x)
+        b: pl.Tensor[[1, 64], pl.FP32] = pl.add(a, 1.0)
+        return a, b
+
+
+@pl.program
 class WideMultiOutputProgram:
     @pl.function(attrs={"auto_tile": True})
     def live_out(
@@ -243,6 +254,22 @@ class Bf16RowReductionProgram:
 
 
 @pl.program
+class Fp16RowReductionProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[64, 4096], pl.FP16]) -> pl.Tensor[[64, 1], pl.FP16]:
+        out: pl.Tensor[[64, 1], pl.FP16] = pl.row_sum(x)
+        return out
+
+
+@pl.program
+class RaggedRowReductionProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[4, 4100], pl.FP32]) -> pl.Tensor[[4, 1], pl.FP32]:
+        out: pl.Tensor[[4, 1], pl.FP32] = pl.row_sum(x)
+        return out
+
+
+@pl.program
 class ReductionApplyProgram:
     @pl.function(attrs={"auto_tile": True})
     def rms(self, x: pl.Tensor[[128, 8192], pl.FP32]) -> pl.Tensor[[128, 8192], pl.FP32]:
@@ -266,6 +293,19 @@ class ReductionMultiOutputProgram:
 
 
 @pl.program
+class BranchedLiveOutProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def diamond(
+        self, x: pl.Tensor[[64, 256], pl.FP32]
+    ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+        shared: pl.Tensor[[64, 256], pl.FP32] = pl.exp(x)
+        left: pl.Tensor[[64, 256], pl.FP32] = pl.add(shared, x)
+        right: pl.Tensor[[64, 256], pl.FP32] = pl.mul(shared, left)
+        out: pl.Tensor[[64, 256], pl.FP32] = pl.add(right, shared)
+        return left, out
+
+
+@pl.program
 class SoftmaxProgram:
     @pl.function(attrs={"auto_tile": True})
     def softmax(self, x: pl.Tensor[[32, 8192], pl.FP32]) -> pl.Tensor[[32, 8192], pl.FP32]:
@@ -286,6 +326,18 @@ class SmallSoftmaxProgram:
         exponent: pl.Tensor[[8, 128], pl.FP32] = pl.exp(shifted)
         total: pl.Tensor[[8, 1], pl.FP32] = pl.row_sum(exponent)
         out: pl.Tensor[[8, 128], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+@pl.program
+class Fp16SoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def softmax(self, x: pl.Tensor[[8, 128], pl.FP16]) -> pl.Tensor[[8, 128], pl.FP16]:
+        maximum: pl.Tensor[[8, 1], pl.FP16] = pl.row_max(x)
+        shifted: pl.Tensor[[8, 128], pl.FP16] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[8, 128], pl.FP16] = pl.exp(shifted)
+        total: pl.Tensor[[8, 1], pl.FP16] = pl.row_sum(exponent)
+        out: pl.Tensor[[8, 128], pl.FP16] = pl.div(exponent, total)
         return out
 
 
@@ -450,6 +502,15 @@ class ColMaxProgram:
 
 
 @pl.program
+class ColReductionApplyProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce_apply(self, x: pl.Tensor[[2048, 64], pl.FP32]) -> pl.Tensor[[2048, 64], pl.FP32]:
+        total: pl.Tensor[[1, 64], pl.FP32] = pl.col_sum(x)
+        out: pl.Tensor[[2048, 64], pl.FP32] = pl.add(x, total)
+        return out
+
+
+@pl.program
 class CalledAutoTileProgram:
     @pl.function(attrs={"auto_tile": True})
     def worker(self, x: pl.Tensor[[64, 256], pl.FP32]) -> pl.Tensor[[64, 256], pl.FP32]:
@@ -494,6 +555,98 @@ def test_pointwise_is_one_kernel_and_marker_is_consumed():
     assert "auto_tile" not in _function(after, "pointwise").attrs
 
 
+def test_materialized_multi_output_ir_is_exact():
+    expected = pl.parse_program(
+        """
+import pypto.language as pl
+
+@pl.program
+class MaterializedMultiOutputProgram:
+    @pl.function
+    def materialized(
+        self,
+        x__ssa_v0: pl.Tensor[[1, 64], pl.FP32],
+        a__ssa_v0_out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        b__ssa_v0_out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        for __auto_tile_region0 in pl.spmd(1, name_hint="materialized_spmd"):
+            __auto_tile_in1: pl.Tensor[[1, 64], pl.FP32] = pl.tensor.slice(
+                x__ssa_v0, [1, 64], [0, __auto_tile_region0 % 1 * 64]
+            )
+            __auto_tile_v2: pl.Tensor[[1, 64], pl.FP32] = pl.tensor.mul(
+                __auto_tile_in1, __auto_tile_in1
+            )
+            __auto_tile_v3: pl.Tensor[[1, 64], pl.FP32] = pl.tensor.adds(__auto_tile_v2, 1.0)
+            a__ssa_v0: pl.Tensor[[1, 64], pl.FP32] = pl.tensor.assemble(
+                a__ssa_v0_out, __auto_tile_v2, [0, __auto_tile_region0 % 1 * 64]
+            )
+            b__ssa_v0: pl.Tensor[[1, 64], pl.FP32] = pl.tensor.assemble(
+                b__ssa_v0_out, __auto_tile_v3, [0, __auto_tile_region0 % 1 * 64]
+            )
+        return a__ssa_v0, b__ssa_v0
+"""
+    )
+    ir.assert_structural_equal(_run_auto_tile(MaterializedMultiOutputProgram), expected)
+
+
+def test_ragged_streaming_ir_is_exact():
+    expected = pl.parse_program(
+        """
+import pypto.language as pl
+
+@pl.program
+class RaggedPointwiseProgram:
+    @pl.function
+    def ragged(
+        self,
+        x__ssa_v0: pl.Tensor[[130, 66], pl.FP32],
+        out__ssa_v0_out: pl.Out[pl.Tensor[[130, 66], pl.FP32]],
+    ) -> pl.Tensor[[130, 66], pl.FP32]:
+        for __auto_tile_region0 in pl.spmd(4, name_hint="ragged_spmd"):
+            for __auto_tile_strip1, (__auto_tile_out_it2,) in pl.pipeline(
+                2, stage=2, init_values=(out__ssa_v0_out,)
+            ):
+                __auto_tile_in3: pl.Tensor[
+                    [33, 40],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[33, 33], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.slice(
+                    x__ssa_v0,
+                    [33, 40],
+                    [
+                        __auto_tile_region0 // 2 * 65 + pl.min(__auto_tile_strip1 * 33, 32),
+                        __auto_tile_region0 % 2 * 33 + 0,
+                    ],
+                    [33, 33],
+                )
+                __auto_tile_v4: pl.Tensor[
+                    [33, 40],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[33, 33], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.abs(__auto_tile_in3)
+                __auto_tile_v5: pl.Tensor[[33, 40], pl.FP32] = pl.tensor.add(
+                    __auto_tile_v4, __auto_tile_in3
+                )
+                __auto_tile_valid6: pl.Tensor[
+                    [33, 40],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[33, 33], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.set_validshape(__auto_tile_v5, 33, 33)
+                __auto_tile_out_next7: pl.Tensor[[130, 66], pl.FP32] = pl.tensor.assemble(
+                    __auto_tile_out_it2,
+                    __auto_tile_valid6,
+                    [
+                        __auto_tile_region0 // 2 * 65 + pl.min(__auto_tile_strip1 * 33, 32),
+                        __auto_tile_region0 % 2 * 33 + 0,
+                    ],
+                )
+                out__ssa_v0: pl.Tensor[[130, 66], pl.FP32] = pl.yield_(__auto_tile_out_next7)
+        return out__ssa_v0
+"""
+    )
+    ir.assert_structural_equal(_run_auto_tile(RaggedPointwiseProgram), expected)
+
+
 def test_repeated_operand_is_one_load_but_two_uses():
     after = _run_auto_tile(RepeatedInputProgram)
     structure = _structure(after)
@@ -519,9 +672,35 @@ def test_explicit_out_parameters_are_reused_without_duplicate_lifted_outputs(
 
 @pytest.mark.parametrize("program", [ExplicitOutDirectCallProgram, ExplicitOutSubmitProgram])
 def test_called_explicit_out_kernel_preserves_its_declared_signature(program):
-    function = _function(_run_auto_tile(program), "kernel")
+    class KernelCalls(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.direct: list[ir.Call] = []
+            self.submits: list[ir.Submit] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == "kernel":
+                self.direct.append(op)
+            super().visit_call(op)
+
+        def visit_submit(self, op: ir.Submit) -> None:
+            if op.op.name == "kernel":
+                self.submits.append(op)
+            super().visit_submit(op)
+
+    after = _run_auto_tile(program)
+    function = _function(after, "kernel")
     assert len(function.params) == 2
     assert list(function.param_directions) == [ir.ParamDirection.In, ir.ParamDirection.Out]
+    calls = KernelCalls()
+    calls.visit_program(after)
+    sites = [*calls.direct, *calls.submits]
+    assert len(sites) == 1
+    assert len(sites[0].args) == 2
+    assert [arg.name_hint for arg in sites[0].args if isinstance(arg, ir.Var)] == [
+        "x__ssa_v0",
+        "y__ssa_v0",
+    ]
 
 
 @pytest.mark.parametrize("kind", ["count", "type"])
@@ -598,6 +777,17 @@ def test_wide_multi_output_streams_with_both_live_outs_carried():
     assert len(_function(after, "live_out").params) == 3
 
 
+def test_branched_live_out_reuses_shared_values_and_stores_each_result():
+    structure = _structure(_run_auto_tile(BranchedLiveOutProgram))
+    assert structure.spmd == 1
+    assert structure.pipeline_loops == 1
+    assert structure.ops["tensor.slice"] == 1
+    assert structure.ops["tensor.exp"] == 1
+    assert structure.ops["tensor.add"] == 2
+    assert structure.ops["tensor.mul"] == 1
+    assert structure.ops["tensor.assemble"] == 2
+
+
 def test_oversized_pointwise_uses_a_two_stage_strip_pipeline():
     after = _run_auto_tile(WidePointwiseProgram)
     structure = _structure(after)
@@ -618,6 +808,92 @@ def test_folded_and_spanning_reductions_emit_planned_phases():
     assert spanning.ops["tensor.rsqrt"] >= 1
     assert spanning.ops["tensor.assemble"] >= 1
     assert spanning.pipeline_loops >= 1
+
+
+def test_folded_reduction_init_rolled_tail_ir_is_exact():
+    expected = pl.parse_program(
+        """
+import pypto.language as pl
+
+@pl.program
+class RaggedRowReductionProgram:
+    @pl.function
+    def reduce(
+        self,
+        x__ssa_v0: pl.Tensor[[4, 4100], pl.FP32],
+        out__ssa_v0_out: pl.Out[pl.Tensor[[4, 1], pl.FP32]],
+    ) -> pl.Tensor[[4, 1], pl.FP32]:
+        for __auto_tile_region0 in pl.spmd(4, name_hint="reduce_spmd"):
+            __auto_tile_in1: pl.Tensor[
+                [8, 1264],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 1264], stride=[], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.slice(
+                x__ssa_v0, [8, 1264], [__auto_tile_region0 // 1 * 1, 0], [1, 1264]
+            )
+            __auto_tile_v2: pl.Tensor[
+                [8, 1],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.row_sum(__auto_tile_in1)
+            for __auto_tile_chunk3, (__auto_tile_acc_it4,) in pl.pipeline(
+                1, 3, stage=2, init_values=(__auto_tile_v2,)
+            ):
+                __auto_tile_in5: pl.Tensor[
+                    [8, 1264],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, 1264], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.slice(
+                    x__ssa_v0,
+                    [8, 1264],
+                    [__auto_tile_region0 // 1 * 1, __auto_tile_chunk3 * 1264],
+                    [1, 1264],
+                )
+                __auto_tile_v6: pl.Tensor[
+                    [8, 1],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.row_sum(__auto_tile_in5)
+                __auto_tile_acc_next7: pl.Tensor[[8, 1], pl.FP32] = pl.tensor.add(
+                    __auto_tile_acc_it4, __auto_tile_v6
+                )
+                __auto_tile_valid8: pl.Tensor[
+                    [8, 1],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.tensor.set_validshape(__auto_tile_acc_next7, 1, 1)
+                __auto_tile_acc9: pl.Tensor[
+                    [8, 1],
+                    pl.FP32,
+                    pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+                ] = pl.yield_(__auto_tile_valid8)
+            __auto_tile_in10: pl.Tensor[
+                [8, 312],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 308], stride=[], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.slice(
+                x__ssa_v0, [8, 312], [__auto_tile_region0 // 1 * 1, 3792], [1, 308]
+            )
+            __auto_tile_v11: pl.Tensor[
+                [8, 1],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.row_sum(__auto_tile_in10)
+            __auto_tile_acc_tail12: pl.Tensor[[8, 1], pl.FP32] = pl.tensor.add(
+                __auto_tile_acc9, __auto_tile_v11
+            )
+            __auto_tile_valid13: pl.Tensor[
+                [8, 1],
+                pl.FP32,
+                pl.TensorView(valid_shape=[1, 1], stride=[], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.set_validshape(__auto_tile_acc_tail12, 1, 1)
+            out__ssa_v0: pl.Tensor[[4, 1], pl.FP32] = pl.tensor.assemble(
+                out__ssa_v0_out, __auto_tile_valid13, [__auto_tile_region0 // 1 * 1, 0]
+            )
+        return out__ssa_v0
+"""
+    )
+    ir.assert_structural_equal(_run_auto_tile(RaggedRowReductionProgram), expected)
 
 
 def test_narrow_row_reduction_prices_the_lowerings_128_element_scratch():
@@ -692,6 +968,15 @@ def test_reduction_multi_live_out_uses_a_capacity_safe_materialized_region():
     assert structure.ops["tensor.assemble"] == 2
 
 
+def test_column_reduction_apply_has_stats_and_apply_streams():
+    structure = _structure(_run_auto_tile(ColReductionApplyProgram))
+    assert structure.spmd == 1
+    assert structure.pipeline_loops == 2
+    assert structure.ops["tensor.col_sum"] == 2
+    assert structure.ops["tensor.col_expand_add"] == 1
+    assert structure.ops["tensor.assemble"] == 1
+
+
 def test_exact_wide_softmax_uses_online_stats_and_apply_passes():
     after = _run_auto_tile(SoftmaxProgram)
     structure = _structure(after)
@@ -702,6 +987,40 @@ def test_exact_wide_softmax_uses_online_stats_and_apply_passes():
     # the peeled tail in the static IR.
     assert structure.ops["tensor.assemble"] == 2
     assert structure.pipeline_loops >= 1
+
+
+def test_online_softmax_recurrence_and_apply_wiring_are_exact():
+    class Calls(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: set[tuple[str, tuple[str, ...]]] = set()
+
+        def visit_call(self, op: ir.Call) -> None:
+            args = tuple(arg.name_hint for arg in op.args if isinstance(arg, ir.Var))
+            self.calls.add((op.op.name, args))
+            super().visit_call(op)
+
+    calls = Calls()
+    calls.visit_program(_run_auto_tile(SoftmaxProgram))
+
+    # Rolled online update:
+    # m = max(old_m, local_m)
+    # s = old_s * exp(old_m - m) + local_s
+    assert ("tensor.maximum", ("__auto_tile_max_it8", "__auto_tile_local_max11")) in calls.calls
+    assert ("tensor.sub", ("__auto_tile_max_it8", "__auto_tile_valid13")) in calls.calls
+    assert ("tensor.exp", ("__auto_tile_valid19",)) in calls.calls
+    assert ("tensor.mul", ("__auto_tile_sum_it9", "__auto_tile_correction20")) in calls.calls
+    assert ("tensor.add", ("__auto_tile_valid22", "__auto_tile_local_sum17")) in calls.calls
+
+    # The peeled tail repeats the same recurrence, then both full and tail
+    # apply paths consume the final corrected max/sum rather than local stats.
+    assert ("tensor.maximum", ("__auto_tile_max25", "__auto_tile_local_max28")) in calls.calls
+    assert ("tensor.mul", ("__auto_tile_sum26", "__auto_tile_correction37")) in calls.calls
+    assert ("tensor.add", ("__auto_tile_valid39", "__auto_tile_local_sum34")) in calls.calls
+    assert ("tensor.row_expand_sub", ("__auto_tile_in44", "__auto_tile_valid30")) in calls.calls
+    assert ("tensor.row_expand_div", ("__auto_tile_v47", "__auto_tile_valid41")) in calls.calls
+    assert ("tensor.row_expand_sub", ("__auto_tile_in52", "__auto_tile_valid30")) in calls.calls
+    assert ("tensor.row_expand_div", ("__auto_tile_v55", "__auto_tile_valid41")) in calls.calls
 
 
 def test_terminal_fp32_to_int8_uses_dtype_exact_tiling():
@@ -826,7 +1145,13 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         RowMaxProgram,
         ReductionApplyProgram,
         ReductionMultiOutputProgram,
+        BranchedLiveOutProgram,
+        RaggedRowReductionProgram,
+        Fp16RowReductionProgram,
+        Bf16RowReductionProgram,
+        ColReductionApplyProgram,
         SoftmaxProgram,
+        Fp16SoftmaxProgram,
         Int8OutputProgram,
         ReductionInt8OutputProgram,
         NativeCastProgram,
@@ -903,6 +1228,38 @@ def test_explicit_marker_fails_when_whole_graph_is_unsupported(kind: str):
                 return out
 
     with pytest.raises(ValueError, match="AutoTile"):
+        _run_auto_tile(Program)
+
+
+def test_marked_control_flow_fails_instead_of_partially_tiling():
+    @pl.program
+    class Program:
+        @pl.function(attrs={"auto_tile": True})
+        def unsupported(self, x: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[16, 64], pl.FP32]:
+            initial: pl.Tensor[[16, 64], pl.FP32] = pl.exp(x)
+            for _i, (acc,) in pl.range(2, init_values=(initial,)):
+                next_value: pl.Tensor[[16, 64], pl.FP32] = pl.add(acc, 1.0)
+                result = pl.yield_(next_value)
+            return result
+
+    with pytest.raises(ValueError, match="straight-line tensor DAG"):
+        _run_auto_tile(Program)
+
+
+def test_marked_effectful_statement_fails_instead_of_being_dropped():
+    @pl.program
+    class Program:
+        @pl.function(attrs={"auto_tile": True})
+        def unsupported(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            pl.tensor.write(out, [0, 0], 1.0)
+            result: pl.Tensor[[16, 64], pl.FP32] = pl.exp(x)
+            return result
+
+    with pytest.raises(ValueError, match="effectful statements are unsupported"):
         _run_auto_tile(Program)
 
 
@@ -988,6 +1345,13 @@ def test_auto_tile_is_idempotent_after_consuming_the_marker():
             (slice(0, 64), slice(0, 64)),
         ),
         (
+            RaggedPointwiseProgram,
+            "ragged",
+            lambda torch: (torch.randn(130, 66),),
+            lambda torch, x: torch.abs(x) + x,
+            (slice(0, 33), slice(0, 33)),
+        ),
+        (
             SmallSoftmaxProgram,
             "softmax",
             lambda torch: (torch.randn(8, 128),),
@@ -1022,3 +1386,24 @@ def test_emitted_algorithm_matches_torch(program, entry, inputs, expected, block
     reference = expected(torch, *values)
     actual = namespace[entry](*values, torch.empty_like(reference))
     assert torch.allclose(actual[block_zero], reference[block_zero], rtol=1e-4, atol=1e-4)
+
+
+def test_padded_fp16_softmax_preserves_valid_shape_and_semantics():
+    torch = pytest.importorskip("torch")
+    from pypto.debug import torch_codegen  # noqa: PLC0415
+
+    torch.manual_seed(0)
+    x = torch.randn((8, 128), dtype=torch.float16)
+    after = _run_auto_tile(Fp16SoftmaxProgram)
+    structure = _structure(after)
+    assert structure.ops["tensor.set_validshape"] >= 1
+
+    namespace: dict[str, object] = {}
+    exec(torch_codegen(after), namespace)  # noqa: S102
+    actual = namespace["softmax"](x, torch.empty_like(x))
+    expected = torch.softmax(x, dim=1)
+    assert torch.allclose(actual[:4], expected[:4], rtol=2e-3, atol=2e-3)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

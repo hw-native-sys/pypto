@@ -523,6 +523,11 @@ def _tensor_view(tensor, shape, is_dn, valid_shape=None):
         result._pypto_full_shape = shape
     return result
 
+def _set_validshape(tensor, valid_rows, valid_cols):
+    tensor._pypto_valid_shape = (int(valid_rows), int(valid_cols))
+    tensor._pypto_full_shape = getattr(tensor, "_pypto_full_shape", tuple(tensor.shape))
+    return tensor
+
 def _fillpad(tensor, pad_mode="zero"):
     valid_shape = getattr(tensor, "_pypto_valid_shape", None)
     full_shape = getattr(tensor, "_pypto_full_shape", tuple(tensor.shape))
@@ -959,6 +964,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         # transpose_view: zero-copy reinterpret swapping the trailing two dims.
         m[f"{prefix}.transpose_view"] = lambda a, _kw: f"{a[0]}.mT"
         m[f"{prefix}.concat"] = lambda a, _kw: f"torch.cat([{a[0]}, {a[1]}], dim=-1)"
+        m[f"{prefix}.set_validshape"] = lambda a, _kw: f"_set_validshape({a[0]}, {a[1]}, {a[2]})"
 
         # fillpad
         m[f"{prefix}.fillpad"] = _handle_fillpad

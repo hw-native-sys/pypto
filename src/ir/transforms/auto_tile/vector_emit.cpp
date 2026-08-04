@@ -15,6 +15,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -22,13 +23,19 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
+#include "src/ir/transforms/auto_tile/vector_plan.h"
 
 namespace pypto {
 namespace ir {
@@ -43,7 +50,9 @@ ExprPtr Index(int64_t value, const Span& span) {
 ExprPtr IndexTuple(std::initializer_list<int64_t> values, const Span& span) {
   std::vector<ExprPtr> elements;
   elements.reserve(values.size());
-  for (int64_t value : values) elements.push_back(Index(value, span));
+  for (int64_t value : values) {
+    elements.push_back(Index(value, span));
+  }
   return std::make_shared<MakeTuple>(std::move(elements), span);
 }
 
@@ -69,8 +78,11 @@ std::vector<std::pair<std::string, std::any>> WithoutAutoTile(
     const std::vector<std::pair<std::string, std::any>>& attrs) {
   std::vector<std::pair<std::string, std::any>> result;
   result.reserve(attrs.size());
-  for (const auto& attr : attrs)
-    if (attr.first != "auto_tile") result.push_back(attr);
+  for (const auto& attr : attrs) {
+    if (attr.first != "auto_tile") {
+      result.push_back(attr);
+    }
+  }
   return result;
 }
 
@@ -78,7 +90,9 @@ class VectorEmitter {
  public:
   VectorEmitter(const VectorGraph& graph, const VectorSchedulePlan& plan, bool lift_outputs)
       : graph_(graph), plan_(plan), lift_outputs_(lift_outputs), span_(graph.function->span_) {
-    for (size_t op = 0; op < graph_.ops.size(); ++op) producer_.emplace(graph_.ops[op].output, op);
+    for (size_t op = 0; op < graph_.ops.size(); ++op) {
+      producer_.emplace(graph_.ops[op].output, op);
+    }
   }
 
   FunctionPtr Emit() {
@@ -137,8 +151,11 @@ class VectorEmitter {
 
   ReturnStmtPtr OriginalReturn() const {
     if (auto sequence = As<SeqStmts>(graph_.function->body_)) {
-      for (const StmtPtr& stmt : sequence->stmts_)
-        if (auto ret = As<ReturnStmt>(stmt)) return ret;
+      for (const StmtPtr& stmt : sequence->stmts_) {
+        if (auto ret = As<ReturnStmt>(stmt)) {
+          return ret;
+        }
+      }
     }
     return As<ReturnStmt>(graph_.function->body_);
   }
@@ -159,7 +176,9 @@ class VectorEmitter {
                                     {{"dtype", output.dtype}, {"layout", TensorLayout::ND}}, span_);
       auto buffer = std::make_shared<Var>(output.var->name_hint_ + "_out", create->GetType(), span_);
       outputs_.emplace(tensor, buffer);
-      if (!lift_outputs_) prologue_.push_back(std::make_shared<AssignStmt>(buffer, create, span_));
+      if (!lift_outputs_) {
+        prologue_.push_back(std::make_shared<AssignStmt>(buffer, create, span_));
+      }
     }
   }
 
@@ -182,7 +201,9 @@ class VectorEmitter {
         << "Internal error: AutoTile vector plan has no DMA alignment";
     INTERNAL_CHECK_SPAN(plan_.full_peak_ub_bytes > 0 && plan_.chunk_peak_ub_bytes > 0, span_)
         << "Internal error: AutoTile vector plan has an empty UB footprint";
-    for (const VectorPhasePlan& phase : plan_.phases) ValidatePhase(phase);
+    for (const VectorPhasePlan& phase : plan_.phases) {
+      ValidatePhase(phase);
+    }
 
     const VectorPhasePlan& body = plan_.phases[PhaseIndex(VectorPhase::Body)];
     const VectorPhasePlan& stats = plan_.phases[PhaseIndex(VectorPhase::Stats)];
@@ -299,10 +320,12 @@ class VectorEmitter {
     const ExprPtr n_index = MakeFloorMod(index, Index(plan_.n_partition.parts, span_), span_);
     ExprPtr row = PartitionOffset(m_index, plan_.m_partition);
     ExprPtr col = PartitionOffset(n_index, plan_.n_partition);
-    if (plan_.m_partition.parts * plan_.tile_h > graph_.iteration_rows)
+    if (plan_.m_partition.parts * plan_.tile_h > graph_.iteration_rows) {
       row = MakeMin(row, Index(graph_.iteration_rows - plan_.tile_h, span_), span_);
-    if (plan_.n_partition.parts * plan_.tile_w > graph_.iteration_cols)
+    }
+    if (plan_.n_partition.parts * plan_.tile_w > graph_.iteration_cols) {
       col = MakeMin(col, Index(graph_.iteration_cols - plan_.tile_w, span_), span_);
+    }
     return {row, col};
   }
 
@@ -321,12 +344,41 @@ class VectorEmitter {
     const ExprPtr input_col = broadcast_col ? Index(0, span_) : col_offset;
     std::vector<ExprPtr> args{input.var, IndexTuple({alloc_rows, alloc_cols}, span_),
                               Pair(input_row, input_col, span_)};
-    if (alloc_rows != valid_rows || alloc_cols != valid_cols)
+    if (alloc_rows != valid_rows || alloc_cols != valid_cols) {
       args.push_back(IndexTuple({valid_rows, valid_cols}, span_));
+    }
     auto slice = registry.Create("tensor.slice", args, span_);
     auto value = std::make_shared<Var>(Fresh("in"), slice->GetType(), span_);
     body.push_back(std::make_shared<AssignStmt>(value, slice, span_));
     return value;
+  }
+
+  VarPtr EnsureValidShape(const VarPtr& value, int64_t valid_rows, int64_t valid_cols,
+                          std::vector<StmtPtr>& body) {
+    const auto type = As<TensorType>(value->GetType());
+    INTERNAL_CHECK_SPAN(type != nullptr && type->shape_.size() == 2, span_)
+        << "Internal error: AutoTile can preserve valid shapes only on rank-2 tensors";
+    const std::vector<ExprPtr>* valid_shape = nullptr;
+    if (type->tensor_view_.has_value() && !type->tensor_view_->valid_shape.empty()) {
+      INTERNAL_CHECK_SPAN(type->tensor_view_->valid_shape.size() == 2, span_)
+          << "Internal error: AutoTile emitted a non-rank-2 valid shape";
+      valid_shape = &type->tensor_view_->valid_shape;
+    }
+    auto current_dim = [&](size_t dim) -> int64_t {
+      const ExprPtr& extent = valid_shape == nullptr ? type->shape_[dim] : (*valid_shape)[dim];
+      auto constant = As<ConstInt>(extent);
+      INTERNAL_CHECK_SPAN(constant != nullptr, span_)
+          << "Internal error: AutoTile emitted a dynamic valid shape";
+      return constant->value_;
+    };
+    if (current_dim(0) == valid_rows && current_dim(1) == valid_cols) {
+      return value;
+    }
+    auto call = OpRegistry::GetInstance().Create(
+        "tensor.set_validshape", {value, Index(valid_rows, span_), Index(valid_cols, span_)}, span_);
+    auto result = std::make_shared<Var>(Fresh("valid"), call->GetType(), span_);
+    body.push_back(std::make_shared<AssignStmt>(result, call, span_));
+    return result;
   }
 
   VarPtr Replay(const VectorPhasePlan& phase, int64_t rows, int64_t cols, const ExprPtr& row_offset,
@@ -382,6 +434,9 @@ class VectorEmitter {
       auto call = registry.Create(op.emission_op, args, op.call->kwargs_, span_);
       result = std::make_shared<Var>(Fresh("v"), call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(result, call, span_));
+      const VectorTensor& output = graph_.tensors[op.output];
+      result = EnsureValidShape(result, output.rows == 1 ? 1 : std::min(output.rows, rows),
+                                output.cols == 1 ? 1 : std::min(output.cols, cols), body);
       onchip[op.output] = result;
     }
     for (const VectorInputLifetime& expected : phase.inputs) {
@@ -405,7 +460,9 @@ class VectorEmitter {
     auto& registry = OpRegistry::GetInstance();
     const ExprPtr buffer = target == nullptr ? ExprPtr(outputs_.at(tensor)) : target;
     std::vector<std::pair<std::string, std::any>> kwargs;
-    if (atomic != 0) kwargs.emplace_back("atomic", atomic);
+    if (atomic != 0) {
+      kwargs.emplace_back("atomic", atomic);
+    }
     auto assemble =
         registry.Create("tensor.assemble", {buffer, tile, OutputOffset(tensor, row, col)}, kwargs, span_);
     VarPtr result = atomic == 0 ? graph_.tensors[tensor].var
@@ -445,14 +502,16 @@ class VectorEmitter {
                             ? ExprPtr(strip)
                             : MakeFloorDiv(strip, Index(plan_.width_strips, span_), span_);
     ExprPtr local_row = MakeMul(row_index, Index(plan_.strip_h, span_), span_);
-    if (plan_.row_strips * plan_.strip_h > plan_.tile_h)
+    if (plan_.row_strips * plan_.strip_h > plan_.tile_h) {
       local_row = MakeMin(local_row, Index(plan_.tile_h - plan_.strip_h, span_), span_);
+    }
     ExprPtr local_col = Index(0, span_);
     if (plan_.width_strips > 1) {
       local_col = MakeMul(MakeFloorMod(strip, Index(plan_.width_strips, span_), span_),
                           Index(plan_.strip_w, span_), span_);
-      if (plan_.width_strips * plan_.strip_w > plan_.tile_w)
+      if (plan_.width_strips * plan_.strip_w > plan_.tile_w) {
         local_col = MakeMin(local_col, Index(plan_.tile_w - plan_.strip_w, span_), span_);
+      }
     }
     ExprPtr row = MakeAdd(region_row, local_row, span_);
     ExprPtr col = MakeAdd(region_col, local_col, span_);
@@ -480,7 +539,9 @@ class VectorEmitter {
     loop_body.push_back(std::make_shared<YieldStmt>(std::move(yielded), span_));
     std::vector<std::pair<std::string, std::any>> attrs;
     const bool pipelined = plan_.phases[PhaseIndex(VectorPhase::Body)].pipeline_stages == 2;
-    if (pipelined) attrs.emplace_back(kPipelineStagesAttr, 2);
+    if (pipelined) {
+      attrs.emplace_back(kPipelineStagesAttr, 2);
+    }
     auto loop = std::make_shared<ForStmt>(
         strip, Index(0, span_), Index(strips, span_), Index(1, span_), std::move(output_iters),
         SeqStmts::Flatten(std::move(loop_body), span_), std::move(results), span_,
@@ -490,13 +551,17 @@ class VectorEmitter {
 
   VarPtr PreserveValid(const VarPtr& value, const TypePtr& carried, std::vector<StmtPtr>& body) {
     auto type = As<TensorType>(carried);
-    if (type == nullptr || !type->tensor_view_.has_value() || type->tensor_view_->valid_shape.empty())
+    if (type == nullptr || !type->tensor_view_.has_value() || type->tensor_view_->valid_shape.empty()) {
       return value;
+    }
     const auto& valid = type->tensor_view_->valid_shape;
-    auto call = OpRegistry::GetInstance().Create("tensor.set_validshape", {value, valid[0], valid[1]}, span_);
-    auto result = std::make_shared<Var>(Fresh("valid"), call->GetType(), span_);
-    body.push_back(std::make_shared<AssignStmt>(result, call, span_));
-    return result;
+    INTERNAL_CHECK_SPAN(valid.size() == 2, span_)
+        << "Internal error: AutoTile loop carry has a non-rank-2 valid shape";
+    const auto valid_rows = As<ConstInt>(valid[0]);
+    const auto valid_cols = As<ConstInt>(valid[1]);
+    INTERNAL_CHECK_SPAN(valid_rows != nullptr && valid_cols != nullptr, span_)
+        << "Internal error: AutoTile loop carry has a dynamic valid shape";
+    return EnsureValidShape(value, valid_rows->value_, valid_cols->value_, body);
   }
 
   void AppendLoop(std::vector<StmtPtr>& outer, const VectorPhasePlan& descriptor, const VarPtr& index,
@@ -505,7 +570,9 @@ class VectorEmitter {
         << "Internal error: AutoTile attempted to emit an empty planned loop";
     std::vector<std::pair<std::string, std::any>> attrs;
     const bool pipelined = descriptor.pipeline_stages == 2;
-    if (pipelined) attrs.emplace_back(kPipelineStagesAttr, 2);
+    if (pipelined) {
+      attrs.emplace_back(kPipelineStagesAttr, 2);
+    }
     outer.push_back(std::make_shared<ForStmt>(
         index, Index(descriptor.first_chunk, span_),
         Index(descriptor.first_chunk + descriptor.trip_count, span_), Index(1, span_), std::move(carries),
@@ -647,38 +714,51 @@ class VectorEmitter {
                    : SliceInput(input, extent, plan_.free_tile, offset, free, true, body);
     const VectorOp& max_op = graph_.ops[graph_.softmax.max_op];
     const VectorOp& sum_op = graph_.ops[graph_.softmax.sum_op];
+    const int64_t wide_rows = graph_.reduced_axis == 1 ? plan_.free_tile : extent;
+    const int64_t wide_cols = graph_.reduced_axis == 1 ? extent : plan_.free_tile;
+    const int64_t thin_rows = graph_.reduced_axis == 1 ? plan_.free_tile : 1;
+    const int64_t thin_cols = graph_.reduced_axis == 1 ? 1 : plan_.free_tile;
     auto local_max_call = registry.Create(max_op.call->op_->name_, {x}, max_op.call->kwargs_, span_);
-    auto local_max = std::make_shared<Var>(Fresh("local_max"), local_max_call->GetType(), span_);
+    VarPtr local_max = std::make_shared<Var>(Fresh("local_max"), local_max_call->GetType(), span_);
     body.push_back(std::make_shared<AssignStmt>(local_max, local_max_call, span_));
+    local_max = EnsureValidShape(local_max, thin_rows, thin_cols, body);
     VarPtr new_max = local_max;
     if (old_max != nullptr) {
       auto call = registry.Create("tensor.maximum", {old_max, local_max}, span_);
       new_max = std::make_shared<Var>(Fresh("max"), call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(new_max, call, span_));
+      new_max = EnsureValidShape(new_max, thin_rows, thin_cols, body);
     }
     auto shifted_call = registry.Create("tensor.sub", {x, new_max}, span_);
-    auto shifted = std::make_shared<Var>(Fresh("shift"), shifted_call->GetType(), span_);
+    VarPtr shifted = std::make_shared<Var>(Fresh("shift"), shifted_call->GetType(), span_);
     body.push_back(std::make_shared<AssignStmt>(shifted, shifted_call, span_));
+    shifted = EnsureValidShape(shifted, wide_rows, wide_cols, body);
     auto exp_call = registry.Create("tensor.exp", {shifted}, span_);
-    auto exp = std::make_shared<Var>(Fresh("exp"), exp_call->GetType(), span_);
+    VarPtr exp = std::make_shared<Var>(Fresh("exp"), exp_call->GetType(), span_);
     body.push_back(std::make_shared<AssignStmt>(exp, exp_call, span_));
+    exp = EnsureValidShape(exp, wide_rows, wide_cols, body);
     auto local_sum_call = registry.Create(sum_op.call->op_->name_, {exp}, sum_op.call->kwargs_, span_);
-    auto local_sum = std::make_shared<Var>(Fresh("local_sum"), local_sum_call->GetType(), span_);
+    VarPtr local_sum = std::make_shared<Var>(Fresh("local_sum"), local_sum_call->GetType(), span_);
     body.push_back(std::make_shared<AssignStmt>(local_sum, local_sum_call, span_));
+    local_sum = EnsureValidShape(local_sum, thin_rows, thin_cols, body);
     VarPtr new_sum = local_sum;
     if (old_sum != nullptr) {
       auto delta_call = registry.Create("tensor.sub", {old_max, new_max}, span_);
-      auto delta = std::make_shared<Var>(Fresh("delta"), delta_call->GetType(), span_);
+      VarPtr delta = std::make_shared<Var>(Fresh("delta"), delta_call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(delta, delta_call, span_));
+      delta = EnsureValidShape(delta, thin_rows, thin_cols, body);
       auto correction_call = registry.Create("tensor.exp", {delta}, span_);
-      auto correction = std::make_shared<Var>(Fresh("correction"), correction_call->GetType(), span_);
+      VarPtr correction = std::make_shared<Var>(Fresh("correction"), correction_call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(correction, correction_call, span_));
+      correction = EnsureValidShape(correction, thin_rows, thin_cols, body);
       auto scaled_call = registry.Create("tensor.mul", {old_sum, correction}, span_);
-      auto scaled = std::make_shared<Var>(Fresh("scaled_sum"), scaled_call->GetType(), span_);
+      VarPtr scaled = std::make_shared<Var>(Fresh("scaled_sum"), scaled_call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(scaled, scaled_call, span_));
+      scaled = EnsureValidShape(scaled, thin_rows, thin_cols, body);
       auto sum_call = registry.Create("tensor.add", {scaled, local_sum}, span_);
       new_sum = std::make_shared<Var>(Fresh("sum"), sum_call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(new_sum, sum_call, span_));
+      new_sum = EnsureValidShape(new_sum, thin_rows, thin_cols, body);
     }
     return {new_max, new_sum};
   }

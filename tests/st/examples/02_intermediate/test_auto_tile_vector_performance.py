@@ -108,6 +108,17 @@ def _compare(
     reference_compiled = _compile_manual(reference, reference_args, config, output_dir / f"{name}_manual")
     auto_compiled = _compile_auto(auto_program, config, output_dir / f"{name}_auto_tile")
 
+    rtol, atol = tolerance
+
+    def correctness_launch(compiled, args: list[torch.Tensor]) -> None:
+        """Check a fresh launch so a later good timing launch cannot hide a bad one."""
+        args[-1].fill_(float("nan"))
+        compiled(*args, config=benchmark_config)
+        torch.testing.assert_close(args[-1], expected, rtol=rtol, atol=atol)
+
+    correctness_launch(reference_compiled, reference_args)
+    correctness_launch(auto_compiled, auto_args)
+
     reference_runs = [
         benchmark(
             reference_compiled,
@@ -117,6 +128,7 @@ def _compare(
             config=benchmark_config,
         )
     ]
+    correctness_launch(reference_compiled, reference_args)
     auto_runs = [
         benchmark(
             auto_compiled,
@@ -126,6 +138,7 @@ def _compare(
             config=benchmark_config,
         )
     ]
+    correctness_launch(auto_compiled, auto_args)
     # Repeat in reverse order so page-in, thermal, and run-order effects do not
     # systematically favor either implementation.
     auto_runs.append(
@@ -137,6 +150,7 @@ def _compare(
             config=benchmark_config,
         )
     )
+    correctness_launch(auto_compiled, auto_args)
     reference_runs.append(
         benchmark(
             reference_compiled,
@@ -146,8 +160,8 @@ def _compare(
             config=benchmark_config,
         )
     )
+    correctness_launch(reference_compiled, reference_args)
 
-    rtol, atol = tolerance
     torch.testing.assert_close(reference_args[-1], expected, rtol=rtol, atol=atol)
     torch.testing.assert_close(auto_args[-1], expected, rtol=rtol, atol=atol)
     torch.testing.assert_close(auto_args[-1], reference_args[-1], rtol=rtol, atol=atol)
