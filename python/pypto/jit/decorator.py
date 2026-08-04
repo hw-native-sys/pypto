@@ -292,7 +292,7 @@ def _annotation_layout(annotation: Any, param_name: str, func_name: str) -> _ir.
         f"@pl.jit function {func_name!r}: parameter {param_name!r} annotates a "
         f"{type(layout).__name__} in its layout slot, which @pl.jit does not yet "
         f"support — it would be dropped and the parameter compiled as ND. Use a "
-        f"plain layout (e.g. pl.NZ), or declare the kernel with @pl.function, "
+        f"plain layout (e.g. pl.MX_A_ZZ), or declare the kernel with @pl.function, "
         f"which resolves the annotation directly."
     )
 
@@ -1554,6 +1554,7 @@ class JITFunction:
         ) = None
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
         self._source_hash: str | None = None
+        self._dep_layouts: tuple[tuple[str, str, str], ...] | None = None
 
         # Preserve function metadata
         self.__name__ = func.__name__
@@ -1587,18 +1588,26 @@ class JITFunction:
         them in the key, rebinding ``L`` would hand the second call the first
         one's artifact.
 
+        Computed once and memoized: the key is rebuilt on every call including
+        cache hits, and re-deriving it runs ``inspect.signature`` (plus ``eval``
+        for postponed annotations) per dep. A dep's declarations cannot change
+        over this ``JITFunction``'s lifetime, so the cost is paid once — same
+        reasoning as ``_get_dep_graph`` / ``_get_source_hash``.
+
         Returns:
             Sorted ``(dep name, parameter, layout)`` triples — a stable,
             hashable component for the cache key
         """
-        deps, _, _, _ = self._get_dep_graph()
-        return tuple(
-            sorted(
-                (dep.__name__, param, str(layout))
-                for dep in deps
-                for param, layout in _param_layouts(dep._func, dep.__name__).items()
+        if self._dep_layouts is None:
+            deps, _, _, _ = self._get_dep_graph()
+            self._dep_layouts = tuple(
+                sorted(
+                    (dep.__name__, param, str(layout))
+                    for dep in deps
+                    for param, layout in _param_layouts(dep._func, dep.__name__).items()
+                )
             )
-        )
+        return self._dep_layouts
 
     def _get_dep_graph(
         self,

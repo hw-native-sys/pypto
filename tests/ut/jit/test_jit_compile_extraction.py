@@ -571,8 +571,10 @@ class TestNzOnTensorIsNotJitSpecific:
                     pl.store(t, [0, 0], c)
                 return c
 
-        view = list(Prog.functions.values())[0].params[0].type.tensor_view
-        assert view is not None and view.layout == ir.TensorLayout.NZ
+        param_type = list(Prog.functions.values())[0].params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
 
 
 if __name__ == "__main__":

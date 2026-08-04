@@ -31,7 +31,7 @@
 ```python
 x: pl.Tensor[[64, 128], pl.FP32]        # 二维，64×128，float32
 y: pl.Tensor[[256], pl.FP16]            # 一维，256 个元素，float16
-s: pl.Tensor[[64, 128], pl.UINT8, pl.MX_A_ZZ] # 带布局（见下文）
+s: pl.Tensor[[64, 128], pl.UINT8, pl.MX_A_ZZ] # MX scale 操作数 —— 见「张量布局」
 ```
 
 **`pl.Tile[[shape], dtype]`** —— 片上内存缓冲区（默认统一缓冲区）。
@@ -50,6 +50,8 @@ idx: pl.Scalar[pl.INDEX]                # 索引标量
 ### 张量布局（TensorLayout）
 
 `pl.Tensor[...]` annotation 写 **runtime 行优先 shape**，不写 layout 标记。layout 是 IR 内部概念，由派生/消费视图的 op 推导，不需要在 annotation 上表达。
+
+唯一的例外是 **MX 布局**（`pl.MX_A_ZZ` / `pl.MX_B_NN`）：它描述 scale 操作数的落盘打包方式，任何 op 都推导不出来，因此必须显式标注；其 load 需要 `target_memory=pl.Mem.Mat` 且 dtype 为 `pl.UINT8` / `pl.FP8E8M0`。
 
 ```python
 # ✅ 推荐 —— 写源 tensor shape，不写 layout 标记：
