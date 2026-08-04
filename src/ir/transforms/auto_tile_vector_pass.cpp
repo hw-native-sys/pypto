@@ -16,11 +16,13 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -59,18 +61,22 @@ class CalledFunctionCollector : public IRVisitor {
 auto_tile::VectorHardware ReadVectorHardware(const Span& span) {
   CHECK_SPAN(backend::BackendConfig::IsConfigured(), span)
       << "AutoTile requires an explicitly configured backend";
-  CHECK_SPAN(backend::GetBackendType() == backend::BackendType::Ascend910B, span)
-      << "AutoTile vector scheduling currently supports Ascend910B only";
   const backend::Backend* backend = backend::GetBackend();
+  const PassContext* context = PassContext::Current();
+  const backend::BackendHandler* handler =
+      context != nullptr ? context->GetBackendHandler() : backend->GetHandler();
+  CHECK_SPAN(handler != nullptr, span) << "AutoTile could not obtain the active backend handler";
+  const std::optional<backend::VectorAutoTileTarget> target = handler->GetVectorAutoTileTarget();
+  CHECK_SPAN(target.has_value(), span) << "AutoTile vector scheduling currently supports Ascend910B only";
   auto_tile::VectorHardware hardware;
   hardware.vector_cores = backend->GetCoreCount(CoreType::VECTOR);
   hardware.ub_bytes = static_cast<int64_t>(backend->GetMemSize(MemorySpace::Vec));
-  // Ascend910B tensor GM<->UB transfers use one 32-byte DMA block. The Vec
-  // allocator alignment is intentionally stricter (128 bytes) and must not be
-  // confused with the logical tile-padding granule.
-  hardware.dma_alignment_bytes = 32;
-  CHECK_SPAN(hardware.vector_cores > 0 && hardware.ub_bytes > 0, span)
-      << "AutoTile could not derive the Ascend910B vector topology";
+  hardware.dma_alignment_bytes = target->dma_alignment_bytes;
+  hardware.vector_register_bytes = target->vector_register_bytes;
+  CHECK_SPAN(hardware.vector_cores > 0 && hardware.ub_bytes > 0 && hardware.dma_alignment_bytes > 0 &&
+                 hardware.vector_register_bytes > 0,
+             span)
+      << "AutoTile could not derive the " << target->model_name << " vector topology";
   return hardware;
 }
 

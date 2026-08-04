@@ -41,7 +41,6 @@ constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kGmToUbGiBps = 100.9;
 constexpr double kUbToGmGiBps = 188.46;
 constexpr double kHbmAggregateGiBps = 900.0;
-constexpr int64_t kVectorRegisterBytes = 256;
 constexpr double kCountModeFloorCycles = 16.0;
 constexpr double kKernelFillCycles = 10000.0;
 constexpr double kPerTaskCycles = 64.0;
@@ -261,10 +260,11 @@ PrimitiveCost PrimitiveCycles(VectorPrimitive primitive) {
   return {2.0, 32.0, false};
 }
 
-double ReductionCycles(const VectorGraph& graph, const VectorOp& op, int64_t rows, int64_t cols) {
+double ReductionCycles(const VectorGraph& graph, const VectorOp& op, int64_t rows, int64_t cols,
+                       int64_t vector_register_bytes) {
   const VectorTensor& input = graph.tensors[op.inputs.front()];
   const int64_t element_bytes = DTypeBytes(input.dtype);
-  const int64_t elements_per_repeat = std::max<int64_t>(1, kVectorRegisterBytes / element_bytes);
+  const int64_t elements_per_repeat = std::max<int64_t>(1, vector_register_bytes / element_bytes);
   const int64_t frame_rows = FrameRows(input, rows);
   const int64_t frame_cols = FrameCols(input, cols);
   if (op.kind == VectorOpKind::ColSum || op.kind == VectorOpKind::ColMax) {
@@ -276,13 +276,13 @@ double ReductionCycles(const VectorGraph& graph, const VectorOp& op, int64_t row
 }
 
 double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, int64_t rows, int64_t cols,
-                     int64_t iterations, int64_t work_units) {
+                     int64_t iterations, int64_t work_units, int64_t vector_register_bytes) {
   double per_frame = 0.0;
   bool stream_start = true;
   for (size_t op_index : ops) {
     const VectorOp& op = graph.ops[op_index];
     if (IsReduction(op.kind)) {
-      per_frame += ReductionCycles(graph, op, rows, cols);
+      per_frame += ReductionCycles(graph, op, rows, cols, vector_register_bytes);
       stream_start = true;
       continue;
     }
@@ -293,7 +293,7 @@ double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, i
       frame_rows = std::max(frame_rows, FrameRows(graph.tensors[input], rows));
       frame_cols = std::max(frame_cols, FrameCols(graph.tensors[input], cols));
     }
-    const int64_t epr = std::max<int64_t>(1, kVectorRegisterBytes / DTypeBytes(output.dtype));
+    const int64_t epr = std::max<int64_t>(1, vector_register_bytes / DTypeBytes(output.dtype));
     const int64_t repeats = op.geometry == VectorGeometry::Flat ? (frame_rows * frame_cols + epr - 1) / epr
                                                                 : frame_rows * ((frame_cols + epr - 1) / epr);
     PrimitiveCost cost = PrimitiveCycles(op.primitive);
@@ -375,7 +375,8 @@ const char* ScheduleKindName(VectorScheduleKind kind) {
 }
 
 VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
-  CHECK(hardware_.vector_cores > 0 && hardware_.ub_bytes > 0 && hardware_.dma_alignment_bytes > 0)
+  CHECK(hardware_.vector_cores > 0 && hardware_.ub_bytes > 0 && hardware_.dma_alignment_bytes > 0 &&
+        hardware_.vector_register_bytes > 0)
       << "AutoTile vector planner received an invalid Ascend 910B hardware descriptor";
 
   const int64_t iteration_rows = graph.iteration_rows;
@@ -424,8 +425,9 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                            int stages, const std::unordered_set<size_t>& outputs) {
       const int64_t tasks = candidate.work_units;
       const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
-      const double compute = WaveCompute(ComputeCycles(graph, phase.ops, rows, cols, iterations, tasks),
-                                         tasks, hardware_.vector_cores);
+      const double compute = WaveCompute(
+          ComputeCycles(graph, phase.ops, rows, cols, iterations, tasks, hardware_.vector_register_bytes),
+          tasks, hardware_.vector_cores);
       const double in_bytes = BoundaryInputBytes(graph, phase, rows, cols, iterations, tasks);
       const double out_bytes = OutputBytes(graph, outputs, rows, cols, iterations, tasks);
       const double transfer =
@@ -472,7 +474,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
             trial.phases[PhaseIndex(VectorPhase::Body)].pipeline_stages = 2;
             const int64_t tasks = trial.work_units;
             const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
-            const double compute = WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, tasks),
+            const double compute = WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, tasks,
+                                                             hardware_.vector_register_bytes),
                                                tasks, hardware_.vector_cores);
             const double in_bytes = BoundaryInputBytes(graph, trial.phases[PhaseIndex(VectorPhase::Body)],
                                                        strip_h, strip_w, trips, tasks);
@@ -508,7 +511,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
           if (peak > hardware_.ub_bytes) continue;
           const int64_t active = std::min<int64_t>(candidate.work_units, hardware_.vector_cores);
           const double compute =
-              WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, candidate.work_units),
+              WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, candidate.work_units,
+                                        hardware_.vector_register_bytes),
                           candidate.work_units, hardware_.vector_cores);
           const double in_bytes = BoundaryInputBytes(graph, candidate.phases[PhaseIndex(VectorPhase::Body)],
                                                      strip_h, strip_w, trips, candidate.work_units);
@@ -621,7 +625,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
         const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
         if (graph.softmax.matched) {
           const double wide = static_cast<double>(rows * cols);
-          const double epr = static_cast<double>(kVectorRegisterBytes / DTypeBytes(reduction_dtype));
+          const double epr =
+              static_cast<double>(hardware_.vector_register_bytes / DTypeBytes(reduction_dtype));
           const double repeats = std::ceil(wide / epr);
           const double per_chunk = 10.0 * repeats + 180.0;
           const double total_compute = per_chunk * static_cast<double>(candidate.full_chunks) * tasks;
@@ -657,8 +662,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
           if (merges > 0) {
             const PrimitiveCost merge = PrimitiveCycles(VectorPrimitive::Add);
             const int64_t repeats =
-                (candidate.free_tile + kVectorRegisterBytes / DTypeBytes(reduction_dtype) - 1) /
-                (kVectorRegisterBytes / DTypeBytes(reduction_dtype));
+                (candidate.free_tile + hardware_.vector_register_bytes / DTypeBytes(reduction_dtype) - 1) /
+                (hardware_.vector_register_bytes / DTypeBytes(reduction_dtype));
             const double merge_compute =
                 WaveCompute((merge.slope * static_cast<double>(repeats) + merge.fixed) * merges * tasks,
                             tasks, hardware_.vector_cores);
@@ -705,7 +710,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                                              true, hardware_.dma_alignment_bytes, 1);
         if (split_peak > hardware_.ub_bytes) continue;
         const double split_compute =
-            WaveCompute(ComputeCycles(graph, all_ops, partial_rows, candidate.tile_w, 1, split_tasks),
+            WaveCompute(ComputeCycles(graph, all_ops, partial_rows, candidate.tile_w, 1, split_tasks,
+                                      hardware_.vector_register_bytes),
                         split_tasks, hardware_.vector_cores);
         const double seed_compute =
             WaveCompute(kPerTaskCycles * static_cast<double>(seed_tasks), seed_tasks, hardware_.vector_cores);

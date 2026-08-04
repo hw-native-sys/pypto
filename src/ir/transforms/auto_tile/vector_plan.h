@@ -115,6 +115,7 @@ struct VectorHardware {
   int vector_cores = 0;
   int64_t ub_bytes = 0;
   int64_t dma_alignment_bytes = 0;
+  int64_t vector_register_bytes = 0;
 };
 
 class VectorPlanner910B {
