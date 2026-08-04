@@ -148,7 +148,7 @@ print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 `device_wall_us` 列表的别名。
 
 `benchmark` 从 `[STRACE]` 标记读取计时（simpler PR #1177）：它在 worker 生命周期内
-将 runtime 日志级别提升到 `v9`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环
+将 runtime 日志级别提升到 `timing`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环
 期间产生的 stderr 会被转存到临时文件，而非实时打印。`device_wall_us` 在 L2 单芯片
 运行时是真实的 NPU 墙钟（分布式见下方 L3 说明）；在未开启 `SIMPLER_HOST_STRACE` 的
 runtime 上或 `*sim` 平台上为 `0`（用 `stats.all_zero_device` 判断）。

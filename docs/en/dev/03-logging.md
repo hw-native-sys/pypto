@@ -161,7 +161,7 @@ respect them.
 | Option | Default | Drives |
 | ------ | ------- | ------ |
 | `--pypto-log-level` | `ERROR` | PyPTO C++ logger via `set_log_level(LogLevel[name])` |
-| `--runtime-log-level` | unset (keeps `v5`) | PyPTO runtime logger via `configure_log(level)` — note this **does not** pass `sync_pypto=True` |
+| `--runtime-log-level` | unset (keeps `timing`) | PyPTO runtime logger via `configure_log(level)` — note this **does not** pass `sync_pypto=True` |
 
 ```bash
 # Quiet PyPTO compile chatter, verbose runtime logs

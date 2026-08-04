@@ -164,7 +164,7 @@ exposed under both `device_wall_us_*` and shorter `device_us_*` names, with
 `samples` aliasing the raw `device_wall_us` list.
 
 `benchmark` reads timing from the `[STRACE]` markers (simpler PR #1177): it
-raises the runtime log level to `v9` for the worker's lifetime and captures
+raises the runtime log level to `timing` for the worker's lifetime and captures
 `stderr` at the fd level around the measured loop, so stderr emitted during the
 loop is diverted into a temp file rather than shown live. `device_wall_us` is a
 real on-NPU wall for L2 single-chip runs (see the L3 note below for distributed

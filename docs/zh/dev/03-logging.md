@@ -151,7 +151,7 @@ PYPTO_RUNTIME_LOG=debug PYPTO_RUNTIME_LOG_SYNC=1 python -m my_test
 | 选项 | 默认值 | 作用 |
 | ---- | ------ | ---- |
 | `--pypto-log-level` | `ERROR` | 通过 `set_log_level(LogLevel[name])` 控制 PyPTO C++ 日志 |
-| `--runtime-log-level` | 未设置（保留 `v5`） | 通过 `configure_log(level)` 控制 PyPTO runtime 日志；**不会** 同时传 `sync_pypto=True` |
+| `--runtime-log-level` | 未设置（保留 `timing`） | 通过 `configure_log(level)` 控制 PyPTO runtime 日志；**不会** 同时传 `sync_pypto=True` |
 
 ```bash
 # 抑制编译噪声，放大 runtime 日志
