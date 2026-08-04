@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/distributed/comm_layout.h"
+#include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -44,7 +45,6 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -334,17 +334,6 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   return dyn_vars;
 }
 
-int GetGMPipeSlotCount(int dir_mask) {
-  const int bidirectional = ir::core_affinity::kDirMaskC2V | ir::core_affinity::kDirMaskV2C;
-  if (dir_mask == bidirectional) {
-    return 4;
-  }
-  if (dir_mask == ir::core_affinity::kDirMaskC2V || dir_mask == ir::core_affinity::kDirMaskV2C) {
-    return 8;
-  }
-  return 0;
-}
-
 // In-place DPS ops that write into input 0 rather than a freshly-allocated
 // result tile:
 //   * scatter family (`set_output_reuses_input(0)`): a tscatter into a fresh
@@ -587,6 +576,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr)
 
 void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
+  std::map<std::pair<int, int>, int> slot_count_by_pipe;
 
   std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
   scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
@@ -596,8 +586,14 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
         const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        const int slot_num = call->GetKwarg<int>("slot_num", 0);
         if (dir_mask > 0 && slot_size > 0) {
           const auto key = std::make_pair(pipe_id, dir_mask);
+          const int slot_count = gm_pipe::EffectiveSlotCount(dir_mask, slot_num);
+          auto [nit, ninserted] = slot_count_by_pipe.emplace(key, slot_count);
+          CHECK(ninserted || nit->second == slot_count)
+              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+              << " uses inconsistent slot counts: " << nit->second << " and " << slot_count;
           auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
           CHECK(inserted || it->second == slot_size)
               << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
@@ -624,15 +620,22 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
     }
   }
 
+  // Each pipe's region must advance by its FULL footprint — both rings of a bidirectional pipe,
+  // and an explicit slot_num where given — or the next pipe's base lands inside this one. This
+  // has to stay in step with ComputeGMPipeWorkspaceElements, which sizes the whole workspace;
+  // both derive it from gm_pipe_layout.h.
   int64_t byte_offset = 0;
   for (const auto& [key, slot_size] : slot_size_by_pipe) {
     gm_slot_buffer_offsets_[key] = byte_offset;
     const int dir_mask = key.second;
-    const int slot_count = GetGMPipeSlotCount(dir_mask);
-    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
-    CHECK(byte_offset <= std::numeric_limits<int64_t>::max() - static_cast<int64_t>(slot_count) * slot_size)
+    CHECK(gm_pipe::SlotCountForDirMask(dir_mask) > 0)
+        << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
+    auto num_it = slot_count_by_pipe.find(key);
+    const int slot_count = num_it != slot_count_by_pipe.end() ? num_it->second : 0;
+    const int64_t pipe_bytes = gm_pipe::FootprintBytes(dir_mask, slot_count, slot_size);
+    CHECK(byte_offset <= std::numeric_limits<int64_t>::max() - pipe_bytes)
         << "GM slot buffer offset overflow while assigning frontend pipe id " << key.first;
-    byte_offset += static_cast<int64_t>(slot_count) * slot_size;
+    byte_offset += pipe_bytes;
   }
 }
 

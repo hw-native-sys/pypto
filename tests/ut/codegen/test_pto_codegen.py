@@ -3017,5 +3017,61 @@ def test_pto_codegen_tensor_view_shape_and_layout():
     assert any(f"pto.partition_view {view_ssa}" in line for line in lines)
 
 
+def test_gm_slot_buffer_regions_do_not_overlap_across_pipes():
+    """A second frontend pipe starts past the first pipe's FULL footprint.
+
+    PrepareGMSlotBufferLayout must advance by rings * slots * slot_size, the same rule
+    ComputeGMPipeWorkspaceElements uses to size the workspace. Pipe 0 here is bidirectional
+    (two rings) *and* carries an explicit slot_num, so a layout that counted one ring, or
+    that ignored slot_num, hands pipe 1 an addptr pointing inside pipe 0's region.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class TwoPipeProgram:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube(
+            self,
+            q: pl.Tensor[[16, 16], pl.FP32],
+            __gm_pipe_buffer: pl.Out[pl.Tensor[[6144], pl.FP32]],
+        ):
+            c2v_peer_0 = pl.import_peer_buffer(name="p0_c2v", peer_func="vector")
+            v2c_buf_0 = pl.reserve_buffer(name="p0_v2c", size=8192, base=0x1000)
+            pl.aic_initialize_pipe(c2v_peer_0, v2c_buf_0, dir_mask=3, slot_size=1024, slot_num=8, id=0)
+            c2v_peer_1 = pl.import_peer_buffer(name="p1_c2v", peer_func="vector")
+            pl.aic_initialize_pipe(c2v_peer_1, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, id=1)
+            tile = pl.load(q, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            pl.tpush_to_aiv(tile, split=0, id=0)
+            pl.tpush_to_aiv(tile, split=0, id=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector(
+            self,
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            __gm_pipe_buffer: pl.Out[pl.Tensor[[6144], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            c2v_buf_0 = pl.reserve_buffer(name="p0_c2v", size=8192, base=0x2000)
+            v2c_peer_0 = pl.import_peer_buffer(name="p0_v2c", peer_func="cube")
+            pl.aiv_initialize_pipe(c2v_buf_0, v2c_peer_0, dir_mask=3, slot_size=1024, slot_num=8, id=0)
+            c2v_buf_1 = pl.reserve_buffer(name="p1_c2v", size=8192, base=0x6000)
+            pl.aiv_initialize_pipe(c2v_buf_1, pl.const(0, pl.INT32), dir_mask=1, slot_size=1024, id=1)
+            t0 = pl.tpop_from_aic(shape=[16, 16], dtype=pl.FP32, split=0, id=0)
+            pl.tfree_to_aic(t0, split=0, id=0)
+            t1 = pl.tpop_from_aic(shape=[16, 16], dtype=pl.FP32, split=0, id=1)
+            pl.tfree_to_aic(t1, split=0, id=1)
+            return pl.store(t1, [0, 0], out)
+
+    mlir_code = _generate_mlir(TwoPipeProgram)
+    addptrs = [line for line in _get_mlir_lines(mlir_code) if "pto.addptr" in line]
+
+    # Pipe 0 sits at offset 0 (no addptr); pipe 1 starts after it, on both cores.
+    assert len(addptrs) == 2, f"Expected one GM pipe region addptr per core. Generated code:\n{mlir_code}"
+    # 2 rings * 8 slots * 1024 B = 16384 B = 4096 f32 elements. One ring would put pipe 1 at
+    # 2048, and ignoring slot_num as well would put it at 1024 — both inside pipe 0's region.
+    for line in addptrs:
+        assert "%c4096_index" in line, f"Pipe 1 must start past pipe 0's full two-ring footprint, got: {line}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
