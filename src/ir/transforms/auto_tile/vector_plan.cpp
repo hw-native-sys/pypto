@@ -25,6 +25,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
+#include "src/ir/transforms/auto_tile/vector_cost_910b.h"
 
 namespace pypto {
 namespace ir {
@@ -41,7 +42,6 @@ constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kGmToUbGiBps = 100.9;
 constexpr double kUbToGmGiBps = 188.46;
 constexpr double kHbmAggregateGiBps = 900.0;
-constexpr double kCountModeFloorCycles = 16.0;
 constexpr double kKernelFillCycles = 10000.0;
 constexpr double kPerTaskCycles = 64.0;
 
@@ -213,76 +213,19 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
   return peak * std::max(1, bands);
 }
 
-struct PrimitiveCost {
-  double slope;
-  double fixed;
-  bool count_mode;
-};
-
-PrimitiveCost PrimitiveCycles(VectorPrimitive primitive) {
-  switch (primitive) {
-    case VectorPrimitive::Generic:
-      return {2.0, 32.0, false};
-    case VectorPrimitive::Add:
-      return {2.0, 24.0, true};
-    case VectorPrimitive::Mul:
-      return {2.0, 25.0, true};
-    case VectorPrimitive::Div:
-      return {4.0, 30.0, true};
-    case VectorPrimitive::Exp:
-      return {2.0, 31.0, false};
-    case VectorPrimitive::Log:
-      return {2.0, 33.0, false};
-    case VectorPrimitive::Abs:
-      return {1.0, 29.0, false};
-    case VectorPrimitive::Sqrt:
-      return {2.0, 39.0, false};
-    case VectorPrimitive::Rsqrt:
-      return {1.0, 24.0, false};
-    case VectorPrimitive::ScalarAdd:
-      return {1.0, 31.0, false};
-    case VectorPrimitive::ScalarMul:
-      return {1.0, 26.0, false};
-    case VectorPrimitive::ScalarMax:
-      return {1.0, 23.0, false};
-    case VectorPrimitive::ScalarMin:
-      return {1.0, 30.0, false};
-    case VectorPrimitive::Cast:
-      return {1.0, 24.0, false};
-    case VectorPrimitive::Recip:
-      return {2.0, 30.0, false};
-    case VectorPrimitive::RowSum:
-    case VectorPrimitive::RowExtrema:
-    case VectorPrimitive::ColSum:
-    case VectorPrimitive::ColExtrema:
-      return {0.0, 0.0, false};
-  }
-  return {2.0, 32.0, false};
-}
-
-double ReductionCycles(const VectorGraph& graph, const VectorOp& op, int64_t rows, int64_t cols,
-                       int64_t vector_register_bytes) {
-  const VectorTensor& input = graph.tensors[op.inputs.front()];
-  const int64_t element_bytes = DTypeBytes(input.dtype);
-  const int64_t elements_per_repeat = std::max<int64_t>(1, vector_register_bytes / element_bytes);
-  const int64_t frame_rows = FrameRows(input, rows);
-  const int64_t frame_cols = FrameCols(input, cols);
-  if (op.kind == VectorOpKind::ColSum || op.kind == VectorOpKind::ColMax) {
-    return 16.0 * std::max<int64_t>(0, frame_rows - 1) +
-           30.0 * (frame_rows > 1 ? std::log2(static_cast<double>(frame_rows)) : 0.0);
-  }
-  const int64_t passes = std::max<int64_t>(1, (frame_cols + elements_per_repeat - 1) / elements_per_repeat);
-  return 45.0 * static_cast<double>(passes - 1) + 51.0;
-}
-
 double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, int64_t rows, int64_t cols,
-                     int64_t iterations, int64_t work_units, int64_t vector_register_bytes) {
+                     int64_t iterations, int64_t work_units, int64_t vector_register_bytes,
+                     bool* used_reduction_fallback = nullptr) {
   double per_frame = 0.0;
   bool stream_start = true;
   for (size_t op_index : ops) {
     const VectorOp& op = graph.ops[op_index];
     if (IsReduction(op.kind)) {
-      per_frame += ReductionCycles(graph, op, rows, cols, vector_register_bytes);
+      const VectorTensor& input = graph.tensors[op.inputs.front()];
+      const VectorReductionCost reduction = ReductionCycles910B(
+          op.kind, input.dtype, FrameRows(input, rows), FrameCols(input, cols), vector_register_bytes);
+      per_frame += reduction.cycles;
+      if (used_reduction_fallback != nullptr) *used_reduction_fallback |= reduction.used_fallback;
       stream_start = true;
       continue;
     }
@@ -293,13 +236,8 @@ double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, i
       frame_rows = std::max(frame_rows, FrameRows(graph.tensors[input], rows));
       frame_cols = std::max(frame_cols, FrameCols(graph.tensors[input], cols));
     }
-    const int64_t epr = std::max<int64_t>(1, vector_register_bytes / DTypeBytes(output.dtype));
-    const int64_t repeats = op.geometry == VectorGeometry::Flat ? (frame_rows * frame_cols + epr - 1) / epr
-                                                                : frame_rows * ((frame_cols + epr - 1) / epr);
-    PrimitiveCost cost = PrimitiveCycles(op.primitive);
-    if (op.geometry == VectorGeometry::RowExpand) cost.fixed += 19.0;
-    per_frame += cost.slope * static_cast<double>(repeats) + (stream_start ? cost.fixed : 0.0);
-    if (cost.count_mode && frame_cols % epr != 0) per_frame += kCountModeFloorCycles;
+    per_frame += PointwiseCycles910B(op.primitive, op.geometry, output.dtype, frame_rows, frame_cols,
+                                     stream_start, graph.reduced_axis != 0, vector_register_bytes);
     stream_start = false;
   }
   return per_frame * static_cast<double>(std::max<int64_t>(1, iterations)) *
@@ -343,6 +281,17 @@ void PopulatePhase(VectorPhasePlan* phase, const VectorGraph& graph, std::vector
                    const std::unordered_set<size_t>& substituted = {}) {
   phase->ops = std::move(ops);
   phase->inputs = BuildInputLifetimes(graph, phase->ops, substituted);
+}
+
+void ClearModeledCosts(VectorSchedulePlan* plan) {
+  plan->modeled_cycles = std::numeric_limits<double>::infinity();
+  plan->modeled_compute_cycles = 0.0;
+  plan->modeled_transfer_cycles = 0.0;
+  plan->modeled_phase_compute_cycles.fill(0.0);
+  plan->modeled_phase_transfer_cycles.fill(0.0);
+  plan->modeled_phase_input_bytes.fill(0.0);
+  plan->modeled_phase_output_bytes.fill(0.0);
+  plan->used_reduction_fallback = false;
 }
 
 bool LexicographicallyBetter(const VectorSchedulePlan& lhs, const VectorSchedulePlan& rhs) {
@@ -419,20 +368,37 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
     candidate.full_peak_ub_bytes = PeakBytes(graph, all_ops, candidate.tile_h, candidate.tile_w, all_outputs,
                                              {}, reduction_layout, hardware_.dma_alignment_bytes, 1);
 
-    auto price_phase = [&](const VectorPhasePlan& phase, int64_t rows, int64_t cols, int64_t iterations,
-                           int stages, const std::unordered_set<size_t>& outputs) {
-      const int64_t tasks = candidate.work_units;
+    auto record_phase = [&](VectorSchedulePlan* target, VectorPhase phase_id, int64_t rows, int64_t cols,
+                            int64_t iterations, int stages, const std::unordered_set<size_t>& outputs,
+                            double compute_work) {
+      if (iterations <= 0) return 0.0;
+      const size_t phase_index = PhaseIndex(phase_id);
+      const int64_t tasks = target->work_units;
       const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
-      const double compute = WaveCompute(
-          ComputeCycles(graph, phase.ops, rows, cols, iterations, tasks, hardware_.vector_register_bytes),
-          tasks, hardware_.vector_cores);
+      const double compute = WaveCompute(compute_work, tasks, hardware_.vector_cores);
+      const VectorPhasePlan& phase = target->phases[phase_index];
       const double in_bytes = BoundaryInputBytes(graph, phase, rows, cols, iterations, tasks);
       const double out_bytes = OutputBytes(graph, outputs, rows, cols, iterations, tasks);
       const double transfer =
           TransferCycles(in_bytes, kGmToUbGiBps, active) + TransferCycles(out_bytes, kUbToGmGiBps, active);
-      candidate.modeled_compute_cycles += compute;
-      candidate.modeled_transfer_cycles += transfer;
+      target->modeled_compute_cycles += compute;
+      target->modeled_transfer_cycles += transfer;
+      target->modeled_phase_compute_cycles[phase_index] += compute;
+      target->modeled_phase_transfer_cycles[phase_index] += transfer;
+      target->modeled_phase_input_bytes[phase_index] += in_bytes;
+      target->modeled_phase_output_bytes[phase_index] += out_bytes;
       return stages == 2 ? std::max(compute, transfer) : compute + transfer;
+    };
+    auto price_phase = [&](VectorSchedulePlan* target, VectorPhase phase_id, int64_t rows, int64_t cols,
+                           int64_t iterations, int stages, const std::unordered_set<size_t>& outputs,
+                           double extra_compute_work = 0.0) {
+      bool fallback = false;
+      const VectorPhasePlan& phase = target->phases[PhaseIndex(phase_id)];
+      const double compute_work = ComputeCycles(graph, phase.ops, rows, cols, iterations, target->work_units,
+                                                hardware_.vector_register_bytes, &fallback) +
+                                  extra_compute_work;
+      target->used_reduction_fallback |= fallback;
+      return record_phase(target, phase_id, rows, cols, iterations, stages, outputs, compute_work);
     };
 
     double latency = 0.0;
@@ -443,8 +409,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
       candidate.strip_h = candidate.tile_h;
       candidate.strip_w = candidate.tile_w;
       candidate.chunk_peak_ub_bytes = candidate.full_peak_ub_bytes;
-      latency = price_phase(candidate.phases[PhaseIndex(VectorPhase::Body)], candidate.tile_h,
-                            candidate.tile_w, 1, 1, all_outputs);
+      latency =
+          price_phase(&candidate, VectorPhase::Body, candidate.tile_h, candidate.tile_w, 1, 1, all_outputs);
       feasible = true;
 
       if (graph.reduced_axis == 0) {
@@ -462,6 +428,7 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                                            hardware_.dma_alignment_bytes, 2);
             if (peak > hardware_.ub_bytes) continue;
             VectorSchedulePlan trial = candidate;
+            ClearModeledCosts(&trial);
             trial.kind = VectorScheduleKind::PointwiseStream;
             trial.row_strips = row_strips;
             trial.width_strips = width_strips;
@@ -470,21 +437,10 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
             trial.chunk_peak_ub_bytes = peak;
             trial.phases[PhaseIndex(VectorPhase::Body)].trip_count = trips;
             trial.phases[PhaseIndex(VectorPhase::Body)].pipeline_stages = 2;
-            const int64_t tasks = trial.work_units;
-            const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
-            const double compute = WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, tasks,
-                                                             hardware_.vector_register_bytes),
-                                               tasks, hardware_.vector_cores);
-            const double in_bytes = BoundaryInputBytes(graph, trial.phases[PhaseIndex(VectorPhase::Body)],
-                                                       strip_h, strip_w, trips, tasks);
-            const double out_bytes = OutputBytes(graph, all_outputs, strip_h, strip_w, trips, tasks);
-            const double transfer = TransferCycles(in_bytes, kGmToUbGiBps, active) +
-                                    TransferCycles(out_bytes, kUbToGmGiBps, active);
-            const double trial_latency = std::max(compute, transfer);
+            const double trial_latency =
+                price_phase(&trial, VectorPhase::Body, strip_h, strip_w, trips, 2, all_outputs);
             if (trial_latency < best_stream_latency) {
               streamed = std::move(trial);
-              streamed.modeled_compute_cycles = compute;
-              streamed.modeled_transfer_cycles = transfer;
               best_stream_latency = trial_latency;
             }
           }
@@ -507,30 +463,21 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
           const int64_t peak = PeakBytes(graph, all_ops, strip_h, strip_w, all_outputs, {}, false,
                                          hardware_.dma_alignment_bytes, 2);
           if (peak > hardware_.ub_bytes) continue;
-          const int64_t active = std::min<int64_t>(candidate.work_units, hardware_.vector_cores);
-          const double compute =
-              WaveCompute(ComputeCycles(graph, all_ops, strip_h, strip_w, trips, candidate.work_units,
-                                        hardware_.vector_register_bytes),
-                          candidate.work_units, hardware_.vector_cores);
-          const double in_bytes = BoundaryInputBytes(graph, candidate.phases[PhaseIndex(VectorPhase::Body)],
-                                                     strip_h, strip_w, trips, candidate.work_units);
-          const double out_bytes =
-              OutputBytes(graph, all_outputs, strip_h, strip_w, trips, candidate.work_units);
-          const double transfer = TransferCycles(in_bytes, kGmToUbGiBps, active) +
-                                  TransferCycles(out_bytes, kUbToGmGiBps, active);
-          const double trial_latency = std::max(compute, transfer);
+          VectorSchedulePlan trial = candidate;
+          ClearModeledCosts(&trial);
+          trial.kind = VectorScheduleKind::PointwiseStream;
+          trial.row_strips = row_strips;
+          trial.width_strips = width_strips;
+          trial.strip_h = strip_h;
+          trial.strip_w = strip_w;
+          trial.chunk_peak_ub_bytes = peak;
+          trial.phases[PhaseIndex(VectorPhase::Body)].trip_count = trips;
+          trial.phases[PhaseIndex(VectorPhase::Body)].pipeline_stages = 2;
+          const double trial_latency =
+              price_phase(&trial, VectorPhase::Body, strip_h, strip_w, trips, 2, all_outputs);
           if (trial_latency >= best_stream_latency) continue;
           best_stream_latency = trial_latency;
-          candidate.kind = VectorScheduleKind::PointwiseStream;
-          candidate.row_strips = row_strips;
-          candidate.width_strips = width_strips;
-          candidate.strip_h = strip_h;
-          candidate.strip_w = strip_w;
-          candidate.chunk_peak_ub_bytes = peak;
-          candidate.phases[PhaseIndex(VectorPhase::Body)].trip_count = trips;
-          candidate.phases[PhaseIndex(VectorPhase::Body)].pipeline_stages = 2;
-          candidate.modeled_compute_cycles = compute;
-          candidate.modeled_transfer_cycles = transfer;
+          candidate = std::move(trial);
           latency = trial_latency;
           feasible = true;
         }
@@ -569,8 +516,10 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
             {graph.softmax.input, 0, 0, {{graph.softmax.max_op, 0}}}};
       }
 
-      int64_t best_chunk = 0;
-      int64_t best_peak = 0;
+      VectorSchedulePlan best_reduction;
+      double best_reduction_latency = std::numeric_limits<double>::infinity();
+      int64_t largest_feasible_chunk = 0;
+      int64_t feasible_chunk_candidates = 0;
       for (int64_t chunk = std::min<int64_t>(candidate.reduced_extent, 4096); chunk >= 1; --chunk) {
         if (chunk != candidate.reduced_extent && chunk % 16 != 0) continue;
         const int64_t rows = graph.reduced_axis == 1 ? candidate.free_tile : chunk;
@@ -597,94 +546,101 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                                  hardware_.dma_alignment_bytes, 1);
         }
         const int64_t peak = std::max(stats_peak, apply_peak);
-        if (peak <= hardware_.ub_bytes) {
-          best_chunk = chunk;
-          best_peak = peak;
-          break;
-        }
-      }
-      if (best_chunk > 0) {
-        candidate.chunk = best_chunk;
-        candidate.full_chunks = candidate.reduced_extent / best_chunk;
-        candidate.tail = candidate.reduced_extent % best_chunk;
-        candidate.chunk_peak_ub_bytes = best_peak;
-        VectorPhasePlan& stats = candidate.phases[PhaseIndex(VectorPhase::Stats)];
+        if (peak > hardware_.ub_bytes) continue;
+        if (largest_feasible_chunk == 0) largest_feasible_chunk = chunk;
+        ++feasible_chunk_candidates;
+
+        VectorSchedulePlan trial = candidate;
+        ClearModeledCosts(&trial);
+        trial.chunk = chunk;
+        trial.full_chunks = trial.reduced_extent / chunk;
+        trial.tail = trial.reduced_extent % chunk;
+        trial.chunk_peak_ub_bytes = peak;
+        VectorPhasePlan& stats = trial.phases[PhaseIndex(VectorPhase::Stats)];
         stats.first_chunk = 1;
-        stats.trip_count = std::max<int64_t>(0, candidate.full_chunks - 1);
+        stats.trip_count = std::max<int64_t>(0, trial.full_chunks - 1);
         stats.pipeline_stages = stats.trip_count >= 2 ? 2 : 1;
-        VectorPhasePlan& apply = candidate.phases[PhaseIndex(VectorPhase::Apply)];
+        VectorPhasePlan& apply = trial.phases[PhaseIndex(VectorPhase::Apply)];
         apply.first_chunk = 0;
-        apply.trip_count = candidate.full_chunks;
+        apply.trip_count = trial.full_chunks;
         apply.pipeline_stages = apply.trip_count >= 2 ? 2 : 1;
 
-        const int64_t rows = graph.reduced_axis == 1 ? candidate.free_tile : candidate.chunk;
-        const int64_t cols = graph.reduced_axis == 1 ? candidate.chunk : candidate.free_tile;
-        const int64_t tasks = candidate.work_units;
-        const int64_t active = std::min<int64_t>(tasks, hardware_.vector_cores);
+        double trial_latency = 0.0;
         if (graph.softmax.matched) {
-          const double wide = static_cast<double>(rows * cols);
-          const double epr =
-              static_cast<double>(hardware_.vector_register_bytes / DTypeBytes(reduction_dtype));
-          const double repeats = std::ceil(wide / epr);
-          const double per_chunk = 10.0 * repeats + 180.0;
-          const double total_compute = per_chunk * static_cast<double>(candidate.full_chunks) * tasks;
-          const double stats_compute = WaveCompute(total_compute, tasks, hardware_.vector_cores);
-          const double stats_bytes =
-              static_cast<double>(rows * cols * DTypeBytes(reduction_dtype) * candidate.full_chunks * tasks);
-          const double stats_transfer = TransferCycles(stats_bytes, kGmToUbGiBps, active);
-          latency += stats.pipeline_stages == 2 ? std::max(stats_compute, stats_transfer)
-                                                : stats_compute + stats_transfer;
-          candidate.modeled_compute_cycles += stats_compute;
-          candidate.modeled_transfer_cycles += stats_transfer;
-          if (candidate.tail > 0) {
-            const int64_t tail_rows = graph.reduced_axis == 1 ? candidate.free_tile : candidate.tail;
-            const int64_t tail_cols = graph.reduced_axis == 1 ? candidate.tail : candidate.free_tile;
-            const double tail_wide = static_cast<double>(tail_rows * tail_cols);
-            const double tail_compute = WaveCompute((10.0 * std::ceil(tail_wide / epr) + 180.0) * tasks,
-                                                    tasks, hardware_.vector_cores);
-            const double tail_bytes = tail_wide * static_cast<double>(DTypeBytes(reduction_dtype) * tasks);
-            const double tail_transfer = TransferCycles(tail_bytes, kGmToUbGiBps, active);
-            latency += tail_compute + tail_transfer;
-            candidate.modeled_compute_cycles += tail_compute;
-            candidate.modeled_transfer_cycles += tail_transfer;
+          bool fallback = false;
+          const double init_compute =
+              GeneratedSoftmaxCycles910B(false, trial.free_tile, trial.chunk, 1, reduction_dtype,
+                                         trial.work_units, hardware_.vector_register_bytes, &fallback);
+          trial.used_reduction_fallback |= fallback;
+          trial_latency += record_phase(&trial, VectorPhase::Stats, rows, cols, 1, 1, {}, init_compute);
+          if (stats.trip_count > 0) {
+            fallback = false;
+            const double update_compute = GeneratedSoftmaxCycles910B(
+                true, trial.free_tile, trial.chunk, stats.trip_count, reduction_dtype, trial.work_units,
+                hardware_.vector_register_bytes, &fallback);
+            trial.used_reduction_fallback |= fallback;
+            trial_latency += record_phase(&trial, VectorPhase::Stats, rows, cols, stats.trip_count,
+                                          stats.pipeline_stages, {}, update_compute);
+          }
+          if (trial.tail > 0) {
+            const int64_t tail_rows = graph.reduced_axis == 1 ? trial.free_tile : trial.tail;
+            const int64_t tail_cols = graph.reduced_axis == 1 ? trial.tail : trial.free_tile;
+            fallback = false;
+            const double tail_compute =
+                GeneratedSoftmaxCycles910B(true, trial.free_tile, trial.tail, 1, reduction_dtype,
+                                           trial.work_units, hardware_.vector_register_bytes, &fallback);
+            trial.used_reduction_fallback |= fallback;
+            trial_latency +=
+                record_phase(&trial, VectorPhase::Stats, tail_rows, tail_cols, 1, 1, {}, tail_compute);
           }
         } else {
-          latency += price_phase(stats, rows, cols, std::max<int64_t>(1, candidate.full_chunks),
-                                 stats.pipeline_stages, {});
-          if (candidate.tail > 0) {
-            const int64_t tail_rows = graph.reduced_axis == 1 ? candidate.free_tile : candidate.tail;
-            const int64_t tail_cols = graph.reduced_axis == 1 ? candidate.tail : candidate.free_tile;
-            latency += price_phase(stats, tail_rows, tail_cols, 1, 1, {});
+          trial_latency += price_phase(&trial, VectorPhase::Stats, rows, cols, 1, 1, {});
+          if (stats.trip_count > 0) {
+            const double merge_compute = GeneratedReductionMergeCycles910B(
+                graph.reduced_axis, trial.free_tile, stats.trip_count, reduction_dtype, trial.work_units,
+                hardware_.vector_register_bytes);
+            trial_latency += price_phase(&trial, VectorPhase::Stats, rows, cols, stats.trip_count,
+                                         stats.pipeline_stages, {}, merge_compute);
           }
-          const int64_t merges = candidate.full_chunks - 1 + (candidate.tail > 0 ? 1 : 0);
-          if (merges > 0) {
-            const PrimitiveCost merge = PrimitiveCycles(VectorPrimitive::Add);
-            const int64_t repeats =
-                (candidate.free_tile + hardware_.vector_register_bytes / DTypeBytes(reduction_dtype) - 1) /
-                (hardware_.vector_register_bytes / DTypeBytes(reduction_dtype));
+          if (trial.tail > 0) {
+            const int64_t tail_rows = graph.reduced_axis == 1 ? trial.free_tile : trial.tail;
+            const int64_t tail_cols = graph.reduced_axis == 1 ? trial.tail : trial.free_tile;
             const double merge_compute =
-                WaveCompute((merge.slope * static_cast<double>(repeats) + merge.fixed) * merges * tasks,
-                            tasks, hardware_.vector_cores);
-            latency += merge_compute;
-            candidate.modeled_compute_cycles += merge_compute;
+                GeneratedReductionMergeCycles910B(graph.reduced_axis, trial.free_tile, 1, reduction_dtype,
+                                                  trial.work_units, hardware_.vector_register_bytes);
+            trial_latency +=
+                price_phase(&trial, VectorPhase::Stats, tail_rows, tail_cols, 1, 1, {}, merge_compute);
           }
         }
-        if (candidate.kind == VectorScheduleKind::ReductionSpanning || graph.softmax.matched) {
-          latency += price_phase(apply, rows, cols, std::max<int64_t>(1, candidate.full_chunks),
-                                 apply.pipeline_stages, all_outputs);
-          if (candidate.tail > 0) {
-            const int64_t tail_rows = graph.reduced_axis == 1 ? candidate.free_tile : candidate.tail;
-            const int64_t tail_cols = graph.reduced_axis == 1 ? candidate.tail : candidate.free_tile;
-            latency += price_phase(apply, tail_rows, tail_cols, 1, 1, all_outputs);
+        if (trial.kind == VectorScheduleKind::ReductionSpanning || graph.softmax.matched) {
+          trial_latency += price_phase(&trial, VectorPhase::Apply, rows, cols, trial.full_chunks,
+                                       apply.pipeline_stages, all_outputs);
+          if (trial.tail > 0) {
+            const int64_t tail_rows = graph.reduced_axis == 1 ? trial.free_tile : trial.tail;
+            const int64_t tail_cols = graph.reduced_axis == 1 ? trial.tail : trial.free_tile;
+            trial_latency += price_phase(&trial, VectorPhase::Apply, tail_rows, tail_cols, 1, 1, all_outputs);
           }
         } else {
-          candidate.phases[PhaseIndex(VectorPhase::Finalize)] = apply;
-          candidate.phases[PhaseIndex(VectorPhase::Apply)] = {};
-          const int64_t thin_rows = graph.reduced_axis == 1 ? candidate.free_tile : 1;
-          const int64_t thin_cols = graph.reduced_axis == 1 ? 1 : candidate.free_tile;
-          latency += price_phase(candidate.phases[PhaseIndex(VectorPhase::Finalize)], thin_rows, thin_cols, 1,
-                                 1, all_outputs);
+          trial.phases[PhaseIndex(VectorPhase::Finalize)] = apply;
+          trial.phases[PhaseIndex(VectorPhase::Apply)] = {};
+          const int64_t thin_rows = graph.reduced_axis == 1 ? trial.free_tile : 1;
+          const int64_t thin_cols = graph.reduced_axis == 1 ? 1 : trial.free_tile;
+          trial_latency +=
+              price_phase(&trial, VectorPhase::Finalize, thin_rows, thin_cols, 1, 1, all_outputs);
         }
+
+        if (trial_latency < best_reduction_latency ||
+            (trial_latency == best_reduction_latency && trial.chunk > best_reduction.chunk)) {
+          trial.modeled_cycles = trial_latency;
+          best_reduction = std::move(trial);
+          best_reduction_latency = trial_latency;
+        }
+      }
+      if (std::isfinite(best_reduction_latency)) {
+        best_reduction.largest_feasible_chunk = largest_feasible_chunk;
+        best_reduction.feasible_chunk_candidates = feasible_chunk_candidates;
+        candidate = std::move(best_reduction);
+        latency = best_reduction_latency;
         feasible = true;
       }
     }

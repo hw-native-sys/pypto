@@ -95,12 +95,19 @@ struct VectorSchedulePlan {
   int64_t free_tile_alloc = 0;
   int64_t reduced_extent = 0;
   int64_t chunk = 0;
+  int64_t largest_feasible_chunk = 0;
+  int64_t feasible_chunk_candidates = 0;
   int64_t full_chunks = 0;
   int64_t tail = 0;
   std::array<VectorPhasePlan, 4> phases;
+  std::array<double, 4> modeled_phase_compute_cycles{};
+  std::array<double, 4> modeled_phase_transfer_cycles{};
+  std::array<double, 4> modeled_phase_input_bytes{};
+  std::array<double, 4> modeled_phase_output_bytes{};
   double modeled_cycles = std::numeric_limits<double>::infinity();
   double modeled_compute_cycles = 0.0;
   double modeled_transfer_cycles = 0.0;
+  bool used_reduction_fallback = false;
 };
 
 struct VectorHardware {

@@ -21,7 +21,7 @@ from collections import Counter
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir, passes
+from pypto import LogLevel, backend, ir, passes, set_log_level
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -85,6 +85,19 @@ def _function(program: ir.Program, name: str) -> ir.Function:
     function = program.get_function(name)
     assert function is not None
     return function
+
+
+def _logged_plan(program: ir.Program, capfd: pytest.CaptureFixture[str]) -> tuple[ir.Program, str]:
+    """Run AutoTile and return its single machine-readable selected-plan log."""
+    capfd.readouterr()
+    set_log_level(LogLevel.INFO)
+    try:
+        after = _run_auto_tile(program)
+    finally:
+        set_log_level(LogLevel.INFO)
+    lines = [line for line in capfd.readouterr().err.splitlines() if "AutoTile[" in line]
+    assert len(lines) == 1
+    return after, lines[0]
 
 
 @pl.program
@@ -218,6 +231,14 @@ class NarrowRowReductionProgram:
     @pl.function(attrs={"auto_tile": True})
     def reduce(self, x: pl.Tensor[[16384, 16], pl.FP32]) -> pl.Tensor[[16384, 1], pl.FP32]:
         out: pl.Tensor[[16384, 1], pl.FP32] = pl.row_sum(x)
+        return out
+
+
+@pl.program
+class Bf16RowReductionProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[64, 4096], pl.BF16]) -> pl.Tensor[[64, 1], pl.BF16]:
+        out: pl.Tensor[[64, 1], pl.BF16] = pl.row_sum(x)
         return out
 
 
@@ -377,6 +398,30 @@ class BroadcastProgram:
     ) -> pl.Tensor[[64, 256], pl.FP32]:
         with_row: pl.Tensor[[64, 256], pl.FP32] = pl.add(x, row)
         out: pl.Tensor[[64, 256], pl.FP32] = pl.add(col, with_row)
+        return out
+
+
+@pl.program
+class RowExpandRepeatAlignedProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def row_expand(
+        self,
+        x: pl.Tensor[[1, 64], pl.FP32],
+        row: pl.Tensor[[1, 1], pl.FP32],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        out: pl.Tensor[[1, 64], pl.FP32] = pl.row_expand_add(x, row)
+        return out
+
+
+@pl.program
+class RowExpandCountModeProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def row_expand(
+        self,
+        x: pl.Tensor[[1, 256], pl.FP32],
+        row: pl.Tensor[[1, 1], pl.FP32],
+    ) -> pl.Tensor[[1, 256], pl.FP32]:
+        out: pl.Tensor[[1, 256], pl.FP32] = pl.row_expand_add(x, row)
         return out
 
 
@@ -582,6 +627,60 @@ def test_narrow_row_reduction_prices_the_lowerings_128_element_scratch():
     # 16-column input.  Tensor-to-tile lowering pads it to 128 columns, so the
     # first capacity-safe balanced grid is two 48-core waves.
     assert structure.spmd_core_nums == [96]
+
+
+def test_grounded_pointwise_chain_and_row_expand_count_mode_costs(capfd):
+    _, pointwise = _logged_plan(PointwiseProgram, capfd)
+    # One [32,64] strip executes exp -> add -> mul twice.  Only exp starts the
+    # vector stream: (2*32+31 + 2*32 + 2*32) * 2 = 446 cycles.
+    assert "strip=32x64" in pointwise
+    assert "compute_cycles=446 " in pointwise
+
+    _, aligned = _logged_plan(RowExpandRepeatAlignedProgram, capfd)
+    _, count_mode = _logged_plan(RowExpandCountModeProgram, capfd)
+    # FP32 has 64 elements/repeat. [1,64] pays 2*1+24. [1,256]
+    # additionally satisfies cols/epr > rows and therefore pays the grounded
+    # 16-cycle count-mask dispatch floor: 2*4+24+16 = 48.
+    assert "compute_cycles=26 " in aligned
+    assert "compute_cycles=48 " in count_mode
+
+
+def test_grounded_reduction_tables_and_fallback_are_observable(capfd):
+    _, row = _logged_plan(NarrowRowReductionProgram, capfd)
+    _, col = _logged_plan(ColSumProgram, capfd)
+    _, bf16 = _logged_plan(Bf16RowReductionProgram, capfd)
+    # These are exact interpolation-table goldens, including the selected
+    # grid's wave division. They are intentionally independent of Fusebox.
+    assert "compute_cycles=2510 " in row
+    assert "compute_cycles=38941 " in col
+    assert "reduction_model=grounded" in row
+    assert "reduction_model=grounded" in col
+    assert "reduction_model=legacy_fallback" in bf16
+
+
+def test_reduction_chunk_is_chosen_by_cost_not_first_capacity_fit(capfd):
+    after, plan = _logged_plan(RowReductionProgram, capfd)
+    structure = _structure(after)
+    assert structure.spmd_core_nums == [16]
+    # 1456 is the largest capacity-safe emitted chunk, but the exact
+    # reduction/traffic roofline selects 512. This pins enumeration by modeled
+    # cost instead of the former descending first-fit policy.
+    assert "chunks=8x512+0" in plan
+    assert "largest_feasible_chunk=1456" in plan
+    assert "feasible_chunks=91" in plan
+
+
+def test_generated_softmax_work_and_phase_traffic_are_exact(capfd):
+    _, plan = _logged_plan(SoftmaxProgram, capfd)
+    assert "chunks=17x480+32" in plan
+    # Statistics are the exact generated init/update primitive tallies; apply
+    # is the source DAG replay with persistent max/sum substituted.
+    assert "compute_cycles=13612 " in plan
+    assert "phase_compute=[0,10316,3296,0]" in plan
+    # The input is read once by each pass and the one output is stored only by
+    # apply. Padding remains UB-only and therefore does not inflate GM traffic.
+    assert "phase_input_bytes=[0,1048576,1048576,0]" in plan
+    assert "phase_output_bytes=[0,0,1048576,0]" in plan
 
 
 def test_reduction_multi_live_out_uses_a_capacity_safe_materialized_region():

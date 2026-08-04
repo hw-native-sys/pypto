@@ -118,13 +118,28 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
              << " grid=" << plan.m_partition.parts << "x" << plan.n_partition.parts
              << " work_units=" << plan.work_units << " tile=" << plan.tile_h << "x" << plan.tile_w
              << " strip=" << plan.strip_h << "x" << plan.strip_w << " chunks=" << plan.full_chunks << "x"
-             << plan.chunk << "+" << plan.tail
+             << plan.chunk << "+" << plan.tail << " largest_feasible_chunk=" << plan.largest_feasible_chunk
+             << " feasible_chunks=" << plan.feasible_chunk_candidates
              << " stages=" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Body)].pipeline_stages
              << "/" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Stats)].pipeline_stages
              << "/" << plan.phases[auto_tile::PhaseIndex(auto_tile::VectorPhase::Apply)].pipeline_stages
              << " peak_ub=" << plan.chunk_peak_ub_bytes << " full_peak_ub=" << plan.full_peak_ub_bytes
              << " compute_cycles=" << plan.modeled_compute_cycles
-             << " transfer_cycles=" << plan.modeled_transfer_cycles
+             << " transfer_cycles=" << plan.modeled_transfer_cycles << " phase_compute=["
+             << plan.modeled_phase_compute_cycles[0] << "," << plan.modeled_phase_compute_cycles[1] << ","
+             << plan.modeled_phase_compute_cycles[2] << "," << plan.modeled_phase_compute_cycles[3] << "]"
+             << " phase_transfer=[" << plan.modeled_phase_transfer_cycles[0] << ","
+             << plan.modeled_phase_transfer_cycles[1] << "," << plan.modeled_phase_transfer_cycles[2] << ","
+             << plan.modeled_phase_transfer_cycles[3] << "]"
+             << " phase_input_bytes=[" << static_cast<int64_t>(plan.modeled_phase_input_bytes[0]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[1]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[2]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[3]) << "]"
+             << " phase_output_bytes=[" << static_cast<int64_t>(plan.modeled_phase_output_bytes[0]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[1]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[2]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[3]) << "]"
+             << " reduction_model=" << (plan.used_reduction_fallback ? "legacy_fallback" : "grounded")
              << " modeled_cycles=" << plan.modeled_cycles;
     functions.emplace(global, emitted);
     changed = true;
