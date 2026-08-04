@@ -40,6 +40,9 @@ class LogLevel(IntEnum):
 def set_log_level(level: LogLevel) -> None:
     """Set the global log level threshold. Only messages at or above this level will be logged."""
 
+def _get_log_level() -> LogLevel:
+    """Return the global log level threshold for internal state restoration."""
+
 def log_debug(message: str) -> None:
     """Log a message at the DEBUG level"""
 

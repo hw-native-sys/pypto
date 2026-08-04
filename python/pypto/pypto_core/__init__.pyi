@@ -18,6 +18,7 @@ from .logging import (
     Error,
     InternalError,
     LogLevel,
+    _get_log_level,
     check,
     internal_check,
     internal_check_span,
@@ -165,6 +166,7 @@ __all__ = [
     "InternalError",
     # Logging framework
     "LogLevel",
+    "_get_log_level",
     "set_log_level",
     "log_debug",
     "log_info",

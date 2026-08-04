@@ -52,6 +52,7 @@ from harness.core.test_runner import (  # noqa: E402
     start_pipeline,
 )
 from pypto import LogLevel, set_log_level  # noqa: E402
+from pypto.pypto_core import _get_log_level  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
@@ -480,7 +481,7 @@ def tensor_shape(request):
 
 # Skip markers
 def pytest_configure(config):
-    """Register custom markers and apply early global settings."""
+    """Register custom markers and apply early runtime settings."""
     config.addinivalue_line(
         "markers",
         "platforms(*ids): restrict the test to the given platform ids "
@@ -498,14 +499,6 @@ def pytest_configure(config):
         "ci.yml change.",
     )
 
-    # Set C++ log level as early as possible so it applies to collection too.
-    # Forked child processes inherit this setting via os.fork().
-    try:
-        level_name: str = config.getoption("--pypto-log-level")
-        set_log_level(LogLevel[level_name])
-    except (ValueError, KeyError):
-        pass  # option not yet registered (e.g. during --co --help)
-
     # Set PyPTO runtime log level (orthogonal to PyPTO C++ logger above).
     try:
         runtime_level = config.getoption("--runtime-log-level")
@@ -516,6 +509,30 @@ def pytest_configure(config):
             from pypto.runtime import configure_log  # noqa: PLC0415
 
             configure_log(runtime_level)  # ValueError propagates: invalid CLI value must fail fast
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Apply the requested C++ log level only while an ST item is running.
+
+    ``tests/st/conftest.py`` can be loaded in a mixed ST/UT session.  Changing
+    the process-global C++ logger in ``pytest_configure`` therefore suppressed
+    diagnostics expected by later unit tests.  Surround the complete pytest
+    protocol (fixture setup, test call, and teardown) so forked runtime workers
+    still inherit the requested level, then restore the exact previous value.
+    """
+    del nextitem
+    if not item.path.is_relative_to(_ST_DIR):
+        yield
+        return
+
+    previous_level = _get_log_level()
+    try:
+        level_name: str = item.config.getoption("--pypto-log-level")
+        set_log_level(LogLevel[level_name])
+        yield
+    finally:
+        set_log_level(previous_level)
 
 
 def pytest_itemcollected(item):

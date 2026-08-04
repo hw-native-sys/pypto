@@ -80,21 +80,11 @@ class TestL3Manual:
     """Drive an L2 PyPTO build from a hand-written L3 using simpler directly."""
 
     def test_manual_l3(self, test_config, device_ids, tmp_path):
-        # Conftest's session fixture inserts ``simpler`` into ``sys.path``;
-        # importing inside the test guarantees the path is in place. Skipped
-        # automatically under --codegen-only since simpler isn't required there.
+        # Conftest's session fixture inserts ``simpler`` into ``sys.path``.
+        # Runtime imports stay below the compile-only exit because Simpler is
+        # neither configured nor required under --codegen-only.
         if not device_ids:
             pytest.skip("manual L3 test needs at least one device")
-
-        from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-            CallConfig,
-            TaskArgs,
-            TensorArgType,
-        )
-        from simpler.worker import Worker  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-        from simpler_setup.torch_interop import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-            make_tensor_arg,
-        )
 
         # 1) Compile L2 only. The result is a CompiledProgram; ``output_dir``
         # itself is the chip's work dir (contains kernel_config.py, kernels/,
@@ -104,6 +94,18 @@ class TestL3Manual:
             L2OnlyAddProgram,
             output_dir=str(out_dir),
             platform=test_config.platform,
+        )
+        if test_config.codegen_only:
+            pytest.skip("--codegen-only disables distributed runtime execution")
+
+        from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            CallConfig,
+            TaskArgs,
+            TensorArgType,
+        )
+        from simpler.worker import Worker  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        from simpler_setup.torch_interop import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            make_tensor_arg,
         )
 
         # 2) Assemble the ChipCallable ourselves — the same call
