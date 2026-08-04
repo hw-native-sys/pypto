@@ -13,9 +13,9 @@ Type stubs for pypto.testing submodule
 Internal testing utilities (do not use in production)
 """
 
-from typing import NoReturn, TypedDict
+from typing import Literal, NoReturn, TypedDict
 
-from .ir import Function
+from .ir import Call, Function
 
 class DsaReusePenaltyEdge(TypedDict):
     """One internal pre-solver DSA-RP recognizer result."""
@@ -55,3 +55,9 @@ def raise_internal_error_with_span(message: str, filename: str, line: int, col: 
 
 def recognize_dsa_reuse_penalties(function: Function) -> list[DsaReusePenaltyEdge]:
     """Return recognized DSA-RP edges without running placement."""
+
+def try_infer_pipe(call: Call) -> int | None:
+    """Return the exact backend pipe for a Call, or None."""
+
+def get_execution_memory_access_evidence(op_name: str) -> Literal["unknown", "functional", "no_access"]:
+    """Return an operation's execution-memory-access evidence."""
