@@ -14,60 +14,18 @@
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include "pypto/core/dtype.h"
-#include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
-#include "pypto/ir/program.h"
-#include "pypto/ir/stmt.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
 
 namespace pypto {
 namespace ir {
 namespace pass {
 namespace auto_tile {
-
-enum class VectorOpKind : uint8_t {
-  Elementwise,
-  RowSum,
-  RowMax,
-  ColSum,
-  ColMax,
-};
-
-enum class VectorPrimitive : uint8_t {
-  Generic,
-  Add,
-  Mul,
-  Div,
-  Exp,
-  Log,
-  Abs,
-  Sqrt,
-  Rsqrt,
-  ScalarAdd,
-  ScalarMul,
-  ScalarMax,
-  ScalarMin,
-  Cast,
-  Recip,
-  RowSum,
-  RowExtrema,
-  ColSum,
-  ColExtrema,
-};
-
-enum class VectorGeometry : uint8_t {
-  Flat,
-  RowExpand,
-  ColExpand,
-};
 
 enum class VectorScheduleKind : uint8_t {
   Materialized,
@@ -85,52 +43,6 @@ enum class VectorPhase : uint8_t {
 };
 
 inline constexpr size_t PhaseIndex(VectorPhase phase) { return static_cast<size_t>(phase); }
-
-struct VectorTensor {
-  VarPtr var;
-  int64_t rows = 0;
-  int64_t cols = 0;
-  DataType dtype = DataType::FP32;
-  bool boundary_input = false;
-  bool required_output = false;
-};
-
-struct VectorOp {
-  AssignStmtPtr stmt;
-  CallPtr call;
-  std::string emission_op;
-  bool swap_operands = false;
-  VectorOpKind kind = VectorOpKind::Elementwise;
-  VectorPrimitive primitive = VectorPrimitive::Add;
-  VectorGeometry geometry = VectorGeometry::Flat;
-  std::vector<size_t> inputs;
-  size_t output = 0;
-};
-
-struct SoftmaxPattern {
-  bool matched = false;
-  size_t input = 0;
-  size_t max_op = 0;
-  size_t exp_op = 0;
-  size_t sum_op = 0;
-  size_t sink_op = 0;
-};
-
-struct VectorGraph {
-  FunctionPtr function;
-  int64_t iteration_rows = 0;
-  int64_t iteration_cols = 0;
-  std::vector<VectorTensor> tensors;
-  std::vector<VectorOp> ops;
-  std::vector<size_t> required_outputs;
-  std::vector<size_t> required_output_ops;
-  std::unordered_map<const Var*, size_t> tensor_by_var;
-  SoftmaxPattern softmax;
-  int reduced_axis = 0;  // 0 = none, 1 = width, 2 = height
-  size_t reduction_op = std::numeric_limits<size_t>::max();
-
-  [[nodiscard]] static VectorGraph Build(const FunctionPtr& function, const ProgramPtr& program);
-};
 
 struct AxisPartition {
   int64_t parts = 1;
@@ -215,8 +127,6 @@ class VectorPlanner910B {
   VectorHardware hardware_;
 };
 
-[[nodiscard]] int64_t DTypeBytes(const DataType& dtype);
-[[nodiscard]] std::pair<int64_t, int64_t> StaticTensorShape(const TypePtr& type);
 [[nodiscard]] const char* ScheduleKindName(VectorScheduleKind kind);
 
 }  // namespace auto_tile

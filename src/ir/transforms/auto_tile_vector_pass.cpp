@@ -91,7 +91,10 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
     }
     CHECK_SPAN(function->func_type_ == FunctionType::Opaque, function->span_)
         << "AutoTile must run on a tensor-level Opaque function before scope outlining";
-    const auto_tile::VectorGraph graph = auto_tile::VectorGraph::Build(function, program);
+    auto_tile::VectorAdmissionResult admission = auto_tile::AdmitVectorGraph(function, program);
+    if (!admission.supported && admission.failure != nullptr) std::rethrow_exception(admission.failure);
+    CHECK_SPAN(admission.supported, function->span_) << "AutoTile cannot admit the entire marked function";
+    const auto_tile::VectorGraph& graph = admission.graph;
     const auto_tile::VectorSchedulePlan plan =
         auto_tile::VectorPlanner910B(ReadVectorHardware(function->span_)).Plan(graph);
     CHECK_SPAN(plan.feasible, function->span_)
