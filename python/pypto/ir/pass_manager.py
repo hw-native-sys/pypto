@@ -165,6 +165,9 @@ class PassManager:
             passes.simplify,
             passes.normalize_stmt_structure,
             passes.flatten_call_expr,
+            # Whole-function tensor tiling is explicit and all-or-nothing. It
+            # must see the flattened tensor DAG before any scope is outlined.
+            passes.auto_tile,
         )
         tensor_only_passes: tuple[PassFactory, ...] = (
             passes.outline_hierarchy_scopes,

@@ -650,6 +650,15 @@ def expand_manual_phase_fence() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def auto_tile() -> Pass:
+    """Tile one marked tensor function as one Ascend910B vector kernel.
+
+    A function carrying ``attrs={"auto_tile": True}`` must be a supported,
+    static rank-2 tensor DAG with one capacity-safe schedule. The pass does not
+    partition the graph or fall back to multiple kernels. Unmarked functions
+    are unchanged.
+    """
+
 def inline_functions() -> Pass:
     """Create a pass that eliminates ``FunctionType.Inline`` functions.
 
@@ -971,6 +980,7 @@ __all__ = [
     "lower_composite_ops",
     "materialize_dist_tensor_ctx",
     "flatten_call_expr",
+    "auto_tile",
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",

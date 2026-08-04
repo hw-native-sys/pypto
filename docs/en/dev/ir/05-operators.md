@@ -367,7 +367,7 @@ whose implicit `blayout` is `col_major`.
 `tile.move` stamps the destination `memory_space` itself (see the `TileType`
 contract in [Types](02-types.md#tiletype)), so a result view matching the
 destination's implicit view collapses to `nullopt` — the same per-space view
-[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) refreshes a
+[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) refreshes a
 retyped tile to.
 
 ### Reshape and the valid region

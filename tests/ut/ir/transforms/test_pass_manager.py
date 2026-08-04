@@ -30,6 +30,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "Simplify",
     "NormalizeStmtStructure",
     "FlattenCallExpr",
+    "AutoTile",
     *TENSOR_ONLY_PASSES,
     "LowerCompositeOps",
     "FlattenTileNdTo2D",

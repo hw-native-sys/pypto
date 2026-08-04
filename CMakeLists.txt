@@ -178,6 +178,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
+    src/ir/transforms/auto_tile_vector_pass.cpp
+    src/ir/transforms/auto_tile/vector_plan.cpp
+    src/ir/transforms/auto_tile/vector_emit.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
     src/ir/transforms/insert_mx_scale_addr_pass.cpp
     src/ir/transforms/loop_invariant_mat_residency.cpp

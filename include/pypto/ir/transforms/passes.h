@@ -486,6 +486,20 @@ Pass FlattenTileNdTo2D();
 Pass LegalizeTileCast();
 
 /**
+ * @brief Tile one explicitly marked tensor function as one Ascend910B vector kernel.
+ *
+ * A function with ``attrs={"auto_tile": true}`` is admitted only when its
+ * complete, static rank-2 tensor DAG has one capacity-safe vector schedule.
+ * The pass owns the SPMD grid, UB strip/chunk schedule, reduction phases,
+ * boundary-input lifetimes, and output stores. Unsupported operations or a
+ * graph that would require more than one kernel are compile errors. Functions
+ * without the marker are unchanged.
+ *
+ * Runs immediately after FlattenCallExpr and before scope outlining.
+ */
+Pass AutoTile();
+
+/**
  * @brief Auto-tile static 2D matmul-family calls for the backend's L0
  *
  * Queries ``utils::ChooseL0Tile`` for an ``(m, n, k, stationarity, dbC)``

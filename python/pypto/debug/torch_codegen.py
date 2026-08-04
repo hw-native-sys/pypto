@@ -976,6 +976,7 @@ def _register_ops() -> None:  # noqa: PLR0915
         m[f"{prefix}.row_expand_sub"] = _binop("-")
         m[f"{prefix}.row_expand_mul"] = _binop("*")
         m[f"{prefix}.row_expand_div"] = _binop("/")
+        m[f"{prefix}.col_expand_add"] = _binop("+")
         m[f"{prefix}.col_expand_mul"] = _binop("*")
         m[f"{prefix}.col_expand_sub"] = _binop("-")
         m[f"{prefix}.col_expand_div"] = _binop("/")

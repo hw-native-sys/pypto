@@ -540,6 +540,10 @@ void BindPass(nb::module_& m) {
              "skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("auto_tile", &pass::AutoTile,
+             "Tile one attrs={'auto_tile': True} tensor function as one exact Ascend910B vector kernel.\n\n"
+             "The whole static rank-2 DAG must be supported and capacity-safe; AutoTile never partitions "
+             "the function or falls back to multiple kernels. Unmarked functions are unchanged.");
   passes.def("inline_functions", &pass::InlineFunctions,
              "Create a pass that eliminates FunctionType::Inline functions by splicing\n"
              "their bodies at every call site. Runs as the first pipeline pass.\n"

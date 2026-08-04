@@ -454,7 +454,7 @@ def test_tuple_return_type_materialized():
     # Both elements must be materialized to their packed DN canonical stride:
     #   [4, 8]    -> [1, 4]
     #   [2, 4, 8] -> [32, 1, 4]
-    # (DN formula, doc 28-materialize_tensor_strides.md "Stride Formulas".)
+    # (DN formula, doc 29-materialize_tensor_strides.md "Stride Formulas".)
     def build(stride_2d, stride_3d):
         x = ir.Var("x", _dn_tensor([4, 8], stride_2d), _SPAN)
         y = ir.Var("y", _dn_tensor([2, 4, 8], stride_3d), _SPAN)

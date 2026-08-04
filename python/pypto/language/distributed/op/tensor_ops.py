@@ -594,7 +594,7 @@ def allreduce(
     counts do not read or store past the end.
 
     See ``docs/en/dev/distributed_ops.md`` and
-    ``docs/en/dev/passes/12-lower_composite_ops.md`` for the mesh partial-valid /
+    ``docs/en/dev/passes/13-lower_composite_ops.md`` for the mesh partial-valid /
     symbolic-extent target constraints (unchanged by this PR).
 
     **Barrier protocol (self-clearing credit barrier):** every call's

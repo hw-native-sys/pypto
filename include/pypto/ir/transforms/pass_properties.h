@@ -88,6 +88,15 @@ inline const PassProperties kFlattenCallExprProperties{
     .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
 
+// -- Whole-function tensor AutoTile pass -------------------------------------
+//
+// Consumes a marked, straight-line tensor DAG immediately after
+// FlattenCallExpr and replaces it with one exact SPMD/InCore vector schedule.
+// It preserves SSA and the flattened-call/normalized-statement contracts.
+inline const PassProperties kAutoTileProperties{
+    .required = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
+
 inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
 
