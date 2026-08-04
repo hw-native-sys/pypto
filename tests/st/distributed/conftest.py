@@ -12,8 +12,6 @@
 from typing import Any
 
 import pytest
-from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
-from pypto.runtime.distributed_runner import DistributedWorker
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +19,9 @@ def disable_runtime_execution_in_codegen_only(request, monkeypatch) -> None:
     """Let distributed tests compile, then skip at every public execution edge."""
     if not request.config.getoption("--codegen-only"):
         return
+
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+    from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
 
     def skip_execution(*args: Any, **kwargs: Any) -> None:
         del args, kwargs

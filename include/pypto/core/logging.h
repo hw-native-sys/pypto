@@ -36,6 +36,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -261,7 +262,7 @@ class LoggerManager {
   template <typename T>
   void Log(LogLevel l, const T& t, const T& t_rich) {
     std::scoped_lock lock(log_mtx);
-    if (l >= level) {
+    if (l >= GetLevel()) {
       if (std_enabled) {
         std_logger.Log(t_rich);
       }
@@ -281,6 +282,21 @@ class LoggerManager {
    * @param l New log level
    */
   static void ResetLevel(LogLevel l) { GetManager().level = l; }
+
+  /**
+   * @brief Get the effective log level for the calling thread
+   * @return Thread override when set, otherwise the process-global level
+   */
+  static LogLevel GetLevel() { return ThreadLevel().value_or(GetManager().level); }
+
+  /**
+   * @brief Override the log level for the calling thread
+   * @param l Thread-local log level threshold
+   */
+  static void SetThreadLevel(LogLevel l) { ThreadLevel() = l; }
+
+  /** @brief Remove the calling thread's log level override */
+  static void ClearThreadLevel() { ThreadLevel().reset(); }
 
   /**
    * @brief Enable or disable standard output logging
@@ -346,6 +362,11 @@ class LoggerManager {
   }
 
  private:
+  static std::optional<LogLevel>& ThreadLevel() {
+    static thread_local std::optional<LogLevel> level;
+    return level;
+  }
+
   /**
    * @brief Resolve the default log level for this process.
    *
@@ -416,7 +437,7 @@ class Logger {
    * @param line Line number (currently unused but available for future use)
    */
   Logger(LogLevel level_in, [[maybe_unused]] int line) : level(level_in) {
-    enable_log = LoggerManager::GetManager().level <= level;
+    enable_log = LoggerManager::GetLevel() <= level;
     if (enable_log) {
       static const char* MSG = "DIWEFVN";
       auto now = std::chrono::system_clock::now();
@@ -518,18 +539,18 @@ class Logger {
 #define LOG_EVENT LOG_LEVEL(pypto::LogLevel::EVENT)
 
 // Printf-style logging macros
-#define LOG_F(lvl, args...)                                                 \
-  do {                                                                      \
-    if (pypto::LoggerManager::GetManager().level <= pypto::LogLevel::lvl) { \
-      constexpr int default_buf_size = 1024;                                \
-      std::string buf(default_buf_size, '\0');                              \
-      int msg_length = std::snprintf(buf.data(), buf.size(), ##args) + 1;   \
-      if (msg_length > default_buf_size) {                                  \
-        buf.resize(msg_length, '\0');                                       \
-        std::snprintf(buf.data(), buf.size(), ##args);                      \
-      }                                                                     \
-      LOG_##lvl(buf.data());                                                \
-    }                                                                       \
+#define LOG_F(lvl, args...)                                               \
+  do {                                                                    \
+    if (pypto::LoggerManager::GetLevel() <= pypto::LogLevel::lvl) {       \
+      constexpr int default_buf_size = 1024;                              \
+      std::string buf(default_buf_size, '\0');                            \
+      int msg_length = std::snprintf(buf.data(), buf.size(), ##args) + 1; \
+      if (msg_length > default_buf_size) {                                \
+        buf.resize(msg_length, '\0');                                     \
+        std::snprintf(buf.data(), buf.size(), ##args);                    \
+      }                                                                   \
+      LOG_##lvl(buf.data());                                              \
+    }                                                                     \
   } while (false)
 
 #define LOG_DEBUG_F(fmt, args...) LOG_F(DEBUG, fmt, ##args)

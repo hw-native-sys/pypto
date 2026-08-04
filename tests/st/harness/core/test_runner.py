@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.pypto_core import LogLevel, _set_thread_log_level
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
@@ -949,6 +950,7 @@ def start_pipeline(  # noqa: PLR0913
     session_platform: str,
     dump_passes: bool,
     codegen_only: bool,
+    pypto_log_level: LogLevel,
     compile_workers: int,
     device_pool: "queue.Queue[int]",
     analyze_auto_scopes_for_deps: bool = False,
@@ -1027,7 +1029,12 @@ def start_pipeline(  # noqa: PLR0913
         n_exec = min(n_batches, _MAX_TASK_SUBMIT_INFLIGHT)
     else:
         n_exec = max(1, device_pool.qsize())
-    _execute_pool = ThreadPoolExecutor(max_workers=n_exec, thread_name_prefix="pypto-exec")
+    _execute_pool = ThreadPoolExecutor(
+        max_workers=n_exec,
+        thread_name_prefix="pypto-exec",
+        initializer=_set_thread_log_level,
+        initargs=(pypto_log_level,),
+    )
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
@@ -1037,7 +1044,12 @@ def start_pipeline(  # noqa: PLR0913
     for i, (backend_type, group) in enumerate(group_items):
         is_last = i == len(group_items) - 1
         set_backend_type(backend_type)
-        compile_pool = ThreadPoolExecutor(max_workers=compile_workers, thread_name_prefix="pypto-compile")
+        compile_pool = ThreadPoolExecutor(
+            max_workers=compile_workers,
+            thread_name_prefix="pypto-compile",
+            initializer=_set_thread_log_level,
+            initargs=(pypto_log_level,),
+        )
         _compile_pools.append(compile_pool)
         group_futs: list[Future] = []
         for tc in group:

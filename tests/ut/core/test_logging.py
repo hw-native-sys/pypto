@@ -23,11 +23,13 @@ while capsys only captures Python's sys.stdout/sys.stderr.
 """
 
 import re
+import threading
 import time
 
 import pypto
 import pytest
 from pypto import LogLevel, set_log_level
+from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level
 
 
 class TestLogLevel:
@@ -229,6 +231,32 @@ class TestLogLevelFiltering:
         assert "Error" not in captured.err
         assert "Fatal" not in captured.err
         assert "Event" not in captured.err
+
+
+class TestThreadLogLevel:
+    """Test internal thread-scoped log-level overrides."""
+
+    def test_override_is_isolated_to_calling_thread(self, capfd):
+        """A worker override must not change the process-global threshold."""
+        set_log_level(LogLevel.INFO)
+
+        def log_from_worker() -> None:
+            _set_thread_log_level(LogLevel.ERROR)
+            try:
+                pypto.log_info("worker info filtered")
+                pypto.log_error("worker error visible")
+            finally:
+                _clear_thread_log_level()
+
+        worker = threading.Thread(target=log_from_worker)
+        worker.start()
+        worker.join()
+        pypto.log_info("main info visible")
+
+        captured = capfd.readouterr()
+        assert "worker info filtered" not in captured.err
+        assert "worker error visible" in captured.err
+        assert "main info visible" in captured.err
 
 
 class TestLoggingScenarios:
