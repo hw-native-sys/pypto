@@ -46,6 +46,16 @@ def comparison() -> ModuleType:
 
 
 @pytest.fixture(scope="module")
+def multi_comparison() -> ModuleType:
+    return _load_script("standalone_multi_compare")
+
+
+@pytest.fixture(scope="module")
+def panel_summary() -> ModuleType:
+    return _load_script("summarize_dsa_device_panel")
+
+
+@pytest.fixture(scope="module")
 def preflight() -> ModuleType:
     return _load_script("preflight_standalone_comparison")
 
@@ -924,6 +934,61 @@ def test_validate_cases_and_summarize(generator: ModuleType, comparison: ModuleT
     assert summary["loose_minus_compact_us"] == pytest.approx(-1.0)
     assert summary["loose_minus_compact_percent"] < 0
     assert summary["paired_bootstrap_95_ci_us"][1] < 0
+
+
+def test_multi_comparison_balances_orders_and_summarizes(multi_comparison: ModuleType):
+    names = ["geometry_ff", "cypress", "dsa_rp_cg"]
+    orders = multi_comparison.balanced_orders(names)
+    assert len(orders) == 6
+    for position in range(3):
+        assert sorted(order[position] for order in orders) == sorted(names * 2)
+
+    summary = multi_comparison.summarize_variants(
+        {
+            "first_fit": [12.0, 12.2, 11.8],
+            "cypress": [11.0, 11.2, 10.8],
+            "dsa_rp": [9.0, 9.2, 8.8],
+        },
+        [
+            {"first_fit": 12.0, "cypress": 11.0, "dsa_rp": 9.0},
+            {"first_fit": 12.2, "cypress": 11.1, "dsa_rp": 9.1},
+            {"first_fit": 11.9, "cypress": 10.9, "dsa_rp": 8.9},
+        ],
+        bootstrap_samples=100,
+    )
+    assert summary["comparisons"]["cypress_minus_first_fit"]["median_delta_us"] == pytest.approx(-1.0)
+    assert summary["comparisons"]["dsa_rp_minus_cypress"]["paired_bootstrap_95_ci_us"][1] < 0
+
+
+def test_panel_summary_keeps_devices_separate(panel_summary: ModuleType):
+    def report(scale: float) -> dict:
+        medians = {
+            "geometry_ff": 10.0,
+            "cypress": 9.0,
+            "dsa_rp_cg": 8.0,
+        }
+        return {
+            "summary": {"variants": {arm: {"median_us": value * scale} for arm, value in medians.items()}}
+        }
+
+    reports = {
+        ("kernel_a", "device4"): report(1.0),
+        ("kernel_b", "device4"): report(2.0),
+        ("kernel_a", "device5"): report(3.0),
+    }
+    kernel_rows, panel_rows = panel_summary.summarize_panel(reports, bootstrap_samples=100)
+    assert len(kernel_rows) == 9
+    devices = {row["device"] for row in panel_rows}
+    assert devices == {"device4", "device5"}
+    candidate = next(
+        row
+        for row in panel_rows
+        if row["device"] == "device4"
+        and row["reference"] == "geometry_ff"
+        and row["candidate"] == "dsa_rp_cg"
+    )
+    assert candidate["kernels"] == 2
+    assert candidate["geomean_ratio"] == pytest.approx(0.8)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,46 @@ It verifies fingerprints, hard geometry, exact moves, and placement legality,
 then writes full replay-ready solution sets and an overlap/objective report. PyPTO
 replay remains the authoritative C++ validator before codegen.
 
+For the paper's first device comparison, freeze recognizer provenance and a
+broad schema-v1 kernel inventory, then generate all three replayable
+solutions in one pass:
+
+```bash
+python .claude/skills/incore-profiling/prepare_dsa_device_panel.py \
+  --panel panel.json --dsa-bench <dsa-solver-build>/dsa-bench \
+  --output-root <prepared-panel>
+```
+
+The default protocol includes every currently eligible A2/A3 kernel exported by
+the selected PyPTO/PyPTO-Lib programs, without a buffer-count threshold, and
+retains historical winners as forced attempts. The manifest is written before
+any solver runs. Its three device arms are geometry FirstFit, Cypress
+relaxation, and DSA-RP canonical greedy. Geometry canonical greedy and DSA-RP
+local search remain model-study algorithms; earlier results show no useful
+separation on the easier compiler corpus, so they do not consume device time in
+the exploratory screen.
+
+The input manifest has this shape (repeat `kernels` to the required stratum
+counts):
+
+```json
+{
+  "schema_version": 1,
+  "selection_policy": "all_current_eligible_plus_historical_winners_v1",
+  "recognizer": {
+    "policy": "quadratic_unit_v0",
+    "source_sha256": "<recognizer-source-sha256>"
+  },
+  "kernels": [{
+    "tag": "stable-kernel-id",
+    "program": "source-program-id",
+    "kernel": "logical-function-id",
+    "selection_class": "historical_winner",
+    "problem": "relative/or/absolute/problem.dsa.json"
+  }]
+}
+```
+
 For a single buffer-pair experiment, construct the disjoint/overlapping pair
 and its translated address control jointly:
 
@@ -118,6 +158,35 @@ python .claude/skills/incore-profiling/standalone_compare.py \
   --output <real-output-abi-name> --device-id 0 \
   --quartets 8 --warmup 10 --rounds 100 --output-root <results>
 ```
+
+For three or more placements, use the balanced multi-arm driver. `--case` is
+repeatable; with three variants it runs three cyclic orders and their reverses,
+so every placement occurs twice in every process position:
+
+```bash
+python .claude/skills/incore-profiling/standalone_multi_compare.py \
+  --case geometry_ff=<case> --case cypress=<case> --case dsa_rp_cg=<case> \
+  --output <real-output-abi-name> --device-id 0 \
+  --warmup 10 --rounds 100 --output-root <results>
+```
+
+The driver validates identical ABI, inputs, captured expectations, and output
+hashes before timing. It writes all pairwise paired-block bootstrap intervals;
+cross-device confirmation remains an experiment-level reporting decision.
+
+After all kernels finish, aggregate the frozen panel per device. Repeat
+`--report` for every kernel/device pair; never pool or average devices:
+
+```bash
+python .claude/skills/incore-profiling/summarize_dsa_device_panel.py \
+  --report kernel_a@device4=<report.json> \
+  --report kernel_a@device5=<report.json> \
+  --output-root <panel-results>
+```
+
+The summary reports geometric-mean candidate/reference latency ratios and a
+kernel bootstrap interval separately for each device. The per-kernel table is
+retained so nulls and sign reversals remain visible.
 
 Synthetic inputs are bounded and emitted in chunks. Integer pointers default to
 zero; use `pointer_fills` or file inputs when kernels require indices,
