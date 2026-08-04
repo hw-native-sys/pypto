@@ -18,6 +18,7 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -309,6 +310,28 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
     graph.required_output_ops.push_back(defining_op->second);
   }
   CHECK_SPAN(!graph.ops.empty(), function->span_) << "AutoTile found no tensor operations to schedule";
+
+  for (size_t i = 0; i < function->params_.size(); ++i) {
+    const ParamDirection direction =
+        i < function->param_directions_.size() ? function->param_directions_[i] : ParamDirection::In;
+    if (direction != ParamDirection::Out) continue;
+    CHECK_SPAN(As<TensorType>(function->params_[i]->GetType()) != nullptr, function->params_[i]->span_)
+        << "AutoTile explicit Out parameters must be tensors";
+    graph.required_output_buffers.push_back(function->params_[i]);
+  }
+  if (!graph.required_output_buffers.empty()) {
+    CHECK_SPAN(graph.required_output_buffers.size() == graph.required_outputs.size(), function->span_)
+        << "AutoTile requires all returned tensors to map positionally to explicit Out parameters; got "
+        << graph.required_outputs.size() << " returns and " << graph.required_output_buffers.size()
+        << " Out parameters";
+    for (size_t i = 0; i < graph.required_outputs.size(); ++i) {
+      const TypePtr& produced_type = graph.tensors[graph.required_outputs[i]].var->GetType();
+      const VarPtr& output_buffer = graph.required_output_buffers[i];
+      CHECK_SPAN(structural_equal(produced_type, output_buffer->GetType()), output_buffer->span_)
+          << "AutoTile returned tensor " << i << " is not type-compatible with explicit Out parameter '"
+          << output_buffer->name_hint_ << "'";
+    }
+  }
 
   std::unordered_map<size_t, size_t> use_count;
   for (const VectorOp& op : graph.ops)

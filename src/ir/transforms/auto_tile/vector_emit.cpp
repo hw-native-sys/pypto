@@ -140,6 +140,14 @@ class VectorEmitter {
   }
 
   void CreateOutputs() {
+    if (!graph_.required_output_buffers.empty()) {
+      INTERNAL_CHECK_SPAN(graph_.required_output_buffers.size() == graph_.required_outputs.size(), span_)
+          << "Internal error: AutoTile explicit output mapping is incomplete";
+      for (size_t i = 0; i < graph_.required_outputs.size(); ++i) {
+        outputs_.emplace(graph_.required_outputs[i], graph_.required_output_buffers[i]);
+      }
+      return;
+    }
     auto& registry = OpRegistry::GetInstance();
     for (size_t tensor : graph_.required_outputs) {
       const VectorTensor& output = graph_.tensors[tensor];
@@ -773,7 +781,8 @@ class VectorEmitter {
 
 FunctionPtr EmitVectorSchedule(const VectorGraph& graph, const VectorSchedulePlan& plan,
                                const std::unordered_set<std::string>& called_functions) {
-  const bool lift_outputs = called_functions.count(graph.function->name_) == 0;
+  const bool lift_outputs =
+      graph.required_output_buffers.empty() && called_functions.count(graph.function->name_) == 0;
   return VectorEmitter(graph, plan, lift_outputs).Emit();
 }
 

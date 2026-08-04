@@ -105,6 +105,8 @@ struct VectorGraph {
   std::vector<VectorOp> ops;
   std::vector<size_t> required_outputs;
   std::vector<size_t> required_output_ops;
+  // Empty for return-only functions; otherwise positional with required_outputs.
+  std::vector<VarPtr> required_output_buffers;
   std::unordered_map<const Var*, size_t> tensor_by_var;
   SoftmaxPattern softmax;
   int reduced_axis = 0;  // 0 = none, 1 = width, 2 = height

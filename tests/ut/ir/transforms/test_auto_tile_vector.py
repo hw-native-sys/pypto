@@ -106,6 +106,75 @@ class RepeatedInputProgram:
 
 
 @pl.program
+class ExplicitOutProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def pointwise(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        y = pl.exp(x)
+        return y
+
+
+@pl.program
+class ExplicitMultiOutProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def pointwise(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        first: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+        second: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+        first = pl.exp(x)
+        second = pl.add(first, 1.0)
+        return first, second
+
+
+@pl.program
+class ExplicitOutDirectCallProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        y = pl.exp(x)
+        return y
+
+    @pl.function
+    def main(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        out: pl.Tensor[[64, 256], pl.FP32] = self.kernel(x, y)
+        return out
+
+
+@pl.program
+class ExplicitOutSubmitProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        y = pl.exp(x)
+        return y
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        with pl.manual_scope():
+            out, _tid = pl.submit(self.kernel, x, y)
+        return out
+
+
+@pl.program
 class MultiOutputProgram:
     @pl.function(attrs={"auto_tile": True})
     def live_out(
@@ -363,6 +432,83 @@ def test_repeated_operand_is_one_load_but_two_uses():
     assert structure.ops["tensor.mul"] == 1
 
 
+@pytest.mark.parametrize(
+    ("program", "expected_params", "expected_assembles"),
+    [(ExplicitOutProgram, 2, 1), (ExplicitMultiOutProgram, 3, 2)],
+)
+def test_explicit_out_parameters_are_reused_without_duplicate_lifted_outputs(
+    program, expected_params: int, expected_assembles: int
+):
+    after = _run_auto_tile(program)
+    function = _function(after, "pointwise")
+    structure = _structure(after)
+    assert len(function.params) == expected_params
+    assert list(function.param_directions).count(ir.ParamDirection.Out) == expected_assembles
+    assert structure.ops["tensor.create"] == 0
+    assert structure.ops["tensor.assemble"] == expected_assembles
+
+
+@pytest.mark.parametrize("program", [ExplicitOutDirectCallProgram, ExplicitOutSubmitProgram])
+def test_called_explicit_out_kernel_preserves_its_declared_signature(program):
+    function = _function(_run_auto_tile(program), "kernel")
+    assert len(function.params) == 2
+    assert list(function.param_directions) == [ir.ParamDirection.In, ir.ParamDirection.Out]
+
+
+@pytest.mark.parametrize("kind", ["count", "type"])
+def test_explicit_out_mapping_is_all_or_none_and_type_exact(kind: str):
+    if kind == "count":
+
+        @pl.program
+        class Program:
+            @pl.function(attrs={"auto_tile": True})
+            def kernel(
+                self,
+                x: pl.Tensor[[64, 256], pl.FP32],
+                only: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 256], pl.FP32], pl.Tensor[[64, 256], pl.FP32]]:
+                first: pl.Tensor[[64, 256], pl.FP32] = pl.exp(x)
+                second: pl.Tensor[[64, 256], pl.FP32] = pl.add(first, 1.0)
+                return first, second
+
+    else:
+
+        @pl.program
+        class Program:
+            @pl.function(attrs={"auto_tile": True})
+            def kernel(
+                self,
+                x: pl.Tensor[[64, 256], pl.FP32],
+                wrong: pl.Out[pl.Tensor[[64, 256], pl.FP16]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                out: pl.Tensor[[64, 256], pl.FP32] = pl.exp(x)
+                return out
+
+    with pytest.raises(ValueError, match="AutoTile"):
+        _run_auto_tile(Program)
+
+
+def test_inout_parameter_is_not_an_implicit_output_sink():
+    @pl.program
+    class Program:
+        @pl.function(attrs={"auto_tile": True})
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 256], pl.FP32],
+            state: pl.InOut[pl.Tensor[[64, 256], pl.FP32]],
+        ) -> pl.Tensor[[64, 256], pl.FP32]:
+            out: pl.Tensor[[64, 256], pl.FP32] = pl.add(x, state)
+            return out
+
+    function = _function(_run_auto_tile(Program), "kernel")
+    assert len(function.params) == 3
+    assert list(function.param_directions) == [
+        ir.ParamDirection.In,
+        ir.ParamDirection.InOut,
+        ir.ParamDirection.Out,
+    ]
+
+
 def test_returned_intermediate_stays_live_for_two_distinct_stores():
     after = _run_auto_tile(MultiOutputProgram)
     structure = _structure(after)
@@ -506,6 +652,8 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
     "program",
     [
         PointwiseProgram,
+        ExplicitOutProgram,
+        ExplicitMultiOutProgram,
         WidePointwiseProgram,
         MultiOutputProgram,
         WideMultiOutputProgram,
