@@ -322,7 +322,7 @@ class TestSystemOpsParsing:
                 self,
                 x: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Tensor[[512, 128], pl.FP32],
-                ws: pl.Tensor[[32], pl.INT32],
+                ws: pl.Tensor[[16], pl.INT32],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 off = pl.tile.get_block_idx() * 128
                 t = pl.load(x, [off, 0], [128, 128])
@@ -330,16 +330,76 @@ class TestSystemOpsParsing:
                 return pl.store(t, [off, 0], out)
 
         printed = Before.as_python()
-        # The high-level surface (mode/core_type/gm_workspace/used_cores) round-trips;
-        # the synthesized scratch is threaded back via the internal scratch= kwarg.
+        # The high-level surface has no compiler-internal scratch operands.
         assert 'pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4' in printed
+        assert "scratch" not in printed
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_syncall_soft_auto_participant_count_round_trip(self):
+        """Explicit used_cores=0 round-trips as the launch-derived soft form."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, ws: pl.Tensor[[16], pl.INT32]) -> pl.Tensor[[16], pl.INT32]:
+                pl.system.syncall(mode="soft", core_type="mix", gm_workspace=ws, used_cores=0)
+                return ws
+
+        printed = Before.as_python()
+        syncall_line = next(line for line in printed.splitlines() if "pl.system.syncall" in line)
+        assert 'mode="soft", core_type="mix", gm_workspace=ws, used_cores=0' in syncall_line
+
+        reparsed = pl.parse_program(printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_syncall_soft_ir_zero_count_is_canonicalized(self):
+        """The low-level helper also maps explicit i32 zero to the one-operand form."""
+        span = ir.Span.unknown()
+        workspace = ir.Var("ws", ir.TensorType([16], DataType.INT32), span)
+        zero = ir.ConstInt(0, DataType.INT32, span)
+
+        call = system_ops.syncall_soft("aiv_only", workspace, zero, span=span)
+
+        assert call.args == [workspace]
+
+    def test_syncall_soft_ir_rejects_out_of_range_count(self):
+        """The low-level helper rejects i32 constants that cannot represent a participant count."""
+        span = ir.Span.unknown()
+        workspace = ir.Var("ws", ir.TensorType([16], DataType.INT32), span)
+
+        for invalid_count in (-1, 1 << 31):
+            count = ir.ConstInt(invalid_count, DataType.INT32, span)
+            with pytest.raises(ValueError, match="INT32 range"):
+                system_ops.syncall_soft("aiv_only", workspace, count, span=span)
+
+    def test_syncall_soft_dynamic_participant_count_round_trip(self):
+        """An INT32 participant count remains an operand across print/parse."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                ws: pl.Tensor[[16], pl.INT32],
+                participants: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16], pl.INT32]:
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=participants)
+                return ws
+
+        printed = Before.as_python()
+        syncall_line = next(line for line in printed.splitlines() if "pl.system.syncall" in line)
+        assert "used_cores=participants" in syncall_line
 
         reparsed = pl.parse_program(printed)
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
     def test_syncall_soft_validation(self):
-        """Soft syncall validates mode, core_type, gm_workspace, and used_cores."""
+        """Soft syncall validates mode, core type, workspace, and participant count."""
         with pytest.raises(ValueError, match="mode"):
             pl.system.syncall(mode="bogus")
         # An unknown core_type is rejected.
@@ -350,6 +410,16 @@ class TestSystemOpsParsing:
         for ct in ("aiv_only", "aic_only", "mix"):
             with pytest.raises(ValueError, match="gm_workspace"):
                 pl.system.syncall(mode="soft", core_type=ct, used_cores=4)
+
+        span = ir.Span.unknown()
+        workspace = pl.Tensor(expr=ir.Var("ws", ir.TensorType([16], DataType.INT32), span))
+        with pytest.raises(ValueError, match="explicit used_cores"):
+            pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace)
+        for invalid_count in (-1, 1 << 31):
+            with pytest.raises(ValueError, match="INT32 range"):
+                pl.system.syncall(
+                    mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=invalid_count
+                )
 
     def test_multiple_system_ops_round_trip(self):
         """Test round-trip with multiple system ops in a single function."""

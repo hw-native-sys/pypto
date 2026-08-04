@@ -14,6 +14,7 @@
  * @brief PTO codegen registration for cross-core (TPUSH/TPOP/TFREE/pipe) ops.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -618,72 +619,63 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     }
 
     CHECK(mode == "soft") << "system.syncall: mode must be hard|soft, got " << mode;
-    // Soft form operands (all validated below):
-    //   aiv_only: [gm_workspace, ub_scratch, used_cores]
-    //   aic_only: [gm_workspace, l1_scratch, used_cores]
-    //   mix:      [gm_workspace, ub_scratch, l1_scratch, used_cores]
-    // gm_workspace is a shared 1-D GM int32 buffer (used_cores*8 slots, zero-init);
-    // the scratch tiles are local int32 staging (UB=Vec on the vector lane, flat
-    // L1=Mat on the cube lane); used_cores is an i32 participant count. A mix
-    // barrier carries both scratch tiles and is emitted on both lanes (SHARED);
-    // pto-isa's soft-mix lowering uses the L1 tile on the cube path and the UB
-    // tile on the vector path (the other is dead on each lane).
-    const bool is_mix = core_type == "mix";
-    const size_t num_scratch = is_mix ? 2 : 1;
-    const size_t expected_args = num_scratch + 2;  // gm_workspace + scratch(es) + used_cores
-    CHECK(op->args_.size() == expected_args) << "system.syncall (soft " << core_type << ") requires "
-                                             << expected_args << " operands, got " << op->args_.size();
-    const size_t used_idx = op->args_.size() - 1;
+    // PTOAS v0.55 uses one soft operand ABI for every participant set:
+    // [gm_workspace] or [gm_workspace, used_cores]. Omitting used_cores asks
+    // PTO-ISA to derive the participant count from the launch configuration.
+    CHECK(op->args_.size() == 1 || op->args_.size() == 2)
+        << "system.syncall (soft " << core_type << ") requires gm_workspace and optional used_cores, got "
+        << op->args_.size() << " operands";
 
-    // gm_workspace: shared 1-D GM int32 tensor -> pto.partition_view over the
-    // whole buffer.
+    // gm_workspace: shared GM int32 tensor -> pto.partition_view over the whole
+    // buffer. PTO-ISA uses one exclusive 64-byte cache line, so a statically
+    // shaped workspace must contain at least 16 int32 elements.
     auto gm_var = AsVarLike(op->args_[0]);
     CHECK_SPAN(gm_var, op->span_) << "system.syncall soft: gm_workspace must be a tensor variable";
     auto gm_tt = As<ir::TensorType>(gm_var->GetType());
-    CHECK_SPAN(gm_tt && gm_tt->shape_.size() == 1, op->span_)
-        << "system.syncall soft: gm_workspace must be a 1-D tensor";
+    CHECK_SPAN(gm_tt && !gm_tt->shape_.empty(), op->span_)
+        << "system.syncall soft: gm_workspace must be a tensor with rank >= 1";
     const std::string dtype_str = codegen.GetTypeString(gm_tt->dtype_);
-    // Workspace contract (user-facing): the soft barrier indexes int32 counter
-    // slots, so the GM buffer must be INT32 with >= used_cores * 8 elements.
     CHECK_SPAN(dtype_str == "i32", op->span_)
         << "system.syncall soft: gm_workspace must be an INT32 tensor, got " << dtype_str;
-    constexpr int64_t kSyncAllSoftSlotInt32 = 8;  // pto::SYNCALL soft: 8 int32 slots per core
-    if (auto used_const = As<ir::ConstInt>(op->args_[used_idx])) {
-      const int64_t required = used_const->value_ * kSyncAllSoftSlotInt32;
-      if (auto gm_dim = As<ir::ConstInt>(gm_tt->shape_[0])) {
-        CHECK_SPAN(gm_dim->value_ >= required, op->span_)
-            << "system.syncall soft: gm_workspace needs >= used_cores*8 (" << required
-            << ") int32 slots, got " << gm_dim->value_;
+
+    constexpr int64_t kSyncAllSoftWorkspaceInt32 = 16;
+    int64_t static_capacity = 1;
+    bool has_dynamic_dim = false;
+    for (const auto& dim_expr : gm_tt->shape_) {
+      auto dim = As<ir::ConstInt>(dim_expr);
+      if (!dim) {
+        has_dynamic_dim = true;
+        continue;
       }
+      CHECK_SPAN(dim->value_ > 0, op->span_)
+          << "system.syncall soft: gm_workspace dimensions must be positive, got " << dim->value_;
+      static_capacity = std::min(kSyncAllSoftWorkspaceInt32,
+                                 static_capacity * std::min(kSyncAllSoftWorkspaceInt32, dim->value_));
     }
-    // Each scratch tile must be an INT32 staging tile (it mirrors the int32 GM slots).
-    for (size_t i = 1; i <= num_scratch; ++i) {
-      if (auto scratch_tt = As<ir::TileType>(op->args_[i]->GetType())) {
-        CHECK_SPAN(codegen.GetTypeString(scratch_tt->dtype_) == "i32", op->span_)
-            << "system.syncall soft: scratch tile must be INT32";
-      }
+    if (!has_dynamic_dim) {
+      CHECK_SPAN(static_capacity >= kSyncAllSoftWorkspaceInt32, op->span_)
+          << "system.syncall soft: gm_workspace must contain at least " << kSyncAllSoftWorkspaceInt32
+          << " INT32 elements (64 bytes), got " << static_capacity;
     }
+
     const std::string gm_view = codegen.GetOrCreateTensorView(gm_var);
     const std::string gm_view_type = codegen.GetTensorViewTypeString(gm_tt.get());
     const std::string partition_type = MakePartitionTensorViewType(GetDimStrings(gm_tt->shape_), dtype_str);
-    const std::vector<std::string> offset_codes = {codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX)};
+    const std::vector<std::string> offset_codes(gm_tt->shape_.size(),
+                                                codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX));
     const std::vector<std::string> size_codes = GetSizeCodes(gm_tt->shape_, codegen);
     const std::string gm_pview = EmitPartitionViewPTO(gm_var->name_hint_ + "_syncgm", gm_view, gm_view_type,
                                                       partition_type, offset_codes, size_codes, codegen);
 
-    // Assemble the operand + type-annotation lists: gm_pview, scratch(es), used_cores.
+    // Assemble the operand and type lists: gm_pview[, used_cores].
     std::vector<std::string> operands = {gm_pview};
     std::vector<std::string> types = {partition_type};
-    for (size_t i = 1; i <= num_scratch; ++i) {
-      const std::string scratch = codegen.GetExprAsCode(op->args_[i]);
-      const std::string scratch_type = codegen.GetExprTypeAnnotation(op->args_[i]);
-      CHECK_SPAN(!scratch_type.empty(), op->span_)
-          << "system.syncall soft: scratch tile has no tile_buf type annotation";
-      operands.push_back(scratch);
-      types.push_back(scratch_type);
+    if (op->args_.size() == 2) {
+      CHECK_SPAN(ExprIsI32Scalar(op->args_[1]), op->span_)
+          << "system.syncall soft: used_cores must be an INT32 scalar";
+      operands.push_back(codegen.GetExprAsCode(op->args_[1]));
+      types.emplace_back("i32");
     }
-    operands.push_back(codegen.GetExprAsCode(op->args_[used_idx]));  // used_cores (i32)
-    types.emplace_back("i32");
 
     std::ostringstream oss;
     oss << "pto.syncall(";

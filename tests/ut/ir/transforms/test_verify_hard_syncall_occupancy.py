@@ -123,7 +123,7 @@ def _soft_program(n: int):
             self,
             a: pl.Tensor[[n * TR, TC], pl.FP32],
             b: pl.Tensor[[n * TR, TC], pl.FP32],
-            ws: pl.Tensor[[n * 8], pl.INT32],
+            ws: pl.Tensor[[16], pl.INT32],
             out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
         ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
             i = pl.tile.get_block_idx()
@@ -139,7 +139,7 @@ def _soft_program(n: int):
             self,
             a: pl.Tensor[[n * TR, TC], pl.FP32],
             b: pl.Tensor[[n * TR, TC], pl.FP32],
-            ws: pl.Tensor[[n * 8], pl.INT32],
+            ws: pl.Tensor[[16], pl.INT32],
             out: pl.Out[pl.Tensor[[n * TR, TC], pl.FP32]],
         ) -> pl.Tensor[[n * TR, TC], pl.FP32]:
             with pl.spmd(n):

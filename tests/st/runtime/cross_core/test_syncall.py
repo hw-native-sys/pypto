@@ -75,15 +75,14 @@ TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 48 * 128 = 6144 on 910B
 # Hard-form SYNCALL needs the full AIV grid; the 950/a5 AIV count differs, so
 # restrict this test to the a2a3 (910B) profile it was validated against.
 A2A3_PLATFORMS = ("a2a3", "a2a3sim")
-SOFT_SYNCALL_SKIP_REASON = "Soft syncall needs PTOAS v0.55 codegen compatibility; restore in a follow-up PR"
 
 # Soft-form SYNCALL polls a shared GM workspace, so it works at *partial*
 # occupancy. Use a small block count to exercise that (a hard barrier would
-# deadlock here). The GM workspace needs used_cores * 8 zero-initialized int32
-# slots, shared across all blocks (passed as a kernel parameter).
+# deadlock here). The GM workspace is one exclusive, zero-initialized 64-byte
+# cache line (16 int32 elements), shared across all blocks.
 SOFT_CORE_NUM = 4
 SOFT_TOTAL_ROWS = SOFT_CORE_NUM * TILE_ROWS  # 512
-SOFT_WS_SLOTS = SOFT_CORE_NUM * 8
+SOFT_WS_SLOTS = 16
 
 # Mixed (AIC + AIV) soft-form SYNCALL. On 910B one cube block pairs with
 # AIV_RATIO vector subblocks (1 AIC + 2 AIV), so a launch of B cube blocks has
@@ -92,7 +91,7 @@ _BK910B = backend.Backend910B.instance()
 AIV_RATIO = _aiv_core_count(_BK910B) // _aic_core_count(_BK910B)  # 48 // 24 = 2
 MIX_CUBE_BLOCKS = 2  # partial occupancy (a hard mix barrier would deadlock here)
 MIX_USED_CORES = MIX_CUBE_BLOCKS * (1 + AIV_RATIO)  # 2 * 3 = 6 total AIC+AIV participants
-MIX_WS_SLOTS = MIX_USED_CORES * 8  # 48
+MIX_WS_SLOTS = 16
 MIX_M = 32
 MIX_K = 64
 MIX_N = 32
@@ -102,7 +101,7 @@ MIX_ROW_TILE = MIX_M // MIX_CUBE_BLOCKS  # 16 rows per cube block
 # blocks has exactly B soft participants.
 AIC_CUBE_BLOCKS = 2
 AIC_USED_CORES = AIC_CUBE_BLOCKS  # cube cores only
-AIC_WS_SLOTS = AIC_USED_CORES * 8  # 16
+AIC_WS_SLOTS = 16
 AIC_M = 32
 AIC_K = 64
 AIC_N = 32
@@ -185,7 +184,9 @@ class SPMDSyncAllSoftProgram:
         offset = block_idx * TILE_ROWS
         tile_a = pl.load(a, [offset, 0], [TILE_ROWS, TILE_COLS])
         tile_b = pl.load(b, [offset, 0], [TILE_ROWS, TILE_COLS])
-        # GM-polling barrier across the SOFT_CORE_NUM participating AIV cores.
+        # Simpler currently passes its logical block count through the kernel
+        # arguments, while PTO-ISA's implicit-count path reads the raw device
+        # launch register. Keep the runtime path explicit until those agree.
         pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=sync_ws, used_cores=SOFT_CORE_NUM)
         tile_c = pl.add(tile_a, tile_b)
         out = pl.store(tile_c, [offset, 0], out)
@@ -358,21 +359,18 @@ class TestSyncAll:
         assert result.passed, f"SPMD aiv_only syncall failed: {result.error}"
 
     @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
-    @pytest.mark.skip(reason=SOFT_SYNCALL_SKIP_REASON)
     def test_spmd_syncall_soft_aiv_only(self, test_runner, platform):
         """SPMD add with an aiv_only *soft* barrier at partial occupancy: verify out = a + b."""
         result = test_runner.run(SPMDSyncAllSoftTestCase(platform=platform))
         assert result.passed, f"SPMD aiv_only soft syncall failed: {result.error}"
 
     @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
-    @pytest.mark.skip(reason=SOFT_SYNCALL_SKIP_REASON)
     def test_spmd_syncall_soft_mix(self, test_runner, platform):
         """Mixed (AIC+AIV) *soft* barrier at partial occupancy: verify out = (a + 1) @ b + 1."""
         result = test_runner.run(SPMDSyncAllMixSoftTestCase(platform=platform))
         assert result.passed, f"SPMD mix soft syncall failed: {result.error}"
 
     @pytest.mark.parametrize("platform", A2A3_PLATFORMS)
-    @pytest.mark.skip(reason=SOFT_SYNCALL_SKIP_REASON)
     def test_spmd_syncall_soft_aic_only(self, test_runner, platform):
         """AIC-only *soft* barrier at partial occupancy: verify out = a @ b."""
         result = test_runner.run(SPMDSyncAllAicSoftTestCase(platform=platform))
