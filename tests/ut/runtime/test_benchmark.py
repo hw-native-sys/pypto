@@ -928,10 +928,11 @@ def test_benchmark_registers_once_and_loops_warmup_plus_rounds():
     assert stats.rounds == 3
 
 
-def test_benchmark_raises_log_level_to_v9_and_restores():
+def test_benchmark_raises_log_level_to_timing_and_restores():
     _stats, _worker, _ctor, cfg, _parse = _run_benchmark(rounds=1, warmup=0)
-    # First call raises to v9; the final call restores the saved level (20).
-    assert cfg.call_args_list[0].args == ("v9",)
+    # First call raises to timing (the [STRACE] tier); the final call restores
+    # the saved level (20).
+    assert cfg.call_args_list[0].args == ("timing",)
     assert cfg.call_args_list[-1].args == (20,)
 
 

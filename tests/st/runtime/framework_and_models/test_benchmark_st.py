@@ -13,7 +13,7 @@ The unit test (``tests/ut/runtime/test_benchmark.py``) mocks the worker and the
 stderr capture, so it only proves the parse / warmup-discard / aggregation
 logic. This system test runs a real kernel on device and exercises the full
 on-device path that the UT cannot: ``benchmark`` raising the runtime log level
-to ``v9``, fd-level capturing the host runtime's ``[STRACE]`` stderr markers
+to ``timing``, fd-level capturing the host runtime's ``[STRACE]`` stderr markers
 (simpler PR #1177), and parsing the *measured* per-launch ``device_wall_us``
 out of them.
 

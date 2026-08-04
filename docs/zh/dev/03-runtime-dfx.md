@@ -319,7 +319,7 @@ python -m pypto.runtime.debug.replay build_output/_jit_xxx/ \
 默认 `recompile=True` 会清掉缓存的 `.so` / `.bin`,确保手改的 cpp
 能被重新编译。如果没改 cpp、想跳过重编译,传 `recompile=False`
 （或 CLI 的 `--no-recompile`）即可。`--log-level` 接受和
-`PYPTO_RUNTIME_LOG` 相同的值（`debug`、`v0..v9`、`info`、`warn`、
+`PYPTO_RUNTIME_LOG` 相同的值（`debug`、`info`、`timing`、`warn`、
 `error`、`null`）;加上 `--log-sync-pypto` 可以把同一档位推到
 PyPTO 的 C++ logger。
 

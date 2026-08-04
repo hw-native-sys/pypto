@@ -105,7 +105,7 @@ CLI flags (forwarded to ``pypto.runtime.debug.replay._main``)
   --dep-gen                enable dep_gen profiling
   --no-recompile           reuse cached .so/.bin (ignores cpp edits)
   --no-rebuild-from-pto    skip ptoas/*.pto -> kernels/*.cpp rebuild
-  --log-level LEVEL        runtime log level: debug/v0..v9/info/warn/error/null
+  --log-level LEVEL        runtime log level: debug/info/timing/warn/error/null
   --log-sync-pypto         also push --log-level to PyPTO's C++ logger
   --validate               compare outputs vs. golden.py (auto-on if golden.py exists)
   --no-validate            skip golden validation; runs ``_user_compare`` instead

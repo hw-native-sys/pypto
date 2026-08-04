@@ -176,8 +176,9 @@ class RunConfig:
         aicpu_thread_num: Optional per-invocation override of the AICPU
             thread count. ``None`` (default) defers to the value baked
             into ``kernel_config.py``'s ``RUNTIME_CONFIG`` at compile
-            time (which itself may be unset, in which case the simpler
-            runtime default applies).
+            time; when that is unset too, the runtime picks its own
+            per-architecture default (``CallConfig.aicpu_thread_num = 0``
+            means auto — a2a3: 4, a5: 5). An explicit value must be ``>= 2``.
         ring_task_window: Optional per-invocation override of the runtime
             ring's task-slot window (number of in-flight tasks). Forwarded to
             ``CallConfig.runtime_env.ring_task_window``. A scalar (broadcast to

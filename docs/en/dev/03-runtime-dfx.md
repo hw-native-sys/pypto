@@ -354,7 +354,7 @@ python -m pypto.runtime.debug.replay build_output/_jit_xxx/ \
 hand-edited cpps are picked up. Pass `recompile=False` (or
 `--no-recompile`) when no cpp changed and you want to skip the rebuild.
 `--log-level` accepts the same values as `PYPTO_RUNTIME_LOG`
-(`debug`, `v0..v9`, `info`, `warn`, `error`, `null`); add
+(`debug`, `info`, `timing`, `warn`, `error`, `null`); add
 `--log-sync-pypto` to also push the band to PyPTO's C++ logger.
 
 Pass `validate=True` (or `--validate`) to compare each output tensor

@@ -22,10 +22,10 @@ Timing source (simpler PR #1177)
 ``Worker.run`` no longer returns a ``RunTiming``. The host runtime instead
 emits one ``[STRACE]`` marker line per stage to **stderr** on every launch
 (``fprintf(stderr, ...)`` from the C++ host logger, gated by the compile-time
-``SIMPLER_HOST_STRACE`` macro and emitted at the ``LOG_INFO_V9`` tier). This
+``SIMPLER_HOST_STRACE`` macro and emitted at the ``LOG_TIMING`` tier). This
 module therefore:
 
-1. raises the simpler runtime log level to ``v9`` so the markers print (the
+1. raises the simpler runtime log level to ``timing`` so the markers print (the
    C++ host logger is seeded from the Python logger snapshot at
    ``ChipWorker.init``), then restores the prior level afterward;
 2. redirects ``stderr`` at the file-descriptor level (``os.dup2`` — Python's
@@ -315,8 +315,8 @@ def _span_names() -> dict[str, str]:
         return dict(_LEGACY_SPAN_NAMES)
 
 
-# Runtime log level that makes the ``LOG_INFO_V9`` ``[STRACE]`` markers visible.
-_STRACE_LOG_LEVEL = "v9"
+# Runtime log level that makes the ``LOG_TIMING`` ``[STRACE]`` markers visible.
+_STRACE_LOG_LEVEL = "timing"
 
 # Metric name → the per-dispatch :class:`TraceInvocation` attribute it reads
 # (used by ``BenchmarkStats.per_dispatch`` / ``per_rank`` / ``per_round``).
@@ -1243,7 +1243,7 @@ def benchmark(
     arg building.
 
     Timing is read from the runtime's ``[STRACE]`` stderr markers (simpler PR
-    #1177): this raises the runtime log level to ``v9`` for the worker's
+    #1177): this raises the runtime log level to ``timing`` for the worker's
     lifetime (restored afterward) and captures ``stderr`` at the file-descriptor
     level, so the emitted stderr is diverted into a temp file rather than shown
     live. For L2 the capture wraps only the measured loop; for L3 it must wrap
@@ -1423,7 +1423,7 @@ def benchmark(
         raise RuntimeError(
             f"benchmark(): no [STRACE] markers captured across {warmup + rounds} launches. "
             "The runtime emits per-launch timing markers only when built with the "
-            "SIMPLER_HOST_STRACE macro (LOG_INFO_V9 tier); this runtime emitted none. "
+            "SIMPLER_HOST_STRACE macro (LOG_TIMING tier); this runtime emitted none. "
             "Rebuild the runtime with SIMPLER_HOST_STRACE enabled to read benchmark timing."
         )
     return stats

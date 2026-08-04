@@ -361,7 +361,7 @@ def _main(
         default=None,
         metavar="LEVEL",
         help=(
-            "PyPTO runtime log level (debug, v0..v9, info, warn, error, null). "
+            "PyPTO runtime log level (debug, info, timing, warn, error, null). "
             "Equivalent to setting PYPTO_RUNTIME_LOG=<level> in the environment. "
             "Pass --log-sync-pypto to also push the band to PyPTO's C++ logger."
         ),

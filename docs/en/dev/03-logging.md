@@ -72,29 +72,37 @@ The user-facing entry point lives in
 ```python
 from pypto.runtime import configure_log, log_level
 
-configure_log("v7")                # finer than INFO, coarser than DEBUG
-print(log_level())                 # → 22  (Python logging int)
+configure_log("timing")            # the runtime default; carries [STRACE]
+print(log_level())                 # → 25  (Python logging int)
 ```
 
 ### Levels
 
-The runtime logger uses a finer band than PyPTO's C++ enum. The canonical
-table lives in
+The runtime logger adds one band that PyPTO's C++ enum has no equivalent
+for. The canonical table lives in
 [runtime/simpler_setup/log_config.py](../../../runtime/simpler_setup/log_config.py)
 and `pypto.runtime.configure_log()` delegates parsing there:
 
 | Name(s) | Python `logging` int | Notes |
 | ------- | -------------------- | ----- |
 | `debug` | 10 | full verbosity |
-| `v0` .. `v9` | 15..24 | INFO sub-tiers; `v5` == `info` (20) |
-| `info` | 20 | runtime default |
+| `info` | 20 | |
+| `timing` | 25 | runtime default; the tier carrying `[STRACE]` markers |
 | `warn` / `warning` | 30 | |
 | `error` | 40 | |
 | `null` | 60 | silence everything |
 
-`v0..v9` is what makes the runtime logger different from the PyPTO C++
-one: you get ten gradations inside INFO so noisy subsystems can be
-turned up without dropping back to full `debug`.
+`timing` is what makes the runtime logger different from the PyPTO C++
+one: per-span `[STRACE]` timing markers get their own tier between `info`
+and `warn`, so timing telemetry stays visible by default without dragging
+in the rest of INFO. It is the tier
+[`benchmark()`](../../../python/pypto/runtime/bench.py) raises to while
+measuring.
+
+> The former `v0`..`v9` INFO sub-tiers were retired in simpler #1475.
+> `parse_level` silently maps any unknown name — including a leftover
+> `"v5"` — to `timing` (25), so old call sites do not raise; they just
+> stop meaning what they used to.
 
 ### `configure_log(level, *, sync_pypto=False)`
 
@@ -109,10 +117,14 @@ The band mapping used by `sync_pypto=True`
 | runtime threshold | PyPTO `LogLevel` |
 | ----------------- | ---------------- |
 | ≤14 | `DEBUG` |
-| 15..24 (`v0..v9`) | `INFO` |
-| 25..39 (`warn`) | `WARN` |
+| 15..25 (`info`, `timing`) | `INFO` |
+| 26..39 (`warn`) | `WARN` |
 | 40..59 (`error`) | `ERROR` |
 | ≥60 (`null`) | `NONE` |
+
+`timing` (25) sits in the `INFO` band, not `WARN`: it is below `WARNING`
+(30) in severity *and* it is simpler's default threshold, so binding it to
+`WARN` would silence two PyPTO bands out of the box.
 
 Read back the effective threshold with
 `pypto.runtime.log_level()` (re-exported from `current_level()`).
@@ -125,12 +137,12 @@ Python:
 
 | Env var | Effect |
 | ------- | ------ |
-| `PYPTO_RUNTIME_LOG` | Same string accepted by `configure_log(level=...)`. Unset = keep the runtime logger at its V5 default. |
+| `PYPTO_RUNTIME_LOG` | Same string accepted by `configure_log(level=...)`. Unset = keep the runtime logger at its `timing` default. |
 | `PYPTO_RUNTIME_LOG_SYNC` | When `=1`, flips the default of `sync_pypto` to `True` for the env-var bootstrap. Ignored when `PYPTO_RUNTIME_LOG` is unset. |
 
 ```bash
 # Verbose runtime logs, leave PyPTO C++ untouched
-PYPTO_RUNTIME_LOG=v7 python -m my_test
+PYPTO_RUNTIME_LOG=info python -m my_test
 
 # One knob for both subsystems
 PYPTO_RUNTIME_LOG=debug PYPTO_RUNTIME_LOG_SYNC=1 python -m my_test
@@ -153,7 +165,7 @@ respect them.
 
 ```bash
 # Quiet PyPTO compile chatter, verbose runtime logs
-pytest tests/st/ --pypto-log-level=ERROR --runtime-log-level=v8
+pytest tests/st/ --pypto-log-level=ERROR --runtime-log-level=info
 
 # Debug both
 pytest tests/st/ --pypto-log-level=DEBUG --runtime-log-level=debug
@@ -167,7 +179,7 @@ pytest tests/st/ --pypto-log-level=DEBUG --runtime-log-level=debug
 | See pass-by-pass tracing | `set_log_level(LogLevel.DEBUG)` |
 | Read perf hints on stderr | leave PyPTO at default `INFO` (or `PYPTO_LOG_LEVEL=info`) — see [passes/92-diagnostics.md](passes/92-diagnostics.md) |
 | Trace a hang at execute time | `configure_log("debug")` or `PYPTO_RUNTIME_LOG=debug` |
-| Bump only one noisy runtime subsystem | `configure_log("v7")` (V0..V9 is finer than `info`/`debug`) |
+| Read per-span `[STRACE]` timing markers | `configure_log("timing")` — the tier `benchmark()` raises to |
 | One env var to silence everything | `PYPTO_RUNTIME_LOG=null PYPTO_RUNTIME_LOG_SYNC=1 PYPTO_LOG_LEVEL=none` |
 
 ## 5. Common pitfalls

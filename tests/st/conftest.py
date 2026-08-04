@@ -196,8 +196,8 @@ def pytest_addoption(parser):
         "--runtime-log-level",
         action="store",
         default=None,
-        help="PyPTO runtime log level (debug, v0..v9, info, warn, error, null). "
-        "Default: leave the runtime logger at its V5/INFO default.",
+        help="PyPTO runtime log level (debug, info, timing, warn, error, null). "
+        "Default: leave the runtime logger at its TIMING default.",
     )
     parser.addoption(
         "--analyze-auto-scopes-for-deps",

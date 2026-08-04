@@ -70,7 +70,7 @@ def configure_log(level: int | str, *, sync_pypto: bool = False) -> None:
 
     Args:
         level: Python ``logging`` int (e.g. ``20``) or string (``"debug"``,
-            ``"v0".."v9"``, ``"info"``, ``"warn"``, ``"error"``, ``"null"``).
+            ``"info"``, ``"timing"``, ``"warn"``, ``"error"``, ``"null"``).
             Case-insensitive. See :data:`simpler_setup.log_config.LOG_LEVEL_CHOICES`.
         sync_pypto: When ``True``, also push the closest PyPTO ``LogLevel`` to
             the C++ side so both subsystems display the same band. Defaults to
@@ -89,15 +89,20 @@ def configure_log(level: int | str, *, sync_pypto: bool = False) -> None:
 def _sync_to_pypto(threshold: int) -> None:
     """Map the unified threshold onto PyPTO's coarser LogLevel enum.
 
-    Bands mirror :func:`simpler._log._split_threshold`:
-    ``<=14`` DEBUG, ``15..24`` (V0..V9) INFO, ``25..39`` WARN,
+    Bands mirror :mod:`simpler._log`'s severity levels:
+    ``<=14`` DEBUG, ``15..25`` INFO, ``26..39`` WARN,
     ``40..59`` ERROR, ``>=60`` NUL/NONE.
+
+    ``25`` is simpler's ``TIMING`` tier — its *default* threshold, and the one
+    that carries the ``[STRACE]`` markers. It belongs in the INFO band: it sits
+    below ``WARNING`` (30) in severity, so mapping it to ``WARN`` would silence
+    two PyPTO bands at simpler's own default level.
     """
     from pypto.pypto_core import LogLevel, set_log_level  # noqa: PLC0415
 
     if threshold <= 14:
         set_log_level(LogLevel.DEBUG)
-    elif threshold <= 24:
+    elif threshold <= 25:
         set_log_level(LogLevel.INFO)
     elif threshold <= 39:
         set_log_level(LogLevel.WARN)
