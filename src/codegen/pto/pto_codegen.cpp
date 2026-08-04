@@ -1296,9 +1296,15 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   struct Candidate {
     uint64_t count = 1;
     std::string slot_type_str;
-    std::optional<std::pair<int64_t, int64_t>> extents;  ///< The valid extent all slots must share
-    ir::VarPtr first_tile;                               ///< Diagnostic anchor: the first tile seen
-    ir::VarPtr reference_tile;                           ///< The first slot-selecting tile: geometry
+    /// The valid extent every slot must share, taken from the reference tile.
+    /// Held as plain values plus a flag rather than an optional: `blocker` is what
+    /// decides whether they are usable, and an optional here reads as if a null
+    /// extent were a state the emission below has to handle.
+    bool has_extents = false;
+    int64_t valid_row = 0;
+    int64_t valid_col = 0;
+    ir::VarPtr first_tile;      ///< Diagnostic anchor: the first tile seen
+    ir::VarPtr reference_tile;  ///< The first slot-selecting tile: geometry
     std::string blocker;
   };
   std::map<const ir::Var*, Candidate> candidates;
@@ -1326,7 +1332,10 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     }
     if (candidate.reference_tile || !memref->slot_index_.has_value() || !*memref->slot_index_) continue;
     candidate.slot_type_str = GetTileBufTypeStringFromTileType(tile_type);
-    candidate.extents = StaticValidExtents(tile_type);
+    const auto reference_extents = StaticValidExtents(tile_type);
+    candidate.has_extents = reference_extents.has_value();
+    candidate.valid_row = candidate.has_extents ? reference_extents->first : 0;
+    candidate.valid_col = candidate.has_extents ? reference_extents->second : 0;
     candidate.reference_tile = tile_var;
   }
   if (candidates.empty()) return;
@@ -1347,6 +1356,9 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     // that print alike but differ in valid_shape would silently give one of them
     // the other's extent.
     const auto extents = StaticValidExtents(tile_type);
+    const bool static_extents = extents.has_value();
+    const int64_t tile_valid_row = static_extents ? extents->first : 0;
+    const int64_t tile_valid_col = static_extents ? extents->second : 0;
 
     if (!memref->slot_index_.has_value() || !*memref->slot_index_) {
       candidate.blocker = "tile '" + tile_var->name_hint_ + "' binds it without selecting a slot";
@@ -1358,15 +1370,18 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
                           std::to_string(candidate.count);
     } else if (type_str != candidate.slot_type_str) {
       candidate.blocker = "its slots hold differently shaped tiles, and ptoas slots are uniform";
-    } else if (!extents.has_value()) {
-      candidate.blocker = "tile '" + tile_var->name_hint_ +
+    } else if (!static_extents || !candidate.has_extents) {
+      // Either this tile or the reference slot has a runtime extent; name the one
+      // that does, since that is the annotation to change.
+      const auto& offender = static_extents ? candidate.reference_tile : tile_var;
+      candidate.blocker = "tile '" + offender->name_hint_ +
                           "' has a runtime valid shape, and a region declares one static extent for "
                           "all its slots";
-    } else if (extents != candidate.extents) {
-      candidate.blocker =
-          "its slots declare different valid shapes (" + std::to_string(candidate.extents->first) + "x" +
-          std::to_string(candidate.extents->second) + " and " + std::to_string(extents->first) + "x" +
-          std::to_string(extents->second) + "), and a region declares one valid extent for all of them";
+    } else if (tile_valid_row != candidate.valid_row || tile_valid_col != candidate.valid_col) {
+      candidate.blocker = "its slots declare different valid shapes (" + std::to_string(candidate.valid_row) +
+                          "x" + std::to_string(candidate.valid_col) + " and " +
+                          std::to_string(tile_valid_row) + "x" + std::to_string(tile_valid_col) +
+                          "), and a region declares one valid extent for all of them";
     } else if (!IsMultiBufferMemorySpace(tile_type->memory_space_)) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
@@ -1389,8 +1404,8 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     // slot agrees on it, and that it is static — the region is declared in the
     // function head, where a runtime extent's SSA value is not yet in scope.
     MultiBufferRegion region;
-    region.valid_row_ssa = GetOrEmitConstant(candidate.extents->first, DataType::INDEX);
-    region.valid_col_ssa = GetOrEmitConstant(candidate.extents->second, DataType::INDEX);
+    region.valid_row_ssa = GetOrEmitConstant(candidate.valid_row, DataType::INDEX);
+    region.valid_col_ssa = GetOrEmitConstant(candidate.valid_col, DataType::INDEX);
     region.count = candidate.count;
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);

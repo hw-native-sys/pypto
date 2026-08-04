@@ -38,6 +38,7 @@ TOO_MANY = pl.MemRef(slots=17)
 MIXED_SHAPES = pl.MemRef(slots=2)
 MIXED_BINDING = pl.MemRef(slots=2)
 MIXED_VALID = pl.MemRef(slots=2)
+RUNTIME_VALID = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -134,6 +135,31 @@ class MixedSlotValidShapes:
         )
         t1: pl.Tile[[64, 64], pl.FP32, MIXED_VALID[1], pl.Mem.Vec] = pl.load(
             a, [0, 0], [64, 64], valid_shape=[32, 64], target_memory=pl.MemorySpace.Vec
+        )
+        t2: pl.Tile[[64, 64], pl.FP32] = pl.add(t0, t1)
+        return pl.store(t2, [0, 0], output)
+
+
+@pl.program
+class RuntimeValidShapeSlots:
+    """Slots whose valid extent is only known at runtime.
+
+    The region is declared in the function head, where a runtime extent's SSA value
+    is not yet in scope — so there is no extent to state for the slots at all.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        rows: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        t0: pl.Tile[[64, 64], pl.FP32, RUNTIME_VALID[0], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [64, 64], valid_shape=[rows, 64], target_memory=pl.MemorySpace.Vec
+        )
+        t1: pl.Tile[[64, 64], pl.FP32, RUNTIME_VALID[1], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [64, 64], valid_shape=[rows, 64], target_memory=pl.MemorySpace.Vec
         )
         t2: pl.Tile[[64, 64], pl.FP32] = pl.add(t0, t1)
         return pl.store(t2, [0, 0], output)
@@ -314,12 +340,14 @@ class TestUnsupportedShapesAreLoud:
             (TooManySlots, "17"),
             (MixedSlotShapes, "differently shaped tiles"),
             (MixedSlotValidShapes, "different valid shapes"),
+            (RuntimeValidShapeSlots, "runtime valid shape"),
             (UnsubscriptedBinding, "without selecting a slot"),
         ],
         ids=[
             "slot-count-out-of-range",
             "non-uniform-slot-type",
             "non-uniform-valid-shape",
+            "runtime-valid-shape",
             "unsubscripted-binding",
         ],
     )
@@ -329,11 +357,18 @@ class TestUnsupportedShapesAreLoud:
 
     @pytest.mark.parametrize(
         "program",
-        [TooManySlots, MixedSlotShapes, MixedSlotValidShapes, UnsubscriptedBinding],
+        [
+            TooManySlots,
+            MixedSlotShapes,
+            MixedSlotValidShapes,
+            RuntimeValidShapeSlots,
+            UnsubscriptedBinding,
+        ],
         ids=[
             "slot-count-out-of-range",
             "non-uniform-slot-type",
             "non-uniform-valid-shape",
+            "runtime-valid-shape",
             "unsubscripted-binding",
         ],
     )
