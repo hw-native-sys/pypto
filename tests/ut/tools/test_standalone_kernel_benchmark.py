@@ -960,6 +960,28 @@ def test_multi_comparison_balances_orders_and_summarizes(multi_comparison: Modul
     assert summary["comparisons"]["dsa_rp_minus_cypress"]["paired_bootstrap_95_ci_us"][1] < 0
 
 
+def test_multi_comparison_requires_repeated_deterministic_outputs(
+    multi_comparison: ModuleType, tmp_path: Path
+):
+    dumps: dict[str, list[Path]] = {}
+    for arm in ("geometry_ff", "cypress", "dsa_rp_cg"):
+        repetitions: list[Path] = []
+        for repetition in range(3):
+            dump = tmp_path / arm / f"run{repetition}"
+            dump.mkdir(parents=True)
+            (dump / "v0.bin").write_bytes(b"stable-output")
+            repetitions.append(dump)
+        dumps[arm] = repetitions
+
+    stable, runs = multi_comparison._compare_all_outputs(dumps, ["v0"], None)
+    assert len(set(stable["v0"].values())) == 1
+    assert all(len(hashes) == 3 for hashes in runs["v0"].values())
+
+    (dumps["cypress"][2] / "v0.bin").write_bytes(b"changed-output")
+    with pytest.raises(ValueError, match="nondeterministic for cypress/v0.bin"):
+        multi_comparison._compare_all_outputs(dumps, ["v0"], None)
+
+
 def test_panel_summary_keeps_devices_separate(panel_summary: ModuleType):
     def report(scale: float) -> dict:
         medians = {
@@ -975,9 +997,14 @@ def test_panel_summary_keeps_devices_separate(panel_summary: ModuleType):
         ("kernel_a", "device4"): report(1.0),
         ("kernel_b", "device4"): report(2.0),
         ("kernel_a", "device5"): report(3.0),
+        ("kernel_b", "device5"): report(4.0),
     }
-    kernel_rows, panel_rows = panel_summary.summarize_panel(reports, bootstrap_samples=100)
-    assert len(kernel_rows) == 9
+    kernel_rows, panel_rows = panel_summary.summarize_panel(
+        reports,
+        bootstrap_samples=100,
+        expected_tags={"kernel_a", "kernel_b"},
+    )
+    assert len(kernel_rows) == 12
     devices = {row["device"] for row in panel_rows}
     assert devices == {"device4", "device5"}
     candidate = next(
@@ -989,6 +1016,108 @@ def test_panel_summary_keeps_devices_separate(panel_summary: ModuleType):
     )
     assert candidate["kernels"] == 2
     assert candidate["geomean_ratio"] == pytest.approx(0.8)
+
+
+def test_panel_summary_rejects_different_kernel_sets(panel_summary: ModuleType):
+    def report() -> dict:
+        return {
+            "summary": {
+                "variants": {
+                    arm: {"median_us": value}
+                    for arm, value in {"geometry_ff": 10.0, "cypress": 9.0, "dsa_rp_cg": 8.0}.items()
+                }
+            }
+        }
+
+    reports = {
+        ("kernel_a", "device4"): report(),
+        ("kernel_b", "device4"): report(),
+        ("kernel_a", "device5"): report(),
+    }
+    with pytest.raises(ValueError, match="device kernel sets differ"):
+        panel_summary.summarize_panel(reports, bootstrap_samples=100)
+
+
+def test_panel_summary_requires_frozen_panel_tags(panel_summary: ModuleType):
+    report = {
+        "summary": {
+            "variants": {
+                arm: {"median_us": value}
+                for arm, value in {"geometry_ff": 10.0, "cypress": 9.0, "dsa_rp_cg": 8.0}.items()
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="do not match frozen panel"):
+        panel_summary.summarize_panel(
+            {("kernel_a", "device4"): report},
+            bootstrap_samples=100,
+            expected_tags={"kernel_a", "kernel_b"},
+        )
+
+
+def test_panel_summary_loads_json_and_tsv_frozen_panels(panel_summary: ModuleType, tmp_path: Path):
+    json_panel = tmp_path / "panel.json"
+    json_panel.write_text(
+        json.dumps({"kernels": [{"tag": "kernel_a"}, {"tag": "kernel_b"}]}),
+        encoding="utf-8",
+    )
+    tsv_panel = tmp_path / "panel.tsv"
+    tsv_panel.write_text("tag\tstatus\nkernel_a\tconfirm\nkernel_b\tconfirm\n", encoding="utf-8")
+
+    assert panel_summary.load_expected_tags(json_panel) == {"kernel_a", "kernel_b"}
+    assert panel_summary.load_expected_tags(tsv_panel) == {"kernel_a", "kernel_b"}
+
+
+def test_panel_summary_rejects_mislabeled_report_device(panel_summary: ModuleType, tmp_path: Path):
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "device_id": 5,
+                "summary": {
+                    "variants": {
+                        arm: {"median_us": value}
+                        for arm, value in {
+                            "geometry_ff": 10.0,
+                            "cypress": 9.0,
+                            "dsa_rp_cg": 8.0,
+                        }.items()
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="contains a report for device 5"):
+        panel_summary.load_reports([("kernel_a", "device4", report)])
+
+
+def test_panel_summary_accepts_matching_device_alias(panel_summary: ModuleType, tmp_path: Path):
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "device_id": 4,
+                "summary": {
+                    "variants": {
+                        arm: {"median_us": value}
+                        for arm, value in {
+                            "geometry_ff": 10.0,
+                            "cypress": 9.0,
+                            "dsa_rp_cg": 8.0,
+                        }.items()
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    reports = panel_summary.load_reports([("kernel_a", "device4", report)])
+    assert reports[("kernel_a", "device4")]["device_id"] == 4
 
 
 if __name__ == "__main__":

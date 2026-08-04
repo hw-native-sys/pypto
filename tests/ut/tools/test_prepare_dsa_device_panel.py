@@ -10,6 +10,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -105,3 +106,72 @@ def test_freeze_panel_records_problem_and_edge_provenance(tmp_path: Path):
     assert winner["exported_edge_policy"] == "quadratic_route_frontier_v3"
     assert winner["buffers"] == 2
     assert winner["reuse_penalties"] == 1
+    assert winner["replay_solution_filename"] == "pypto_winner_instance.dsa.solution.json"
+
+
+def test_replay_solution_filename_matches_pypto_contract():
+    assert panel.replay_solution_filename("") == "pypto_unnamed.dsa.solution.json"
+    assert panel.replay_solution_filename("a b") == "pypto_a_20b.dsa.solution.json"
+    assert panel.replay_solution_filename("é") == "pypto__c3_a9.dsa.solution.json"
+
+
+def test_main_writes_replay_ready_arm_directories(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    problem = {
+        "instance": "winner_instance",
+        "profile": "pypto_research_v1",
+        "metadata": {"reuse_penalty_recognizer": "quadratic_route_frontier_v3"},
+        "problem": {
+            "buffers": [{"id": 0}],
+            "cost_model": {"reuse_penalties": []},
+        },
+    }
+    problem_path = tmp_path / "winner.json"
+    problem_path.write_text(json.dumps(problem), encoding="utf-8")
+    panel_document = _panel()
+    panel_document["kernels"] = [panel_document["kernels"][0]]
+    panel_path = tmp_path / "panel.json"
+    panel_path.write_text(json.dumps(panel_document), encoding="utf-8")
+    solver = tmp_path / "dsa-bench"
+    solver.write_text("fake", encoding="utf-8")
+
+    def fake_run(command: list[str], **_kwargs) -> SimpleNamespace:
+        solution = Path(command[command.index("--solution-output") + 1])
+        result = Path(command[command.index("--json-output") + 1])
+        solution.write_text(
+            json.dumps(
+                {
+                    "problem_fingerprint": "frozen-fingerprint",
+                    "placements": [{"buffer": 0, "offset": 0}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result.write_text(
+            json.dumps(
+                {
+                    "status": "feasible",
+                    "capacity_overflow": 0,
+                    "reuse_cost": 0,
+                    "total_peak": 1,
+                    "peak": 1,
+                    "runtime_us": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(panel.subprocess, "run", fake_run)
+    output_root = tmp_path / "prepared"
+    assert (
+        panel.main(
+            ["--panel", str(panel_path), "--dsa-bench", str(solver), "--output-root", str(output_root)]
+        )
+        == 0
+    )
+
+    for arm, _ in panel.ARMS:
+        replay_dir = output_root / "solutions" / "winner" / arm
+        assert (replay_dir / "pypto_winner_instance.dsa.solution.json").is_file()
+    rows = (output_root / "solver-results.tsv").read_text(encoding="utf-8")
+    assert "replay_dir" in rows

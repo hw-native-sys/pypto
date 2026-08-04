@@ -88,6 +88,11 @@ local search remain model-study algorithms; earlier results show no useful
 separation on the easier compiler corpus, so they do not consume device time in
 the exploratory screen.
 
+Each result row names a replay directory containing the exact
+`pypto_<instance>.dsa.solution.json` filename consumed by PyPTO. Pass that
+directory as `dsa_solution_dir`; a parent with multiple DSA functions must have
+all sibling solution files staged in the same arm directory.
+
 The input manifest has this shape (repeat `kernels` to the required stratum
 counts):
 
@@ -167,26 +172,32 @@ so every placement occurs twice in every process position:
 python .claude/skills/incore-profiling/standalone_multi_compare.py \
   --case geometry_ff=<case> --case cypress=<case> --case dsa_rp_cg=<case> \
   --output <real-output-abi-name> --device-id 0 \
-  --warmup 10 --rounds 100 --output-root <results>
+  --correctness-repetitions 3 --warmup 10 --rounds 100 \
+  --output-root <results>
 ```
 
-The driver validates identical ABI, inputs, captured expectations, and output
-hashes before timing. It writes all pairwise paired-block bootstrap intervals;
-cross-device confirmation remains an experiment-level reporting decision.
+The driver validates identical ABI, inputs, captured expectations, three-run
+within-arm output determinism, and cross-arm output hashes before timing. It
+writes all pairwise paired-block bootstrap intervals; cross-device confirmation
+remains an experiment-level reporting decision.
 
 After all kernels finish, aggregate the frozen panel per device. Repeat
 `--report` for every kernel/device pair; never pool or average devices:
 
 ```bash
 python .claude/skills/incore-profiling/summarize_dsa_device_panel.py \
+  --expected-panel <confirmation-panel.tsv> \
   --report kernel_a@device4=<report.json> \
   --report kernel_a@device5=<report.json> \
+  --report kernel_b@device4=<report.json> \
+  --report kernel_b@device5=<report.json> \
   --output-root <panel-results>
 ```
 
-The summary reports geometric-mean candidate/reference latency ratios and a
-kernel bootstrap interval separately for each device. The per-kernel table is
-retained so nulls and sign reversals remain visible.
+The summary fails closed unless every device has exactly the frozen panel tag
+set. It reports geometric-mean candidate/reference latency ratios and a kernel
+bootstrap interval separately for each device. The per-kernel table is retained
+so nulls and sign reversals remain visible.
 
 Synthetic inputs are bounded and emitted in chunks. Integer pointers default to
 zero; use `pointer_fills` or file inputs when kernels require indices,
