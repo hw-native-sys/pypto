@@ -1,0 +1,236 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Silicon A/Bs for manual and whole-function AutoTile vector kernels.
+
+Each pair uses identical tensor shapes, dtypes, inputs, formula, output, worker
+configuration, warmup count, and measured launch count.  Correctness is a hard
+gate.  Timing is deliberately reported rather than thresholded: a relative
+performance result is useful evidence, while a fixed pass/fail speedup would be
+fragile across firmware, runtime, PTOAS, and shared-device conditions.
+"""
+
+import math
+import statistics
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+import torch
+from examples.advanced.auto_tile_vector import (
+    RMS_EPS,
+    RMS_HIDDEN,
+    RMS_ROWS,
+    SOFTMAX_COLS,
+    SOFTMAX_ROWS,
+    AutoTileRmsNormProgram,
+    AutoTileSoftmaxProgram,
+    manual_rms_norm,
+    manual_softmax,
+)
+from pypto import ir
+from pypto.runtime import BenchmarkStats, RunConfig, benchmark
+
+_WARMUP = 5
+_ROUNDS = 15
+_REPETITIONS = 2
+
+
+def _compile_manual(jit_function, args: Sequence[torch.Tensor], config: RunConfig, output_dir: Path):
+    """Compile one explicit reference while preserving its generated artifacts."""
+    jit_function._cache.clear()
+    compile_config = replace(config, save_kernels=True, save_kernels_dir=str(output_dir))
+    return jit_function.compile(*args, config=compile_config)
+
+
+def _compile_auto(program: Any, config: RunConfig, output_dir: Path):
+    """Compile one tensor-level AutoTile program through the default pipeline."""
+    return ir.compile(
+        program,
+        output_dir=str(output_dir),
+        strategy=config.strategy,
+        backend_type=config.backend_type,
+        dump_passes=config.dump_passes,
+        diagnostic_phase=config.diagnostic_phase,
+        disabled_diagnostics=config.disabled_diagnostics,
+        platform=config.platform,
+        profiling=config.compile_profiling,
+        analyze_auto_scopes_for_deps=config.analyze_auto_scopes_for_deps,
+        memory_planner=config.memory_planner,
+    )
+
+
+def _effective_samples(runs: Sequence[BenchmarkStats]) -> list[float]:
+    """Return sched/orch-union samples from single-dispatch benchmark runs."""
+    samples = [invocation.effective_us for stats in runs for invocation in stats.invocations]
+    assert len(samples) == _ROUNDS * len(runs)
+    assert all(sample > 0.0 and math.isfinite(sample) for sample in samples)
+    return samples
+
+
+def _device_samples(runs: Sequence[BenchmarkStats]) -> list[float]:
+    """Return device-wall samples and verify every run used the requested protocol."""
+    for stats in runs:
+        assert len(stats.device_wall_us) == _ROUNDS
+        assert not stats.all_zero_device
+    return [sample for stats in runs for sample in stats.device_wall_us]
+
+
+def _compare(
+    *,
+    name: str,
+    reference,
+    auto_program: Any,
+    reference_args: list[torch.Tensor],
+    auto_args: list[torch.Tensor],
+    expected: torch.Tensor,
+    config: RunConfig,
+    output_dir: Path,
+    tolerance: tuple[float, float],
+    record_property,
+) -> None:
+    benchmark_config = replace(
+        config,
+        enable_l2_swimlane=False,
+        enable_dump_args=0,
+        enable_pmu=0,
+        enable_dep_gen=False,
+        enable_scope_stats=False,
+    )
+    reference_compiled = _compile_manual(reference, reference_args, config, output_dir / f"{name}_manual")
+    auto_compiled = _compile_auto(auto_program, config, output_dir / f"{name}_auto_tile")
+
+    reference_runs = [
+        benchmark(
+            reference_compiled,
+            reference_args,
+            warmup=_WARMUP,
+            rounds=_ROUNDS,
+            config=benchmark_config,
+        )
+    ]
+    auto_runs = [
+        benchmark(
+            auto_compiled,
+            auto_args,
+            warmup=_WARMUP,
+            rounds=_ROUNDS,
+            config=benchmark_config,
+        )
+    ]
+    # Repeat in reverse order so page-in, thermal, and run-order effects do not
+    # systematically favor either implementation.
+    auto_runs.append(
+        benchmark(
+            auto_compiled,
+            auto_args,
+            warmup=_WARMUP,
+            rounds=_ROUNDS,
+            config=benchmark_config,
+        )
+    )
+    reference_runs.append(
+        benchmark(
+            reference_compiled,
+            reference_args,
+            warmup=_WARMUP,
+            rounds=_ROUNDS,
+            config=benchmark_config,
+        )
+    )
+
+    rtol, atol = tolerance
+    torch.testing.assert_close(reference_args[-1], expected, rtol=rtol, atol=atol)
+    torch.testing.assert_close(auto_args[-1], expected, rtol=rtol, atol=atol)
+    torch.testing.assert_close(auto_args[-1], reference_args[-1], rtol=rtol, atol=atol)
+
+    reference_device = statistics.median(_device_samples(reference_runs))
+    auto_device = statistics.median(_device_samples(auto_runs))
+    reference_effective = statistics.median(_effective_samples(reference_runs))
+    auto_effective = statistics.median(_effective_samples(auto_runs))
+    assert all(
+        value > 0.0 and math.isfinite(value)
+        for value in (reference_device, auto_device, reference_effective, auto_effective)
+    )
+
+    device_speedup = reference_device / auto_device
+    effective_speedup = reference_effective / auto_effective
+    record_property(f"{name}.manual.device_wall_us", reference_device)
+    record_property(f"{name}.auto_tile.device_wall_us", auto_device)
+    record_property(f"{name}.auto_tile.device_wall_speedup", device_speedup)
+    record_property(f"{name}.manual.effective_us", reference_effective)
+    record_property(f"{name}.auto_tile.effective_us", auto_effective)
+    record_property(f"{name}.auto_tile.effective_speedup", effective_speedup)
+    for repetition, (reference_run, auto_run) in enumerate(zip(reference_runs, auto_runs, strict=True)):
+        record_property(
+            f"{name}.rep{repetition}.device_wall_speedup",
+            reference_run.device_us_median / auto_run.device_us_median,
+        )
+        record_property(
+            f"{name}.rep{repetition}.effective_speedup",
+            statistics.median(_effective_samples([reference_run]))
+            / statistics.median(_effective_samples([auto_run])),
+        )
+    print(
+        f"AUTOTILE_PERF pair={name} repetitions={_REPETITIONS} "
+        f"rounds={_ROUNDS} warmup={_WARMUP} "
+        f"manual_device_wall_us={reference_device:.3f} "
+        f"auto_tile_device_wall_us={auto_device:.3f} "
+        f"device_wall_speedup={device_speedup:.4f} "
+        f"manual_effective_us={reference_effective:.3f} "
+        f"auto_tile_effective_us={auto_effective:.3f} "
+        f"effective_speedup={effective_speedup:.4f}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.platforms("a2a3")
+class TestAutoTileVectorPerformance:
+    """Correctness-gated, register-once performance comparisons on Ascend 910B."""
+
+    def test_softmax_manual_vs_auto_tile(self, test_config, tmp_path, record_property):
+        torch.manual_seed(0)
+        x = torch.randn((SOFTMAX_ROWS, SOFTMAX_COLS), dtype=torch.float32)
+        expected = torch.softmax(x, dim=1)
+        reference_out = torch.zeros_like(x)
+        auto_out = torch.zeros_like(x)
+        _compare(
+            name="softmax",
+            reference=manual_softmax,
+            auto_program=AutoTileSoftmaxProgram,
+            reference_args=[x, reference_out],
+            auto_args=[x, auto_out],
+            expected=expected,
+            config=test_config,
+            output_dir=tmp_path,
+            tolerance=(1.0e-5, 1.0e-5),
+            record_property=record_property,
+        )
+
+    def test_rms_norm_manual_vs_auto_tile(self, test_config, tmp_path, record_property):
+        torch.manual_seed(1)
+        x = torch.randn((RMS_ROWS, RMS_HIDDEN), dtype=torch.float32)
+        gamma = torch.randn((1, RMS_HIDDEN), dtype=torch.float32)
+        expected = x * torch.rsqrt(x.square().mean(dim=1, keepdim=True) + RMS_EPS) * gamma
+        reference_out = torch.zeros_like(x)
+        auto_out = torch.zeros_like(x)
+        _compare(
+            name="rms_norm",
+            reference=manual_rms_norm,
+            auto_program=AutoTileRmsNormProgram,
+            reference_args=[x, gamma, reference_out],
+            auto_args=[x, gamma, auto_out],
+            expected=expected,
+            config=test_config,
+            output_dir=tmp_path,
+            tolerance=(1.0e-2, 1.0e-2),
+            record_property=record_property,
+        )
