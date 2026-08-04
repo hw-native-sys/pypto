@@ -100,9 +100,9 @@ REGISTER_OP("system.fence")
 //     %view single_cache_line` — for every region size, a single element
 //     included. A raw `!pto.ptr` operand is rejected by ptoas outright, so there
 //     is no scalar/ptr variant to dispatch to.
-// Variadic arity (0 or 3), like system.syncall below: the three arguments
-// below describe ONLY the region form; omitting all of them selects the
-// whole-GM form. The registry does not enforce argument count.
+// Variadic arity (0 or 3): the three arguments below describe ONLY the region
+// form; omitting all of them selects the whole-GM form. The registry does not
+// enforce argument count.
 REGISTER_OP("system.cacheinvalid")
     .set_description(
         "Invalidate cache lines: whole GM when called with no args, else a tensor sub-region "
@@ -118,20 +118,17 @@ REGISTER_OP("system.cacheinvalid")
 //   - "hard" (default): FFTS barrier, no operands. Codegen emits
 //     `pto.syncall() mode = <hard>`. Requires full-core occupancy.
 //   - "soft": GM-polling barrier with operands. Codegen emits
-//     `pto.syncall(%gm, %scratch[, %l1], %used : ...) mode = <soft>`.
-//     Operand order (positional, count not enforced by the registry):
-//       aiv_only / aic_only: [gm_workspace, scratch_tile, used_cores]
-//       mix:                 [gm_workspace, ub_scratch, l1_scratch, used_cores]
-//     where gm_workspace is a shared GM int32 buffer (used_cores*8 slots,
-//     zero-initialized), scratch tiles are local int32 staging (UB on AIV,
-//     L1 on AIC), and used_cores is an i32 participant count (0 = auto).
+//     `pto.syncall(%gm[, %used] : ...) mode = <soft>` for every core_type.
+//     gm_workspace is a shared, zero-initialized GM int32 buffer with at least
+//     16 elements (one exclusive 64-byte cache line). used_cores is an optional
+//     i32 participant count; omitting it asks PTO-ISA to derive the count from
+//     the launch configuration.
 // Attributes: core_type ("aiv_only"|"aic_only"|"mix"), mode ("hard"|"soft").
 REGISTER_OP("system.syncall")
     .set_description("Cross-core all-participant barrier (pto::SYNCALL)")
     .set_op_category("SyncOp")
-    .add_argument("gm_workspace", "Soft form: shared GM int32 workspace (used_cores*8 slots, zero-init)")
-    .add_argument("scratch", "Soft form: local int32 staging tile (UB on AIV, L1 on AIC)")
-    .add_argument("used_cores", "Soft form: participant core count (i32; 0 = auto)")
+    .add_argument("gm_workspace", "Soft form: shared GM int32 workspace (at least 16 elements, zero-init)")
+    .add_argument("used_cores", "Soft form: optional participant core count (i32; omitted = auto)")
     .set_attr<std::string>("core_type")
     .set_attr<std::string>("mode")
     .f_deduce_type(DeduceUnknownType);

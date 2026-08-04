@@ -3045,7 +3045,7 @@ class TestSyncAllCodegen:
         assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
 
     def test_syncall_soft_emits_gm_polling_barrier(self):
-        """soft syncall emits pto.syncall(%gm_pview, %scratch, %used : ...) mode=<soft>."""
+        """soft syncall emits pto.syncall(%gm_pview, %used : ...) mode=<soft>."""
 
         @pl.program
         class Prog:
@@ -3054,7 +3054,7 @@ class TestSyncAllCodegen:
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
                 out: pl.Tensor[[16, 16], pl.FP32],
-                ws: pl.Tensor[[32], pl.INT32],
+                ws: pl.Tensor[[16], pl.INT32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
                 pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=4)
@@ -3066,13 +3066,64 @@ class TestSyncAllCodegen:
         assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
         assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
         assert "core_type = #pto.sync_core_type<aiv_only>" in line, f"core_type missing:\n{line}"
-        # 3 operands: gm partition_view, scratch tile_buf, used_cores i32.
-        assert "partition_tensor_view<32xi32>" in line, f"gm partition_view missing:\n{line}"
-        assert "tile_buf<loc=vec" in line and "i32" in line, f"scratch tile_buf missing:\n{line}"
-        # The GM workspace is lowered to a partition_view over all 32 slots.
+        # PTOAS v0.55 takes only gm partition_view + optional used_cores.
+        assert "partition_tensor_view<16xi32>" in line, f"gm partition_view missing:\n{line}"
+        assert "tile_buf" not in line, f"legacy scratch operand still emitted:\n{line}"
+        assert line.split(" : ", 1)[0].count(",") == 1, f"unexpected soft operand count:\n{line}"
+        # The GM workspace is lowered to a partition_view over all 16 slots.
         assert any("partition_view" in ln and "syncgm" in ln for ln in mlir.splitlines()), (
             f"gm workspace partition_view not emitted:\n{mlir}"
         )
+
+    def test_syncall_soft_omits_launch_derived_participant_count(self):
+        """used_cores=0 emits the canonical single-operand v0.55 form."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_syncall_soft(self, ws: pl.Tensor[[4, 4], pl.INT32]) -> pl.Tensor[[4, 4], pl.INT32]:
+                pl.system.syncall(mode="soft", core_type="mix", gm_workspace=ws, used_cores=0)
+                return ws
+
+        mlir = self._generate_mlir(Prog)
+        line = next((ln for ln in mlir.splitlines() if "pto.syncall(" in ln), "")
+        assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
+        assert "partition_tensor_view<4x4xi32>" in line, f"gm partition_view missing:\n{line}"
+        assert line.split(" : ", 1)[0].count(",") == 0, f"unexpected used_cores operand:\n{line}"
+        assert "mode = #pto.sync_all_mode<soft>" in line, f"soft mode missing:\n{line}"
+
+    def test_syncall_soft_accepts_dynamic_participant_count(self):
+        """An INT32 scalar lowers as the optional v0.55 used_cores operand."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_syncall_soft(
+                self,
+                ws: pl.Tensor[[16], pl.INT32],
+                participants: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16], pl.INT32]:
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=participants)
+                return ws
+
+        mlir = self._generate_mlir(Prog)
+        line = next((ln for ln in mlir.splitlines() if "pto.syncall(" in ln), "")
+        assert line, f"soft pto.syncall not found in MLIR:\n{mlir}"
+        assert "partition_tensor_view<16xi32>, i32" in line, f"dynamic used_cores missing:\n{line}"
+        assert line.split(" : ", 1)[0].count(",") == 1, f"unexpected soft operand count:\n{line}"
+
+    def test_syncall_soft_rejects_workspace_smaller_than_cache_line(self):
+        """A static GM workspace must contain at least 16 INT32 elements."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_syncall_soft(self, ws: pl.Tensor[[15], pl.INT32]) -> pl.Tensor[[15], pl.INT32]:
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=ws, used_cores=0)
+                return ws
+
+        with pytest.raises(ValueError, match="at least 16 INT32 elements"):
+            self._generate_mlir(Prog)
 
 
 class TestFenceCodegen:
