@@ -200,11 +200,19 @@ class _DbcMatScratch(PTOTestCase):
         return f"dbc2_mat_scratch_{tag}_{self.M}x{self.K}x{self.N}"
 
     def define_tensors(self) -> list[TensorSpec]:
+        M, K, N, P = self.M, self.K, self.N, self.P
+
+        # Keep the chained BF16 result O(1) so the fixed absolute tolerance covers
+        # cancellation elements, and use local generators because the harness does
+        # not seed torch before materializing inputs.
+        def seeded(rows, cols, seed, scale=1.0):
+            return torch.randn(rows, cols, generator=torch.Generator().manual_seed(seed)) * scale
+
         return [
-            TensorSpec("a", [self.M, self.K], DataType.BF16, init_value=torch.randn),
-            TensorSpec("b", [self.K, self.N], DataType.BF16, init_value=torch.randn),
-            TensorSpec("e", [self.N, self.P], DataType.BF16, init_value=torch.randn),
-            TensorSpec("out", [self.M, self.P], DataType.FP32, is_output=True),
+            TensorSpec("a", [M, K], DataType.BF16, init_value=lambda: seeded(M, K, 1)),
+            TensorSpec("b", [K, N], DataType.BF16, init_value=lambda: seeded(K, N, 2, 1 / K**0.5)),
+            TensorSpec("e", [N, P], DataType.BF16, init_value=lambda: seeded(N, P, 3, 1 / N**0.5)),
+            TensorSpec("out", [M, P], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
