@@ -18,6 +18,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 

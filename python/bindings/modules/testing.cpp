@@ -19,7 +19,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
-#include <nanobind/stl/string.h>  // NOLINT(misc-include-cleaner) -- registers std::string casters
+#include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers std::string casters
 
 #include <cassert>
 #include <string>
