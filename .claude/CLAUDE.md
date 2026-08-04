@@ -17,6 +17,12 @@ Refer to the individual rule files in `.claude/rules/` for specific guidance on 
 
 Skills are workflow guides that help the main assistant perform specific tasks:
 
+Portable shared skill sources are pinned in the `.claude/pypto-skills`
+submodule. Initialize them after cloning with
+`git submodule update --init .claude/pypto-skills`. The repository-local
+entrypoints in `.claude/skills/` remain authoritative for PyPTO-specific
+policy and skill discovery.
+
 - **`git-commit`** - Complete commit workflow with review, testing, and optional code simplification
 - **`code-review`** - Reviews code changes against project standards (`context: fork` — runs in isolated context)
 - **`testing`** - Builds project and runs test suite (`context: fork` — runs in isolated context)

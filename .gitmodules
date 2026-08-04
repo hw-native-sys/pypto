@@ -7,3 +7,6 @@
 [submodule "simpler"]
 	path = runtime
 	url = https://github.com/hw-native-sys/simpler
+[submodule ".claude/pypto-skills"]
+	path = .claude/pypto-skills
+	url = https://github.com/hw-native-sys/pypto-skills.git
