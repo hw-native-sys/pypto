@@ -131,9 +131,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 > max_recv) rows64 = max_recv;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
-    pto::comm::Signal count_sig(remote_recv_slot);
-    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
+    if (dest == my_rank) {
+      // Self-send: write recv_counts via compiler atomic builtin — a
+      // TNOTIFY to self may be dropped by the NPU interconnect on some
+      // hardware generations.  __atomic_store_n is a GCC/Clang builtin
+      // that the CCE compiler supports natively (no <atomic> needed),
+      // and it is address-space aware (works with __gm__ pointers).
+      __atomic_store_n(recv_counts_base + my_rank, rows, __ATOMIC_RELEASE);
+    } else {
+      __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
+      pto::comm::Signal count_sig(remote_recv_slot);
+      pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
+    }
 
     int64_t src_row_offset = static_cast<int64_t>(dest) * max_recv * row_numel;
     int64_t dst_row_offset = static_cast<int64_t>(my_rank) * max_recv * row_numel;
