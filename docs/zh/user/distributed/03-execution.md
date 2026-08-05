@@ -27,6 +27,7 @@ with compiled.prepare() as rt:
 | `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
 | `rt(x, y, z)` | 单次分发——转换参数，调用 host_orch。 |
 | `rt.run(compiled, x, y, z)` | 多程序分发——选择目标程序。 |
+| `rt.submit(compiled, x, y, z)` | 有界异步分发——返回 `DistributedRunHandle`。 |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | 分配 worker 常驻的 `DeviceTensor`。`init` 从 host 拷贝（一次性 H2D）。 |
 | `rt.free_tensor(tensor)` | 释放 `DeviceTensor`。 |
 | `rt.alloc_stacked_tensor(host_w)` | 沿 dim 0 分片 `host_w`——分片 `i` 上传到卡 `i`。返回 `StackedDeviceTensor`。 |
@@ -47,6 +48,28 @@ with compiled.prepare() as rt:
   搭配使用，后者决定保留的 window 是否在两次请求之间清零（正确性与
   开销的权衡）。见 `docs/en/dev/06-persistent-l3.md`。
 - **`extra_compiled`**——见下方"在同一个 worker 上运行多个程序"。
+
+### 有界异步分发
+
+`DistributedWorker.submit(compiled, *args)` 在 Simpler 接受分发后返回
+`DistributedRunHandle`。后端支持异步执行时，调用方可以在当前请求仍在执行时准备
+下一请求的 host 工作。`run()` 和 `rt(...)` 仍是阻塞兼容接口。
+
+worker 固定拥有两个可复用的分发元数据帧。前两次提交可以同时处于执行中；第三次
+`submit()` 会先等待最老的 handle，再构造和发布新的分发。每个 handle 会快照本次
+运行配置，并把参数和生成的任务元数据保留到完成。
+
+```python
+with compiled.prepare() as rt:
+    first = rt.submit(compiled, input_a, weight, output_a)
+    second = rt.submit(compiled, input_b, weight, output_b)
+    first.result()
+    second.result()
+```
+
+重叠分发必须使用不同的可变输入和输出 buffer；对应的 `result()` 返回前不得修改或
+释放这些 buffer。只读常驻权重可以共享。关闭 worker 时会按 FIFO 顺序排空所有已接受
+的 handle。诊断用双遍 swimlane 采集仍保持同步，并返回一个已经完成的 handle。
 
 ## DeviceTensor
 
