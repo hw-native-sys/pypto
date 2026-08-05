@@ -827,11 +827,37 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     stream_ << std::quoted(std::any_cast<std::string>(value));
   } else if (t == typeid(double)) {
     stream_ << FormatFloatLiteral(std::any_cast<double>(value));
+  } else if (t == typeid(float)) {
+    stream_ << FormatFloatLiteral(static_cast<double>(std::any_cast<float>(value)));
   } else if (t == typeid(DataType)) {
     // ``LowerHostTensorCollectives`` stamps a DataType attr on every
     // ``builtin.tensor.<collective>`` call. Printed in the ``pl.<DTYPE>`` DSL
     // form the dtype resolver reads back (ast_parser._parse_attr_value).
     stream_ << prefix_ << "." << DataTypeToString(std::any_cast<DataType>(value));
+  } else if (t == typeid(MemorySpace)) {
+    stream_ << prefix_ << ".Mem." << MemorySpaceToString(std::any_cast<MemorySpace>(value));
+  } else if (t == typeid(TensorLayout)) {
+    stream_ << prefix_ << ".TensorLayout." << TensorLayoutToString(std::any_cast<TensorLayout>(value));
+  } else if (t == typeid(TileLayout)) {
+    stream_ << prefix_ << ".TileLayout." << TileLayoutToString(std::any_cast<TileLayout>(value));
+  } else if (t == typeid(PadValue)) {
+    stream_ << prefix_ << ".PadValue.";
+    switch (std::any_cast<PadValue>(value)) {
+      case PadValue::null:
+        stream_ << "null";
+        break;
+      case PadValue::zero:
+        stream_ << "zero";
+        break;
+      case PadValue::max:
+        stream_ << "max";
+        break;
+      case PadValue::min:
+        stream_ << "min";
+        break;
+    }
+  } else if (t == typeid(ArgDirection)) {
+    stream_ << prefix_ << ".adir." << ArgDirectionToDslName(std::any_cast<ArgDirection>(value));
   } else if (t == typeid(std::vector<ArgDirection>)) {
     const auto& dirs = std::any_cast<std::vector<ArgDirection>>(value);
     stream_ << "[";
@@ -873,8 +899,8 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
     // the source rather than masked by a dropped attr.
     INTERNAL_CHECK_SPAN(false, span)
         << "Internal error: no DSL attr-value codec for type '" << DemangleTypeName(t.name())
-        << "'. The python printer round-trips int/bool/str/double/DataType/vector<ArgDirection>/"
-           "vector<int32_t>/vector<VarPtr>/VarPtr/ExprPtr attrs; add a PrintAttrValue arm, a "
+        << "'. The python printer round-trips scalar, supported enum, vector, VarPtr, and ExprPtr "
+           "attrs; add a PrintAttrValue arm, a "
            "matching _parse_attr_value case, and ConvertKwargsDict support for this type instead "
            "of dropping it.";
   }
@@ -2495,21 +2521,8 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
         auto split_mode = static_cast<SplitMode>(split_value);
         stream_ << prefix_ << ".SplitMode." << SplitModeToPythonString(split_mode);
-      } else if (value.type() == typeid(int)) {
-        stream_ << AnyCast<int>(value, "func attr key: " + key);
-      } else if (value.type() == typeid(double)) {
-        stream_ << FormatFloatLiteral(AnyCast<double>(value, "func attr key: " + key));
-      } else if (value.type() == typeid(float)) {
-        stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "func attr key: " + key)));
-      } else if (value.type() == typeid(bool)) {
-        stream_ << (AnyCast<bool>(value, "func attr key: " + key) ? "True" : "False");
-      } else if (value.type() == typeid(std::string)) {
-        stream_ << std::quoted(AnyCast<std::string>(value, "func attr key: " + key));
-      } else if (value.type() == typeid(ExprPtr)) {
-        VisitExpr(AnyCast<ExprPtr>(value, "func attr key: " + key));
       } else {
-        INTERNAL_CHECK(false) << "Unsupported function attrs value type for key '" << key
-                              << "': " << DemangleTypeName(value.type().name());
+        PrintAttrValue(value, func->span_);
       }
     };
     if (has_type || has_level || has_role || auto_scope_off || has_attrs) {

@@ -1074,6 +1074,8 @@ void BindIR(nb::module_& m) {
         result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(PadValue)) {
         result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(ArgDirection)) {
+        result[key.c_str()] = AnyCast<ArgDirection>(value, "converting to Python: " + key);
       } else if (value.type() == typeid(std::vector<ArgDirection>)) {
         const auto& dirs = AnyCast<std::vector<ArgDirection>>(value, "converting to Python: " + key);
         nb::list lst;
@@ -1743,38 +1745,10 @@ void BindIR(nb::module_& m) {
       nb::arg("attrs") = nb::none(), nb::arg("requires_runtime_binding") = false,
       "Create a function definition");
   BindFields<Function>(function_class);
-  // Custom attrs property: convert vector<pair<string, any>> to Python dict
+  // Use the shared attr converter so Function readback covers every value type
+  // accepted by ConvertKwargsDict, including enum, list, Var, and Expr attrs.
   function_class.def_prop_ro(
-      "attrs",
-      [](const FunctionPtr& self) {
-        nb::dict result;
-        for (const auto& [key, value] : self->attrs_) {
-          if (value.type() == typeid(int)) {
-            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(bool)) {
-            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(std::string)) {
-            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(double)) {
-            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(float)) {
-            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(DataType)) {
-            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(MemorySpace)) {
-            result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(TensorLayout)) {
-            result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(TileLayout)) {
-            result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(PadValue)) {
-            result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(ExprPtr)) {
-            result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
-          }
-        }
-        return result;
-      },
+      "attrs", [kwargs_to_pydict](const FunctionPtr& self) { return kwargs_to_pydict(self->attrs_); },
       "Function-level attributes as a dictionary");
   // Backward-compat split property: extract SplitMode from attrs
   function_class.def_prop_ro(

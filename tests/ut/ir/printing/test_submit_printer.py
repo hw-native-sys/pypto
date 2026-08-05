@@ -108,6 +108,53 @@ def test_submit_zero_arg_with_deps():
     assert "pl.submit(self.seed, deps=[t])" in text, text
 
 
+def test_submit_generic_enum_attrs_roundtrip():
+    """Generic enum attrs on Submit keep their types through print and parse."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def caller(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            with pl.manual_scope():
+                out, _ = pl.submit(
+                    self.kernel,
+                    x,
+                    attrs={
+                        "memory": pl.Mem.Vec,
+                        "tensor_layout": pl.TensorLayout.ND,
+                        "tile_layout": pl.TileLayout.row_major,
+                        "pad": pl.PadValue.zero,
+                        "direction": pl.adir.input,
+                    },
+                )
+            return out
+
+    text = Prog.as_python()
+    reparsed = pl.parse_program(text)
+    ir.assert_structural_equal(Prog, reparsed)
+
+    submits: list[ir.Submit] = []
+
+    class _CollectSubmits(ir.IRVisitor):
+        def visit_submit(self, op):
+            submits.append(op)
+            super().visit_submit(op)
+
+    _CollectSubmits().visit_program(reparsed)
+    assert len(submits) == 1
+    assert dict(submits[0].attrs) == {
+        "memory": ir.MemorySpace.Vec,
+        "tensor_layout": ir.TensorLayout.ND,
+        "tile_layout": ir.TileLayout.row_major,
+        "pad": ir.PadValue.zero,
+        "direction": ir.ArgDirection.Input,
+    }
+
+
 def test_task_dummy_prints_deps_kwarg_and_roundtrips():
     """A user-written dummy barrier preserves its explicit deps in Python dumps."""
 

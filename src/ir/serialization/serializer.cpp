@@ -818,6 +818,11 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
           break;
       }
       kwargs_msgs.push_back(make_pair(key, msgpack::object(pad_map, zone_)));
+    } else if (value.type() == typeid(ArgDirection)) {
+      std::map<std::string, msgpack::object> dir_map;
+      dir_map["type"] = msgpack::object("ArgDirection", zone_);
+      dir_map["value"] = VisitLeafField(AnyCast<ArgDirection>(value, "serializing kwarg: " + key));
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(dir_map, zone_)));
     } else if (value.type() == typeid(std::vector<ArgDirection>)) {
       const auto& dirs = AnyCast<std::vector<ArgDirection>>(value, "serializing kwarg: " + key);
       std::map<std::string, msgpack::object> dir_map;
@@ -873,7 +878,7 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "TensorLayout, TileLayout, PadValue, std::vector<ArgDirection>, "
+                      "TensorLayout, TileLayout, PadValue, ArgDirection, std::vector<ArgDirection>, "
                       "std::vector<int32_t>, VarPtr, std::vector<VarPtr>, or ExprPtr, but got " +
                       DemangleTypeName(value.type().name()));
     }

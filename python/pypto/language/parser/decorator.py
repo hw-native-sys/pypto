@@ -493,10 +493,12 @@ def _parse_launch_query_call(node: ast.expr) -> Any | None:
 
 
 def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, Any]:
-    """Extract function attrs from @pl.function(attrs={...}) decorator.
+    """Extract function attrs from decorator AST when runtime metadata is unavailable.
 
-    Supports attrs={"split": pl.SplitMode.UP_DOWN, ...} syntax.
-    Returns a normalized dict with enum values converted to ints.
+    The normal ``@pl.program`` path reads the evaluated attrs snapshot retained
+    by :func:`function`. This fallback supports the small set of expressions
+    that can be reconstructed without executing arbitrary source and rejects
+    everything else rather than silently dropping an attr.
     """
     decorator = _find_function_decorator_call(node)
     if decorator is None:
@@ -533,6 +535,11 @@ def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, A
                 attrs[attr_key] = v.value
             elif (launch_query := _parse_launch_query_call(v)) is not None:
                 attrs[attr_key] = launch_query
+            else:
+                raise ParserSyntaxError(
+                    f"Unsupported value for @pl.function attr '{attr_key}': {ast.unparse(v)}",
+                    hint=("Use a scalar literal, pl.SplitMode value, or pl.system.available_*_count() call."),
+                )
         return attrs
     return {}
 
@@ -837,10 +844,13 @@ def function(
         # If so, return the original function - it will be parsed by @pl.program decorator
         if _is_class_method(f):
             # Don't parse now - let @pl.program handle it with proper global_vars
-            # context. Stash the resolved external_source on the function object so
-            # the @pl.program AST walker can recover it via getattr (the value is a
-            # runtime Path expression, not an AST literal, so it can't be re-read
-            # from the decorator node).
+            # context. Retain an evaluated snapshot of attrs on the function
+            # object: reconstructing the dict from AST loses closure values,
+            # DataType values, and every other non-literal expression. The
+            # @pl.program walker reads this snapshot before building the IR.
+            f._pl_function_attrs = _normalize_attrs(attrs or {}) or {}  # type: ignore[attr-defined]
+            # Stash the resolved external_source for the same reason: the value
+            # is a runtime Path expression that cannot be re-read from the AST.
             if resolved_external_source is not None:
                 f._pl_external_source = resolved_external_source  # type: ignore[attr-defined]
             return f
@@ -1111,7 +1121,13 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 # Extract function type, level/role, and attrs from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
                 func_level, func_role = _extract_function_level_role_from_decorator(func_def)
-                func_attrs = _extract_function_attrs_from_decorator(func_def)
+                method_obj = getattr(c, func_def.name, None)
+                evaluated_attrs = getattr(method_obj, "_pl_function_attrs", None)
+                func_attrs = (
+                    dict(evaluated_attrs)
+                    if evaluated_attrs is not None
+                    else _extract_function_attrs_from_decorator(func_def)
+                )
                 # Fold auto_scope=False into attrs (absent ⇒ default True). The pass
                 # MaterializeRuntimeScopes and the parser both read attrs["auto_scope"].
                 func_auto_scope = _extract_function_auto_scope_from_decorator(func_def)
@@ -1122,7 +1138,6 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 # resolved path on the method object (the value is a runtime Path
                 # expression, not an AST literal). Fold it into attrs so the parser
                 # emits a header-only function and the backend compiles the .cpp.
-                method_obj = getattr(c, func_def.name, None)
                 external_source = getattr(method_obj, "_pl_external_source", None)
                 if external_source is not None:
                     func_attrs[EXTERNAL_SOURCE_ATTR] = external_source

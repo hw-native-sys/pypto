@@ -7263,10 +7263,11 @@ class ASTParser:
         (``src/ir/transforms/python_printer.cpp``). The value type is inferred
         from syntax (the "syntax inference only" round-trip contract): scalars
         from constants, ``[int, ...]`` -> index list, ``[pl.adir.X, ...]`` ->
-        direction list, ``[name, ...]`` / bare ``name`` -> Var(s), anything else
-        -> an IR expression. Syntactically ambiguous shapes (empty / mixed-kind
-        lists) are REJECTED rather than guessed — never silently dropped —
-        mirroring the printer's fail-loud behaviour.
+        direction list, printed enum attributes -> their original enum values,
+        and ``[name, ...]`` / bare ``name`` -> Var(s). Anything else becomes an
+        IR expression. Syntactically ambiguous shapes (empty / mixed-kind lists)
+        are REJECTED rather than guessed — never silently dropped — mirroring
+        the printer's fail-loud behaviour.
         """
         from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
@@ -7324,10 +7325,19 @@ class ASTParser:
                 "unsupported kind (expected all ints, all pl.adir.<name>, or all names)",
                 span=node_span,
             )
-        # ``pl.<DTYPE>`` -> DataType. The printer emits DataType attrs in this
-        # form (PrintAttrValue's DataType arm), and ``parse_expression`` has no
-        # way to represent a dtype, so resolve it before the generic fallback.
+        # Printed enum attrs must remain enum attrs. ``parse_expression`` either
+        # rejects these standalone attribute forms or, for MemorySpace, lowers
+        # them to ConstInt and silently changes the stored attr type.
         if isinstance(value_node, ast.Attribute):
+            success, value = self.expr_evaluator.try_eval_expr(value_node)
+            if success and isinstance(
+                value,
+                (DataType, ir.MemorySpace, ir.TensorLayout, ir.TileLayout, ir.PadValue, ir.ArgDirection),
+            ):
+                return value
+
+            # Keep the dtype resolver's diagnostic for unknown ``pl.<DTYPE>``
+            # spellings when expression evaluation cannot resolve the value.
             try:
                 return self.type_resolver.resolve_dtype(value_node)
             except ParserTypeError:

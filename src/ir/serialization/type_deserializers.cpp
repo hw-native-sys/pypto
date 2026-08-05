@@ -200,7 +200,17 @@ static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msg
           }
         }
       }
-      if (type_name == "ArgDirectionVector") {
+      if (type_name == "ArgDirection") {
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::POSITIVE_INTEGER) {
+          throw TypeError("ArgDirection kwarg '" + key + "' must have integer value");
+        }
+        uint8_t code = value_obj_inner.as<uint8_t>();
+        if (code > static_cast<uint8_t>(ArgDirection::Scalar)) {
+          throw TypeError("Invalid ArgDirection value " + std::to_string(static_cast<int>(code)) +
+                          " for kwarg: " + key);
+        }
+        kwargs.emplace_back(key, static_cast<ArgDirection>(code));
+      } else if (type_name == "ArgDirectionVector") {
         if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
           throw TypeError("ArgDirectionVector kwarg '" + key + "' must have ARRAY value");
         }

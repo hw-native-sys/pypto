@@ -596,6 +596,50 @@ class TestProgramDecorator:
 
         assert MyCustomProgram.name == "MyCustomProgram"
 
+    def test_function_attrs_preserve_evaluated_values(self):
+        """Program methods retain non-literal attrs evaluated by the decorator."""
+        marker = 7
+        expected_attrs = {
+            "marker": marker,
+            "dtype": pl.FP16,
+            "memory_space": pl.Mem.Vec,
+            "tensor_layout": pl.TensorLayout.ND,
+            "tile_layout": pl.TileLayout.row_major,
+            "pad": pl.PadValue.zero,
+            "direction": pl.adir.input,
+        }
+
+        @pl.program
+        class AttrProgram:
+            @pl.function(attrs=expected_attrs)
+            def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                return x
+
+        func = AttrProgram.get_function("kernel")
+        assert func is not None
+        assert dict(func.attrs) == expected_attrs
+
+        printed = AttrProgram.as_python()
+        assert '"marker": 7' in printed
+        assert '"dtype": pl.FP16' in printed
+        assert '"memory_space": pl.Mem.Vec' in printed
+        assert '"tensor_layout": pl.TensorLayout.ND' in printed
+        assert '"tile_layout": pl.TileLayout.row_major' in printed
+        assert '"pad": pl.PadValue.zero' in printed
+        assert '"direction": pl.adir.input' in printed
+        ir.assert_structural_equal(pl.parse_program(printed), AttrProgram)
+        ir.assert_structural_equal(ir.deserialize(ir.serialize(AttrProgram)), AttrProgram)
+
+    def test_unsupported_function_attr_fails_loudly(self):
+        """An unrepresentable Function attr is rejected instead of disappearing."""
+        with pytest.raises(ParserSyntaxError, match="Unsupported list element type for key: custom_list"):
+
+            @pl.program
+            class InvalidAttrProgram:
+                @pl.function(attrs={"custom_list": [1, 2]})
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
     def test_empty_class_error(self):
         """Test that empty class raises error."""
         with pytest.raises(ParserSyntaxError):  # Should raise ParserSyntaxError

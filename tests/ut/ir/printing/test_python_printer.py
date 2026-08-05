@@ -1840,6 +1840,11 @@ def test_builtin_op_call_generic_attrs_roundtrip():
                         "my_bool_attr": True,
                         "my_str_attr": "hello",
                         "my_dtype_attr": pl.FP16,
+                        "my_memory_attr": pl.Mem.Vec,
+                        "my_tensor_layout_attr": pl.TensorLayout.ND,
+                        "my_tile_layout_attr": pl.TileLayout.row_major,
+                        "my_pad_attr": pl.PadValue.zero,
+                        "my_direction_attr": pl.adir.input,
                         "pipeline_membership": "0:3",
                         "dump_vars": [a],
                     },
@@ -1854,6 +1859,11 @@ def test_builtin_op_call_generic_attrs_roundtrip():
         assert key in printed, printed
     # DataType attrs print in the ``pl.<DTYPE>`` form the dtype resolver reads back.
     assert '"my_dtype_attr": pl.FP16' in printed, printed
+    assert '"my_memory_attr": pl.Mem.Vec' in printed, printed
+    assert '"my_tensor_layout_attr": pl.TensorLayout.ND' in printed, printed
+    assert '"my_tile_layout_attr": pl.TileLayout.row_major' in printed, printed
+    assert '"my_pad_attr": pl.PadValue.zero' in printed, printed
+    assert '"my_direction_attr": pl.adir.input' in printed, printed
 
     reparsed = pl.parse_program(printed)
     ir.assert_structural_equal(program, reparsed)
@@ -1875,6 +1885,11 @@ def test_builtin_op_call_generic_attrs_roundtrip():
     assert attrs["my_bool_attr"] is True
     assert attrs["my_str_attr"] == "hello"
     assert attrs["my_dtype_attr"] == DataType.FP16
+    assert attrs["my_memory_attr"] == ir.MemorySpace.Vec
+    assert attrs["my_tensor_layout_attr"] == ir.TensorLayout.ND
+    assert attrs["my_tile_layout_attr"] == ir.TileLayout.row_major
+    assert attrs["my_pad_attr"] == ir.PadValue.zero
+    assert attrs["my_direction_attr"] == ir.ArgDirection.Input
     assert attrs["pipeline_membership"] == "0:3"
     # The Var-list attr resolves back to the very same operand, by identity.
     assert list(attrs["dump_vars"]) == [loads[0].args[0]]

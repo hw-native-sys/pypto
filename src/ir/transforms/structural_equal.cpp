@@ -620,6 +620,9 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(PadValue)) {
         values_equal = (AnyCast<PadValue>(lhs_val, "comparing kwarg: " + lhs_key) ==
                         AnyCast<PadValue>(rhs_val, "comparing kwarg: " + lhs_key));
+      } else if (lhs_val.type() == typeid(ArgDirection)) {
+        values_equal = (AnyCast<ArgDirection>(lhs_val, "comparing kwarg: " + lhs_key) ==
+                        AnyCast<ArgDirection>(rhs_val, "comparing kwarg: " + lhs_key));
       } else if (lhs_val.type() == typeid(float)) {
         values_equal = (AnyCast<float>(lhs_val, "comparing kwarg: " + lhs_key) ==
                         AnyCast<float>(rhs_val, "comparing kwarg: " + lhs_key));
