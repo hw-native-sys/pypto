@@ -81,6 +81,28 @@ PyPTO（发音：pai p-t-o）是一个面向 AI 加速器的高性能编程框�
   sudo apt-get install ccache  # Ubuntu/Debian
   ```
 
+### AI 助手插件
+
+PyPTO 公共 skills 通过
+[`hw-native-sys/pypto-skills`](https://github.com/hw-native-sys/pypto-skills)
+发布为两个插件：`pypto-developer` 提供仓库开发工作流，`pypto-user` 提供面向用户的检查和性能分析工作流。可按需安装其中一个或两个插件。
+
+Codex：
+
+```bash
+codex plugin marketplace add hw-native-sys/pypto-skills
+codex plugin add pypto-developer@pypto-skills
+codex plugin add pypto-user@pypto-skills
+```
+
+Claude Code：
+
+```bash
+claude plugin marketplace add hw-native-sys/pypto-skills
+claude plugin install pypto-developer@pypto-skills
+claude plugin install pypto-user@pypto-skills
+```
+
 ### 运行示例
 
 PyPTO 包含按复杂度组织的示例：

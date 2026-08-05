@@ -81,6 +81,30 @@ The build system uses scikit-build-core to automatically handle CMake configurat
   sudo apt-get install ccache  # Ubuntu/Debian
   ```
 
+### AI Assistant Plugins
+
+Shared PyPTO skills are published from
+[`hw-native-sys/pypto-skills`](https://github.com/hw-native-sys/pypto-skills)
+as two plugins: `pypto-developer` for repository development workflows and
+`pypto-user` for user-facing inspection and profiling workflows. Install either
+or both plugins as needed.
+
+Codex:
+
+```bash
+codex plugin marketplace add hw-native-sys/pypto-skills
+codex plugin add pypto-developer@pypto-skills
+codex plugin add pypto-user@pypto-skills
+```
+
+Claude Code:
+
+```bash
+claude plugin marketplace add hw-native-sys/pypto-skills
+claude plugin install pypto-developer@pypto-skills
+claude plugin install pypto-user@pypto-skills
+```
+
 ### Running Examples
 
 PyPTO includes examples organized by complexity:
