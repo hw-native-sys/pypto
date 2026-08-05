@@ -145,6 +145,33 @@ runs:
             exit 1
           fi
         done
+        # The .env makes the host's *paths* portable; these tool names are the
+        # other half of the provisioning contract (see this action's description).
+        # Check them here so a mis-provisioned runner fails in seconds naming what
+        # to install. Without this, a missing ccache surfaces ~3 minutes later as
+        # a CMake "The C compiler is not able to compile a simple test program"
+        # — because CMAKE_*_COMPILER_LAUNCHER makes CMake run `ccache gcc`, and
+        # the 127 from the absent launcher reads as a broken gcc. The `ccache -s`
+        # step below cannot catch it either: it is `|| true` on purpose.
+        tools="ccache git curl"
+        if [ "$NEEDS_DEVICE" = "true" ]; then
+          tools="$tools task-submit npu-smi"
+        fi
+        missing=""
+        for tool in $tools; do
+          command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+        done
+        if [ -n "$missing" ]; then
+          for tool in $missing; do
+            echo "::error::$tool is not on PATH — install it on this runner"
+          done
+          echo "Missing on $(hostname):$missing"
+          echo "Every self-hosted pypto job needs ccache/git/curl on PATH;"
+          echo "device jobs also need task-submit and npu-smi. The host provides"
+          echo "these by name — CI does not install them."
+          echo "PATH=$PATH"
+          exit 1
+        fi
         # CI_CACHE_ROOT is different in kind: CI owns everything under it, so it
         # only has to be declared, not to pre-exist — a fresh host starts with an
         # empty (or absent) cache and simply takes the miss.
@@ -162,7 +189,7 @@ runs:
           echo "PIP_CACHE_DIR=$CI_CACHE_ROOT/$PIP_CACHE_NAME"
           echo "PTOAS_CACHE_DIR=$CI_CACHE_ROOT/ptoas"
         } >> "$GITHUB_ENV"
-        echo "runner config OK (checked: CI_CACHE_ROOT $required)"
+        echo "runner config OK (checked: CI_CACHE_ROOT $required; tools: $tools)"
         # Identity and storage of the host we landed on, made visible in every log:
         # these jobs run on a pool of self-hosted runners that are not necessarily
         # identically provisioned, so surface the basics instead of guessing later.
