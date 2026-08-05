@@ -23,6 +23,7 @@ import types
 import warnings
 import weakref
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1860,15 +1861,34 @@ class DistributedWorker(Worker):
 
         shards: list[DeviceTensor] = []
         try:
-            for i, w in enumerate(ids):
-                shards.append(
-                    self.alloc_tensor(
-                        tuple(host.shape[1:]),
-                        host.dtype,
-                        init=host[i].contiguous(),
-                        worker_id=w,
-                    )
+            # Upload the shards concurrently: each one targets a different chip
+            # worker, so the H2D transfers overlap instead of running back-to-back
+            # at single-chip bandwidth (the device-memory bindings release the GIL,
+            # and Simpler serializes provenance-guarded device ops per worker).
+            def _upload_shard(i: int, w: int) -> DeviceTensor:
+                return self.alloc_tensor(
+                    tuple(host.shape[1:]),
+                    host.dtype,
+                    init=host[i].contiguous(),
+                    worker_id=w,
                 )
+
+            uploaded: dict[int, DeviceTensor] = {}
+            errors: list[Exception] = []
+            with ThreadPoolExecutor(max_workers=len(ids)) as pool:
+                futures = {pool.submit(_upload_shard, i, w): i for i, w in enumerate(ids)}
+                for future, index in futures.items():
+                    try:
+                        uploaded[index] = future.result()
+                    except Exception as exc:  # noqa: PERF203 -- one shard failing must not orphan the rest
+                        errors.append(exc)
+            if errors:
+                # A concurrent upload can fail anywhere in the group, so roll back
+                # by index rather than relying on the successes being a prefix.
+                for index, shard in uploaded.items():
+                    self.free_tensor(shard, worker_id=ids[index])
+                raise errors[0]
+            shards.extend(uploaded[index] for index in range(len(ids)))
         except Exception:
             # Roll back any shards already uploaded so a mid-loop failure
             # (e.g. a non-shared host) never leaks device memory.
