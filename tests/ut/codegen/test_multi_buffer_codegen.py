@@ -486,5 +486,67 @@ class TestSlotGeometrySurvivesInitMemRef:
         ir.assert_structural_equal(pl.parse_program(dumped), after)
 
 
+@pl.program
+class PipelinedLoad:
+    """``pl.pipeline`` with no hand-written declaration.
+
+    ``LowerPipelineToSlots`` synthesizes the slotted allocation, so this is the
+    compiler-generated counterpart of ``RotatingSlot`` above — the two must reach
+    codegen in the same shape.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for i, (acc_i,) in pl.pipeline(4, stage=2, init_values=(seed,)):
+            t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+            r = pl.yield_(acc_next)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
+class TestPipelineLowersToARegion:
+    """``pl.pipeline`` reaches codegen as one region, not as F copies of the body."""
+
+    def test_emits_one_region_sized_to_the_stage_count(self):
+        mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PTOAS)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 1, f"expected exactly one region:\n{mlir}"
+        assert "count=2" in regions[0], regions[0]
+
+    def test_takes_one_slot_per_iteration(self):
+        """One `multi_tile_get` per iteration is the shape ptoas guards correctly."""
+        mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 1, mlir
+
+    def test_slot_operand_is_the_affine_index_not_a_byte_offset(self):
+        """ptoas matches `i % 2` to earn the rotation its dynamic event ids."""
+        mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PTOAS)
+        assert _lines(mlir, "arith.remsi"), f"the slot index must survive as a remainder:\n{mlir}"
+
+    def test_the_body_is_not_replicated(self):
+        """One load in the loop, and the loop still strides by its original step."""
+        mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PTOAS)
+        # Two tloads total: the seed before the loop, and the one in the body.
+        assert len(_lines(mlir, "pto.tload")) == 2, mlir
+        loops = _lines(mlir, "scf.for")
+        assert len(loops) == 1, mlir
+        assert "step %c1_index" in loops[0], f"a slotted loop keeps its step:\n{loops[0]}"
+
+    def test_pypto_planner_still_replicates(self):
+        """The default planner emits no region and keeps the F-way replication."""
+        mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PYPTO)
+        assert _lines(mlir, "pto.alloc_multi_tile") == []
+        assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
+        assert "step %c2_index" in _lines(mlir, "scf.for")[0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

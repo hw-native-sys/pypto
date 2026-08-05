@@ -295,9 +295,12 @@ def normalize_return_order() -> Pass:
 
 - [`OutlineInCoreScopes`](08-outline_incore_scopes.md) — upstream
   producer of the `InCore` functions this pass rewrites
-- [`LowerPipelineLoops`](27-lower_pipeline_loops.md) — runs immediately
-  after; consumes the normalized returns when expanding pipeline scopes
-- [`DeriveCallDirections`](36-derive_call_directions.md) — later
+- [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) and
+  [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) — run in between,
+  claiming the pipeline loops each one handles
+- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) — consumes the normalized
+  returns when expanding the pipeline scopes those two passes left behind
+- [`DeriveCallDirections`](37-derive_call_directions.md) — later
   inspects call signatures whose return shape this pass canonicalizes
 - [PTO codegen overview](../codegen/00-pto_codegen.md) and
   [orchestration codegen](../codegen/01-orchestration_codegen.md) —

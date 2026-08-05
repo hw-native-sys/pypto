@@ -435,7 +435,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/39-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/40-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape `[world_size, 1]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
 pass binds `world_size = pld.world_size()` as a standalone statement and uses
@@ -506,11 +506,11 @@ The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/40-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/41-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/41-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/42-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing

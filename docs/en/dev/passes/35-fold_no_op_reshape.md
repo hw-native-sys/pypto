@@ -43,7 +43,7 @@ cases, knowing the no-op cases were already removed upstream.
 - Only InCore-type functions (`InCore`, `AIC`, `AIV`) are scanned; Opaque
   and Orchestration functions are returned unchanged.
 
-**When to use**: 29th pass in the `Default` strategy, immediately after
+**When to use**: 35th pass in the `Default` strategy, immediately after
 `AllocateMemoryAddr` (so `MemRef` merging is finalized) and before
 `FuseCreateAssembleToSlice`.
 

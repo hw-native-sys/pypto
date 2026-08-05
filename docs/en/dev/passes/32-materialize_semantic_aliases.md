@@ -16,12 +16,12 @@ Memory planning distinguishes two kinds of buffer sharing:
   lifetimes *may* share storage to save memory. This is optimization.
 
 This pass handles only the **must-alias** case. It was split out of
-[`MemoryReuse`](32-memory_reuse.md) (it is that pass's former "Step 0") so that
+[`MemoryReuse`](33-memory_reuse.md) (it is that pass's former "Step 0") so that
 the opportunistic lifetime coalescing can be skipped independently — e.g. when
 ptoas owns lifetime reuse under `compile(memory_planner=MemoryPlanner.PTOAS)`.
 
-**When to use**: Run after [`InitMemRef`](30-init_memref.md) (which creates the
-MemRefs) and before [`MemoryReuse`](32-memory_reuse.md). It always runs; only the
+**When to use**: Run after [`InitMemRef`](31-init_memref.md) (which creates the
+MemRefs) and before [`MemoryReuse`](33-memory_reuse.md). It always runs; only the
 opportunistic reuse is skippable.
 
 ## API

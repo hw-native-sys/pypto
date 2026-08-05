@@ -15,7 +15,7 @@
 - 生命周期通过 def-use 分析确定
 - 共享完成后，已无引用的 MemRef 及其 alloc 语句会被清理
 
-**使用时机**：在 [`MaterializeSemanticAliases`](31-materialize_semantic_aliases.md) 之后、AllocateMemoryAddr 之前运行。可减少内存分配开销。本 pass 只做**机会性**的生命周期合并；**语义强制**的 must-alias 重定向（循环 carry / 原地 —— 本 pass 原来的 "Step 0"）现在在 `MaterializeSemanticAliases` 里运行,因此 `MemoryReuse` 可以被独立跳过（例如 `memory_planner=PTOAS`,由 ptoas 接管生命周期复用）。
+**使用时机**：在 [`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) 之后、AllocateMemoryAddr 之前运行。可减少内存分配开销。本 pass 只做**机会性**的生命周期合并；**语义强制**的 must-alias 重定向（循环 carry / 原地 —— 本 pass 原来的 "Step 0"）现在在 `MaterializeSemanticAliases` 里运行,因此 `MemoryReuse` 可以被独立跳过（例如 `memory_planner=PTOAS`,由 ptoas 接管生命周期复用）。
 
 ## API
 
@@ -78,7 +78,7 @@ program_optimized = reuse_pass(program)
   | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)`（广播向量） | 行/列向量（arg 1）会被**每个**输出行/列重读,输出若 alias 它则在第一行/列后被覆盖 |
   | `tile.cast`（仅升精度） | 输出 ≠ 输入缓冲区（条件式,在 `ForbidAliasCollector`） | 更宽的输出写指针超前于读指针（见上） |
 
-- **流水线 stage 守卫**（容量门控）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [27-lower_pipeline_loops.md](27-lower_pipeline_loops.md)）。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号——把并发副本合并到同一块缓冲会注入一条虚假的写后读（write-after-read），使各 stage 串行化（即 #1475 的 cube matmul 操作数坍缩）。MemoryReuse 因此在**每个内存空间**（包括 L0 matmul 空间 Left/Right/Acc/Bias，且无论 tile 是 load 还是 `tile.move` 的结果）都把并发副本保持在**不同的缓冲**中，最多到**可负担的双缓冲深度** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`：stage `k` 的副本落在残数 `ordinal(k) mod F_g`（**稠密**的 stage 序号，因此稀疏 stage ID 如 `{0, 2}` 不会因 `2 mod 2 == 0 mod 2` 而错误合并），因此并发副本永不共享（放得下时是完整 ping-pong，空间紧张时尽量分散）。分离是否放得下由**精确的按空间分配器足迹**（`SpaceFootprint`，与 `AllocateMemoryAddr` 共享——按构造保证一致）决定，而非估算。当某空间在所有 group 的可负担深度下仍然溢出时，采用**优雅的跨 group 削减**：将某个 group 的深度降低一个残数并重新打包（按 `MaxRelief` 启发式选择 group——优先释放最多字节，平局取最小 group id）；若削减耗尽，则整体回退到 **legacy 重新打包**（`force_legacy`），从而绝不会在 legacy 打包本可放下的情况下溢出。容量未知的空间（未配置 backend）使用 legacy 判据，因此容量门控路径绝不比 legacy 更差。当门控把某个 group 的深度降到其请求的 `stage=` 之下（或某空间触发 legacy 回退）时，MemoryReuse 通过统一诊断通道发出诊断——一条 `PH-MR-001` **性能提示**（回退情形则为 **warning**），指出请求深度与实际深度以及修复方式（把每 stage 的 tile 缩小到 `≤ C_s / stage`，或把 `stage=` 降到能放下的值）——因此容量导致的串行化绝不会静默发生。复用决策完成后，MemoryReuse 会剥离已消费的 `pipeline_membership` attr，使其不会带到下游 pass 或 codegen。
+- **流水线 stage 守卫**（容量门控，仅针对复制路径）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [28-lower_pipeline_loops.md](28-lower_pipeline_loops.md)）。本守卫只作用于这条复制路径。在 `memory_planner=PTOAS` 下，合格循环会先被 [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) 接手：它给每个 load 一个以 `iv % F` 索引的 `pl.MemRef(..., slots=F)`，循环体只有一份——没有副本，也没有 `pipeline_membership`，而且该流水线本就跳过 MemoryReuse。以下描述仅适用于被那个 pass 拒绝的循环。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号——把并发副本合并到同一块缓冲会注入一条虚假的写后读（write-after-read），使各 stage 串行化（即 #1475 的 cube matmul 操作数坍缩）。MemoryReuse 因此在**每个内存空间**（包括 L0 matmul 空间 Left/Right/Acc/Bias，且无论 tile 是 load 还是 `tile.move` 的结果）都把并发副本保持在**不同的缓冲**中，最多到**可负担的双缓冲深度** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`：stage `k` 的副本落在残数 `ordinal(k) mod F_g`（**稠密**的 stage 序号，因此稀疏 stage ID 如 `{0, 2}` 不会因 `2 mod 2 == 0 mod 2` 而错误合并），因此并发副本永不共享（放得下时是完整 ping-pong，空间紧张时尽量分散）。分离是否放得下由**精确的按空间分配器足迹**（`SpaceFootprint`，与 `AllocateMemoryAddr` 共享——按构造保证一致）决定，而非估算。当某空间在所有 group 的可负担深度下仍然溢出时，采用**优雅的跨 group 削减**：将某个 group 的深度降低一个残数并重新打包（按 `MaxRelief` 启发式选择 group——优先释放最多字节，平局取最小 group id）；若削减耗尽，则整体回退到 **legacy 重新打包**（`force_legacy`），从而绝不会在 legacy 打包本可放下的情况下溢出。容量未知的空间（未配置 backend）使用 legacy 判据，因此容量门控路径绝不比 legacy 更差。当门控把某个 group 的深度降到其请求的 `stage=` 之下（或某空间触发 legacy 回退）时，MemoryReuse 通过统一诊断通道发出诊断——一条 `PH-MR-001` **性能提示**（回退情形则为 **warning**），指出请求深度与实际深度以及修复方式（把每 stage 的 tile 缩小到 `≤ C_s / stage`，或把 `stage=` 降到能放下的值）——因此容量导致的串行化绝不会静默发生。复用决策完成后，MemoryReuse 会剥离已消费的 `pipeline_membership` attr，使其不会带到下游 pass 或 codegen。
 
 **不再有 shape / dtype / TileView 兼容性门槛**：共享同一物理 MemRef 的 tile 可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。这允许例如：
 
@@ -101,7 +101,7 @@ MemRef 共享完成后，部分 MemRef 对象变为无引用状态（其变量�
 
 在 tile 注解中引用一个声明好的 `pl.MemRef("name")`，作者即可把某块分配从 packer 手里收回。
 InitMemRef 将其物化为 `tile.alloc(..., pinned=True)`（见
-[InitMemRef](30-init_memref.md#声明式分配)），本 pass 随后视其为封闭的：pinned 区间在
+[InitMemRef](31-init_memref.md#声明式分配)），本 pass 随后视其为封闭的：pinned 区间在
 first-fit 打包中自开一个槽位，之后每个候选在扫描槽位时都会跳过它。（隔离是打包循环内的
 per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) 打包的最内层，且每次 shed
 都会重跑，所以该判定按区间解析一次，而不是按配对解析。）具体而言：

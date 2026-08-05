@@ -13,7 +13,7 @@ This pass detects that pattern and rewrites it: the `tensor.create` becomes a `t
 - The pass requires `IRProperty::SplitIncoreOrch` — Orchestration functions must already be split out from InCore code (`OutlineHierarchyScopes` / `OutlineIncoreScopes` / `OutlineClusterScopes` have run).
 - Only Orchestration functions are scanned; InCore, AIC, AIV, and Opaque functions are returned unchanged.
 
-**When to use**: 27th pass in the `Default` strategy, after `AllocateMemoryAddr` (so memory addresses are already assigned for any tensors that survive) and before `DeriveCallDirections` and the trailing `Simplify`. It is the last tensor-shape rewrite before call-direction inference.
+**When to use**: 36th pass in the `Default` strategy, after `AllocateMemoryAddr` (so memory addresses are already assigned for any tensors that survive) and before `DeriveCallDirections` and the trailing `Simplify`. It is the last tensor-shape rewrite before call-direction inference.
 
 ## API
 

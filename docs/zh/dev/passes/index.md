@@ -2,7 +2,7 @@
 
 PyPTO 在 IR 之上运行的全部变换，编号与其在默认流水线中的位置一致。
 
-pass 文档按编号组织，因此从头读到尾就是按执行顺序走完整条编译流水。`01`–`43` 是流水线
+pass 文档按编号组织，因此从头读到尾就是按执行顺序走完整条编译流水。`01`–`46` 是流水线
 pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是流水线 pass 的基础设施"。
 
 ## 框架
@@ -41,25 +41,26 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 24 | [StampTfreeSplit](24-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
 | 25 | [NormalizeReturnOrder](25-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
 | 26 | [SkewCrossCorePipeline](26-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
-| 27 | [LowerPipelineLoops](27-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
-| 28 | [CanonicalizeIOOrder](28-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
-| 29 | [MaterializeTensorStrides](29-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
-| 30 | [InitMemRef](30-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
-| 31 | [MaterializeSemanticAliases](31-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
-| 32 | [MemoryReuse](32-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc |
-| 33 | [AllocateMemoryAddr](33-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
-| 34 | [FoldNoOpReshape](34-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
-| 35 | [FuseCreateAssembleToSlice](35-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
-| 36 | [DeriveCallDirections](36-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
-| 37 | [AutoDeriveTaskDependencies](37-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
-| 38 | [ExpandManualPhaseFence](38-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
-| 39 | [SynthesizeAllReduceSignals](39-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
-| 40 | [MaterializeCommDomainScopes](40-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
-| 41 | [LowerHostTensorCollectives](41-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
-| 42 | [MaterializeDistTensorCtx](42-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
-| 43 | [MaterializeRuntimeScopes](43-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
-| 44 | [ClassifyIterArgCarry](44-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
-| 45 | [InsertCommFence](45-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
+| 27 | [LowerPipelineToSlots](27-lower_pipeline_to_slots.md) | 把 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制（`memory_planner=PTOAS`） |
+| 28 | [LowerPipelineLoops](28-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
+| 29 | [CanonicalizeIOOrder](29-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |
+| 30 | [MaterializeTensorStrides](30-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
+| 31 | [InitMemRef](31-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
+| 32 | [MaterializeSemanticAliases](32-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
+| 33 | [MemoryReuse](33-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc |
+| 34 | [AllocateMemoryAddr](34-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
+| 35 | [FoldNoOpReshape](35-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
+| 36 | [FuseCreateAssembleToSlice](36-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
+| 37 | [DeriveCallDirections](37-derive_call_directions.md) | 先物化包装函数的 `ParamDirection`，再为每个调用逐实参推导 `ArgDirection` |
+| 38 | [AutoDeriveTaskDependencies](38-auto_derive_task_dependencies.md) | 推导保守的任务间依赖边 |
+| 39 | [ExpandManualPhaseFence](39-expand_manual_phase_fence.md) | 压缩 manual scope 中收益明确的全数组 `TaskId` 依赖 |
+| 40 | [SynthesizeAllReduceSignals](40-synthesize_allreduce_signals.md) | 把 host allreduce 的可选 signal 转为显式的内部 signal IR |
+| 41 | [MaterializeCommDomainScopes](41-materialize_comm_domain_scopes.md) | 在每个 host 编排函数体内装配 `WindowBuffer` 与 `CommDomainScopeStmt` 包装 |
+| 42 | [LowerHostTensorCollectives](42-lower_host_tensor_collectives.md) | 把 host 级 tensor 集合通信改写为内部 builtin chip 派发 |
+| 43 | [MaterializeDistTensorCtx](43-materialize_dist_tensor_ctx.md) | 为每个 `DistributedTensor` 物化显式的 `CommCtx` 参数与实参 |
+| 44 | [MaterializeRuntimeScopes](44-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
+| 45 | [ClassifyIterArgCarry](45-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
+| 46 | [InsertCommFence](46-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
 
 ## 默认流水线之外
 

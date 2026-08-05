@@ -413,6 +413,15 @@ void BindPass(nb::module_& m) {
              "or multi-round-trip loop demotes to a plain Sequential loop (order-preserving).\n"
              "Output is Sequential with no pipeline marker, so lower_pipeline_loops and\n"
              "canonicalize_io_order leave it alone. Non-cross-core loops are untouched.");
+  passes.def("lower_pipeline_to_slots", &pass::LowerPipelineToSlots,
+             "Rotate ``pl.pipeline`` loops through the slots of one declared allocation;\n"
+             "runs immediately before lower_pipeline_loops. Rebinds each top-level\n"
+             "``tile.load`` / ``tile.read`` whose args read the induction variable onto\n"
+             "``pl.MemRef(name, slots=F)[iv % F]`` and demotes the loop to Sequential,\n"
+             "keeping ONE body instead of F copies (no remainder dispatch needed).\n"
+             "Self-gated on ``memory_planner=PTOAS`` — the only planner under which codegen\n"
+             "emits a ptoas multi-buffer region today. Any loop it declines is left intact\n"
+             "for lower_pipeline_loops to replicate.");
   passes.def("lower_pipeline_loops", &pass::LowerPipelineLoops,
              "Lower ``pl.pipeline(N, stage=F)`` loops at the tile level (triggers on F > 1):\n"
              "replicate the body F times per outer iteration with a bare-SeqStmts remainder\n"

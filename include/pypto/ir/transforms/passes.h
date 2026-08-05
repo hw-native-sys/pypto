@@ -284,6 +284,43 @@ Pass UnrollLoops();
 Pass SkewCrossCorePipeline();
 
 /**
+ * @brief Rotate a ``pl.pipeline`` loop through the slots of one declared
+ *        allocation; runs immediately before ``LowerPipelineLoops``.
+ *
+ * Where ``LowerPipelineLoops`` buys ping-pong by replicating the body ``F`` times
+ * so each copy owns a distinct buffer, this pass keeps ONE body and gives the
+ * buffer ``F`` slots: every top-level ``tile.load`` / ``tile.read`` in the body
+ * whose arguments read the induction variable is rebound onto
+ * ``pl.MemRef(name, slots=F)[iv % F]``, and the loop is demoted to
+ * ``ForKind::Sequential`` with ``pipeline_stages`` stripped. Bounds, step and
+ * ``iter_args`` are untouched, so no remainder dispatch is needed and a dynamic
+ * trip count needs no special case.
+ *
+ * The synthesized MemRef is shaped exactly like an author's declaration, so
+ * ``InitMemRef`` resolves it and PTO codegen lowers it to one
+ * ``pto.alloc_multi_tile`` plus a ``pto.multi_tile_get`` per use — no new IR op
+ * and no new user-facing switch.
+ *
+ * **Self-gated on ``memory_planner=PTOAS``.** Only that planner emits a ptoas
+ * region today — PTO codegen's ``PlanMultiBufferRegions`` bails under the PyPTO
+ * planner — so this pass returns the function untouched there and the default
+ * pipeline is byte-identical. The gate tracks that codegen limitation, not a
+ * limitation of ptoas: an addressed region synchronizes identically at
+ * ``--pto-level=level3``. Widening it is follow-up work in the address
+ * allocator.
+ *
+ * Loops it declines — a slot count outside ptoas' ``[2, 16]``, a step other than 1,
+ * a start not a multiple of ``F``, a body with no eligible load, a tile in a space
+ * other than Vec / Mat / Acc, a runtime valid shape, a tile carried out as a phi or
+ * consumed by a view / in-place op, or any loop nested under a pipeline loop this
+ * pass already declined — are left intact for ``LowerPipelineLoops`` to replicate.
+ * Every rejection is a fallback to the existing behaviour, never an error: codegen
+ * refuses a region it cannot describe, so synthesizing a doubtful one would turn a
+ * kernel that compiles today into a compile failure.
+ */
+Pass LowerPipelineToSlots();
+
+/**
  * @brief Lower ``pl.pipeline(N, stage=F)`` loops at the tile level
  *
  * Triggers on ``ForStmt`` nodes with ``kind_ == ForKind::Pipeline`` and

@@ -46,6 +46,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "StampTfreeSplit",
     "NormalizeReturnOrder",
     "SkewCrossCorePipeline",
+    "LowerPipelineToSlots",
     "LowerPipelineLoops",
     "CanonicalizeIOOrder",
     "MaterializeTensorStrides",

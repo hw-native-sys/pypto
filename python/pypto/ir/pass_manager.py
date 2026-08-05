@@ -202,6 +202,12 @@ class PassManager:
             passes.stamp_tfree_split,
             passes.normalize_return_order,
             passes.skew_cross_core_pipeline,
+            # LowerPipelineToSlots multi-buffers what it can via MemRef slots (one
+            # body, one N-slot allocation) and demotes those loops; every loop it
+            # declines stays ForKind.Pipeline for LowerPipelineLoops to replicate.
+            # It is self-gated on memory_planner=PTOAS, so the default path is
+            # unchanged — hence both passes run, rather than one replacing the other.
+            passes.lower_pipeline_to_slots,
             passes.lower_pipeline_loops,
             passes.canonicalize_io_order,
             # MaterializeTensorStrides fills empty stride slots on every

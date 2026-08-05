@@ -250,25 +250,26 @@ nav:
           - en/dev/passes/24-stamp_tfree_split.md
           - en/dev/passes/25-normalize_return_order.md
           - en/dev/passes/26-skew_cross_core_pipeline.md
-          - en/dev/passes/27-lower_pipeline_loops.md
-          - en/dev/passes/28-canonicalize_io_order.md
-          - en/dev/passes/29-materialize_tensor_strides.md
-          - en/dev/passes/30-init_memref.md
-          - en/dev/passes/31-materialize_semantic_aliases.md
-          - en/dev/passes/32-memory_reuse.md
-          - en/dev/passes/33-allocate_memory_addr.md
-          - en/dev/passes/34-fold_no_op_reshape.md
-          - en/dev/passes/35-fuse_create_assemble_to_slice.md
-          - en/dev/passes/36-derive_call_directions.md
-          - en/dev/passes/37-auto_derive_task_dependencies.md
-          - en/dev/passes/38-expand_manual_phase_fence.md
-          - en/dev/passes/39-synthesize_allreduce_signals.md
-          - en/dev/passes/40-materialize_comm_domain_scopes.md
-          - en/dev/passes/41-lower_host_tensor_collectives.md
-          - en/dev/passes/42-materialize_dist_tensor_ctx.md
-          - en/dev/passes/43-materialize_runtime_scopes.md
-          - en/dev/passes/44-classify_iter_arg_carry.md
-          - en/dev/passes/45-insert_comm_fence.md
+          - en/dev/passes/27-lower_pipeline_to_slots.md
+          - en/dev/passes/28-lower_pipeline_loops.md
+          - en/dev/passes/29-canonicalize_io_order.md
+          - en/dev/passes/30-materialize_tensor_strides.md
+          - en/dev/passes/31-init_memref.md
+          - en/dev/passes/32-materialize_semantic_aliases.md
+          - en/dev/passes/33-memory_reuse.md
+          - en/dev/passes/34-allocate_memory_addr.md
+          - en/dev/passes/35-fold_no_op_reshape.md
+          - en/dev/passes/36-fuse_create_assemble_to_slice.md
+          - en/dev/passes/37-derive_call_directions.md
+          - en/dev/passes/38-auto_derive_task_dependencies.md
+          - en/dev/passes/39-expand_manual_phase_fence.md
+          - en/dev/passes/40-synthesize_allreduce_signals.md
+          - en/dev/passes/41-materialize_comm_domain_scopes.md
+          - en/dev/passes/42-lower_host_tensor_collectives.md
+          - en/dev/passes/43-materialize_dist_tensor_ctx.md
+          - en/dev/passes/44-materialize_runtime_scopes.md
+          - en/dev/passes/45-classify_iter_arg_carry.md
+          - en/dev/passes/46-insert_comm_fence.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

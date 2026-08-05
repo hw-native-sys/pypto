@@ -172,10 +172,16 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 始终要求 MemRef 与空间成对出现），且绑定到同一块分配的 tile 必须一致。未加注解的 tile 保持
 默认的自动复用。
 
-声明式分配不会随流水级复制，因此在 `pl.pipeline(stage=2)` 体内声明会被**拒绝**：复制出的各级
-会让同一个 tile 在同一块分配上与自身同时存活。声明槽位与"交给编译器做多缓冲"是二选一，不能
-叠加。要自己管理某一层，就用 `pl.range` 驱动它并为每个槽位声明一块分配；希望编译器管理的层次
-则不加注解。
+声明式分配不会随流水级复制，因此**当该循环走复制路径下降时**，在 `pl.pipeline(stage=2)` 体内
+声明会被**拒绝**：复制出的各级会让同一个 tile 在同一块分配上与自身同时存活。声明槽位与"交给
+编译器做多缓冲"是二选一，不能叠加。要自己管理某一层，就用 `pl.range` 驱动它并为每个槽位声明
+一块分配；希望编译器管理的层次则不加注解。
+
+在 `memory_planner=PTOAS` 下，编译器用的是**同一套**机制而非另一套：
+[`LowerPipelineToSlots`](../passes/27-lower_pipeline_to_slots.md) 会为合格 `pl.pipeline` 循环体中
+**顶层**的每个 `tile.load` 合成与上文完全一致的声明——`slots=F`、以 `iv % F` 索引——于是单份循环体
+轮转各个槽位而不被复制。你自己绑定过的 tile 不受影响；该 pass 未接手的循环仍走复制路径
+（上述拒绝规则对其依然成立）。
 
 ```python
 l0b_ping, l0b_pong = pl.MemRef(), pl.MemRef()
@@ -188,8 +194,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/30-init_memref.md#声明式分配) 与
-[MemoryReuse](../passes/32-memory_reuse.md#声明式分配)。
+参见 [InitMemRef](../passes/31-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/33-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 
@@ -442,7 +448,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/43-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/44-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 

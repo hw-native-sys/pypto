@@ -399,6 +399,31 @@ def skew_cross_core_pipeline() -> Pass:
     ``lower_pipeline_loops``.
     """
 
+def lower_pipeline_to_slots() -> Pass:
+    """Create a pass that multi-buffers ``pl.pipeline`` loops via MemRef slots.
+
+    Runs immediately before ``lower_pipeline_loops``. Instead of replicating the
+    body ``F`` times, keeps one body and rebinds every top-level ``tile.load`` /
+    ``tile.read`` whose arguments read the induction variable onto
+    ``pl.MemRef(name, slots=F)[iv % F]``, then demotes the loop to
+    ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Bounds, step and
+    ``iter_args`` are untouched, so no remainder dispatch is needed.
+
+    Self-gated on ``memory_planner=PTOAS``: only that planner's codegen path emits
+    a ptoas multi-buffer region today, so under the default PyPTO planner the pass
+    returns every function untouched. The gate tracks that codegen limitation, not
+    a ptoas one — an addressed region synchronizes identically at level3, and
+    widening the gate is follow-up work in the address allocator. Loops it
+    declines — an unsupported
+    slot count, a step other than 1, a start not a multiple of ``F``, no eligible
+    load, an unsupported memory space or runtime valid shape, a tile carried out as
+    a phi or consumed by a view op, or nesting under a declined pipeline loop — are
+    left intact for ``lower_pipeline_loops`` to replicate.
+
+    Returns:
+        Function-level pass
+    """
+
 def lower_pipeline_loops() -> Pass:
     """Create a tile-level lowering pass for ``pl.pipeline(N, stage=F)`` loops.
 

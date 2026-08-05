@@ -39,25 +39,26 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 24 | `24-stamp_tfree_split.md` | 24th pass (copies each cross-core tpop's split/pipe-id onto its matching tfree op; runs right after SplitVectorKernel finalizes split, before SkewCrossCorePipeline clones tpop/tfree pairs) |
 | 25 | `25-normalize_return_order.md` | 25th pass |
 | 26 | `26-skew_cross_core_pipeline.md` | 26th pass (cross-core cube/vector software-pipeline skew; runs immediately before LowerPipelineLoops) |
-| 27 | `27-lower_pipeline_loops.md` | 27th pass |
-| 28 | `28-canonicalize_io_order.md` | 28th pass |
-| 29 | `29-materialize_tensor_strides.md` | 29th pass (RFC #1300 P3 — wired into Default starting from P6) |
-| 30 | `30-init_memref.md` | 30th pass |
-| 31 | `31-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
-| 32 | `32-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
-| 33 | `33-allocate_memory_addr.md` | 33rd pass (skippable under `memory_planner=PTOAS`) |
-| 34 | `34-fold_no_op_reshape.md` | 34th pass |
-| 35 | `35-fuse_create_assemble_to_slice.md` | 35th pass |
-| 36 | `36-derive_call_directions.md` | 36th pass (two-phase: arg directions + manual-scope lowering) |
-| 37 | `37-auto_derive_task_dependencies.md` | 37th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 38 | `38-expand_manual_phase_fence.md` | 38th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 39 | `39-synthesize_allreduce_signals.md` | 39th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
-| 40 | `40-materialize_comm_domain_scopes.md` | 40th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 41 | `41-lower_host_tensor_collectives.md` | 41st pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 42 | `42-materialize_dist_tensor_ctx.md` | 42nd pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
-| 43 | `43-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
-| 44 | `44-classify_iter_arg_carry.md` | Classifies each Orchestration ForStmt iter_arg (trivial alias vs materialised rebind carry) and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes |
-| 45 | `45-insert_comm_fence.md` | Last pass (distributed: inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after all statement-reordering passes so the inserted ops stay adjacent to notify through codegen) |
+| 27 | `27-lower_pipeline_to_slots.md` | Rotates an eligible `pl.pipeline` body through the slots of one allocation instead of replicating it; self-gated on `memory_planner=PTOAS`, and every loop it declines is left for LowerPipelineLoops |
+| 28 | `28-lower_pipeline_loops.md` | 28th pass |
+| 29 | `29-canonicalize_io_order.md` | 29th pass |
+| 30 | `30-materialize_tensor_strides.md` | 30th pass (RFC #1300 P3 — wired into Default starting from P6) |
+| 31 | `31-init_memref.md` | 31st pass |
+| 32 | `32-materialize_semantic_aliases.md` | Semantics-required must-alias (loop-carry / in-place); split out of MemoryReuse (its former "Step 0"); always runs, even when MemoryReuse is skipped under `memory_planner=PTOAS` |
+| 33 | `33-memory_reuse.md` | Opportunistic lifetime reuse (also enforces the Ascend910B load + tpop_from_aic in-place hazard guard); skippable under `memory_planner=PTOAS` |
+| 34 | `34-allocate_memory_addr.md` | 34th pass (skippable under `memory_planner=PTOAS`) |
+| 35 | `35-fold_no_op_reshape.md` | 35th pass |
+| 36 | `36-fuse_create_assemble_to_slice.md` | 36th pass |
+| 37 | `37-derive_call_directions.md` | 37th pass (two-phase: arg directions + manual-scope lowering) |
+| 38 | `38-auto_derive_task_dependencies.md` | 38th pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 39 | `39-expand_manual_phase_fence.md` | 39th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 40 | `40-synthesize_allreduce_signals.md` | 40th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
+| 41 | `41-materialize_comm_domain_scopes.md` | 41st pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 42 | `42-lower_host_tensor_collectives.md` | 42nd pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 43 | `43-materialize_dist_tensor_ctx.md` | 43rd pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
+| 44 | `44-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
+| 45 | `45-classify_iter_arg_carry.md` | Classifies each Orchestration ForStmt iter_arg (trivial alias vs materialised rebind carry) and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes |
+| 46 | `46-insert_comm_fence.md` | Last pass (distributed: inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after all statement-reordering passes so the inserted ops stay adjacent to notify through codegen) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

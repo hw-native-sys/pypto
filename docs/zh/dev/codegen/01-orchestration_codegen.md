@@ -6,7 +6,7 @@
 
 例如，返回值到参数的追踪（将被调用者返回值映射回 `Out` 参数）是分析工作，应由代码生成之前的 Pass 解决。[`NormalizeReturnOrder`](../passes/25-normalize_return_order.md) pass 现在会在代码生成之前完成此规范化，使编排代码生成可以直接将 `return[i]` 映射到 `out_indices[i]`，无需追踪 `tile.store`/yield 链。
 
-同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/44-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
+同样，判断一个 `ForStmt` iter_arg 是否需要物化 carry 变量，过去要在循环体上跑别名等价不动点。[`ClassifyIterArgCarry`](../passes/45-classify_iter_arg_carry.md) pass 现在把该判定（以及 TaskId fence 数组的 extent）打在 `ForStmt::attrs_` 上，codegen 直接读 `iter_arg_rebind_<i>` / `iter_arg_array_size_<i>`，不再自行推导。
 
 ## 概述
 
@@ -108,7 +108,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `PTO2_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/43-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/44-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `PTO2_SCOPE`（manual scope
 降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`）：
@@ -465,7 +465,7 @@ parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg 写入类
 `manual_dep_edges` 的形态已不存在——ManualDepsOnSubmitOnly 结构性属性会校验
 任何跨函数 `Call` 都不携带它；只有 `system.task_dummy` barrier op 作为 fanin
 契约保留该 attr。编译器推导的依赖边来自
-[`AutoDeriveTaskDependencies`](../passes/37-auto_derive_task_dependencies.md)，
+[`AutoDeriveTaskDependencies`](../passes/38-auto_derive_task_dependencies.md)，
 保存在 `Call.attrs["compiler_manual_dep_edges"]`（独立的 key，允许出现在普通
 call 上）。该 pass 从不分析用户写的 MANUAL scope——在 `pl.manual_scope()` 内，
 显式的 `deps=[...]` 仍是唯一的依赖边来源。它只分析 AUTO 区域，且仅当编译期开关
@@ -521,7 +521,7 @@ MANUAL）在进入时快照 `manual_task_id_map_` 与 `array_carry_vars_`、退�
 
 来源由 attr key 判定。注意 `attrs["dummy_task"]` **不是**作者身份标记：parser 会把
 它打在用户书写的 `pl.system.task_dummy(deps=[...])` 上，与
-[`ExpandManualPhaseFence`](../passes/38-expand_manual_phase_fence.md) 给自己合成的
+[`ExpandManualPhaseFence`](../passes/39-expand_manual_phase_fence.md) 给自己合成的
 barrier 打的完全相同，因此所有 `manual_dep_edges` 载体一律强制校验。合成的 barrier
 只会引用其所改写的 manual scope 内仍然活跃的 TaskId，故其 fanin 必然可解析。
 
