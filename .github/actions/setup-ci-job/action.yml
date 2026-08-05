@@ -80,6 +80,13 @@ inputs:
       CANN_ROOT is not required in the runner config.
     required: false
     default: 'false'
+  npu-check-timeout:
+    description: >-
+      Maximum seconds the initial npu-smi task-submit probe may wait for the
+      requested device. A5 callers override the 5-minute default because that
+      pool can stay occupied by longer on-board suites.
+    required: false
+    default: '300'
   install-toolchain:
     description: >-
       When 'true' (the default) download ptoas, clone the pinned pto-isa, and
@@ -269,7 +276,9 @@ runs:
     - name: Check NPU
       if: ${{ inputs.needs-device == 'true' }}
       shell: bash
-      run: npu-smi info
+      run: |
+        task-submit --device "$DEVICE_ID" --timeout "${{ inputs.npu-check-timeout }}" --max-time 120 \
+          --run "cd $GITHUB_WORKSPACE/${{ inputs.checkout-path }} && npu-smi info"
 
     - name: Scope ccache to pto-isa version
       # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a real
