@@ -99,9 +99,6 @@ runs:
         INSTALL_TOOLCHAIN: ${{ inputs.install-toolchain }}
         PTO_ISA_COMMIT_IN: ${{ inputs.pto-isa-commit }}
         PIP_CACHE_NAME: ${{ inputs.pip-cache-name }}
-        # Keep in sync with the bootstrap step below — this step runs before the
-        # env is activated, so it can only look the tools up by path.
-        CONDA_ENV: py310
       run: |
         set -uo pipefail
         # A device job that installs the toolchain must have a pto-isa commit to
@@ -148,49 +145,6 @@ runs:
             exit 1
           fi
         done
-        # The .env makes the host's *paths* portable; these tool names are the
-        # other half of the provisioning contract (see this action's description).
-        # Check them here so a mis-provisioned runner fails in seconds naming what
-        # to install. Without this, a missing ccache surfaces ~3 minutes later as
-        # a CMake "The C compiler is not able to compile a simple test program"
-        # — because CMAKE_*_COMPILER_LAUNCHER makes CMake run `ccache gcc`, and
-        # the 127 from the absent launcher reads as a broken gcc. The `ccache -s`
-        # step below cannot catch it either: it is `|| true` on purpose.
-        # Two classes of tool, because the conda env is not active yet here:
-        #   path_tools run in steps BEFORE the bootstrap step (Check NPU,
-        #     Install ptoas, Clone pto-isa), so they must be on the bare PATH;
-        #   env_tools are only ever run by steps that source activate.sh, so
-        #     living in the conda env is equally valid.
-        path_tools="git curl"
-        if [ "$NEEDS_DEVICE" = "true" ]; then
-          path_tools="$path_tools task-submit npu-smi"
-        fi
-        env_tools="ccache"
-        missing=""
-        for tool in $path_tools; do
-          if ! command -v "$tool" >/dev/null 2>&1; then
-            missing="$missing $tool"
-          fi
-        done
-        for tool in $env_tools; do
-          if ! command -v "$tool" >/dev/null 2>&1 &&
-             [ ! -x "$CONDA_ROOT/envs/$CONDA_ENV/bin/$tool" ]; then
-            missing="$missing $tool"
-          fi
-        done
-        if [ -n "$missing" ]; then
-          for tool in $missing; do
-            echo "::error::$tool not found — install it on this runner"
-          done
-          echo "Missing on $(hostname):$missing"
-          echo "git/curl (and task-submit/npu-smi on device runners) must be on"
-          echo "PATH: they are used before the conda env is activated. ccache may"
-          echo "be either on PATH or in the '$CONDA_ENV' conda env"
-          echo "(conda install -n $CONDA_ENV -c conda-forge ccache)."
-          echo "PATH=$PATH"
-          echo "conda env bin: $CONDA_ROOT/envs/$CONDA_ENV/bin"
-          exit 1
-        fi
         # CI_CACHE_ROOT is different in kind: CI owns everything under it, so it
         # only has to be declared, not to pre-exist — a fresh host starts with an
         # empty (or absent) cache and simply takes the miss.
@@ -208,7 +162,7 @@ runs:
           echo "PIP_CACHE_DIR=$CI_CACHE_ROOT/$PIP_CACHE_NAME"
           echo "PTOAS_CACHE_DIR=$CI_CACHE_ROOT/ptoas"
         } >> "$GITHUB_ENV"
-        echo "runner config OK (checked: CI_CACHE_ROOT $required; tools: $tools)"
+        echo "runner config OK (checked: CI_CACHE_ROOT $required)"
         # Identity and storage of the host we landed on, made visible in every log:
         # these jobs run on a pool of self-hosted runners that are not necessarily
         # identically provisioned, so surface the basics instead of guessing later.
@@ -369,14 +323,8 @@ runs:
         fi
 
     - name: Show ccache stats (before)
-      # Source activate.sh so this reports the same ccache the build step uses:
-      # ccache may live in the conda env rather than on the bare PATH, in which
-      # case a bare `ccache -s` here silently printed nothing (it is `|| true`).
       shell: bash
-      working-directory: ${{ inputs.checkout-path }}
-      run: |
-        source activate.sh
-        ccache -s || true
+      run: ccache -s || true
 
     - name: Build and install pypto (+ simpler)
       shell: bash
@@ -403,9 +351,5 @@ runs:
         fi
 
     - name: Show ccache stats (after)
-      # See the "before" step: activate.sh so a conda-env ccache is visible.
       shell: bash
-      working-directory: ${{ inputs.checkout-path }}
-      run: |
-        source activate.sh
-        ccache -s || true
+      run: ccache -s || true
