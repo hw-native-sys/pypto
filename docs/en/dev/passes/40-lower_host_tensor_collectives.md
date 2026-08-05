@@ -90,6 +90,17 @@ Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
 
+The `builtin.tensor.allreduce_ring` kernel is **push-based**: data movement uses
+`pto::comm::TPUT` (remote write) — the reduce-scatter phase accumulates into the
+right neighbour's slot via `TPUT<AtomicAdd>`, and the allgather phase forwards
+each finalized chunk with a non-atomic `TPUT`, mirroring the in-tree `allgather`
+/ `all_to_all` host builtins.  Ordering is `pipe_barrier(PIPE_ALL)` around each
+transfer plus `dsb(DSB_DDR)` before every `TNOTIFY` (not
+`pto.fence.barrier_all`, which does not drain the MTE DMA pipe).  Cross-rank
+synchronisation uses the O(1) `NeighborBarrier` (notify/wait the two ring
+neighbours only) — safe on NPU because the TPUT write pipeline orders the data
+ahead of the signal, which the old pull model (TLOAD/TSTORE) did not.
+
 ## Pass properties
 
 | Field | Value |

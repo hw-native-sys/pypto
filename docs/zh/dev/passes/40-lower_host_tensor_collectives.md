@@ -78,6 +78,15 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `mode="ring"` 下尚未支持。Ring allreduce 最多支持 16 个参与设备
 （`world_size <= 16`）。
 
+`builtin.tensor.allreduce_ring` 内核采用**推送（push）模型**：数据搬运使用
+`pto::comm::TPUT`（远端写）——reduce-scatter 阶段通过 `TPUT<AtomicAdd>` 将部分和
+累加到右邻居的 slot，allgather 阶段用非原子 `TPUT` 转发每个已归约的 chunk，
+与树内 `allgather` / `all_to_all` host builtin 保持一致。顺序保证为每次传输前后
+`pipe_barrier(PIPE_ALL)`，并在每次 `TNOTIFY` 前加 `dsb(DSB_DDR)`（而非
+`pto.fence.barrier_all`，后者不会排空 MTE DMA 流水线）。跨 rank 同步使用 O(1) 的
+`NeighborBarrier`（只通知/等待左右两个 ring 邻居）——在 NPU 上安全是因为 TPUT
+写流水线保证数据先于信号可见，而旧的拉取（pull）模型（TLOAD/TSTORE）不具备该保证。
+
 ## Pass 属性
 
 | 字段 | 取值 |

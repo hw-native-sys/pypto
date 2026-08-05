@@ -1264,6 +1264,18 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto ring_target = b.Bind(
       "target_2d", CreateAllReduceTargetView(target, flat_shape, flat_valid_shape, partial_valid_shape, span),
       span);
+  // VEC staging tile for the TPUT push path (mirrors the allgather / all_to_all
+  // host-builtin recipe).  pto-isa TPUT streams the transfer through this tile,
+  // clamping the last chunk to the transfer extent, and the single-shot path
+  // reads exactly the tile's valid mask — so each pld.tile.put below narrows it
+  // to the subchunk's valid_cols via tile.set_validshape (the same mechanism as
+  // the host builtin's ColMaskInternal).  The stage is shared across all ring
+  // pushes; it is mutable per-use kernel state.
+  auto put_stage =
+      b.Bind("ring_put_stage",
+             reg.Create("tile.create", {chunk_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
   // Value-producing IfExpr branches must agree on a fixed TileType. For an
   // inactive logical segment, read one in-bounds element and pad it to the
   // physical chunk shape. Using tile.create here would survive the default
@@ -1286,23 +1298,6 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto segment_end = [&](const ExprPtr& segment_idx) {
     return segment_boundary(MakeAdd(segment_idx, one_idx, span));
   };
-  std::vector<std::pair<std::string, std::any>> remote_load_kwargs;
-  if (target_type->dtype_ == DataType::FP16) {
-    remote_load_kwargs.emplace_back("allow_physical_tail_padding", true);
-  }
-  auto remote_valid_cols = [&](const ExprPtr& logical_valid_cols) {
-    if (target_type->dtype_ != DataType::FP16) return logical_valid_cols;
-    return MakeMul(MakeFloorDiv(MakeAdd(logical_valid_cols, alignment_minus_one_idx, span),
-                                alignment_elements_idx, span),
-                   alignment_elements_idx, span);
-  };
-  auto restore_remote_valid_shape = [&](LoweringBuilder& body, const ExprPtr& loaded,
-                                        const ExprPtr& logical_valid_cols,
-                                        const std::string& name) -> ExprPtr {
-    if (target_type->dtype_ != DataType::FP16) return loaded;
-    return body.Bind(name, reg.Create("tile.set_validshape", {loaded, one_idx, logical_valid_cols}, {}, span),
-                     span);
-  };
   auto emit_barrier = [&](LoweringBuilder& body, const ExprPtr& round, const ExprPtr& expected,
                           const std::string& suffix) {
     body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, round, NotifyOp::kAtomicAdd, one_i32, suffix,
@@ -1314,78 +1309,172 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto nr_minus_one = b.Bind("nr_minus_one", MakeSub(comm.nranks_idx, one_idx, span), span);
 
   // ------------------------------------------------------------------
-  // Phase 1: Reduce-Scatter — P−1 ring steps
+  // Phase 1: Reduce-Scatter — P−1 ring steps (TPUT push + local reduce)
   // ------------------------------------------------------------------
+  //
+  // Push-model schedule (non-atomic TPUT + local reduce — preserves
+  // Sum/Max/Min/Prod; the ReduceOp trade-off is an explicit design choice,
+  // NOT a silent Sum-only regression):
+  //
+  //   * recv_idx = (my_rank − step − 1 + NR) % NR is the chunk this rank
+  //     receives from the left neighbour; send_idx = (my_rank − step + NR) % NR
+  //     is the chunk this rank pushes to the right neighbour.
+  //   * Each rank first reads its OWN value of slot recv_idx into a register
+  //     tile (the slot is stable — own value only — until the left neighbour's
+  //     push lands).
+  //   * Ready barrier (generation 2k+1): all ranks' own-value reads are done
+  //     and no push has landed — this is what makes the own-read race-free.
+  //   * Each rank then TPUTs (pld.tile.put, AtomicType::kNone) its current
+  //     partial of slot send_idx into the RIGHT neighbour's slot of the same
+  //     index.  The transfer extent is the exact (possibly ragged) valid_cols;
+  //     the staging tile is narrowed to it via tile.set_validshape so the TPUT
+  //     single-shot path reads exactly the transfer width (PTOAS >= v0.55
+  //     accepts dynamic partition-view shapes — issue #1069).
+  //   * Push-done barrier (generation 2k+2): all pushes have landed.
+  //   * Each rank reads its own slot recv_idx again (now holding the left
+  //     neighbour's partial), reduces it with the saved own value, and stores
+  //     the result back.  The push is a plain copy into the receiver's own
+  //     window — no remote read, so the only cross-rank visibility needed is
+  //     the TPUT→notify ordering the credit-barrier protocol provides
+  //     (pld.tile.put codegen emits pipe_barrier(PIPE_ALL) around the TPUT and
+  //     the comm-fence pass orders it ahead of the notify).
   b.EmitFor(
       "rs_step", zero_idx, nr_minus_one, one_idx,
       [&](LoweringBuilder& body, const VarPtr& rs_step_var) {
         auto step = body.Bind("step", MakeAdd(rs_step_var, one_idx, span), span);
 
-        // recv_add_idx = (my_rank − step − 1 + NR) % NR
+        // recv_idx = (my_rank − step − 1 + NR) % NR
         auto r1 = MakeSub(my_rank_idx, step, span);
         auto r2 = MakeSub(r1, one_idx, span);
         auto r3 = MakeAdd(r2, comm.nranks_idx, span);
-        // recv_add_idx and send_idx are the same chunk index in this
-        // reduce-scatter formulation — bind once and reuse.
-        auto recv_add_idx = body.Bind("recv_add_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
-        const auto& send_idx = recv_add_idx;
+        auto recv_idx = body.Bind("recv_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
 
-        // left = (my_rank − 1 + NR) % NR
-        auto l1 = MakeSub(my_rank_idx, one_idx, span);
-        auto l2 = MakeAdd(l1, comm.nranks_idx, span);
-        auto left_peer = body.Bind("left", MakeFloorMod(l2, comm.nranks_idx, span), span);
+        // send_idx = (my_rank − step + NR) % NR — one chunk ahead of recv_idx.
+        auto s1 = MakeSub(my_rank_idx, step, span);
+        auto s2 = MakeAdd(s1, comm.nranks_idx, span);
+        auto send_idx = body.Bind("send_idx", MakeFloorMod(s2, comm.nranks_idx, span), span);
 
-        auto segment_offset = body.Bind("rs_segment_begin", segment_begin(send_idx), span);
-        auto segment_limit = body.Bind("rs_segment_end", segment_end(send_idx), span);
-        auto segment_cols = body.Bind("rs_segment_cols", MakeSub(segment_limit, segment_offset, span), span);
+        // right = (my_rank + 1) % NR — the push destination.
+        auto rr1 = MakeAdd(my_rank_idx, one_idx, span);
+        auto right_peer = body.Bind("right", MakeFloorMod(rr1, comm.nranks_idx, span), span);
+
+        auto recv_segment_offset = body.Bind("rs_recv_segment_begin", segment_begin(recv_idx), span);
+        auto recv_segment_limit = body.Bind("rs_recv_segment_end", segment_end(recv_idx), span);
+        auto recv_segment_cols =
+            body.Bind("rs_recv_segment_cols", MakeSub(recv_segment_limit, recv_segment_offset, span), span);
+
+        auto send_segment_offset = body.Bind("rs_send_segment_begin", segment_begin(send_idx), span);
+        auto send_segment_limit = body.Bind("rs_send_segment_end", segment_end(send_idx), span);
+        auto send_segment_cols =
+            body.Bind("rs_send_segment_cols", MakeSub(send_segment_limit, send_segment_offset, span), span);
 
         body.EmitFor(
             "rs_col", zero_idx, max_segment_cols, chunk_cols,
             [&](LoweringBuilder& chunk_body, const VarPtr& subcol) {
-              auto active = MakeLt(subcol, segment_cols, span);
-              auto remaining = MakeSub(segment_cols, subcol, span);
-              auto valid_cols = MakeMin(chunk_cols, remaining, span);
+              // Receive-side extent (own-value read, pushed-partial read,
+              // reduce, store all operate on slot recv_idx).
+              auto recv_active = MakeLt(subcol, recv_segment_cols, span);
+              auto recv_remaining = MakeSub(recv_segment_cols, subcol, span);
+              auto recv_valid_cols = MakeMin(chunk_cols, recv_remaining, span);
               // Keep the value-producing IfExpr branch metadata identical.
               // Inactive ranks use one safe element, while active ranks retain
               // the exact logical tail extent.
-              auto load_valid_cols = MakeMax(one_idx, valid_cols, span);
+              auto load_valid_cols = MakeMax(one_idx, recv_valid_cols, span);
               auto load_valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, load_valid_cols}, span);
-              auto remote_load_valid_shape =
-                  tile_conversion_utils::MakeShapeTuple({one_idx, remote_valid_cols(load_valid_cols)}, span);
-              auto offsets = tile_conversion_utils::MakeShapeTuple(
-                  {zero_idx, MakeAdd(segment_offset, subcol, span)}, span);
+              auto recv_offsets = tile_conversion_utils::MakeShapeTuple(
+                  {zero_idx, MakeAdd(recv_segment_offset, subcol, span)}, span);
+
+              // Send-side extent (TPUT source = slot send_idx).
+              auto send_active = MakeLt(subcol, send_segment_cols, span);
+              auto send_remaining = MakeSub(send_segment_cols, subcol, span);
+              auto send_valid_cols = MakeMin(chunk_cols, send_remaining, span);
+              auto send_valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, send_valid_cols}, span);
+              auto send_offsets = tile_conversion_utils::MakeShapeTuple(
+                  {zero_idx, MakeAdd(send_segment_offset, subcol, span)}, span);
 
               auto chunk_id = MakeFloorDiv(subcol, chunk_cols, span);
+
+              // ---- Own-value read: BEFORE the ready barrier, so no push has
+              // landed in slot recv_idx yet (the slot is stable — own value).
+              auto acc_own = chunk_body.EmitIfExpr(
+                  recv_active,
+                  [&](LoweringBuilder& then_body) {
+                    auto acc_loaded = then_body.Bind(
+                        "acc_rs_own_loaded",
+                        reg.Create("tile.load", {ring_target, recv_offsets, chunk_shape, load_valid_shape},
+                                   {{"target_memory", MemorySpace::Vec}}, span),
+                        span);
+                    return then_body.Bind("acc_rs_own",
+                                          reg.Create("tile.fillpad_inplace", {acc_loaded},
+                                                     {{"pad_value", PadValue::zero}}, span),
+                                          span);
+                  },
+                  [&](LoweringBuilder& else_body) {
+                    auto placeholder_loaded = else_body.Bind(
+                        "acc_rs_own_placeholder_loaded",
+                        reg.Create("tile.load",
+                                   {ring_target, placeholder_offsets, chunk_shape, load_valid_shape},
+                                   {{"target_memory", MemorySpace::Vec}}, span),
+                        span);
+                    return else_body.Bind("acc_rs_own_placeholder",
+                                          reg.Create("tile.fillpad_inplace", {placeholder_loaded},
+                                                     {{"pad_value", PadValue::zero}}, span),
+                                          span);
+                  },
+                  span);
+
+              // ---- Ready barrier: all ranks' own-value reads are done; no
+              // push can land before this barrier completes.
               auto ready_epoch_idx = MakeAdd(MakeMul(chunk_id, two_idx, span), one_idx, span);
               auto ready_epoch = chunk_body.Bind(
                   "rs_ready_epoch", std::make_shared<ir::Cast>(ready_epoch_idx, DataType::INT32, span), span);
               emit_barrier(chunk_body, rs_step_var, ready_epoch, "_rs_ready");
 
+              // ---- Push phase: TPUT slot send_idx into the right neighbour's
+              // slot of the same index (plain copy; the receiver reduces
+              // locally after the push-done barrier).  The staging tile is
+              // narrowed to the transfer width so the TPUT single-shot path
+              // reads exactly send_valid_cols.
+              chunk_body.EmitIf(
+                  send_active,
+                  [&](LoweringBuilder& push_body) {
+                    auto rs_stage_valid = push_body.Bind(
+                        "rs_stage_valid",
+                        reg.Create("tile.set_validshape", {put_stage, one_idx, send_valid_cols}, {}, span),
+                        span);
+                    push_body.Bind("push_rs",
+                                   reg.Create("pld.tile.put",
+                                              {ring_target, right_peer, ring_target, rs_stage_valid,
+                                               send_offsets, send_offsets, send_valid_shape},
+                                              {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                                   span);
+                  },
+                  /*else_fn=*/nullptr, span);
+
+              // ---- Push-done barrier: all pushes have landed — slot recv_idx
+              // now holds the left neighbour's partial.
+              auto read_epoch_idx = MakeAdd(ready_epoch_idx, one_idx, span);
+              auto read_epoch = chunk_body.Bind(
+                  "rs_read_epoch", std::make_shared<ir::Cast>(read_epoch_idx, DataType::INT32, span), span);
+              emit_barrier(chunk_body, rs_step_var, read_epoch, "_rs_read");
+
+              // ---- Local reduce + store: read the pushed partial (own slot
+              // recv_idx, now = left's partial), combine with the saved own
+              // value, store back.
               auto acc_full = chunk_body.EmitIfExpr(
-                  active,
+                  recv_active,
                   [&](LoweringBuilder& then_body) {
                     auto recv_loaded = then_body.Bind(
                         "recv_rs_loaded",
-                        reg.Create("pld.tile.remote_load",
-                                   {ring_target, left_peer, offsets, chunk_shape, remote_load_valid_shape},
-                                   remote_load_kwargs, span),
-                        span);
-                    auto recv_tail =
-                        restore_remote_valid_shape(then_body, recv_loaded, load_valid_cols, "recv_rs_tail");
-                    auto recv = then_body.Bind("recv_rs",
-                                               reg.Create("tile.fillpad_inplace", {recv_tail},
-                                                          {{"pad_value", PadValue::zero}}, span),
-                                               span);
-                    auto acc_loaded = then_body.Bind(
-                        "acc_rs_loaded",
-                        reg.Create("tile.load", {ring_target, offsets, chunk_shape, load_valid_shape},
+                        reg.Create("tile.load", {ring_target, recv_offsets, chunk_shape, load_valid_shape},
                                    {{"target_memory", MemorySpace::Vec}}, span),
                         span);
-                    auto acc = then_body.Bind("acc_rs",
-                                              reg.Create("tile.fillpad_inplace", {acc_loaded},
-                                                         {{"pad_value", PadValue::zero}}, span),
-                                              span);
-                    return then_body.Bind("acc_rs_next", then_body.Reduce(reduce_op, acc, recv, span), span);
+                    auto recv = then_body.Bind("recv_rs",
+                                               reg.Create("tile.fillpad_inplace", {recv_loaded},
+                                                          {{"pad_value", PadValue::zero}}, span),
+                                               span);
+                    return then_body.Bind("acc_rs_next", then_body.Reduce(reduce_op, acc_own, recv, span),
+                                          span);
                   },
                   [&](LoweringBuilder& else_body) {
                     auto placeholder_loaded = else_body.Bind(
@@ -1401,22 +1490,17 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
                   },
                   span);
 
-              auto read_epoch_idx = MakeAdd(ready_epoch_idx, one_idx, span);
-              auto read_epoch = chunk_body.Bind(
-                  "rs_read_epoch", std::make_shared<ir::Cast>(read_epoch_idx, DataType::INT32, span), span);
-              emit_barrier(chunk_body, rs_step_var, read_epoch, "_rs_read");
-
               chunk_body.EmitIf(
-                  active,
+                  recv_active,
                   [&](LoweringBuilder& store_body) {
                     // Encode the active-branch bounds in the store operands so
                     // valid-region inference can prove this write stays inside
                     // the flattened logical extent without relying on control
                     // flow predicates.
-                    auto raw_store_col = MakeAdd(segment_offset, subcol, span);
+                    auto raw_store_col = MakeAdd(recv_segment_offset, subcol, span);
                     auto store_col = MakeSub(
                         size_expr, MakeMax(zero_idx, MakeSub(size_expr, raw_store_col, span), span), span);
-                    auto raw_store_end = MakeAdd(store_col, valid_cols, span);
+                    auto raw_store_end = MakeAdd(store_col, recv_valid_cols, span);
                     auto store_end = MakeSub(
                         size_expr, MakeMax(zero_idx, MakeSub(size_expr, raw_store_end, span), span), span);
                     auto store_valid_cols = MakeSub(store_end, store_col, span);
@@ -1436,27 +1520,38 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
       span);
 
   // ------------------------------------------------------------------
-  // Phase 2: AllGather — P−1 ring steps
+  // Phase 2: AllGather — P−1 ring steps (TPUT push, non-atomic copy)
   // ------------------------------------------------------------------
+  //
+  // Each rank TPUTs its finalized chunk send_idx = (my_rank − step + 1 + NR)
+  // % NR into the RIGHT neighbour's slot of the same index — a plain copy,
+  // since the chunk value is already fully reduced.  The receiver does
+  // nothing locally; the push performs the store.  The transfer extent is the
+  // exact (possibly ragged) valid_cols with the staging tile narrowed to it
+  // (PTOAS >= v0.55 dynamic partition-view shapes).  The ready barrier
+  // (generation 2k+1) guarantees the pushed slot's data is valid (the
+  // cumulative generation count includes the previous step's push-done
+  // notifies); the push-done barrier (generation 2k+2) guarantees the copy is
+  // visible before any rank reads it at the next step.
   b.EmitFor(
       "ag_step", zero_idx, nr_minus_one, one_idx,
       [&](LoweringBuilder& body, const VarPtr& ag_step_var) {
         auto step = body.Bind("ag_step_val", MakeAdd(ag_step_var, one_idx, span), span);
         auto ag_round = body.Bind("ag_round", MakeAdd(ag_step_var, nr_minus_one, span), span);
 
+        // send_idx = (my_rank − step + 1 + NR) % NR — the fully-reduced chunk
+        // this rank forwards to the right neighbour.
         auto r1 = MakeSub(my_rank_idx, step, span);
-        auto r2 = MakeAdd(r1, comm.nranks_idx, span);
-        auto segment_idx = body.Bind("ag_segment_idx", MakeFloorMod(r2, comm.nranks_idx, span), span);
+        auto r2 = MakeAdd(r1, one_idx, span);
+        auto r3 = MakeAdd(r2, comm.nranks_idx, span);
+        auto send_idx = body.Bind("ag_send_idx", MakeFloorMod(r3, comm.nranks_idx, span), span);
 
-        // left = (my_rank - 1 + NR) % NR is the peer that already owns this
-        // step's segment.
-        auto l1 = MakeSub(my_rank_idx, one_idx, span);
-        auto l2 = MakeAdd(l1, comm.nranks_idx, span);
-        auto left_val = MakeFloorMod(l2, comm.nranks_idx, span);
-        auto left_peer = body.Bind("ag_left", left_val, span);
+        // right = (my_rank + 1) % NR — the push destination.
+        auto rr1 = MakeAdd(my_rank_idx, one_idx, span);
+        auto right_peer = body.Bind("ag_right", MakeFloorMod(rr1, comm.nranks_idx, span), span);
 
-        auto segment_offset = body.Bind("ag_segment_begin", segment_begin(segment_idx), span);
-        auto segment_limit = body.Bind("ag_segment_end", segment_end(segment_idx), span);
+        auto segment_offset = body.Bind("ag_segment_begin", segment_begin(send_idx), span);
+        auto segment_limit = body.Bind("ag_segment_end", segment_end(send_idx), span);
         auto segment_cols = body.Bind("ag_segment_cols", MakeSub(segment_limit, segment_offset, span), span);
 
         body.EmitFor(
@@ -1465,77 +1560,45 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
               auto active = MakeLt(subcol, segment_cols, span);
               auto remaining = MakeSub(segment_cols, subcol, span);
               auto valid_cols = MakeMin(chunk_cols, remaining, span);
-              auto load_valid_cols = MakeMax(one_idx, valid_cols, span);
-              auto load_valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, load_valid_cols}, span);
-              auto remote_load_valid_shape =
-                  tile_conversion_utils::MakeShapeTuple({one_idx, remote_valid_cols(load_valid_cols)}, span);
+              auto valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, valid_cols}, span);
               auto offsets = tile_conversion_utils::MakeShapeTuple(
                   {zero_idx, MakeAdd(segment_offset, subcol, span)}, span);
 
               auto chunk_id = MakeFloorDiv(subcol, chunk_cols, span);
+
+              // ---- Ready barrier: all ranks' previous-step pushes have landed
+              // (the cumulative generation includes them), so the slot being
+              // forwarded holds valid data.
               auto ready_epoch_idx = MakeAdd(MakeMul(chunk_id, two_idx, span), one_idx, span);
               auto ready_epoch = chunk_body.Bind(
                   "ag_ready_epoch", std::make_shared<ir::Cast>(ready_epoch_idx, DataType::INT32, span), span);
               emit_barrier(chunk_body, ag_round, ready_epoch, "_ag_ready");
 
-              auto recv_full = chunk_body.EmitIfExpr(
+              // ---- Push phase: TPUT slot send_idx into the right neighbour's
+              // slot of the same index (plain copy).  The staging tile is
+              // narrowed to the transfer width so the TPUT single-shot path
+              // reads exactly valid_cols.
+              chunk_body.EmitIf(
                   active,
-                  [&](LoweringBuilder& then_body) {
-                    auto recv_loaded = then_body.Bind(
-                        "recv_ag_loaded",
-                        reg.Create("pld.tile.remote_load",
-                                   {ring_target, left_peer, offsets, chunk_shape, remote_load_valid_shape},
-                                   remote_load_kwargs, span),
-                        span);
-                    auto recv_tail =
-                        restore_remote_valid_shape(then_body, recv_loaded, load_valid_cols, "recv_ag_tail");
-                    return then_body.Bind("recv_ag",
-                                          reg.Create("tile.fillpad_inplace", {recv_tail},
-                                                     {{"pad_value", PadValue::zero}}, span),
-                                          span);
+                  [&](LoweringBuilder& push_body) {
+                    auto ag_stage_valid = push_body.Bind(
+                        "ag_stage_valid",
+                        reg.Create("tile.set_validshape", {put_stage, one_idx, valid_cols}, {}, span), span);
+                    push_body.Bind("push_ag",
+                                   reg.Create("pld.tile.put",
+                                              {ring_target, right_peer, ring_target, ag_stage_valid, offsets,
+                                               offsets, valid_shape},
+                                              {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                                   span);
                   },
-                  [&](LoweringBuilder& else_body) {
-                    auto placeholder_loaded = else_body.Bind(
-                        "recv_ag_placeholder_loaded",
-                        reg.Create("tile.load",
-                                   {ring_target, placeholder_offsets, chunk_shape, load_valid_shape},
-                                   {{"target_memory", MemorySpace::Vec}}, span),
-                        span);
-                    return else_body.Bind("recv_ag_placeholder",
-                                          reg.Create("tile.fillpad_inplace", {placeholder_loaded},
-                                                     {{"pad_value", PadValue::zero}}, span),
-                                          span);
-                  },
-                  span);
+                  /*else_fn=*/nullptr, span);
 
+              // ---- Push-done barrier: all pushes have landed — every rank's
+              // forwarded slot is visible before the next step reads it.
               auto read_epoch_idx = MakeAdd(ready_epoch_idx, one_idx, span);
               auto read_epoch = chunk_body.Bind(
                   "ag_read_epoch", std::make_shared<ir::Cast>(read_epoch_idx, DataType::INT32, span), span);
               emit_barrier(chunk_body, ag_round, read_epoch, "_ag_read");
-
-              chunk_body.EmitIf(
-                  active,
-                  [&](LoweringBuilder& store_body) {
-                    // See the reduce-scatter store above: these clamped
-                    // expressions are no-ops for active chunks and make both
-                    // the offset and far edge statically bounded by size_expr.
-                    auto raw_store_col = MakeAdd(segment_offset, subcol, span);
-                    auto store_col = MakeSub(
-                        size_expr, MakeMax(zero_idx, MakeSub(size_expr, raw_store_col, span), span), span);
-                    auto raw_store_end = MakeAdd(store_col, valid_cols, span);
-                    auto store_end = MakeSub(
-                        size_expr, MakeMax(zero_idx, MakeSub(size_expr, raw_store_end, span), span), span);
-                    auto store_valid_cols = MakeSub(store_end, store_col, span);
-                    auto store_offsets = tile_conversion_utils::MakeShapeTuple({zero_idx, store_col}, span);
-                    auto narrowed = store_body.Bind(
-                        "recv_ag_valid",
-                        reg.Create("tile.set_validshape", {recv_full, one_idx, store_valid_cols}, {}, span),
-                        span);
-                    store_body.Bind(
-                        "store_ag",
-                        reg.Create("tile.store", {narrowed, store_offsets, ring_target}, {}, span), span);
-                  },
-                  /*else_fn=*/nullptr, span);
             },
             span);
       },
