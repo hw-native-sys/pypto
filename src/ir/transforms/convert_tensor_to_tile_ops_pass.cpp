@@ -1173,12 +1173,13 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (IsOp(call, "system.syncall") && call->args_.size() >= 3) {
+  if (IsOp(call, "system.syncall") && call->GetKwarg<std::string>("mode", "hard") == "soft") {
     // Soft form: each core writes its arrival counter into gm_workspace
-    // (args_[0]) and polls the others, so the workspace is read AND written.
-    // The scratch tile(s) and used_cores (args_[1:]) are reads. Marking the
-    // write lets dependency analysis order barriers that reuse one workspace.
-    // args_.size() is 3 for aiv_only/aic_only and 4 for mix (extra L1 scratch).
+    // (args_[0]) and polls it, so the workspace is read AND written. The
+    // optional used_cores operand is a read. Marking the write lets dependency
+    // analysis order barriers that reuse one workspace.
+    INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
+        << "Internal error: soft system.syncall is missing gm_workspace";
     MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_read);
     MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_write);
     for (size_t i = 1; i < call->args_.size(); ++i) {

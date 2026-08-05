@@ -4682,6 +4682,26 @@ class TestWindowSliceIncoreConversion:
     # Composite intrinsic param-direction upgrade tests
     # ------------------------------------------------------------------
 
+    def test_soft_syncall_upgrades_workspace_to_inout(self):
+        """The GM counter workspace is both read and written by soft syncall."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, workspace: pl.Tensor[[16], pl.INT32]):
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, workspace: pl.InOut[pl.Tensor[[16], pl.INT32]]):
+                pl.system.syncall(mode="soft", core_type="aiv_only", gm_workspace=workspace, used_cores=0)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_barrier_upgrades_signal_to_inout(self):
         """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
 

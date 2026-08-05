@@ -161,10 +161,8 @@ def create(
             slayout=none_box) L1/cbuf tile — a contiguous byte-staging buffer
             rather than the boxed NZ layout Mat tiles normally carry. Requires
             ``target_memory=Mat`` and is mutually exclusive with ``transpose``.
-            Used for the mix/aic_only soft ``system.syncall`` L1 scratch, whose
-            counter slots must be contiguous. Default ``None`` keeps the
-            canonical layout. Kept keyword-only so it does not shift ``span``'s
-            positional slot for existing callers.
+            Default ``None`` keeps the canonical layout. Kept keyword-only so
+            it does not shift ``span``'s positional slot for existing callers.
 
     Returns:
         Call expression that returns a TileType with the created tile
