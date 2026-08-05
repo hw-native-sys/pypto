@@ -116,8 +116,8 @@ consume each view.
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
-The layout-only shorthand `pl.Tensor[..., pl.DN]` is not supported — writing it never gets
-you a DN tensor. For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to
+The layout-only shorthand `pl.Tensor[..., pl.DN]` is not supported: it raises
+`ParserTypeError`. For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to
 `pl.matmul`, or derive the transposed view at the use site with `pl.transpose(x, -2, -1)`.
 A slice or reshape of a DN-producing operation inherits DN automatically.
 

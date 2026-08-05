@@ -68,13 +68,11 @@ DEFERRED = {
     "parse_program": "B6 tools",
     # B6 execution — IR-level types surfaced mainly in printed IR.
     "MemRefType": "B6 execution",
-    "Ptr": "B6 execution",
     "PtrType": "B6 execution",
     "TileView": "B6 execution",
+    "CompactMode": "B6 execution",
     "TileLayout": "B6 execution",
-    "AtomicType": "B6 execution",
     "PipeType": "B6 execution",
-    "IntLike": "B6 execution",
 }
 
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)

@@ -14,6 +14,7 @@
 | `full` | `pl.` | 用常量填充的张量 |
 | `arange` | `pl.` | 连续整数（`tensor.ci`） |
 | `random` | `pl.` | 随机填充的张量 |
+| `tri` | `pl.` (t) | 下三角或上三角掩码 tile；`upper=` 选边、`diagonal=` 平移，且只写有效区 |
 | `const` | `pl.` | 带显式 dtype 的字面量 —— 见 [编译期指令](../language/05-directives.md#带类型的常量) |
 | `array.create` | `pl.array.` | 分配核内数组 |
 
@@ -44,7 +45,7 @@
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `exp` `log` | `pl.` | 指数、自然对数 |
-| `sqrt` `rsqrt` | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径 —— tile 级请直接调 `pl.tile.rsqrt(src, tmp=...)`，它需要调用方自备一块 scratch tile |
+| `sqrt` `rsqrt` | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径，传给 Tile 会**抛异常** —— tile 级的精度由是否传入 scratch tile 决定：`pl.tile.rsqrt(src, tmp)` |
 | `sin` `cos` | `pl.` | 三角函数 |
 
 ## 比较与选择
@@ -130,6 +131,8 @@
 | ---- | ---- | ---- |
 | `gather` `gather_row` | `pl.` | 按索引 gather |
 | `paged_gather` | `pl.` | 跨分页布局 gather |
+| `gatherb` | `pl.` (t) | 按 UINT32 字节偏移 gather 32 字节块；一列偏移展开成 `32 / sizeof(output_dtype)` 个元素 |
+| `mgather` | `pl.` (t) | 按索引 tile 从 DDR 张量 gather 行，带 `coalesce=` 与 `gather_oob=` 策略 |
 | `scatter` `scatter_update` | `pl.` | 按索引 scatter；原地更新 |
 | `mscatter` | `pl.` (t) | 带掩码的 scatter |
 | `sort32` `mrgsort` | `pl.` | 对 32 元素组排序；归并已排序段 |

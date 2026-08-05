@@ -18,6 +18,7 @@ Every operator family, one line each. Signatures live in the docstrings — see
 | `full` | `pl.` | A tensor filled with a constant |
 | `arange` | `pl.` | Consecutive integers (`tensor.ci`) |
 | `random` | `pl.` | Random-filled tensor |
+| `tri` | `pl.` (t) | Lower- or upper-triangular mask tile; `upper=` picks the side, `diagonal=` shifts it, and only the valid region is written |
 | `const` | `pl.` | A literal with an explicit dtype — see [Directives](../language/05-directives.md#typed-constants) |
 | `array.create` | `pl.array.` | Allocate an on-core array |
 
@@ -48,7 +49,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
 | `exp` `log` | `pl.` | Exponential, natural logarithm |
-| `sqrt` `rsqrt` | `pl.` | Square root; reciprocal square root. `high_precision=` applies to the tensor path only — at tile level call `pl.tile.rsqrt(src, tmp=...)`, which needs a caller-supplied scratch tile |
+| `sqrt` `rsqrt` | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)` |
 | `sin` `cos` | `pl.` | Trigonometric |
 
 ## Comparison and selection
@@ -138,6 +139,8 @@ tile depend on the pad value; see
 | -------- | ----- | ------------ |
 | `gather` `gather_row` | `pl.` | Gather by index |
 | `paged_gather` | `pl.` | Gather across a paged layout |
+| `gatherb` | `pl.` (t) | Gather 32-byte blocks by UINT32 byte offset; one offset column expands to `32 / sizeof(output_dtype)` elements |
+| `mgather` | `pl.` (t) | Gather rows from a DDR tensor by index tile, with `coalesce=` and `gather_oob=` policies |
 | `scatter` `scatter_update` | `pl.` | Scatter by index; update in place |
 | `mscatter` | `pl.` (t) | Masked scatter |
 | `sort32` `mrgsort` | `pl.` | Sort a 32-element group; merge sorted runs |

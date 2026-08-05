@@ -97,7 +97,7 @@ x = arr[i]              # array.get_element
 b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 ```
 
-只写布局的简写 `pl.Tensor[..., pl.DN]` 不被支持 —— 写了也拿不到 DN 张量。矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或在使用处用 `pl.transpose(x, -2, -1)` 导出转置视图。对产生 DN 的算子做切片或 reshape，会自动继承 DN。
+只写布局的简写 `pl.Tensor[..., pl.DN]` 不被支持：它会抛 `ParserTypeError`。矩阵乘需要转置操作数时，给 `pl.matmul` 传 `a_trans=True` / `b_trans=True`，或在使用处用 `pl.transpose(x, -2, -1)` 导出转置视图。对产生 DN 的算子做切片或 reshape，会自动继承 DN。
 
 `pl.ND` 是默认的行主序布局，不需要写出来。`pl.NZ` 只用于 tile —— 那是硬件 tile 布局，永远不做 `pl.Tensor` 注解。
 

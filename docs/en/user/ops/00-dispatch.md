@@ -51,6 +51,17 @@ t = pl.tile.load(x, [0, 0], [64, 64])
 t = pl.tile.adds(t, 1.0)  # tile-specific spelling
 ```
 
+### Path-specific keyword arguments raise
+
+A few operators take a keyword only one level can honour. A tensor has no layout, so
+`matmul` transposes through `a_trans=` / `b_trans=`, while at tile level transposition is a
+type property expressed with `pl.tile.transpose_view(...)`. Conversely a tile's scratch
+buffer is caller-supplied, where the tensor path has the compiler allocate it.
+
+Passing such a keyword with a non-default value to the wrong path raises `TypeError`,
+naming the offending keyword and the level-appropriate alternative — it is not dropped.
+Passing the documented default (`b_trans=False`, say) is a no-op and stays accepted.
+
 ### When the unified form does not exist
 
 An operator has no `pl.*` spelling when it is meaningful at only one level. Reaching for
