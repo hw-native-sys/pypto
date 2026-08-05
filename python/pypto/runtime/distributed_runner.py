@@ -23,7 +23,7 @@ import types
 import warnings
 import weakref
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1859,6 +1859,12 @@ class DistributedWorker(Worker):
             if not 0 <= w < world:
                 raise ValueError(f"worker id {w} out of range [0, {world}) (world_size from device_ids)")
 
+        # Validate the stacked host before uploading anything: `alloc_tensor` only
+        # rejects an unreachable host buffer from `_prepare_init`, which runs after
+        # its device malloc, so N concurrent shards would each commit device memory
+        # first and surface an allocator failure instead of this ValueError.
+        self._require_forked_host_buffer(host, "alloc_stacked_tensor(host=...)", "read")
+
         shards: list[DeviceTensor] = []
         try:
             # Upload the shards concurrently: each one targets a different chip
@@ -1873,18 +1879,30 @@ class DistributedWorker(Worker):
                     worker_id=w,
                 )
 
-            uploaded: dict[int, DeviceTensor] = {}
-            errors: list[Exception] = []
+            futures: dict[Future[DeviceTensor], int] = {}
+            errors: list[BaseException] = []
             with ThreadPoolExecutor(max_workers=len(ids)) as pool:
-                futures = {pool.submit(_upload_shard, i, w): i for i, w in enumerate(ids)}
-                for future, index in futures.items():
+                for i, w in enumerate(ids):
                     try:
-                        uploaded[index] = future.result()
-                    except Exception as exc:  # noqa: PERF203 -- one shard failing must not orphan the rest
+                        futures[pool.submit(_upload_shard, i, w)] = i
+                    except BaseException as exc:
+                        # Stop submitting, but still drain what is already running.
                         errors.append(exc)
+                        break
+
+            # Leaving the pool joined every submitted task, so this only collects
+            # results. Every future is drained even once the group has failed —
+            # dropping one would strand a live device buffer with no owner.
+            uploaded: dict[int, DeviceTensor] = {}
+            for future, index in futures.items():
+                try:
+                    uploaded[index] = future.result()
+                except BaseException as exc:
+                    errors.append(exc)
+
             if errors:
-                # A concurrent upload can fail anywhere in the group, so roll back
-                # by index rather than relying on the successes being a prefix.
+                # A concurrent group can fail anywhere, so the successes are not a
+                # prefix of `ids`: roll back by index, against the owning worker.
                 for index, shard in uploaded.items():
                     self.free_tensor(shard, worker_id=ids[index])
                 raise errors[0]
