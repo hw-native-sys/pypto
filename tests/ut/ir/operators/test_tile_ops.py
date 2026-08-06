@@ -6257,6 +6257,19 @@ class TestDestinationSpaceLayoutDeduction:
             assert result_type.memory_space == ir.MemorySpace.Acc, name
             assert self._layout_of(result_type) == acc_nz, name
 
+    def test_matmul_bias_propagates_physical_box_and_logical_valid_shape(self):
+        """Biased matmul follows the same padded-box contract as plain matmul."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [1, 16], name="bias")
+
+        result_type = tile.matmul_bias(lhs, rhs, bias).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert all(isinstance(dim, ir.ConstInt) for dim in result_type.shape)
+        assert [cast(ir.ConstInt, dim).value for dim in result_type.shape] == [32, 32]
+        assert _valid_of(result_type) == [16, 16]
+
 
 class TestWriteValidRegionUnion:
     """The valid-region union rule shared by tile.assemble and tile.store.

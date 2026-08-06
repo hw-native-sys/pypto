@@ -534,12 +534,15 @@ Pass LegalizeTileCast();
  * stores, and insufficient L0C capacity stay unchanged.
  *
  * Eligible calls require static 2D operands with B in Mat and A in Mat or Vec.
+ * ``tile.matmul_bias`` is supported when both matrix operands are Mat and its
+ * static ``[1, N]`` bias is Mat- or Bias-resident. The bias is applied once on
+ * the first K block; M/N tiling slices a Mat-resident bias along N.
  * When the chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is
  * needed, although a chained result may still be remapped to Mat by the
  * compatible cast-fold placement above.  Other unsupported regimes are left
  * untouched; useful deferred cases emit ``PerfHint`` diagnostics.
- * ``tile.matmul_bias`` remains unsupported because its bias must be applied
- * only after the final K block.
+ * An already-Bias-resident source that itself needs N tiling is deferred
+ * because Bias-to-Bias sub-window extraction is unsupported.
  *
  * Requirements:
  * - Input IR must have static 2D tile ops (run FlattenTileNdTo2D first)

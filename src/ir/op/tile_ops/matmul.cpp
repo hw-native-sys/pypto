@@ -254,6 +254,10 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   CHECK(bias_shape.size() == 2) << "The operator " << op_name << " requires bias to be 2D, but got "
                                 << bias_shape.size() << " dimensions";
 
+  const auto lhs_valid = GetValidShape(lhs_type);
+  const auto rhs_valid = GetValidShape(rhs_type);
+  const auto bias_valid = GetValidShape(bias_type);
+
   auto k_lhs_const = As<ConstInt>(lhs_shape[1]);
   auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
   if (k_lhs_const && k_rhs_const) {
@@ -263,7 +267,13 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
         << " and rhs K=" << k_rhs_const->value_;
   }
 
+  CHECK(ProveValidExtentLessEqual(lhs_valid[1], rhs_valid[0]) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires rhs valid K to cover lhs valid K, but got lhs K=" << PythonPrint(lhs_valid[1])
+      << " and rhs K=" << PythonPrint(rhs_valid[0]);
+
   std::vector<ExprPtr> output_shape = {lhs_shape[0], rhs_shape[1]};
+  std::vector<ExprPtr> output_valid_shape = {lhs_valid[0], rhs_valid[1]};
 
   // Hardware requires bias to be [1, N]
   auto bias_row_const = As<ConstInt>(bias_shape[0]);
@@ -278,6 +288,10 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
         << " requires bias N dimension to match output N=" << rhs_n_const->value_
         << ", but got bias N=" << bias_n_const->value_;
   }
+  CHECK(ProveValidExtentLessEqual(rhs_valid[1], bias_valid[1]) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires bias valid N to cover output valid N=" << PythonPrint(rhs_valid[1])
+      << ", but got bias valid N=" << PythonPrint(bias_valid[1]);
 
   auto lhs_rhs_dtype = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
   CHECK(lhs_rhs_dtype) << "The operator " << op_name << " requires compatible lhs/rhs data types, but got "
@@ -293,7 +307,7 @@ TypePtr DeduceTileMatMulBiasType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view_semantics::SetTileLayout(
       tile_view, tile_view_semantics::GetImplicitTileLayout(output_shape, MemorySpace::Acc));
-  tile_view.valid_shape = output_shape;
+  tile_view.valid_shape = std::move(output_valid_shape);
   return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view, MemorySpace::Acc);
 }
 

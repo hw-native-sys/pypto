@@ -23,6 +23,8 @@ Validates on device the cases from examples/kernels/11_auto_tile_matmul.py:
     must place an output grid outside the source K loop rather than materialize the full Acc;
     a second non-issue shape exercises simultaneous M and N boundary tiles, and a larger
     source panel composes those boundaries with AutoTile's ordinary inner-K rewrite.
+  - **Biased matmul** -- ``tile.matmul_bias`` applies its bias exactly once per output tile
+    while combining M/N and K tiling, for both direct-GM and chained Mat-scratch placement.
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot
 give (actual execution). Ascend910B (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
@@ -67,6 +69,15 @@ _BOUNDARY_K_TILE = 128
 
 _COMPOSE_K = 768
 _COMPOSE_K_TILE = 384
+
+_BIAS_M = 256
+_BIAS_N = 256
+_BIAS_K = 256
+_BIAS_SCRATCH_K = 192
+_BIAS_OUT_N = 64
+_BIAS_BOUNDARY_M = 272
+_BIAS_BOUNDARY_K = 64
+_BIAS_BOUNDARY_N = 144
 
 
 @pl.jit
@@ -133,6 +144,61 @@ def matmul_acc_n_boundary_retiles_k(
     return c
 
 
+@pl.jit
+def matmul_bias_mn_k_direct(
+    a: pl.Tensor[[_BIAS_M, _BIAS_K], pl.BF16],
+    b: pl.Tensor[[_BIAS_K, _BIAS_N], pl.BF16],
+    bias: pl.Tensor[[1, _BIAS_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[_BIAS_M, _BIAS_N], pl.FP32]],
+):
+    """Biased GEMM whose output and K reduction both require AutoTile."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_mn_k_direct"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_M, _BIAS_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_K, _BIAS_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_N], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+        out = pl.store(c, [0, 0], out)
+    return out
+
+
+@pl.jit
+def matmul_bias_mn_k_scratch(
+    a: pl.Tensor[[_BIAS_M, _BIAS_SCRATCH_K], pl.BF16],
+    b: pl.Tensor[[_BIAS_SCRATCH_K, _BIAS_N], pl.BF16],
+    bias: pl.Tensor[[1, _BIAS_N], pl.FP32],
+    e: pl.Tensor[[_BIAS_N, _BIAS_OUT_N], pl.BF16],
+    out: pl.Out[pl.Tensor[[_BIAS_M, _BIAS_OUT_N], pl.FP32]],
+):
+    """Biased GEMM whose tiled result stays in a bf16 Mat scratch."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_mn_k_scratch"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_M, _BIAS_SCRATCH_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_SCRATCH_K, _BIAS_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_N], target_memory=pl.Mem.Mat)
+        e_mat = pl.load(e, [0, 0], [_BIAS_N, _BIAS_OUT_N], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+        cb = pl.cast(c, pl.BF16, mode="rint")
+        d = pl.tile.matmul(cb, e_mat)
+        out = pl.store(d, [0, 0], out)
+    return out
+
+
+@pl.jit
+def matmul_bias_mn_boundary_direct(
+    a: pl.Tensor[[_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_K], pl.BF16],
+    b: pl.Tensor[[_BIAS_BOUNDARY_K, _BIAS_BOUNDARY_N], pl.BF16],
+    bias: pl.Tensor[[1, _BIAS_BOUNDARY_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_N], pl.FP32]],
+):
+    """Biased GEMM with partial M and N output tiles."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_mn_boundary_direct"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_BOUNDARY_K, _BIAS_BOUNDARY_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_BOUNDARY_N], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+        out = pl.store(c, [0, 0], out)
+    return out
+
+
 def _cfg(test_config, planner):
     """Return the session config with the requested planner selected explicitly."""
     return dataclasses.replace(test_config, memory_planner=planner)
@@ -161,6 +227,56 @@ class TestAutoTileMatmulL0:
         assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
             f"{kernel.__name__} (DDR direct-store) max abs diff = {(out - expected).abs().max().item():.3e}"
         )
+
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_mn_k_direct_store(self, test_config, planner):
+        """Bias is applied once while M/N sub-tiles complete a split-K reduction."""
+        matmul_bias_mn_k_direct._cache.clear()
+        torch.manual_seed(11)
+        a = torch.randn(_BIAS_M, _BIAS_K, dtype=torch.bfloat16)
+        b = torch.randn(_BIAS_K, _BIAS_N, dtype=torch.bfloat16)
+        bias = torch.randn((1, _BIAS_N), dtype=torch.float32)
+        out = torch.zeros((_BIAS_M, _BIAS_N), dtype=torch.float32)
+
+        matmul_bias_mn_k_direct(a, b, bias, out, config=_cfg(test_config, planner))
+
+        expected = a.float() @ b.float() + bias
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, f"direct matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
+
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_mn_k_mat_scratch(self, test_config, planner):
+        """A biased producer is tiled into Mat scratch for its sole matmul consumer."""
+        matmul_bias_mn_k_scratch._cache.clear()
+        torch.manual_seed(12)
+        a = torch.randn(_BIAS_M, _BIAS_SCRATCH_K, dtype=torch.bfloat16)
+        b = torch.randn(_BIAS_SCRATCH_K, _BIAS_N, dtype=torch.bfloat16)
+        bias = torch.randn((1, _BIAS_N), dtype=torch.float32)
+        e = torch.randn(_BIAS_N, _BIAS_OUT_N, dtype=torch.bfloat16)
+        out = torch.zeros((_BIAS_M, _BIAS_OUT_N), dtype=torch.float32)
+
+        matmul_bias_mn_k_scratch(a, b, bias, e, out, config=_cfg(test_config, planner))
+
+        intermediate = (a.float() @ b.float() + bias).to(torch.bfloat16).float()
+        expected = intermediate @ e.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, f"Mat-scratch matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
+
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_mn_boundaries(self, test_config, planner):
+        """Partial M/N tiles preserve the logical Bias and output regions."""
+        matmul_bias_mn_boundary_direct._cache.clear()
+        torch.manual_seed(13)
+        a = torch.randn(_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_K, dtype=torch.bfloat16)
+        b = torch.randn(_BIAS_BOUNDARY_K, _BIAS_BOUNDARY_N, dtype=torch.bfloat16)
+        bias = torch.randn((1, _BIAS_BOUNDARY_N), dtype=torch.float32)
+        out = torch.zeros((_BIAS_BOUNDARY_M, _BIAS_BOUNDARY_N), dtype=torch.float32)
+
+        matmul_bias_mn_boundary_direct(a, b, bias, out, config=_cfg(test_config, planner))
+
+        expected = a.float() @ b.float() + bias
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, f"boundary matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
 
     @pytest.mark.parametrize("planner", _PLANNERS)
     def test_loop_carried_matmul_acc_mn_tiling(self, test_config, planner):

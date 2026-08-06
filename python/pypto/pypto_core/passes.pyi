@@ -487,7 +487,7 @@ def legalize_tile_cast() -> Pass:
     """
 
 def auto_tile_matmul_l0() -> Pass:
-    """Create a pass that auto-tiles static 2D ``tile.matmul`` / ``tile.matmul_acc`` for L0.
+    """Create a pass that auto-tiles static 2D ``tile.matmul`` family calls for L0.
 
     The active backend's roofline chooser selects
     ``(m, n, k, stationarity, dbC)``. K-split reductions use a 2-stage
@@ -503,7 +503,8 @@ def auto_tile_matmul_l0() -> Pass:
     although a chained result may still be remapped to Mat by the compatible
     cast-fold placement above. Other unsupported regimes are left untouched;
     useful deferred cases emit ``PerfHint`` diagnostics. ``tile.matmul_bias``
-    is deferred.
+    is supported for Mat-resident matrix operands: its bias is applied once on
+    the first K block and a Mat-resident bias is sliced along N for output tiling.
 
     Under the PyPTO planner, a canonical static already-L0 pipeline containing
     one stationary-panel ``tile.matmul`` and one direct store or assemble drain

@@ -74,26 +74,27 @@
 /// Acc's physical footprint overflows L0c.  Capacity uses the backend's
 /// accumulator-row alignment, which may be stricter than the logical M shape
 /// (Ascend910B INT32 M=16 occupies 32 physical rows).  The operands are already
-/// Mat-resident, so only the output overflows. For plain ``tile.matmul``, the pass emits a
+/// Mat-resident, so only the output overflows. For fresh ``tile.matmul`` or
+/// ``tile.matmul_bias``, the pass emits a
 /// ``ceil(M/m) x ceil(N/n)`` grid and hands each ``[m_eff, n_eff]`` Acc result to
 /// a placement strategy: either direct-store to the sole 2D
 /// ``tile.store(c, base, out)`` consumer, or assembly into an on-chip Mat scratch
 /// when every use is a later matmul operand. Each sub-tile uses the pipelined
 /// K-loop above when K spans >= 2 L0 blocks, or — when ``k == K`` (the full K
-/// fits L0a/L0b at once) — a single straight-line ``tile.matmul`` emitted inside
+/// fits L0a/L0b at once) — a single straight-line matmul emitted inside
 /// **nested pipelined loops** over the divisible interior so
 /// ``LowerPipelineLoops`` double-buffers the operand extracts (see
 /// ``BuildFullKPipelined``). The partial boundary is peeled into a
 /// straight-line tail, so ``m`` / ``n`` need not divide ``M`` / ``N``.
 ///
 /// Supported today:
-///   * ``tile.matmul`` and ``tile.matmul_acc``.  ``tile.matmul_bias`` is
-///     deferred — bias add only after the final iteration needs extra
-///     rewriting that is not yet implemented.
-///   * K tiling (``m == M and n == N``) for ``tile.matmul`` and
-///     ``tile.matmul_acc``; M/N tiling for plain ``tile.matmul`` with either a
-///     direct-store or Mat-scratch placement, with a pipelined K-loop or a
-///     straight-line single-K-block (``k == K``) per sub-tile.
+///   * ``tile.matmul``, ``tile.matmul_acc``, and ``tile.matmul_bias``. For a
+///     biased matmul, the bias is sliced along N and applied exactly once on
+///     the first K block of each output sub-tile.
+///   * K tiling (``m == M and n == N``) for all three calls; M/N tiling for
+///     fresh ``tile.matmul`` / ``tile.matmul_bias`` with either a direct-store
+///     or Mat-scratch placement, with a pipelined K-loop or a straight-line
+///     single-K-block (``k == K``) per sub-tile.
 ///     The canonical frontend split-K create/pipeline/store form is M/N-tiled
 ///     outside its K loop: each output sub-tile completes the whole source K
 ///     reduction before the next one starts. Arbitrary standalone
@@ -320,6 +321,7 @@ struct KLoopRewrite {
   AssignStmtPtr original;
   VarPtr lhs_src;                 ///< [M, K] left operand — Mat- or Vec-resident
   VarPtr rhs_src;                 ///< [K, N] right operand — Mat-resident
+  VarPtr bias_src;                ///< optional [1, N] bias — Mat- or Bias-resident
   bool stage_lhs_to_mat = false;  ///< lhs is Vec-resident: stage Vec→Mat before the K-loop
   VarPtr acc_init = nullptr;      ///< Caller-provided accumulator for matmul_acc;
                                   ///< nullptr for plain matmul (Vec placeholder is built instead).
@@ -351,16 +353,38 @@ struct RewriteResult {
   VarPtr return_var;           ///< ForStmt's return_var; substituted into downstream uses.
 };
 
-/// Body of the K-loop for plain ``tile.matmul``: branches on ``ko == 0``
-/// between ``tile.matmul`` (fresh Acc) and ``tile.matmul_acc`` (accumulating).
-/// The ``IfStmt`` materializes a phi return_var that the outer yield carries
-/// back to the iter-arg.
+/// Materialize the bias operand for one output-column window. A full vector
+/// already resident in the architectural Bias buffer is reusable as-is. A
+/// Mat-resident source is extracted once into Bias. N-tiling of an already-Bias
+/// source is rejected by AnalyzeMatmul because Bias-to-Bias extract is not a
+/// supported transfer.
+VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int64_t n, int64_t N,
+                        const ExprPtr& ni, const std::string& name, const Span& sp) {
+  if (!bias_src) return nullptr;
+  auto bias_ty = As<TileType>(bias_src->GetType());
+  INTERNAL_CHECK_SPAN(bias_ty, sp) << "Internal error: matmul bias is not a TileType";
+  if (bias_ty->GetMemorySpace() == MemorySpace::Bias) {
+    INTERNAL_CHECK_SPAN(n == N, sp)
+        << "Internal error: an already-Bias-resident source cannot be sliced along N";
+    return bias_src;
+  }
+  auto bias = BuildExtract(bias_src, {1, n}, MakeIndex(0, sp), ni, MemorySpace::Bias, name, sp);
+  stmts.push_back(bias);
+  return bias->var_;
+}
+
+/// Body of the K-loop for a fresh ``tile.matmul`` or ``tile.matmul_bias``:
+/// branches on ``ko == 0`` between a fresh Acc (with the optional bias) and
+/// ``tile.matmul_acc``. The ``IfStmt`` materializes a phi return_var that the
+/// outer yield carries back to the iter-arg.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
-                        const AssignStmtPtr& sb, const std::string& base, const Span& sp) {
+                        const AssignStmtPtr& sb, const VarPtr& bias, const std::string& base,
+                        const Span& sp) {
   auto& reg = OpRegistry::GetInstance();
 
-  // Then-branch: fresh Acc tile from tile.matmul.
-  auto c_then_call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+  // Then-branch: fresh Acc tile, applying the optional bias exactly once.
+  auto c_then_call = bias ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias}, sp)
+                          : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
   auto c_then_var = std::make_shared<Var>(base + "_l0_c_first", c_then_call->GetType(), sp);
   auto c_then_assign = std::make_shared<AssignStmt>(c_then_var, c_then_call, sp);
   auto then_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_then_var}, sp);
@@ -395,7 +419,7 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
   return SeqStmts::Flatten(std::vector<StmtPtr>{sa, sb, c_assign, outer_yield}, sp);
 }
 
-/// Build the replacement statements for one Mat-resident matmul or matmul_acc.
+/// Build the replacement statements for one supported Mat-resident matmul-family call.
 /// See the file-level comment for the emitted shape.
 RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const Span sp = r.original->span_;
@@ -455,6 +479,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
 
   ExprPtr mi_off = r.mi ? r.mi : MakeIndex(0, sp);
   ExprPtr ni_off = r.ni ? r.ni : MakeIndex(0, sp);
+  VarPtr bias_operand = BuildBiasOperand(out, r.bias_src, r.n, r.N, ni_off, base + "_l0_bias", sp);
 
   // Emit one straight-line K block ``[m, kb] x [kb, n]`` at static K-offset
   // ``ko``, accumulating into ``acc_in`` (``tile.matmul_acc``) or starting fresh
@@ -465,8 +490,14 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
                            base + "_l0_b" + tag, sp);
-    ExprPtr call = acc_in ? reg.Create("tile.matmul_acc", {acc_in, sa->var_, sb->var_}, sp)
-                          : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+    ExprPtr call;
+    if (acc_in) {
+      call = reg.Create("tile.matmul_acc", {acc_in, sa->var_, sb->var_}, sp);
+    } else if (bias_operand) {
+      call = reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp);
+    } else {
+      call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+    }
     auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
     out.push_back(sa);
     out.push_back(sb);
@@ -484,7 +515,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
         BuildExtract(lhs_extract_src, {r.m, r.k}, mi_off, ko_var, MemorySpace::Left, base + "_l0_a", sp);
     auto sb = BuildExtract(r.rhs_src, {r.k, r.n}, ko_var, ni_off, MemorySpace::Right, base + "_l0_b", sp);
     StmtPtr body = is_acc ? BuildMatmulAccBody(c_iter, sa, sb, base, sp)
-                          : BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp);
+                          : BuildMatmulBody(ko_var, c_iter, sa, sb, bias_operand, base, sp);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a partial tail follows (named
     // distinctly so round-trip names stay unique), else the final result.
@@ -518,7 +549,8 @@ struct MatmulTiling {
   AssignStmtPtr assign;
   VarPtr lhs;       ///< [M, K] left operand — Mat (or Vec for the PV pattern; see stage_lhs_to_mat)
   VarPtr rhs;       ///< [K, N] right operand — Mat
-  VarPtr acc_init;  ///< caller-provided accumulator for matmul_acc; null for plain matmul
+  VarPtr bias;      ///< optional [1, N] bias for tile.matmul_bias
+  VarPtr acc_init;  ///< caller-provided accumulator for matmul_acc; null for fresh matmul/bias
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
@@ -563,6 +595,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
   r.original = t.assign;
   r.lhs_src = t.lhs;
   r.rhs_src = t.rhs;
+  r.bias_src = t.bias;
   r.stage_lhs_to_mat = t.stage_lhs_to_mat;
   r.acc_init = t.acc_init;
   r.M = t.M;
@@ -618,19 +651,20 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
-  // ``tile.matmul`` and ``tile.matmul_acc`` are rewritten by this pass.
-  // ``tile.matmul_bias`` is deferred — bias add inside a tiled K-loop needs
-  // bias-add only after the final iteration, which is extra rewriting.
+  // Plain, accumulating, and bias matmuls share the L0 tile chooser. Bias is
+  // applied on the first K block only; subsequent blocks use matmul_acc.
   const bool is_matmul = IsOp(call, "tile.matmul");
   const bool is_matmul_acc = IsOp(call, "tile.matmul_acc");
-  if (!is_matmul && !is_matmul_acc) return std::nullopt;
+  const bool is_matmul_bias = IsOp(call, "tile.matmul_bias");
+  if (!is_matmul && !is_matmul_acc && !is_matmul_bias) return std::nullopt;
 
-  // Operand layout: (lhs, rhs) for matmul; (acc, lhs, rhs) for matmul_acc.
+  // Operand layout: (lhs, rhs) for matmul; (acc, lhs, rhs) for matmul_acc;
+  // (lhs, rhs, bias) for matmul_bias.
   // Use ``AsVarLike`` for the operands so IterArg (Var subclass) is accepted —
   // this is the common case for the accumulator inside a pipelined K-loop.
   const size_t expected_arity = is_matmul ? 2u : 3u;
   if (call->args_.size() != expected_arity) return std::nullopt;
-  const size_t lhs_idx = is_matmul ? 0u : 1u;
+  const size_t lhs_idx = is_matmul_acc ? 1u : 0u;
   auto lhs = AsVarLike(call->args_[lhs_idx]);
   auto rhs = AsVarLike(call->args_[lhs_idx + 1u]);
   if (!lhs || !rhs) return std::nullopt;
@@ -652,6 +686,20 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     if (!acc_tile || acc_tile->shape_.size() != 2) return std::nullopt;
   }
 
+  VarPtr bias_var;
+  TileTypePtr bias_tile;
+  int64_t bias_n = 0;
+  if (is_matmul_bias) {
+    bias_var = AsVarLike(call->args_[2]);
+    if (!bias_var) return std::nullopt;
+    bias_tile = As<TileType>(bias_var->GetType());
+    int64_t bias_m = 0;
+    if (!IsStatic2DInSpaces(bias_tile, {MemorySpace::Mat, MemorySpace::Bias}, bias_m, bias_n) ||
+        bias_m != 1) {
+      return std::nullopt;
+    }
+  }
+
   // Operand source residency, with static 2D shapes.  The right (B) operand
   // must be Mat — it is loaded from DDR into L1 and fed into L0B.  The left (A)
   // operand may be Mat (the QK pattern) or Vec (the fused-attention PV /
@@ -663,10 +711,16 @@ std::optional<MatmulTiling> AnalyzeMatmul(
       !IsStatic2DInSpaces(rhs_tile, {MemorySpace::Mat}, K_rhs, N)) {
     return std::nullopt;
   }
+  // New matmul_bias coverage intentionally starts at the native cube boundary:
+  // both matrix operands are already in Mat. Keep the historical Vec-left
+  // exception for plain matmul/matmul_acc K-tiling, but do not widen it here.
+  if (is_matmul_bias && lhs_tile->GetMemorySpace() != MemorySpace::Mat) return std::nullopt;
   // K mismatch is an ill-typed matmul — the op verifier should have caught it
   // upstream.  Treat as an internal invariant.
   INTERNAL_CHECK(K_lhs == K_rhs) << "tile.matmul: K dimensions don't match (lhs K=" << K_lhs
                                  << ", rhs K=" << K_rhs << ")";
+  INTERNAL_CHECK_SPAN(!is_matmul_bias || bias_n == N, assign->span_)
+      << "Internal error: tile.matmul_bias bias N does not match rhs N";
   const int64_t K = K_lhs;
 
   uint32_t bytes_a = DTypeBytes(lhs_tile->dtype_);
@@ -814,6 +868,19 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // Already L0-sized — nothing to do.
   if (res.m == M && res.n == N && res.k == K) return std::nullopt;
 
+  // A Bias-resident vector can be reused for K-tiling or M-only tiling, but
+  // there is no legal Bias-to-Bias extract for an N sub-window. Normal
+  // pre-inference inputs are Mat-resident and take the supported Mat->Bias path.
+  if (is_matmul_bias && res.n != N && bias_tile->GetMemorySpace() == MemorySpace::Bias) {
+    hints.emplace_back(
+        DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+        "tile.matmul_bias needs N tiling, but its source is already resident in the architectural Bias "
+        "buffer; forming an N sub-window would require an unsupported Bias-to-Bias extract, so the call "
+        "is left untouched (keep the pre-inference bias source in Mat)",
+        assign->span_);
+    return std::nullopt;
+  }
+
   if (!res.perf_hint.empty()) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-008",
                        "tile.matmul: ChooseL0Tile fallback. " + res.perf_hint, assign->span_);
@@ -823,11 +890,12 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   t.assign = assign;
   t.lhs = lhs;
   t.rhs = rhs;
+  t.bias = bias_var;
   // A Vec-resident left operand is staged into Mat before the K-loop (see
   // BuildMoveToMat); Mat-resident left operands extract directly.  The right
   // operand is always Mat (checked above), so it never needs staging.
   t.stage_lhs_to_mat = lhs_tile->GetMemorySpace() == MemorySpace::Vec;
-  t.acc_init = acc_var;  // null for tile.matmul, set for tile.matmul_acc
+  t.acc_init = acc_var;  // null for fresh matmul/bias, set for tile.matmul_acc
   t.M = M;
   t.N = N;
   t.K = K;
@@ -896,17 +964,19 @@ class SiblingUseCounter : public IRVisitor {
   }
   // Skip the LHS (a def); count only reads in the RHS value.
   void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
-  // A *direct* Var at a matmul OPERAND position (``tile.matmul`` args {0,1};
-  // ``tile.matmul_acc`` args {1,2} — arg 0 is the Acc accumulator, NOT a matrix
-  // operand) is a Mat-safe consumer use: the consumer K-tiles that operand, so an
-  // L1/Mat scratch produced upstream is legal there.  Classifying by operand index
-  // is essential — a scratch fed to ``matmul_acc`` arg 0 would be an illegal
-  // Mat-for-Acc substitution and must stay deferred.
+  // A *direct* Var at a matrix-operand position (``tile.matmul`` /
+  // ``tile.matmul_bias`` args {0,1}; ``tile.matmul_acc`` args {1,2} — arg 0 is
+  // the Acc accumulator, NOT a matrix operand) is a Mat-safe consumer use: the
+  // consumer K-tiles that operand, so an L1/Mat scratch produced upstream is
+  // legal there. Classifying by operand index is essential — a scratch fed to
+  // ``matmul_acc`` arg 0 would be an illegal Mat-for-Acc substitution and must
+  // stay deferred. The bias argument is likewise not a matrix-operand use.
   void VisitExpr_(const CallPtr& op) override {
     const bool is_mm = IsOp(op, "tile.matmul");
     const bool is_acc = IsOp(op, "tile.matmul_acc");
+    const bool is_bias = IsOp(op, "tile.matmul_bias");
     for (size_t i = 0; i < op->args_.size(); ++i) {
-      const bool operand_pos = (is_mm && (i == 0 || i == 1)) || (is_acc && (i == 1 || i == 2));
+      const bool operand_pos = ((is_mm || is_bias) && (i == 0 || i == 1)) || (is_acc && (i == 1 || i == 2));
       const bool prev = in_matmul_operand_;
       in_matmul_operand_ = operand_pos && (AsVarLike(op->args_[i]) != nullptr);
       VisitExpr(op->args_[i]);
@@ -1612,7 +1682,10 @@ VarPtr EmitFullKTile(std::vector<StmtPtr>& stmts, const MatmulTiling& t, Subtile
                          base + "_tb" + std::to_string(step), sp);
   stmts.push_back(sa);
   stmts.push_back(sb);
-  auto c_call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+  auto bias_operand = BuildBiasOperand(stmts, t.bias, n_eff, t.N, MakeIndex(ni, sp),
+                                       base + "_tbias" + std::to_string(step), sp);
+  auto c_call = bias_operand ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp)
+                             : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
   auto c_var = std::make_shared<Var>(base + "_tc" + std::to_string(step), c_call->GetType(), sp);
   stmts.push_back(std::make_shared<AssignStmt>(c_var, c_call, sp));
   return placer.PlaceAt(stmts, c_var, MakeIndex(mi, sp), MakeIndex(ni, sp), chain, step);
@@ -1697,9 +1770,19 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     auto sb = BuildExtract(t.rhs, {t.K, t.n}, MakeIndex(0, sp), ni, MemorySpace::Right, base + "_b", sp);
     const AssignStmtPtr& outer_extract = row_outer ? sa : sb;  // stationary panel
     const AssignStmtPtr& inner_extract = row_outer ? sb : sa;  // moving panel
-    auto c_call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+    std::vector<StmtPtr> bias_stmts;
+    auto bias_operand = BuildBiasOperand(bias_stmts, t.bias, t.n, t.N, ni, base + "_bias", sp);
+    auto c_call = bias_operand ? reg.Create("tile.matmul_bias", {sa->var_, sb->var_, bias_operand}, sp)
+                               : reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
     auto c_var = std::make_shared<Var>(base + "_c", c_call->GetType(), sp);
-    std::vector<StmtPtr> inner_body{inner_extract, std::make_shared<AssignStmt>(c_var, c_call, sp)};
+    std::vector<StmtPtr> inner_body{inner_extract};
+    // Bias varies with N. In a row-outer schedule N is the moving inner axis;
+    // otherwise N is stationary and the slice can be hoisted beside the outer
+    // Right-panel extract rather than reloaded for every M tile.
+    if (row_outer) {
+      for (auto& stmt : bias_stmts) inner_body.push_back(std::move(stmt));
+    }
+    inner_body.push_back(std::make_shared<AssignStmt>(c_var, c_call, sp));
     VarPtr inner_chain = placer.PlaceAt(inner_body, c_var, mi, ni, out_inner, /*step=*/0);
     inner_body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_chain}, sp));
     // overlap_stores stays false: the one-accumulator schedule
@@ -1724,8 +1807,12 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
         inner_var, MakeIndex(0, sp), MakeIndex(inner_extent, sp), MakeIndex(inner_step, sp),
         std::vector<IterArgPtr>{out_inner}, SeqStmts::Flatten(std::move(inner_body), sp),
         std::vector<VarPtr>{inner_rv}, sp, ForKind::Pipeline, std::move(inner_attrs));
-    std::vector<StmtPtr> outer_body{outer_extract, inner_for,
-                                    std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_rv}, sp)};
+    std::vector<StmtPtr> outer_body{outer_extract};
+    if (!row_outer) {
+      for (auto& stmt : bias_stmts) outer_body.push_back(std::move(stmt));
+    }
+    outer_body.push_back(inner_for);
+    outer_body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_rv}, sp));
     // Operand-stationary: the outer loop carries the SINGLE-buffered stationary
     // panel, so it is Sequential — a Pipeline stage=2 outer would double-buffer the
     // held operand (2x its full-L0 budget -> overflow). The inner (moving) loop
