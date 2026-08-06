@@ -128,7 +128,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 
 ### 让数据留在片上
 
-为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/31-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/32-allocate_memory_addr.md) 决定；讲如何驾驭它们的性能章节尚未编写。
+为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/32-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/33-allocate_memory_addr.md) 决定；讲如何驾驭它们的性能章节尚未编写。
 
 ## Edge Cases
 
@@ -148,5 +148,5 @@ m = pl.row_max(t)                              # pad value decides what the tail
 - [作用域与放置](04-scopes.md) —— 代码在哪里执行，以及跨核环深度。
 - [算子](../ops/01-catalog.md) —— 搬运、规约与广播家族。
 - [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) —— 替你插入 move 的那个 pass。
-- [MemoryReuse](../../dev/passes/31-memory_reuse.md) —— 缓冲区如何按生命周期共享。
+- [MemoryReuse](../../dev/passes/32-memory_reuse.md) —— 缓冲区如何按生命周期共享。
 - [Memory Map](../../dev/07-memory-map.md) —— 可视化最终落在片上的东西。

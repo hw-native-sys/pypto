@@ -124,6 +124,7 @@
 | `matmul_bias` | `pl.` (t) | 带 bias 操作数的乘法 |
 | `batch_matmul` | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | 矩阵-向量形式 |
+| `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | MX 块缩放矩阵乘 —— 每个操作数由一块 FP8E4M3FN 数据 tile 和一块 FP8E8M0 scale tile 组成 |
 
 ## Gather、Scatter、排序
 
@@ -158,7 +159,7 @@
 | `aiv_shard` `aic_gather` | `pl.` | 在 AIV lane 间分片 / 在 AIC 上聚回 |
 | `AUTO` | `pl.` | 由编译器选择管道参数的哨兵值 |
 
-push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。涵盖这部分的教程尚未编写；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/20-expand_mixed_kernel.md)。
+push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。涵盖这部分的教程尚未编写；机制见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) 与 [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md)。
 
 ## 任务与依赖
 

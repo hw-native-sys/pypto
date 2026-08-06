@@ -132,6 +132,7 @@ tile depend on the pad value; see
 | `matmul_bias` | `pl.` (t) | Multiply with a bias operand |
 | `batch_matmul` | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | Matrix-vector forms |
+| `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | MX block-scale multiply — each operand is an FP8E4M3FN data tile plus an FP8E8M0 scale tile |
 
 ## Gather, scatter, sort
 
@@ -169,7 +170,7 @@ The mixed-kernel surface — AIC and AIV cooperating inside one InCore function.
 Push and pop must be **paired**, and each pop must be matched by a `tfree`. The tutorial
 covering this is not written yet; the mechanics are in
 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) and
-[ExpandMixedKernel](../../dev/passes/20-expand_mixed_kernel.md).
+[ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md).
 
 ## Tasks and dependencies
 

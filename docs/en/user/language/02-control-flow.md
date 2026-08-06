@@ -92,7 +92,7 @@ are independent. If they are not, the result is a race.
 ping-pong. The outer loop advances in strides of `stage * step` and a tail dispatch covers
 the remainder when the trip count does not divide evenly. `stage` is required and must be
 a positive integer (typically 2–4). It is lowered at tile level by
-[LowerPipelineLoops](../../dev/passes/26-lower_pipeline_loops.md).
+[LowerPipelineLoops](../../dev/passes/27-lower_pipeline_loops.md).
 
 ```python
 for i in pl.pipeline(64, stage=4):
@@ -195,4 +195,4 @@ non-SSA source is normal input, not a compatibility mode.
 - [Scopes and Placement](04-scopes.md) — the placement scopes these loops sit inside.
 - [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) — the conversion this page's rules come from.
 - [UnrollLoops](../../dev/passes/02-unroll_loops.md) — what `pl.unroll` becomes.
-- [LowerPipelineLoops](../../dev/passes/26-lower_pipeline_loops.md) — what `pl.pipeline` becomes.
+- [LowerPipelineLoops](../../dev/passes/27-lower_pipeline_loops.md) — what `pl.pipeline` becomes.

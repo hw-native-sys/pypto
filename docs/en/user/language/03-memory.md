@@ -153,8 +153,8 @@ Reloading the same operand for every tile of a loop is the most common avoidable
 Hoist the load out of the loop when the operand is loop-invariant, and prefer `Mat`
 residency for a matmul operand reused across the K loop. What the compiler will and will
 not do here — buffer reuse, address assignment — is decided by
-[MemoryReuse](../../dev/passes/31-memory_reuse.md) and
-[AllocateMemoryAddr](../../dev/passes/32-allocate_memory_addr.md); the performance chapter
+[MemoryReuse](../../dev/passes/32-memory_reuse.md) and
+[AllocateMemoryAddr](../../dev/passes/33-allocate_memory_addr.md); the performance chapter
 covering how to drive them is not written yet.
 
 ## Edge Cases
@@ -178,5 +178,5 @@ covering how to drive them is not written yet.
 - [Scopes and Placement](04-scopes.md) — where the code runs, and cross-core ring depth.
 - [Operations](../ops/01-catalog.md) — the movement, reduction, and broadcast families.
 - [InferTileMemorySpace](../../dev/passes/17-infer_tile_memory_space.md) — the pass that inserts moves you did not write.
-- [MemoryReuse](../../dev/passes/31-memory_reuse.md) — how buffers are shared across lifetimes.
+- [MemoryReuse](../../dev/passes/32-memory_reuse.md) — how buffers are shared across lifetimes.
 - [Memory Map](../../dev/07-memory-map.md) — visualizing what ended up on chip.

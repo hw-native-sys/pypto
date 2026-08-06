@@ -143,7 +143,8 @@ source layout instead of byte-copying incompatible data into `LeftScale` / `Righ
 They are the one case where a layout marker on a `pl.Tensor` annotation is required rather
 than discouraged. Current limitations: an MX `pl.load` must pass `target_memory=pl.Mem.Mat`
 explicitly, MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`, `view`) and
-MX `remote_load` are rejected, and MX matmul is not supported yet.
+MX `remote_load` are rejected. The matmul itself is `pl.matmul_mx` and its `_acc` /
+`_bias` variants, which take a data tile and a scale tile per operand.
 
 ### Dynamic shapes
 
