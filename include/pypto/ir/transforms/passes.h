@@ -534,6 +534,10 @@ Pass LegalizeTileCast();
  * stores, and insufficient L0C capacity stay unchanged.
  *
  * Eligible calls require static 2D operands with B in Mat and A in Mat or Vec.
+ * A manually materialized Left/Right operand is otherwise left untouched, but
+ * if its static physical footprint alone exceeds L0A/L0B the pass raises an
+ * operation-specific error with the operand name, required/available bytes,
+ * source location, and both automatic- and manual-tiling fixes.
  * When the chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is
  * needed, although a chained result may still be remapped to Mat by the
  * compatible cast-fold placement above.  Other unsupported regimes are left

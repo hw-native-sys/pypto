@@ -2311,15 +2311,31 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           // place (perf hint for a partial reduction below; this Warning for a space that fits at no depth).
           if (out_hints != nullptr) {
             const bool still_overflows = footprint(buffers) > cap;
+            // A single physical buffer larger than the entire space is not a
+            // reuse or pipeline-depth failure.  Legacy packing cannot repair
+            // it, and the final allocator (or an earlier operation-specific
+            // check such as AutoTileMatmulL0's explicit-L0 operand diagnostic)
+            // reports the impossible allocation.  Do not obscure that error
+            // with a fallback warning that suggests reuse or stage count is
+            // responsible.  Keep warning for aggregate pressure: every buffer
+            // fits individually, but their required co-residency does not.
+            const bool has_intrinsically_oversized_buffer =
+                std::any_of(buffers.begin(), buffers.end(), [&](const std::vector<size_t>& buf) {
+                  uint64_t slot = 0;
+                  for (size_t idx : buf) slot = std::max(slot, lifetimes[idx].size);
+                  return slot > cap;
+                });
             const std::string why =
                 within_budget ? "at any double-buffering depth" : "within the shed-repack budget";
-            out_hints->emplace_back(
-                DiagnosticSeverity::Warning, "MemoryReuse", 0,
-                "capacity-gated reuse could not fit memory space " + MemorySpaceToString(space) + " " + why +
-                    "; fell back to the legacy packing" +
-                    (still_overflows ? " (which also overflows — reduce tile size or stage count)" : "") +
-                    ".",
-                func ? func->span_ : Span::unknown());
+            if (!has_intrinsically_oversized_buffer) {
+              out_hints->emplace_back(
+                  DiagnosticSeverity::Warning, "MemoryReuse", 0,
+                  "capacity-gated reuse could not fit memory space " + MemorySpaceToString(space) + " " +
+                      why + "; fell back to the legacy packing" +
+                      (still_overflows ? " (which also overflows — reduce tile size or stage count)" : "") +
+                      ".",
+                  func ? func->span_ : Span::unknown());
+            }
           }
           break;
         }
