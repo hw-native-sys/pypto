@@ -88,6 +88,44 @@ local search remain model-study algorithms; earlier results show no useful
 separation on the easier compiler corpus, so they do not consume device time in
 the exploratory screen.
 
+Before freezing a device panel, reproduce the full schema-v1 corpus and screen
+the solver model locally. This phase uses no NPU, tensor payloads, PTOAS, or
+wall-time data:
+
+```bash
+python .claude/skills/incore-profiling/export_pypto_lib_dsa_corpus.py export \
+  --pypto-lib-root <pypto-lib> --pypto-python <pypto>/python \
+  --python <python-with-pypto-core> --manifest <export-status.tsv> \
+  --platform a2a3sim --output-root <corpus>
+
+python .claude/skills/incore-profiling/screen_dsa_capacity_corpus.py \
+  --problems-dir <corpus>/corpus/penalty-bearing \
+  --dsa-bench <dsa-solver-build>/dsa-bench \
+  --fractions 0,1/4,1/2,1 --workers 2 --output-root <screen>
+```
+
+The exporter deduplicates only by the solver's semantic problem fingerprint and
+does not impose a buffer-count threshold. The screen tightens one memory pool at
+a time while leaving every other pool at native capacity. Its lower endpoint is
+the geometry-first-fit peak for that pool, so the conventional control remains
+feasible by construction. It compares geometry first-fit, DSA-RP canonical
+greedy, and a six-order Cypress portfolio. Cypress selection is deliberately
+blind to reuse-penalty weights and device time. `model-separation.tsv` is a
+candidate-ranking aid, not performance evidence; retain neutral and
+Cypress-favoured controls when freezing the device panel.
+
+Do not turn kernels that lack a sound standalone ABI into synthetic kernel
+measurements. Use three terminal measurement strata:
+
+- `STANDALONE_KERNEL` or a complete co-scheduled mixed group: primary
+  per-kernel latency evidence.
+- Parent-wide policy: solve every DSA instance in the parent with the same arm
+  and report one end-to-end parent observation. This collapses multiple DSA
+  instances and cannot be counted as independent kernel samples.
+- `NOT_MEASURABLE`: ambiguous per-block capture, missing compiled endpoint, or
+  an unavailable mixed-group launch. Never select one block/half or divide a
+  parent delta by dispatch count to manufacture kernel latency.
+
 Each result row names a replay directory containing the exact
 `pypto_<instance>.dsa.solution.json` filename consumed by PyPTO. Pass that
 directory as `dsa_solution_dir`; a parent with multiple DSA functions must have
