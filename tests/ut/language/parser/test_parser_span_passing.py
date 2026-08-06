@@ -157,7 +157,8 @@ class TestParserSpanPassing:
         assert isinstance(test_create, ir.Function)
 
         create_call = find_unique_call(test_create, "tensor.create")
-        assert_span_at(create_call.span, current_line + 4, expected_column=46)
+        # 1-indexed: `pl.create_tensor` sits at 0-based offset 46 on its line.
+        assert_span_at(create_call.span, current_line + 4, expected_column=47)
 
     def test_parser_span_accuracy_multiple_operations(self):
         """Test that parser assigns different spans to different operations."""
@@ -178,7 +179,8 @@ class TestParserSpanPassing:
         assert len(calls) == 2, f"expected 2 calls, got {[call.op.name for call in calls]}"
 
         for call, offset in zip(calls, [4, 5], strict=True):
-            assert_span_at(call.span, current_line + offset, expected_column=42, context=call.op.name)
+            # 1-indexed: `pl.mul` / `pl.add` sit at 0-based offset 42.
+            assert_span_at(call.span, current_line + offset, expected_column=43, context=call.op.name)
 
     def test_parser_passes_span_to_matmul(self):
         """Parser should pass AST span to tensor.matmul operation."""
@@ -252,6 +254,81 @@ class TestParserSpanPassing:
 
         for call, offset in zip(calls, [7, 8, 9, 10, 11], strict=True):
             assert_span_at(call.span, current_line + offset, context=call.op.name)
+
+
+class TestNonAsciiSourceColumns:
+    """Span columns count characters, so a multi-byte prefix must not shift them.
+
+    ``ast`` reports ``col_offset`` in UTF-8 bytes; feeding that through unchanged
+    pushes the column past its token by one per extra byte, misplacing the
+    diagnostics caret on any line containing non-ASCII text.
+    """
+
+    def test_multibyte_identifier_does_not_shift_column(self):
+        code = """
+@pl.program
+class Prog:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        café_résultat: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+        return café_résultat
+"""
+        prog = pl.parse(code)
+        assert isinstance(prog, ir.Program)
+
+        main = prog.get_function("main")
+        assert main is not None
+        call = find_unique_call(main, "tensor.add")
+        line = code.split("\n")[call.span.begin_line - 1]
+
+        byte_offset = len(line[: line.index("pl.add")].encode("utf-8"))
+        assert byte_offset > line.index("pl.add"), "test line must contain a multi-byte prefix"
+
+        assert line[call.span.begin_column - 1 :].startswith("pl.add"), (
+            f"column {call.span.begin_column} does not land on the token in {line!r}"
+        )
+
+
+class TestLeftMarginSpansAreValid:
+    """A node at the left margin must produce a valid span.
+
+    ``Span::is_valid()`` requires a positive column, and every consumer
+    (``CHECK_SPAN``/``INTERNAL_CHECK_SPAN`` messages, the verifier's diagnostic
+    formatter, ``OpRegistry``) drops the source location when it returns false.
+    While the parser emitted 0-indexed columns, a module-level ``@pl.program``
+    landed on column 0 and silently lost its location.
+    """
+
+    def test_module_level_program_span_is_valid(self):
+        code = """
+@pl.program
+class Prog:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+        return y
+"""
+        prog = pl.parse(code)
+        assert isinstance(prog, ir.Program)
+
+        assert prog.span.begin_column == 1, (
+            f"module-level @pl.program must start at column 1, got {prog.span.begin_column}"
+        )
+        assert prog.span.is_valid(), f"module-level program span must be valid, got {prog.span}"
+
+    def test_module_level_program_span_survives_to_string(self):
+        """``to_string()`` emits file:line:column, which tooling reads as 1-indexed."""
+        code = """
+@pl.program
+class Prog:
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return x
+"""
+        prog = pl.parse(code)
+        assert isinstance(prog, ir.Program)
+
+        assert prog.span.to_string().endswith(":2:1")
 
 
 if __name__ == "__main__":

@@ -130,6 +130,21 @@ return result  # OK
 - 每个 IR 节点包含带有文件名、行/列范围的 `Span`
 - 支持调试、错误报告和源码到 IR 的映射
 
+**坐标转换 (coordinate conversion)**（`span_tracker.ast_column_to_span_column`）：
+`ast` 节点与 `ir.Span` 使用不同的列约定，因此解析器在边界处完成转换：
+
+| 维度 | `ast` 节点 | `ir.Span` |
+| ---- | ---------- | --------- |
+| 行 | 从 1 开始（`lineno`） | 从 1 开始（`begin_line`） |
+| 列 | 从 **0** 开始（`col_offset`） | 从 **1** 开始（`begin_column`） |
+| 列单位 | UTF-8 **字节** | **字符** |
+
+CPython 在把内部 `col_offset` 转换为对外报告的 `SyntaxError.offset` 时做的是同样的偏移。
+两个方面都很重要：`+1` 使位于行首的节点不落入 `Span::is_valid()` 拒绝的 `column <= 0`
+区间；字节到字符的转换则保证在包含非 ASCII 文本的行上，列仍然指向对应的 token。
+逆向转换只在消费侧发生一次 —— 位于 `ErrorRenderer._caret_index`，在任何列被用于索引
+源码行之前。
+
 **源码映射溯源 (source-map provenance)**（`pl.parse(code, source_map=...)`）：当 `code`
 是从其他源码*生成*的 —— 例如 `@pl.jit` 通过 `ast.unparse` 将 kernel 重新生成为
 `@pl.program` 字符串 —— 一个 `generated_line → (orig_file, orig_line, orig_col)`

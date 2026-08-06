@@ -20,6 +20,11 @@ def renderer() -> ErrorRenderer:
 
 
 def _make_error(message: str, line: str, column: int, hint: str | None = None) -> ParserSyntaxError:
+    """Build a rendered-error fixture.
+
+    ``column`` is a *span* column, i.e. 1-indexed, matching what the parser
+    emits. The renderer converts it to a 0-based string index internally.
+    """
     err = ParserSyntaxError(message, hint=hint)
     err.span = {"filename": "test.py", "begin_line": 1, "begin_column": column, "line": 1, "column": column}
     err.source_lines = [line]
@@ -62,7 +67,7 @@ class TestInlineMessage:
         """
         message = "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_()"
         line = " " * 10 + "pl.piepline(x):"
-        err = _make_error(message, line, column=10)
+        err = _make_error(message, line, column=11)  # 1-indexed: token at 0-based 10
         rendered = renderer.render(err)
 
         assert "For loop must use pl\n" not in rendered
@@ -73,7 +78,7 @@ class TestInlineMessage:
         """For short messages, the first real sentence is still used."""
         message = "Variable x not defined. Expected an assignment first."
         line = "x + 1"
-        err = _make_error(message, line, column=0)
+        err = _make_error(message, line, column=1)
         rendered = renderer.render(err)
 
         caret_row = next(row for row in rendered.split("\n") if "^" in row)
@@ -85,10 +90,47 @@ class TestInlineMessage:
         should be emitted in full (when short enough), not truncated."""
         message = "Missing argument for module.attr call"
         line = "module.attr()"
-        err = _make_error(message, line, column=0)
+        err = _make_error(message, line, column=1)
         rendered = renderer.render(err)
 
         assert "Missing argument for module.attr call" in rendered
+
+
+class TestCaretColumnConvention:
+    """The renderer consumes 1-indexed span columns (``include/pypto/ir/span.h``).
+
+    It converts once via ``_caret_index``; every caret/padding calculation
+    downstream is a 0-based index into the source line.
+    """
+
+    def test_caret_sits_under_the_token(self, renderer: ErrorRenderer):
+        line = "        y = pl.add(x, x)"
+        column = line.index("pl.add") + 1  # 1-indexed span column
+
+        rendered = renderer.render(_make_error("unknown op", line, column=column))
+
+        rows = rendered.split("\n")
+        caret_idx = next(i for i, row in enumerate(rows) if "^" in row)
+        source_row, caret_row = rows[caret_idx - 1], rows[caret_idx]
+
+        # Both rows carry the same gutter, so the caret must start at the very
+        # column the token occupies in the rendered source row above it.
+        assert caret_row.index("^") == source_row.index("pl.add"), (
+            f"caret misaligned\n{source_row}\n{caret_row}"
+        )
+        assert "^" * len("pl.add") in caret_row
+
+    def test_column_one_carets_the_first_character(self, renderer: ErrorRenderer):
+        rendered = renderer.render(_make_error("bad name", "module.attr()", column=1))
+
+        caret_row = next(row for row in rendered.split("\n") if "^" in row)
+        assert "^" * len("module.attr") in caret_row
+
+    def test_location_header_keeps_column_one(self, renderer: ErrorRenderer):
+        """Column 1 must survive into the header; only 0 ('unknown') is dropped."""
+        rendered = renderer.render(_make_error("bad name", "module.attr()", column=1))
+
+        assert "test.py:1:1" in rendered
 
 
 class TestRealFileSnippet:
@@ -107,9 +149,9 @@ class TestRealFileSnippet:
         err.span = {
             "filename": str(real),
             "begin_line": 2,
-            "begin_column": 0,
+            "begin_column": 1,
             "line": 2,
-            "column": 0,
+            "column": 1,
         }
         # Deliberately wrong/generated source lines: linecache must take priority.
         err.source_lines = ["t_v1 = pl.mul(t_v1, t_v1)"]
@@ -126,9 +168,9 @@ class TestRealFileSnippet:
         err.span = {
             "filename": "<jit:kernel>",
             "begin_line": 1,
-            "begin_column": 0,
+            "begin_column": 1,
             "line": 1,
-            "column": 0,
+            "column": 1,
         }
         err.source_lines = ["t_v1 = pl.mul(t_v1, t_v1)"]
 
@@ -150,9 +192,9 @@ class TestRealFileSnippet:
         err.span = {
             "filename": str(real),
             "begin_line": 2,
-            "begin_column": 0,
+            "begin_column": 1,
             "line": 2,
-            "column": 0,
+            "column": 1,
         }
         err.source_lines = None  # no captured source — only the remapped span
 

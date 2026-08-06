@@ -46,7 +46,10 @@ class TestSpanTracker:
         assert isinstance(span, ir.Span)
         assert span.filename == source_file
         assert span.begin_line == 1
-        assert span.begin_column == 0
+        # ast col_offset 0 -> Span column 1: Span columns are 1-indexed, so a
+        # statement at the left margin starts at column 1, not 0.
+        assert span.begin_column == 1
+        assert span.is_valid()
 
     def test_get_span_none_node(self):
         """Test getting span from None node returns unknown span."""
@@ -108,6 +111,70 @@ class TestSpanTracker:
         assert span.filename == source_file
 
 
+class TestSpanTrackerColumnConvention:
+    """Columns are 1-indexed characters, matching ``include/pypto/ir/span.h``.
+
+    ``ast`` nodes carry a 0-indexed ``col_offset`` counted in UTF-8 *bytes*;
+    ``SpanTracker`` converts both aspects on the way into ``ir.Span``.
+    """
+
+    def test_left_margin_statement_is_column_one(self):
+        """col_offset 0 becomes column 1 — and the span is therefore valid.
+
+        Under the previous 0-indexed emission this span had column 0, which
+        ``Span::is_valid()`` rejects, silently dropping the location from every
+        diagnostic anchored on a left-margin node.
+        """
+        source = "x = 42"
+        tracker = SpanTracker("test.py", source.split("\n"))
+
+        span = tracker.get_span(ast.parse(source).body[0])
+
+        assert span.begin_column == 1
+        assert span.is_valid()
+
+    def test_column_matches_source_offset(self):
+        """The column round-trips to the token when read as a 1-indexed position."""
+        source = "y = foo(1)"
+        tracker = SpanTracker("test.py", source.split("\n"))
+
+        assign = ast.parse(source).body[0]
+        assert isinstance(assign, ast.Assign)
+        span = tracker.get_span(assign.value)
+
+        assert source[span.begin_column - 1 :].startswith("foo(1)")
+
+    def test_col_offset_is_indentation_aware(self):
+        """``col_offset`` (dedent compensation) is added on top of the 1-indexed column."""
+        source = "x = 42"
+        tracker = SpanTracker("test.py", source.split("\n"), col_offset=4)
+
+        span = tracker.get_span(ast.parse(source).body[0])
+
+        assert span.begin_column == 5  # 4 spaces of stripped indentation, then column 1
+
+    def test_multibyte_prefix_yields_character_column(self):
+        """A multi-byte character before the token must not shift the column.
+
+        ``ast`` reports ``col_offset`` in UTF-8 bytes, so a non-ASCII prefix
+        would otherwise push the column past the token it names.
+        """
+        source = "y = f('é', bar)"
+        tracker = SpanTracker("test.py", source.split("\n"))
+
+        assign = ast.parse(source).body[0]
+        assert isinstance(assign, ast.Assign)
+        call = assign.value
+        assert isinstance(call, ast.Call)
+        bar = call.args[1]
+        span = tracker.get_span(bar)
+
+        # 'é' is 2 bytes but 1 character: the byte offset would overshoot by one.
+        assert bar.col_offset == source.index("bar") + 1
+        assert span.begin_column == source.index("bar") + 1
+        assert source[span.begin_column - 1 :].startswith("bar")
+
+
 class TestSpanTrackerSourceMap:
     """Source-map remapping of spans to original source (issue #1612)."""
 
@@ -123,7 +190,8 @@ class TestSpanTrackerSourceMap:
 
         assert span.filename == "/real/kernel.py"
         assert span.begin_line == 5
-        assert span.begin_column == 8
+        # Map entries hold AST coordinates, so col 8 becomes 1-indexed column 9.
+        assert span.begin_column == 9
 
     def test_unmapped_line_keeps_generated_coords(self):
         """A node whose emitted line is absent from the map keeps generated coords."""

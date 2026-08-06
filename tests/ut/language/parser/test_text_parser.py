@@ -24,11 +24,17 @@ def _span_begin(err: ParserError) -> tuple[int, int]:
     """Return (begin_line, begin_column) from a ParserError span.
 
     ``ParserError.span`` is stored as a dict of extracted coordinates (see
-    ``diagnostics/exceptions.py``).
+    ``diagnostics/exceptions.py``). Both coordinates are 1-indexed; use
+    :func:`_span_char_index` to slice a source line with the column.
     """
     sp = err.span
     assert sp is not None, "expected a span on the parser error"
     return sp["begin_line"], sp["begin_column"]
+
+
+def _span_char_index(begin_column: int) -> int:
+    """Convert a 1-indexed span column to a 0-based index into the source line."""
+    return begin_column - 1
 
 
 def _assert_caret_on_line(err: ParserError, expected_substring: str) -> None:
@@ -579,6 +585,30 @@ def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         assert err.span is not None
         assert err.span["column"] > 0  # Not column 0 — points at 'BadType'
 
+    def test_exec_error_column_points_at_non_ascii_attribute(self):
+        """The bad-attribute column must survive a non-ASCII identifier.
+
+        ``ast`` reports ``end_col_offset`` in UTF-8 bytes, so the attribute's
+        *byte* length is what locates its start. Subtracting the character
+        length instead lands inside the identifier whenever it contains
+        non-ASCII text, which Python permits in identifiers.
+        """
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        code = """
+@pl.function(type=pl.FunctionType.Bad_é_Type)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        assert err.span is not None
+        line = code.split("\n")[err.span["begin_line"] - 1]
+        assert line[err.span["begin_column"] - 1 :].startswith("Bad_é_Type"), (
+            f"column {err.span['begin_column']} does not land on the attribute in {line!r}"
+        )
+
     def test_exec_error_hint_lists_valid_values(self):
         """Hint message lists the valid enum values."""
         from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
@@ -776,7 +806,7 @@ class Prog:
         error_line = err.source_lines[begin_line - 1]
         assert "deps=" in error_line
         # The column must point exactly at the rejected `[seed_tid] + ...` value.
-        assert error_line[begin_column:].startswith("[seed_tid]")
+        assert error_line[_span_char_index(begin_column) :].startswith("[seed_tid]")
 
         # The rendered caret must sit under that same line.
         _assert_caret_on_line(err, expected_substring="deps=")
@@ -801,7 +831,7 @@ class Prog:
 
         error_line = err.source_lines[begin_line - 1]
         assert "this_op_does_not_exist" in error_line
-        assert error_line[begin_column:].startswith("pl.this_op_does_not_exist")
+        assert error_line[_span_char_index(begin_column) :].startswith("pl.this_op_does_not_exist")
 
         _assert_caret_on_line(err, expected_substring="this_op_does_not_exist")
 

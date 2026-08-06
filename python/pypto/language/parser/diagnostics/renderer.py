@@ -145,6 +145,9 @@ class ErrorRenderer:
     def _extract_span_info(self, span) -> tuple[str, int, int]:
         """Extract filename, line, and column from a span (dict or object).
 
+        The returned column is the span's own 1-indexed column; use
+        :meth:`_caret_index` before indexing into a source line with it.
+
         Args:
             span: Span object or dictionary
 
@@ -160,6 +163,22 @@ class ErrorRenderer:
             line = getattr(span, "begin_line", getattr(span, "line", 0))
             column = getattr(span, "begin_column", getattr(span, "column", 0))
         return filename, line, column
+
+    @staticmethod
+    def _caret_index(column: int) -> int:
+        """Convert a 1-indexed ``Span`` column to a 0-based index into a source line.
+
+        ``Span`` columns are 1-indexed characters (``include/pypto/ir/span.h``);
+        every caret and padding calculation below indexes a Python ``str``, so
+        the conversion happens once, here.
+
+        Args:
+            column: 1-indexed span column (0 for "unknown")
+
+        Returns:
+            0-based character index, clamped at the start of the line
+        """
+        return max(0, column - 1)
 
     def _format_location(self, span) -> str:
         """Format a span as a file:line:column location string.
@@ -207,7 +226,7 @@ class ErrorRenderer:
         # Show previous definition code context
         prev_source = self._source_lines_for(prev_file, error.source_lines)
         if prev_source and prev_line <= len(prev_source):
-            lines.extend(self._render_previous_context(prev_source, prev_line, prev_col))
+            lines.extend(self._render_previous_context(prev_source, prev_line, self._caret_index(prev_col)))
 
         return lines
 
@@ -217,7 +236,7 @@ class ErrorRenderer:
         Args:
             source_lines: Full source code lines
             line_num: Line number of previous definition
-            column: Column number of previous definition
+            column: 0-based character index into the line (see _caret_index)
 
         Returns:
             List of formatted lines
@@ -256,7 +275,7 @@ class ErrorRenderer:
 
         Args:
             line_content: Source line content
-            column: Column position
+            column: 0-based character index into the line (see _caret_index)
             line_num_width: Width for line number alignment
 
         Returns:
@@ -365,7 +384,9 @@ class ErrorRenderer:
 
             if line_num == error_line:
                 lines.append(f"{formatted_line_num} {line_content}")
-                caret_line = self._render_caret_line(line_content, error_col, line_num_width, error.message)
+                caret_line = self._render_caret_line(
+                    line_content, self._caret_index(error_col), line_num_width, error.message
+                )
                 lines.append(caret_line)
             else:
                 lines.append(f"{formatted_line_num} {line_content}")
@@ -380,7 +401,7 @@ class ErrorRenderer:
 
         Args:
             source_line: Source code line
-            column: Column position (0-based)
+            column: 0-based character index into the line (see _caret_index)
             line_num_width: Width of line numbers for alignment
             message: Short error message to display
 

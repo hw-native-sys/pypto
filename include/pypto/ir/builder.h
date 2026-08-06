@@ -53,7 +53,7 @@ class IfStmtContext;
  * Example usage (C++):
  * @code
  * IRBuilder builder;
- * auto span = Span(__FILE__, __LINE__, 0);
+ * auto span = Span(__FILE__, __LINE__, 1);
  * builder.BeginFunction("my_func", span);
  * auto x = builder.FuncArg("x", ScalarType::Create(DataType::INT64), span);
  * builder.ReturnType(ScalarType::Create(DataType::INT64));

@@ -18,7 +18,22 @@ from pypto.pypto_core import ir
 
 from .diagnostics.exceptions import ParserError, ParserSyntaxError
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP
-from .span_tracker import active_source_map
+from .span_tracker import active_source_map, ast_column_to_span_column
+
+
+def _span_column(source_lines: list[str], lineno: int, col_offset: int) -> int:
+    """Convert an AST ``col_offset`` on ``lineno`` to a 1-indexed ``Span`` column.
+
+    Args:
+        source_lines: Lines of the code being parsed, in AST coordinates.
+        lineno: 1-indexed AST line number the offset belongs to.
+        col_offset: 0-indexed UTF-8 byte offset from the AST node.
+
+    Returns:
+        The 1-indexed character column to store in an ``ir.Span``.
+    """
+    line = source_lines[lineno - 1] if 1 <= lineno <= len(source_lines) else None
+    return ast_column_to_span_column(line, col_offset)
 
 
 def _extract_exec_error_line(tb, filename: str) -> int | None:
@@ -112,10 +127,12 @@ def _validate_enum_kwarg(
 
     attr_name = value.attr
     if attr_name not in enum_map:
-        # Column: end_col_offset − len(attr) gives start of the attribute name
+        # Column: end_col_offset − len(attr) gives start of the attribute name.
+        # end_col_offset counts UTF-8 bytes, so the attribute's *byte* length is
+        # the right subtrahend — Python allows non-ASCII identifiers.
         line = getattr(value, "lineno", 0)
-        col = max(0, getattr(value, "end_col_offset", 0) - len(attr_name))
-        span = ir.Span(filename, line, col)
+        col = max(0, getattr(value, "end_col_offset", 0) - len(attr_name.encode("utf-8")))
+        span = ir.Span(filename, line, _span_column(source_lines, line, col))
         raise ParserSyntaxError(
             f"Unknown {enum_name} value: {attr_name}",
             span=span,
@@ -133,7 +150,7 @@ def _validate_enum_kwarg(
     if not valid_prefix:
         line = getattr(value, "lineno", 0)
         col = getattr(value, "col_offset", 0)
-        span = ir.Span(filename, line, col)
+        span = ir.Span(filename, line, _span_column(source_lines, line, col))
         raise ParserSyntaxError(
             f"Expected {qualified}.<name>",
             span=span,
@@ -249,7 +266,8 @@ def parse(
         # Convert exec-time errors to ParserSyntaxError with source location when possible.
         line_num = _extract_exec_error_line(e.__traceback__, filename)
         if line_num is not None:
-            span = ir.Span(filename, line_num, 0)
+            # Exact column unknown — point at the first column of the line.
+            span = ir.Span(filename, line_num, 1)
             raise ParserSyntaxError(
                 f"{type(e).__name__}: {e}",
                 span=span,

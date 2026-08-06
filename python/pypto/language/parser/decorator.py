@@ -1232,8 +1232,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # Combine internal and external functions
             all_functions = functions + list(external_functions.values())
 
-            # Create Program with class name and span
-            program_span = ir.Span(source_file, starting_line, col_offset)
+            # Create Program with class name and span. ``col_offset`` is the
+            # class's indentation as a character count; Span columns are
+            # 1-indexed, so a class at the left margin starts at column 1.
+            program_span = ir.Span(source_file, starting_line, col_offset + 1)
             prog = ir.Program(all_functions, c.__name__, program_span)
 
             return prog

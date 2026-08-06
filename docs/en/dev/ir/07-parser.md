@@ -130,6 +130,23 @@ return result  # OK
 - Each IR node includes `Span` with filename, line/column ranges
 - Enables debugging, error reporting, and source-to-IR mapping
 
+**Coordinate conversion** (`span_tracker.ast_column_to_span_column`): `ast` nodes
+and `ir.Span` use different column conventions, so the parser converts at the
+boundary:
+
+| Aspect | `ast` node | `ir.Span` |
+| ------ | ---------- | --------- |
+| Line | 1-indexed (`lineno`) | 1-indexed (`begin_line`) |
+| Column | **0**-indexed (`col_offset`) | **1**-indexed (`begin_column`) |
+| Column unit | UTF-8 **bytes** | **characters** |
+
+CPython makes the same shift when it turns an internal `col_offset` into the
+reported `SyntaxError.offset`. Both aspects matter: the `+1` keeps a left-margin
+node out of `Span::is_valid()`'s rejected `column <= 0` range, and the
+byte-to-character conversion keeps the column pointing at its token on lines
+containing non-ASCII text. The inverse conversion happens once on the consumer
+side, in `ErrorRenderer._caret_index`, before any column indexes a source line.
+
 **Source-map provenance** (`pl.parse(code, source_map=...)`): When `code` is
 *generated* from another source — as `@pl.jit` does, re-deriving a kernel into a
 `@pl.program` string via `ast.unparse` — a `generated_line → (orig_file,
