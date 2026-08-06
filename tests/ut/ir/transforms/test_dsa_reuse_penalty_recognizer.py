@@ -168,6 +168,36 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
     assert not _overlap(ranges["source"], ranges["result"])
 
 
+def test_dsa_rp_preserves_tuple_result_not_inplace_safe_separation():
+    """Every physical result of a tuple op inherits its semantic no-alias inputs."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            source_tensor: pl.Tensor[[16, 64], pl.INT32],
+            kvalue: pl.Scalar[pl.INT32],
+            output: pl.Tensor[[16, 8], pl.INT32],
+        ) -> pl.Tensor[[16, 8], pl.INT32]:
+            source = pl.load(source_tensor, [0, 0], [16, 64])
+            temporary = pl.tile.create([16, 64], pl.UINT8)
+            destination, count = pl.tile.gather_compare(
+                source,
+                kvalue,
+                temporary,
+                cmp_mode="eq",
+                out_cols=8,
+            )
+            _count_copy = pl.add(count, count)
+            return pl.store(destination, [0, 0], output)
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    for result in ("destination", "count"):
+        for forbidden_input in ("source", "temporary"):
+            assert not _overlap(ranges[result], ranges[forbidden_input])
+
+
 def test_dsa_rp_does_not_promote_partial_handoff_endpoint(ascend_backend):
     """A consumer of only half an allocation does not create a whole-buffer edge."""
 
@@ -399,9 +429,9 @@ def test_dsa_rp_unknown_tuple_operation_poisons_all_results():
             next_destination = pl.load(next_destination_tensor, [0, 0], [16, 8])
             return pl.store(next_destination, [0, 0], output)
 
-    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
-    assert _overlap(ranges["destination"], ranges["next_destination"])
-    assert _overlap(ranges["_count"], ranges["_next_count"])
+    recognized = _recognized_pairs(Before)
+    assert frozenset(("destination", "next_destination")) not in recognized
+    assert frozenset(("_count", "_next_count")) not in recognized
 
 
 def test_dsa_rp_unknown_mutating_operand_stays_unpenalized():

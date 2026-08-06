@@ -73,7 +73,7 @@ program_optimized = reuse_pass(program)
   - `forbid_output_alias(i)` —— 该算子对其值操作数 in-place-safe，但在写输出时读取**某个特定**操作数，因此输出不得 alias 该操作数的缓冲区。
   - **升精度 `tile.cast`**（直接在 `ForbidAliasCollector` 处理）—— 输出 dtype 比输入**更宽**时,cast 无法原地：元素 `i` 在 `i*in_bytes` 处读、`i*out_bytes` 处写,写指针超前于读指针,冲掉尚未转换的输入。降精度 / 同宽 cast 仍 in-place-safe（保留下方的跨 dtype 复用）。
 
-  MemoryReuse 拒绝将输出放到任一禁止操作数的**物理缓冲区**上,并通过 reuse-map 合并**与** VIEW 继承（`reshape`/`slice` 共享其源的 MemRef base）解析每个操作数——因此间接到达的禁止操作数（其 owner tile 被复用到别的缓冲区,或经 view 占用）也能被捕获。
+  MemoryReuse 拒绝将输出放到任一禁止操作数的**物理缓冲区**上,并通过 reuse-map 合并**与** VIEW 继承（`reshape`/`slice` 共享其源的 MemRef base）解析每个操作数——因此间接到达的禁止操作数（其 owner tile 被复用到别的缓冲区,或经 view 占用）也能被捕获。对于返回 tuple 的算子，约束会从 tuple 临时变量传播到每个 tile 类型的 `TupleGetItem` 结果。
 
   当前声明 no-alias 约束的算子：
 

@@ -1599,15 +1599,25 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
+    // Multi-result calls are assigned to a tuple temporary and unpacked by
+    // subsequent TupleGetItem assignments. Carry the call's semantic
+    // no-alias inputs onto every physical tile result; the tuple temporary
+    // itself has no allocation interval to constrain.
+    if (const auto get_item = As<TupleGetItemExpr>(op->value_)) {
+      if (const VarPtr tuple = AsVarLike(get_item->tuple_)) {
+        const auto pending = tuple_forbidden_.find(tuple.get());
+        if (pending != tuple_forbidden_.end()) RecordForOutput(op->var_, pending->second);
+      }
+    }
+
     if (auto call = As<Call>(op->value_); call && call->op_) {
       const auto& reg = OpRegistry::GetInstance();
       if (reg.IsRegistered(call->op_->name_)) {
         const auto& entry = reg.GetEntry(call->op_->name_);
-        auto rep_it = member_to_rep_.find(op->var_.get());
-        const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : op->var_.get();
+        std::vector<VarPtr> forbidden_inputs;
         auto forbid_arg = [&](size_t i) {
           if (i < call->args_.size()) {
-            if (auto v = AsVarLike(call->args_[i])) forbidden_[out_key].push_back(v);
+            if (auto v = AsVarLike(call->args_[i])) forbidden_inputs.push_back(v);
           }
         };
         if (!entry.IsInplaceSafe()) {
@@ -1630,6 +1640,7 @@ class ForbidAliasCollector : public IRVisitor {
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
+        RecordForOutput(op->var_, forbidden_inputs);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -1641,7 +1652,21 @@ class ForbidAliasCollector : public IRVisitor {
   ForbidAliasMap Take() { return std::move(forbidden_); }
 
  private:
+  void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
+    if (!output || forbidden_inputs.empty()) return;
+    if (As<TupleType>(output->GetType())) {
+      tuple_forbidden_[output.get()] = forbidden_inputs;
+      return;
+    }
+    if (!As<TileType>(output->GetType())) return;
+    const auto rep_it = member_to_rep_.find(output.get());
+    const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
+    auto& recorded = forbidden_[out_key];
+    recorded.insert(recorded.end(), forbidden_inputs.begin(), forbidden_inputs.end());
+  }
+
   ForbidAliasMap forbidden_;
+  std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
