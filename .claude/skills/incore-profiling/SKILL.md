@@ -114,6 +114,26 @@ blind to reuse-penalty weights and device time. `model-separation.tsv` is a
 candidate-ranking aid, not performance evidence; retain neutral and
 Cypress-favoured controls when freezing the device panel.
 
+Build an inclusive **screening** slate before doing current launchability
+checks. This is deliberately not the paper's frozen 20--30-kernel panel:
+
+```bash
+python .claude/skills/incore-profiling/select_dsa_device_slate.py \
+  --screen-root <screen> --problems-dir <corpus>/corpus/penalty-bearing \
+  --invocations <corpus>/invocations.tsv --forced-tsv <prior-evidence.tsv> \
+  --min-geometry-advantage 20 --output-root <device-screen-slate>
+```
+
+The selector includes every instance where DSA-RP beats Cypress in any screened
+capacity, every Cypress no-fit case, every instance with the configured
+geometry-objective gap, and explicitly identified prior device winners. It
+verifies problem and native-solution provenance and emits parent groupings, but
+marks every row `NEEDS_CURRENT_LAUNCH_PREFLIGHT`. Only a subsequent current-pin
+compile, mixed-group/ABI reconstruction, correctness gate, and short device
+screen can establish that a candidate actually runs. Freeze the representative
+evaluation panel only after that funnel; do not report model-objective selection
+as device performance.
+
 Do not turn kernels that lack a sound standalone ABI into synthetic kernel
 measurements. Use three terminal measurement strata:
 
