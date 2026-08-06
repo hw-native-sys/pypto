@@ -53,12 +53,6 @@ NOT_SYMBOLS = {
 # retires it. Remove entries as those chapters land — a stale entry silently
 # weakens the gate.
 DEFERRED = {
-    # Task ordering: `deps=`, `predicate=`, submit and the runtime-scope modes are
-    # advanced task-graph control. `language/04-scopes.md` covers placement only;
-    # ordering gets its own chapter.
-    "ScopeMode": "tasks & ordering chapter",
-    "scope": "tasks & ordering chapter",
-    "manual_scope": "tasks & ordering chapter",
     # B3 tutorials / B5 performance — the prefetch surface has no guide yet.
     "AsyncEvent": "B6 execution",
     "AsyncSession": "B6 execution",

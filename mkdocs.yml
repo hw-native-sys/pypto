@@ -176,6 +176,12 @@ nav:
           - en/user/language/04-scopes.md
           - en/user/language/05-directives.md
           - en/user/language/06-syntax.md
+      - Tasks and Ordering:
+          - en/user/tasks/index.md
+          - en/user/tasks/00-model.md
+          - en/user/tasks/01-scopes.md
+          - en/user/tasks/02-submit.md
+          - en/user/tasks/03-tuning.md
       - Operations:
           - en/user/ops/index.md
           - en/user/ops/00-dispatch.md
