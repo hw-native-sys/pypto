@@ -46,6 +46,105 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 
 
+class TestAutoTileMatmulL0ExplicitL0Diagnostics:
+    """Actionable failures for manual L0 operands that cannot fit."""
+
+    def test_oversized_right_operand_names_tile_and_fix(self):
+        """The hpgemm-step0 shape is one impossible 128 KiB L0B tile.
+
+        AutoTile must fail at the explicit ``b_right`` definition instead of
+        silently skipping the already-L0 matmul and letting MemoryReuse blame
+        packing before AllocateMemoryAddr reports only an aggregate overflow.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 256], pl.FP16],
+                b: pl.Tensor[[256, 256], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [128, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 256], target_memory=pl.Mem.Right)
+                acc = pl.tile.matmul(a_left, b_right)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        before_ssa = passes.convert_to_ssa()(Before)
+        with pytest.raises(ValueError) as exc_info:
+            passes.auto_tile_matmul_l0()(before_ssa)
+
+        message = str(exc_info.value)
+        assert "tile.matmul right operand 'b_right'" in message
+        assert "Right (L0B)" in message
+        assert "physical shape [256, 256]" in message
+        assert "requiring 131072 bytes" in message
+        assert "provides 65536 bytes" in message
+        assert "does not retile operands already placed in Left or Right" in message
+        assert "Keep this operand in Mat" in message
+        assert "manually extract a smaller Right tile" in message
+        assert "b_right__ssa" not in message
+        assert "Check failed" not in message
+
+    def test_oversized_left_matmul_acc_operand_is_also_diagnosed(self):
+        """The same check covers matmul_acc's shifted lhs/rhs argument slots."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[256, 256], pl.FP16],
+                b: pl.Tensor[[256, 64], pl.FP16],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [256, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 64], target_memory=pl.Mem.Right)
+                acc = pl.tile.create([256, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                result = pl.tile.matmul_acc(acc, a_left, b_right)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError) as exc_info:
+            passes.auto_tile_matmul_l0()(Before)
+
+        message = str(exc_info.value)
+        assert "tile.matmul_acc left operand 'a_left'" in message
+        assert "Left (L0A)" in message
+        assert "physical shape [256, 256]" in message
+        assert "requiring 131072 bytes" in message
+        assert "manually extract a smaller Left tile" in message
+
+    def test_exact_capacity_manual_operands_remain_untouched(self):
+        """Manual L0 scheduling remains valid at the inclusive capacity boundary."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 256], pl.FP16],
+                b: pl.Tensor[[256, 128], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [128, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 128], target_memory=pl.Mem.Right)
+                acc = pl.tile.matmul(a_left, b_right)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+
 class TestAutoTileMatmulL0KOnly:
     """K-tiling rewrites for Mat-resident tile.matmul."""
 
