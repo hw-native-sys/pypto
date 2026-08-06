@@ -26,6 +26,7 @@ from .ast_parser import ASTParser
 from .comment_extractor import extract_line_comments
 from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .source_lookup import get_class_source_lines
 
 
 def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
@@ -678,7 +679,7 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     """Get source file, source lines, and starting line for an entity.
 
     Tries multiple strategies:
-    1. Standard inspect.getsourcelines()
+    1. Standard inspect.getsourcelines() (classes take a cached fast path first)
     2. linecache fallback (handles IPython, pre-populated cache)
     3. sys.orig_argv for `python -c` invocations
     4. Clear error with actionable hint
@@ -703,7 +704,13 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     # Strategy 1: Standard inspect
     try:
         source_file = inspect.getfile(entity)
-        source_lines_raw, starting_line = inspect.getsourcelines(entity)
+        if isinstance(entity, type):
+            # inspect.getsourcelines() costs a full-file ast.parse per class on
+            # CPython < 3.13; this returns the same answer for one parse per
+            # file, and defers to inspect elsewhere. See parser/source_lookup.py.
+            source_lines_raw, starting_line = get_class_source_lines(entity)
+        else:
+            source_lines_raw, starting_line = inspect.getsourcelines(entity)
         return source_file, source_lines_raw, starting_line
     except (OSError, TypeError):
         pass
