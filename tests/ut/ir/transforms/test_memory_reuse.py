@@ -1261,6 +1261,42 @@ class TestViewOps:
 class TestInplaceOps:
     """Tests verifying that ops marked not_inplace_safe block producer-consumer reuse."""
 
+    def test_remainder_outputs_do_not_alias_inputs_or_scratch(self):
+        """TREM/TREMS keep result buffers distinct from every live operand."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 16], pl.FP32],
+                rhs: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(lhs, [0, 0], [16, 16])
+                rhs_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(rhs, [0, 0], [16, 16])
+                tmp2: pl.Tile[[2, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [2, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                rem: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.rem(lhs_tile, rhs_tile, tmp2)
+                tmp1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                rems: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.rems(rem, 3.0, tmp1)
+                return pl.store(rems, [0, 0], out)
+
+        after = _run_pipeline(Before)
+        bases = _collect_tile_memref_bases(after)
+        assert bases["rem"] not in {
+            bases["lhs_tile"],
+            bases["rhs_tile"],
+            bases["tmp2"],
+        }
+        assert bases["rems"] not in {
+            bases["rem"],
+            bases["tmp1"],
+        }
+
     def test_concat_output_must_not_alias_either_source(self):
         """tile.concat's output must get a buffer distinct from both sources.
 

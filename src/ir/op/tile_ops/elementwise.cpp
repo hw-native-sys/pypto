@@ -93,6 +93,14 @@ static bool IsTSelsMaskDataType(DataType dtype) {
          dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
 }
 
+static bool IsRemainderDataType(DataType dtype) {
+  // Union of the current A2/A3 and A5 PTO-ISA contracts. A2/A3 exercises
+  // FP32/INT32 for TREM(S) and FP32 for TFMOD(S); A5 additionally supports
+  // the 16-bit and unsigned integer forms.
+  return dtype == DataType::INT16 || dtype == DataType::UINT16 || dtype == DataType::INT32 ||
+         dtype == DataType::UINT32 || dtype == DataType::FP16 || dtype == DataType::FP32;
+}
+
 static std::shared_ptr<TileType> MakePackedPredicateTileType(
     const std::vector<ExprPtr>& logical_shape, const std::shared_ptr<const TileType>& source_tile_type) {
   INTERNAL_CHECK(!logical_shape.empty())
@@ -309,6 +317,120 @@ TypePtr DeduceTileOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
+static void CheckRemainderTileContract(const std::shared_ptr<const TileType>& lhs,
+                                       const std::shared_ptr<const TileType>& rhs,
+                                       const std::string& op_name) {
+  CHECK(lhs->dtype_ == rhs->dtype_) << "The operator " << op_name
+                                    << " requires src0, src1, and dst to have the same dtype, but got "
+                                    << lhs->dtype_.ToString() << " and " << rhs->dtype_.ToString();
+  CHECK(IsRemainderDataType(lhs->dtype_))
+      << "The operator " << op_name
+      << " requires dtype in {INT16, UINT16, INT32, UINT32, FP16, FP32}, but got " << lhs->dtype_.ToString();
+
+  CHECK(lhs->shape_.size() == rhs->shape_.size())
+      << "The operator " << op_name
+      << " requires src0, src1, and dst to have the same physical shape rank, but got " << lhs->shape_.size()
+      << " and " << rhs->shape_.size();
+  for (size_t i = 0; i < lhs->shape_.size(); ++i) {
+    CHECK(DimensionsEqual(lhs->shape_[i], rhs->shape_[i]))
+        << "The operator " << op_name
+        << " requires src0, src1, and dst to have the same physical shape, but dimension " << i
+        << " differs; got src0 shape " << FormatShape(lhs->shape_) << " and src1 shape "
+        << FormatShape(rhs->shape_);
+  }
+
+  const auto lhs_valid = GetValidShape(lhs);
+  const auto rhs_valid = GetValidShape(rhs);
+  CHECK(lhs_valid.size() == rhs_valid.size())
+      << "The operator " << op_name
+      << " requires src0, src1, and dst to have the same valid_shape rank, but got " << lhs_valid.size()
+      << " and " << rhs_valid.size();
+  for (size_t i = 0; i < lhs_valid.size(); ++i) {
+    CHECK(ProveValidExtentEqual(lhs_valid[i], rhs_valid[i]) == ProofResult::kTrue)
+        << "The operator " << op_name
+        << " requires src0, src1, and dst to have the same valid_shape, but dimension " << i
+        << " differs; got src0 valid_shape " << FormatShape(lhs_valid) << " and src1 valid_shape "
+        << FormatShape(rhs_valid);
+  }
+}
+
+static void CheckRemainderTmpContract(const std::shared_ptr<const TileType>& src,
+                                      const std::shared_ptr<const TileType>& tmp, int64_t required_rows,
+                                      const std::string& op_name) {
+  CHECK(tmp->dtype_ == src->dtype_) << "The operator " << op_name
+                                    << " requires tmp dtype to match the source dtype, but got "
+                                    << tmp->dtype_.ToString() << " and " << src->dtype_.ToString();
+
+  const auto src_valid = GetValidShape(src);
+  const auto tmp_valid = GetValidShape(tmp);
+  CHECK(src_valid.size() == 2 && tmp_valid.size() == 2)
+      << "The operator " << op_name << " requires 2D source and tmp tiles, but got ranks " << src_valid.size()
+      << " and " << tmp_valid.size();
+  const auto required_row_expr = MakeIndexConst(required_rows);
+  CHECK(ProveValidExtentLessEqual(required_row_expr, tmp_valid[0]) != ProofResult::kFalse)
+      << "The operator " << op_name << " requires tmp valid_shape to contain at least " << required_rows
+      << " row(s), but got " << FormatShape(tmp_valid);
+  CHECK(ProveValidExtentLessEqual(src_valid[1], tmp_valid[1]) != ProofResult::kFalse)
+      << "The operator " << op_name
+      << " requires tmp valid_shape columns to cover the source valid columns, but got source valid_shape "
+      << FormatShape(src_valid) << " and tmp valid_shape " << FormatShape(tmp_valid);
+}
+
+TypePtr DeduceTileRemainderType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const std::string& op_name, bool has_tmp) {
+  const size_t expected_args = has_tmp ? 3 : 2;
+  CHECK(args.size() == expected_args) << "The operator " << op_name << " requires exactly " << expected_args
+                                      << " arguments, but got " << args.size();
+  auto lhs = As<TileType>(args[0]->GetType());
+  auto rhs = As<TileType>(args[1]->GetType());
+  CHECK(lhs) << "The operator " << op_name << " requires first argument to be a TileType";
+  CHECK(rhs) << "The operator " << op_name << " requires second argument to be a TileType";
+  CheckRemainderTileContract(lhs, rhs, op_name);
+  CHECK(!GetKwargOr<bool>(kwargs, "high_precision", false) || lhs->dtype_ == DataType::FP32)
+      << "The operator " << op_name
+      << " supports high_precision only for FP32 because the PTO-ISA high-precision algorithm is "
+         "defined only for float";
+  if (has_tmp) {
+    auto tmp = As<TileType>(args[2]->GetType());
+    CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
+    CheckRemainderTmpContract(lhs, tmp, 2, op_name);
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(lhs);
+  InheritTileViewLayout(tile_view, lhs);
+  return std::make_shared<TileType>(lhs->shape_, lhs->dtype_, std::nullopt, tile_view);
+}
+
+TypePtr DeduceTileScalarRemainderType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                      const std::string& op_name, bool has_tmp) {
+  const size_t expected_args = has_tmp ? 3 : 2;
+  CHECK(args.size() == expected_args) << "The operator " << op_name << " requires exactly " << expected_args
+                                      << " arguments, but got " << args.size();
+  auto src = As<TileType>(args[0]->GetType());
+  auto scalar = As<ScalarType>(args[1]->GetType());
+  CHECK(src) << "The operator " << op_name << " requires first argument to be a TileType";
+  CHECK(scalar) << "The operator " << op_name << " requires second argument to be a ScalarType";
+  CHECK(IsRemainderDataType(src->dtype_))
+      << "The operator " << op_name
+      << " requires dtype in {INT16, UINT16, INT32, UINT32, FP16, FP32}, but got " << src->dtype_.ToString();
+  CHECK(src->dtype_ == scalar->dtype_)
+      << "The operator " << op_name << " requires the scalar dtype to match the tile dtype, but got "
+      << scalar->dtype_.ToString() << " and " << src->dtype_.ToString();
+  if (has_tmp) {
+    auto tmp = As<TileType>(args[2]->GetType());
+    CHECK(tmp) << "The operator " << op_name << " requires third argument (tmp) to be a TileType";
+    CheckRemainderTmpContract(src, tmp, 1, op_name);
+  }
+
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(src);
+  InheritTileViewLayout(tile_view, src);
+  return std::make_shared<TileType>(src->shape_, src->dtype_, std::nullopt, tile_view);
+}
+
 // ============================================================================
 // Op Registration
 // ============================================================================
@@ -399,17 +521,19 @@ REGISTER_OP("tile.minimum")
 
 REGISTER_OP("tile.rem")
     .set_op_category("TileOp")
-    .set_description("Element-wise remainder (modulo) of two tiles with broadcasting")
+    .set_description("Element-wise floor remainder of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .add_argument("tmp", "Temporary tile (TileType) required by the hardware")
+    .set_attr<bool>("high_precision")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpTernaryType(args, kwargs, "tile.rem", false);
+      return DeduceTileRemainderType(args, kwargs, "tile.rem", true);
     });
 
 // Partial-combine binary ops: elementwise over dst's valid region, but where
@@ -470,9 +594,10 @@ REGISTER_OP("tile.part_min")
 
 REGISTER_OP("tile.fmod")
     .set_op_category("TileOp")
-    .set_description("Element-wise floating-point remainder of two tiles with broadcasting")
+    .set_description("Element-wise truncating remainder of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
+    .set_attr<bool>("high_precision")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
@@ -482,7 +607,7 @@ REGISTER_OP("tile.fmod")
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.fmod");
+      return DeduceTileRemainderType(args, kwargs, "tile.fmod", false);
     });
 
 REGISTER_OP("tile.muls")
@@ -542,14 +667,15 @@ REGISTER_OP("tile.rems")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpTileScalarTileType(args, kwargs, "tile.rems");
+      return DeduceTileScalarRemainderType(args, kwargs, "tile.rems", true);
     });
 
 REGISTER_OP("tile.fmods")
     .set_op_category("TileOp")
-    .set_description("Element-wise floating-point remainder of tile and scalar")
+    .set_description("Element-wise truncating remainder of tile and scalar with matching dtype")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)
@@ -559,7 +685,7 @@ REGISTER_OP("tile.fmods")
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.fmods");
+      return DeduceTileScalarRemainderType(args, kwargs, "tile.fmods", false);
     });
 
 REGISTER_OP("tile.shl")

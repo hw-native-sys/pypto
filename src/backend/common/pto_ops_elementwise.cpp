@@ -97,6 +97,7 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.sels",
       // Gather operands and result are linearly addressed.
       "tile.gatherb",
+      "tile.rems",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
@@ -228,8 +229,8 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
 
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
-// Unlike cmp/cvt attributes, the tdiv/tlog assembly formats place their
-// attr-dict after the complete ins()/outs() clause.
+// Unlike cmp/cvt attributes, precision-backed arithmetic assembly formats place
+// their attr-dict after the complete ins()/outs() clause.
 static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_t arity,
                                            const char* attr_kind, const CallPtr& op,
                                            codegen::CodegenBase& codegen_base) {
@@ -244,6 +245,33 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   }
   codegen.Emit(code);
   return "";
+}
+
+static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_t arity,
+                                           const char* precision_attr_kind, const CallPtr& op,
+                                           codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, pto_op_name, arity);
+  auto src_type = As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(src_type, op->span_)
+      << "Internal error: " << op->op_->name_ << " first argument must be a TileType";
+
+  const bool is_a5 = codegen.GetBackendHandler()->GetPtoTargetArch() == "a5";
+  if (!is_a5) {
+    const bool is_floor_remainder = pto_op_name == "pto.trem" || pto_op_name == "pto.trems";
+    const bool supported = is_floor_remainder
+                               ? (src_type->dtype_ == DataType::INT32 || src_type->dtype_ == DataType::FP32)
+                               : src_type->dtype_ == DataType::FP32;
+    CHECK_SPAN(supported, op->span_)
+        << op->op_->name_ << " with dtype " << src_type->dtype_.ToString()
+        << " is not supported on A2/A3; tile.rem/tile.rems support INT32 or FP32, while "
+           "tile.fmod/tile.fmods support FP32 only";
+  }
+
+  if (precision_attr_kind != nullptr) {
+    return MakePrecisionCodegenPTO(pto_op_name, arity, precision_attr_kind, op, codegen_base);
+  }
+  return MakeNaryCodegenPTO(pto_op_name, arity, op, codegen_base);
 }
 
 // Helper function for full op
@@ -553,13 +581,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.add",             "pto.tadd",             2},
     {"tile.sub",             "pto.tsub",             2},
     {"tile.mul",             "pto.tmul",             2},
-    {"tile.rem",             "pto.trem",             3},  // src0, src1, tmp
     // Tile x Tile partial-combine operations
     {"tile.part_add",        "pto.tpartadd",         2},
     {"tile.part_mul",        "pto.tpartmul",         2},
     {"tile.part_max",        "pto.tpartmax",         2},
     {"tile.part_min",        "pto.tpartmin",         2},
-    {"tile.fmod",            "pto.tfmod",            2},
     // Tile x Tile bitwise operations
     {"tile.and",             "pto.tand",             2},
     {"tile.or",              "pto.tor",              2},
@@ -586,8 +612,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.subs",            "pto.tsubs",            2},
     {"tile.muls",            "pto.tmuls",            2},
     {"tile.divs",            "pto.tdivs",            2},
-    {"tile.rems",            "pto.trems",            3},  // src0, scalar, tmp
-    {"tile.fmods",           "pto.tfmods",           2},
     {"tile.ands",            "pto.tands",            2},
     {"tile.ors",             "pto.tors",             2},
     {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
@@ -678,6 +702,30 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       reg_entry.set_output_layout(ir::TileLayout::row_major);
     }
+  }
+
+  struct RemainderOpEntry {
+    const char* op_name;
+    const char* pto_op_name;
+    size_t arity;
+    const char* precision_attr_kind;
+  };
+  static constexpr RemainderOpEntry kRemainderOps[] = {
+      {"tile.rem", "pto.trem", 3, "rem_precision"},
+      {"tile.rems", "pto.trems", 3, nullptr},
+      {"tile.fmod", "pto.tfmod", 2, "fmod_precision"},
+      {"tile.fmods", "pto.tfmods", 2, nullptr},
+  };
+  for (const auto& entry : kRemainderOps) {
+    if (exclude_ops.count(entry.op_name) > 0) continue;
+    auto reg_entry = backend.RegisterOp(entry.op_name);
+    reg_entry.f_codegen([entry](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeRemainderCodegenPTO(entry.pto_op_name, entry.arity, entry.precision_attr_kind, op, codegen);
+    });
+    for (size_t i = 0; i < entry.arity; ++i) {
+      reg_entry.set_input_layout(i, ir::TileLayout::row_major);
+    }
+    reg_entry.set_output_layout(ir::TileLayout::row_major);
   }
 
   if (exclude_ops.count("tile.sels") == 0) {

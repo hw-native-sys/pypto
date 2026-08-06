@@ -1388,6 +1388,20 @@ class TestUnifiedOpsTypeErrors:
             with pytest.raises(ValueError, match="high_precision"):
                 unified_ops.div(lhs, rhs, high_precision=True)  # type: ignore[call-overload]
 
+    def test_fmod_precision_dispatches_only_to_tile_tile(self):
+        span = ir.Span.unknown()
+        tensor = Tensor(expr=ir.Var("tensor", ir.TensorType([8], DataType.FP32), span))
+        lhs = Tile(expr=ir.Var("lhs", ir.TileType([8], DataType.FP32), span))
+        rhs = Tile(expr=ir.Var("rhs", ir.TileType([8], DataType.FP32), span))
+
+        call = unified_ops.fmod(lhs, rhs, high_precision=True).unwrap()
+        assert isinstance(call, ir.Call)
+        assert dict(call.kwargs) == {"high_precision": True}
+        with pytest.raises(ValueError, match="high_precision"):
+            unified_ops.fmod(tensor, tensor, high_precision=True)  # type: ignore[call-overload]
+        with pytest.raises(ValueError, match="requires a Tile rhs"):
+            unified_ops.fmod(lhs, 3.0, high_precision=True)
+
     def test_matmul_invalid_lhs(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
             unified_ops.matmul(1, 2)  # type: ignore

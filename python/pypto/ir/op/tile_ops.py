@@ -972,7 +972,14 @@ def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     return _create_tile_binary_call("tile.sub", "tile.subs", lhs, rhs, actual_span)
 
 
-def rem(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
+def rem(
+    lhs: Expr,
+    rhs: Expr,
+    tmp: Expr,
+    span: Span | None = None,
+    *,
+    high_precision: bool = False,
+) -> Call:
     """Element-wise remainder (modulo) of two tiles.
 
     Computes lhs % rhs element-wise. Maps to the TREM hardware intrinsic.
@@ -980,14 +987,18 @@ def rem(lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
-        tmp: Temporary tile (TileType) required by the hardware
+        tmp: Same-dtype 2D scratch tile. It needs at least two valid rows and
+            enough valid columns to cover ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Whether to select PTOAS's high-precision TREM mode.
+            This mode is defined only for FP32 and is ignored by A2/A3 hardware.
 
     Returns:
         Call expression for element-wise remainder
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.rem", [lhs, rhs, tmp], {}, actual_span)
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.rem", [lhs, rhs, tmp], kwargs, actual_span)
 
 
 def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None) -> Call:
@@ -998,7 +1009,8 @@ def rems(lhs: Expr, rhs: int | float | Expr, tmp: Expr, span: Span | None = None
     Args:
         lhs: Tile (TileType)
         rhs: Scalar (int/float/Expr with ScalarType)
-        tmp: Temporary tile (TileType) required by the hardware
+        tmp: Same-dtype 2D scratch tile. It needs at least one valid row and
+            enough valid columns to cover ``lhs``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1081,29 +1093,38 @@ def part_min(src0: Expr, src1: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.part_min", [src0, src1], {}, actual_span)
 
 
-def fmod(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise floating-point remainder of two tiles.
+def fmod(
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+    *,
+    high_precision: bool = False,
+) -> Call:
+    """Element-wise truncating remainder of two tiles.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMOD hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``; the result follows the dividend sign). Maps to TFMOD.
 
     Args:
         lhs: Left-hand side tile (TileType)
         rhs: Right-hand side tile (TileType)
         span: Optional source span for debugging (auto-captured if not provided)
+        high_precision: Whether to select PTOAS's high-precision TFMOD mode.
+            This mode is defined only for FP32.
 
     Returns:
-        Call expression for element-wise floating-point remainder
+        Call expression for element-wise truncating remainder
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.fmod", [lhs, rhs], {}, actual_span)
+    kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
+    return _ir_core.create_op_call("tile.fmod", [lhs, rhs], kwargs, actual_span)
 
 
 def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise floating-point remainder of tile and scalar.
+    """Element-wise truncating remainder of tile and scalar.
 
-    Computes the IEEE-style remainder of lhs / rhs element-wise (matching
-    ``torch.fmod``). Maps to the TFMODS hardware intrinsic.
+    Computes the truncating remainder of lhs / rhs element-wise (matching
+    ``torch.fmod``; the result follows the dividend sign). Maps to TFMODS.
 
     Args:
         lhs: Tile (TileType)
@@ -1111,7 +1132,7 @@ def fmods(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for element-wise floating-point remainder with scalar
+        Call expression for element-wise truncating remainder with scalar
     """
     actual_span = _get_span_or_capture(span)
     rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
