@@ -17,8 +17,8 @@ jobs:
   # one of them is documentation, elides the whole build/test pipeline below:
   # `clang-tidy`, `unit-tests`, `codegen-tests`, the four device jobs and
   # `system-tests-a5sim`. A prose-only change cannot break a build or a test, so
-  # spending a macOS runner and four in-house arm64 CPU / NPU slots (a scarce
-  # shared pool) on it only delays every other PR in the queue.
+  # spending four in-house arm64 CPU / NPU slots (a scarce shared pool) on it
+  # only delays every other PR in the queue.
   #
   # Two mechanisms, because one of them does not work for a matrix job:
   #  - every job except `unit-tests` is skipped outright via `if:`;
@@ -219,8 +219,8 @@ jobs:
   # test job lists both of them in its `needs` (the five jobs that also consume
   # `needs.toolchain.outputs.*` list `toolchain` alongside), so a formatting or
   # static-analysis failure short-circuits the run before any downstream job
-  # claims a macOS runner, a GitHub-hosted ubuntu slot, or one of the in-house
-  # arm64 CPU / NPU slots (a scarce shared pool).
+  # claims a GitHub-hosted ubuntu slot or one of the in-house arm64 CPU / NPU
+  # slots (a scarce shared pool).
   #
   # This cannot weaken the merge rule: `pre-commit` and `clang-tidy` are
   # themselves required status checks (repo ruleset "default" → Require status
@@ -347,23 +347,23 @@ jobs:
         fi
 
   unit-tests:
-    # Lint gate (see the pre-commit job) — don't spend a macOS runner on a tree
-    # that doesn't lint.
+    # Lint gate (see the pre-commit job) — don't spend a runner on a tree that
+    # doesn't lint.
     #
     # Docs-only gate (see the `changes` job) — THE ONE JOB THAT IS NOT SKIPPED
     # WHOLESALE. `jobs.<job_id>.if` is evaluated *before* `strategy.matrix` is
     # expanded, so a skipped matrix job produces a single check run named
-    # `unit-tests` instead of the `unit-tests (<os>, 3.10)` contexts the ruleset
+    # `unit-tests` instead of the `unit-tests (<os>, 3.10)` context the ruleset
     # requires. Verified on run 30525415124, where the lint gate failed and
     # `commits/<sha>/check-runs` reports exactly one `unit-tests` / `skipped` —
     # no per-matrix contexts. Skipping this job on a docs-only PR would leave
-    # both required contexts uncreated, i.e. permanently "expected", and the PR
+    # the required context uncreated, i.e. permanently "expected", and the PR
     # unmergeable — the opposite of the intent.
     #
     # So the matrix always expands and the two expensive steps carry the
-    # condition instead: on a docs-only PR each leg checks out, reports its
+    # condition instead: on a docs-only PR the leg checks out, reports its
     # required context green, and finishes in seconds without building the C++
-    # extension or running pytest. Both runners are GitHub-hosted, so this costs
+    # extension or running pytest. The runner is GitHub-hosted, so this costs
     # none of the scarce in-house capacity the gate exists to protect.
     #
     # The `if` must tolerate a *skipped* `clang-tidy` (a skipped dependency
@@ -377,27 +377,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Single-leg matrix, deliberately kept as a matrix: the required status
+      # check is named `unit-tests (ubuntu-latest, 3.10)`, and collapsing this
+      # into a plain job would rename the context to `unit-tests` and leave the
+      # required one permanently "expected". Linux is the only supported CI
+      # platform — the target (Ascend NPU) has no macOS support, so a macOS leg
+      # validated nothing the Linux leg does not.
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ["3.10"]
-        # Linux runs the full unit-test suite; macOS runs only a small
-        # foundational smoke subset. The C++ extension's macOS compilation is
-        # already validated by the `pip install -v .[dev]` build step below, so
-        # macOS only needs to confirm the built module imports and executes —
-        # duplicating all ~6.7k cases on both OSes is wasted CI time. The `include`
-        # entries add a per-OS `ut_paths` without creating extra jobs, so the
-        # required-check names `unit-tests (<os>, 3.10)` are preserved.
-        include:
-          - os: ubuntu-latest
-            ut_paths: tests/ut
-            ut_label: full suite
-          - os: macos-latest
-            # Smoke: core object system (dtype/error/logging) + basic IR node
-            # construction — the layers where a macOS-specific binding or
-            # compile/execute break would surface. Widen this list if a macOS-only
-            # regression slips through.
-            ut_paths: tests/ut/core tests/ut/ir/core
-            ut_label: smoke subset (compile + execute check)
 
     steps:
     - name: Checkout
@@ -419,9 +407,9 @@ jobs:
         pip install torch --index-url https://download.pytorch.org/whl/cpu
         pip install -v .[dev]
 
-    - name: Test unit tests (${{ matrix.ut_label }})
+    - name: Test unit tests
       if: needs.changes.outputs.docs_only != 'true'
-      run: pytest ${{ matrix.ut_paths }} -n auto --maxprocesses 8 -v
+      run: pytest tests/ut -n auto --maxprocesses 8 -v
 
     - name: Skipped (documentation-only change)
       if: needs.changes.outputs.docs_only == 'true'
