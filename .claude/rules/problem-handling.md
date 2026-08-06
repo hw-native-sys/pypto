@@ -84,6 +84,57 @@ If you cannot produce a concrete example, treat that as a signal the issue may n
 4. Append the new issue using the format above — verify it meets the "Entry Quality" bar before saving
 5. Continue with the current task (do not fix the logged issue now)
 
+### Writing from a worktree
+
+While a session is isolated in a worktree, Claude Code **blocks `Edit` / `Write` /
+`NotebookEdit` against the main checkout** ([How Claude Code enforces
+isolation](https://code.claude.com/docs/en/worktrees#how-claude-code-enforces-isolation)).
+Reads still work; only writes are refused, and there is no opt-out. Do **not**
+create a worktree-local `KNOWN_ISSUES.md` as a workaround — that fragments the
+file, which is exactly what the "main repo root" rule exists to prevent.
+
+Use a Bash command instead, run from the worktree cwd. The isolation checks test
+a command's *working directory* and *git redirects* — not file writes by
+absolute path — so a plain write to the main repo's `KNOWN_ISSUES.md` passes:
+
+```bash
+python3 - <<'PY'
+p = '/abs/path/to/main-repo/KNOWN_ISSUES.md'
+entry_text = """
+## Short Title
+
+- **Date**: YYYY-MM-DD
+- **Found during**: [task context]
+- **Description**: [actual vs. expected behaviour, why it matters]
+- **Example / Repro**: [smallest artefact that surfaces it]
+- **Location**: [file path(s) and line number(s)]
+- **Severity**: low
+
+---
+"""
+open(p, 'a').write(entry_text)
+PY
+```
+
+The heredoc is quoted (`<<'PY'`), so the entry text is passed through verbatim —
+define it inside the snippet rather than relying on a shell variable.
+
+Constraints that make this work:
+
+- **Never `cd` into the main checkout**, and never point `git -C` / `--git-dir` /
+  `GIT_DIR` / `GIT_WORK_TREE` at it — each is independently blocked.
+- **Keep the command simple.** Compound commands (`&&`, `;`-chains, redirects)
+  are refused as unverifiable, even when their effect would be legal.
+- **Anchor edits on entry heading text, never line numbers — and require exactly
+  one match.** The file is shared by every worktree of the repo and concurrent
+  sessions may append to it, so headings are *not* guaranteed unique. Count the
+  matches first and **abort without modifying the file** when zero or more than
+  one heading matches; never rewrite the first match.
+- **Back it up first** (`cp` to a scratch dir) before any in-place rewrite, and
+  diff against the backup afterward to confirm only the intended hunk changed.
+  The diff proves *something* changed, not that the *right* entry changed — it
+  supplements the unique-match check above, it does not replace it.
+
 ## On Task Completion
 
 **Before finishing any task, revisit `KNOWN_ISSUES.md`:**
@@ -100,5 +151,6 @@ If you cannot produce a concrete example, treat that as a signal the issue may n
 - `KNOWN_ISSUES.md` is in `.gitignore` — local-only tracking file
 - Each developer's file is independent; it does not get shared via git
 - **Never reference `KNOWN_ISSUES.md` or its entries in shared artifacts** — commit messages, PR descriptions, and GitHub issues must not name the file or quote its entries. It is local-only and per-developer, so external readers cannot see it. Describe the actual change, not the local tracking entry it resolves.
-- **Always write to the main repo root**, never to a worktree's directory
+- **Always write to the main repo root**, never to a worktree's directory — from a
+  worktree this requires Bash, since `Edit` is blocked (see "Writing from a worktree")
 - Use `/create-issue` to promote an entry to a proper GitHub issue
