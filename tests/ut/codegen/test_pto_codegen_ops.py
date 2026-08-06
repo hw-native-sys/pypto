@@ -3421,6 +3421,98 @@ class TestCrossCoreSyncCodegen:
         assert "pto.sync.wait <PIPE_MTE2>, %" in mlir
 
 
+class TestSyncFlagCodegen:
+    """Tests for pl.system.sync_src/sync_dst (intra-core pto.set_flag/pto.wait_flag).
+
+    Like system.sync_set/sync_wait (TestCrossCoreSyncCodegen above), event_id
+    is either a static compile-time int (lowers to pto.set_flag/wait_flag) or
+    a dynamic ScalarType(INDEX) operand (lowers to pto.set_flag_dyn/
+    wait_flag_dyn) — never both (see DeduceSyncFlagType in
+    src/ir/op/sync_ops/sync.cpp and MakeSyncFlagCodegenPTO in
+    src/backend/common/pto_ops_memory.cpp).
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_sync_src_emits_set_flag(self):
+        """pl.system.sync_src(event_id=<int>) emits pto.set_flag[...]."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=3)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.set_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in mlir, (
+            f"pto.set_flag not found in MLIR:\n{mlir}"
+        )
+
+    def test_sync_dst_emits_wait_flag(self):
+        """pl.system.sync_dst(event_id=<int>) emits pto.wait_flag[...]."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=3)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.wait_flag[<PIPE_MTE2>, <PIPE_V>, <EVENT_ID3>]" in mlir, (
+            f"pto.wait_flag not found in MLIR:\n{mlir}"
+        )
+
+    def test_dynamic_event_id_emits_set_flag_dyn_and_wait_flag_dyn(self):
+        """An index Scalar event id lowers to the PTO dynamic set_flag/wait_flag operand."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+                event_id: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                pl.system.sync_src(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)
+                pl.system.sync_dst(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
+                return updated
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.set_flag_dyn[<PIPE_MTE2>, <PIPE_V>, %" in mlir, (
+            f"pto.set_flag_dyn not found in MLIR:\n{mlir}"
+        )
+        assert "pto.wait_flag_dyn[<PIPE_MTE2>, <PIPE_V>, %" in mlir, (
+            f"pto.wait_flag_dyn not found in MLIR:\n{mlir}"
+        )
+
+
 class TestSyncAllCodegen:
     """Tests that pl.system.syncall lowers to pto.syncall (hard/FFTS form)."""
 
