@@ -2349,7 +2349,7 @@ class TestTileMatMulOps:
             ) -> pl.Tensor[[1, 128], pl.FP32]:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2364,15 +2364,15 @@ class TestTileMatMulOps:
             @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
-                acc_in: pl.Tensor[[1, 128], pl.FP32],
+                acc_in: pl.Tensor[[16, 128], pl.FP32],
                 a: pl.Tensor[[1, 64], pl.FP32],
                 b: pl.Tensor[[64, 128], pl.FP32],
                 output: pl.Tensor[[1, 128], pl.FP32],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
-                tile_acc: pl.Tile[[1, 32], pl.FP32] = pl.load(acc_in, [0, 0], [1, 32])
+                tile_acc: pl.Tile[[16, 32], pl.FP32] = pl.load(acc_in, [0, 0], [16, 32], valid_shape=[1, 32])
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2395,12 +2395,206 @@ class TestTileMatMulOps:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_bias: pl.Tile[[1, 32], pl.FP32] = pl.load(bias, [0, 0], [1, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
         assert "tile.gemv_bias" in ir_str
+
+    def test_tile_gemv_physical_accumulator_and_logical_valid_shape(self):
+        """GEMV pads Acc rows to 16 while preserving the logical [1, N] extent."""
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+
+        result = tile.gemv(lhs, rhs)
+        result_type = result.type
+        assert isinstance(result_type, ir.TileType)
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+        assert _valid_of(result_type) == [1, 48]
+
+        acc_result = tile.gemv_acc(result, lhs, rhs)
+        bias_result = tile.gemv_bias(lhs, rhs, bias)
+        for call in (acc_result, bias_result):
+            call_type = call.type
+            assert isinstance(call_type, ir.TileType)
+            assert [d.value for d in call_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+            assert _valid_of(call_type) == [1, 48]
+
+    @pytest.mark.parametrize(
+        ("input_dtype", "output_dtype"),
+        [
+            (DataType.INT8, DataType.INT32),
+            (DataType.FP16, DataType.FP32),
+            (DataType.BF16, DataType.FP32),
+            (DataType.FP32, DataType.FP32),
+        ],
+    )
+    def test_tile_gemv_family_accepts_supported_dtype_triples(self, input_dtype, output_dtype):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], input_dtype, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], input_dtype, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 128], output_dtype, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], output_dtype, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+
+        for call in (tile.gemv(lhs, rhs), tile.gemv_acc(acc, lhs, rhs), tile.gemv_bias(lhs, rhs, bias)):
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType)
+            assert result_type.dtype == output_dtype
+
+    def test_tile_gemv_rejects_mismatched_logical_k(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[96, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="matching logical K extents"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_unsupported_input_dtype(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.INT16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.INT16), span)
+
+        with pytest.raises(ValueError, match="supports only INT8"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_mixed_input_dtypes(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="identical lhs and rhs data types"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_bias_rejects_input_dtype_bias(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP16), span)
+        bias = ir.Var("bias", ir.TileType([1, 128], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires bias dtype fp32"):
+            tile.gemv_bias(lhs, rhs, bias)
+
+    def test_tile_gemv_acc_rejects_input_dtype_accumulator(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP16), span)
+        acc = ir.Var("acc", ir.TileType([16, 128], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires accumulator dtype fp32"):
+            tile.gemv_acc(acc, lhs, rhs)
+
+    def test_tile_gemv_rejects_multiple_logical_lhs_rows(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[2, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="logical row extent to be exactly 1"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_padded_physical_lhs_rows(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([16, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="physical row extent to be exactly 1"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_bias_rejects_mismatched_valid_shape(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 32])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match=r"bias valid_shape \[1, 48\]"):
+            tile.gemv_bias(lhs, rhs, bias)
+
+    def test_tile_gemv_acc_rejects_mismatched_valid_shape(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 32])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="accumulator valid_shape"):
+            tile.gemv_acc(acc, lhs, rhs)
 
 
 class TestTileTransformOps:

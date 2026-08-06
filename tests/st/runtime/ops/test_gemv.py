@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime tests for the tile-level Cube op matmul_bias.
+"""Runtime tests for the tile-level Cube ops matmul_bias and the GEMV family.
 
 matmul_bias: C[M,N] = A[M,K] @ B[K,N] + bias[1,N]. Operands load to Mat (L1);
 the layout passes (AutoTileMatmulL0 / CanonicalizeTileSlice) insert the L0
@@ -17,9 +17,16 @@ accumulator, narrowed valid_shape on the output rows (M) and the contraction
 (K), and a non-zero output row offset. Cube accumulation reorders the K
 reduction vs torch, so a relaxed FP32 tolerance is used.
 
-gemv / gemv_acc / gemv_bias are not covered yet: they need pto-isa support
-(gemv/gemv_bias hit the TExtract dstRow % 16 == 0 1-row constraint; gemv_acc
-needs acc->acc pto.tmov). Will be added once the ISA path is available.
+gemv / gemv_bias / gemv_acc are the M==1 specialization of the Cube matmul
+family: C[1,N] = A[1,K] @ B[K,N], optionally + bias[1,N] or accumulated into
+an existing result. Operands load to Mat (L1) and move to Left/Right; the
+single-row lhs uses PTO-ISA's Mat-to-Left vector path. Coverage includes
+several K/N shapes, every A2/A3 datatype triple (INT8, FP16, BF16, FP32),
+contraction/output/combined valid-shape tails, and exact base/bias/acc
+instruction forms. AccPhase coverage includes standalone Final base/bias
+operations and a Partial base followed by a Final accumulate. A row tail is
+not applicable because the GEMV verifier requires the logical row extent to
+be exactly one.
 
 Scope is a2a3 only (``@pytest.mark.platforms("a2a3")``); a5 coverage is a
 separate PR.
@@ -36,13 +43,28 @@ from pypto.runtime.runner import RunConfig
 K = 64
 N = 64
 M = 16
-VALID_N = 32
+VALID_N = 30
 VALID_M = 8
 
 _RTOL = 1e-3
 _ATOL = 1e-3
 
-_PL_DT = {DataType.FP32: pl.FP32, DataType.BF16: pl.BF16}
+_PL_DT = {
+    DataType.FP32: pl.FP32,
+    DataType.BF16: pl.BF16,
+    DataType.FP16: pl.FP16,
+    DataType.INT8: pl.INT8,
+}
+
+
+def _gemv_input(shape: list[int], dtype: DataType) -> torch.Tensor:
+    if dtype in (DataType.INT8, DataType.INT32):
+        return torch.randint(-4, 5, shape, dtype=dtype.torch_dtype)
+    return torch.randn(shape, dtype=dtype.torch_dtype)
+
+
+def _gemv_output_dtype(dtype: DataType) -> DataType:
+    return DataType.INT32 if dtype == DataType.INT8 else DataType.FP32
 
 
 def _cfg() -> RunConfig:
@@ -185,6 +207,423 @@ class TestMatmulBias:
     @pytest.mark.platforms("a2a3")
     def test_tile_matmul_bias_offset(self, test_runner):
         result = test_runner.run(MatmulBiasTestCase(out_m=2 * M, off_row=M, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+# ===========================================================================
+# gemv / gemv_bias (M == 1 matmul family)
+# ===========================================================================
+
+# The Cube GEMV lhs is extracted to Left through PTO-ISA's single-row vector
+# path. The physical K must occupy a whole 512-byte Cube block: K % 128 == 0
+# for FP32, K % 256 == 0 for BF16/FP16, and K % 512 == 0 for INT8. A narrowed
+# contraction retains an aligned physical K and changes only its valid extent.
+VALID_K = 64
+
+
+class GemvTestCase(PTOTestCase):
+    """C[1,N] = A[1,K] @ B[K,N], optionally + bias[1,N]."""
+
+    __test__ = False
+
+    def __init__(
+        self,
+        *,
+        k=K,
+        n=N,
+        bias=False,
+        narrow=None,
+        ab_dtype=DataType.FP32,
+        acc_phase="unspecified",
+        config=None,
+    ):
+        super().__init__(config)
+        self._k, self._n = k, n
+        self._bias, self._narrow, self._ab = bias, narrow, ab_dtype
+        self._acc_phase = acc_phase
+
+    def get_name(self) -> str:
+        op = "gemv_bias" if self._bias else "gemv"
+        narrowed = f"_n{self._narrow}" if self._narrow else ""
+        phase = f"_{self._acc_phase}" if self._acc_phase != "unspecified" else ""
+        return f"tile_{op}_1x{self._k}x{self._n}_{self._ab.value}{narrowed}{phase}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        out_dtype = _gemv_output_dtype(self._ab)
+        valid_n = VALID_N if self._narrow in ("N", "KN") else self._n
+        # N tails are compact in GM; padding belongs only to the aligned Mat/Right/Bias tiles.
+        specs = [
+            TensorSpec("a", [1, self._k], self._ab, init_value=lambda: _gemv_input([1, self._k], self._ab)),
+            TensorSpec(
+                "b",
+                [self._k, valid_n],
+                self._ab,
+                init_value=lambda: _gemv_input([self._k, valid_n], self._ab),
+            ),
+        ]
+        if self._bias:
+            specs.append(
+                TensorSpec(
+                    "bias",
+                    [1, valid_n],
+                    out_dtype,
+                    init_value=lambda: _gemv_input([1, valid_n], out_dtype),
+                )
+            )
+        specs.append(TensorSpec("out", [1, valid_n], out_dtype, is_output=True))
+        return specs
+
+    def get_program(self) -> Any:
+        k, n = self._k, self._n
+        ab = _PL_DT[self._ab]
+        out_dt = pl.INT32 if self._ab == DataType.INT8 else pl.FP32
+        valid_k = VALID_K if self._narrow in ("K", "KN") else k
+        valid_n = VALID_N if self._narrow in ("N", "KN") else n
+        acc_phase = self._acc_phase
+        a_valid = [1, valid_k]
+        b_valid = [valid_k, valid_n]
+
+        if not self._bias:
+
+            @pl.program
+            class GemvProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[1, k], ab],
+                    b: pl.Tensor[[k, valid_n], ab],
+                    out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+                ) -> pl.Tensor[[1, valid_n], out_dt]:
+                    tile_a = pl.load(
+                        a,
+                        [0, 0],
+                        [1, k],
+                        valid_shape=a_valid,
+                        target_memory=pl.MemorySpace.Mat,
+                    )
+                    tile_b = pl.load(
+                        b,
+                        [0, 0],
+                        [k, n],
+                        valid_shape=b_valid,
+                        target_memory=pl.MemorySpace.Mat,
+                        clamp=True,
+                    )
+                    out = pl.store(pl.tile.gemv(tile_a, tile_b, acc_phase=acc_phase), [0, 0], out)
+                    return out
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def orchestrator(
+                    self,
+                    a: pl.Tensor[[1, k], ab],
+                    b: pl.Tensor[[k, valid_n], ab],
+                    out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+                ) -> pl.Tensor[[1, valid_n], out_dt]:
+                    out = self.kernel(a, b, out)
+                    return out
+
+            return GemvProgram
+
+        @pl.program
+        class GemvBiasProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, k], ab],
+                b: pl.Tensor[[k, valid_n], ab],
+                bias: pl.Tensor[[1, valid_n], out_dt],
+                out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+            ) -> pl.Tensor[[1, valid_n], out_dt]:
+                tile_a = pl.load(a, [0, 0], [1, k], valid_shape=a_valid, target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(
+                    b,
+                    [0, 0],
+                    [k, n],
+                    valid_shape=b_valid,
+                    target_memory=pl.MemorySpace.Mat,
+                    clamp=True,
+                )
+                tile_bias = pl.load(
+                    bias,
+                    [0, 0],
+                    [1, n],
+                    valid_shape=[1, valid_n],
+                    target_memory=pl.MemorySpace.Mat,
+                    clamp=True,
+                )
+                result = pl.tile.gemv_bias(tile_a, tile_b, tile_bias, acc_phase=acc_phase)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[1, k], ab],
+                b: pl.Tensor[[k, valid_n], ab],
+                bias: pl.Tensor[[1, valid_n], out_dt],
+                out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+            ) -> pl.Tensor[[1, valid_n], out_dt]:
+                out = self.kernel(a, b, bias, out)
+                return out
+
+        return GemvBiasProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        out_dtype = _gemv_output_dtype(self._ab).torch_dtype
+        if self._ab == DataType.INT8:
+            a = tensors["a"].to(torch.int32)
+            b = tensors["b"].to(torch.int32)
+        else:
+            a = tensors["a"].to(torch.float32)
+            b = tensors["b"].to(torch.float32)
+        valid_k = VALID_K if self._narrow in ("K", "KN") else self._k
+        valid_n = VALID_N if self._narrow in ("N", "KN") else self._n
+        result = torch.matmul(a[:, :valid_k], b[:valid_k, :valid_n])
+        if self._bias:
+            result = result + tensors["bias"][:, :valid_n]
+        tensors["out"][:] = result.to(out_dtype)
+
+
+# GEMV keeps the whole rhs resident in the 64-KiB Right buffer rather than
+# K-splitting it, so these K/N pairs stay within that capacity.
+_KN = [(128, 64), (256, 64), (128, 128)]
+
+
+class TestGemv:
+    """Cube gemv on A2/A3 across K/N, valid-region tails, and supported input dtypes."""
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("k,n", _KN, ids=[f"1x{k}x{n}" for k, n in _KN])
+    def test_tile_gemv(self, test_runner, k, n):
+        result = test_runner.run(GemvTestCase(k=k, n=n, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_narrow_k(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=128, narrow="K", config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_bf16(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=256, n=64, ab_dtype=DataType.BF16, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_fp16(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=256, n=64, ab_dtype=DataType.FP16, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_int8(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=512, n=64, ab_dtype=DataType.INT8, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_final_phase(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=128, n=64, acc_phase="final", config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("narrow", ["N", "KN"])
+    def test_tile_gemv_output_tail(self, test_runner, narrow):
+        result = test_runner.run(GemvTestCase(k=128, n=32, narrow=narrow, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestGemvBias:
+    """Cube gemv_bias on A2/A3 across K/N, valid-region tails, and supported dtypes."""
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("k,n", _KN, ids=[f"1x{k}x{n}" for k, n in _KN])
+    def test_tile_gemv_bias(self, test_runner, k, n):
+        result = test_runner.run(GemvTestCase(k=k, n=n, bias=True, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_bias_narrow_k(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=128, bias=True, narrow="K", config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("ab_dtype", [DataType.BF16, DataType.FP16, DataType.INT8])
+    def test_tile_gemv_bias_dtype(self, test_runner, ab_dtype):
+        k = 512 if ab_dtype == DataType.INT8 else 256
+        result = test_runner.run(GemvTestCase(k=k, n=64, bias=True, ab_dtype=ab_dtype, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_bias_final_phase(self, test_runner):
+        result = test_runner.run(GemvTestCase(k=128, n=64, bias=True, acc_phase="final", config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("narrow", ["N", "KN"])
+    def test_tile_gemv_bias_output_tail(self, test_runner, narrow):
+        result = test_runner.run(GemvTestCase(k=128, n=32, bias=True, narrow=narrow, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+# ===========================================================================
+# gemv_acc (C[1,N] += A[1,K] @ B[K,N])
+# ===========================================================================
+
+
+class GemvAccTestCase(PTOTestCase):
+    """Accumulate two K chunks through one fresh gemv and one gemv_acc."""
+
+    __test__ = False
+    NUM_CHUNKS = 2
+
+    def __init__(
+        self,
+        *,
+        k_chunk=128,
+        n=N,
+        narrow=None,
+        ab_dtype=DataType.FP32,
+        phased=False,
+        config=None,
+    ):
+        super().__init__(config)
+        self._k_chunk, self._n, self._narrow = k_chunk, n, narrow
+        self._ab = ab_dtype
+        self._phased = phased
+        self._k = k_chunk * self.NUM_CHUNKS
+
+    def get_name(self) -> str:
+        narrowed = f"_n{self._narrow}" if self._narrow else ""
+        phase = "_partial_final" if self._phased else ""
+        return (
+            f"tile_gemv_acc_1x{self._k}x{self._n}_{self._ab.value}_chunks{self.NUM_CHUNKS}{narrowed}{phase}"
+        )
+
+    def define_tensors(self) -> list[TensorSpec]:
+        out_dtype = _gemv_output_dtype(self._ab)
+        valid_n = VALID_N if self._narrow in ("N", "KN") else self._n
+        # Keep the logical GM row stride while each on-chip rhs tile stays physically aligned.
+        return [
+            TensorSpec("a", [1, self._k], self._ab, init_value=lambda: _gemv_input([1, self._k], self._ab)),
+            TensorSpec(
+                "b",
+                [self._k, valid_n],
+                self._ab,
+                init_value=lambda: _gemv_input([self._k, valid_n], self._ab),
+            ),
+            TensorSpec("out", [1, valid_n], out_dtype, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        k_chunk, n, k_total = self._k_chunk, self._n, self._k
+        ab = _PL_DT[self._ab]
+        out_dt = pl.INT32 if self._ab == DataType.INT8 else pl.FP32
+        valid_k = VALID_K if self._narrow in ("K", "KN") else k_chunk
+        valid_n = VALID_N if self._narrow in ("N", "KN") else n
+        first_phase = "partial" if self._phased else "unspecified"
+        last_phase = "final" if self._phased else "unspecified"
+        a_valid = [1, valid_k]
+        b_valid = [valid_k, valid_n]
+
+        @pl.program
+        class GemvAccProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[1, k_total], ab],
+                b: pl.Tensor[[k_total, valid_n], ab],
+                out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+            ) -> pl.Tensor[[1, valid_n], out_dt]:
+                a0 = pl.load(a, [0, 0], [1, k_chunk], valid_shape=a_valid, target_memory=pl.MemorySpace.Mat)
+                b0 = pl.load(
+                    b,
+                    [0, 0],
+                    [k_chunk, n],
+                    valid_shape=b_valid,
+                    target_memory=pl.MemorySpace.Mat,
+                    clamp=True,
+                )
+                acc = pl.tile.gemv(a0, b0, acc_phase=first_phase)
+
+                a1 = pl.load(
+                    a,
+                    [0, k_chunk],
+                    [1, k_chunk],
+                    valid_shape=a_valid,
+                    target_memory=pl.MemorySpace.Mat,
+                )
+                b1 = pl.load(
+                    b,
+                    [k_chunk, 0],
+                    [k_chunk, n],
+                    valid_shape=b_valid,
+                    target_memory=pl.MemorySpace.Mat,
+                    clamp=True,
+                )
+                acc = pl.tile.gemv_acc(acc, a1, b1, acc_phase=last_phase)
+                out = pl.store(acc, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[1, k_total], ab],
+                b: pl.Tensor[[k_total, valid_n], ab],
+                out: pl.Out[pl.Tensor[[1, valid_n], out_dt]],
+            ) -> pl.Tensor[[1, valid_n], out_dt]:
+                out = self.kernel(a, b, out)
+                return out
+
+        return GemvAccProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        out_dtype = _gemv_output_dtype(self._ab).torch_dtype
+        if self._ab == DataType.INT8:
+            a = tensors["a"].to(torch.int32)
+            b = tensors["b"].to(torch.int32)
+        else:
+            a = tensors["a"].to(torch.float32)
+            b = tensors["b"].to(torch.float32)
+        valid_n = VALID_N if self._narrow in ("N", "KN") else self._n
+        valid_k = VALID_K if self._narrow in ("K", "KN") else self._k_chunk
+        result = torch.zeros(1, valid_n, dtype=out_dtype)
+        for chunk in range(self.NUM_CHUNKS):
+            start = chunk * self._k_chunk
+            result = result + torch.matmul(
+                a[:, start : start + valid_k],
+                b[start : start + valid_k, :valid_n],
+            ).to(out_dtype)
+        tensors["out"][:] = result.to(out_dtype)
+
+
+class TestGemvAcc:
+    """Cube gemv_acc on A2/A3 across N, valid-region tails, and supported dtypes."""
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("n", [64, 128], ids=["n64", "n128"])
+    def test_tile_gemv_acc(self, test_runner, n):
+        result = test_runner.run(GemvAccTestCase(n=n, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_acc_narrow_k(self, test_runner):
+        result = test_runner.run(GemvAccTestCase(narrow="K", config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("ab_dtype", [DataType.BF16, DataType.FP16, DataType.INT8])
+    def test_tile_gemv_acc_dtype(self, test_runner, ab_dtype):
+        k_chunk = 512 if ab_dtype == DataType.INT8 else 256
+        result = test_runner.run(GemvAccTestCase(k_chunk=k_chunk, n=64, ab_dtype=ab_dtype, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    def test_tile_gemv_acc_partial_final_phases(self, test_runner):
+        result = test_runner.run(GemvAccTestCase(n=64, phased=True, config=_cfg()))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3")
+    @pytest.mark.parametrize("narrow", ["N", "KN"])
+    def test_tile_gemv_acc_output_tail(self, test_runner, narrow):
+        result = test_runner.run(GemvAccTestCase(n=32, narrow=narrow, config=_cfg()))
         assert result.passed, f"Test failed: {result.error}"
 
 

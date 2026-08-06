@@ -185,8 +185,7 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // ``tile.load`` of a DN source produces the transposed (ZN) Mat layout.
   // A transposed matmul operand is realised by a zero-copy ``tile.transpose_view``
   // at the matmul site, not by the load.
-  bool source_is_dn =
-      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
+  bool source_is_dn = tensor_type->tensor_view_.value_or(TensorView{}).layout == TensorLayout::DN;
   TileView tile_view;
   if (is_mx_load) {
     // A5 TLoadMxCubeCheck: MX_A_* → row-major ZZ (SFractal=32); MX_B_* → col-major NN.
@@ -205,6 +204,21 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       tile_view.slayout = TileLayout::row_major;
       if (source_is_dn) {
         std::swap(tile_view.blayout, tile_view.slayout);
+      }
+      // A single-row 2-D Mat operand (cube GEMV lhs / bias) is an ND row
+      // vector, not the NZ fractal used by multi-row matmul operands. PTO-ISA
+      // declares it as Tile<Mat, 1, K, BLayout::RowMajor, ...,
+      // SLayout::NoneBox>; that pair routes the Mat->Left move through the
+      // rows==1 vector path instead of the regular extraction path, whose row
+      // alignment excludes M=1. In a rank-3+ Mat load, shape[0] is a batch
+      // dimension, so keep the canonical NZ view.
+      const auto& shape = shapes_tuple->elements_;
+      if (shape.size() == 2) {
+        const ExprPtr& row_dim = source_is_dn ? shape[1] : shape[0];
+        if (auto rows = As<ConstInt>(row_dim); rows && rows->value_ == 1) {
+          tile_view.blayout = TileLayout::row_major;
+          tile_view.slayout = TileLayout::none_box;
+        }
       }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
                last_dim && last_dim->value_ == 1) {
@@ -579,14 +593,12 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
   // The transposed Mat (ZN) layout is a 2D L1 matmul-`b_trans` operand layout; it
   // is meaningless for a non-Mat space or a non-2D shape. Fail fast rather than
   // emit an invalid tile (mirrors tile.load's Mat-only transpose guard).
-  CHECK(!transpose_layout ||
-        (tile_shape.size() == 2 && target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat))
+  CHECK(!transpose_layout || (tile_shape.size() == 2 && target_memory_opt == MemorySpace::Mat))
       << "The operator " << op_name
       << " supports transpose=true only for a 2D tile with target_memory=Mat (L1)";
   // flat_layout is a Mat (L1/cbuf) staging layout and mutually exclusive with the
   // transposed NZ layout.
-  CHECK(!flat_layout ||
-        (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat && !transpose_layout))
+  CHECK(!flat_layout || (target_memory_opt == MemorySpace::Mat && !transpose_layout))
       << "The operator " << op_name
       << " supports flat_layout=true only for target_memory=Mat (L1) without transpose";
 

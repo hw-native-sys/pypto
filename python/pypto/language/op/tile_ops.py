@@ -1297,47 +1297,61 @@ def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias:
     return Tile(expr=call_expr)
 
 
-def gemv(lhs: Tile, rhs: Tile) -> Tile:
+def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
+
+    ``lhs`` must have exactly one physical and logical row. The logical K
+    extents must match. Inputs must use the same INT8, FP16, BF16, or FP32
+    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
 
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv operation
     """
-    call_expr = _ir_ops.gemv(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.gemv(lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 
-def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
+
+    ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
+    dtype requirements are identical to :func:`gemv`.
 
     Args:
         acc: Accumulator tile [1, N]
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv_acc operation
     """
-    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 
-def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
+def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile, acc_phase: str = "unspecified") -> Tile:
     """GEMV with bias add: C[1,N] = A[1,K] @ B[K,N] + bias[1,N].
+
+    ``bias`` must use the GEMV output dtype and its valid shape must equal the
+    logical output shape ``[1, N]``. The logical K extents and lhs/rhs dtype
+    requirements are identical to :func:`gemv`.
 
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
         bias: Bias tile [1, N]
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv_bias operation
     """
-    call_expr = _ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap())
+    call_expr = _ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 

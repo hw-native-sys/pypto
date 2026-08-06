@@ -153,6 +153,22 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   return "";
 }
 
+static std::string GemvAccPhaseAttr(const CallPtr& op) {
+  const auto acc_phase = op->GetKwarg<std::string>("acc_phase", "unspecified");
+  CHECK(acc_phase == "unspecified" || acc_phase == "partial" || acc_phase == "final")
+      << "GEMV acc_phase must be one of {unspecified, partial, final}, but got " << acc_phase;
+  if (acc_phase == "unspecified") return "";
+  return " {accPhase = #pto<acc_phase " + acc_phase + ">}";
+}
+
+static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
+                                      codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, pto_op_name, arity);
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + GemvAccPhaseAttr(op));
+  return "";
+}
+
 static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, "pto.tsel", 4);
@@ -637,9 +653,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
     // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
-    {"tile.gemv",            "pto.tgemv",            2},
     // tile.gemv_acc has custom codegen (in-place accumulation)
-    {"tile.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
     // tile.move has custom codegen (no-op elision for same-space same-address moves)
@@ -959,7 +973,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
-      acc_inst << ")";
+      acc_inst << ")" << GemvAccPhaseAttr(op);
       codegen.Emit(acc_inst.str());
       return "";
     };
@@ -1011,8 +1025,14 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   };
 
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
+  reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
+  });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
+  reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);
+  });
 }
 }  // namespace backend
 }  // namespace pypto

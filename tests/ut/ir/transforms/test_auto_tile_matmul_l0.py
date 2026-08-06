@@ -2537,6 +2537,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
             def kernel(
                 self,
                 q: pl.Tensor[[16, 128], pl.BF16],
+                q_row: pl.Tensor[[1, 128], pl.BF16],
                 b: pl.Tensor[[128, 512], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
@@ -2546,6 +2547,12 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 q_l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
                     q_mat, target_memory=pl.Mem.Left
                 )
+                q_row_mat: pl.Tile[[1, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    q_row, [0, 0], [1, 128], target_memory=pl.Mem.Mat
+                )
+                q_row_l0: pl.Tile[[1, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    q_row_mat, target_memory=pl.Mem.Left
+                )
                 b_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                     b, [0, 0], [128, 512], target_memory=pl.Mem.Mat
                 )
@@ -2553,7 +2560,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                     b_l0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b_mat, 0, ni, [128, 128], target_memory=pl.Mem.Right
                     )
-                    _other: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.gemv(q_l0, b_l0)
+                    _other: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.gemv(q_row_l0, b_l0)
                     c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
                     out_s: pl.Tensor[[16, 512], pl.FP32] = pl.store(c, [0, ni], out_i)
                     out_r = pl.yield_(out_s)

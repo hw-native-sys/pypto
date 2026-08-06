@@ -183,6 +183,26 @@ layout contract is implemented.
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage uses **host ZZ/NN** (AZZ2ZZ). |
 | Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`. |
 
+### Tile-only GEMV family (A2/A3)
+
+The tile-only GEMV family uses logical shape `[1, N]` but follows the Cube
+instruction's padded physical contract. Its Acc result has 16 physical rows,
+while its physical column count follows the RHS tile (and must satisfy the
+target's normal C0 alignment); the bias uses the same physical column count.
+Their `valid_shape` retains the logical `[K, N]`, `[1, N]`, and `[1, N]`
+regions. The lhs must have exactly one physical and logical row. A single-row Mat load uses `blayout=row_major` and
+`slayout=none_box`, selecting PTO-ISA's row-vector extraction path.
+
+The lhs and rhs logical K extents must match exactly. Supported dtype triples
+are `INT8 x INT8 -> INT32` and same-type `FP16`, `BF16`, or `FP32` inputs to
+`FP32`; `gemv_acc` uses that output dtype for `acc`, and `gemv_bias` requires
+the same output dtype for `bias`. The bias valid shape must exactly match the
+logical output shape `[1, N]`.
+
+`tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
+`"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
+while more K chunks remain and `"final"` for the last chunk.
+
 ## Python Usage
 
 ```python
