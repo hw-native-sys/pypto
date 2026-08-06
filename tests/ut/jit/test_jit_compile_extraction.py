@@ -14,6 +14,7 @@ runtime APIs directly.
 Closes hw-native-sys/pypto#1455.
 """
 
+import ctypes
 import importlib
 
 import pypto.language as pl
@@ -301,6 +302,41 @@ def sig_kernel(a: pl.Tensor[[_SIG_M, 128], pl.FP32], c: pl.Out[pl.Tensor[[_SIG_M
     return c
 
 
+# Runtime (unspecialized) scalar parameters in signature mode (issue #2283).
+# The scalar is consumed inside the incore dep, so these kernels also cover
+# scalar propagation across the JIT call graph.
+@jit.incore
+def _rt_add_scalar_incore(
+    a: pl.Tensor[[_SIG_M, 128], pl.FP32],
+    n: pl.Scalar[pl.FP32],
+    c: pl.Out[pl.Tensor[[_SIG_M, 128], pl.FP32]],
+):
+    tile = pl.load(a, [0, 0], [128, 128])
+    shifted = pl.add(tile, n)
+    pl.store(shifted, [0, 0], c)
+    return c
+
+
+@jit
+def rt_scalar_kernel(
+    a: pl.Tensor[[_SIG_M, 128], pl.FP32],
+    n: pl.Scalar[pl.FP32],
+    c: pl.Out[pl.Tensor[[_SIG_M, 128], pl.FP32]],
+):
+    c = _rt_add_scalar_incore(a, n, c)
+    return c
+
+
+@jit
+def rt_scalar_default_kernel(
+    a: pl.Tensor[[_SIG_M, 128], pl.FP32],
+    c: pl.Out[pl.Tensor[[_SIG_M, 128], pl.FP32]],
+    n: pl.Scalar[pl.FP32] = pl.RUNTIME,
+):
+    c = _rt_add_scalar_incore(a, n, c)
+    return c
+
+
 class TestCompileFromSignature:
     """``compile()`` with no positional args reads the shape/dtype contract
     straight from the kernel's own annotations — no throwaway ``torch.empty``
@@ -373,6 +409,85 @@ class TestCompileFromSignature:
         # Supplied via keyword: value flows into scalar_values.
         _, _, _, scalar_values, _, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
         assert scalar_values == {"n": 7}
+
+    def test_runtime_scalar_left_unspecialized(self):
+        """``pl.RUNTIME`` keeps a scalar out of ``scalar_values`` (issue #2283):
+        the value is supplied at dispatch, not baked into the artifact. The
+        dtype is still recorded — only the value is withheld."""
+        _, _, _, scalar_values, scalar_dtypes, _ = rt_scalar_kernel._bind_args_from_signature(
+            {"n": pl.RUNTIME}
+        )
+        assert scalar_values == {}
+        assert scalar_dtypes == {"n": pl.FP32}
+
+    def test_runtime_scalar_keeps_symbolic_param_in_program(self):
+        """A ``pl.RUNTIME`` scalar survives specialization as a real parameter
+        reference — in the entry *and* in the incore dep it is forwarded to.
+        A literal is folded into a constant in both instead."""
+        _, _, tm_r, sv_r, sd_r, dyn_r = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        prog_runtime = str(rt_scalar_kernel._compile_to_program(tm_r, sv_r, sd_r, dyn_r, pl))
+
+        _, _, tm_s, sv_s, sd_s, dyn_s = rt_scalar_kernel._bind_args_from_signature({"n": 7.0})
+        prog_specialized = str(rt_scalar_kernel._compile_to_program(tm_s, sv_s, sd_s, dyn_s, pl))
+
+        # Both keep 'n' in the entry *and* dep signatures — the parameter list
+        # comes from the annotations either way. What differs is every *use*:
+        # runtime forwards and consumes the symbol, specialized folds a constant.
+        assert prog_runtime.count("n: pl.Scalar[pl.FP32]") == 2
+        assert prog_specialized.count("n: pl.Scalar[pl.FP32]") == 2
+        assert "self._rt_add_scalar_incore(a, n, c)" in prog_runtime
+        assert "self._rt_add_scalar_incore(a, 7.0, c)" in prog_specialized
+        assert "pl.tile.adds(tile, n)" in prog_runtime
+        assert "pl.tile.adds(tile, 7.0)" in prog_specialized
+
+    def test_runtime_scalar_forwards_dtype_to_dep(self):
+        """A runtime scalar carries no value, but its dtype still reaches the dep
+        it is forwarded to."""
+        _, _, tm, sv, sd, dyn = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        contexts = rt_scalar_kernel._build_contexts(tm, sv, sd, dyn)
+        dep_ctx = next(c for c in contexts if c.func_name == "_rt_add_scalar_incore")
+        assert dep_ctx.scalar_values == {}
+        assert dep_ctx.scalar_dtypes == {"n": pl.FP32}
+
+    def test_runtime_scalar_default_needs_no_keyword(self):
+        """``pl.RUNTIME`` as the signature default makes the parameter runtime
+        without the caller passing anything — through to the generated program
+        (the specializer drops Python defaults, so the marker never leaks)."""
+        _, _, tm, sv, sd, dyn = rt_scalar_default_kernel._bind_args_from_signature({})
+        assert sv == {}
+        assert sd == {"n": pl.FP32}
+
+        prog = str(rt_scalar_default_kernel._compile_to_program(tm, sv, sd, dyn, pl))
+        assert "n: pl.Scalar[pl.FP32]" in prog
+        assert "pl.RUNTIME" not in prog
+        assert "pl.tile.adds(tile, n)" in prog
+
+    def test_runtime_marker_rejected_on_the_dispatch_path(self):
+        """``pl.RUNTIME`` is a compile-time marker. Binding real arguments — a
+        dispatch call, or a sample-argument compile — must reject it by name
+        instead of letting it reach the runtime as a bogus scalar. The signature
+        default makes this reachable from a plain ``kernel(a, c)`` call."""
+        torch = pytest.importorskip("torch")
+
+        t = torch.zeros(256, 128, dtype=torch.float32)
+        with pytest.raises(TypeError, match=r"'n' received pl\.RUNTIME"):
+            rt_scalar_default_kernel._bind_args((t, t), {})
+        with pytest.raises(TypeError, match=r"'n' received pl\.RUNTIME"):
+            rt_scalar_kernel._bind_args((t, pl.RUNTIME, t), {})
+
+    def test_runtime_scalar_and_literal_do_not_share_cache(self):
+        """Specializing the value and leaving it runtime are different artifacts."""
+        from_runtime = rt_scalar_kernel.compile(n=pl.RUNTIME)
+        from_literal = rt_scalar_kernel.compile(n=7.0)
+        assert isinstance(from_runtime, CompiledProgram)
+        assert from_runtime is not from_literal
+        # Re-requesting the runtime specialization hits the same cache entry.
+        assert rt_scalar_kernel.compile(n=pl.RUNTIME) is from_runtime
+
+    def test_unsupported_scalar_value_points_at_runtime_marker(self):
+        """A value that is neither a literal nor ``pl.RUNTIME`` names both paths."""
+        with pytest.raises(TypeError, match=r"pl\.RUNTIME"):
+            rt_scalar_kernel._bind_args_from_signature({"n": ctypes.c_int32()})
 
     def test_keyword_tensor_samples_use_tensor_mode(self):
         """Passing sample tensors by keyword (no positional args) must still bind

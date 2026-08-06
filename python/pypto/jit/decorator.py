@@ -361,12 +361,19 @@ def _signature_scalar_value(
     name: str,
     param: inspect.Parameter,
     kwargs: dict[str, Any],
-) -> int | float | bool:
+) -> int | float | bool | None:
     """Resolve a scalar parameter's value for signature-mode specialization.
 
     Value comes from ``kwargs`` (by param name) or the signature default; a
     scalar with neither is an error (the signature carries no value).
+
+    Returns:
+        The literal to specialize into the compiled artifact, or ``None`` when
+        the caller passed ``pl.RUNTIME`` — the parameter then stays a runtime
+        ``pl.Scalar`` in the generated program instead of being baked in.
     """
+    from pypto.language.typing.scalar import RUNTIME  # noqa: PLC0415
+
     if name in kwargs:
         value = kwargs[name]
     elif param.default is not inspect.Parameter.empty:
@@ -375,11 +382,15 @@ def _signature_scalar_value(
         raise TypeError(
             f"@pl.jit function '{func_name}': scalar parameter '{name}' has no value. When "
             f"specializing from annotations, pass scalar values as keyword arguments, e.g. "
-            f"lower({name}=...) or compile({name}=...)."
+            f"lower({name}=...) or compile({name}=...). Pass '{name}=pl.RUNTIME' instead to "
+            f"leave it unspecialized (its value is supplied at dispatch)."
         )
+    if value is RUNTIME:
+        return None
     if not isinstance(value, (int, float, bool)):
         raise TypeError(
-            f"@pl.jit function '{func_name}': scalar parameter '{name}' must be an int/float/bool, "
+            f"@pl.jit function '{func_name}': scalar parameter '{name}' must be an int/float/bool "
+            f"(specializes the value into the artifact) or pl.RUNTIME (leaves it unspecialized), "
             f"got {type(value).__name__}."
         )
     return value
@@ -1327,8 +1338,12 @@ def _resolve_dep_call_metadata(
                 continue
             if caller_arg in all_tensor_meta:
                 dep_tensor_meta[dep_param] = all_tensor_meta[caller_arg]
-            elif caller_arg in caller_scalar_values:
-                dep_scalar_values[dep_param] = caller_scalar_values[caller_arg]
+            else:
+                # A scalar arg carries a value only when the caller specialized
+                # it; a ``pl.RUNTIME`` scalar has a dtype but no value. Forward
+                # each fact independently so the dtype survives either way.
+                if caller_arg in caller_scalar_values:
+                    dep_scalar_values[dep_param] = caller_scalar_values[caller_arg]
                 if caller_arg in caller_scalar_dtypes:
                     dep_scalar_dtypes[dep_param] = caller_scalar_dtypes[caller_arg]
     else:
@@ -1786,7 +1801,25 @@ class JITFunction:
         scalar_values: dict[str, int | float | bool] = {}
         scalar_dtypes: dict[str, DataType] = {}
 
+        from pypto.language.typing.scalar import RUNTIME  # noqa: PLC0415
+
         for name, value in arguments.items():
+            # ``pl.RUNTIME`` is a compile-time marker, not a value. This path
+            # binds real arguments (dispatch, or sample-argument compile), where
+            # an unrecognized object would otherwise slip through the
+            # int/float/bool filter below and fail much later with an opaque
+            # "must be real number" from the runtime. Note ``apply_defaults()``
+            # above materializes a ``= pl.RUNTIME`` signature default, so a plain
+            # ``kernel(a, c)`` call reaches here too.
+            if value is RUNTIME:
+                raise TypeError(
+                    f"@pl.jit function '{self.__name__}': parameter '{name}' received "
+                    f"pl.RUNTIME, which is a compile-time marker rather than a value. It is "
+                    f"only accepted by annotation-driven signature mode — call compile() or "
+                    f"lower() with no tensor arguments and pass it by keyword, e.g. "
+                    f"{self.__name__}.compile({name}=pl.RUNTIME). To run the kernel, pass "
+                    f"'{name}' its actual value."
+                )
             if _is_tensor(value):
                 tensor_meta[name] = _extract_tensor_meta(
                     value, entry_dyn_map.get(name), param_layouts.get(name)
@@ -1818,7 +1851,11 @@ class JITFunction:
         ``None`` in the cache key.
 
         Scalar parameters carry no value in the signature, so their values must
-        come from ``kwargs`` (or a signature default).
+        come from ``kwargs`` (or a signature default). A literal is specialized
+        into the artifact; ``pl.RUNTIME`` instead leaves the parameter
+        unspecialized — it is omitted from ``scalar_values`` (and therefore from
+        the cache key) and survives into the generated program as a real
+        ``pl.Scalar`` parameter, exactly like a dynamic dim extent.
 
         Raises:
             TypeError: if a tensor parameter has a bare ``pl.Tensor`` annotation
@@ -1893,7 +1930,13 @@ class JITFunction:
             if scalar_dtype is None and isinstance(annotation, DataType):
                 scalar_dtype = annotation
             if scalar_dtype is not None:
-                scalar_values[name] = _signature_scalar_value(self.__name__, name, param, kwargs)
+                value = _signature_scalar_value(self.__name__, name, param, kwargs)
+                # ``pl.RUNTIME`` -> no ``scalar_values`` entry. The specializer only
+                # substitutes names present in ``scalar_values``, so the parameter
+                # stays symbolic in the generated program; it also drops out of the
+                # cache key, so one artifact serves every runtime value.
+                if value is not None:
+                    scalar_values[name] = value
                 scalar_dtypes[name] = scalar_dtype
                 continue
 
@@ -2130,27 +2173,44 @@ class JITFunction:
         raises). Dynamic dims (``pl.dynamic`` / ``bind_dynamic``) need no value —
         the artifact is extent-independent. Scalar parameters have no value in
         the signature, so pass them as keyword args (or via a signature
-        default). This shares the same cache entry as an equivalent
-        ``compile(*sample_tensors)`` call.
+        default); a literal **specializes** that value into the artifact, while
+        ``pl.RUNTIME`` leaves the parameter **unspecialized** — it stays a real
+        ``pl.Scalar`` parameter supplied at dispatch and, like a dynamic dim,
+        drops out of the cache key. A signature-mode call shares a cache entry
+        with an equivalent ``compile(*sample_tensors)`` call whenever the two
+        agree on every specialized scalar; ``pl.RUNTIME`` is its own
+        specialization and is rejected on the sample-argument path, which always
+        specializes the scalar value it is handed.
 
         Example::
 
+            M = pl.dynamic("M")
+
             @pl.jit
-            def my_kernel(x, w, out):
+            def my_kernel(
+                x: pl.Tensor[[M, 4096], pl.BF16],
+                w: pl.Tensor[[4096, 4096], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, 4096], pl.BF16]],
+                num_tokens: pl.Scalar[pl.INT32],
+            ):
                 ...
 
             worker = ChipWorker(config=RunConfig(platform="a2a3"))
 
             # From sample tensors (shape/dtype read; contents ignored):
-            compiled = my_kernel.compile(sample_x, sample_w, sample_out)
+            compiled = my_kernel.compile(sample_x, sample_w, sample_out, 128)
 
-            # Or straight from the (fully-annotated) signature — no tensors:
-            compiled = my_kernel.compile()
+            # Or straight from the (fully-annotated) signature — no tensors.
+            # num_tokens varies per launch, so keep it out of the artifact: its
+            # value is supplied on each dispatch through the compiled artifact
+            # (below), not by calling my_kernel(...) directly — an eager call
+            # re-specializes and compiles a separate artifact.
+            compiled = my_kernel.compile(num_tokens=pl.RUNTIME)
 
             w_dev = worker.alloc_tensor(real_w.shape, real_w.dtype, init=real_w)
             h = worker.register(compiled)
             for batch in stream:
-                h(batch.x, w_dev, batch.out)
+                h(batch.x, w_dev, batch.out, batch.num_tokens)
 
         Args:
             *args: Positional arguments matching the decorated function's
@@ -2159,7 +2219,9 @@ class JITFunction:
                 straight from the signature annotations instead.
             **kwargs: Keyword arguments. A ``config`` keyword, if present, is
                 a :class:`~pypto.runtime.runner.RunConfig`. In signature mode,
-                scalar parameter values are also passed here (by name).
+                scalar parameter values are also passed here (by name) — a
+                literal to specialize it, or ``pl.RUNTIME`` to leave it
+                unspecialized.
 
         Returns:
             The cached :class:`CompiledProgram` for this specialization.
@@ -2179,7 +2241,9 @@ class JITFunction:
         Args:
             *args: Positional sample arguments matching the decorated function.
                 Omit tensor samples to specialize from fully shaped annotations.
-            **kwargs: Keyword sample arguments and an optional ``config``.
+            **kwargs: Keyword sample arguments and an optional ``config``. In
+                signature mode a scalar parameter takes a literal (specialized
+                into the IR) or ``pl.RUNTIME`` (left unspecialized).
 
         Returns:
             The specialized :class:`ir.Program` after configured passes.

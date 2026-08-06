@@ -111,8 +111,15 @@ compiled = prefill_fwd.compile()
 - **静态维**（`HIDDEN`、`VOCAB` …）来自注解常量。
 - **动态维**（`pl.dynamic` / `bind_dynamic`）无需给值 —— 编译产物与具体 extent
   无关，`compile()` 与等价的 `compile(sample_tensors)` 共享同一 cache 条目。
-- **标量参数**在签名里没有值 —— 用关键字参数传入，例如
-  `kernel.compile(num_tokens=128)`。
+- **标量参数**在签名里没有值 —— 用关键字参数传入。传字面量会把该值**特化**进
+  产物，例如 `kernel.compile(num_tokens=128)` 编出的内核只认 128。改传
+  `pl.RUNTIME` —— `kernel.compile(num_tokens=pl.RUNTIME)` —— 则**不特化**：该参数
+  在生成的程序里仍是真正的 `pl.Scalar` 参数，值在 dispatch 时给出；它与动态维一样
+  不进 cache key，一份产物服务所有取值。该值要通过编译产物给出 —— `compiled(...)`
+  或 `worker.register(compiled)` 拿到的 handle —— 而不是直接调用内核：
+  `kernel(x, out, 128)` 会按 128 重新特化并编出另一份产物。`pl.RUNTIME` 也可以写成
+  签名默认值（`num_tokens: pl.Scalar[pl.INT32] = pl.RUNTIME`），这样每个 `compile()`
+  调用点都不必再传关键字。
 - **bare `pl.Tensor`**（无 shape）无从读取，会给出明确报错；请补全
   `pl.Tensor[[...], dtype]` 注解，或回退到 `compile(*sample_tensors)`。
 

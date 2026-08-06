@@ -262,4 +262,64 @@ class Scalar(metaclass=ScalarMeta):
         return cls.__getitem__(item)
 
 
-__all__ = ["Scalar"]
+class RuntimeScalarMarker(Scalar):
+    """Marker for a scalar parameter whose value is supplied at dispatch.
+
+    A ``pl.Scalar[dtype]`` annotation carries a type but no value, so
+    annotation-driven signature mode (``compile()`` / ``lower()`` with no
+    tensor arguments) needs one value per scalar parameter. Passing a literal
+    **specializes** that value into the compiled artifact; passing
+    :data:`RUNTIME` leaves the parameter **unspecialized** — it stays a real
+    ``pl.Scalar`` parameter in the generated program and its value is supplied
+    at dispatch, exactly like a ``pl.dynamic`` dimension extent. Unspecialized
+    scalars also drop out of the specialization cache key, so one artifact
+    serves every runtime value.
+
+    Subclasses :class:`Scalar` so that a type checker accepts it as the default
+    of a scalar parameter — ``n: pl.Scalar[dtype] = pl.RUNTIME`` — for the same
+    reason :class:`~pypto.language.typing.dynamic.DynVar` does: the marker
+    stands in wherever a ``Scalar`` is expected. It carries no dtype of its own;
+    the parameter's annotation supplies that.
+
+    Use the :data:`RUNTIME` singleton rather than instantiating this class.
+
+    Examples:
+        >>> import pypto.language as pl
+        >>>
+        >>> # num_tokens varies per step: keep it out of the artifact.
+        >>> compiled = prefill_fwd.compile(num_tokens=pl.RUNTIME)  # doctest: +SKIP
+    """
+
+    def __init__(self) -> None:
+        """Initialize the marker with no dtype and no wrapped expression.
+
+        Bypasses :meth:`Scalar.__init__`, which requires one of the two — this
+        marker deliberately has neither, and its dtype comes from the annotated
+        parameter it defaults.
+        """
+        self.dtype = None
+        self.expr = None
+        self._annotation_only = False
+
+    def unwrap(self) -> Expr:
+        """Reject use in an expression.
+
+        Raises:
+            RuntimeError: Always — the marker has no value to unwrap.
+        """
+        raise RuntimeError(
+            "pl.RUNTIME is a compile-time marker with no value. Pass it to compile() or "
+            "lower() to leave a scalar parameter unspecialized; it cannot take part in an "
+            "expression."
+        )
+
+    def __repr__(self) -> str:
+        """Return the marker's canonical spelling."""
+        return "pl.RUNTIME"
+
+
+RUNTIME = RuntimeScalarMarker()
+"""Singleton :class:`RuntimeScalarMarker` — see the class docstring."""
+
+
+__all__ = ["RUNTIME", "RuntimeScalarMarker", "Scalar"]

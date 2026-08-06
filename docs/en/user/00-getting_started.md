@@ -125,7 +125,17 @@ throwaway `torch.empty(...)` buffers. Details:
   artifact is extent-independent, and `compile()` shares one cache entry with an
   equivalent `compile(sample_tensors)` call.
 - **Scalar parameters** carry no value in the signature — pass them as keyword
-  args, e.g. `kernel.compile(num_tokens=128)`.
+  args. A literal **specializes** the value into the artifact, e.g.
+  `kernel.compile(num_tokens=128)` compiles a kernel that only ever sees 128.
+  Pass `pl.RUNTIME` instead — `kernel.compile(num_tokens=pl.RUNTIME)` — to leave
+  the parameter **unspecialized**: it stays a real `pl.Scalar` parameter whose
+  value arrives at dispatch and, like a dynamic dim, drops out of the cache key,
+  so one artifact serves every value. Supply that value through the compiled
+  artifact — `compiled(...)` or a `worker.register(compiled)` handle — not by
+  calling the kernel eagerly: `kernel(x, out, 128)` re-specializes on 128 and
+  compiles a separate artifact. `pl.RUNTIME` also works as the signature default
+  (`num_tokens: pl.Scalar[pl.INT32] = pl.RUNTIME`), which makes the keyword
+  unnecessary at every `compile()` call site.
 - A **bare `pl.Tensor`** parameter (no shape) has nothing to read and raises a
   clear error; give it a full `pl.Tensor[[...], dtype]` annotation, or fall back
   to `compile(*sample_tensors)`.

@@ -235,6 +235,7 @@ from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
 from .typing import (
+    RUNTIME,
     Array,
     AsyncEvent,
     AsyncSession,
@@ -313,6 +314,7 @@ __all__ = [
     "InOut",
     "IntLike",
     "Out",
+    "RUNTIME",
     "dynamic",
     "const",
     "range",
