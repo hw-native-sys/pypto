@@ -486,7 +486,7 @@ Pass FlattenTileNdTo2D();
 Pass LegalizeTileCast();
 
 /**
- * @brief Auto-tile static 2D matmul / matmul_acc calls for the backend's L0
+ * @brief Auto-tile static 2D matmul-family calls for the backend's L0
  *
  * Queries ``utils::ChooseL0Tile`` for an ``(m, n, k, stationarity, dbC)``
  * design point and rewrites Mat-resident operands into aligned Left/Right
@@ -497,10 +497,11 @@ Pass LegalizeTileCast();
  * L0C legality uses the backend's physical accumulator-row alignment, which
  * may be stricter than the logical cube shape (for example, an INT32 M=16
  * result occupies 32 rows on Ascend910B).  When that physical ``[M, N]``
- * footprint exceeds L0c, plain ``tile.matmul`` is M/N-tiled.  A result consumed
- * by one output store uses direct-to-GM placement; a result consumed entirely
- * as a later matmul operand is assembled into an on-chip Mat scratch.  The
- * Mat-scratch route also folds a compatible f32-to-bf16/f16
+ * footprint exceeds L0c, fresh ``tile.matmul`` and ``tile.matmul_bias`` calls
+ * are M/N-tiled.  A result consumed by one output store uses direct-to-GM
+ * placement; a result consumed entirely as a later matmul operand is assembled
+ * into an on-chip Mat scratch.  The Mat-scratch route also folds a compatible
+ * f32-to-bf16/f16
  * ``tile.cast(mode="rint")`` into the FIXPIPE writeback.
  *
  * The canonical frontend split-K form -- a full-output accumulator placeholder,
@@ -535,14 +536,29 @@ Pass LegalizeTileCast();
  *
  * Eligible calls require static 2D operands with B in Mat and A in Mat or Vec.
  * ``tile.matmul_bias`` is supported when both matrix operands are Mat and its
- * static ``[1, N]`` bias is Mat- or Bias-resident. The bias is applied once on
- * the first K block; M/N tiling slices a Mat-resident bias along N.
+ * static ``[1, N]`` bias is Mat- or Bias-resident and has the accumulator dtype
+ * (FP32 for floating-point matrix operands, INT32 for integer operands). The
+ * bias is applied once on the first K block. M/N tiling reconstructs each N
+ * window from a single-use defining ``tile.load`` separated from the call only
+ * by other sibling loads, then moves that independent Mat tile to Bias;
+ * candidate N is bounded by the
+ * backend's bias-table capacity and its emitted pipeline replication depth.
+ * An already-Bias-resident source stays outside the emitted grid and consumes
+ * one slot rather than inheriting those replication factors.
+ * The backend must support the exact Mat-to-Bias dtype pair, and matrix tile
+ * dimensions must satisfy their layout-derived boxed alignment.
  * When the chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is
  * needed, although a chained result may still be remapped to Mat by the
  * compatible cast-fold placement above.  Other unsupported regimes are left
  * untouched; useful deferred cases emit ``PerfHint`` diagnostics.
  * An already-Bias-resident source that itself needs N tiling is deferred
- * because Bias-to-Bias sub-window extraction is unsupported.
+ * because Bias-to-Bias sub-window extraction is unsupported. A Mat source that
+ * needs N tiling is also deferred unless it is a single-use 2D load in the same
+ * statement scope with only sibling loads between it and the matmul, since
+ * reloading across an intervening effect changes snapshot semantics and boxed
+ * one-row Mat subviews are not PTOAS-legal. Direct-store placement additionally
+ * requires that its consumer store be the first non-load statement after the
+ * matmul, so deferred emission cannot move computation across an effect.
  *
  * Requirements:
  * - Input IR must have static 2D tile ops (run FlattenTileNdTo2D first)

@@ -1234,7 +1234,8 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
     Args:
         lhs: Left-hand side tile [M, K]
         rhs: Right-hand side tile [K, N]
-        bias: Bias tile [1, N]
+        bias: Bias tile [1, N] with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
 
     Returns:
         Tile wrapping the matmul_bias operation
@@ -1332,7 +1333,8 @@ def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
-        bias: Bias tile [1, N]
+        bias: Bias tile [1, N] with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
 
     Returns:
         Tile wrapping the gemv_bias operation

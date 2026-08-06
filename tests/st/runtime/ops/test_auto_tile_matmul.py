@@ -25,6 +25,8 @@ Validates on device the cases from examples/kernels/11_auto_tile_matmul.py:
     source panel composes those boundaries with AutoTile's ordinary inner-K rewrite.
   - **Biased matmul** -- ``tile.matmul_bias`` applies its bias exactly once per output tile
     while combining M/N and K tiling, for both direct-GM and chained Mat-scratch placement.
+    A2/A3 exercises both its INT8/INT32 and FP16/BF16-to-FP32 Mat→Bias transfers;
+    the floating FP32-bias cases are also covered on A5.
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot
 give (actual execution). Ascend910B (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
@@ -71,13 +73,23 @@ _COMPOSE_K = 768
 _COMPOSE_K_TILE = 384
 
 _BIAS_M = 256
-_BIAS_N = 256
+_BIAS_N = 512
 _BIAS_K = 256
 _BIAS_SCRATCH_K = 192
 _BIAS_OUT_N = 64
-_BIAS_BOUNDARY_M = 272
-_BIAS_BOUNDARY_K = 64
-_BIAS_BOUNDARY_N = 144
+_BIAS_BOUNDARY_M = 528
+_BIAS_BOUNDARY_K = 32
+_BIAS_BOUNDARY_N = 528
+_BIAS_PEEL_M = 64
+_BIAS_PEEL_K = 272
+_BIAS_PEEL_N = 64
+_BIAS_M_ONLY_M = 1040
+_BIAS_M_ONLY_K = 64
+_BIAS_M_ONLY_N = 64
+
+_BIAS_INT_M = 128
+_BIAS_INT_K = 512
+_BIAS_INT_N = 512
 
 
 @pl.jit
@@ -199,6 +211,58 @@ def matmul_bias_mn_boundary_direct(
     return out
 
 
+@pl.jit
+def matmul_bias_nondivisor_k_tail(
+    a: pl.Tensor[[_BIAS_PEEL_M, _BIAS_PEEL_K], pl.BF16],
+    b: pl.Tensor[[_BIAS_PEEL_K, _BIAS_PEEL_N], pl.BF16],
+    bias: pl.Tensor[[1, _BIAS_PEEL_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[_BIAS_PEEL_M, _BIAS_PEEL_N], pl.FP32]],
+):
+    """Biased GEMM whose selected K tile leaves an aligned peeled tail."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_nondivisor_k_tail"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_PEEL_M, _BIAS_PEEL_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_PEEL_K, _BIAS_PEEL_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_PEEL_N], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+        out = pl.store(c, [0, 0], out)
+    return out
+
+
+@pl.jit
+def matmul_bias_m_only_bias_resident(
+    a: pl.Tensor[[_BIAS_M_ONLY_M, _BIAS_M_ONLY_K], pl.BF16],
+    b: pl.Tensor[[_BIAS_M_ONLY_K, _BIAS_M_ONLY_N], pl.BF16],
+    bias: pl.Tensor[[1, _BIAS_M_ONLY_N], pl.FP32],
+    out: pl.Out[pl.Tensor[[_BIAS_M_ONLY_M, _BIAS_M_ONLY_N], pl.FP32]],
+):
+    """M-only output tiling reuses a full architectural Bias tile."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_m_only_bias_resident"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_M_ONLY_M, _BIAS_M_ONLY_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_M_ONLY_K, _BIAS_M_ONLY_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_M_ONLY_N], target_memory=pl.Mem.Mat)
+        bias_l0 = pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_l0)
+        out = pl.store(c, [0, 0], out)
+    return out
+
+
+@pl.jit
+def matmul_bias_a2a3_int_direct(
+    a: pl.Tensor[[_BIAS_INT_M, _BIAS_INT_K], pl.INT8],
+    b: pl.Tensor[[_BIAS_INT_K, _BIAS_INT_N], pl.INT8],
+    bias: pl.Tensor[[1, _BIAS_INT_N], pl.INT32],
+    out: pl.Out[pl.Tensor[[_BIAS_INT_M, _BIAS_INT_N], pl.INT32]],
+):
+    """A2/A3 biased GEMM using its supported INT32 Mat-to-Bias path."""
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul_bias_a2a3_int_direct"):
+        a_mat = pl.load(a, [0, 0], [_BIAS_INT_M, _BIAS_INT_K], target_memory=pl.Mem.Mat)
+        b_mat = pl.load(b, [0, 0], [_BIAS_INT_K, _BIAS_INT_N], target_memory=pl.Mem.Mat)
+        bias_mat = pl.load(bias, [0, 0], [1, _BIAS_INT_N], target_memory=pl.Mem.Mat)
+        c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+        out = pl.store(c, [0, 0], out)
+    return out
+
+
 def _cfg(test_config, planner):
     """Return the session config with the requested planner selected explicitly."""
     return dataclasses.replace(test_config, memory_planner=planner)
@@ -229,6 +293,21 @@ class TestAutoTileMatmulL0:
         )
 
     @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_a2a3_int_direct_store(self, test_config, planner):
+        """A2/A3 applies INT32 bias once across an INT8 M/N+K tiled GEMM."""
+        matmul_bias_a2a3_int_direct._cache.clear()
+        torch.manual_seed(10)
+        a = torch.randint(-3, 4, (_BIAS_INT_M, _BIAS_INT_K), dtype=torch.int8)
+        b = torch.randint(-3, 4, (_BIAS_INT_K, _BIAS_INT_N), dtype=torch.int8)
+        bias = torch.randint(-20, 21, (1, _BIAS_INT_N), dtype=torch.int32)
+        out = torch.zeros((_BIAS_INT_M, _BIAS_INT_N), dtype=torch.int32)
+
+        matmul_bias_a2a3_int_direct(a, b, bias, out, config=_cfg(test_config, planner))
+
+        assert torch.equal(out, a.int() @ b.int() + bias)
+
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+    @pytest.mark.parametrize("planner", _PLANNERS)
     def test_matmul_bias_mn_k_direct_store(self, test_config, planner):
         """Bias is applied once while M/N sub-tiles complete a split-K reduction."""
         matmul_bias_mn_k_direct._cache.clear()
@@ -244,6 +323,7 @@ class TestAutoTileMatmulL0:
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 2e-2, f"direct matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
     @pytest.mark.parametrize("planner", _PLANNERS)
     def test_matmul_bias_mn_k_mat_scratch(self, test_config, planner):
         """A biased producer is tiled into Mat scratch for its sole matmul consumer."""
@@ -262,6 +342,7 @@ class TestAutoTileMatmulL0:
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 2e-2, f"Mat-scratch matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
     @pytest.mark.parametrize("planner", _PLANNERS)
     def test_matmul_bias_mn_boundaries(self, test_config, planner):
         """Partial M/N tiles preserve the logical Bias and output regions."""
@@ -277,6 +358,40 @@ class TestAutoTileMatmulL0:
         expected = a.float() @ b.float() + bias
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 2e-2, f"boundary matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_nondivisor_k_tail(self, test_config, planner):
+        """The peeled final K block accumulates without applying bias twice."""
+        matmul_bias_nondivisor_k_tail._cache.clear()
+        torch.manual_seed(14)
+        a = torch.randn(_BIAS_PEEL_M, _BIAS_PEEL_K, dtype=torch.bfloat16)
+        b = torch.randn(_BIAS_PEEL_K, _BIAS_PEEL_N, dtype=torch.bfloat16)
+        bias = torch.randn((1, _BIAS_PEEL_N), dtype=torch.float32)
+        out = torch.zeros((_BIAS_PEEL_M, _BIAS_PEEL_N), dtype=torch.float32)
+
+        matmul_bias_nondivisor_k_tail(a, b, bias, out, config=_cfg(test_config, planner))
+
+        expected = a.float() @ b.float() + bias
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, f"peeled-K matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim", "a5", "a5sim")
+    @pytest.mark.parametrize("planner", _PLANNERS)
+    def test_matmul_bias_m_only_bias_resident(self, test_config, planner):
+        """M-only tiling reuses a full Bias-resident source without subwindowing."""
+        matmul_bias_m_only_bias_resident._cache.clear()
+        torch.manual_seed(15)
+        a = torch.randn(_BIAS_M_ONLY_M, _BIAS_M_ONLY_K, dtype=torch.bfloat16)
+        b = torch.randn(_BIAS_M_ONLY_K, _BIAS_M_ONLY_N, dtype=torch.bfloat16)
+        bias = torch.randn((1, _BIAS_M_ONLY_N), dtype=torch.float32)
+        out = torch.zeros((_BIAS_M_ONLY_M, _BIAS_M_ONLY_N), dtype=torch.float32)
+
+        matmul_bias_m_only_bias_resident(a, b, bias, out, config=_cfg(test_config, planner))
+
+        expected = a.float() @ b.float() + bias
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 2e-2, f"M-only matmul_bias rel_err {rel_err:.3e} exceeds 2e-2"
 
     @pytest.mark.parametrize("planner", _PLANNERS)
     def test_loop_carried_matmul_acc_mn_tiling(self, test_config, planner):

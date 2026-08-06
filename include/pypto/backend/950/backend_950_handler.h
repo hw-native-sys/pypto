@@ -71,6 +71,14 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
+  [[nodiscard]] uint32_t GetBiasCapacityBytes() const override { return 4ULL * 1024; }
+  [[nodiscard]] bool SupportsMatToBiasMove(const DataType& source_dtype,
+                                           const DataType& bias_dtype) const override {
+    return (source_dtype == DataType::INT32 && bias_dtype == DataType::INT32) ||
+           (bias_dtype == DataType::FP32 &&
+            (source_dtype == DataType::FP32 || source_dtype == DataType::FP16 ||
+             source_dtype == DataType::BF16));
+  }
   [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
   // a5 roofline cost-model constants -- FULLY a5-sim-CALIBRATED (all 7; raw work-cycle fit;

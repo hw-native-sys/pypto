@@ -6270,6 +6270,53 @@ class TestDestinationSpaceLayoutDeduction:
         assert [cast(ir.ConstInt, dim).value for dim in result_type.shape] == [32, 32]
         assert _valid_of(result_type) == [16, 16]
 
+    def test_gemv_bias_uses_the_shared_product_geometry_contract(self):
+        """The shared biased-product deducer also preserves GEMV valid N."""
+        lhs = _partial_tile([1, 64], [1, 48], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [1, 24], name="bias")
+
+        result_type = tile.gemv_bias(lhs, rhs, bias).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert [cast(ir.ConstInt, dim).value for dim in result_type.shape] == [1, 32]
+        assert _valid_of(result_type) == [1, 16]
+
+    def test_matmul_bias_rejects_insufficient_valid_bias_n(self):
+        """Bias must cover every valid output column read by the cube."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 24], name="rhs")
+        bias = _partial_tile([1, 32], [1, 16], name="bias")
+
+        with pytest.raises(ValueError, match="bias valid N to cover output valid N"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_rejects_empty_valid_bias_row(self):
+        """The cube always reads and broadcasts one logical bias row."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [0, 16], name="bias")
+
+        with pytest.raises(ValueError, match="bias valid rows to cover one broadcast row"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_requires_accumulator_dtype_bias(self):
+        """TMATMUL_BIAS requires FP32/INT32 bias to match its Acc output."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.BF16), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], DataType.BF16), span)
+        bias = ir.Var("bias", ir.TileType([1, 32], DataType.BF16), span)
+
+        with pytest.raises(ValueError, match="requires bias dtype fp32"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+        int_lhs = ir.Var("int_lhs", ir.TileType([16, 64], DataType.INT8), span)
+        int_rhs = ir.Var("int_rhs", ir.TileType([64, 32], DataType.INT8), span)
+        int_bias = ir.Var("int_bias", ir.TileType([1, 32], DataType.INT32), span)
+        result_type = tile.matmul_bias(int_lhs, int_rhs, int_bias).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.INT32
+
 
 class TestWriteValidRegionUnion:
     """The valid-region union rule shared by tile.assemble and tile.store.

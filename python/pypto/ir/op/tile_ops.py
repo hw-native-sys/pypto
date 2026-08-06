@@ -1825,7 +1825,8 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     Args:
         lhs: Left-hand side tile (TileType [M, K])
         rhs: Right-hand side tile (TileType [K, N])
-        bias: Bias tile (TileType [1, N])
+        bias: Bias tile (TileType [1, N]) with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1967,7 +1968,8 @@ def gemv_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Cal
     Args:
         lhs: Row vector tile (TileType [1, K])
         rhs: Right-hand side tile (TileType [K, N])
-        bias: Bias tile (TileType [1, N])
+        bias: Bias tile (TileType [1, N]) with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

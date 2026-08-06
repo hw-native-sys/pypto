@@ -483,8 +483,9 @@ void BindPass(nb::module_& m) {
              "B-stationary schedules. dbC=2 is enabled under PTOAS and available as a PyPTO\n"
              "planner opt-in. Under PyPTO, a canonical already-L0 stationary-panel pipeline\n"
              "may automatically use two L0C slots when its post-lowering Acc footprint fits.\n"
-             "Mat-resident tile.matmul_bias is supported with bias-once K reduction and N-sliced\n"
-             "bias placement. Other already-L0-sized and unsupported regimes are left untouched;\n"
+             "Mat-resident tile.matmul_bias is supported with accumulator-typed bias, bias-once K\n"
+             "reduction, and bias-capacity-bounded N-window reloads followed by Mat-to-Bias moves. Other\n"
+             "already-L0-sized and unsupported regimes are left untouched;\n"
              "useful deferred cases emit PerfHint diagnostics.");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
@@ -745,8 +746,12 @@ void BindPass(nb::module_& m) {
       .value("AStationary", utils::Stationarity::kAStationary)
       .value("BStationary", utils::Stationarity::kBStationary);
 
-  nb::class_<utils::L0TileConfig>(l0_tile, "L0TileConfig",
-                                  "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs")
+  nb::class_<utils::L0TileConfig>(
+      l0_tile, "L0TileConfig",
+      "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs. max_n caps the logical chosen "
+      "tile-N extent (not the problem N); max_n_pipelined may tighten that bound when N moves through "
+      "a full-K output pipeline, and max_n_nested_pipelined handles two nested pipeline levels. Zero "
+      "means unbounded.")
       .def(nb::init<>())
       .def_rw("M", &utils::L0TileConfig::M)
       .def_rw("N", &utils::L0TileConfig::N)
@@ -766,6 +771,9 @@ void BindPass(nb::module_& m) {
       .def_rw("l0c_align_m", &utils::L0TileConfig::l0c_align_m)
       .def_rw("box_align_m", &utils::L0TileConfig::box_align_m)
       .def_rw("box_align_n", &utils::L0TileConfig::box_align_n)
+      .def_rw("max_n", &utils::L0TileConfig::max_n)
+      .def_rw("max_n_pipelined", &utils::L0TileConfig::max_n_pipelined)
+      .def_rw("max_n_nested_pipelined", &utils::L0TileConfig::max_n_nested_pipelined)
       .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
       .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)

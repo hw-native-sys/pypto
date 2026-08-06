@@ -46,6 +46,9 @@ def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConf
     cfg.align_m = cfg.align_n = cfg.align_k = 16
     cfg.l0c_align_m = 16
     cfg.box_align_m = cfg.box_align_n = 1
+    cfg.max_n = 0
+    cfg.max_n_pipelined = 0
+    cfg.max_n_nested_pipelined = 0
     # Realizable-mask gates default OFF (output-stationary, dbC=1) — the
     # algorithm the pass realizes today. Tests open a gate to exercise an axis.
     cfg.allow_a_stationary = False
@@ -353,6 +356,86 @@ class TestL0TilingInvariants:
         cfg = _default_config(M=128, N=-1, K=128)
         with pytest.raises(ValueError, match="M, N, K must all be positive"):
             passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+    def test_optional_max_n_caps_the_legal_tile_grid(self):
+        """Auxiliary N-only SRAM constraints restrict candidates without changing the cost model."""
+        cfg = _default_config(M=256, N=1024, K=128)
+        cfg.max_n = 64
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert result.n <= 64
+
+    def test_max_n_must_fit_the_minimum_tile(self):
+        cfg = _default_config(M=128, N=128, K=128)
+        cfg.max_n = 8
+        with pytest.raises(ValueError, match="max_n must be zero .* or at least min_n"):
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+    def test_pipelined_n_cap_keeps_full_width_b_stationary_candidate(self):
+        """A one-slot B-stationary candidate remains in the global legal search."""
+        cfg = _default_config(M=256, N=256, K=64)
+        cfg.allow_b_stationary = True
+        cfg.max_n = 256
+        cfg.max_n_pipelined = 128
+        cfg.max_n_nested_pipelined = 64
+        # Make holding the full B panel decisively preferable to re-streaming it.
+        cfg.bw_a = 1000.0
+        cfg.bw_b = 1.0
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert result.stationarity == passes.l0_tile_chooser.Stationarity.BStationary
+        assert result.n == 256
+
+    def test_pipelined_n_cap_restricts_a_stationary(self):
+        """An A-stationary schedule obeys the one-level N-resource cap."""
+        cfg = _default_config(M=512, N=1024, K=128)
+        # The wider synthetic L0B makes A-stationary's natural N tile 64; the
+        # explicit cap below must narrow it to 32 without changing regimes.
+        cfg.l0b_bytes = 128 * 1024
+        cfg.allow_a_stationary = True
+        cfg.allow_double_buffer_c = True
+        cfg.max_n = 256
+        cfg.max_n_pipelined = 32
+        cfg.max_n_nested_pipelined = 16
+        cfg.bw_a = 1.0
+        cfg.bw_b = 1000.0
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert result.stationarity == passes.l0_tile_chooser.Stationarity.AStationary
+        assert result.n <= 32
+
+    def test_pipelined_n_cap_restricts_output_stationary_hold_b(self):
+        """Output-stationary with B held obeys the one-level N-resource cap."""
+        cfg = _default_config(M=128, N=512, K=16)
+        cfg.max_n = 512
+        cfg.max_n_pipelined = 128
+        cfg.max_n_nested_pipelined = 64
+        cfg.bw_a = 1000.0
+        cfg.bw_b = 1.0
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert result.stationarity == passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert not result.os_holds_a
+        assert result.n <= 128
+
+    def test_nested_pipelined_n_cap_restricts_output_stationary_hold_a(self):
+        """A nested output-stationary schedule obeys the four-slot N-resource cap."""
+        cfg = _default_config(M=256, N=256, K=16)
+        cfg.max_n = 256
+        cfg.max_n_pipelined = 128
+        cfg.max_n_nested_pipelined = 64
+        # Slow A loads make the output-stationary schedule hold A and pipeline
+        # the N axis under both grid loops.
+        cfg.bw_a = 1.0
+        cfg.bw_b = 1000.0
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert result.stationarity == passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert result.os_holds_a
+        assert result.n <= 64
 
 
 # ---------------------------------------------------------------------------
