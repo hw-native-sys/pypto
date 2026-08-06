@@ -2372,7 +2372,7 @@ class TestScopeOutlineBoundary:
 
 class TestSplitAivRegionTransparentToSSA:
     """``SplitAivScopeStmt`` is non-boundary / transparent to SSA: it is never
-    outlined and is lowered in place by LowerAutoVectorSplit (pass 21), so its
+    outlined and is lowered in place by LowerAutoVectorSplit (pass 20), so its
     body shares SSA state with the enclosing function. ConvertToSSA must thread
     values through it and version the in-body ``aiv_id`` binding normally."""
 

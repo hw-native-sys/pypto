@@ -4724,7 +4724,7 @@ class ASTParser:
 
         # Build a first-class SplitAivScopeStmt region. The region body begins
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
-        # SplitMode on the node; LowerAutoVectorSplit (pass 18) consumes it.
+        # SplitMode on the node; LowerAutoVectorSplit (pass 20) consumes it.
         #
         # FLATTEN: when already inside a CORE_GROUP InCore scope — directly or
         # through an intervening pl.range/pl.pipeline/if — emit the region in

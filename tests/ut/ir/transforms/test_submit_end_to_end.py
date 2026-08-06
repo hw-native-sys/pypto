@@ -10,12 +10,12 @@
 """End-to-end integration test for the Submit IR migration.
 
 The original motivation: dumps captured after InferTileMemorySpace
-(pass 18) print kernel submissions as ``self.stage1(...)`` with an
+(pass 17) print kernel submissions as ``self.stage1(...)`` with an
 implicit tuple-augmented return type — visually indistinguishable from
 a plain function call. With the Submit IR kind plus the parser flip,
 those mid-pipeline dumps now use the source-level
 ``pl.submit(self.stage1, ..., deps=[...])`` form, matching what users
-write in the DSL. DeriveCallDirections (pass 34) lowers Submit → Call
+write in the DSL. DeriveCallDirections (pass 36) lowers Submit → Call
 so late passes and codegen are unaffected.
 """
 

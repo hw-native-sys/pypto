@@ -817,7 +817,7 @@ class TestConvertTensorToTileOps:
         """``pld.tensor.allreduce(target, signal, op=...)`` upgrades both
         ``target`` and ``signal`` params from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 14),
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12),
         so it sees ``pld.tensor.allreduce`` as a single composite Call before
         the ready-plus-per-chunk decomposition exists. Without the explicit
         ``has_read | has_write`` marking, the param-direction analysis
@@ -4685,7 +4685,7 @@ class TestWindowSliceIncoreConversion:
     def test_barrier_upgrades_signal_to_inout(self):
         """``pld.tensor.barrier(signal)`` upgrades ``signal`` from In to InOut.
 
-        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 14);
+        ConvertTensorToTileOps runs upstream of LowerCompositeOps (pass 12);
         without the explicit has_read|has_write marking, the param-direction
         analysis would leave the window param as In and a downstream reader
         would miss the RAW edge."""
@@ -4869,7 +4869,7 @@ class TestConvertCrossCoreSplitOps:
 
     Each Before is an InCore function running ``pl.aiv_shard`` / ``pl.aic_gather``
     on a high-level Tensor inside a ``for aiv_id in pl.split_aiv(...)`` region — the
-    shape that reaches this pass (pass 10), before LowerAutoVectorSplit (pass 18)
+    shape that reaches this pass (pass 10), before LowerAutoVectorSplit (pass 20)
     erases the region. The shard operand is a cube ``pl.matmul`` result (Acc tile
     after conversion); the gather operand is a Vec vector-compute result
     (``pl.exp`` → Vec tile). Inside a ``split_aiv`` region the printer suppresses
