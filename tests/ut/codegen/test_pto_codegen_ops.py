@@ -3320,7 +3320,7 @@ class TestScatterCodegen:
         )
 
     def test_tile_scatter_mask_form_codegen(self):
-        """tile.scatter_mask emits pto.tscatter with a maskPattern attribute (DPS)."""
+        """tile.scatter_mask emits row-axis pto.tscatter with a maskPattern attribute (DPS)."""
 
         @pl.program
         class Prog:
@@ -3353,6 +3353,9 @@ class TestScatterCodegen:
         # "expected ',' after src operand".
         assert line.index("maskPattern") < line.index("outs("), (
             f"maskPattern must appear inside ins(...) before outs(...), got:\n{line}"
+        )
+        assert '"row"' in line and line.index('"row"') < line.index("outs("), (
+            f'mask-form pto.tscatter must emit the PTOAS row axis before outs(...), got:\n{line}'
         )
 
 
