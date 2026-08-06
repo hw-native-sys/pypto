@@ -201,7 +201,7 @@ runs:
     - name: Check NPU
       if: ${{ inputs.needs-device == 'true' }}
       shell: bash
-      run: npu-smi info
+      run: task-submit --run "npu-smi info"
 
     - name: Scope ccache to pto-isa version
       # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a real

@@ -34,83 +34,90 @@ jobs:
           echo "PTO_ISA_COMMIT=$commit" >> "$GITHUB_OUTPUT"
 
   a5-system-tests:
+    # Nightly A5 (Ascend950) on-board coverage. Setup is the standard device-job
+    # shape — the same composite action / env / task-submit mechanism as ci.yml
+    # `mixed-kernel-tests-a5` and the `qwen3-perf` job below — on the npu-a5
+    # runner pool. That runner must satisfy the setup-ci-job contract:
+    # CONDA_ROOT / CI_CACHE_ROOT / CANN_ROOT + DEVICE_ID in its .env, a py310
+    # conda env, and task-submit / npu-smi / ccache on PATH.
+    #
+    # The card comes from the runner's DEVICE_ID rather than the old hardcoded
+    # `--device 6`, so the job schedules on any card in the pool.
+    #
+    # Checkout / install land under ./daily-a5-checkout — a dir distinct from
+    # ci.yml's ./a5-checkout, because kill-orphaned-tasks matches tasks by
+    # "$GITHUB_WORKSPACE/<checkout-path>". Sharing a dir would let one workflow's
+    # cleanup kill the other's tasks on a shared workspace root.
     needs: toolchain
-    runs-on: [self-hosted, a5-device6]
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, npu-a5]
     defaults:
       run:
-        shell: bash -leo pipefail {0}
+        working-directory: daily-a5-checkout
     env:
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_ROOT: ${{ github.workspace }}/daily-a5-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/daily-a5-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      # Shared ci-cache/ccache dir still holds root-owned entries from the
+      # container era; keep the umask that leaves new entries mutually writable.
+      # The cache *paths* and CCACHE_NAMESPACE are derived by setup-ci-job from
+      # the runner config's CI_CACHE_ROOT.
+      CCACHE_UMASK: '000'
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch composite action definitions
+        # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
+        # but this job checks the repo out into ./daily-a5-checkout — sparse-fetch
+        # just the action defs at the workspace root first (clean: false leaves
+        # sibling subdir checkouts on this persistent runner untouched).
+        uses: actions/checkout@v4
         with:
-          submodules: true
+          sparse-checkout: .github/actions
+          clean: false
+          # Bootstrap only fetches the public .github/actions tree; it doesn't
+          # need the token persisted into .git/config afterward (zizmor artipacked).
+          persist-credentials: false
 
-      - name: Install project and dependencies
-        run: |
-          pip install -v .[dev]
-
-      - name: Cache ptoas binary
-        id: cache-ptoas
-        uses: actions/cache@v4
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
         with:
-          path: ${{ github.workspace }}/ptoas-bin
-          key: ptoas-aarch64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
-
-      - name: Install ptoas
-        if: steps.cache-ptoas.outputs.cache-hit != 'true'
-        run: |
-          curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
-             -o /tmp/ptoas-bin-aarch64.tar.gz
-          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
-          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
-
-      - name: Clone pto-isa repository
-        run: |
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-          cd $GITHUB_WORKSPACE/pto-isa
-          git checkout ${{ needs.toolchain.outputs.pto_isa_commit }}
-
-      - name: Install simpler
-        run: |
-          rm -rf ./runtime/build
-          pip install -v ./runtime
+          checkout-path: daily-a5-checkout
+          needs-device: 'true'
+          pip-cache-name: pip-daily-a5
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Run A5 system tests
-        # `cd $GITHUB_WORKSPACE` is a no-op (the child already runs from the
-        # checkout root — the relative tests/st/... paths resolve today) but it
-        # puts the workspace path into the task command so the cleanup step below
-        # can grep -F "$GITHUB_WORKSPACE" to find THIS job's task.
+        timeout-minutes: 60
+        # Mechanism B: one task-submit card session wrapping a single pytest run,
+        # executed in-process on the borrowed card. The `cd $GITHUB_WORKSPACE/
+        # daily-a5-checkout` also puts this job's checkout dir into the task
+        # command, which is how the cleanup step below finds THIS job's tasks.
         run: |
-          task-submit --timeout 3600 --max-time 1800 --device 6 \
-            --run "cd $GITHUB_WORKSPACE && pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_gather.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_random.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=6 \
+          source activate.sh
+          echo "[device] DEVICE_ID=$DEVICE_ID"
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
+            --run "cd $GITHUB_WORKSPACE/daily-a5-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/ops/test_assemble.py \
+              tests/st/runtime/ops/test_gather.py \
+              tests/st/runtime/ops/test_mscatter.py \
+              tests/st/runtime/ops/test_random.py \
+              tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py \
+              tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention \
+              -v --forked --platform=a5 --device=\$TASK_DEVICE \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
 
       - name: Kill orphaned task-submit tasks
-        # If this job is cancelled or killed mid-flight, the task-submit task it
-        # submitted keeps running server-side (detached) and holds device 6 until
-        # --max-time. always() runs even on cancellation; match by this job's
-        # workspace path (embedded in the --run above) so we never touch another
-        # job's tasks.
         if: always()
-        run: |
-          echo "cleaning up task-submit tasks for $GITHUB_WORKSPACE"
-          task-submit --list 2>/dev/null \
-            | grep -F "$GITHUB_WORKSPACE" \
-            | grep -oE 'task_[0-9_]+' \
-            | sort -u \
-            | while read -r tid; do
-                echo "  killing $tid"
-                task-submit --kill "$tid" || true
-              done || true
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: daily-a5-checkout
 
   qwen3-perf:
     # Qwen3-14B decode performance monitoring (moved out of per-PR ci.yml).
