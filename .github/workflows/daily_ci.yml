@@ -53,7 +53,7 @@ jobs:
         run: |
           pip install -v .[dev]
 
-      - name: Cache ptoas binary
+      - name: Cache ptoas environment
         id: cache-ptoas
         uses: actions/cache@v4
         with:
@@ -63,14 +63,17 @@ jobs:
       - name: Install ptoas
         if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
+          PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
+          PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_aarch64.whl"
+          PTOAS_WHEEL="/tmp/$PTOAS_WHEEL_NAME"
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
-             -o /tmp/ptoas-bin-aarch64.tar.gz
-          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
-          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
+            -o "$PTOAS_WHEEL"
+          echo "${PTOAS_SHA256}  $PTOAS_WHEEL" | sha256sum -c -
+          rm -rf "$PTOAS_ROOT"
+          python -m venv "$PTOAS_ROOT" --system-site-packages
+          "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
+          "$PTOAS_ROOT/bin/ptoas" --version
 
       - name: Clone pto-isa repository
         run: |
