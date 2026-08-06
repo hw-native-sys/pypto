@@ -290,7 +290,7 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 | Canonical split-K `create([M,N])` → pipeline (`matmul` first, loop-carried `matmul_acc` later) → one 2D store, physical output exceeds L0c | M/N-tiled outside the K loop; each `[m,n]` tile completes the full K reduction before it is stored |
 | `tile.matmul[_acc]` with a Vec **right** operand | Skipped (the B operand must feed L0B from L1) |
 | `tile.matmul_bias` with static Mat matrix operands and a `[1,N]` Mat/Bias source, output fits L0c but K does not | K-tiled; `matmul_bias` initializes each output tile once and later K blocks use `matmul_acc` |
-| `tile.matmul_bias` with static Mat matrix operands and a single-use Mat bias load separated from the call only by sibling loads, output exceeds L0c, with one direct store or only later matmul-operand uses | M/N-tiled after replacing the full load with per-N tensor→Mat window loads; placed through the same direct-GM or Mat-scratch strategies as fresh `tile.matmul` |
+| `tile.matmul_bias` with static Mat matrix operands and a single-use, full rectangular `[1,N]` Mat bias load separated from the call only by sibling loads, output exceeds L0c, with one direct store or only later matmul-operand uses | M/N-tiled after replacing the full load with per-N tensor→Mat window loads; placed through the same direct-GM or Mat-scratch strategies as fresh `tile.matmul` |
 | `tile.matmul_bias` with a Vec left operand, or an already-Bias-resident source requiring N tiling | Skipped; the new biased path requires native Mat operands and cannot emit Bias-to-Bias sub-window extracts |
 | Already L0-sized matmul (`(m, n, k) == (M, N, K)`) | Untouched |
 | Output exceeds L0c but no M/N placement applies — non-canonical standalone `matmul_acc`, Vec left, a non-matmul-operand consumer, or a chained-matmul scratch whose `[M, N]` exceeds Mat/L1 | Skipped with `PerfHint` (`PH-AT-006`) |
@@ -311,7 +311,7 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 | `PH-AT-008` | `ChooseL0Tile` returned a fallback configuration with a perf hint message |
 | `PH-AT-009` | Backend needs a bf16/f16 on-chip Mat scratch (e.g. Ascend910B) but the oversized chained-matmul intermediate is f32 — cast the matmul result to bf16/f16 before the consumer matmul; left on the deferred path |
 | `PH-AT-010` | A fits-L0c chained-matmul cast cannot fold onto the cube FIXPIPE (which narrows `f32 → bf16/f16` with round-half-to-even only): the source is non-f32, or the round mode is not `rint` (e.g. the default `round`, or `floor`/`ceil`/`trunc`/`odd`/`none`). Kept on the Vector `pto.tcvt` path — a cube→vector→cube round-trip that may overflow the Vec buffer at large `[M, N]`. Cast an f32 result with `mode="rint"` to keep it on the cube. |
-| `PH-AT-011` | A biased matmul cannot form a legal Bias window: unsupported Mat→Bias dtype pair, non-Mat matrix operand, unknown/non-load-backed N window, insufficient Bias capacity, or layout-misaligned M/N/K. The call is unchanged. |
+| `PH-AT-011` | A biased matmul cannot form a legal Bias window: unsupported Mat→Bias dtype pair, non-Mat matrix operand, partial/dynamic/non-load-backed N window, insufficient Bias capacity, or layout-misaligned M/N/K. The call is unchanged. |
 
 ## See also
 

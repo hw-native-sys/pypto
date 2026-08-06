@@ -367,7 +367,7 @@ class TestL0TilingInvariants:
     def test_max_n_must_fit_the_minimum_tile(self):
         cfg = _default_config(M=128, N=128, K=128)
         cfg.max_n = 8
-        with pytest.raises(ValueError, match="max_n must be zero .* or at least min_n"):
+        with pytest.raises(ValueError, match=r"max_n must be zero .* or at least min_n"):
             passes.l0_tile_chooser.choose_l0_tile(cfg)
 
     def test_pipelined_n_cap_keeps_full_width_b_stationary_candidate(self):

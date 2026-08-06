@@ -25,7 +25,7 @@ Validates on device the cases from examples/kernels/11_auto_tile_matmul.py:
     source panel composes those boundaries with AutoTile's ordinary inner-K rewrite.
   - **Biased matmul** -- ``tile.matmul_bias`` applies its bias exactly once per output tile
     while combining M/N and K tiling, for both direct-GM and chained Mat-scratch placement.
-    A2/A3 exercises both its INT8/INT32 and FP16/BF16-to-FP32 Mat→Bias transfers;
+    A2/A3 exercises both its INT32→INT32 and FP32→FP32 Mat→Bias transfers;
     the floating FP32-bias cases are also covered on A5.
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot

@@ -102,7 +102,7 @@ class TestBackend950MemoryPath:
         950 memory graph extends the common cube topology with Bias and scale tables:
           DDR -> Vec, Mat
           Vec -> Mat, DDR
-          Mat -> Left, Right
+          Mat -> Left, Right, Bias, LeftScale, RightScale
           Acc -> Vec, Mat, DDR
         """
         backend = Backend950.instance()

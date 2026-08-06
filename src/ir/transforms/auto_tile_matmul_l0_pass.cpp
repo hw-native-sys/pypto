@@ -224,6 +224,14 @@ bool IsStatic2DInSpaces(const TileTypePtr& tile, std::initializer_list<MemorySpa
   return true;
 }
 
+bool IsStatic2DTuple(const ExprPtr& expr, int64_t dim0, int64_t dim1) {
+  auto tuple = As<MakeTuple>(expr);
+  if (!tuple || tuple->elements_.size() != 2) return false;
+  auto first = As<ConstInt>(tuple->elements_[0]);
+  auto second = As<ConstInt>(tuple->elements_[1]);
+  return first && second && first->value_ == dim0 && second->value_ == dim1;
+}
+
 /// Element width in bytes for a tile dtype.  Returns 0 for sub-byte types
 /// (INT4, FP4 et al.) which the cube path does not support; the caller emits
 /// a ``PerfHint`` and skips in that case.
@@ -777,7 +785,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
         auto candidate = As<Call>(def->second->value_);
         if (candidate && IsOp(candidate, "tile.load") && candidate->args_.size() == 4) {
           auto offsets = As<MakeTuple>(candidate->args_[1]);
-          if (offsets && offsets->elements_.size() == 2) {
+          if (offsets && offsets->elements_.size() == 2 && IsStatic2DTuple(candidate->args_[2], 1, bias_n) &&
+              IsStatic2DTuple(candidate->args_[3], 1, bias_n)) {
             bias_load = candidate;
             bias_load_def = def->second;
           }
@@ -1046,9 +1055,9 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   if (is_bias && res.n != N && bias_tile->GetMemorySpace() == MemorySpace::Mat && !bias_load) {
     hints.emplace_back(
         DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-011",
-        "tile.matmul_bias needs N tiling, but its Mat bias is not a single-use two-dimensional tile.load "
-        "separated from the call only by read-only sibling loads; a legal snapshot-preserving bias window "
-        "cannot be reconstructed, so the call is left untouched",
+        "tile.matmul_bias needs N tiling, but its Mat bias is not a single-use full-rectangular [1, N] "
+        "tile.load separated from the call only by read-only sibling loads; a legal snapshot-preserving "
+        "bias window cannot be reconstructed, so the call is left untouched",
         assign->span_);
     return std::nullopt;
   }
@@ -1431,14 +1440,6 @@ std::optional<std::pair<AssignStmtPtr, YieldStmtPtr>> MatchSingleAssignYield(con
     return std::nullopt;
   }
   return std::make_pair(assign, yield);
-}
-
-bool IsStatic2DTuple(const ExprPtr& expr, int64_t dim0, int64_t dim1) {
-  auto tuple = As<MakeTuple>(expr);
-  if (!tuple || tuple->elements_.size() != 2) return false;
-  auto first = As<ConstInt>(tuple->elements_[0]);
-  auto second = As<ConstInt>(tuple->elements_[1]);
-  return first && second && first->value_ == dim0 && second->value_ == dim1;
 }
 
 std::optional<CanonicalSplitKAccMatch> MatchCanonicalSplitKAcc(
@@ -3009,10 +3010,10 @@ class AutoTileMutator : public IRMutator {
               store_it == sibling_index.store_of.end() ? nullptr : store_it->second;
           const bool reconstructs_bias = tiling->bias_load_def && tiling->n != tiling->N;
           const bool bias_snapshot_reaches_store =
-              !reconstructs_bias ||
-              (store_stmt && next_non_load[i] < op->stmts_.size() &&
+              !reconstructs_bias || !store_stmt ||
+              (next_non_load[i] < op->stmts_.size() &&
                op->stmts_[next_non_load[i]].get() == static_cast<const Stmt*>(store_stmt));
-          if (reconstructs_bias && !bias_snapshot_reaches_store) {
+          if (reconstructs_bias && store_stmt && !bias_snapshot_reaches_store) {
             hints.emplace_back(
                 DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-011",
                 "tile.matmul_bias N-window loads would move to its folded consumer store across an "

@@ -538,9 +538,11 @@ Pass LegalizeTileCast();
  * ``tile.matmul_bias`` is supported when both matrix operands are Mat and its
  * static ``[1, N]`` bias is Mat- or Bias-resident and has the accumulator dtype
  * (FP32 for floating-point matrix operands, INT32 for integer operands). The
- * bias is applied once on the first K block. M/N tiling reconstructs each N
- * window from a single-use defining ``tile.load`` separated from the call only
- * by other sibling loads, then moves that independent Mat tile to Bias;
+ * bias is applied once on the first K block. M/N tiling requires a full
+ * rectangular ``[1, N]`` defining load (physical shape equals valid shape),
+ * reconstructs each N window from that single-use ``tile.load`` when it is
+ * separated from the call only by other sibling loads, then moves that
+ * independent Mat tile to Bias;
  * candidate N is bounded by the
  * backend's bias-table capacity and its emitted pipeline replication depth.
  * An already-Bias-resident source stays outside the emitted grid and consumes

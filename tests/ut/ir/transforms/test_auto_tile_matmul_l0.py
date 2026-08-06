@@ -809,6 +809,60 @@ class TestAutoTileMatmulL0MNTiling:
             f"mismatches={(out != expected).sum().item()}, max_abs={(out - expected).abs().max().item()}"
         )
 
+    def test_matmul_bias_n_tiling_with_partial_valid_load_is_deferred(self):
+        """A narrowed bias snapshot cannot be widened by reconstructed N-window loads."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], [K, N - 16], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], [1, N - 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_matmul_bias_n_tiling_without_store_reports_placement_hint(self, capfd):
+        """A missing store is a placement gap, not a bias-snapshot ordering hazard."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                _ = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "PH-AT-011" not in diagnostics
+
     def test_matmul_bias_n_tiling_with_intervening_store_is_deferred(self):
         """Reloading after an intervening effect must not replace the earlier bias snapshot."""
         _backend.reset_for_testing()
