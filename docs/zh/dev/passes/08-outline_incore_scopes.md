@@ -248,3 +248,20 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 | `optimizations=[pl.split(MODE)]` | AUTO 拆分——由编译器划分向量计算 |
 | `for aiv_id in pl.split_aiv(2, mode=...)` | 手动拆分——由作者按区域划分 |
 | `optimizations=[pl.cross_core_slot(slot_num=N)]` | 都不是——仅决定跨核 pipe 的大小 |
+
+**函数级 `split` 属性对"不切分"只有一种编码：不存在该键。** 当被外提的函数体中含有
+`pl.split_aiv` 区域时，本 Pass 仅在所有区域模式一致 **且** 该模式是真实切分时，才把它
+提升为函数级属性：
+
+| 函数体中的区域 | 外提函数上标记的 attrs |
+| -------------- | ---------------------- |
+| 全部 `mode=UP_DOWN`（或全部 `LEFT_RIGHT`） | `{"split_aiv": True, "split": pl.SplitMode.UP_DOWN}` |
+| 全部 `mode=NONE` | `{"split_aiv": True}`——不带 `split` 键 |
+| 模式不一致 | `{"split_aiv": True}`——没有代表性模式 |
+
+`Function::GetSplitMode()` 把存储的 `0` 与缺失的键同样映射为 `nullopt`，因此
+`split=SplitMode.NONE` 这一项对所有消费方都不可见；而 parser 会在回读时丢弃它，导致
+print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始终承载于
+`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)
+消费。printer 以同一规则兜底：省略取值为 `SplitMode.NONE` 的 `split` 属性，使绕过本 Pass
+的 IR（此前写出的 `.pto`、以编程方式构造的 `Function`）依然以规范、可重新解析的形式打印。

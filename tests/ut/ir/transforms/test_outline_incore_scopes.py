@@ -1841,6 +1841,68 @@ class TestOutlineNoDepArgs:
             f"aiv_id must not be promoted to an outlined param, got params {param_names}"
         )
 
+    @staticmethod
+    def _outline_incore(program: ir.Program) -> ir.Function:
+        """Outline ``program`` and return its single InCore function."""
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(program)
+        return next(f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore)
+
+    def test_split_aiv_none_region_stamps_no_function_level_split(self):
+        """A uniform ``mode=NONE`` region set stamps ``split_aiv`` alone.
+
+        "No split" has a single canonical encoding at the function-attr level: an
+        absent key. ``Function::GetSplitMode`` maps a stored 0 to ``None`` exactly
+        as it does an absent key, so an explicit ``split=SplitMode.NONE`` was
+        invisible to every consumer — while the parser dropped it on the way back
+        in, making print -> parse lossy (``Kwargs size mismatch``). Asserted as
+        exact dict equality: the defect was an EXTRA entry, which a per-key
+        ``.get()`` check would not have caught.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    base = aiv_id * 64
+                    c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+                return c
+
+        outlined = self._outline_incore(Before)
+
+        assert dict(outlined.attrs) == {"split_aiv": True}
+        assert outlined.split is None
+
+    def test_split_aiv_up_down_region_stamps_function_level_split(self):
+        """Control for the NONE case: a real mode is still bridged to the function.
+
+        Pins that the NONE exclusion above is narrow — dropping a genuine
+        representative mode would silently strip the whole-function marker that
+        SplitVectorKernel keys on.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    c = pl.store(pl.exp(pl.load(a, [0, 0], [128, 128])), [0, 0], c)
+                return c
+
+        outlined = self._outline_incore(Before)
+
+        assert dict(outlined.attrs) == {"split_aiv": True, "split": ir.SplitMode.UP_DOWN.value}
+        assert outlined.split == ir.SplitMode.UP_DOWN
+
 
 class TestOutlineReboundOutCapture:
     """A captured ``pl.Out`` tensor the scope rebinds under its own name.
@@ -1924,12 +1986,17 @@ class TestOutlineReboundOutCapture:
     def test_rebound_out_capture_in_split_aiv_region_reparses(self):
         """The originally-reported shape: the region form used to leave ``c`` free.
 
-        Asserts parseability only, not structural equality: a ``pl.split_aiv``
-        region with ``mode=NONE`` stamps the function attr
-        ``split=pl.SplitMode.NONE``, which the parser drops on the way back in.
-        That attr gap is unrelated to the capture fix (it reproduces on the
-        ConvertToSSA-prefixed path too) — see the sibling assertion in
-        ``test_lower_auto_vector_split.py::test_outlined_region_still_lowers_and_stamps``.
+        Asserts parseability only, not structural equality — but no longer over the
+        ``split=pl.SplitMode.NONE`` attr, which the outliner has stopped stamping.
+        What remains is the surviving region node itself: the parser wraps a
+        top-level ``pl.split_aiv`` in an ``InCoreScopeStmt`` whenever an InCore
+        scope is open, so re-parsing this *outlined* function (which the pass
+        declines to re-enter, being already InCore) re-introduces a
+        ``with pl.at(level=pl.Level.CORE_GROUP):`` the original does not have. That
+        is the separate ``pl.split_aiv``-inside-InCore gap, unrelated to the capture
+        fix. Once the region is erased the output does round-trip structurally —
+        asserted by ``test_lower_auto_vector_split.py::
+        test_outlined_region_still_lowers_and_stamps``.
         """
 
         @pl.program

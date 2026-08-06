@@ -354,5 +354,30 @@ def test_roundtrip_after_aiv_id_dce():
     ir.assert_structural_equal(prog, reparsed)
 
 
+def test_split_none_func_attr_is_not_printed():
+    """A function attr ``split=0`` is a non-canonical "no split" and must not print.
+
+    ``Function::GetSplitMode`` maps a stored 0 to ``None`` exactly as it does an
+    absent key, and the parser drops an explicit ``pl.SplitMode.NONE``, so printing
+    it would make print -> parse lossy. No pass produces this shape any more (the
+    outliner stopped stamping a NONE), which is why the Function is built directly
+    here — the printer must still normalize IR that bypassed the passes, such as a
+    ``.pto`` blob written before that change.
+    """
+    span = ir.Span.unknown()
+    func = ir.Function("f", [], [], ir.SeqStmts([], span), span, attrs={"split": 0})
+    assert dict(func.attrs) == {"split": 0}, "the Function must actually carry the attr"
+    assert func.split is None, "GetSplitMode already treats a stored 0 as unset"
+
+    text = ir.python_print(ir.Program([func], "P", span))
+
+    assert "SplitMode.NONE" not in text, text
+    # ``split`` was the only entry, so no empty ``attrs={}`` may be emitted either.
+    assert "attrs=" not in text, text
+    # A real mode is unaffected.
+    real = ir.Function("g", [], [], ir.SeqStmts([], span), span, attrs={"split": ir.SplitMode.UP_DOWN.value})
+    assert 'attrs={"split": pl.SplitMode.UP_DOWN}' in ir.python_print(ir.Program([real], "P", span))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1129,11 +1129,19 @@ class ScopeOutliner : public IRMutator {
              "optimizations=[pl.cross_core_slot(slot_num=N)], which is orthogonal to splitting.";
       outlined_attrs.emplace_back("split_aiv", true);
       // Stamp a function-level representative ``split`` mode ONLY when all regions
-      // share one mode (``uniform_mode``). Differing sibling modes have no single
-      // representative: leave the function-level mode unset — the authoritative
-      // per-region mode rides ``node->split_`` (consumed at pass 20). No need to
-      // re-check incore_split here: the CHECK above guarantees it is None.
-      if (finder.uniform_mode.has_value()) {
+      // share one mode (``uniform_mode``) AND that mode is a real split. Differing
+      // sibling modes have no single representative: leave the function-level mode
+      // unset — the authoritative per-region mode rides ``node->split_`` (consumed
+      // at pass 20). No need to re-check incore_split here: the CHECK above
+      // guarantees it is None.
+      //
+      // ``SplitMode::None`` is excluded for the same reason the sibling
+      // ``append_split_attr`` excludes it: "no split" has ONE canonical encoding at
+      // the function-attr level — an absent key. ``Function::GetSplitMode`` maps a
+      // stored 0 to ``nullopt`` exactly as it does an absent key, so the entry is
+      // invisible to every consumer, while the parser drops it on the way back in —
+      // which made print -> parse lossy (``Kwargs size mismatch``).
+      if (finder.uniform_mode.has_value() && finder.uniform_mode.value() != SplitMode::None) {
         outlined_attrs.emplace_back("split", static_cast<int>(finder.uniform_mode.value()));
       }
     };

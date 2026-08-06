@@ -261,3 +261,22 @@ The three states read distinctly:
 | `optimizations=[pl.split(MODE)]` | AUTO split — the compiler partitions the vector work |
 | `for aiv_id in pl.split_aiv(2, mode=...)` | Manual split — the author partitions it per region |
 | `optimizations=[pl.cross_core_slot(slot_num=N)]` | Neither — just sizes the cross-core pipe |
+
+**The function-level `split` attr has one encoding of "no split": an absent key.**
+When the outlined body holds `pl.split_aiv` regions, this pass bridges their mode
+onto the function only when all regions agree *and* that mode is a real split:
+
+| Regions in the body | Attrs stamped on the outlined function |
+| ------------------- | -------------------------------------- |
+| All `mode=UP_DOWN` (or all `LEFT_RIGHT`) | `{"split_aiv": True, "split": pl.SplitMode.UP_DOWN}` |
+| All `mode=NONE` | `{"split_aiv": True}` — no `split` key |
+| Differing modes | `{"split_aiv": True}` — no representative mode |
+
+`Function::GetSplitMode()` maps a stored `0` to `nullopt` exactly as it does an
+absent key, so a `split=SplitMode.NONE` entry was invisible to every consumer —
+and the parser drops it, which made print → parse lossy (`Kwargs size mismatch`).
+The authoritative per-region mode always rides `SplitAivScopeStmt::split_`, which
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) consumes. The printer
+applies the same rule as a backstop: it omits a `split` attr of `SplitMode.NONE`
+so IR that bypassed this pass (a pre-existing `.pto` blob, a programmatically
+built `Function`) still prints in the canonical, re-parsable form.

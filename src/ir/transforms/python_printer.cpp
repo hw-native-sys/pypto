@@ -2513,9 +2513,23 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
     // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
     bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
-    auto is_filtered_attr_key = [](const std::string& k) { return k == "auto_scope"; };
+    // A ``split`` of ``SplitMode::None`` is filtered for a different reason: it is
+    // a non-canonical spelling of "no split" (``Function::GetSplitMode`` maps a
+    // stored 0 to ``nullopt``, exactly as an absent key does), and the parser drops
+    // it — so emitting it would make print -> parse lossy. No pass produces it; this
+    // only normalizes IR that bypassed them (a ``.pto`` blob written before
+    // OutlineIncoreScopes stopped stamping it, a programmatically built Function).
+    // The pointer form of ``any_cast`` keeps a mistyped attr failing at the
+    // existing print site rather than in this predicate, which also runs for the
+    // ``has_attrs`` test.
+    auto is_filtered_attr = [](const std::string& k, const std::any& v) {
+      if (k == "auto_scope") return true;
+      if (k != "split") return false;
+      const int* split_value = std::any_cast<int>(&v);
+      return split_value != nullptr && *split_value == static_cast<int>(SplitMode::None);
+    };
     bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
-                                 [&](const auto& kv) { return !is_filtered_attr_key(kv.first); });
+                                 [&](const auto& kv) { return !is_filtered_attr(kv.first, kv.second); });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
       if (key == "split") {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
@@ -2552,7 +2566,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "attrs={";
         bool first_attr = true;
         for (const auto& [key, value] : func->attrs_) {
-          if (is_filtered_attr_key(key)) continue;
+          if (is_filtered_attr(key, value)) continue;
           if (!first_attr) stream_ << ", ";
           stream_ << std::quoted(key) << ": ";
           print_func_attr_value(key, value);

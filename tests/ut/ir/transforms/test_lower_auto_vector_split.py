@@ -42,8 +42,7 @@ IR, so Before/Expected does not apply. Their ``Before`` programs are still DSL.
 
 ``_lower`` keeps the print->parse roundtrip instrument ON (see its docstring for
 why property verification is not), so the pass's output is asserted
-round-trippable on every test but one — ``test_outlined_region_still_lowers_and_stamps``,
-which opts out over an unrelated attr printer/parser gap documented at that test.
+round-trippable on every test.
 
 End-to-end DSL coverage of this authoring form lives in
 ``tests/st/codegen/torch/test_torch_codegen_cross_core.py``
@@ -2414,20 +2413,21 @@ def test_outlined_region_still_lowers_and_stamps():
     )
     pl.parse_program(ir.python_print(outlined))  # outlined program round-trips
 
-    # Still the one test that cannot use ``_lower``, but for a narrower and
-    # unrelated reason: a ``pl.split_aiv`` region with ``mode=NONE`` stamps the
-    # function attr ``split=pl.SplitMode.NONE``, and the parser drops an explicit
-    # NONE, so print->parse loses that attr and structural equality reports
-    # "Kwargs size mismatch". That is a printer/parser gap on the attr, present
-    # on the ConvertToSSA-prefixed path too and independent of this pass.
-    with passes.PassContext([]):
-        after = passes.lower_auto_vector_split()(outlined)
+    # Uses ``_lower`` like every other test here, so the roundtrip instrument
+    # guards this path too. It used to opt out: a ``mode=NONE`` region made
+    # OutlineIncoreScopes stamp ``split=pl.SplitMode.NONE`` on the function, and
+    # the parser drops an explicit NONE, so print->parse lost that attr and
+    # structural equality reported "Kwargs size mismatch". The outliner no longer
+    # stamps a NONE (absence is the canonical encoding of "no split"), so the
+    # lowered output — region erased — now round-trips exactly.
+    after = _lower(outlined)
 
     incore = [f for f in after.functions.values() if f.func_type == ir.FunctionType.InCore]
     assert len(incore) == 1, "OutlineIncoreScopes should have produced one InCore function"
     assert "pl.split_aiv" not in ir.python_print(after), "region must be erased"
-    for key, value in _REGION_ATTRS.items():
-        assert incore[0].attrs.get(key) == value, f"expected {key}={value}"
+    assert dict(incore[0].attrs) == _REGION_ATTRS, (
+        f"expected exactly {_REGION_ATTRS}, got {dict(incore[0].attrs)}"
+    )
 
 
 if __name__ == "__main__":
