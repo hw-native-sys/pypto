@@ -1170,25 +1170,27 @@ class TorchCodegen(_ir.IRVisitor):
         """Build a stable key for nanobind-backed IR vars.
 
         IR callbacks may wrap the same underlying C++ Var with different Python
-        objects, so ``id(var)`` alone is not stable across visits. We key by
-        semantic fields that remain stable across wrappers.
-        """
-        span = getattr(var, "span", None)
-        span_key: tuple[Any, ...] | None = None
-        if span is not None and getattr(span, "is_valid", False):
-            span_key = (
-                getattr(span, "filename", ""),
-                int(getattr(span, "begin_line", 0)),
-                int(getattr(span, "begin_column", 0)),
-                int(getattr(span, "end_line", 0)),
-                int(getattr(span, "end_column", 0)),
-            )
+        objects, so ``id(var)`` alone is not stable across visits. ``Var`` carries
+        a ``unique_id`` for exactly this purpose -- a process-unique counter
+        assigned at construction, documented as the key to use when deduplicating
+        wrappers of the same underlying object. ``IterArg`` shares the counter.
 
+        Keying on it is both stricter and looser than the surrounding fields in
+        the ways we need: two wrappers of one Var always agree, and two distinct
+        Vars never collide, including when both carry ``Span.unknown()`` and the
+        same name and type -- a case name/type/span fields cannot separate.
+        """
+        unique_id = getattr(var, "unique_id", None)
+        if unique_id is not None:
+            return (type(var).__name__, int(unique_id))
+
+        # No identity available (a non-Var duck type): fall back to the
+        # descriptive fields rather than merging everything onto one key.
         var_type = getattr(var, "type", None)
         return (
             type(var).__name__,
             getattr(var, "name_hint", ""),
-            span_key,
+            id(var),
             str(var_type) if var_type is not None else "",
         )
 

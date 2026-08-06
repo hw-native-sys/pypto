@@ -1404,5 +1404,60 @@ def test_variable_name_uniquing():
     assert cg._unique_name("a") == "a_2"
 
 
+def test_var_semantic_key_separates_unknown_span_vars():
+    """Two distinct vars must not share a key, even with no source location.
+
+    The regression this guards: keying on name/type/span merged two unknown-span
+    vars that agreed on name and type, so ``_name_of`` handed them one generated
+    name and the emitted Torch code could merge their values.
+    """
+    type_ = ir.ScalarType(DataType.INT64)
+    a = ir.Var("x", type_, ir.Span.unknown())
+    b = ir.Var("x", type_, ir.Span.unknown())
+
+    assert TorchCodegen._var_semantic_key(a) != TorchCodegen._var_semantic_key(b)
+
+
+def test_var_semantic_key_carries_no_span_coordinates():
+    """The key must not embed span coordinates at all.
+
+    An unknown span used to contribute the sentinel ("", -1, -1, -1, -1), which
+    reads as a real source location. Identity now comes from ``unique_id``, so
+    no span tuple — real or sentinel — belongs in the key.
+    """
+    var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span("f.py", 3, 7, 3, 9))
+
+    key = TorchCodegen._var_semantic_key(var)
+
+    assert ("f.py", 3, 7, 3, 9) not in key
+    assert ("", -1, -1, -1, -1) not in key
+    assert var.unique_id in key
+
+
+def test_var_semantic_key_is_stable_across_wrappers():
+    """Two Python wrappers of one underlying Var must agree.
+
+    This is the property the key exists for: ``id(var)`` is not stable across
+    visits, so a per-wrapper identity would split one variable into two names.
+    """
+    type_ = ir.ScalarType(DataType.INT64)
+    a = ir.Var("x", type_, ir.Span.unknown())
+    add = ir.Add(a, a, DataType.INT64, ir.Span.unknown())
+    left, right = add.left, add.right
+    assert isinstance(left, ir.Var) and isinstance(right, ir.Var)
+
+    assert TorchCodegen._var_semantic_key(left) == TorchCodegen._var_semantic_key(a)
+    assert TorchCodegen._var_semantic_key(right) == TorchCodegen._var_semantic_key(a)
+
+
+def test_var_semantic_key_distinguishes_spans():
+    """Same name and type, different vars -> different keys."""
+    type_ = ir.ScalarType(DataType.INT64)
+    a = ir.Var("x", type_, ir.Span("f.py", 1, 1, 1, 2))
+    b = ir.Var("x", type_, ir.Span("f.py", 9, 1, 9, 2))
+
+    assert TorchCodegen._var_semantic_key(a) != TorchCodegen._var_semantic_key(b)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
