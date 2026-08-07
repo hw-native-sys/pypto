@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_
-#define PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_
+#ifndef SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_
+#define SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_
 
 #include <array>
 #include <cstddef>
@@ -90,6 +90,9 @@ struct VectorSchedulePlan {
   int64_t full_peak_ub_bytes = 0;
   int64_t chunk_peak_ub_bytes = 0;
   int64_t dma_alignment_bytes = 0;
+  // Physical element-count alignment for every graph tensor. Values in one
+  // physical-shape class are equal; allocation bytes remain dtype-specific.
+  std::vector<int64_t> tensor_element_granules;
   int reduced_axis = 0;
   int64_t free_tile = 0;
   int64_t free_tile_alloc = 0;
@@ -134,4 +137,4 @@ class VectorPlanner910B {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_
+#endif  // SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_PLAN_H_

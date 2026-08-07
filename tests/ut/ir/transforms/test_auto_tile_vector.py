@@ -351,12 +351,30 @@ class Int8OutputProgram:
 
 
 @pl.program
+class RaggedInt8CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_output(self, x: pl.Tensor[[1, 33], pl.FP32]) -> pl.Tensor[[1, 33], pl.INT8]:
+        wide: pl.Tensor[[1, 33], pl.FP32] = pl.add(x, 1.0)
+        out: pl.Tensor[[1, 33], pl.INT8] = pl.cast(wide, pl.INT8)
+        return out
+
+
+@pl.program
 class ReductionInt8OutputProgram:
     @pl.function(attrs={"auto_tile": True})
     def cast_output(self, x: pl.Tensor[[128, 8192], pl.FP32]) -> pl.Tensor[[128, 8192], pl.INT8]:
         total: pl.Tensor[[128, 1], pl.FP32] = pl.row_sum(x)
         centered: pl.Tensor[[128, 8192], pl.FP32] = pl.sub(x, total)
         out: pl.Tensor[[128, 8192], pl.INT8] = pl.cast(centered, pl.INT8)
+        return out
+
+
+@pl.program
+class ReductionResultCastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_stat(self, x: pl.Tensor[[33, 128], pl.FP32]) -> pl.Tensor[[33, 1], pl.INT8]:
+        stat: pl.Tensor[[33, 1], pl.FP32] = pl.row_sum(x)
+        out: pl.Tensor[[33, 1], pl.INT8] = pl.cast(stat, pl.INT8)
         return out
 
 
@@ -381,6 +399,14 @@ class Fp16ToBf16CastProgram:
     @pl.function(attrs={"auto_tile": True})
     def cast_output(self, x: pl.Tensor[[128, 512], pl.FP16]) -> pl.Tensor[[128, 512], pl.BF16]:
         out: pl.Tensor[[128, 512], pl.BF16] = pl.cast(x, pl.BF16)
+        return out
+
+
+@pl.program
+class RaggedFp16ToBf16CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def cast_output(self, x: pl.Tensor[[1, 33], pl.FP16]) -> pl.Tensor[[1, 33], pl.BF16]:
+        out: pl.Tensor[[1, 33], pl.BF16] = pl.cast(x, pl.BF16)
         return out
 
 
@@ -1035,6 +1061,11 @@ def test_terminal_fp32_to_int8_uses_dtype_exact_tiling():
         assert structure.ops["tensor.assemble"] >= 1
 
 
+def test_direct_reduction_result_cast_declines_until_its_physical_box_can_be_realized():
+    with pytest.raises(ValueError, match="cast chain rooted in a reduction result"):
+        _run_auto_tile(ReductionResultCastProgram)
+
+
 @pytest.mark.parametrize(
     ("program", "expected_targets"),
     [
@@ -1065,6 +1096,59 @@ def test_cast_plans_contain_the_complete_native_910b_conversion_path(program, ex
     tiled = passes.outline_cluster_scopes()(tiled)
     tiled = passes.convert_tensor_to_tile_ops()(tiled)
     ir.assert_structural_equal(passes.legalize_tile_cast()(tiled), tiled)
+
+
+@pytest.mark.parametrize(
+    ("program", "expected_targets", "required_granule", "expected_peak_ub"),
+    [
+        (RaggedInt8CastProgram, [pl.FP16, pl.INT8], 32, 512),
+        (RaggedFp16ToBf16CastProgram, [pl.FP32, pl.BF16], 16, 288),
+    ],
+)
+def test_native_cast_chain_uses_one_physical_granule_and_keeps_logical_shape(
+    program, expected_targets, required_granule, expected_peak_ub, capfd
+):
+    """Native multi-hop casts share one element box without widening logical bounds."""
+
+    def static_shape(type_: ir.TensorType) -> tuple[int, int]:
+        assert len(type_.shape) == 2
+        assert all(isinstance(dim, ir.ConstInt) for dim in type_.shape)
+        return tuple(int(dim.value) for dim in type_.shape)  # type: ignore[union-attr,return-value]
+
+    def valid_shape(type_: ir.TensorType) -> tuple[int, int]:
+        if type_.tensor_view is None or not type_.tensor_view.valid_shape:
+            return static_shape(type_)
+        assert all(isinstance(dim, ir.ConstInt) for dim in type_.tensor_view.valid_shape)
+        return tuple(
+            int(dim.value)
+            for dim in type_.tensor_view.valid_shape  # type: ignore[union-attr,return-value]
+        )
+
+    class CastBoxes(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.boxes: list[tuple[ir.DataType, tuple[int, int], tuple[int, int]]] = []
+
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            call = op.value
+            if isinstance(call, ir.Call) and call.op.name == "tensor.cast":
+                source = call.args[0]
+                assert isinstance(source.type, ir.TensorType)
+                assert isinstance(op.var.type, ir.TensorType)
+                assert static_shape(source.type) == static_shape(op.var.type)
+                assert valid_shape(source.type) == valid_shape(op.var.type)
+                self.boxes.append((op.var.type.dtype, static_shape(op.var.type), valid_shape(op.var.type)))
+            super().visit_assign_stmt(op)
+
+    after, plan = _logged_plan(program, capfd)
+    assert f"peak_ub={expected_peak_ub} full_peak_ub={expected_peak_ub}" in plan
+    casts = CastBoxes()
+    casts.visit_program(after)
+    assert [dtype for dtype, _physical, _valid in casts.boxes] == expected_targets
+    assert len({physical for _dtype, physical, _valid in casts.boxes}) == 1
+    for _dtype, physical, valid in casts.boxes:
+        assert physical[1] % required_granule == 0
+        assert valid[1] <= 33 < physical[1]
 
 
 @pytest.mark.parametrize(
@@ -1153,10 +1237,12 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         SoftmaxProgram,
         Fp16SoftmaxProgram,
         Int8OutputProgram,
+        RaggedInt8CastProgram,
         ReductionInt8OutputProgram,
         NativeCastProgram,
         Bf16ToFp16CastProgram,
         Fp16ToBf16CastProgram,
+        RaggedFp16ToBf16CastProgram,
         ColSumProgram,
         ColMaxProgram,
     ],

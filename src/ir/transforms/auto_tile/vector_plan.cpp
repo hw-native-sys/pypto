@@ -15,10 +15,14 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
@@ -63,6 +67,32 @@ int64_t AlignUp(int64_t value, int64_t alignment) {
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
+int64_t DmaElementGranule(const DataType& dtype, int64_t dma_alignment_bytes) {
+  const int64_t bytes = DTypeBytes(dtype);
+  CHECK(bytes > 0 && dma_alignment_bytes > 0);
+  return dma_alignment_bytes / std::gcd(dma_alignment_bytes, bytes);
+}
+
+std::vector<int64_t> PhysicalElementGranules(const VectorGraph& graph, int64_t dma_alignment_bytes) {
+  size_t class_count = 0;
+  for (const VectorTensor& tensor : graph.tensors) {
+    CHECK(tensor.physical_shape_class != std::numeric_limits<size_t>::max())
+        << "AutoTile vector graph has an unresolved physical-shape class";
+    class_count = std::max(class_count, tensor.physical_shape_class + 1);
+  }
+  std::vector<int64_t> class_granules(class_count, 1);
+  for (const VectorTensor& tensor : graph.tensors) {
+    int64_t& granule = class_granules[tensor.physical_shape_class];
+    granule = std::lcm(granule, DmaElementGranule(tensor.dtype, dma_alignment_bytes));
+  }
+  std::vector<int64_t> result;
+  result.reserve(graph.tensors.size());
+  for (const VectorTensor& tensor : graph.tensors) {
+    result.push_back(class_granules[tensor.physical_shape_class]);
+  }
+  return result;
+}
+
 int64_t FrameRows(const VectorTensor& tensor, int64_t rows) {
   return tensor.rows == 1 ? 1 : std::min(tensor.rows, rows);
 }
@@ -71,10 +101,9 @@ int64_t FrameCols(const VectorTensor& tensor, int64_t cols) {
   return tensor.cols == 1 ? 1 : std::min(tensor.cols, cols);
 }
 
-int64_t TensorFrameBytes(const VectorTensor& tensor, int64_t rows, int64_t cols, bool reduction_layout,
-                         int64_t dma_alignment_bytes) {
+int64_t TensorFrameBytes(const VectorTensor& tensor, int64_t element_granule, int64_t rows, int64_t cols,
+                         bool reduction_layout) {
   const int64_t bytes = DTypeBytes(tensor.dtype);
-  const int64_t granule = std::max<int64_t>(1, dma_alignment_bytes / bytes);
   int64_t frame_rows = FrameRows(tensor, rows);
   int64_t frame_cols = FrameCols(tensor, cols);
   // A logical extent of one is not necessarily a broadcast.  The emitter
@@ -82,19 +111,18 @@ int64_t TensorFrameBytes(const VectorTensor& tensor, int64_t rows, int64_t cols,
   // balanced partition happens to contain one row/column.  Key padding on
   // the source tensor's shape, exactly as SliceInput does, so the planner
   // cannot under-price the common one-row softmax region.
-  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, granule);
-  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, granule);
+  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, element_granule);
+  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, element_granule);
   return frame_rows * frame_cols * bytes;
 }
 
-int64_t RowReductionScratchBytes(const VectorTensor& tensor, int64_t rows, int64_t cols,
-                                 bool reduction_layout, int64_t dma_alignment_bytes) {
+int64_t RowReductionScratchBytes(const VectorTensor& tensor, int64_t element_granule, int64_t rows,
+                                 int64_t cols, bool reduction_layout) {
   const int64_t bytes = DTypeBytes(tensor.dtype);
-  const int64_t granule = std::max<int64_t>(1, dma_alignment_bytes / bytes);
   int64_t frame_rows = FrameRows(tensor, rows);
   int64_t frame_cols = FrameCols(tensor, cols);
-  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, granule);
-  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, granule);
+  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, element_granule);
+  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, element_granule);
   // OpConversionRegistry::RegisterReductionOps pads the scratch's final
   // dimension to at least 128 elements for row reductions. Column reductions
   // lower directly to one-operand tile ops and allocate no scratch.
@@ -149,7 +177,7 @@ std::vector<VectorInputLifetime> BuildInputLifetimes(const VectorGraph& graph, c
 int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int64_t rows, int64_t cols,
                   const std::unordered_set<size_t>& phase_outputs,
                   const std::unordered_set<size_t>& substituted, bool reduction_layout,
-                  int64_t dma_alignment_bytes, int bands) {
+                  const std::vector<int64_t>& element_granules, int bands) {
   if (ops.empty()) return 0;
   std::unordered_map<size_t, size_t> first;
   std::unordered_map<size_t, size_t> last;
@@ -175,12 +203,14 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
   std::unordered_set<size_t> live;
   auto allocate = [&](size_t tensor) {
     if (!live.insert(tensor).second) return;
-    current += TensorFrameBytes(graph.tensors[tensor], rows, cols, reduction_layout, dma_alignment_bytes);
+    current +=
+        TensorFrameBytes(graph.tensors[tensor], element_granules.at(tensor), rows, cols, reduction_layout);
     peak = std::max(peak, current);
   };
   auto release = [&](size_t tensor) {
     if (live.erase(tensor) == 0) return;
-    current -= TensorFrameBytes(graph.tensors[tensor], rows, cols, reduction_layout, dma_alignment_bytes);
+    current -=
+        TensorFrameBytes(graph.tensors[tensor], element_granules.at(tensor), rows, cols, reduction_layout);
   };
 
   for (size_t tensor : substituted) allocate(tensor);
@@ -194,11 +224,13 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
     // relying on the downstream allocator to discover unplanned storage.
     int64_t implicit_scratch = 0;
     if (op.kind == VectorOpKind::RowSum || op.kind == VectorOpKind::RowMax) {
-      implicit_scratch = RowReductionScratchBytes(graph.tensors[op.inputs.front()], rows, cols,
-                                                  reduction_layout, dma_alignment_bytes);
+      const size_t input = op.inputs.front();
+      implicit_scratch = RowReductionScratchBytes(graph.tensors[input], element_granules.at(input), rows,
+                                                  cols, reduction_layout);
     } else if (IsOp(op.call, "tensor.rsqrt") && op.call->GetKwarg<bool>("high_precision", false)) {
-      implicit_scratch = TensorFrameBytes(graph.tensors[op.inputs.front()], rows, cols, reduction_layout,
-                                          dma_alignment_bytes);
+      const size_t input = op.inputs.front();
+      implicit_scratch =
+          TensorFrameBytes(graph.tensors[input], element_granules.at(input), rows, cols, reduction_layout);
     }
     if (implicit_scratch != 0) {
       current += implicit_scratch;
@@ -330,6 +362,7 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
   const int64_t iteration_cols = graph.iteration_cols;
   const bool reduction_layout = graph.reduced_axis != 0;
   const std::unordered_set<size_t> all_outputs(graph.required_outputs.begin(), graph.required_outputs.end());
+  const std::vector<int64_t> element_granules = PhysicalElementGranules(graph, hardware_.dma_alignment_bytes);
   std::vector<size_t> all_ops(graph.ops.size());
   std::iota(all_ops.begin(), all_ops.end(), 0);
 
@@ -365,8 +398,9 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
     candidate.tile_w = candidate.n_partition.big;
     candidate.reduced_axis = graph.reduced_axis;
     candidate.dma_alignment_bytes = hardware_.dma_alignment_bytes;
+    candidate.tensor_element_granules = element_granules;
     candidate.full_peak_ub_bytes = PeakBytes(graph, all_ops, candidate.tile_h, candidate.tile_w, all_outputs,
-                                             {}, reduction_layout, hardware_.dma_alignment_bytes, 1);
+                                             {}, reduction_layout, element_granules, 1);
 
     auto record_phase = [&](VectorSchedulePlan* target, VectorPhase phase_id, int64_t rows, int64_t cols,
                             int64_t iterations, int stages, const std::unordered_set<size_t>& outputs,
@@ -424,8 +458,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
             const int64_t strip_w = (candidate.tile_w + width_strips - 1) / width_strips;
             const int64_t trips = row_strips * width_strips;
             if (trips < 2) continue;
-            const int64_t peak = PeakBytes(graph, all_ops, strip_h, strip_w, all_outputs, {}, false,
-                                           hardware_.dma_alignment_bytes, 2);
+            const int64_t peak =
+                PeakBytes(graph, all_ops, strip_h, strip_w, all_outputs, {}, false, element_granules, 2);
             if (peak > hardware_.ub_bytes) continue;
             VectorSchedulePlan trial = candidate;
             ClearModeledCosts(&trial);
@@ -460,8 +494,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
           if (trips < 2) continue;
           const int64_t strip_h = (candidate.tile_h + row_strips - 1) / row_strips;
           const int64_t strip_w = (candidate.tile_w + width_strips - 1) / width_strips;
-          const int64_t peak = PeakBytes(graph, all_ops, strip_h, strip_w, all_outputs, {}, false,
-                                         hardware_.dma_alignment_bytes, 2);
+          const int64_t peak =
+              PeakBytes(graph, all_ops, strip_h, strip_w, all_outputs, {}, false, element_granules, 2);
           if (peak > hardware_.ub_bytes) continue;
           VectorSchedulePlan trial = candidate;
           ClearModeledCosts(&trial);
@@ -505,8 +539,7 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                                                     : VectorScheduleKind::ReductionSpanning);
       candidate.free_tile = graph.reduced_axis == 1 ? candidate.tile_h : candidate.tile_w;
       const DataType reduction_dtype = graph.tensors[reduction_tensor].dtype;
-      candidate.free_tile_alloc =
-          AlignUp(candidate.free_tile, hardware_.dma_alignment_bytes / DTypeBytes(reduction_dtype));
+      candidate.free_tile_alloc = AlignUp(candidate.free_tile, element_granules.at(reduction_tensor));
       candidate.reduced_extent = graph.reduced_axis == 1 ? iteration_cols : iteration_rows;
       PopulatePhase(&candidate.phases[PhaseIndex(VectorPhase::Stats)], graph, stats_ops);
       PopulatePhase(&candidate.phases[PhaseIndex(VectorPhase::Apply)], graph, apply_ops, substituted);
@@ -528,22 +561,22 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
         const int64_t thin_cols = graph.reduced_axis == 1 ? 1 : candidate.free_tile;
         int64_t stats_peak;
         if (graph.softmax.matched) {
-          const int64_t x_bytes = TensorFrameBytes(graph.tensors[graph.softmax.input], rows, cols, true,
-                                                   hardware_.dma_alignment_bytes);
+          const int64_t x_bytes = TensorFrameBytes(
+              graph.tensors[graph.softmax.input], element_granules.at(graph.softmax.input), rows, cols, true);
           const int64_t thin_bytes = candidate.free_tile_alloc * DTypeBytes(reduction_dtype);
           stats_peak = 2 * (6 * x_bytes + 4 * thin_bytes);
         } else {
-          stats_peak = PeakBytes(graph, stats_ops, rows, cols, {reduction_tensor}, {}, true,
-                                 hardware_.dma_alignment_bytes, 2) +
-                       2 * candidate.free_tile_alloc * DTypeBytes(reduction_dtype);
+          stats_peak =
+              PeakBytes(graph, stats_ops, rows, cols, {reduction_tensor}, {}, true, element_granules, 2) +
+              2 * candidate.free_tile_alloc * DTypeBytes(reduction_dtype);
         }
         int64_t apply_peak = 0;
         if (candidate.kind == VectorScheduleKind::ReductionSpanning || graph.softmax.matched) {
-          apply_peak = PeakBytes(graph, apply_ops, rows, cols, all_outputs, substituted, true,
-                                 hardware_.dma_alignment_bytes, 2);
+          apply_peak =
+              PeakBytes(graph, apply_ops, rows, cols, all_outputs, substituted, true, element_granules, 2);
         } else {
           apply_peak = PeakBytes(graph, apply_ops, thin_rows, thin_cols, all_outputs, substituted, true,
-                                 hardware_.dma_alignment_bytes, 1);
+                                 element_granules, 1);
         }
         const int64_t peak = std::max(stats_peak, apply_peak);
         if (peak > hardware_.ub_bytes) continue;

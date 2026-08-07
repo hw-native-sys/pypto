@@ -75,6 +75,12 @@ broadcasted left operand of non-commutative subtraction or division are rejected
 Broadcast division supports FP16 and FP32; its high-precision form is not part
 of this contract.
 
+A native cast chain may consume a boundary or full-frame elementwise value. A
+cast rooted directly in a reduction result is declined: reduction emission owns
+a separately padded result box that the current emitter cannot yet widen to the
+cast chain's common physical granule. Applying or broadcasting the reduction
+result back into the full iteration frame before casting remains supported.
+
 The pass rejects dynamic or non-rank-2 shapes, control flow, side-effecting
 statements, `full`/shape construction, minimum/product/argument reductions,
 matmul and other Cube work, mixed kernels, Welford, unsupported dtypes, and any
@@ -87,6 +93,16 @@ The planner first constructs a typed vector graph. Tensor nodes record static
 shape, dtype, boundary status, and whether the value must survive to a return.
 Operation nodes record their primitive and geometry. The original SSA statement
 order is the topological order; the pass does not reorder user operations.
+
+Same-shaped values connected by elementwise operations form a physical-shape
+class. For a native cast chain, the planner takes the least common multiple of
+the per-dtype DMA element granularities and assigns that one element-count
+granule to the complete class. Thus every native `TCVT` hop has an identical
+physical shape. This does **not** allocate every value as the widest dtype:
+each SSA result is charged and later allocated as
+`physical_elements * sizeof(its_own_dtype)`. The emitter carries the original
+logical extent as `valid_shape`, so padding never changes the program's
+logical bounds.
 
 It then enumerates balanced two-dimensional core grids. Every emitted task uses
 one static maximum-size tile. Ragged partitions clamp or overlap their final
@@ -165,6 +181,11 @@ two-stage pipeline, padded row-reduction scratch tiles inserted by tensor-to-til
 lowering, high-precision `rsqrt` scratch, and thin accumulators. Metadata-only
 `set_validshape` aliases do not allocate a second buffer. Column reductions
 lower without a scratch tile and are priced that way.
+
+Ordinary casts are conversions with distinct source and destination storage;
+MemoryReuse must not turn `tile.cast` into an in-place operation. An explicitly
+requested equal-byte `tile.reinterpret_view` remains the zero-copy opt-in and
+lowers through the bitcast/view path instead of `TCVT`.
 
 The cost model combines:
 

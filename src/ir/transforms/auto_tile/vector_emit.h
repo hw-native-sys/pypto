@@ -5,12 +5,12 @@
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the LICENSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_
-#define PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_
+#ifndef SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_
+#define SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_
 
 #include <string>
 #include <unordered_set>
@@ -31,4 +31,4 @@ namespace auto_tile {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_
+#endif  // SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_EMIT_H_

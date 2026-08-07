@@ -1,8 +1,9 @@
 /*
- * Copyright (c) PyPTO Contributors. This program is free software, you can redistribute it and/or modify it
- * under the terms and conditions of CANN Open Software License Agreement Version 2.0 (the "License"). Please
- * refer to the License for details. You may not use this file except in compliance with the License. THIS
- * SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
@@ -12,9 +13,14 @@
 
 #include <algorithm>
 #include <any>
+#include <memory>
+#include <numeric>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "pypto/backend/common/tcvt_path.h"
 #include "pypto/core/error.h"
@@ -123,6 +129,63 @@ bool IsSupportedComputeDType(const DataType& dtype) {
 
 bool IsSupportedTensorDType(const DataType& dtype) {
   return IsSupportedComputeDType(dtype) || dtype == DataType::INT8;
+}
+
+void AssignPhysicalShapeClasses(VectorGraph* graph) {
+  std::vector<size_t> parent(graph->tensors.size());
+  std::iota(parent.begin(), parent.end(), 0);
+  const auto find = [&](size_t tensor, const auto& self) -> size_t {
+    if (parent[tensor] != tensor) parent[tensor] = self(parent[tensor], self);
+    return parent[tensor];
+  };
+  const auto unite = [&](size_t lhs, size_t rhs) {
+    lhs = find(lhs, find);
+    rhs = find(rhs, find);
+    if (lhs != rhs) parent[rhs] = lhs;
+  };
+
+  // Tensor elementwise type deduction preserves the physical box of its
+  // same-shaped operands. Model that equality explicitly so a cast's common
+  // granule propagates through its producer/consumer chain to the boundary
+  // slice that creates the box. Broadcast operands have a different logical
+  // shape and therefore remain in their own class.
+  for (const VectorOp& op : graph->ops) {
+    if (op.kind != VectorOpKind::Elementwise) continue;
+    const VectorTensor& output = graph->tensors[op.output];
+    for (size_t input : op.inputs) {
+      const VectorTensor& operand = graph->tensors[input];
+      if (operand.rows == output.rows && operand.cols == output.cols) unite(input, op.output);
+    }
+  }
+
+  std::unordered_map<size_t, size_t> class_by_root;
+  for (size_t tensor = 0; tensor < graph->tensors.size(); ++tensor) {
+    const size_t root = find(tensor, find);
+    auto [it, inserted] = class_by_root.emplace(root, class_by_root.size());
+    (void)inserted;
+    graph->tensors[tensor].physical_shape_class = it->second;
+  }
+}
+
+void ValidateCastPhysicalShapeClasses(const VectorGraph& graph) {
+  std::unordered_set<size_t> cast_classes;
+  for (const VectorOp& op : graph.ops) {
+    if (op.primitive == VectorPrimitive::Cast)
+      cast_classes.insert(graph.tensors[op.output].physical_shape_class);
+  }
+
+  // Reduction emission owns a separately padded accumulator/result box. The
+  // current emitter cannot widen that box to the common DMA element granule
+  // required by a same-shaped native TCVT chain. Fail closed instead of
+  // accepting a plan whose cast class cannot be realized. Applying or
+  // broadcasting the reduction result back into the full iteration frame
+  // creates a different physical-shape class and remains supported.
+  for (const VectorOp& op : graph.ops) {
+    if (!IsReduction(op.kind)) continue;
+    CHECK_SPAN(cast_classes.count(graph.tensors[op.output].physical_shape_class) == 0, op.stmt->span_)
+        << "AutoTile does not support a native cast chain rooted in a reduction result; "
+           "apply or broadcast the reduction result back into the full iteration frame before casting";
+  }
 }
 
 bool IsUnifiedBroadcastOp(const CallPtr& call) {
@@ -439,6 +502,8 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   }
   graph.iteration_rows = iteration_rows;
   graph.iteration_cols = iteration_cols;
+  AssignPhysicalShapeClasses(&graph);
+  ValidateCastPhysicalShapeClasses(graph);
 
   if (graph.ops.size() == 5 && graph.required_outputs.size() == 1) {
     const VectorOp& max_op = graph.ops[0];

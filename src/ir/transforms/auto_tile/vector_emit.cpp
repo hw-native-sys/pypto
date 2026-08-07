@@ -5,7 +5,7 @@
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the LICENSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
 
@@ -16,7 +16,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -199,6 +201,23 @@ class VectorEmitter {
         << "Internal error: AutoTile vector tile disagrees with its balanced partitions";
     INTERNAL_CHECK_SPAN(plan_.dma_alignment_bytes > 0, span_)
         << "Internal error: AutoTile vector plan has no DMA alignment";
+    INTERNAL_CHECK_SPAN(plan_.tensor_element_granules.size() == graph_.tensors.size(), span_)
+        << "Internal error: AutoTile vector plan has an incomplete physical-granule descriptor";
+    std::unordered_map<size_t, int64_t> granule_by_class;
+    for (size_t tensor = 0; tensor < graph_.tensors.size(); ++tensor) {
+      const VectorTensor& value = graph_.tensors[tensor];
+      const int64_t bytes = DTypeBytes(value.dtype);
+      const int64_t required = plan_.dma_alignment_bytes / std::gcd(plan_.dma_alignment_bytes, bytes);
+      const int64_t granule = plan_.tensor_element_granules[tensor];
+      INTERNAL_CHECK_SPAN(value.physical_shape_class != std::numeric_limits<size_t>::max() && granule > 0 &&
+                              granule % required == 0,
+                          span_)
+          << "Internal error: AutoTile vector plan has an invalid physical element granule for tensor "
+          << tensor;
+      auto [it, inserted] = granule_by_class.emplace(value.physical_shape_class, granule);
+      INTERNAL_CHECK_SPAN(inserted || it->second == granule, span_)
+          << "Internal error: AutoTile vector plan disagrees within one physical-shape class";
+    }
     INTERNAL_CHECK_SPAN(plan_.full_peak_ub_bytes > 0 && plan_.chunk_peak_ub_bytes > 0, span_)
         << "Internal error: AutoTile vector plan has an empty UB footprint";
     for (const VectorPhasePlan& phase : plan_.phases) {
@@ -333,7 +352,7 @@ class VectorEmitter {
                     const ExprPtr& col_offset, bool reduction_layout, std::vector<StmtPtr>& body) {
     auto& registry = OpRegistry::GetInstance();
     const VectorTensor& input = graph_.tensors[tensor];
-    const int64_t granule = std::max<int64_t>(1, plan_.dma_alignment_bytes / DTypeBytes(input.dtype));
+    const int64_t granule = plan_.tensor_element_granules.at(tensor);
     const bool broadcast_row = input.rows == 1;
     const bool broadcast_col = input.cols == 1;
     const int64_t valid_rows = broadcast_row ? 1 : rows;

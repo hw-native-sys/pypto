@@ -68,6 +68,11 @@ no-op。
 tensor 的歧义 broadcast，以及非交换减法或除法中位于左侧的 broadcast 操作数会被
 拒绝。broadcast 除法支持 FP16 和 FP32；其高精度形式不在本契约中。
 
+原生 cast 链可以消费边界值或 full-frame 逐元素值。若 cast 直接以归约结果为起点，pass
+会拒绝该图：归约发射拥有单独 padding 的结果 box，而当前 emitter 尚不能把它扩展到 cast
+链要求的公共物理粒度。先把归约结果 apply 或 broadcast 回完整迭代 frame，再执行 cast，
+仍属于支持范围。
+
 该 pass 会拒绝动态或非 rank-2 shape、控制流、有副作用的语句、`full`/shape 构造、
 minimum/product/argument reduction、matmul 和其他 Cube 工作、mixed kernel、Welford、
 不支持的 dtype，以及任何需要多个 kernel 的图。这些是面向用户的准入错误，不是转交
@@ -78,6 +83,12 @@ minimum/product/argument reduction、matmul 和其他 Cube 工作、mixed kernel
 planner 首先构造带类型的 Vector 图。Tensor 节点记录静态 shape、dtype、是否为边界
 值以及是否必须存活到 return。Operation 节点记录 primitive 与几何类型。原始 SSA
 语句顺序就是拓扑顺序；该 pass 不重排用户操作。
+
+通过逐元素运算连接且 shape 相同的值组成一个物理 shape 类。对于原生 cast 链，planner
+会对链内各 dtype 的 DMA 元素粒度取最小公倍数，并把同一个“元素个数”粒度赋给整个类，
+从而保证每个原生 `TCVT` hop 的物理 shape 完全一致。这**不**意味着所有值都按最宽 dtype
+分配：每个 SSA 结果仍按 `physical_elements * sizeof(自身 dtype)` 独立计价并分配。emitter
+把原始逻辑 extent 保存在 `valid_shape` 中，因此 padding 不会改变程序的逻辑边界。
 
 随后枚举平衡的二维核网格。每个发射任务使用一个静态最大尺寸 tile。ragged partition
 会 clamp 或重叠最后一个 tile，因此重复的边缘工作必须是幂等的，并计入流量模型。
@@ -142,6 +153,10 @@ padding、两阶段 pipeline 的第二个 bank、tensor-to-tile lowering 插入�
 padding 的行 reduction scratch、高精度 `rsqrt` scratch 和细 accumulator。仅修改元数据
 的 `set_validshape` alias 不会分配第二个 buffer。列 reduction lowering 不分配 scratch，
 模型也不会为它计费。
+
+普通 cast 是源、目标存储彼此独立的转换；MemoryReuse 不得把 `tile.cast` 变成原地操作。
+显式请求等字节数的 `tile.reinterpret_view` 仍是零拷贝 opt-in，并通过 bitcast/view 路径
+lower，而不是使用 `TCVT`。
 
 cost model 组合：
 

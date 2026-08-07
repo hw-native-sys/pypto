@@ -1,15 +1,16 @@
 /*
- * Copyright (c) PyPTO Contributors. This program is free software, you can redistribute it and/or modify it
- * under the terms and conditions of CANN Open Software License Agreement Version 2.0 (the "License"). Please
- * refer to the License for details. You may not use this file except in compliance with the License. THIS
- * SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
-#define PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
+#ifndef SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
+#define SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -75,6 +76,12 @@ struct VectorTensor {
   DataType dtype = DataType::FP32;
   bool boundary_input = false;
   bool required_output = false;
+  // Same-shaped elementwise values must use one physical element box. This is
+  // especially important for native cast chains: PTO TCVT requires every hop
+  // to have the same physical shape even though each SSA value has its own
+  // dtype-sized allocation. The planner resolves this hardware-independent
+  // equivalence class to a DMA-specific element granule.
+  size_t physical_shape_class = std::numeric_limits<size_t>::max();
 };
 
 struct VectorOp {
@@ -135,4 +142,4 @@ struct VectorAdmissionResult {
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
+#endif  // SRC_IR_TRANSFORMS_AUTO_TILE_VECTOR_GRAPH_H_
