@@ -180,9 +180,13 @@ build containing the `--pto-insert-sync-summary` experiment flag.
 
 The default export is `pypto_hard_v1`: standard DSA geometry with fixed memory
 spaces, one conservative allocation-lifetime hull, capacities/reservations,
-alignment, and typed separations. Lifetime-disjoint buffers may partially reuse
-freed regions, including the subdivision required by #1908. If strict pipeline
-intent does not fit, the adapter explicitly creates a cost-aware
+alignment, typed separations, and PyPTO's `no_partial_overlaps` backend-safety
+relations. A `no_partial_overlaps` pair may use byte-identical ranges (true
+in-place execution) or disjoint ranges, but never staggered or containment
+overlap. This is a hard correctness constraint, not a reuse penalty or part of
+the experimental objective. Other lifetime-disjoint buffers may partially
+reuse freed regions, including the subdivision required by #1908. If strict
+pipeline intent does not fit, the adapter explicitly creates a cost-aware
 `pypto_research_v1` relaxation and emits `PH-DSA-001`. Legacy
 `pypto_structured` documents remain readable in the standalone tools but are no
 longer emitted. The complete problem and objective definition is maintained by
@@ -220,7 +224,12 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    read may share an address with the result written by that statement.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
    hard separation pairs for declared allocations, pipeline clones, backend
-   hazards, and op-specific no-alias rules. Every declared allocation is
+   hazards, and op-specific no-alias rules. For an in-place-safe operation,
+   also export a hard `no_partial_overlaps` relation between its result and each
+   eligible input whose final read shares the result's write statement. That
+   relation preserves exact in-place reuse while rejecting staggered or
+   containment overlap, which can overwrite source elements before the
+   instruction reads them. Every declared allocation is
    separated from unrelated allocations in its memory space. Every requested
    pipeline stage initially receives a distinct residue, and every cross-stage
    member pair is hard-separated. Each separation retains its typed source.

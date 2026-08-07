@@ -73,12 +73,9 @@ namespace {
     case AllocationSeparationReason::SemanticNoAlias:
       return ::dsa::SeparationReason::kSemanticNoAlias;
     case AllocationSeparationReason::StorageLayout:
-      // The standalone schema has no dedicated storage-layout reason. It is
-      // nevertheless an unrelaxable hard separation for every solver.
-      return ::dsa::SeparationReason::kGeneric;
     case AllocationSeparationReason::DeclaredAllocation:
-      // The standalone schema has no dedicated declared-allocation reason.
-      // It remains an ordinary hard separation to every solver.
+      // The standalone schema has no dedicated reason for either constraint.
+      // Both remain ordinary hard separations to every solver.
       return ::dsa::SeparationReason::kGeneric;
   }
   return ::dsa::SeparationReason::kGeneric;
@@ -257,6 +254,23 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     separation.second = pair.second;
     separation.reasons.assign(reasons.begin(), reasons.end());
     exported.document.problem.separations.push_back(std::move(separation));
+  }
+
+  std::set<BufferPair> no_partial_overlaps;
+  for (const AllocationNoPartialOverlap& constraint : allocation_plan.no_partial_overlaps) {
+    INTERNAL_CHECK(constraint.first < buffer_id_by_interval.size() &&
+                   constraint.second < buffer_id_by_interval.size())
+        << "DSA no-partial-overlap constraint references an out-of-range lifetime index";
+    const auto& first_buffer = buffer_id_by_interval[constraint.first];
+    const auto& second_buffer = buffer_id_by_interval[constraint.second];
+    if (!first_buffer.has_value() || !second_buffer.has_value()) continue;
+    auto first = first_buffer.value();
+    auto second = second_buffer.value();
+    if (second < first) std::swap(first, second);
+    if (first != second) no_partial_overlaps.emplace(first, second);
+  }
+  for (const auto& [first, second] : no_partial_overlaps) {
+    exported.document.problem.no_partial_overlaps.push_back({first, second});
   }
 
   ReusePenaltyRecognition recognition =
