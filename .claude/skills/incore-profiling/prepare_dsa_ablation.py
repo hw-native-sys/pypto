@@ -157,6 +157,9 @@ def _validate_solution(problem: dict[str, Any], solution: dict[str, Any]) -> Non
                 raise ValueError(f"buffer {buffer_id} overlaps a reserved range in pool {pool_id}")
 
     separations = {_pair(value["first"], value["second"]) for value in constraints.get("separations", [])}
+    no_partial_overlaps = {
+        _pair(value["first"], value["second"]) for value in constraints.get("no_partial_overlaps", [])
+    }
     ordered_buffers = sorted(buffers)
     for index, first_id in enumerate(ordered_buffers):
         first = buffers[first_id]
@@ -175,6 +178,13 @@ def _validate_solution(problem: dict[str, Any], solution: dict[str, Any]) -> Non
                 continue
             if _lifetimes_overlap(first, second) or _pair(first_id, second_id) in separations:
                 raise ValueError(f"buffers {first_id} and {second_id} overlap illegally")
+            if _pair(first_id, second_id) in no_partial_overlaps and (
+                first_placement["offset"] != second_placement["offset"] or first["size"] != second["size"]
+            ):
+                raise ValueError(
+                    f"buffers {first_id} and {second_id} partially overlap despite "
+                    "a no-partial-overlap constraint"
+                )
 
 
 def _validate_envelope(problem: dict[str, Any], solution: dict[str, Any]) -> None:

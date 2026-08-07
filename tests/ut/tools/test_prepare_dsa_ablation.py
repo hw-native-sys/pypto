@@ -121,6 +121,23 @@ def test_fingerprint_canonicalizes_alias_member_labels(ablation: ModuleType):
     assert ablation._fingerprint(original) != ablation._fingerprint(renamed)
 
 
+def test_validate_solution_enforces_no_partial_overlap(ablation: ModuleType):
+    problem = _problem(with_cost=True)
+    problem["problem"]["constraints"]["no_partial_overlaps"] = [{"first": 0, "second": 1}]
+
+    exact = _solution(ablation, problem)
+    ablation._validate_solution(problem, exact)
+
+    disjoint = _solution(ablation, problem)
+    disjoint["placements"][1]["offset"] = 64
+    ablation._validate_solution(problem, disjoint)
+
+    partial = _solution(ablation, problem)
+    partial["placements"][1]["offset"] = 32
+    with pytest.raises(ValueError, match="partially overlap"):
+        ablation._validate_solution(problem, partial)
+
+
 def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleType, tmp_path: Path):
     hard = _problem(with_cost=False)
     target = _problem(with_cost=True)

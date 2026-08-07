@@ -21,6 +21,7 @@ from typing import Any
 
 _ARMS = ("geometry_ff", "cypress", "dsa_rp_cg")
 _MIXED_HALF = re.compile(r"_(?:aic|aiv)(?:_\d+)?$")
+_NUMBERED_CLONE = re.compile(r"_\d+$")
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,14 @@ def _source_scripts(invocations: list[dict[str, str]]) -> dict[str, set[str]]:
     for row in invocations:
         by_fingerprint[row["problem_fingerprint"]].add(row["script"])
     return by_fingerprint
+
+
+def _source_problem_counts(invocations: list[dict[str, str]]) -> dict[str, int]:
+    """Count distinct exported problems per source entry point."""
+    by_script: dict[str, set[str]] = defaultdict(set)
+    for row in invocations:
+        by_script[row["script"]].add(row["problem_fingerprint"])
+    return {script: len(fingerprints) for script, fingerprints in by_script.items()}
 
 
 def _cell_rows(screen_rows: list[dict[str, str]]) -> dict[str, list[dict[str, dict[str, str]]]]:
@@ -176,12 +185,43 @@ def _problem_metadata(
     if len(penalties) != int(separation["reuse_penalties"]):
         raise ValueError(f"problem penalty count disagrees with model screen: {problem}")
     pools = sorted(body["pools"], key=lambda pool: int(pool["id"]))
+    structural_body = {
+        "buffers": [
+            {key: value for key, value in buffer.items() if key != "name"} for buffer in body["buffers"]
+        ],
+        "constraints": body.get("constraints", {}),
+        "cost_model": body.get("cost_model"),
+        "objective": body.get("objective"),
+        "pools": body["pools"],
+    }
     return {
         "problem_sha256": _sha256(problem),
+        "structural_class_sha256": hashlib.sha256(
+            json.dumps(structural_body, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest(),
         "pool_count": len(pools),
         "pool_names": ";".join(str(pool["name"]) for pool in pools),
         "native_capacities": ";".join(str(pool["capacity"]) for pool in pools),
     }
+
+
+def _annotate_structural_classes(candidates: list[dict[str, Any]]) -> None:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        groups[str(candidate["structural_class_sha256"])].append(candidate)
+    for members in groups.values():
+        representative = min(
+            members,
+            key=lambda row: (
+                bool(row["mixed_group_hint"]),
+                int(row["preferred_source_problem_count"]),
+                bool(_NUMBERED_CLONE.search(str(row["instance"]))),
+                str(row["tag"]),
+            ),
+        )
+        for member in members:
+            member["structural_class_size"] = len(members)
+            member["structural_class_representative"] = member is representative
 
 
 def _selection_reasons(
@@ -211,6 +251,7 @@ def build_candidate_rows(inputs: CandidateInputs) -> list[dict[str, Any]]:
     if unknown_forced:
         raise ValueError(f"forced tags are absent from the model screen: {unknown_forced}")
     sources = _source_scripts(inputs.invocations)
+    source_problem_counts = _source_problem_counts(inputs.invocations)
     cells_by_tag = _cell_rows(inputs.screen_rows)
     candidates: list[dict[str, Any]] = []
     for tag, separation in separation_by_tag.items():
@@ -228,6 +269,7 @@ def build_candidate_rows(inputs: CandidateInputs) -> list[dict[str, Any]]:
         scripts = sorted(sources.get(fingerprint, set()))
         if not scripts:
             raise ValueError(f"candidate fingerprint has no source invocation: {tag}")
+        preferred_source = min(scripts, key=lambda script: (source_problem_counts[script], script))
         problem = inputs.problems_dir / f"{tag}.dsa.json"
         if not problem.is_file():
             raise FileNotFoundError(problem)
@@ -247,6 +289,8 @@ def build_candidate_rows(inputs: CandidateInputs) -> list[dict[str, Any]]:
                 "selection_reasons": ";".join(reasons),
                 "source_scripts": ";".join(scripts),
                 "source_count": len(scripts),
+                "preferred_source_script": preferred_source,
+                "preferred_source_problem_count": source_problem_counts[preferred_source],
                 "mixed_group_hint": bool(_MIXED_HALF.search(instance)),
                 "measurement_state": "NEEDS_CURRENT_LAUNCH_PREFLIGHT",
                 "problem": problem.name,
@@ -254,6 +298,7 @@ def build_candidate_rows(inputs: CandidateInputs) -> list[dict[str, Any]]:
                 **_native_solution_paths(inputs.screen_root, tag, cells),
             }
         )
+    _annotate_structural_classes(candidates)
     candidates.sort(
         key=lambda row: (
             -int(row["cypress_no_fit_cells"] > 0),
@@ -271,6 +316,21 @@ def _parent_rows(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for candidate in candidates:
         for script in str(candidate["source_scripts"]).split(";"):
             grouped[script].append(str(candidate["tag"]))
+    return [
+        {
+            "source_script": script,
+            "candidate_count": len(tags),
+            "candidate_tags": ";".join(sorted(tags)),
+            "measurement_state": "NEEDS_PARENT_AND_DISPATCH_PREFLIGHT",
+        }
+        for script, tags in sorted(grouped.items())
+    ]
+
+
+def _preferred_parent_rows(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for candidate in candidates:
+        grouped[str(candidate["preferred_source_script"])].append(str(candidate["tag"]))
     return [
         {
             "source_script": script,
@@ -312,10 +372,14 @@ def main(argv: list[str] | None = None) -> int:
             forced=_forced_reasons(args.forced_tsv),
         )
     )
+    representatives = [row for row in candidates if row["structural_class_representative"]]
     parents = _parent_rows(candidates)
+    representative_parents = _preferred_parent_rows(representatives)
     args.output_root.mkdir(parents=True)
     _write_tsv(args.output_root / "candidate-slate.tsv", candidates)
     _write_tsv(args.output_root / "parent-slate.tsv", parents)
+    _write_tsv(args.output_root / "representative-slate.tsv", representatives)
+    _write_tsv(args.output_root / "representative-parent-slate.tsv", representative_parents)
     (args.output_root / "candidate-slate.json").write_text(
         json.dumps(
             {
@@ -337,7 +401,10 @@ def main(argv: list[str] | None = None) -> int:
         + "\n",
         encoding="utf-8",
     )
-    print(f"SELECTED candidates={len(candidates)} source_programs={len(parents)} frozen=false")
+    print(
+        f"SELECTED candidates={len(candidates)} structural_classes={len(representatives)} "
+        f"source_programs={len(parents)} frozen=false"
+    )
     return 0
 
 
