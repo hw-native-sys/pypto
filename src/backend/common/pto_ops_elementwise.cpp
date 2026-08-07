@@ -106,9 +106,29 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
-                                      codegen::CodegenBase& codegen_base) {
+                                      codegen::CodegenBase& codegen_base,
+                                      std::optional<size_t> i32_operand_idx = std::nullopt) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
+  if (i32_operand_idx.has_value()) {
+    INTERNAL_CHECK_SPAN(*i32_operand_idx < op->args_.size(), op->span_)
+        << "Internal error: " << pto_op_name << " i32 operand index " << *i32_operand_idx
+        << " is outside the " << op->args_.size() << " input operands";
+    std::vector<std::pair<std::string, std::string>> ins;
+    ins.reserve(op->args_.size());
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      const ExprPtr& arg = op->args_[i];
+      std::string operand = codegen.GetExprAsCode(arg);
+      std::string type = codegen.GetExprTypeAnnotation(arg);
+      if (i == *i32_operand_idx) {
+        operand = codegen.EmitCastToI32(arg, operand);
+        type = codegen.GetTypeString(DataType::INT32);
+      }
+      ins.emplace_back(std::move(operand), std::move(type));
+    }
+    EmitInsOuts(codegen, pto_op_name, ins);
+    return "";
+  }
   // The pto.tcolexpand* family requires materialized tile data — their hardware
   // lowering reads physical tile rows/cols from the operand type, which is
   // incorrect for a pto.subview alias.  Other tile ops (tmov, tfillpad, tadd,
@@ -545,6 +565,7 @@ struct SimpleOpEntry {
   const char* op_name;
   const char* pto_op_name;
   size_t arity;
+  std::optional<size_t> i32_operand_idx = std::nullopt;
 };
 
 // clang-format off
@@ -588,11 +609,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.divs",            "pto.tdivs",            2},
     {"tile.rems",            "pto.trems",            3},  // src0, scalar, tmp
     {"tile.fmods",           "pto.tfmods",           2},
-    {"tile.ands",            "pto.tands",            2},
-    {"tile.ors",             "pto.tors",             2},
-    {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
-    {"tile.shls",            "pto.tshls",            2},
-    {"tile.shrs",            "pto.tshrs",            2},
+    {"tile.ands",            "pto.tands",            2, 1},
+    {"tile.ors",             "pto.tors",             2, 1},
+    {"tile.xors",            "pto.txors",            3, 1},  // src0, scalar, tmp
+    {"tile.shls",            "pto.tshls",            2, 1},
+    {"tile.shrs",            "pto.tshrs",            2, 1},
     {"tile.maximums",        "pto.tmaxs",            2},
     {"tile.minimums",        "pto.tmins",            2},
     {"tile.lrelu",           "pto.tlrelu",           2},
@@ -668,9 +689,10 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(entry.op_name) > 0) continue;
     std::string pto_op = entry.pto_op_name;
     size_t arity = entry.arity;
+    std::optional<size_t> i32_operand_idx = entry.i32_operand_idx;
     auto reg_entry = backend.RegisterOp(entry.op_name);
-    reg_entry.f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
+    reg_entry.f_codegen([pto_op, arity, i32_operand_idx](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeNaryCodegenPTO(pto_op, arity, op, codegen, i32_operand_idx);
     });
     if (RequiresRowMajorLayout(entry.op_name)) {
       for (size_t i = 0; i < arity; ++i) {
