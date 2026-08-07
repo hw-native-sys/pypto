@@ -415,6 +415,73 @@ jobs:
       if: needs.changes.outputs.docs_only == 'true'
       run: echo "Every changed path is documentation — no build, no tests."
 
+  examples-tests:
+    # The distributed examples ladder (doc-plan 02) — every example must compile
+    # AND run with a passing golden on the simulator (a2a3sim), so the teaching
+    # material cannot silently rot. Runs in the same container as the system
+    # tests, with ptoas and the simpler runtime installed: the distributed
+    # execution path compiles via ptoas and imports the simpler runtime, which
+    # a bare pip install of the project alone does not provide.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+    container:
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -v .[dev]
+
+      - name: Cache ptoas binary
+        id: cache-ptoas
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ptoas-bin
+          key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+
+      - name: Install ptoas
+        if: steps.cache-ptoas.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-x86_64.tar.gz \
+             -o /tmp/ptoas-bin-x86_64.tar.gz
+          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
+          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+          tar -xzf /tmp/ptoas-bin-x86_64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+
+      - name: Install simpler
+        run: |
+          rm -rf ./runtime/build
+          pip install -v ./runtime
+
+      - name: Run distributed examples on the simulator
+        run: |
+          set -e
+          for ex in examples/distributed/*.py; do
+            case "$ex" in */__init__.py) continue ;; esac
+            echo "=== $ex ==="
+            python "$ex" -p a2a3sim -d 0,1
+          done
+          # Alternate modes documented in the walkthroughs — every documented
+          # invocation must be CI-validated too, or the teaching material rots.
+          echo "=== examples/distributed/04_barrier.py --use-builtin ==="
+          python examples/distributed/04_barrier.py -p a2a3sim -d 0,1 --use-builtin
+          echo "=== examples/distributed/05_remote_load_store.py --mode store ==="
+          python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1 --mode store
+          echo "=== examples/distributed/06_put_get.py --mode get ==="
+          python examples/distributed/06_put_get.py -p a2a3sim -d 0,1 --mode get
+
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and

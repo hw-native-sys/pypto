@@ -210,6 +210,16 @@ require the full 3-segment namespace.
 
 ## Runnable Examples
 
+The [tutorials](05-tutorials.md) teach each primitive by hand before
+any builtin is revealed (steps 03–06 ship; 07–15 are planned):
+
+| Primitive | Tutorial step |
+| --------- | ------------- |
+| window buffer | [08-window_buffer](08-window_buffer.md) (step 03) |
+| notify / wait | [09-barrier](09-barrier.md) (step 04) |
+| remote_load / remote_store | [10-remote_load_store](10-remote_load_store.md) (step 05) |
+| put / get | [11-put_get](11-put_get.md) (step 06) |
+
 | Primitive | Test |
 | --------- | ---- |
 | notify / wait | `test_l3_notify_wait.py` |

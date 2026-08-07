@@ -191,6 +191,16 @@ for peer in pl.range(nranks):
 
 ## 可运行示例
 
+[教程](05-tutorials.md)在揭示任何内置原语之前，先手工教授每个原语
+（步骤 03–06 已交付；07–15 为规划中）：
+
+| 原语 | 教程步骤 |
+| ---- | -------- |
+| window buffer | [08-window_buffer](08-window_buffer.md)（步骤 03） |
+| notify / wait | [09-barrier](09-barrier.md)（步骤 04） |
+| remote_load / remote_store | [10-remote_load_store](10-remote_load_store.md)（步骤 05） |
+| put / get | [11-put_get](11-put_get.md)（步骤 06） |
+
 | 原语 | 测试 |
 | ---- | ---- |
 | notify / wait | `test_l3_notify_wait.py` |
