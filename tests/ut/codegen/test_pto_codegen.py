@@ -896,6 +896,51 @@ def test_pto_codegen_tile_int_literal_scalar_is_not_index():
     assert ", i32)" in tadds, f"scalar operand is not i32: {tadds}"
 
 
+@pytest.mark.parametrize(
+    ("op_name", "pto_op_name", "needs_tmp"),
+    [
+        ("tile.ands", "pto.tands", False),
+        ("tile.ors", "pto.tors", False),
+        ("tile.xors", "pto.txors", True),
+        ("tile.shls", "pto.tshls", False),
+        ("tile.shrs", "pto.tshrs", False),
+    ],
+)
+def test_pto_codegen_tile_bitwise_scalar_index_operand_is_cast_to_i32(op_name, pto_op_name, needs_tmp):
+    """Tile-scalar bitwise codegen must never pass an index operand to PTOAS.
+
+    Python wrappers normalize bare literals before constructing the call, but
+    deserialized or directly constructed IR can still carry an INDEX scalar.
+    The backend contract for all five instructions requires the scalar operand
+    to be emitted as i32.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([32, 32], DataType.INT32)
+    ib = IRBuilder()
+    with ib.function(f"{op_name.removeprefix('tile.')}_index_operand", type=ir.FunctionType.InCore) as f:
+        input_tensor = f.param("input", tensor_type)
+        output_tensor = f.param("output", tensor_type)
+        input_tile = ib.let("input_tile", tile.load(input_tensor, [0, 0], [32, 32]))
+        scalar = ir.ConstInt(5, DataType.INDEX, span)
+        args = [input_tile, scalar]
+        if needs_tmp:
+            args.append(ib.let("tmp", tile.create([32, 32], DataType.INT32)))
+        result_tile = ib.let("result_tile", ir.create_op_call(op_name, args, {}, span))
+        result = ib.let("result", tile.store(result_tile, [0, 0], output_tensor))
+        f.return_type(tensor_type)
+        ib.return_stmt(result)
+
+    program = ir.Program([f.get_result()], f"{op_name.removeprefix('tile.')}_index_operand", span)
+    # The round-trip instrument reparses the literal through the Python wrapper,
+    # which normalizes it before the backend can observe the direct-IR input.
+    with ir.PassContext([], ir.VerificationLevel.NONE):
+        lines = _get_mlir_lines(_generate_default_mlir(program))
+    bitwise_line = _single_line(lines, pto_op_name)
+    assert "index" not in bitwise_line, f"scalar operand is still index: {bitwise_line}"
+    assert ", i32" in bitwise_line, f"scalar operand is not i32: {bitwise_line}"
+    assert any("arith.index_cast" in line and "index to i32" in line for line in lines)
+
+
 def test_pto_codegen_tensor_int_literal_scalar_is_not_index():
     """A tensor-level int literal must lower to an i32-operand tadds, never index.
 
