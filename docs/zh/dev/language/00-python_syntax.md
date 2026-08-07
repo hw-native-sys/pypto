@@ -178,7 +178,7 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 一块分配；希望编译器管理的层次则不加注解。
 
 在 `memory_planner=PTOAS` 下，编译器用的是**同一套**机制而非另一套：
-[`LowerPipelineToSlots`](../passes/27-lower_pipeline_to_slots.md) 会为合格 `pl.pipeline` 循环体中
+[`LowerPipelineToSlots`](../passes/28-lower_pipeline_to_slots.md) 会为合格 `pl.pipeline` 循环体中
 **顶层**的每个 `tile.load` 合成与上文完全一致的声明——`slots=F`、以 `iv % F` 索引——于是单份循环体
 轮转各个槽位而不被复制。你自己绑定过的 tile 不受影响；该 pass 未接手的循环仍走复制路径
 （上述拒绝规则对其依然成立）。
@@ -194,8 +194,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-参见 [InitMemRef](../passes/31-init_memref.md#声明式分配) 与
-[MemoryReuse](../passes/33-memory_reuse.md#声明式分配)。
+参见 [InitMemRef](../passes/32-init_memref.md#声明式分配) 与
+[MemoryReuse](../passes/34-memory_reuse.md#声明式分配)。
 
 ### Tile 视图 (TileView)
 
@@ -448,7 +448,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/44-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`PTO2_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/45-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 
@@ -472,7 +472,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.cross_core_slot(slot_num=N)` | 两种均适用 | 给内层 InCore 设置 `slot_num` 属性——自动跨核 pipe 的槽位数（环深），由 `ExpandMixedKernel` 消费。它只决定数据通道大小，**不**划分计算，因此可与 `pl.split_aiv` 区域共存（而 `pl.split(...)` 不能）。省略时沿用 PTOAS 默认值（单向 8，双向每方向 4）。 |
 
 > `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
-> [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md#覆盖槽位数slot_num)。
+> [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
 示例参见 [作用域与放置](../../user/language/04-scopes.md)。
 

@@ -94,7 +94,7 @@ class TestMxLoad:
             )
 
 
-class TestDtypeAndMemorySpace:
+class TestMxDtypeAndMemorySpace:
     def test_fp8e8m0_exists(self):
         assert DataType.FP8E8M0.get_bit() == 8
         assert DataType.FP8E8M0.to_string() == "fp8e8m0"

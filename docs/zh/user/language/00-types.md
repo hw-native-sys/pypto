@@ -109,7 +109,7 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
-剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。当前限制：MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`；MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`、`view`）与 MX `remote_load` 会被拒绝。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。
+剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。对于 FP8E8M0 A 侧 scale，`pl.tensor.view` 支持在 ND backing tensor 与 `MX_A_ZZ` 消费 tensor 之间建立元素总数不变的带 shape 零拷贝别名；带 shape 的 `MX_B_NN` view 仍不支持。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。
 
 ### 动态 shape
 
@@ -146,10 +146,10 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
 | **报 DN layout-only shorthand 的 `ParserTypeError`** | `pl.Tensor[..., pl.DN]` —— 已移除，它把两套坐标系压进了一条注解 | 写源 shape、不带标记；在使用处用 `pl.transpose(x, -2, -1)` 导出 DN；或让它从产生 DN 的算子经切片/reshape 继承 |
 | **只有两个任务重叠时结果才出错** | 读写缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
 | **读 `Out` 参数读到垃圾** | `Out` 承诺的是先写后读 | 若此前内容有意义，改用 `pl.InOut[...]` |
-| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) |
+| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) |
 | **两个本应相同的维度被当成互相独立** | 调了两次 `pl.dynamic("M")` | 只创建一次 `DynVar` 并复用该对象 |
 
-并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910B 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md)。
+并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910B 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md)。
 
 ## See Also
 
@@ -157,4 +157,4 @@ def rows(x: pl.Tensor[[M, 64], pl.FP32], out: pl.Out[pl.Tensor[[M, 64], pl.FP32]
 - [内存与数据搬运](03-memory.md) —— 在这些类型所命名的空间之间搬运数据。
 - [算子](../ops/index.md) —— 哪些算子接受 `Tensor`、哪些接受 `Tile`。
 - [IR 类型](../../dev/ir/02-types.md) —— 这些注解所构建的 IR 层类型系统。
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。
+- [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。

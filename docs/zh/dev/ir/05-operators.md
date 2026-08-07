@@ -144,9 +144,11 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）；对齐 M↑16、K↑64、N↑32（fp8）。
 
 MX tensor subview 是当前遗留限制。由于硬件路径无法表达 subview base
-offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
-`tensor.reinterpret_view` 和 `tensor.view` 均拒绝 MX-layout source。
-在完整的 scale layout contract 实现前，`pld.tile.remote_load` 也拒绝 MX layout。
+offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose` 和
+`tensor.reinterpret_view` 均拒绝 MX-layout source。`tensor.view` 唯一的
+例外是 FP8E8M0 在 `MX_A_ZZ` 与 packed ND storage 之间的 shaped、zero-copy
+backing alias；它保留同一个完整 buffer，而不是选择 subview。在完整的
+scale layout contract 实现前，`pld.tile.remote_load` 也拒绝 MX layout。
 
 #### MX / Ascend950：pto-isa 约束
 
@@ -281,9 +283,9 @@ UINT32 + INT32 → INT32 (signed precedence)
 
 **操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.maximum/minimum`（逐元素 max/min；rhs 可为 tensor 或 scalar — `ConvertTensorToTileOps` 根据 rhs 类型分发到 `tile.maximum/minimum` 或 `tile.maximums/minimums`），`tensor.set_validshape`（内部 API，更新 valid_shape 元数据，不搬移数据 — 仅供编译器生成代码使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（按维索引；MVP 仅支持 2D 输入 + `dim=-1`，由 `ConvertTensorToTileOps` 按后端分策略下降 —— A5（Ascend950）将末维 gather 展开为对扁平元素偏移 `flat[i, j] = i * src_cols + index[i, j]` 的单次整块 `tile.gather`，并在此之前把带 stride 的 tile 源（如 `tile.slice` 视图）物化为连续 tile，使扁平索引能正确寻址；A2A3（Ascend910B）保留 legacy 的按行 `tile.gather` 循环，此时每个单行切片内的列索引即等于扁平索引），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`；见[掩码模式](#掩码模式)），`tensor.scatter`（按列散布；`tensor.gather` 的按列逆操作，MVP 仅支持 2D 输入 + `dim=-1` —— `out[b, index[b, k]] = src[b, k]`，`index` 与 `src` 同形状 —— 由 `ConvertTensorToTileOps` 下降到 `tile.scatter`），`tensor.scatter_mask`（按掩码模式散布；对应 `tile.scatter_mask`，将紧凑 `input` 按掩码扩展到 `dst` 的对应列 —— 见[掩码模式](#掩码模式)），`tensor.ci` / `tensor.arange`（生成连续整数序列，下层降到 `tile.ci`；同时通过 `pl.arange` 暴露在顶层 namespace），`tensor.and/ands/or/ors/xor/xors/not/shl/shls/shr/shrs`（仅整数的位运算与移位。此处列出的是注册的 *IR* 名称；其中名字本身是 Python 关键字的三个，其 Python 拼写带尾部下划线 —— `tensor.and_`、`tensor.or_`、`tensor.not_` —— printer 也按该形式输出，以保证 IR 能往返为合法 Python；对应同名 `tile.*` 操作。张量-张量形式的两个操作数形状必须相同 —— 硬件没有 `tile.row_expand_and`，因此广播在类型推导阶段即被拒绝，而不是延迟到 pass 中失败。`tensor.not` 仅支持 int16/uint16，与 `tile.not`/TNOT 一致。移位保持 lhs 的元素类型；`and`/`or`/`xor` 按整数位宽提升，与其 tile 版本行为一致。`ConvertTensorToTileOps` 将其中九个 1:1 下降，并为 `tensor.xor`/`tensor.xors` 合成 `pto.txor` 所需的临时操作数，使 tensor 层调用者无需提供 `tmp`）
 
-`tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）；编排层仅支持 ND shape 重新解释，且不能同时改变 layout。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
+`tensor.view` 是只修改元数据的零拷贝 shape/layout 重新解释操作。它注册为 `TensorOp`，并在 `ConvertTensorToTileOps` 中作为 passthrough 处理；PTO in-core codegen 会将其降级为基于原始 base pointer 的 `pto.make_tensor_view`。目标 rank 至少为 1（DN 至少为 2）。编排层通常仅支持 ND shape 重新解释，且不能同时改变 layout；FP8E8M0 dynamic A-scale storage 还允许在 packed ND 与 `MX_A_ZZ` 之间建立元素数相同的 shaped alias，编排层保留同一个 runtime tensor，不调用 `reshape`。对部分有效的源张量进行 shape 重新解释时，仅支持把 packed ND 的 leading dimensions 折叠为 2D，或把连续前缀线性折叠为 `[1, product(shape)]`；两种形式都必须显式提供目标 `valid_shape`，并会保留源张量类型及其底层元数据。
 
-`pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图，因此 `dtype` 必须不同，且仅支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
+`pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图，因此 `dtype` 必须不同，且仅支持有/无符号 8/16/32/64 位整数、FP8E4M3FN、FP8E8M0、FP16、BF16 与 FP32。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
 **示例：**
 
@@ -319,6 +321,8 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 MX block-32 动态量化，返回语义类型 `{FP8E4M3FN quant, FP8E8M0 scale}`；公开 `dtype` 目前仅接受 `FP8E4M3FN`；要求完整有效区域（`valid_shape == shape`）、`M % 16 == 0`、`K % 32 == 0`、`M*K <= 59461`，两个结果可独立使用；[Pass 12](../passes/12-expand_mx_packed_quant.md) 展开紧凑 ZZ/NN 布局，[Pass 13](../passes/13-lower_composite_ops.md) 隐藏 PTOAS 所需的原始 INT8/UINT8 destination，随后 codegen 生成 `pto.tquant.mx` |
+| - | `tile.tdequant` / `pl.tdequant` | 整数逐行反量化：`dst = (src - offset) * scale`；src 接受 row-major 或 column-major 输入并规范化为 row-major，dst 为 row-major，`[M,1]` scale/offset 为 column-major |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
@@ -342,7 +346,7 @@ with ib.function("tensor_example") as f:
 | 字段 | 结果值的来源 |
 | ---- | ------------ |
 | `blayout` / `slayout` | 凡目标 space 自带 layout（`Mat`、`Acc`、`Left`、`Right`、`LeftScale`、`RightScale`），取**目标**的 implicit layout；扁平 space（`Vec`、`Bias` 等）则沿用源 tile 的 effective layout。两者都可由 `blayout` / `slayout` kwarg 覆盖 |
-| `fractal` | **目标** space 的分块（boxing）粒度，绝不取源的：`Acc`（L0C，NZ 分形）为 1024，MX scale tile 为 32，其余为 512 |
+| `fractal` | **目标** space 的分块（boxing）粒度：`Acc`（L0C，NZ 分形）为 1024，MX scale tile 为 32，其余为 512。唯一的窄化例外是 UINT8/FP8E8M0 MX scale 从 Vec 显式暂存到 Mat：匹配的 row/row 或 col/col layout 会保留源 fractal-32 元数据，使下一次 move 可以进入 LeftScale/RightScale |
 | `valid_shape` / `pad` | 从源带过来 |
 | `stride` / `start_offset` | 丢弃 —— 目标是稠密缓冲区 |
 
@@ -350,10 +354,14 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile_view_semantics::GetImplicitTileLayout` 提供。`Right` 仍需就地覆盖：L0B 要求
 `blayout=row_major`，而 `[N, 1]` 形状的 implicit `blayout` 是 `col_major`。
 
+把 fractal-32 的 UINT8/FP8E8M0 量化 scale reshape 为二维矩阵时会保留 block
+大小并选择 row/row；对该 view 做 transpose 后选择 col/col。这两者分别是左右
+scale 的规范暂存 layout。
+
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/17-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/18-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 ### reshape 与有效区域（valid region）

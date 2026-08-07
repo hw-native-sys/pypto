@@ -1365,6 +1365,66 @@ class TestCrossCoreBoundaries:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_v2c_mx_scale_staging_preserves_fractal32_layouts(self):
+        """Vec->Mat MX scale staging must not be rewritten to ordinary Mat NZ.
+
+        LeftScale TMov_mx requires a row/row/32 Mat source. The A5 V2C fractal
+        adapter normally forces Mat NZ (col/row); MX staging views must be kept.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 2], pl.FP8E8M0]],
+            ) -> pl.Tensor[[16, 2], pl.FP8E8M0]:
+                a_src = pl.load(a, [0, 0], [16, 64])
+                a_quant, a_scale = pl.tile._quant_mx_nd(a_src)
+                a_scale_2d = pl.tile.reshape(a_scale, [16, 2])
+                a_scale_mat = pl.move(
+                    a_scale_2d,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                _lhs_scale = pl.move(a_scale_mat, target_memory=pl.Mem.LeftScale)
+                # Companion Cube consumer so ExpandMixedKernel opens a V2C boundary.
+                a_mat = pl.move(a_quant, target_memory=pl.Mem.Mat)
+                _lhs = pl.move(a_mat, target_memory=pl.Mem.Left)
+                out_0 = pl.store(a_scale_2d, [0, 0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+
+        def _walk(stmt):
+            if isinstance(stmt, ir.SeqStmts):
+                for child in stmt.stmts:
+                    yield from _walk(child)
+                return
+            if isinstance(stmt, ir.AssignStmt):
+                yield stmt
+
+        staging = []
+        for func in After.functions.values():
+            if func.func_type not in (pl.FunctionType.AIC, pl.FunctionType.AIV):
+                continue
+            for stmt in _walk(func.body):
+                tile_type = stmt.var.type
+                if not isinstance(tile_type, ir.TileType) or tile_type.dtype != pl.FP8E8M0:
+                    continue
+                view = tile_type.tile_view
+                if view is None or view.fractal != 32:
+                    continue
+                if tile_type.memory_space == pl.Mem.Mat or stmt.var.name_hint.endswith(("_nz", "_zn")):
+                    staging.append((stmt.var.name_hint, view.blayout, view.slayout, tile_type.memory_space))
+
+        assert staging, "expected MX scale Mat/tpush staging tiles after expand"
+        for name, blayout, slayout, _mem in staging:
+            assert blayout == pl.TileLayout.row_major, name
+            assert slayout == pl.TileLayout.row_major, name
+
     def test_v2c_boundary_direct_to_right_uses_nz_transfer_view(self):
         """Direct V->C move to Right must use an NZ bridge tile on Ascend950."""
 

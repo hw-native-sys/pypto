@@ -227,7 +227,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 承载于作用域自身的 `split_`）与显式 `pl.split_aiv` 区域（`SplitAivScopeStmt`）不能在同一
 作用域共存（outliner 会把单个区域的模式桥接为函数级代表 `split`，从而与用户的
 `pl.split` 静默冲突）。幸存机制如何下降见
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)。
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)。
 
 **任何** `pl.split(...)` 都会被拒绝，包括 `SplitMode.NONE`（RFC #1820）。NONE 本身不
 携带拆分，但把它写在同时持有区域的作用域上，读起来仍像"在一个作用域里混用了自动与手动
@@ -262,6 +262,6 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 `Function::GetSplitMode()` 把存储的 `0` 与缺失的键同样映射为 `nullopt`，因此
 `split=SplitMode.NONE` 这一项对所有消费方都不可见；而 parser 会在回读时丢弃它，导致
 print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始终承载于
-`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md)
+`SplitAivScopeStmt::split_`，由 [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md)
 消费。printer 以同一规则兜底：省略取值为 `SplitMode.NONE` 的 `split` 属性，使绕过本 Pass
 的 IR（此前写出的 `.pto`、以编程方式构造的 `Function`）依然以规范、可重新解析的形式打印。

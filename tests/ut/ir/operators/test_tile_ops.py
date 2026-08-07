@@ -3107,6 +3107,22 @@ class TestTileReinterpretViewIR:
         assert isinstance(call.type, ir.TileType)
         assert self._shape_values(call.type) == [32]
 
+    @pytest.mark.parametrize(
+        "target_dtype",
+        [DataType.FP8E4M3FN, DataType.FP8E8M0],
+    )
+    def test_byte_sized_float_target_preserves_shape(self, target_dtype):
+        call = tile.reinterpret_view(self._var([16, 64], DataType.INT8), target_dtype)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == target_dtype
+        assert self._shape_values(call.type) == [16, 64]
+
+    @pytest.mark.parametrize("target_dtype", [DataType.FP8E5M2, DataType.HF8])
+    def test_unsupported_byte_sized_float_target_is_rejected(self, target_dtype):
+        with pytest.raises(ValueError, match="does not support target dtype"):
+            tile.reinterpret_view(self._var([16, 64], DataType.INT8), target_dtype)
+
     def test_auto_shape_uses_col_major_contiguous_axis(self):
         view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.none_box)
         call = tile.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)

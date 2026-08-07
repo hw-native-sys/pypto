@@ -1780,6 +1780,57 @@ def not_(tile: Expr, span: Span | None = None) -> Call:
 
 
 # ============================================================================
+# MX Quantization Operations
+# ============================================================================
+
+
+def tquant_mx(
+    src: Expr,
+    *,
+    mode: str = "mxfp8_e4m3",
+    layout: TensorLayout | None = None,
+    span: Span | None = None,
+) -> Call:
+    """MX block-32 dynamic quantization returning quantized data and scale.
+
+    ``layout`` is optional at the IR builder level: omit for flat ``[1, groups]``
+    scales; pass ``MX_A_ZZ`` / ``MX_B_NN`` to request ExpandMxPackedQuant.
+    Public ``pl.quant_mx`` requires a packed layout and emits this packed form.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict = {"mode": mode}
+    if layout is not None:
+        kwargs["layout"] = layout
+    return _ir_core.create_op_call("tile.tquant_mx", [src], kwargs, actual_span)
+
+
+def tquant_mx_dps(
+    src: Expr,
+    max_scratch: Expr,
+    scaling_scratch: Expr,
+    dst: Expr,
+    exp: Expr,
+    *,
+    mode: str = "mxfp8_e4m3",
+    span: Span | None = None,
+) -> Call:
+    """Build the compiler-internal, side-effecting DPS form of MX quantization."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.tquant_mx_dps",
+        [src, max_scratch, scaling_scratch, dst, exp],
+        {"mode": mode},
+        actual_span,
+    )
+
+
+def tdequant(src: Expr, scale: Expr, offset: Expr, span: Span | None = None) -> Call:
+    """Dequantize an integer tile with per-row scale and offset tiles."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.tdequant", [src, scale, offset], {}, actual_span)
+
+
+# ============================================================================
 # Matrix Operations
 # ============================================================================
 

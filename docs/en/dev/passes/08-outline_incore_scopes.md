@@ -235,7 +235,7 @@ passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes, "Outline InCore 
 explicit `pl.split_aiv` regions (`SplitAivScopeStmt`) cannot coexist on one
 scope (the outliner bridges a single region's mode into a function-level
 representative `split`, which would silently collide with the user's
-`pl.split`). See [`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) for how
+`pl.split`). See [`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) for how
 the surviving mechanism is lowered.
 
 **Any** `pl.split(...)` is rejected, `SplitMode.NONE` included (RFC #1820). NONE
@@ -276,7 +276,7 @@ onto the function only when all regions agree *and* that mode is a real split:
 absent key, so a `split=SplitMode.NONE` entry was invisible to every consumer —
 and the parser drops it, which made print → parse lossy (`Kwargs size mismatch`).
 The authoritative per-region mode always rides `SplitAivScopeStmt::split_`, which
-[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) consumes. The printer
+[`LowerAutoVectorSplit`](21-lower_auto_vector_split.md) consumes. The printer
 applies the same rule as a backstop: it omits a `split` attr of `SplitMode.NONE`
 so IR that bypassed this pass (a pre-existing `.pto` blob, a programmatically
 built `Function`) still prints in the canonical, re-parsable form.

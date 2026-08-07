@@ -531,11 +531,16 @@ void BindPass(nb::module_& m) {
   passes.def(
       "simplify", &pass::Simplify,
       "Create a pass that simplifies expressions and statements using algebraic rules and bound analysis");
+  passes.def("expand_mx_packed_quant", &pass::ExpandMxPackedQuant,
+             "Expand tile.tquant_mx(layout=MX_A_ZZ|MX_B_NN) into per-box flat quant + ZZ/NN scales.\n\n"
+             "Must run before LowerCompositeOps. B (MX_B_NN) also inserts an INT8 [N,K]->[K,N]\n"
+             "transpose. Public pl.quant_mx(layout=...) emits the packed form; this pass\n"
+             "materializes its per-box implementation.");
   passes.def("lower_composite_ops", &pass::LowerCompositeOps,
              "Decompose composite tile/distributed ops into primitives via the "
-             "composite-lowering registry. Today lowers tile.sin/tile.cos and "
-             "explicit-signal InCore pld.tensor.allreduce; host allreduce is "
-             "skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
+             "composite-lowering registry. Today lowers tile.sin/tile.cos, flat "
+             "tile.tquant_mx, and explicit-signal InCore pld.tensor.allreduce; host "
+             "allreduce is skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("inline_functions", &pass::InlineFunctions,

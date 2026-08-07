@@ -188,7 +188,7 @@ loop back-edge shows only its textual extent.
 
 ## Related
 
-- `docs/en/dev/passes/34-allocate_memory_addr.md` — the pass whose output is mapped
-- `docs/en/dev/passes/33-memory_reuse.md` — the pass that decides which lifetimes may share a slot
+- `docs/en/dev/passes/35-allocate_memory_addr.md` — the pass whose output is mapped
+- `docs/en/dev/passes/34-memory_reuse.md` — the pass that decides which lifetimes may share a slot
 - `docs/en/dev/passes/00-pass_manager.md` — `ReportInstrument`, which now only names the artifact directory
 - `docs/en/dev/04-simulator-trace-cleaning.md` — the other post-hoc analysis tool in `pypto.tools`

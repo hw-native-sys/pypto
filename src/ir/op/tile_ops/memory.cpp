@@ -458,6 +458,20 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.blayout = requested_blayout;
   tile_view.slayout = requested_slayout;
 
+  // tquant_mx emits its E8M0 scale bytes in Vec with MX fractal-32 metadata.
+  // Preserve that metadata only for the explicit Vec -> Mat staging layouts
+  // accepted by LeftScale/RightScale; ordinary moves must continue to use the
+  // destination buffer's boxing granularity.
+  const bool is_mx_scale_staging =
+      space == MemorySpace::Mat &&
+      (!tile_type->memory_space_.has_value() || tile_type->memory_space_ == MemorySpace::Vec) &&
+      (tile_type->dtype_ == DataType::UINT8 || tile_type->dtype_ == DataType::FP8E8M0) &&
+      source_view.fractal == tile_view_semantics::kMXScaleFractal && requested_blayout == requested_slayout &&
+      (requested_blayout == TileLayout::row_major || requested_blayout == TileLayout::col_major);
+  if (is_mx_scale_staging) {
+    tile_view.fractal = tile_view_semantics::kMXScaleFractal;
+  }
+
   // Keep original shape
   std::vector<ExprPtr> output_shape = input_shape;
 
