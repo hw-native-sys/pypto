@@ -283,6 +283,20 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+**Enum op arguments:** Op wrappers have parameter slots that take a Python enum
+rather than an IR expression — `DataType`, `MemorySpace`, `TensorLayout`,
+`TileLayout`, `PadValue`, `ArgDirection`. These resolve identically whether
+written positionally or by keyword, both as literal attributes and as closure
+names, so the two lines below build the same call:
+
+```python
+p = pl.fillpad(t, pl.PadValue.min)              # positional
+p = pl.fillpad(t, pad_value=pl.PadValue.min)    # keyword
+```
+
+The same holds for the numeric sugars an op accepts in such a slot: `pl.fillpad`
+takes `0`, `0.0`, `math.inf`, and `-math.inf` in either position.
+
 ### Subscript Indexing
 
 `Tensor` and `Tile` subscripts use numpy/torch-style semantics:

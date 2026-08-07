@@ -67,6 +67,20 @@ if TYPE_CHECKING:
 # / tile_ops); also surfaced as the hint in _parse_pld_category_op.
 _PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
 
+# Enum values that op wrappers and printed ``attrs={...}`` dicts take verbatim.
+# ``parse_expression`` cannot represent these: it either rejects the standalone
+# attribute form outright or (for MemorySpace) lowers it to a ConstInt that the
+# IR builders then reject, so every path that reads such a value must recognize
+# it before falling back to expression parsing.
+_ENUM_VALUE_TYPES: tuple[type, ...] = (
+    DataType,
+    ir.MemorySpace,
+    ir.TensorLayout,
+    ir.TileLayout,
+    ir.PadValue,
+    ir.ArgDirection,
+)
+
 
 def _is_empty_body(body: list[ast.stmt]) -> bool:
     """True if a function body carries no statements beyond a signature marker.
@@ -7330,10 +7344,7 @@ class ASTParser:
         # them to ConstInt and silently changes the stored attr type.
         if isinstance(value_node, ast.Attribute):
             success, value = self.expr_evaluator.try_eval_expr(value_node)
-            if success and isinstance(
-                value,
-                (DataType, ir.MemorySpace, ir.TensorLayout, ir.TileLayout, ir.PadValue, ir.ArgDirection),
-            ):
+            if success and isinstance(value, _ENUM_VALUE_TYPES):
                 return value
 
             # Keep the dtype resolver's diagnostic for unknown ``pl.<DTYPE>``
@@ -7663,17 +7674,50 @@ class ASTParser:
     def _parse_op_positional_arg(self, arg: ast.expr) -> Any:
         """Parse a positional op argument.
 
+        Positional and keyword op arguments must agree: ``pl.fillpad(t,
+        pl.PadValue.zero)`` means exactly what ``pl.fillpad(t,
+        pad_value=pl.PadValue.zero)`` means. Wrappers have non-Expr parameter
+        slots (dtypes, memory spaces, pad modes) that ``parse_expression``
+        cannot represent, so those spellings are resolved here the same way
+        ``_parse_op_kwargs`` resolves them.
+
         For ``ast.Attribute`` nodes (e.g. ``pl.INDEX``, ``pl.FP32``), try
         dtype resolution first so wrappers receive a ``DataType`` for slots
-        like ``pl.cast(value, dtype)``. Falls through to ``parse_expression``
-        for everything else, which keeps Tensor/Tile/Scalar var lookups,
-        list literals, etc. on the existing path.
+        like ``pl.cast(value, dtype)``, then closure evaluation for enum and
+        numeric constants (``pl.PadValue.zero``, ``math.inf``) — neither of
+        which ``parse_expression`` accepts. ``ast.Name`` resolves enums from
+        the closure only when the name is not an IR variable; numeric closure
+        names stay on the existing path, which materializes them as
+        ``ConstInt`` / ``ConstFloat`` carrying the parser's chosen dtype.
+        Everything else falls through to ``parse_expression``, which keeps
+        Tensor/Tile/Scalar var lookups, list literals, etc. unchanged.
         """
         if isinstance(arg, ast.Attribute):
             try:
                 return self.type_resolver.resolve_dtype(arg)
             except ParserError:
                 pass
+            success, value = self.expr_evaluator.try_eval_expr(arg)
+            # bool subclasses int — a positional ``True`` is not a numeric
+            # constant slot, so leave it on the expression path.
+            if success and (
+                isinstance(value, _ENUM_VALUE_TYPES)
+                or (isinstance(value, (int, float)) and not isinstance(value, bool))
+            ):
+                return value
+        elif isinstance(arg, ast.Name) and self.scope_manager.lookup_var(arg.id) is None:
+            success, value = self.expr_evaluator.try_eval_expr(arg)
+            if success and isinstance(value, _ENUM_VALUE_TYPES):
+                return value
+        elif isinstance(arg, ast.UnaryOp) and isinstance(arg.op, ast.USub):
+            # ``-math.inf`` — parse_expression would descend into the operand
+            # and hit the standalone-attribute rejection. Only attributes are
+            # intercepted; ``-<name>`` and ``-<literal>`` keep their existing
+            # expression handling.
+            if isinstance(arg.operand, ast.Attribute):
+                success, value = self.expr_evaluator.try_eval_expr(arg.operand)
+                if success and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return -value
         return self.parse_expression(arg)
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:

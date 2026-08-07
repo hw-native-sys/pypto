@@ -257,6 +257,19 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+**枚举类算子实参 (Enum op arguments):** 算子包装函数中有一类形参接收 Python
+枚举而非 IR 表达式 —— `DataType`、`MemorySpace`、`TensorLayout`、`TileLayout`、
+`PadValue`、`ArgDirection`。无论按位置传入还是按关键字传入，也无论写成字面属性
+还是闭包名称，它们的解析结果完全一致，因此下面两行构建出相同的调用:
+
+```python
+p = pl.fillpad(t, pl.PadValue.min)              # positional
+p = pl.fillpad(t, pad_value=pl.PadValue.min)    # keyword
+```
+
+算子在此类形参上接受的数值糖也同样如此: `pl.fillpad` 在两种位置上都接受 `0`、
+`0.0`、`math.inf` 和 `-math.inf`。
+
 ### 下标索引 (Subscript Indexing)
 
 `Tensor` 和 `Tile` 的下标采用 numpy/torch 风格的语义:
