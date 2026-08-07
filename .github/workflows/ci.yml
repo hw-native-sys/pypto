@@ -827,8 +827,10 @@ jobs:
       - name: Test distributed system tests
         # The step clock includes both task-submit queueing and the device run.
         # Keep enough headroom for a typical ~10-minute suite after waiting for
-        # a two-card slot; --max-time below still caps device execution at 15m.
-        timeout-minutes: 30
+        # a two-card slot; --max-time below still caps device execution at 30m,
+        # so leave the step budget above that or the runner kills the task
+        # before task-submit can report the cap cleanly.
+        timeout-minutes: 45
         # Mechanism B (multi-card): borrow 2 NPUs via `task-submit --device auto
         # --device-num 2` for the whole pytest run; $TASK_DEVICE is the lent set
         # (comma-separated), passed to --device. The job no longer pins an
@@ -836,7 +838,7 @@ jobs:
         # HCCL); task-submit preserves that env into the child.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 900 \
+          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Kill orphaned task-submit tasks
