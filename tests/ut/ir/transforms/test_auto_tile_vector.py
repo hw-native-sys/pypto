@@ -961,17 +961,15 @@ def test_grounded_pointwise_chain_and_row_expand_count_mode_costs(capfd):
     assert "compute_cycles=48 " in count_mode
 
 
-def test_grounded_reduction_tables_and_fallback_are_observable(capfd):
+def test_grounded_reduction_tables_are_observable(capfd):
     _, row = _logged_plan(NarrowRowReductionProgram, capfd)
     _, col = _logged_plan(ColSumProgram, capfd)
-    _, bf16 = _logged_plan(Bf16RowReductionProgram, capfd)
     # These are exact interpolation-table goldens, including the selected
     # grid's wave division. They are intentionally independent of Fusebox.
     assert "compute_cycles=2510 " in row
     assert "compute_cycles=38941 " in col
     assert "reduction_model=grounded" in row
     assert "reduction_model=grounded" in col
-    assert "reduction_model=legacy_fallback" in bf16
 
 
 def test_reduction_chunk_is_chosen_by_cost_not_first_capacity_fit(capfd):
@@ -1284,7 +1282,6 @@ def test_compile_writes_auto_tile_schedule_report_without_pass_dumps(tmp_path):
     [
         (RaggedPointwiseProgram, "tensor.add"),
         (Fp16PointwiseProgram, "tensor.mul"),
-        (Bf16PointwiseProgram, "tensor.add"),
         (PointwiseVocabularyProgram, "tensor.fmod"),
         (HighPrecisionRsqrtProgram, "tensor.rsqrt"),
     ],
@@ -1294,6 +1291,15 @@ def test_ragged_and_half_width_pointwise_are_admitted(program, op):
     assert structure.spmd == 1
     assert structure.ops[op] >= 1
     assert structure.ops["tensor.assemble"] >= 1
+
+
+@pytest.mark.parametrize("program", [Bf16PointwiseProgram, Bf16RowReductionProgram])
+def test_bf16_arithmetic_is_rejected_during_910b_admission(program):
+    with pytest.raises(
+        ValueError,
+        match="Ascend910B vector arithmetic supports FP16 and FP32.*BF16 tensors are supported only",
+    ):
+        _run_auto_tile(program)
 
 
 def test_unified_broadcasts_normalize_to_explicit_row_and_column_ops():
@@ -1348,7 +1354,6 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         WideMultiOutputProgram,
         RaggedPointwiseProgram,
         Fp16PointwiseProgram,
-        Bf16PointwiseProgram,
         PointwiseVocabularyProgram,
         HighPrecisionRsqrtProgram,
         BroadcastProgram,
@@ -1360,7 +1365,6 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         BranchedLiveOutProgram,
         RaggedRowReductionProgram,
         Fp16RowReductionProgram,
-        Bf16RowReductionProgram,
         ColReductionApplyProgram,
         SoftmaxProgram,
         Fp16SoftmaxProgram,

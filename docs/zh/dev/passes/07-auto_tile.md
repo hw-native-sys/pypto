@@ -54,7 +54,8 @@ no-op。
 - 显式配置 Ascend 910B 后端，并在 scope outline 前标记 tensor-level
   `FunctionType::Opaque` function；
 - 具有一个顶层 return、正数静态 rank-2 shape 的直线型、拓扑有序 SSA tensor DAG；
-- FP32、FP16 和 BF16 Vector 计算；
+- FP32 和 FP16 Vector 计算；
+- BF16 tensor 存储和原生 cast 链端点；
 - 作为终端且不再被消费的 FP32-to-INT8 cast；
 - 逐元素算术、scalar 形式、`part_*`、行/列 broadcast、`exp`、`log`、
   `abs`、`sqrt`、`rsqrt`、`recip` 和 `fmod`；
@@ -67,6 +68,11 @@ no-op。
 统一二元操作在发射前会规范化为显式 row-expand 或 col-expand 操作。含 `[1,1]`
 tensor 的歧义 broadcast，以及非交换减法或除法中位于左侧的 broadcast 操作数会被
 拒绝。broadcast 除法支持 FP16 和 FP32；其高精度形式不在本契约中。
+
+经过验证的 Ascend 910B A2/A3 AutoTile 算术范围是 FP16/FP32；PTOAS 会在该目标上拒绝
+直接 BF16 `TADD`。因此 AutoTile 会在准入阶段、规划或 PTOAS 编译之前拒绝 BF16 算术。
+BF16 仍可作为存储 tensor，以及原生 cast 链的源或目标。AutoTile 不会隐式地把 BF16
+算术提升为 FP32，因为那会成为另一种算法，并引入额外的 UB 存储、传输和 modeled cost。
 
 原生 cast 链可以消费边界值或 full-frame 逐元素值。若 cast 直接以归约结果为起点，pass
 会拒绝该图：归约发射拥有单独 padding 的结果 box，而当前 emitter 尚不能把它扩展到 cast
@@ -192,8 +198,9 @@ cost model 组合：
 5. task 与 wave fill 项。
 
 planner 会评估每个容量安全的 reduction chunk，并选择 modeled cost 最小者；不会假定
-最大可容纳 chunk 最快。没有实测归约表的 dtype 使用显式保守 fallback，并在选中 plan
-日志中报告，而不会伪装成 grounded 数据。
+最大可容纳 chunk 最快。当前准入的两种计算 dtype 都使用 grounded reduction table。
+实现仍为未来 backend 扩展保留显式保守 fallback，而不会把未 grounded 的估计伪装成
+实测数据。
 
 模型有意保留保守的双向 GM 流量和。它不会假设 MTE2/MTE3 相互独立重叠，不会拟合
 新的带宽系数，也不会推断 IR 中不存在的隐式 pipeline。

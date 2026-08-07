@@ -124,11 +124,15 @@ bool IsReduction(VectorOpKind kind) {
 }
 
 bool IsSupportedComputeDType(const DataType& dtype) {
-  return dtype == DataType::FP32 || dtype == DataType::FP16 || dtype == DataType::BF16;
+  return dtype == DataType::FP32 || dtype == DataType::FP16;
+}
+
+bool IsSupportedCastDType(const DataType& dtype) {
+  return IsSupportedComputeDType(dtype) || dtype == DataType::BF16;
 }
 
 bool IsSupportedTensorDType(const DataType& dtype) {
-  return IsSupportedComputeDType(dtype) || dtype == DataType::INT8;
+  return IsSupportedCastDType(dtype) || dtype == DataType::INT8;
 }
 
 void AssignPhysicalShapeClasses(VectorGraph* graph) {
@@ -300,8 +304,11 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
       }
       const size_t input = register_tensor(var, is_boundary);
       op.inputs.push_back(input);
-      CHECK_SPAN(IsSupportedComputeDType(tensor_type->dtype_), call->span_)
-          << "AutoTile supports INT8 only as a terminal tensor.cast output, not as vector compute input";
+      CHECK_SPAN(IsOp(call, "tensor.cast") ? IsSupportedCastDType(tensor_type->dtype_)
+                                           : IsSupportedComputeDType(tensor_type->dtype_),
+                 call->span_)
+          << "AutoTile Ascend910B vector arithmetic supports FP16 and FP32; BF16 tensors are supported "
+             "only as tensor.cast sources or destinations, and INT8 only as a terminal tensor.cast output";
     }
     CHECK_SPAN(!op.inputs.empty(), call->span_) << "AutoTile vector operations require a tensor operand";
     if (op.geometry == VectorGeometry::Flat && IsUnifiedBroadcastOp(call) && op.inputs.size() == 2) {
@@ -336,22 +343,19 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
                call->span_)
         << "AutoTile does not support high-precision division with a broadcast operand";
     if (IsOp(call, "tensor.cast")) {
-      CHECK_SPAN(IsSupportedComputeDType(output_type->dtype_) ||
+      CHECK_SPAN(IsSupportedCastDType(output_type->dtype_) ||
                      (graph.tensors[op.inputs.front()].dtype == DataType::FP32 &&
                       output_type->dtype_ == DataType::INT8),
                  call->span_)
-          << "AutoTile supports compute-dtype casts and terminal FP32-to-INT8 casts";
+          << "AutoTile supports FP32, FP16, and BF16 cast endpoints and terminal FP32-to-INT8 casts";
     } else {
       CHECK_SPAN(IsSupportedComputeDType(output_type->dtype_), call->span_)
-          << "AutoTile supports FP32, FP16, and BF16 vector compute outputs";
+          << "AutoTile Ascend910B vector arithmetic supports FP16 and FP32; BF16 tensors are supported "
+             "only as tensor.cast sources or destinations";
       for (size_t input : op.inputs) {
         CHECK_SPAN(graph.tensors[input].dtype == output_type->dtype_, call->span_)
             << "AutoTile requires explicit tensor.cast for mixed tensor dtypes";
       }
-      CHECK_SPAN(!(IsDivisionOp(call) && op.geometry != VectorGeometry::Flat &&
-                   output_type->dtype_ == DataType::BF16),
-                 call->span_)
-          << "AutoTile broadcast division supports FP16 and FP32 only";
     }
     if (IsOp(call, "tensor.cast")) {
       const DataType source_dtype = graph.tensors[op.inputs.front()].dtype;

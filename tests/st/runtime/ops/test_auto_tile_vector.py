@@ -281,36 +281,6 @@ class Fp16Case(_AutoTileCase):
 
 
 @pl.program
-class Bf16Program:
-    @pl.function(attrs={"auto_tile": True})
-    def kernel(
-        self,
-        x: pl.Tensor[[128, 512], pl.BF16],
-        y: pl.Tensor[[128, 512], pl.BF16],
-    ) -> pl.Tensor[[128, 512], pl.BF16]:
-        out: pl.Tensor[[128, 512], pl.BF16] = pl.add(x, y)
-        return out
-
-
-class Bf16Case(_AutoTileCase):
-    def get_name(self) -> str:
-        return "auto_tile_vector_bf16"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("x", [128, 512], DataType.BF16, init_value=torch.randn),
-            TensorSpec("y", [128, 512], DataType.BF16, init_value=torch.randn),
-            TensorSpec("out", [128, 512], DataType.BF16, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return Bf16Program
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        tensors["out"][:] = tensors["x"] + tensors["y"]
-
-
-@pl.program
 class Bf16ToFp16CastProgram:
     @pl.function(attrs={"auto_tile": True})
     def kernel(self, x: pl.Tensor[[48, 47000], pl.BF16]) -> pl.Tensor[[48, 47000], pl.FP16]:
@@ -432,7 +402,6 @@ class TestAutoTileVector:
             (ColSumCase, None),
             (ColMaxCase, None),
             (Fp16Case, _FP16_TOL),
-            (Bf16Case, _BF16_TOL),
             (Bf16ToFp16CastCase, _FP16_TOL),
             (Fp16ToBf16CastCase, _BF16_TOL),
             (Int8OutputCase, None),

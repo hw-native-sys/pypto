@@ -58,7 +58,8 @@ The initial implementation supports the following closed surface:
   `FunctionType::Opaque` function before scope outlining;
 - a straight-line, topologically ordered SSA tensor DAG with one top-level
   return and positive static rank-2 shapes;
-- FP32, FP16, and BF16 vector computation;
+- FP32 and FP16 vector computation;
+- BF16 tensor storage and native cast-chain endpoints;
 - a terminal, unconsumed FP32-to-INT8 cast;
 - elementwise arithmetic, scalar forms, `part_*`, row/column broadcasts,
   `exp`, `log`, `abs`, `sqrt`, `rsqrt`, `recip`, and `fmod`;
@@ -74,6 +75,14 @@ operations before emission. Ambiguous `[1,1]` tensor broadcasts and a
 broadcasted left operand of non-commutative subtraction or division are rejected.
 Broadcast division supports FP16 and FP32; its high-precision form is not part
 of this contract.
+
+The validated Ascend 910B A2/A3 AutoTile arithmetic surface is FP16/FP32;
+PTOAS rejects direct BF16 `TADD` on this target. AutoTile therefore rejects
+BF16 arithmetic during admission, before planning or PTOAS compilation. BF16
+remains supported as a stored tensor and as the source or destination of a
+native cast chain. AutoTile does not implicitly promote BF16 arithmetic through
+FP32 because that would be a different algorithm with additional UB storage,
+transfers, and modeled cost.
 
 A native cast chain may consume a boundary or full-frame elementwise value. A
 cast rooted directly in a reduction result is declined: reduction emission owns
@@ -230,9 +239,10 @@ The cost model combines:
 5. task and wave fill terms.
 
 Every capacity-safe reduction chunk is evaluated and the minimum modeled cost
-wins; the largest fitting chunk is not assumed fastest. A dtype without a
-grounded reduction table uses an explicit conservative fallback, reported in
-the selected-plan log rather than being presented as grounded data.
+wins; the largest fitting chunk is not assumed fastest. Both admitted compute
+dtypes use grounded reduction tables. The implementation retains an explicit
+conservative fallback for future backend expansion rather than presenting an
+ungrounded estimate as measured data.
 
 The model intentionally keeps the conservative summed directional GM term. It
 does not assume independent MTE2/MTE3 overlap, fit a new bandwidth coefficient,
