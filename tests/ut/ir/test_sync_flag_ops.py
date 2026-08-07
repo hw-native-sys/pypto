@@ -22,7 +22,10 @@ from pypto import DataType, ir
 from pypto.ir.op import system_ops
 
 
-@pytest.mark.parametrize("op_name,fn", [("system.sync_src", system_ops.sync_src), ("system.sync_dst", system_ops.sync_dst)])
+@pytest.mark.parametrize(
+    "op_name,fn",
+    [("system.sync_src", system_ops.sync_src), ("system.sync_dst", system_ops.sync_dst)],
+)
 def test_sync_flag_ops_registered(op_name, fn):
     """system.sync_src / system.sync_dst are registered ops."""
     assert ir.is_op_registered(op_name), f"{op_name} should be registered"

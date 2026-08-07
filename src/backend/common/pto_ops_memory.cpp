@@ -774,8 +774,12 @@ static std::string MakeSyncFlagCodegenPTO(bool is_set, const char* op_name, cons
 
   const int set_pipe = op->GetKwarg<int>("set_pipe", -1);
   const int wait_pipe = op->GetKwarg<int>("wait_pipe", -1);
-  INTERNAL_CHECK_SPAN(set_pipe >= 0 && wait_pipe >= 0, op->span_)
-      << op_name << " requires set_pipe/wait_pipe attributes";
+  auto is_valid_pipe = [](int pipe) {
+    return pipe >= static_cast<int>(ir::PipeType::MTE1) && pipe <= static_cast<int>(ir::PipeType::ALL);
+  };
+  INTERNAL_CHECK_SPAN(is_valid_pipe(set_pipe) && is_valid_pipe(wait_pipe), op->span_)
+      << op_name << " requires valid set_pipe/wait_pipe PipeType attributes, got set_pipe=" << set_pipe
+      << ", wait_pipe=" << wait_pipe;
 
   const bool has_static_event_id = op->HasKwarg("event_id");
   const bool has_dynamic_event_id = op->args_.size() == 1;
