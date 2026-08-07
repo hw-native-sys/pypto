@@ -119,6 +119,20 @@ Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
 
+All window operands of a HOST collective — data and signal alike — must
+resolve to pairwise distinct `WindowBuffer` allocations. Two `pld.window()`
+views over the same `alloc_window_buffer` are a cross-process data race under
+in-kernel TPUT/notify: data-vs-data is a reduce overwrite, data-vs-control
+races a notify/count write against a kernel read, and control-vs-control races
+a notify against a count publish. `LowerHostTensorCollectives` rejects any
+aliasing pair before emitting the builtin dispatch.
+
+`broadcast`'s `root` kwarg is additionally bounds-checked when the
+participating device count is statically known: on an explicit static device
+subset it must satisfy `root < participating device count`. The fully-dynamic
+"all device" domain cannot be checked at compile time (no device count is
+known there) — the same documented limitation as the signal-capacity check.
+
 `all_to_all_v`'s single-use Set(1)/wait≥1 signal cannot be reused across a
 `for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md),
 which runs immediately before this pass, rejects that case up front (the same

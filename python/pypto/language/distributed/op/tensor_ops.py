@@ -712,7 +712,8 @@ def barrier(
 
     Args:
         signal: Window-bound INT32 :class:`pld.DistributedTensor` whose
-            shape provides one cell per rank.
+            shape provides one cell per rank — rank-1 ``[world_size]`` or
+            rank-2 ``[world_size, 1]``.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``signal``.
@@ -751,9 +752,16 @@ def broadcast(
             data.  Root must stage its data before the call; non-root slots
             are ignored on input.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
-            cross-rank barrier.  Reusable across calls — see
+            cross-rank barrier — rank-1 ``[world_size]`` or rank-2
+            ``[world_size, 1]``.  Reusable across calls — see
             :func:`allreduce` for the shared barrier protocol.
         root: Root rank index (int, keyword-only).  Must be non-negative.
+            On the HOST path with an explicit static device subset, ``root``
+            must also be a valid rank of that subset (``root <``
+            participating device count) — checked once the subset size is
+            known during ``LowerHostTensorCollectives``.  Not checked at
+            compile time for the fully-dynamic "all device" domain, since no
+            device count is known there.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target``.
@@ -796,7 +804,8 @@ def allgather(
             After the call, ``target[src, :]`` holds the chunk from rank
             ``src``.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier
-            tensor. Reusable across calls — see :func:`allreduce` for the
+            tensor — rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``.
+            Reusable across calls — see :func:`allreduce` for the
             shared barrier protocol.
 
     Returns:
@@ -833,7 +842,8 @@ def reduce_scatter(
         target: Window-bound :class:`pld.DistributedTensor` of shape
             [NR, SIZE].  Each rank stages all NR chunks, one per row.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for
-            the cross-rank barrier. Reusable across calls (2 credits per
+            the cross-rank barrier — rank-1 ``[world_size]`` or rank-2
+            ``[world_size, 1]``.  Reusable across calls (2 credits per
             call — ready + post-reduce) — see :func:`allreduce` for the
             shared barrier protocol.
         op: :class:`pld.ReduceOp` (keyword-only).  ``Sum`` only in
@@ -880,9 +890,10 @@ def all_to_all(
         target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
             the result in-place.  After the call,
             ``target[src, :]`` holds the chunk received from rank ``src``.
-        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
-            Reusable across calls — see :func:`allreduce` for the shared
-            barrier protocol.
+        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier —
+            rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``.  Reusable
+            across calls — see :func:`allreduce` for the shared barrier
+            protocol.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).

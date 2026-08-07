@@ -10,7 +10,6 @@
  */
 
 #include <any>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -39,6 +38,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/window_alias_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -103,13 +103,13 @@ static constexpr size_t kMaxSupportedRanks = 16;
 }
 
 [[nodiscard]] CommDomainScopeStmtPtr FindScopeForBuffers(
-    const std::vector<CommDomainScopeStmtPtr>& scope_stack, const std::vector<WindowBufferPtr>& buffers) {
+    const std::vector<CommDomainScopeStmtPtr>& scope_stack, const std::vector<NamedWindowBuffer>& buffers) {
   INTERNAL_CHECK(!buffers.empty()) << "LowerHostTensorCollectives: scope lookup needs at least one buffer";
   for (auto it = scope_stack.rbegin(); it != scope_stack.rend(); ++it) {
     const auto& scope = *it;
     bool all_present = true;
-    for (const auto& wb : buffers) {
-      if (!ScopeContainsSlot(scope, wb)) {
+    for (const auto& named : buffers) {
+      if (!ScopeContainsSlot(scope, named.buffer)) {
         all_present = false;
         break;
       }
@@ -117,6 +117,20 @@ static constexpr size_t kMaxSupportedRanks = 16;
     if (all_present) return scope;
   }
   return nullptr;
+}
+
+// broadcast's `root` kwarg selects a specific rank; the type deducer only
+// validates `root >= 0` (the participating device count isn't known there).
+// On an explicit static device subset, an out-of-range root would remote-load
+// from a rank outside the subset — check the upper bound here, where the
+// subset size is known. The fully-dynamic "all device" domain is left
+// unchecked (no compile-time device count to check against), same documented
+// limitation as CheckStaticSignalCapacity's dynamic-domain gap.
+void CheckBroadcastRootInRange(const CallPtr& call, size_t participating_devices) {
+  auto root_value = call->GetKwarg<int>("root");
+  CHECK_SPAN(root_value >= 0 && static_cast<size_t>(root_value) < participating_devices, call->span_)
+      << "pld.tensor.broadcast root (" << root_value << ") must be a valid rank in [0, "
+      << participating_devices << ") for this explicit device subset";
 }
 
 /// Validate a collective signal's shape against the participating device count.
@@ -363,19 +377,6 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
                                   std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
 }
 
-void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
-  // After MaterializeCommDomainScopes, window views carry WindowBuffer
-  // back-references. Same-expression aliasing is already rejected in the type
-  // deducers; this catches two distinct pld.window(...) views over one alloc.
-  auto input_wb = GetWindowBuffer(call->args_[0], "input");
-  auto target_wb = GetWindowBuffer(call->args_[1], "target");
-  CHECK_SPAN(input_wb.get() != target_wb.get(), call->span_)
-      << op_name
-      << " input and target must be different window allocations "
-         "(two pld.window views over the same alloc_window_buffer are a "
-         "cross-process data race under in-kernel TPUT)";
-}
-
 // pld.tensor.all_to_all_v's public deducer accepts a plain Tensor for `input`
 // and `send_counts` (AsTensorTypeLike) — legitimate on the InCore composite
 // path, where LowerCompositeOps consumes them directly. The HOST builtin path
@@ -394,45 +395,13 @@ void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const cha
          "called from a HOST orchestrator; a plain Tensor or an unbound DistributedTensor "
          "parameter is only supported on the InCore composite path";
 }
-
-// all_to_all_v's five operands (input, target, signal, send_counts,
-// recv_counts) are independently read/written across ranks inside one AIV
-// kernel; any pairwise aliasing among them is a real cross-process race, not
-// just a style nit:
-//   - data (input/target) aliasing a control window (signal/send_counts/
-//     recv_counts): peer notify/count writes can clobber data this rank is
-//     still reading, or a data TPUT can clobber a control value.
-//   - signal aliasing recv_counts: the barrier's per-peer notify(Set, 1) can
-//     overwrite a just-published count, or a wait can be satisfied early
-//     against a value the count-publish rewrote.
-//   - send_counts aliasing signal or recv_counts: the kernel's local
-//     send_counts[dest] read can race a peer's cross-rank notify write
-//     landing in the same memory.
-// All 10 pairs across the 5 operands must be checked, not just the 4 pairs
-// that data-vs-data / control-vs-control discipline alone would cover.
-void CheckAllToAllVDistinctWindows(const CallPtr& call, const char* op_name) {
-  static constexpr std::array<std::pair<int, const char*>, 5> kOperands = {
-      {{0, "input"}, {1, "target"}, {2, "signal"}, {3, "send_counts"}, {4, "recv_counts"}}};
-  std::array<WindowBufferPtr, 5> buffers;
-  for (size_t i = 0; i < kOperands.size(); ++i) {
-    buffers[i] = GetWindowBuffer(call->args_[kOperands[i].first], kOperands[i].second);
-  }
-  for (size_t i = 0; i < buffers.size(); ++i) {
-    for (size_t j = i + 1; j < buffers.size(); ++j) {
-      CHECK_SPAN(buffers[i].get() != buffers[j].get(), call->span_)
-          << op_name << " " << kOperands[i].second << " and " << kOperands[j].second
-          << " must be different window allocations";
-    }
-  }
-}
-
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {
   // Emit namesake builtin: in-kernel TPUT push (this rank's chunk from the
   // `input` staging window into every peer's `target` window) + barrier
-  // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target`
-  // must be two DISTINCT windows. All chips must run concurrently — the
-  // host orchestrator submits asynchronously.
-  CheckDistinctInputTargetWindows(call, "pld.tensor.allgather");
+  // (TNOTIFY / TWAIT), all in a single AIV kernel. All window operands must
+  // be pairwise distinct (checked generically in LowerCollective via
+  // scope_buffers). All chips must run concurrently — the host orchestrator
+  // submits asynchronously.
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.allgather", call,
@@ -444,10 +413,10 @@ void CheckAllToAllVDistinctWindows(const CallPtr& call, const char* op_name) {
 [[nodiscard]] CallPtr MakeBuiltinAllToAll(const CallPtr& call, const ExprPtr& device) {
   // Emit namesake builtin: in-kernel TPUT push (this rank's chunks from the
   // `input` staging window into every peer's `target` window) + barrier
-  // (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and `target` must
-  // be two DISTINCT windows. All chips must run concurrently — the host
-  // orchestrator submits asynchronously.
-  CheckDistinctInputTargetWindows(call, "pld.tensor.all_to_all");
+  // (TNOTIFY / TWAIT), all in a single AIV kernel. All window operands must
+  // be pairwise distinct (checked generically in LowerCollective via
+  // scope_buffers). All chips must run concurrently — the host orchestrator
+  // submits asynchronously.
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all", call,
@@ -463,9 +432,8 @@ void CheckAllToAllVDistinctWindows(const CallPtr& call, const char* op_name) {
   // send_counts[dest] into peer `recv_counts[my_rank, 0]` + one barrier
   // (TNOTIFY / TWAIT), all in a single AIV kernel. All five operands (input,
   // target, signal, send_counts, recv_counts) must be pairwise-distinct
-  // windows. All chips must run concurrently — the host orchestrator submits
-  // asynchronously.
-  CheckAllToAllVDistinctWindows(call, "pld.tensor.all_to_all_v");
+  // windows (checked generically in LowerCollective via scope_buffers). All
+  // chips must run concurrently — the host orchestrator submits asynchronously.
   auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
   INTERNAL_CHECK_SPAN(target_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
@@ -481,13 +449,23 @@ void CheckAllToAllVDistinctWindows(const CallPtr& call, const char* op_name) {
 struct HostCollectiveRule {
   const char* pld_name;
   using MakeBuiltinFn = std::function<CallPtr(const CallPtr&, const ExprPtr&)>;
-  using ScopeBuffersFn = std::function<std::vector<WindowBufferPtr>(const CallPtr&)>;
+  using ScopeBuffersFn = std::function<std::vector<NamedWindowBuffer>(const CallPtr&)>;
   using SignalExprFn = std::function<ExprPtr(const CallPtr&)>;
   using AliasSourceFn = std::function<std::optional<ExprPtr>(const CallPtr&)>;
+  // Optional extra static-domain check beyond the generic signal-capacity
+  // bound (CheckStaticSignalCapacity) — e.g. broadcast's root-in-range check.
+  // Empty for rules that don't need one.
+  using ExtraStaticCheckFn = std::function<void(const CallPtr&, size_t)>;
   MakeBuiltinFn make_builtin;
   ScopeBuffersFn scope_buffers;
   SignalExprFn signal_expr;
   AliasSourceFn alias_source;
+  ExtraStaticCheckFn extra_static_check;
+  // Args whose public deducer accepts a plain Tensor (the InCore composite
+  // path) but which the HOST builtin requires window-bound. Checked with
+  // CHECK_SPAN before GetWindowBuffer, so a plain Tensor reaching HOST
+  // lowering is a user error, not an INTERNAL_CHECK. (arg index, role)
+  std::vector<std::pair<size_t, const char*>> host_bound_args;
 };
 
 [[nodiscard]] const HostCollectiveRule* LookupHostCollectiveRule(const std::string& op_name) {
@@ -496,8 +474,10 @@ struct HostCollectiveRule {
           "pld.tensor.allreduce",
           &MakeBuiltinAllReduce,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{GetWindowBuffer(call->args_[0], "allreduce src"),
-                                                GetWindowBuffer(call->args_[1], "allreduce signal")};
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "allreduce src"), "src"},
+                {GetWindowBuffer(call->args_[1], "allreduce signal"), "signal"},
+            };
           },
           [](const CallPtr& call) { return call->args_[1]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
@@ -506,7 +486,9 @@ struct HostCollectiveRule {
           "pld.tensor.barrier",
           &MakeBuiltinBarrier,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{GetWindowBuffer(call->args_[0], "barrier signal")};
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "barrier signal"), "signal"},
+            };
           },
           [](const CallPtr& call) { return call->args_[0]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
@@ -515,18 +497,23 @@ struct HostCollectiveRule {
           "pld.tensor.broadcast",
           &MakeBuiltinBroadcast,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{GetWindowBuffer(call->args_[0], "broadcast target"),
-                                                GetWindowBuffer(call->args_[1], "broadcast signal")};
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "broadcast target"), "target"},
+                {GetWindowBuffer(call->args_[1], "broadcast signal"), "signal"},
+            };
           },
           [](const CallPtr& call) { return call->args_[1]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
+          &CheckBroadcastRootInRange,
       },
       {
           "pld.tensor.reduce_scatter",
           &MakeBuiltinReduceScatter,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{GetWindowBuffer(call->args_[0], "reduce_scatter target"),
-                                                GetWindowBuffer(call->args_[1], "reduce_scatter signal")};
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "reduce_scatter target"), "target"},
+                {GetWindowBuffer(call->args_[1], "reduce_scatter signal"), "signal"},
+            };
           },
           [](const CallPtr& call) { return call->args_[1]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
@@ -535,44 +522,48 @@ struct HostCollectiveRule {
           "pld.tensor.allgather",
           &MakeBuiltinAllGather,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{
-                GetWindowBuffer(call->args_[0], "allgather input"),
-                GetWindowBuffer(call->args_[1], "allgather target"),
-                GetWindowBuffer(call->args_[2], "allgather signal"),
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "allgather input"), "input"},
+                {GetWindowBuffer(call->args_[1], "allgather target"), "target"},
+                {GetWindowBuffer(call->args_[2], "allgather signal"), "signal"},
             };
           },
           [](const CallPtr& call) { return call->args_[2]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+          {},              // extra_static_check: none
+          {{0, "input"}},  // host_bound_args: local_data must be window-bound on HOST
       },
       {
           "pld.tensor.all_to_all",
           &MakeBuiltinAllToAll,
           [](const CallPtr& call) {
-            return std::vector<WindowBufferPtr>{
-                GetWindowBuffer(call->args_[0], "all_to_all input"),
-                GetWindowBuffer(call->args_[1], "all_to_all target"),
-                GetWindowBuffer(call->args_[2], "all_to_all signal"),
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "all_to_all input"), "input"},
+                {GetWindowBuffer(call->args_[1], "all_to_all target"), "target"},
+                {GetWindowBuffer(call->args_[2], "all_to_all signal"), "signal"},
             };
           },
           [](const CallPtr& call) { return call->args_[2]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+          {},              // extra_static_check: none
+          {{0, "input"}},  // host_bound_args: input must be window-bound on HOST
       },
       {
           "pld.tensor.all_to_all_v",
           &MakeBuiltinAllToAllV,
           [](const CallPtr& call) {
-            CheckHostWindowBoundArg(call->args_[0], "pld.tensor.all_to_all_v", "input");
-            CheckHostWindowBoundArg(call->args_[3], "pld.tensor.all_to_all_v", "send_counts");
-            return std::vector<WindowBufferPtr>{
-                GetWindowBuffer(call->args_[0], "all_to_all_v input"),
-                GetWindowBuffer(call->args_[1], "all_to_all_v target"),
-                GetWindowBuffer(call->args_[2], "all_to_all_v signal"),
-                GetWindowBuffer(call->args_[3], "all_to_all_v send_counts"),
-                GetWindowBuffer(call->args_[4], "all_to_all_v recv_counts"),
+            return std::vector<NamedWindowBuffer>{
+                {GetWindowBuffer(call->args_[0], "all_to_all_v input"), "input"},
+                {GetWindowBuffer(call->args_[1], "all_to_all_v target"), "target"},
+                {GetWindowBuffer(call->args_[2], "all_to_all_v signal"), "signal"},
+                {GetWindowBuffer(call->args_[3], "all_to_all_v send_counts"), "send_counts"},
+                {GetWindowBuffer(call->args_[4], "all_to_all_v recv_counts"), "recv_counts"},
             };
           },
           [](const CallPtr& call) { return call->args_[2]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+          {},                                  // extra_static_check: none
+          {{0, "input"}, {3, "send_counts"}},  // host_bound_args
       },
   };
   for (const auto& rule : kRules) {
@@ -595,6 +586,7 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     }
+    if (rule.extra_static_check) rule.extra_static_check(call, scope->devices_.size());
     std::vector<StmtPtr> stmts;
     stmts.reserve(scope->devices_.size());
     for (auto device : scope->devices_) {
@@ -675,7 +667,11 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
     INTERNAL_CHECK(rule) << "LowerHostTensorCollectives: missing rule for " << call->op_->name_;
     INTERNAL_CHECK_SPAN(!scope_stack_.empty(), call->span_)
         << "LowerHostTensorCollectives: " << call->op_->name_ << " must appear inside a CommDomainScopeStmt";
+    for (const auto& [arg_idx, role] : rule->host_bound_args) {
+      CheckHostWindowBoundArg(call->args_[arg_idx], call->op_->name_.c_str(), role);
+    }
     auto buffers = rule->scope_buffers(call);
+    CheckPairwiseDistinctWindows(buffers, call->span_, call->op_->name_.c_str());
     auto scope = FindScopeForBuffers(scope_stack_, buffers);
     INTERNAL_CHECK_SPAN(scope, call->span_) << "LowerHostTensorCollectives: " << call->op_->name_
                                             << " window buffers must resolve to the same comm-domain scope";

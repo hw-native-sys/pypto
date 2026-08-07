@@ -102,6 +102,17 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `mode="ring"` 下尚未支持。Ring allreduce 最多支持 16 个参与设备
 （`world_size <= 16`）。
 
+HOST collective 的所有 window 操作数——data 与 signal 都是如此——必须解析为两两不同的
+`WindowBuffer` 分配。同一个 `alloc_window_buffer` 上的两个 `pld.window()` view
+在 in-kernel TPUT/notify 下是跨进程数据竞争：data 对 data 是 reduce 覆盖，
+data 对 control 是 notify/count 写入与内核读取竞争，control 对 control 是
+notify 与 count 发布竞争。`LowerHostTensorCollectives` 在生成 builtin dispatch
+之前会拒绝任何别名对。
+
+当参与设备数静态可知时，还会额外校验 `broadcast` 的 `root` kwarg：在显式静态设备子集上，
+它必须满足 `root < participating device count`。完全动态的 "all device" 域在编译期无法
+校验（那里没有可用的设备数）——与 signal 容量检查存在相同的已记录限制。
+
 `all_to_all_v` 的单次使用 Set(1)/wait≥1 信号无法在 `host_orch` 的
 `for`/`while` 循环中复用——本 pass 之前紧邻运行的
 [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md) 会提前

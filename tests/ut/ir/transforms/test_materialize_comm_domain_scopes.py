@@ -1364,6 +1364,63 @@ def test_two_allocs_different_descriptors_two_groups():
     _assert_scope_fields(scopes[1], [2, 3], [_expected_slot("buf_b", _mul(256, 4))])
 
 
+def test_four_allocs_three_descriptors_three_groups():
+    """Regression for the Phase-6 clustering fix: a linear scan of `pending`
+    per alloc would still pass with two groups, but a third distinct
+    descriptor exercises the third `pending` slot the map-based lookup must
+    also resolve correctly (not just append-and-never-find). `buf_d` reuses
+    `buf_c`'s descriptor ({4, 5}) so `desc_to_index.find` must also succeed on
+    a *nonzero* index (index 2, not just index 0 as the two-group test above
+    already covers) and route `buf_d` into `pending[2]` instead of appending a
+    fourth, spurious domain."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_a(self, a: pld.DistributedTensor[[256], pl.FP32]):
+            return a
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_b(self, b: pld.DistributedTensor[[256], pl.FP32]):
+            return b
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_c(
+            self, c: pld.DistributedTensor[[256], pl.FP32], d: pld.DistributedTensor[[256], pl.FP32]
+        ):
+            return c
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf_a = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            buf_b = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            buf_c = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            buf_d = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            a = pld.window(buf_a, [256], dtype=pl.FP32)
+            b = pld.window(buf_b, [256], dtype=pl.FP32)
+            c = pld.window(buf_c, [256], dtype=pl.FP32)
+            d = pld.window(buf_d, [256], dtype=pl.FP32)
+            self.chip_orch_a(a, device=0)
+            self.chip_orch_a(a, device=1)
+            self.chip_orch_b(b, device=2)
+            self.chip_orch_b(b, device=3)
+            self.chip_orch_c(c, d, device=4)
+            self.chip_orch_c(c, d, device=5)
+            return 0
+
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 3
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf_a", _mul(256, 4))])
+    _assert_scope_fields(scopes[1], [2, 3], [_expected_slot("buf_b", _mul(256, 4))])
+    _assert_scope_fields(
+        scopes[2],
+        [4, 5],
+        [_expected_slot("buf_c", _mul(256, 4)), _expected_slot("buf_d", _mul(256, 4))],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single alloc / multiple views share the same WindowBuffer instance
 # ---------------------------------------------------------------------------

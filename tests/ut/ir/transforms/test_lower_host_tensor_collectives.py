@@ -690,6 +690,34 @@ def test_host_allreduce_rejects_unsupported_dtype_before_lowering():
                 return 0
 
 
+def test_host_allreduce_rejects_aliased_src_signal_windows():
+    """Two pld.window views over one alloc must fail at host lowering — the
+    generic pairwise-distinct check (CheckPairwiseDistinctWindows) applies to
+    every HOST collective's window operands, not just input/target pairs."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            data = pld.window(buf, [256], dtype=pl.FP32)
+            # signal aliases data's own window buffer (mismatched dtype view
+            # over the same allocation is exactly the race this check exists for).
+            signal = pld.window(buf, [256], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"src and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
 def test_host_barrier_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
@@ -720,6 +748,43 @@ def test_host_barrier_lowers_to_builtin_world_size_loop():
         arg_directions=[ir.ArgDirection.InOut],
         kwargs={},
     )
+
+
+def test_host_barrier_accepts_rank1_signal_through_lowering():
+    """Rank-1 [NR] must pass both the public deducer and the builtin
+    validator inside LowerHostTensorCollectives."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pld.DistributedTensor[[256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, signal, device=r)
+            pld.tensor.barrier(signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    host = _get_func(result, "host_orch")
+    loops = _collect_for_stmts(host.body)
+    builtin_loops = [
+        loop
+        for loop in loops
+        if isinstance(loop.body, ir.EvalStmt)
+        and isinstance(loop.body.expr, ir.Call)
+        and loop.body.expr.op.name == "builtin.tensor.barrier"
+    ]
+    assert len(builtin_loops) == 1
 
 
 def test_host_broadcast_lowers_to_builtin_world_size_loop():
@@ -755,6 +820,43 @@ def test_host_broadcast_lowers_to_builtin_world_size_loop():
     )
 
 
+def test_host_broadcast_accepts_rank1_signal_through_lowering():
+    """Rank-1 [NR] must survive public + builtin validation on the HOST
+    broadcast path."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pld.DistributedTensor[[256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, signal, device=r)
+            pld.tensor.broadcast(data, signal, root=0)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    host = _get_func(result, "host_orch")
+    loops = _collect_for_stmts(host.body)
+    builtin_loops = [
+        loop
+        for loop in loops
+        if isinstance(loop.body, ir.EvalStmt)
+        and isinstance(loop.body.expr, ir.Call)
+        and loop.body.expr.op.name == "builtin.tensor.broadcast"
+    ]
+    assert len(builtin_loops) == 1
+
+
 def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
@@ -786,6 +888,131 @@ def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
         kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
         attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
     )
+
+
+def test_host_reduce_scatter_accepts_rank1_signal_through_lowering():
+    """Rank-1 [NR] must survive public + builtin validation on the HOST
+    reduce_scatter path."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, signal, device=r)
+            pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    host = _get_func(result, "host_orch")
+    loops = _collect_for_stmts(host.body)
+    builtin_loops = [
+        loop
+        for loop in loops
+        if isinstance(loop.body, ir.EvalStmt)
+        and isinstance(loop.body.expr, ir.Call)
+        and loop.body.expr.op.name == "builtin.tensor.reduce_scatter"
+    ]
+    assert len(builtin_loops) == 1
+
+
+def test_host_broadcast_rejects_aliased_target_signal_windows():
+    """target and signal sharing an allocation must fail — the broadcast TPUT
+    write into `target` races the notify/wait control path over `signal`."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pld.DistributedTensor[[256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            data = pld.window(buf, [256], dtype=pl.FP32)
+            # signal aliases data's own window buffer.
+            signal = pld.window(buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, signal, device=r)
+            pld.tensor.broadcast(data, signal, root=0)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"target and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_broadcast_rejects_out_of_range_root_on_explicit_device_subset():
+    """root=5 on an explicit 2-device static subset must fail — the type
+    deducer only checks root >= 0 (the participating device count isn't known
+    there); the upper bound is enforced once the static subset size is known."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pld.DistributedTensor[[256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            self.chip_orch(data, signal, device=0)
+            self.chip_orch(data, signal, device=1)
+            pld.tensor.broadcast(data, signal, root=5)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"root \(5\) must be a valid rank in \[0, 2\)"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_reduce_scatter_rejects_aliased_target_signal_windows():
+    """target and signal sharing an allocation must fail — same discipline as
+    broadcast: the reduce TPUT write into `target` races the notify/wait
+    control path over `signal`."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self, data: pld.DistributedTensor[[4, 256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            data = pld.window(buf, [4, 256], dtype=pl.FP32)
+            # signal aliases data's own window buffer.
+            signal = pld.window(buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, signal, device=r)
+            pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"target and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
 
 
 def test_host_allgather_lowers_to_namesake_builtin():
@@ -865,6 +1092,109 @@ def test_host_allgather_rejects_aliased_input_target_windows():
         passes.lower_host_tensor_collectives()(program)
 
 
+def test_host_allgather_rejects_aliased_input_signal_windows():
+    """input aliasing signal must fail too — the generic pairwise check covers
+    every pair of allgather's 3 window operands, not just input vs target
+    (which was already rejected before this generalization)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[1, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            # signal_buf is sized to fit the [1, 256] FP32 view so the test
+            # exercises aliasing alone, not a view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(1 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            # stage aliases signal's own window buffer.
+            stage = pld.window(signal_buf, [1, 256], dtype=pl.FP32)
+            data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.allgather(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"input and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_allgather_rejects_aliased_target_signal_windows():
+    """target aliasing signal must fail too."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[1, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(1 * 256 * pl.FP32.get_byte())
+            # signal_buf is sized to fit the [4, 256] FP32 view so the test
+            # exercises aliasing alone, not a view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            stage = pld.window(stage_buf, [1, 256], dtype=pl.FP32)
+            # data aliases signal's own window buffer.
+            data = pld.window(signal_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.allgather(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"target and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_allgather_rejects_plain_tensor_input():
+    """pld.tensor.allgather's public deducer accepts a plain Tensor for
+    `local_data` (legitimate on the InCore composite path), but the HOST
+    builtin requires it window-bound. This must surface as a CHECK_SPAN
+    ValueError, not an internal crash inside GetWindowBuffer."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pl.Tensor[[1, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, stage: pl.Tensor[[1, 256], pl.FP32]):
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.allgather(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"input must be a window-bound DistributedTensor"):
+        passes.lower_host_tensor_collectives()(program)
+
+
 def test_host_all_to_all_rejects_aliased_input_target_windows():
     """Two pld.window views over one alloc must fail at host lowering."""
 
@@ -893,6 +1223,105 @@ def test_host_all_to_all_rejects_aliased_input_target_windows():
 
     program = passes.materialize_comm_domain_scopes()(P)
     with pytest.raises(ValueError, match=r"different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_all_to_all_rejects_aliased_input_signal_windows():
+    """input aliasing signal must fail too — same generalization as allgather."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            # signal_buf is sized to fit the [4, 256] FP32 view so the test
+            # exercises aliasing alone, not a view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            # stage aliases signal's own window buffer.
+            stage = pld.window(signal_buf, [4, 256], dtype=pl.FP32)
+            data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"input and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_all_to_all_rejects_aliased_target_signal_windows():
+    """target aliasing signal must fail too."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            # signal_buf is sized to fit the [4, 256] FP32 view so the test
+            # exercises aliasing alone, not a view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            stage = pld.window(stage_buf, [4, 256], dtype=pl.FP32)
+            # data aliases signal's own window buffer.
+            data = pld.window(signal_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"target and signal must be different window allocations"):
+        passes.lower_host_tensor_collectives()(program)
+
+
+def test_host_all_to_all_rejects_plain_tensor_input():
+    """Same as the allgather case, for `input` (also Tensor | DistributedTensor
+    on the composite path, but window-bound-only at the HOST builtin layer)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pl.Tensor[[4, 256], pl.FP32],
+            data: pld.DistributedTensor[[4, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, stage: pl.Tensor[[4, 256], pl.FP32]):
+            data_buf = pld.alloc_window_buffer(4 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [4, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    with pytest.raises(ValueError, match=r"input must be a window-bound DistributedTensor"):
         passes.lower_host_tensor_collectives()(program)
 
 
@@ -1283,7 +1712,9 @@ def test_host_all_to_all_v_rejects_aliased_input_signal_windows():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            # signal_buf is sized to fit the [8, 256] FP32 view so the test
+            # exercises aliasing alone, not a view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
