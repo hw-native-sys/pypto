@@ -310,16 +310,66 @@ class Bf16Case(_AutoTileCase):
         tensors["out"][:] = tensors["x"] + tensors["y"]
 
 
-def _small_integral_input() -> torch.Tensor:
-    return torch.randint(-32, 32, (128, 512), dtype=torch.int32).to(torch.float32)
+@pl.program
+class Bf16ToFp16CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[48, 47000], pl.BF16]) -> pl.Tensor[[48, 47000], pl.FP16]:
+        out: pl.Tensor[[48, 47000], pl.FP16] = pl.cast(x, pl.FP16)
+        return out
+
+
+class Bf16ToFp16CastCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_bf16_to_fp16_cast"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [48, 47000], DataType.BF16, init_value=torch.randn),
+            TensorSpec("out", [48, 47000], DataType.FP16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return Bf16ToFp16CastProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = tensors["x"].to(torch.float16)
+
+
+@pl.program
+class Fp16ToBf16CastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[128, 512], pl.FP16]) -> pl.Tensor[[128, 512], pl.BF16]:
+        out: pl.Tensor[[128, 512], pl.BF16] = pl.cast(x, pl.BF16)
+        return out
+
+
+class Fp16ToBf16CastCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_fp16_to_bf16_cast"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [128, 512], DataType.FP16, init_value=torch.randn),
+            TensorSpec("out", [128, 512], DataType.BF16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return Fp16ToBf16CastProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = tensors["x"].to(torch.bfloat16)
+
+
+def _small_integral_input(shape: tuple[int, int]) -> torch.Tensor:
+    return torch.randint(-32, 32, shape, dtype=torch.int32).to(torch.float32)
 
 
 @pl.program
 class Int8OutputProgram:
     @pl.function(attrs={"auto_tile": True})
-    def kernel(self, x: pl.Tensor[[128, 512], pl.FP32]) -> pl.Tensor[[128, 512], pl.INT8]:
-        incremented: pl.Tensor[[128, 512], pl.FP32] = pl.add(x, 1.0)
-        out: pl.Tensor[[128, 512], pl.INT8] = pl.cast(incremented, pl.INT8)
+    def kernel(self, x: pl.Tensor[[128, 8192], pl.FP32]) -> pl.Tensor[[128, 8192], pl.INT8]:
+        incremented: pl.Tensor[[128, 8192], pl.FP32] = pl.add(x, 1.0)
+        out: pl.Tensor[[128, 8192], pl.INT8] = pl.cast(incremented, pl.INT8)
         return out
 
 
@@ -329,12 +379,40 @@ class Int8OutputCase(_AutoTileCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("x", [128, 512], DataType.FP32, init_value=_small_integral_input),
-            TensorSpec("out", [128, 512], DataType.INT8, is_output=True),
+            TensorSpec(
+                "x", [128, 8192], DataType.FP32, init_value=lambda: _small_integral_input((128, 8192))
+            ),
+            TensorSpec("out", [128, 8192], DataType.INT8, is_output=True),
         ]
 
     def get_program(self) -> Any:
         return Int8OutputProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = (tensors["x"] + 1.0).to(torch.int8)
+
+
+@pl.program
+class RaggedInt8OutputProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[1, 33], pl.FP32]) -> pl.Tensor[[1, 33], pl.INT8]:
+        incremented: pl.Tensor[[1, 33], pl.FP32] = pl.add(x, 1.0)
+        out: pl.Tensor[[1, 33], pl.INT8] = pl.cast(incremented, pl.INT8)
+        return out
+
+
+class RaggedInt8OutputCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_ragged_int8_output"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [1, 33], DataType.FP32, init_value=lambda: _small_integral_input((1, 33))),
+            TensorSpec("out", [1, 33], DataType.INT8, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return RaggedInt8OutputProgram
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = (tensors["x"] + 1.0).to(torch.int8)
@@ -355,7 +433,10 @@ class TestAutoTileVector:
             (ColMaxCase, None),
             (Fp16Case, _FP16_TOL),
             (Bf16Case, _BF16_TOL),
+            (Bf16ToFp16CastCase, _FP16_TOL),
+            (Fp16ToBf16CastCase, _BF16_TOL),
             (Int8OutputCase, None),
+            (RaggedInt8OutputCase, None),
         ],
     )
     @pytest.mark.platforms("a2a3")
