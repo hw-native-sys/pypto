@@ -81,7 +81,13 @@ class MatmulBiasTestCase(PTOTestCase):
             TensorSpec("a", [self._m, self._k], self._ab, init_value=torch.randn),
             TensorSpec("b", [self._k, self._n], self._ab, init_value=torch.randn),
             TensorSpec("bias", [1, self._n], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [self._out_m, self._n], DataType.FP32, is_output=True),
+            TensorSpec(
+                "out",
+                [self._out_m, self._n],
+                DataType.FP32,
+                init_value=torch.zeros,
+                is_output=True,
+            ),
         ]
 
     def get_program(self) -> Any:
@@ -104,7 +110,7 @@ class MatmulBiasTestCase(PTOTestCase):
                 a: pl.Tensor[[m, k], ab],
                 b: pl.Tensor[[k, n], ab],
                 bias: pl.Tensor[[1, n], pl.FP32],
-                out: pl.Out[pl.Tensor[[om, n], pl.FP32]],
+                out: pl.InOut[pl.Tensor[[om, n], pl.FP32]],
             ) -> pl.Tensor[[om, n], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [m, k], valid_shape=a_v, target_memory=pl.MemorySpace.Mat)
                 tile_b = pl.load(b, [0, 0], [k, n], valid_shape=b_v, target_memory=pl.MemorySpace.Mat)
@@ -120,7 +126,7 @@ class MatmulBiasTestCase(PTOTestCase):
                 a: pl.Tensor[[m, k], ab],
                 b: pl.Tensor[[k, n], ab],
                 bias: pl.Tensor[[1, n], pl.FP32],
-                out: pl.Out[pl.Tensor[[om, n], pl.FP32]],
+                out: pl.InOut[pl.Tensor[[om, n], pl.FP32]],
             ) -> pl.Tensor[[om, n], pl.FP32]:
                 out = self.kernel(a, b, bias, out)
                 return out
@@ -131,20 +137,17 @@ class MatmulBiasTestCase(PTOTestCase):
         a = tensors["a"].to(torch.float32)
         b = tensors["b"].to(torch.float32)
         bias = tensors["bias"]
-        out = torch.zeros_like(tensors["out"])
+        out = tensors["out"].clone()
         if self._narrow == "K":
             full = torch.matmul(a[:, :VALID_N], b[:VALID_N, :]) + bias
         else:
             full = torch.matmul(a, b) + bias
         if self._narrow == "M":
-            res = torch.zeros(self._m, self._n)
-            res[:VALID_M, :] = full[:VALID_M, :]
+            out[self._off_row : self._off_row + VALID_M, :] = full[:VALID_M, :]
         elif self._narrow == "N":
-            res = torch.zeros(self._m, self._n)
-            res[:, :VALID_N] = full[:, :VALID_N]
+            out[self._off_row : self._off_row + self._m, :VALID_N] = full[:, :VALID_N]
         else:
-            res = full
-        out[self._off_row : self._off_row + self._m, :] = res
+            out[self._off_row : self._off_row + self._m, :] = full
         tensors["out"][:] = out
 
 

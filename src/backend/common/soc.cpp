@@ -124,7 +124,8 @@ const SoC& Create910BSoC() {
                                           Mem(ir::MemorySpace::Mat, 512ULL * 1024, 128),  // 512KB Mat
                                           Mem(ir::MemorySpace::Left, 64ULL * 1024, 64),   // 64KB Left
                                           Mem(ir::MemorySpace::Right, 64ULL * 1024, 64),  // 64KB Right
-                                          Mem(ir::MemorySpace::Acc, 128ULL * 1024, 128)   // 128KB Acc
+                                          Mem(ir::MemorySpace::Acc, 128ULL * 1024, 128),  // 128KB Acc
+                                          Mem(ir::MemorySpace::Bias, 1ULL * 1024, 64)     // 1KB Bias
                                       });
 
     // AIV (VECTOR) core configuration.
@@ -147,7 +148,7 @@ const SoC& Create910BSoC() {
     std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
     mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat};
     mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::DDR};
-    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right};
+    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right, ir::MemorySpace::Bias};
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR};
 
     return SoC(die, 1, std::move(mem_graph));
@@ -190,7 +191,7 @@ const SoC& Create950SoC() {
     std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
     mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat};
     mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR};
-    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right,
+    mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right, ir::MemorySpace::Bias,
                                        ir::MemorySpace::LeftScale, ir::MemorySpace::RightScale};
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat, ir::MemorySpace::DDR};
 
