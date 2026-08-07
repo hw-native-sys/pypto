@@ -26,8 +26,6 @@ from pypto.ir.op.system_ops import (
     bar_m,
     bar_v,
     fence,
-    sync_dst,
-    sync_src,
 )
 from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
@@ -66,6 +64,44 @@ __all__ = [
     "available_cluster_count",
     "available_aiv_count",
 ]
+
+
+def sync_src(
+    event_id: IntLike,
+    *,
+    set_pipe: PipeType,
+    wait_pipe: PipeType,
+    span: Span | None = None,
+) -> Call:
+    """Send a synchronization signal (Set Flag) using a static or dynamic event id.
+
+    ``event_id`` may be passed positionally or by keyword; the latter keeps
+    existing ``pl.system.sync_src(set_pipe=..., wait_pipe=..., event_id=...)``
+    call sites working unchanged for the static (int) case. A dynamic
+    (``pl.Scalar[INDEX]``) event id round-trips through the printer as the
+    leading positional argument, matching ``sync_set``/``sync_wait``.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.sync_src(set_pipe=set_pipe, wait_pipe=wait_pipe, event_id=event_expr, span=span)
+
+
+def sync_dst(
+    event_id: IntLike,
+    *,
+    set_pipe: PipeType,
+    wait_pipe: PipeType,
+    span: Span | None = None,
+) -> Call:
+    """Wait for a synchronization signal (Wait Flag) using a static or dynamic event id.
+
+    ``event_id`` may be passed positionally or by keyword; the latter keeps
+    existing ``pl.system.sync_dst(set_pipe=..., wait_pipe=..., event_id=...)``
+    call sites working unchanged for the static (int) case. A dynamic
+    (``pl.Scalar[INDEX]``) event id round-trips through the printer as the
+    leading positional argument, matching ``sync_set``/``sync_wait``.
+    """
+    event_expr = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.sync_dst(set_pipe=set_pipe, wait_pipe=wait_pipe, event_id=event_expr, span=span)
 
 
 def sync_set(

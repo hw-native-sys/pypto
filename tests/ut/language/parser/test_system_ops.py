@@ -58,6 +58,42 @@ class TestSystemOpsParsing:
         assert isinstance(reparsed, ir.Program)
         ir.assert_structural_equal(Before, reparsed)
 
+    def test_sync_src_dynamic_round_trip(self):
+        """An index SSA event id is printed as the dynamic sync_src operand."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], event_id: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.sync_src(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.sync_src(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)" in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
+    def test_sync_dst_dynamic_round_trip(self):
+        """An index SSA event id is printed as the dynamic sync_dst operand."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], event_id: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.sync_dst(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)
+                return x
+
+        printed = Before.as_python()
+        assert "pl.system.sync_dst(event_id, set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V)" in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Before, reparsed)
+
     def test_cross_core_sync_static_round_trip(self):
         """Static cross-core event ids and pipe enums survive Python printing."""
 

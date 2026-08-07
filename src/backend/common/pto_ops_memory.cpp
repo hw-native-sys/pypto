@@ -36,6 +36,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -749,6 +750,62 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
   return out;
 }
 
+// system.sync_src (Set Flag) / system.sync_dst (Wait Flag): intra-core two-pipe
+// flag synchronization. Lowers to ptoas's low-level pto.set_flag/pto.wait_flag
+// (static event id) or pto.set_flag_dyn/pto.wait_flag_dyn (dynamic event id
+// operand) — see PTOAS's PTOOps.td SetFlagOp/WaitFlagOp/SetFlagDynOp/
+// WaitFlagDynOp. NOT pto.record_event/pto.wait_event: those are the "High
+// Level" ops keyed on an 11-value SyncOpType instruction-tag enum
+// (TLOAD/TMATMUL/...), a different attribute domain from PyPTO's set_pipe/
+// wait_pipe PipeType attrs, and themselves lower to set_flag/wait_flag via a
+// separate op-to-pipe mapping pass PyPTO does not need (it already knows the
+// exact pipe). Assembly form (bracketed, comma-separated):
+//   pto.set_flag[<PIPE_X>, <PIPE_Y>, <EVENT_IDn>]        (static event id)
+//   pto.set_flag_dyn[<PIPE_X>, <PIPE_Y>, %event_ssa]     (dynamic event id)
+// event_id is either a static compile-time attribute or a dynamic runtime
+// operand (mutually exclusive, enforced by DeduceSyncFlagType in
+// sync_ops/sync.cpp). PTO_EventEnum only defines EVENT_ID0..EVENT_ID7 (8
+// values), so the static event_id range is [0, 7].
+static std::string MakeSyncFlagCodegenPTO(bool is_set, const char* op_name, const CallPtr& op,
+                                          codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  INTERNAL_CHECK_SPAN(op->args_.size() <= 1, op->span_)
+      << op_name << " accepts at most one dynamic event-id operand, got " << op->args_.size();
+
+  const int set_pipe = op->GetKwarg<int>("set_pipe", -1);
+  const int wait_pipe = op->GetKwarg<int>("wait_pipe", -1);
+  auto is_valid_pipe = [](int pipe) {
+    return pipe >= static_cast<int>(ir::PipeType::MTE1) && pipe <= static_cast<int>(ir::PipeType::ALL);
+  };
+  INTERNAL_CHECK_SPAN(is_valid_pipe(set_pipe) && is_valid_pipe(wait_pipe), op->span_)
+      << op_name << " requires valid set_pipe/wait_pipe PipeType attributes, got set_pipe=" << set_pipe
+      << ", wait_pipe=" << wait_pipe;
+
+  const bool has_static_event_id = op->HasKwarg("event_id");
+  const bool has_dynamic_event_id = op->args_.size() == 1;
+  INTERNAL_CHECK_SPAN(has_static_event_id != has_dynamic_event_id, op->span_)
+      << op_name << " requires exactly one static event_id attribute or dynamic event-id operand";
+
+  const std::string pipe_operands = std::string("<PIPE_") +
+                                    ir::PipeTypeToString(static_cast<ir::PipeType>(set_pipe)) + ">, <PIPE_" +
+                                    ir::PipeTypeToString(static_cast<ir::PipeType>(wait_pipe)) + ">";
+
+  std::ostringstream oss;
+  if (has_static_event_id) {
+    const int event_id = op->GetKwarg<int>("event_id", -1);
+    INTERNAL_CHECK_SPAN(event_id >= 0 && event_id <= 7, op->span_)
+        << op_name << " static event_id must be in [0, 7] (PTO_EventEnum has EVENT_ID0..EVENT_ID7), got "
+        << event_id;
+    oss << (is_set ? "pto.set_flag[" : "pto.wait_flag[") << pipe_operands << ", <EVENT_ID" << event_id
+        << ">]";
+  } else {
+    oss << (is_set ? "pto.set_flag_dyn[" : "pto.wait_flag_dyn[") << pipe_operands << ", "
+        << codegen.GetExprAsCode(op->args_[0]) << "]";
+  }
+  codegen.Emit(oss.str());
+  return "";
+}
+
 void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1041,6 +1098,13 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   register_pipe_barrier("system.bar_v", "PIPE_V");
   register_pipe_barrier("system.bar_m", "PIPE_M");
   register_pipe_barrier("system.bar_all", "PIPE_ALL");
+
+  reg("system.sync_src", [](const CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSyncFlagCodegenPTO(/*is_set=*/true, "system.sync_src", op, codegen);
+  });
+  reg("system.sync_dst", [](const CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSyncFlagCodegenPTO(/*is_set=*/false, "system.sync_dst", op, codegen);
+  });
 }
 }  // namespace backend
 }  // namespace pypto
