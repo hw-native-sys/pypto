@@ -76,10 +76,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TASSIGN(recv_tile, 0x10000);
 
   // Signal scheme: each slot is single-writer (rank j writes into my_rank's
-  // signal[j]). TNOTIFY adds a constant 1 per tile; the TWAIT threshold grows
-  // 1, 2, 3, … because TWAIT(GE) is non-consuming — the slot retains its
-  // accumulated value across tiles. This matches the reduce_scatter signal
-  // protocol (constant notify + incrementing wait threshold).
+  // signal[j]). Every rank remote-notifies every peer (AtomicAdd(+1) to
+  // signal[my_rank] on peer's device) and locally waits for every peer's
+  // signal cell (TWAIT Ge(N) on signal[peer] in its own memory).  This
+  // symmetric write-remote-read-local pattern is the only one that has been
+  // verified reliable on non-coherent NPU silicon across all collectives; an
+  // asymmetric read-complete round (non-root remote AtomicAdd → root local
+  // TWAIT alone) leaves the root polling a locally-cached zero while the
+  // remote update bypassed the cache, deadlocking the kernel.
+  //
+  // The root self-copies its tile before the remote notify so its target
+  // buffer is up-to-date when non-roots remote-read it, and the
+  // pipe_barrier(PIPE_ALL) between tiles ensures the store is globally
+  // visible before the next tile's notify round.
   int32_t expected = 1;
   for (int64_t base = 0; base < numel; base += kTileCount) {
     int64_t chunk64 = numel - base;
@@ -126,5 +135,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
   }
 
+  // Self-clearing credit reset — all local, symmetric (every cell received
+  // exactly tiles credits this call — one per tile iteration).  Local
+  // AtomicAdd(-N) never mixes Set with the AtomicAdd body.
+  const int32_t tiles = static_cast<int32_t>(expected - 1);
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, -tiles, pto::comm::NotifyOp::AtomicAdd);
+  }
   pipe_barrier(PIPE_ALL);
 }

@@ -95,9 +95,11 @@ def handshake_step(
 
 > **Buffer re-use safety:** Signal cells are zero-initialised by
 > `alloc_window_buffer`. After `notify`, the signal cell holds the written
-> value; after `wait` returns, the caller has observed the barrier. Do not
-> reuse the same signal buffer across back-to-back collectives — the protocol
-> uses monotonic counters that do not self-reset. Allocate a fresh buffer.
+> value; after `wait` returns, the caller has observed the barrier. These
+> tile-level `notify`/`wait` primitives use monotonic counters that do not
+> self-reset — allocate a fresh buffer per call. The `pld.tensor.*`
+> collectives are the exception: their signal buffers are self-clearing and
+> reusable across back-to-back calls.
 
 ## Tile-Level RMA (`pld.tile.*`)
 

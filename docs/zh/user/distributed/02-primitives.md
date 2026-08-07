@@ -80,8 +80,9 @@ def handshake_step(
 `outputs[0] == 1`。rank 1 写入 tag=1，等待来自 rank 0 的 tag 2：
 `outputs[1] == 2`。结果：`outputs == [[1], [2]]`。
 
-> **Buffer 重用安全：** Signal 使用单调计数器且不会自重置。不要在背靠背集合通信中
-> 重用同一 signal buffer。每次调用分配新 buffer。
+> **Buffer 重用安全：** Signal 使用单调计数器且不会自重置。这些 tile 级
+> `notify`/`wait` 原语每次调用需分配新 buffer；`pld.tensor.*` 集合通信除外，
+> 其 signal buffer 自清理，可在连续调用间复用。
 
 ## Tile 级 RMA (`pld.tile.*`)
 

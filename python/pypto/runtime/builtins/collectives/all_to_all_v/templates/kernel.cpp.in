@@ -162,7 +162,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   }
 
   // ==================================================================
-  // Phase 2: barrier — notify peers and wait for all (NotifyOp::Set).
+  // Phase 2: barrier — notify peers and wait for all (NotifyOp::AtomicAdd).
   // ==================================================================
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
@@ -170,7 +170,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
     pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
@@ -178,5 +178,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
 
+  // Self-clearing epilogue: each peer's AtomicAdd(+1) left its cell satisfied;
+  // a local self-notify (TNOTIFY on a local address is the same st_atomic the
+  // remote path uses) restores every cell to 0 so the signal is reusable
+  // across calls.
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+  }
   pipe_barrier(PIPE_ALL);
 }

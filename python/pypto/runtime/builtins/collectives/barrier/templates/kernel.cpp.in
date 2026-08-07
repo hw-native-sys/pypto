@@ -55,21 +55,37 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
 
-  // NOTE: This barrier is single-use per signal buffer — NotifyOp::Set writes
-  // a constant 1 and TWAIT checks >= 1.  After the first barrier, signal slots
-  // stay satisfied.  The caller must provide a fresh (zero-initialised) signal
-  // buffer for each barrier call (pld.alloc_window_buffer satisfies this).
+  // Self-clearing credit barrier: NotifyOp::AtomicAdd writes a constant 1 into
+  // each peer's cell in my memory and TWAIT checks >= 1. The epilogue below
+  // restores every cell to 0, so one signal buffer is reusable across calls
+  // (the InCore credit-barrier protocol).
 
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
     pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::Set);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal sig(signal_base + peer);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
+
+  // Self-clearing epilogue: each peer's AtomicAdd(+1) left its cell satisfied;
+  // a local self-notify restores every cell to 0 so the signal is reusable
+  // across calls.
+  //
+  // Use NotifyOp::Set(0) instead of AtomicAdd(-1): on non-coherent NPU silicon
+  // a new AIV task dispatch may read a stale cached value for the signal cell;
+  // AtomicAdd reads-modifies-writes that stale value, while Set unconditionally
+  // writes 0.  Set is safe here because the TWAIT above guarantees all peers'
+  // AtomicAdd credits have already landed — there is no in-flight write that
+  // Set could clobber.
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
   }
   pipe_barrier(PIPE_ALL);
 }

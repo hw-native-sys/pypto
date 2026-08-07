@@ -297,7 +297,7 @@ pld.tensor.all_to_all_v(
 
 - `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
-- `signal` — DistributedTensor INT32 `[NR, 1]`（单次使用的 Set(1)/wait≥1 屏障）
+- `signal` — DistributedTensor INT32 `[NR, 1]`（自清理信用屏障；可在多次调用间复用）
 - `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 

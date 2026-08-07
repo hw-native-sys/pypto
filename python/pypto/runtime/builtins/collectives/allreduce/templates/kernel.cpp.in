@@ -173,5 +173,20 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
   }
 
+  // Self-clearing epilogue: restore every peer's signal cell in MY block's lane
+  // (in my memory) to 0 so the signal is reusable across calls (the InCore
+  // credit-barrier protocol, see lower_composite_ops_pass.cpp). Each peer
+  // notified +1 into the lane this block waited on once per barrier this call
+  // issued — 1 ready barrier plus one per UB chunk this block processed.
+  // read_done_expected ends at num_chunks + 2, so the barrier count is
+  // read_done_expected - 1; the epilogue is a local hardware atomic (TNOTIFY on
+  // a local address is the same st_atomic the remote path uses).
+  const int32_t barrier_count = read_done_expected - 1;
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer * signal_stride + block_idx);
+    pto::comm::TNOTIFY(self_sig, -barrier_count, pto::comm::NotifyOp::AtomicAdd);
+  }
+
   pipe_barrier(PIPE_ALL);
 }

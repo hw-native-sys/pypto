@@ -100,8 +100,8 @@ mesh 路径均支持。Host 内置的 ring 路径（`builtin.tensor.allreduce_ri
 signal = pld.tensor.barrier(signal)
 ```
 
-在 signal 上使用 `Set(1)` + `Ge(1)`。单次使用；下一次 barrier 前需分配新
-buffer。
+在 signal 上使用自清理信用屏障（`AtomicAdd(+1)` / `Ge(1)` 并带重置尾声），
+因此同一个 signal buffer 可在连续调用间复用。
 
 ## Broadcast
 

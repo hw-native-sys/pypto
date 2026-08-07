@@ -188,8 +188,10 @@ class AllReduceSignalSynthesizer : public IRMutator {
         << "pld.tensor.allreduce expects target[, signal], got " << call->args_.size()
         << " positional arguments";
     CHECK_SPAN(repeating_scope_depth_ == 0, call->span_)
-        << "pld.tensor.allreduce is not supported inside a for/while loop. "
-           "The signal protocol is single-use and cannot reuse a signal across dynamic invocations.";
+        << "pld.tensor.allreduce is not supported inside a for/while loop on the HOST rail: "
+           "the synthesized signal binding cannot be allocated per dynamic iteration. "
+           "Hoist the call out of the loop (InCore composites are loop-safe via the "
+           "self-clearing credit-barrier protocol).";
   }
 
   struct SignalNames {

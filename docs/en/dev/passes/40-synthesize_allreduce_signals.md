@@ -77,13 +77,13 @@ The pass raises `pypto::ValueError` when:
   expression statement, or return value,
 - an allreduce appears inside a `for` / `while` loop.
 
-The loop restriction applies to the HOST rail: the `builtin.tensor.allreduce`
-kernel (lowered by `LowerHostTensorCollectives`) is not self-clearing — it adds
-ready/per-chunk credits via `AtomicAdd(+1)` and never subtracts them — so a
-signal synthesized (or explicitly passed) before a loop would be reused on a
-later iteration with stale `>=` thresholds. InCore composites lowered by
+The loop restriction applies to the HOST rail: `SynthesizeAllReduceSignals`
+inserts the synthesized signal allocation immediately before the allreduce
+statement, which cannot be placed inside a dynamic loop (a fresh allocation per
+iteration under the same name, and every rank must land on the same symmetric
+window). InCore composites lowered by
 [`LowerCompositeOps`](12-lower_composite_ops.md#barrier-signal-protocol) are
-loop-safe because that pass emits the self-clearing epilogue.
+loop-safe because that pass emits the self-clearing credit-barrier epilogue.
 
 ## Pass Properties
 

@@ -12,7 +12,7 @@ rank 上。
 | **Signal cell 永不达到期望值** | 错误 `NotifyOp` | 多参与者屏障用 `AtomicAdd`；1:1 交换用 `Set`。 |
 | **编译时形状不匹配** | `NR` 未使用 `pl.dynamic` | 将运行时维度包裹在 `pl.dynamic("NR")` 中。 |
 | **派发时抛出 `TypeError`** | IO buffer 在 `prepare()` 前未调用 `.share_memory_()`——fork 出的子进程看不到 fork 之后分配的 buffer | 在 `prepare()` 之前对每个传给 worker 的 host tensor 调用 `.share_memory_()`。 |
-| **循环内 allreduce 被拒绝** | Signal 协议无法每轮注入新 buffer | 在循环外每次调用分配新 signal buffer。 |
+| **循环内 allreduce 被拒绝** | HOST 轨的 allreduce 在动态 `for`/`while` 内被拒绝：signal 合成无法为每次迭代分配新 signal（InCore 复合算子通过自清理信用屏障协议可在循环内使用） | 将 HOST allreduce 调用提到循环外。 |
 
 ## 致命陷阱
 

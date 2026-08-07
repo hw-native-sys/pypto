@@ -238,8 +238,9 @@ def allreduce(
     ``target`` holds the reduced value. ``signal``, when provided, is a
     window-bound INT32 matrix used as the cross-rank barrier. Host-level calls
     may omit it; SynthesizeAllReduceSignals inserts a private signal before
-    downstream lowering. Explicit signals are single-shot: callers issuing
-    multiple allreduces must provide a fresh signal for each call. ``op``
+    downstream lowering. The signal is self-clearing: the lowering restores
+    its cells to zero after each call, so one buffer can be reused across
+    back-to-back calls (and, on the InCore rail, inside for/while loops). ``op``
     (:class:`ir.ReduceOp`) selects the reduction operator, defaults to
     ``ReduceOp.Sum``, and is packed as an ``int`` attr. ``mode`` selects the
     lowering algorithm: ``"mesh"`` (direct exchange, O(P) windows) or
@@ -427,8 +428,8 @@ def all_to_all_v(
 
     ``send_counts`` is read at runtime, so the counts may be data-dependent;
     each count is clamped to the per-peer capacity ``MAX_RECV =
-    target.shape[0] // NR``. The barrier signal is single-use and must not be
-    reused inside a ``for``/``while`` loop.
+    target.shape[0] // NR``. The barrier signal is self-clearing (restored to
+    zero after each call) and safe to reuse inside a ``for``/``while`` loop.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     _args: list[Expr] = [input, target, signal, send_counts, recv_counts]

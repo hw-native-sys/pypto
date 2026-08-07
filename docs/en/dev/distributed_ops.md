@@ -338,7 +338,7 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 
 - `input` — Tensor or DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
-- `signal` — DistributedTensor INT32 `[NR, 1]` (single-use Set(1)/wait≥1 barrier)
+- `signal` — DistributedTensor INT32 `[NR, 1]` (self-clearing credit barrier; reusable across calls)
 - `send_counts` — Tensor-like INT32 `[NR]` or `[NR, 1]` (runtime rows per dest)
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
 

@@ -955,11 +955,10 @@ def test_explicit_allreduce_eval_stmt_keeps_user_signal():
 
 
 def test_implicit_allreduce_in_loop_is_rejected():
-    """The HOST builtin allreduce is not self-clearing (it adds credits without
-    subtracting them), so a signal reused across a dynamic trip count would pass
-    its waits on stale state. The loop restriction therefore stays on the HOST
-    signal-synthesis path; only InCore composites (LowerCompositeOps) are
-    loop-safe under the self-clearing protocol.
+    """The HOST-rail signal synthesis cannot allocate a fresh signal per dynamic
+    iteration, so a synthesized-signal allreduce inside a loop is rejected.
+    (InCore composites are loop-safe via the self-clearing credit-barrier
+    protocol; lifting the HOST restriction is tracked separately.)
     """
 
     @pl.program

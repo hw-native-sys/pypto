@@ -687,8 +687,8 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     .add_argument("target",
                   "Window-bound DistributedTensor [NR*MAX_RECV, SIZE] — staging area for exchange (InOut)")
     .add_argument("signal",
-                  "Window-bound INT32 DistributedTensor [NR, 1] used as a single-use cross-rank "
-                  "barrier (InOut); not reusable inside for/while loops")
+                  "Window-bound INT32 DistributedTensor [NR, 1] used as a self-clearing cross-rank "
+                  "barrier (InOut); reusable across calls and inside for/while loops")
     .add_argument("send_counts",
                   "INT32 Tensor [NR] or [NR, 1] — rows to send to each destination, read at "
                   "runtime and clamped to MAX_RECV (Input)")
