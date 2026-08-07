@@ -1742,6 +1742,64 @@ def test_dsa_quadratic_recognizer_records_tuple_result_writes(tmp_path):
 
 
 @requires_dsa
+def test_dsa_preserves_tuple_result_semantic_separations(tmp_path):
+    """Every physical result of a tuple op inherits its hard no-alias inputs."""
+    _allocate_with_dsa(_dsa_tuple_result_hazard_program(), str(tmp_path))
+
+    document = json.loads((tmp_path / "pypto_tuple_result_hazard.dsa.json").read_text())
+    aliases = {
+        alias["buffer"]: set(alias["members"])
+        for alias in document["problem"]["pypto_structure"]["alias_classes"]
+    }
+    semantic_pairs = {
+        frozenset((next(iter(aliases[edge["first"]])), next(iter(aliases[edge["second"]]))))
+        for edge in document["problem"]["constraints"]["separations"]
+        if "semantic_no_alias" in edge["reasons"]
+    }
+    assert semantic_pairs == {
+        frozenset((result, forbidden_input))
+        for result in ("dst", "count")
+        for forbidden_input in ("source", "tmp")
+    }
+
+
+@requires_dsa
+def test_dsa_preserves_expand_broadcast_semantic_separation(tmp_path):
+    """A DSA placement cannot stagger-overlap an expand result and broadcast input."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def expand_semantic_separation(
+            self,
+            target_input: pl.Tensor[[8, 16], pl.FP32],
+            column_input: pl.Tensor[[8, 16], pl.FP32],
+            output: pl.Tensor[[8, 16], pl.FP32],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            target = pl.load(target_input, [0, 0], [8, 16])
+            column_storage = pl.load(column_input, [0, 0], [8, 16])
+            column = pl.slice(column_storage, [1, 16], [0, 0])
+            result = pl.col_expand_mul(target, column)
+            return pl.store(result, [0, 0], output)
+
+    _allocate_with_dsa(passes.init_mem_ref()(Before), str(tmp_path))
+    document = json.loads((tmp_path / "pypto_expand_semantic_separation.dsa.json").read_text())
+    aliases = {
+        alias["buffer"]: set(alias["members"])
+        for alias in document["problem"]["pypto_structure"]["alias_classes"]
+    }
+    semantic_edges = [
+        edge
+        for edge in document["problem"]["constraints"]["separations"]
+        if "semantic_no_alias" in edge["reasons"]
+    ]
+    assert len(semantic_edges) == 1
+    separated_members = aliases[semantic_edges[0]["first"]] | aliases[semantic_edges[0]["second"]]
+    assert "result" in separated_members
+    assert {"column", "column_storage"} <= separated_members
+
+
+@requires_dsa
 def test_dsa_quadratic_recognizer_ignores_no_access_definitions(tmp_path):
     """tile.create allocates storage but does not create a WAW execution hazard."""
     _allocate_with_dsa(

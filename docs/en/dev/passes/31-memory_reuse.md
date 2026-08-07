@@ -61,7 +61,7 @@ program_optimized = reuse_pass(program)
   - `forbid_output_alias(i)` — the op is in-place-safe w.r.t. its value operands but reads a **specific** operand while writing its output, so the output must not alias that one operand's buffer.
   - **widening `tile.cast`** (handled directly in `ForbidAliasCollector`) — when the output dtype is *wider* than the input, the cast cannot run in place: element `i` is read at `i*in_bytes` but written at `i*out_bytes`, so the write cursor outruns the read cursor and clobbers not-yet-converted input. Narrowing / same-width casts stay in-place-safe (preserving the cross-dtype reuse below).
 
-  MemoryReuse refuses to place the output on a forbidden operand's **physical buffer**, resolving each operand through both reuse-map coalescing *and* VIEW inheritance (a `reshape`/`slice` shares its source's MemRef base) — so a forbidden operand reached indirectly (its owning tile reused onto another buffer, or occupied via a view) is still caught.
+  MemoryReuse refuses to place the output on a forbidden operand's **physical buffer**, resolving each operand through both reuse-map coalescing *and* VIEW inheritance (a `reshape`/`slice` shares its source's MemRef base) — so a forbidden operand reached indirectly (its owning tile reused onto another buffer, or occupied via a view) is still caught. For a tuple-returning op, the constraint is propagated from the tuple temporary to every tile-valued `TupleGetItem` result.
 
   Ops that currently declare a no-alias constraint:
 
