@@ -174,6 +174,7 @@ class PassManager:
             passes.optimize_orch_tensors,
         )
         tile_pto_passes: tuple[PassFactory, ...] = (
+            passes.expand_mx_packed_quant,
             passes.lower_composite_ops,
             passes.flatten_tile_nd_to_2d,
             # Expand non-native tile.cast (src,dst) pairs into shortest native

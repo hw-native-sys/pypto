@@ -160,7 +160,7 @@ SSA 的 phi/yield 链每轮迭代都会用一个新名字重新绑定同一块�
 
 ## 相关文档
 
-- `docs/zh/dev/passes/34-allocate_memory_addr.md` —— 被绘制的那个 pass
-- `docs/zh/dev/passes/33-memory_reuse.md` —— 决定哪些生命周期可以共享 slot 的 pass
+- `docs/zh/dev/passes/35-allocate_memory_addr.md` —— 被绘制的那个 pass
+- `docs/zh/dev/passes/34-memory_reuse.md` —— 决定哪些生命周期可以共享 slot 的 pass
 - `docs/zh/dev/passes/00-pass_manager.md` —— `ReportInstrument`，现在只负责给出产物目录
 - `docs/zh/dev/04-simulator-trace-cleaning.md` —— `pypto.tools` 中另一个事后分析工具

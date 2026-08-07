@@ -46,8 +46,9 @@ struct ReinterpretViewPlan {
 inline bool IsSupportedDType(DataType dtype) {
   return dtype == DataType::INT8 || dtype == DataType::INT16 || dtype == DataType::INT32 ||
          dtype == DataType::INT64 || dtype == DataType::UINT8 || dtype == DataType::UINT16 ||
-         dtype == DataType::UINT32 || dtype == DataType::UINT64 || dtype == DataType::FP16 ||
-         dtype == DataType::FP32 || dtype == DataType::BF16;
+         dtype == DataType::UINT32 || dtype == DataType::UINT64 || dtype == DataType::FP8E4M3FN ||
+         dtype == DataType::FP8E8M0 || dtype == DataType::FP16 || dtype == DataType::FP32 ||
+         dtype == DataType::BF16;
 }
 
 /** Preserve only dtype-independent padding across a reinterpret view. */
@@ -263,12 +264,14 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                                    DataType target_dtype, size_t contiguous_axis,
                                    const std::optional<std::vector<ExprPtr>>& requested_shape,
                                    const std::string& op_name, const Span& span) {
+  constexpr const char* kSupportedDTypes =
+      "byte-addressable int/uint8/16/32/64, FP8E4M3FN, FP8E8M0, FP16, BF16, and FP32";
   CHECK_SPAN(IsSupportedDType(source_dtype), span)
-      << op_name << " does not support source dtype " << source_dtype.ToString()
-      << "; supported dtypes are byte-addressable int/uint8/16/32/64, FP16, BF16, and FP32";
+      << op_name << " does not support source dtype " << source_dtype.ToString() << "; supported dtypes are "
+      << kSupportedDTypes;
   CHECK_SPAN(IsSupportedDType(target_dtype), span)
-      << op_name << " does not support target dtype " << target_dtype.ToString()
-      << "; supported dtypes are byte-addressable int/uint8/16/32/64, FP16, BF16, and FP32";
+      << op_name << " does not support target dtype " << target_dtype.ToString() << "; supported dtypes are "
+      << kSupportedDTypes;
   CHECK_SPAN(source_dtype != target_dtype, span)
       << op_name << " requires source and target dtypes to differ; use reshape/view for shape-only changes";
   detail::ValidatePhysicalShape(source_shape, "source shape", op_name, span);

@@ -453,8 +453,13 @@ def _torch_dtype_str(dtype: torch.dtype) -> str:
         torch.int16: "torch.int16",
         torch.int32: "torch.int32",
         torch.int64: "torch.int64",
+        torch.uint8: "torch.uint8",
         torch.bool: "torch.bool",
     }
+    for name in ("float8_e4m3fn", "float8_e8m0fnu"):
+        optional_dtype = getattr(torch, name, None)
+        if optional_dtype is not None:
+            _map[optional_dtype] = f"torch.{name}"
     result = _map.get(dtype)
     if result is None:
         raise ValueError(f"Unsupported dtype {dtype!r} in TensorSpec")

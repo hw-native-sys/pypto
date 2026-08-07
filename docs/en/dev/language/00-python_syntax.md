@@ -201,7 +201,7 @@ with `pl.range` and declare one allocation per slot; leave the levels you want t
 to manage unannotated.
 
 Under `memory_planner=PTOAS` the compiler reaches for the *same* mechanism rather than a
-different one: [`LowerPipelineToSlots`](../passes/27-lower_pipeline_to_slots.md) synthesizes
+different one: [`LowerPipelineToSlots`](../passes/28-lower_pipeline_to_slots.md) synthesizes
 exactly the declaration above — `slots=F`, indexed `iv % F` — for every eligible top-level
 `tile.load` of a `pl.pipeline` body, so one body rotates through the slots instead of being
 replicated. A tile you bound yourself is left alone, and any loop that pass declines still
@@ -218,8 +218,8 @@ for stack, (out_outer,) in pl.pipeline(STACKS, stage=2, init_values=(out,)):
         pong: pl.Tile[[K, STEP], pl.BF16, l0b_pong, pl.Mem.Right] = ...
 ```
 
-See [InitMemRef](../passes/31-init_memref.md#declared-allocations) and
-[MemoryReuse](../passes/33-memory_reuse.md#declared-allocations).
+See [InitMemRef](../passes/32-init_memref.md#declared-allocations) and
+[MemoryReuse](../passes/34-memory_reuse.md#declared-allocations).
 
 ### Tile Views (TileView)
 
@@ -475,7 +475,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`PTO2_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/44-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`PTO2_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/45-materialize_runtime_scopes.md) |
 
 See [Scopes and Placement](../../user/language/04-scopes.md) for examples.
 
@@ -501,7 +501,7 @@ in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):
 | `pl.cross_core_slot(slot_num=N)` | both | Sets the inner InCore's `slot_num` attr — the slot count (ring depth) of the automatic cross-core pipe, consumed by `ExpandMixedKernel`. Sizes a data channel only; it does **not** partition work, so it coexists with `pl.split_aiv` regions where `pl.split(...)` does not. Omit to keep the PTOAS default (8 one-directional, 4 per direction bidirectional). |
 
 > `pl.split(MODE, slot_num=N)` is a deprecated alias for the slot count and warns
-> — see [ExpandMixedKernel](../passes/21-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
+> — see [ExpandMixedKernel](../passes/22-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 
 ### Manual dependency primitives
 

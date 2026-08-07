@@ -578,6 +578,8 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.neg",             "pto.tneg",             1},
     {"tile.not",             "pto.tnot",             1},
     {"tile.relu",            "pto.trelu",            1},
+    // MX quantization. tile.tquant_mx is multi-output and has custom codegen.
+    {"tile.tdequant",        "pto.tdequant",         3},
     // Ternary operations (tile x tile + carry/select)
     {"tile.addc",            "pto.taddc",            3},
     {"tile.subc",            "pto.tsubc",            3},
@@ -672,7 +674,12 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     reg_entry.f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
     });
-    if (RequiresRowMajorLayout(entry.op_name)) {
+    if (std::string_view(entry.op_name) == "tile.tdequant") {
+      reg_entry.set_input_layout(0, ir::TileLayout::row_major);
+      reg_entry.set_input_layout(1, ir::TileLayout::col_major);
+      reg_entry.set_input_layout(2, ir::TileLayout::col_major);
+      reg_entry.set_output_layout(ir::TileLayout::row_major);
+    } else if (RequiresRowMajorLayout(entry.op_name)) {
       for (size_t i = 0; i < arity; ++i) {
         reg_entry.set_input_layout(i, ir::TileLayout::row_major);
       }

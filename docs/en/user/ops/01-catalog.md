@@ -119,9 +119,16 @@ tile depend on the pad value; see
 | `assemble` | `pl.` | Write a sub-region back; also written `dst[i:i+16] = src` |
 | `reinterpret_view` | `pl.` | Reinterpret without moving data |
 | `set_validshape` | `pl.` | Declare the meaningful region of a tile |
-| `cast` | `pl.` | Convert dtype — may expand to a multi-hop chain, see [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) |
+| `cast` | `pl.` | Convert dtype — may expand to a multi-hop chain, see [LegalizeTileCast](../../dev/passes/15-legalize_tile_cast.md) |
 | `dim` | `pl.` | A tensor's runtime dimension |
 | `read` `write` | `pl.` | Element access |
+
+## Quantization
+
+| Operator | Reach | What it does |
+| -------- | ----- | ------------ |
+| `quant_mx` | `pl.` (t) | Ascend950 MX block-32 dynamic quantization from FP16, FP32, or BF16 to FP8E4M3FN data plus FP8E8M0 scales |
+| `tdequant` | `pl.` (t) | Ascend950 per-row affine dequantization of INT8 or INT16 data with FP32 scale and offset |
 
 ## Linear algebra
 
@@ -170,7 +177,7 @@ The mixed-kernel surface — AIC and AIV cooperating inside one InCore function.
 Push and pop must be **paired**, and each pop must be matched by a `tfree`. The tutorial
 covering this is not written yet; the mechanics are in
 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) and
-[ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md).
+[ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md).
 
 ## Tasks and dependencies
 

@@ -4,7 +4,7 @@
 行 = **最新 PTOAS 提供的公共及兼容 op**。接口基线为 Little-oil/PTOAS `main`
 `d852dd2dba3e5bf7a69ce8324eb88afc336e8a33`：manual 公共接口 189 个，加当前
 `PTOOps.td` 仍保留的 source-only 兼容/tile 接口 15 个，共 204 个。列状态按
-**PyPTO 当前源码**核实（最后更新 2026-07-27）。后续每加或修改一个 op，只更新本表对应行。
+**PyPTO 当前源码**核实（最后更新 2026-08-05）。后续每加或修改一个 op，只更新本表对应行。
 
 本表包含公共/兼容接口中 PyPTO 级别为 `internal` 的 op；另有 `PTOOps.td` 中 32 个仅供
 lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO、VMI、SIMT 等其他 dialect。
@@ -194,9 +194,9 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen；Mat→scale `tmov` 按源序发射，PTOAS `PTOA5NormalizeTMovPass` 重排为 bind-before-fill；见 [operators MX 约束](ir/05-operators.md#mx--ascend950ptoas-约束) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | 已有 backend hook，缺 IR/Python 前端与 ST |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
-| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | 仅 Ascend950/A5；内部 `tile.tquant_mx`，公开 `pl.quant_mx(dtype=FP8E4M3FN)`；数值 ST 覆盖精确 E4M3 字节与 E8M0 编码 |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | 当前 backend 发 `pto.tstore.fp` |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | 仅 Ascend950/A5；`tile.tdequant` / `pl.tdequant`；数值 ST 覆盖逐行 scale 与 offset |
 | **同步（8）** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | compiler/system lowering 自动发射 |
 | pto.barrier_sync | barrier lowering | internal | ✅ | — | — | — | — | 同步/调度内部原语，不独立建 ST |

@@ -597,13 +597,21 @@ def split_vector_kernel() -> Pass:
 def simplify() -> Pass:
     """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
+def expand_mx_packed_quant() -> Pass:
+    """Expand packed-layout MX quantization into per-box flat quantization.
+
+    Handles ``MX_A_ZZ`` and ``MX_B_NN`` scale packing before
+    :func:`lower_composite_ops`; the B layout also transposes the quantized
+    values from ``[N, K]`` to ``[K, N]``.
+    """
+
 def lower_composite_ops() -> Pass:
     """Decompose composite tile/distributed ops into primitive ops.
 
     Lowering rules are registered through the composite-lowering registry.
-    Today the pass handles ``tile.sin`` / ``tile.cos`` and explicit-signal
-    InCore ``pld.tensor.allreduce``. Host-level allreduce is skipped here and
-    lowered later by :func:`lower_host_tensor_collectives`.
+    Today the pass handles ``tile.sin`` / ``tile.cos``, flat ``tile.tquant_mx``,
+    and explicit-signal InCore ``pld.tensor.allreduce``. Host-level allreduce is
+    skipped here and lowered later by :func:`lower_host_tensor_collectives`.
 
     FP32-only for the trig rules. Non-FP32 inputs are rejected at
     op-construction time.
@@ -952,6 +960,7 @@ __all__ = [
     "inject_gm_pipe_buffer",
     "split_vector_kernel",
     "simplify",
+    "expand_mx_packed_quant",
     "lower_composite_ops",
     "materialize_dist_tensor_ctx",
     "flatten_call_expr",

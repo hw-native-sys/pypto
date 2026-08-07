@@ -331,6 +331,17 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
   tile_view.blayout = tile_view_semantics::InferImplicitTileLayoutFromShape(new_shape);
 
+  // MX exponent bytes remain grouped in 32-element blocks when their flat
+  // tquant_mx result is reshaped to the 2D scale matrix consumed by matmul_mx.
+  // Preserve only that scale-specific boxing metadata; reshape continues to
+  // infer the logical layout of every other tile from its new shape.
+  if ((tile_type->dtype_ == DataType::UINT8 || tile_type->dtype_ == DataType::FP8E8M0) &&
+      source_view.fractal == tile_view_semantics::kMXScaleFractal) {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = tile_view_semantics::kMXScaleFractal;
+  }
+
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 

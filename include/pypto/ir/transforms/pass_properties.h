@@ -95,12 +95,13 @@ inline const PassProperties kNormalizeStmtStructureProperties{
 
 inline const PassProperties kSimplifyProperties{};
 
-// -- Composite op lowering pass (tile.sin / tile.cos / InCore allreduce -> primitives, etc.) -----
+// -- Composite op lowering pass (trig / flat MX quant / InCore collectives -> primitives) --------
 //
 // LowerCompositeOps decomposes composite tile/distributed ops into primitive
 // ops. Today it handles tile.sin / tile.cos (Cody-Waite range reduction +
-// degree-9 Horner polynomial) and explicit-signal InCore pld.tensor.allreduce;
-// host-level allreduce is skipped and lowered later by LowerHostTensorCollectives.
+// degree-9 Horner polynomial), flat tile.tquant_mx, and explicit-signal InCore
+// pld.tensor.allreduce; host-level allreduce is skipped and lowered later by
+// LowerHostTensorCollectives.
 // Future composite ops add a rule to the file-local dispatch table in
 // lower_composite_ops_pass.cpp. The pass operates within existing op
 // vocabularies, so it neither requires nor produces nor invalidates any
@@ -205,6 +206,8 @@ inline const PassProperties kInferTileMemorySpaceProperties{
     .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
                  IRProperty::AivSplitValid},
     .invalidated = {IRProperty::AivSplitValid}};
+
+inline const PassProperties kExpandMxPackedQuantProperties{};
 
 // -- Insert MX scale-address binding pass ------------------------------------
 //

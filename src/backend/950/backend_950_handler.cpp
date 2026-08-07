@@ -17,6 +17,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -27,6 +28,18 @@ const Ascend950Handler& Ascend950Handler::Instance() {
   return instance;
 }
 
+namespace {
+
+bool IsMxScaleStagingView(const ir::TileView& view) {
+  // tquant_mx / MX Mat staging use fractal-32 with matching blayout==slayout
+  // (row/row for LeftScale, col/col for RightScale). Ordinary Mat NZ is
+  // col_major/row_major and must not match this predicate.
+  return view.fractal == ir::tile_view_semantics::kMXScaleFractal && view.blayout == view.slayout &&
+         (view.blayout == ir::TileLayout::row_major || view.blayout == ir::TileLayout::col_major);
+}
+
+}  // namespace
+
 ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                           const ir::TileView& original_view) const {
   // Ascend950 (a5): hardware cross-core pipe carries data in fractal layout.
@@ -36,6 +49,13 @@ ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_m
   //                stay NZ rather than ZN)
   //   Mat -> NZ
   //   Vec -> preserve the caller-requested final layout
+  //
+  // Exception: MX E8M0 scale staging tiles keep their row/row/32 or
+  // col/col/32 view. Forcing Mat NZ here makes TMov_mx into LeftScale /
+  // RightScale fail (`TMov_mx: SrcTile Invalid Fractal`).
+  if (IsMxScaleStagingView(original_view)) {
+    return original_view;
+  }
   ir::TileView result = original_view;
   switch (dest_ms) {
     case ir::MemorySpace::Left:

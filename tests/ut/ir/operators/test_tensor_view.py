@@ -224,6 +224,65 @@ def test_nz_target_rejected():
         ir.op.tensor.view(src, layout=ir.TensorLayout.NZ)
 
 
+def test_mx_a_shaped_nd_backing_view_is_allowed():
+    """A dynamic A-scale producer may reinterpret MX_A_ZZ storage as packed ND."""
+    src_view = ir.TensorView([], ir.TensorLayout.MX_A_ZZ)
+    src = _tensor_var([32, 4], dtype=DataType.FP8E8M0, view=src_view)
+
+    call = ir.op.tensor.view(src, [1, 128], layout=ir.TensorLayout.ND)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    assert _values_of(out.shape) == [1, 128]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.ND
+
+
+def test_nd_shaped_mx_a_consumer_view_is_allowed():
+    """An FP8E8M0 ND backing tensor may expose an MX_A_ZZ consumer view."""
+    src = _tensor_var([1, 128], dtype=DataType.FP8E8M0)
+
+    call = ir.op.tensor.view(src, [32, 4], layout=ir.TensorLayout.MX_A_ZZ)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    assert _values_of(out.shape) == [32, 4]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.MX_A_ZZ
+
+
+def test_mx_a_backing_view_rejects_non_scale_dtype():
+    """The MX_A_ZZ backing alias is limited to E8M0 scale storage."""
+    src = _tensor_var([1, 128], dtype=DataType.FP32)
+
+    with pytest.raises(ValueError, match="does not support MX layouts except shaped ND/MX_A_ZZ/MX_B_NN"):
+        ir.op.tensor.view(src, [32, 4], layout=ir.TensorLayout.MX_A_ZZ)
+
+
+def test_mx_a_backing_view_requires_explicit_shape():
+    """An MX_A_ZZ layout flip without a backing shape remains unsupported."""
+    src = _tensor_var([1, 128], dtype=DataType.FP8E8M0)
+
+    with pytest.raises(ValueError, match="does not support MX layouts except shaped ND/MX_A_ZZ/MX_B_NN"):
+        ir.op.tensor.view(src, layout=ir.TensorLayout.MX_A_ZZ)
+
+
+def test_nd_shaped_mx_b_consumer_view_is_allowed():
+    """An FP8E8M0 ND backing tensor may expose an MX_B_NN consumer view."""
+    src = _tensor_var([1, 128], dtype=DataType.FP8E8M0)
+
+    call = ir.op.tensor.view(src, [4, 32], layout=ir.TensorLayout.MX_B_NN)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    assert _values_of(out.shape) == [4, 32]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.MX_B_NN
+
+
 def test_cross_layout_flip_below_rank_2_rejected():
     """ND ↔ DN flip needs at least 2 dims to swap; 1D is rejected."""
     src = _tensor_var([8])
