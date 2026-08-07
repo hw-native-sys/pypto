@@ -217,39 +217,49 @@ runs:
       if: ${{ inputs.install-toolchain == 'true' }}
       shell: bash
       run: |
-        # uname -m keeps this arch-portable; on the arm64 runners it resolves to
-        # aarch64, so the cache archive name is unchanged from the old literal.
+        # v0.55's standalone archive requires CPython 3.11, while PyPTO CI
+        # intentionally tests Python 3.10. Install the matching cp310 wheel into
+        # an isolated venv so PTOAS_ROOT/bin/ptoas keeps the existing contract.
         PTOAS_ARCH="$(uname -m)"
-        CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-${PTOAS_ARCH}-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+        PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
+        PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
+        CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
         # $PTOAS_CACHE_DIR is shared across concurrent jobs on the host (unlike the
         # per-job pip dir), so two cache-miss jobs must not fight over one temp
         # file: download into a per-job mktemp, verify it, then atomically rename
-        # into place (last writer wins — content is identical). A trap removes the
-        # temp if we die mid-download. CACHE_ARCHIVE therefore only ever holds a
-        # verified archive; the final sha256 re-check guards a cache hit against a
+        # into place (last writer wins — content is identical). A trap removes
+        # the temp if we die mid-download. CACHE_WHEEL therefore only ever holds
+        # a verified wheel; the final sha256 re-check guards a cache hit against a
         # partial/corrupt file left by a crashed pre-atomic-rename run.
-        if [ ! -f "$CACHE_ARCHIVE" ]; then
+        if [ ! -f "$CACHE_WHEEL" ]; then
           echo "Cache miss — downloading ptoas ${PTOAS_VERSION} for ${PTOAS_ARCH}"
           mkdir -p "$PTOAS_CACHE_DIR"
-          tmp_archive="$(mktemp "$PTOAS_CACHE_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
-          trap 'rm -f "$tmp_archive"' EXIT
+          tmp_wheel="$(mktemp "$PTOAS_CACHE_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
+          trap 'rm -f "$tmp_wheel"' EXIT
           curl --fail --location --retry 3 --retry-all-errors \
-            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-${PTOAS_ARCH}.tar.gz" \
-            -o "$tmp_archive"
-          echo "${PTOAS_SHA256}  $tmp_archive" | sha256sum -c -
-          mv -f "$tmp_archive" "$CACHE_ARCHIVE"
+            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
+            -o "$tmp_wheel"
+          echo "${PTOAS_SHA256}  $tmp_wheel" | sha256sum -c -
+          mv -f "$tmp_wheel" "$CACHE_WHEEL"
           trap - EXIT
         else
-          echo "Cache hit — using $CACHE_ARCHIVE"
+          echo "Cache hit — using $CACHE_WHEEL"
         fi
-        echo "${PTOAS_SHA256}  $CACHE_ARCHIVE" | sha256sum -c -
-        mkdir -p "$PTOAS_ROOT"
-        tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
-        # Guard each chmod on existence so a packaging variation (only one of the
-        # two ptoas paths present) doesn't fail the whole step.
-        [ -f "$PTOAS_ROOT/ptoas" ] && chmod +x "$PTOAS_ROOT/ptoas"
-        [ -f "$PTOAS_ROOT/bin/ptoas" ] && chmod +x "$PTOAS_ROOT/bin/ptoas"
-        true
+        echo "${PTOAS_SHA256}  $CACHE_WHEEL" | sha256sum -c -
+        PTOAS_CONDA_PREFIX="$CONDA_ROOT/envs/py310"
+        PTOAS_PYTHON="$PTOAS_CONDA_PREFIX/bin/python"
+        if [ ! -x "$PTOAS_PYTHON" ]; then
+          echo "::error::ptoas ${PTOAS_VERSION} requires the runner's py310 conda environment"
+          exit 1
+        fi
+        rm -rf "$PTOAS_ROOT"
+        "$PTOAS_PYTHON" -m venv "$PTOAS_ROOT" --system-site-packages
+        "$PTOAS_ROOT/bin/python" -m pip install "$CACHE_WHEEL"
+        # The bootstrap step below writes the same conda lib prefix into
+        # activate.sh. Apply it to this early probe too; otherwise older device
+        # hosts select /usr/lib64/libstdc++.so.6 and miss GLIBCXX_3.4.29.
+        LD_LIBRARY_PATH="$PTOAS_CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+          "$PTOAS_ROOT/bin/ptoas" --version
 
     - name: Clone pto-isa
       if: ${{ inputs.install-toolchain == 'true' }}

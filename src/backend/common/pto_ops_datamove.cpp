@@ -706,8 +706,8 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
-// Helper for tile.scatter_mask (DPS; PyPTO codegen mask form, not a real ISA op):
-//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
+// Helper for tile.scatter_mask (DPS; row-direction mask form):
+//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty, "row")
 //                outs(%dst : dst_ty)
 //
 // The maskPattern rides *inside* ins() right after the src operand, exactly
@@ -716,10 +716,8 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 // The type annotation follows the attr dict, still inside ins().
 //
 // IR surface: 2-input op (dst, src) + mask_pattern attr; dst aliased via
-// set_output_reuses_input(0). NOTE: pto-isa/PTOAS expose a maskPattern form
-// only for tgather, not tscatter — this tscatter mask emission is a PyPTO
-// codegen construct, not a distinct ISA instruction. Emitted for A2/A3 /
-// CPU-sim style lowering paths.
+// set_output_reuses_input(0). PyPTO's mask-scatter semantics expand columns
+// within each row, which PTOAS v0.55 names the "row" axis.
 static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CHECK(op->args_.size() == 2) << "tile.scatter_mask requires 2 arguments (dst, src), but got "
@@ -745,14 +743,16 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
       << ", input=" << input_ssa;
 
   std::ostringstream oss;
-  // maskPattern rides inside ins() after src, then the type annotation:
-  //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty) outs(%dst : dst_ty)
+  // maskPattern rides inside ins() after src, followed by the type annotation
+  // and the mandatory PTOAS v0.55 row axis:
+  //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty, "row")
+  //                outs(%dst : dst_ty)
   oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
       << ">}";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
-  oss << ") outs(" << dst;
+  oss << ", \"row\") outs(" << dst;
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
