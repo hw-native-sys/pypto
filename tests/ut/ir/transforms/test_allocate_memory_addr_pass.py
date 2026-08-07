@@ -1195,6 +1195,10 @@ def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
     ]
     assert document["problem"]["constraints"] == {
         "colocations": [],
+        "no_partial_overlaps": [
+            {"first": 0, "second": 1},
+            {"first": 1, "second": 2},
+        ],
         "pinned_allocations": [],
         "separations": [],
         "temporal_exclusions": [],
@@ -1763,9 +1767,8 @@ def test_dsa_preserves_tuple_result_semantic_separations(tmp_path):
     }
 
 
-@requires_dsa
-def test_dsa_preserves_expand_broadcast_semantic_separation(tmp_path):
-    """A DSA placement cannot stagger-overlap an expand result and broadcast input."""
+def _dsa_expand_semantic_separation_program():
+    """Expand target may alias exactly; its broadcast operand may not alias."""
 
     @pl.program
     class Before:
@@ -1782,7 +1785,32 @@ def test_dsa_preserves_expand_broadcast_semantic_separation(tmp_path):
             result = pl.col_expand_mul(target, column)
             return pl.store(result, [0, 0], output)
 
-    _allocate_with_dsa(passes.init_mem_ref()(Before), str(tmp_path))
+    return passes.init_mem_ref()(Before)
+
+
+def _dsa_inplace_unary_program():
+    """One exact-in-place-safe producer/consumer pair with no third Vec allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def inplace_unary(
+            self,
+            input_tensor: pl.Tensor[[8, 16], pl.FP32],
+            output: pl.Tensor[[8, 16], pl.FP32],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            source = pl.load(input_tensor, [0, 0], [8, 16])
+            result = pl.exp(source)
+            return pl.store(result, [0, 0], output)
+
+    return passes.init_mem_ref()(Before)
+
+
+@requires_dsa
+def test_dsa_preserves_expand_operand_alias_contracts(tmp_path):
+    """DSA exports exact-or-disjoint and always-disjoint input contracts directly."""
+
+    _allocate_with_dsa(_dsa_expand_semantic_separation_program(), str(tmp_path))
     document = json.loads((tmp_path / "pypto_expand_semantic_separation.dsa.json").read_text())
     aliases = {
         alias["buffer"]: set(alias["members"])
@@ -1797,6 +1825,35 @@ def test_dsa_preserves_expand_broadcast_semantic_separation(tmp_path):
     separated_members = aliases[semantic_edges[0]["first"]] | aliases[semantic_edges[0]["second"]]
     assert "result" in separated_members
     assert {"column", "column_storage"} <= separated_members
+
+    no_partial_pairs = {
+        frozenset((next(iter(aliases[edge["first"]])), next(iter(aliases[edge["second"]]))))
+        for edge in document["problem"]["constraints"]["no_partial_overlaps"]
+    }
+    assert no_partial_pairs == {frozenset(("target", "result"))}
+
+
+@requires_dsa
+def test_dsa_replay_rejects_staggered_inplace_overlap(tmp_path):
+    """Independent replay validation rejects a legal-in-place pair shifted by one alignment unit."""
+
+    base = _dsa_inplace_unary_program()
+    _allocate_with_dsa(base, str(tmp_path))
+    problem_path = tmp_path / "pypto_inplace_unary.dsa.json"
+    solution_path = tmp_path / "pypto_inplace_unary.dsa.solution.json"
+    document = json.loads(problem_path.read_text())
+    solution = json.loads(solution_path.read_text())
+    aliases = {
+        member: alias["buffer"]
+        for alias in document["problem"]["pypto_structure"]["alias_classes"]
+        for member in alias["members"]
+    }
+    placements = {entry["buffer"]: entry for entry in solution["placements"]}
+    placements[aliases["result"]]["offset"] = placements[aliases["source"]]["offset"] + 32
+    solution_path.write_text(json.dumps(solution, indent=2) + "\n")
+
+    with pytest.raises(ValueError, match="no-partial-overlap buffers"):
+        _allocate_with_dsa(base, solution_dir=str(tmp_path))
 
 
 @requires_dsa
