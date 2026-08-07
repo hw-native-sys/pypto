@@ -11,7 +11,7 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 ```
 
 这个 pass 只处理 host orchestrator 函数。InCore allreduce 仍然显式接收
-signal，并继续由 [`LowerCompositeOps`](12-lower_composite_ops.md) lower。
+signal，并继续由 [`LowerCompositeOps`](13-lower_composite_ops.md) lower。
 
 ## Pipeline 位置
 
@@ -19,7 +19,7 @@ signal，并继续由 [`LowerCompositeOps`](12-lower_composite_ops.md) lower。
 ... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> Simplify（最终）
 ```
 
-它运行在 [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md)
+它运行在 [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md)
 之前，此时 host 侧 `alloc_window_buffer` / `window` / dispatch 链路仍然可见。
 随后 comm-domain materialization 会把合成的 signal buffer 当成普通 window
 allocation 处理，并放入 allreduce data buffer 所属的通信域。
@@ -68,7 +68,7 @@ alloc / window / allreduce 链路。
 - allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value；
 - allreduce 出现在 `for` / `while` 循环内。
 
-该循环限制针对 HOST 通道：`builtin.tensor.allreduce` kernel（由 `LowerHostTensorCollectives` lower）不是自清理的 —— 它用 `AtomicAdd(+1)` 增加 ready/per-chunk 信用却从不回减 —— 因此循环前合成（或显式传入）的 signal 会在后续迭代中复用残留的 `>=` 阈值。由 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议) lower 的 InCore 组合算子则因该 pass 会发出自清理尾声而具备循环安全性。
+该循环限制针对 HOST 通道：`builtin.tensor.allreduce` kernel（由 `LowerHostTensorCollectives` lower）不是自清理的 —— 它用 `AtomicAdd(+1)` 增加 ready/per-chunk 信用却从不回减 —— 因此循环前合成（或显式传入）的 signal 会在后续迭代中复用残留的 `>=` 阈值。由 [`LowerCompositeOps`](13-lower_composite_ops.md#屏障-信号协议) lower 的 InCore 组合算子则因该 pass 会发出自清理尾声而具备循环安全性。
 
 ## Pass 属性
 

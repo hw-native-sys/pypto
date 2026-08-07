@@ -5,7 +5,7 @@
 `MaterializeCommDomainScopes` walks each host-orchestration function and assembles the
 host-side metadata that the distributed runtime needs in order to size and
 populate per-rank communication windows. It is the structural analogue of
-[`InitMemRef`](31-init_memref.md): it traces an allocation through to its
+[`InitMemRef`](32-init_memref.md): it traces an allocation through to its
 consumption points, constructs a back-reference object, and threads it onto
 the IR types so downstream codegen has O(1) access.
 
@@ -26,7 +26,7 @@ the IR types so downstream codegen has O(1) access.
 ```
 
 The pass runs near the end of the default pipeline, immediately before
-[`LowerHostTensorCollectives`](42-lower_host_tensor_collectives.md) and the final
+[`LowerHostTensorCollectives`](43-lower_host_tensor_collectives.md) and the final
 `Simplify`. None of the intervening passes between `InlineFunctions` and here
 touches the host_orch alloc/window/dispatch chain: host_orch is never
 tile-lowered, and L2 (chip-level) orchestrations are never inlined into L3, so
@@ -121,7 +121,7 @@ After the pass:
 - Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
   `window_buffer_` field points to the corresponding `WindowBuffer`.
 - Every host-level `pld.tensor.allreduce` call has two positional arguments
-  after [`SynthesizeAllReduceSignals`](40-synthesize_allreduce_signals.md) runs.
+  after [`SynthesizeAllReduceSignals`](41-synthesize_allreduce_signals.md) runs.
   For an omitted user signal, the second argument is a synthesized Var produced
   by a preceding `pld.tensor.window` assignment.
 - `pld.tensor.window` views over the same allocation share the same

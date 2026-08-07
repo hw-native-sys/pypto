@@ -129,7 +129,7 @@ live through its distinct `tensor.assemble` store.
 
 An oversized pointwise region is split along one axis. The emitted strip loop is
 a two-stage `ForKind::Pipeline`, allowing load/store work for one strip to
-overlap vector work for another after [`LowerPipelineLoops`](27-lower_pipeline_loops.md).
+overlap vector work for another after [`LowerPipelineLoops`](29-lower_pipeline_loops.md).
 All returned values are loop-carried and stored; no intermediate GM tensor is
 introduced. DMA-aligned physical tiles retain their exact logical valid shape
 through every generated operation, so a ragged store cannot write padded rows

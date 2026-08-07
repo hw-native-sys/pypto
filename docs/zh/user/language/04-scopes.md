@@ -111,5 +111,5 @@ for i in pl.spmd(4):
 - [函数与程序](01-functions.md) —— `pl.at` 的替代写法：独立的 `@pl.jit.incore` 函数。
 - [控制流](02-control-flow.md) —— 包含这些作用域的循环。
 - [内存与数据搬运](03-memory.md) —— 被放置的代码拿缓冲区做什么。
-- [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) —— `pl.at` 如何变成函数。
-- [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) —— `pl.split` 驱动的是什么。
+- [OutlineIncoreScopes](../../dev/passes/09-outline_incore_scopes.md) —— `pl.at` 如何变成函数。
+- [ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md) —— `pl.split` 驱动的是什么。

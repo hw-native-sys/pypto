@@ -4,7 +4,7 @@ L0 tiling for static 2D `tile.matmul`, `tile.matmul_acc`, and `tile.matmul_bias`
 
 ## Overview
 
-Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) carry full `(M, N, K)` operand shapes — almost always larger than the cube unit's L0a/L0b/L0c capacity. This pass picks an L0-fitting `(m, n, k)` and rewrites the matmul into a K-loop whose body extracts `[m, k]` and `[k, n]` slabs into `Left` / `Right` and accumulates into an `Acc`-resident iter-arg. The loop is marked `ForKind::Pipeline` with `pipeline_stages=2` so the downstream [`LowerPipelineLoops`](28-lower_pipeline_loops.md) pass produces a 2-deep ping-pong on the per-iter operand extracts.
+Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) carry full `(M, N, K)` operand shapes — almost always larger than the cube unit's L0a/L0b/L0c capacity. This pass picks an L0-fitting `(m, n, k)` and rewrites the matmul into a K-loop whose body extracts `[m, k]` and `[k, n]` slabs into `Left` / `Right` and accumulates into an `Acc`-resident iter-arg. The loop is marked `ForKind::Pipeline` with `pipeline_stages=2` so the downstream [`LowerPipelineLoops`](29-lower_pipeline_loops.md) pass produces a 2-deep ping-pong on the per-iter operand extracts.
 
 An operand already placed in `Left` or `Right` is a manual L0 scheduling decision, so AutoTile does not silently replace or subdivide it. Legal manual tiles remain untouched. If one static operand by itself exceeds its backend space—for example an FP16 `Right[256, 256]` requiring 131072 bytes in a 65536-byte L0B—the pass instead fails at that operand with its variable name, physical shape, dtype, required/available bytes, and two fixes: keep the operand in `Mat` and pass it directly to the matmul so AutoTile can choose legal L0 tiles, or manually extract a smaller L0 tile. This early operation-specific error prevents the later allocator failure from being preceded by an irrelevant MemoryReuse fallback warning.
 
@@ -16,7 +16,7 @@ The pass also handles an already-tiled form under the PyPTO memory planner: a us
 
 **Fits-L0c chained cast-fold.** A chained matmul whose `[M, N]` result *fits* L0c (no M/N tiling) but feeds a second matmul through a downcast — `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` — needs the bf16 intermediate in **Mat** (L1) for the consumer. Left alone, `tile.cast` lowers to a **Vector** `pto.tcvt` (a cube→vector→cube round-trip that overflows the Vec buffer at `[128, 128]`). Instead the pass folds the cast into a **single full-window** Acc→Mat `tile.assemble` — the same `MatScratchPlacer` as the oversized Mat-scratch path, but one `PlaceAt` at offset `(0, 0)` rather than a grid — so the downcast stays on the cube as a FIXPIPE `pto.tinsert`. This is a cast-peephole independent of K tiling: it fires whether the producer was left whole (`k == K`) or K-looped (`k < K`), and only when every use of the cast result is a matmul operand (a non-matmul consumer keeps the Vector cast). The fold also mirrors exactly what FIXPIPE can reproduce — an **`f32 → bf16/f16`** downcast whose round mode is **`rint`** (round-half-to-*even*), FIXPIPE's fixed tie rule — the same on A2/A3 and A5 (the pto-isa CPU reference narrows via `std::bfloat16_t` with no arch branch, and `pto.tinsert` carries no `rmode`; the backends differ only in the scratch dtype, not the rounding). A non-`f32` accumulator (e.g. an `int32` matmul result, which would need a scaled *dequant*), the cast's default **`round`** mode (round-half-*away*), or a directional/truncating mode (`none`/`floor`/`ceil`/`trunc`/`odd`) all keep the Vector `pto.tcvt` — the only path that honors the requested `rmode` — and the pass emits a `PH-AT-010` hint pointing at `mode="rint"`. The same guard (`CastFoldableToFixpipeMat`) gates the oversized Mat-scratch fold below. Oversized results never reach this peephole — their cast is folded per sub-tile by the M/N path above.
 
-**Pipeline position**: After [`LegalizeTileCast`](14-legalize_tile_cast.md), before [`CanonicalizeTileSlice`](16-canonicalize_tile_slice.md) and [`InferTileMemorySpace`](17-infer_tile_memory_space.md). All tile ops are already 2D and memory spaces have not yet been inferred.
+**Pipeline position**: After [`LegalizeTileCast`](15-legalize_tile_cast.md), before [`CanonicalizeTileSlice`](17-canonicalize_tile_slice.md) and [`InferTileMemorySpace`](18-infer_tile_memory_space.md). All tile ops are already 2D and memory spaces have not yet been inferred.
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
 
@@ -54,7 +54,7 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
    - `tile.matmul_acc` — iter-arg init is the caller's accumulator directly (its type already matches the per-iter `tile.matmul_acc` output); every iteration is uniform `tile.matmul_acc`, so no if-else.
    - `tile.matmul_bias` — uses the same fresh-accumulator loop as `tile.matmul`, but the first K block is `tile.matmul_bias` and every later block is `tile.matmul_acc`, so bias is added exactly once. For N tiling, the matching window is reconstructed as an independent tensor→Mat `tile.load`, then transferred with `tile.move` to Bias (`pto.tload` + `pto.tmov`). A zero-copy one-row Mat `tile.slice` is not used because its boxed `pto.subview` is not PTOAS-legal.
    - Per-iter operand extracts use `tile.extract(src, idx_row, idx_col, [shape], target_memory=Left|Right)` — the SSA-form fusion of the older `tile.slice` (Mat-resident result) + `tile.mov` (Mat→Left/Right) pair. This eliminates the intermediate Mat-resident slice tile and lowers to `pto.textract` rather than `pto.subview`, sidestepping the latter's `valid_row` codegen mismatch. For an output sub-tile at origin `(mi, ni)` the extracts slice `lhs[mi:mi+m, ko:ko+k]` and `rhs[ko:ko+k, ni:ni+n]`; the K-only case is `mi == ni == 0`, `m == M`, `n == N`.
-   - **Vec left operand staging** — when the left (A) operand is `Vec`-resident (PV / `score·V`), a single `tile.move(lhs, target_memory=Mat)` is emitted **before** the K-loop and the per-iter Left extract slices from that staged Mat tile (so the extract source is Mat exactly like the QK path). Keeping the Vec→Mat crossing a `tile.move` lets [`ExpandMixedKernel`](21-expand_mixed_kernel.md) recognise it (`CollectCVBoundaryMoves` only matches `tile.move`) and lower it to the cross-core `tpop_from_aiv` handshake (which lands the data in Mat). Extracting straight from the Vec tile would instead leave the operand a dangling cross-boundary free variable on the cube side.
+   - **Vec left operand staging** — when the left (A) operand is `Vec`-resident (PV / `score·V`), a single `tile.move(lhs, target_memory=Mat)` is emitted **before** the K-loop and the per-iter Left extract slices from that staged Mat tile (so the extract source is Mat exactly like the QK path). Keeping the Vec→Mat crossing a `tile.move` lets [`ExpandMixedKernel`](22-expand_mixed_kernel.md) recognise it (`CollectCVBoundaryMoves` only matches `tile.move`) and lower it to the cross-core `tpop_from_aiv` handshake (which lands the data in Mat). Extracting straight from the Vec tile would instead leave the operand a dangling cross-boundary free variable on the cube side.
    - The K-loop is `ForKind::Pipeline` with `pipeline_stages=2`.
    - **Non-divisor K (K-boundary peel)** — when the chosen `k` does not divide `K`, the pipelined loop covers only the `⌊K/k⌋` full blocks (bound `⌊K/k⌋·k`) and a straight-line `tile.matmul_acc` peels the partial last block of width `K − ⌊K/k⌋·k`; when only one full block fits (`⌊K/k⌋ == 1`), a single straight-line full block + tail replaces the loop. With `K` and `k` both 16-aligned (the cube fractal), the peeled tail width `K − ⌊K/k⌋·k` is itself 16-aligned — an ordinary `matmul_acc` block, no masking. (ptoas requires 16-aligned tile cols, so the operand dimensions must be 16-aligned; non-16-aligned `K` is **not** supported.) The chooser only returns a non-divisor `k` under `ChooseL0Tile`'s `allow_k_boundary`, which this pass sets; when the full (16-aligned) K fits one L0 block the chooser returns `k == K` (no loop) instead. A **non-16-aligned `K` is rejected outright** — there is no valid K-tiling (any peeled tail or whole-K block would have non-fractal cols), so the chooser returns no candidate and the pass skips the matmul with a `PH-AT-007` hint rather than emit invalid extracts.
 6. **M/N tiling (when `m < M` or `n < N`)** — the physical `[M, N]` output Acc footprint overflows L0c.
@@ -107,9 +107,9 @@ below both matmuls (`matmul, matmul, store, store`) to make the two accumulator
 lifetimes co-live.
 
 The planners preserve that intent differently. For eligible PTOAS pipelines,
-[`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) expresses the stages as
+[`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) expresses the stages as
 slots in one allocation; declined loops flow to
-[`LowerPipelineLoops`](28-lower_pipeline_loops.md), and PTOAS assigns the
+[`LowerPipelineLoops`](29-lower_pipeline_loops.md), and PTOAS assigns the
 resulting stage buffers distinct offsets itself. `PYPTO` uses the flat depth-2
 `pipeline_membership` emitted by `LowerPipelineLoops`, and `MemoryReuse`'s
 capacity gate (#1475) keeps the buffers distinct to the affordable depth.
@@ -121,7 +121,7 @@ Mat-scratch (`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
 `PassManager` built under one planner and run under another fails loudly
 because its pass list and chooser gates must agree. The cost-model formulas
 are gate-independent. See
-[`29-canonicalize_io_order.md`](29-canonicalize_io_order.md) for the co-live
+[`30-canonicalize_io_order.md`](30-canonicalize_io_order.md) for the co-live
 float and runtime validation of the distinct `{0, L0C/2}` offsets.
 
 The full-K and ≥2×2 restrictions above apply only to chooser-emitted M/N
@@ -317,6 +317,6 @@ The pass emits `PerfHint` diagnostics rather than failing when it declines to re
 
 ## See also
 
-- [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) — upstream pass; produces the static-2D Mat-resident tile shapes this pass consumes
-- [`InferTileMemorySpace`](17-infer_tile_memory_space.md) — downstream pass; bridges Vec/Acc accumulators that this pass deliberately leaves alone
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) — consumes the `ForKind::Pipeline` + `pipeline_stages=2` produced here
+- [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) — upstream pass; produces the static-2D Mat-resident tile shapes this pass consumes
+- [`InferTileMemorySpace`](18-infer_tile_memory_space.md) — downstream pass; bridges Vec/Acc accumulators that this pass deliberately leaves alone
+- [`LowerPipelineLoops`](29-lower_pipeline_loops.md) — consumes the `ForKind::Pipeline` + `pipeline_stages=2` produced here

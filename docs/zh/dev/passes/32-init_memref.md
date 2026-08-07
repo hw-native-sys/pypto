@@ -59,7 +59,7 @@ program_with_memrefs = init_pass(program)
 
 `pl.Tile[[...], dtype, <alloc>, pl.Mem.Vec]` 将一个 tile 绑定到由 kernel 作者声明的分配
 上，其中 `<alloc>` 是一个按变量引用的 `pl.MemRef("name")`（或同样的单参数内联形式，也就是
-打印器输出的形式）。引用同一块分配的 tile 共享它，且 `MemoryReuse` 绝不会把其他 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](33-memory_reuse.md#声明式分配)。
+打印器输出的形式）。引用同一块分配的 tile 共享它，且 `MemoryReuse` 绝不会把其他 tile 塞进去。这是手工复用控制——作者为何需要它,见 [MemoryReuse](34-memory_reuse.md#声明式分配)。
 
 **声明如何抵达本 pass。** 解析器把单参数 `pl.MemRef` 解析为一个 `MemRef`，其 `base_` Ptr 按
 名字 intern（因此命名同一块分配的两处注解共享同一个 base），`byte_offset = 0`、不带大小，并且
@@ -106,7 +106,7 @@ ptoas 区域，ptoas 被禁止合并这些物理段，详见
   其源 tile 的 buffer，无法另行放置；应改为绑定源 tile。
 
 第四条规则——绑定到**同一槽位**的 tile 生命周期不得重叠——需要生命周期信息，因此在
-[MemoryReuse](33-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时
+[MemoryReuse](34-memory_reuse.md#声明式分配) 中检查。位于*不同*槽位的 tile 本来就应该同时
 存活，这正是多槽位声明的用途。
 
 ```python

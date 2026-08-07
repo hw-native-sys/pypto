@@ -13,7 +13,7 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
 
 The pass only rewrites host orchestrator functions. InCore allreduce continues
 to use the explicit signal argument and is lowered by
-[`LowerCompositeOps`](12-lower_composite_ops.md).
+[`LowerCompositeOps`](13-lower_composite_ops.md).
 
 ## Position in the pipeline
 
@@ -22,7 +22,7 @@ to use the explicit signal argument and is lowered by
 ```
 
 The pass runs immediately before
-[`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md), while the
+[`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md), while the
 host `alloc_window_buffer` / `window` / dispatch chain is still visible.
 Materialization then sees the synthesized signal buffer as an ordinary window
 allocation and can place it in the same communication domain as the allreduce
@@ -82,7 +82,7 @@ kernel (lowered by `LowerHostTensorCollectives`) is not self-clearing — it add
 ready/per-chunk credits via `AtomicAdd(+1)` and never subtracts them — so a
 signal synthesized (or explicitly passed) before a loop would be reused on a
 later iteration with stale `>=` thresholds. InCore composites lowered by
-[`LowerCompositeOps`](12-lower_composite_ops.md#barrier-signal-protocol) are
+[`LowerCompositeOps`](13-lower_composite_ops.md#barrier-signal-protocol) are
 loop-safe because that pass emits the self-clearing epilogue.
 
 ## Pass Properties

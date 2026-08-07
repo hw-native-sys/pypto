@@ -268,14 +268,14 @@ def normalize_return_order() -> Pass:
 
 ## 相关
 
-- [`OutlineInCoreScopes`](08-outline_incore_scopes.md) —— 上游产出本 Pass
+- [`OutlineInCoreScopes`](09-outline_incore_scopes.md) —— 上游产出本 Pass
   改写的 `InCore` 函数
-- [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 与
-  [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) —— 在两者之间运行，
+- [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 与
+  [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) —— 在两者之间运行，
   各自认领自己处理的流水线循环
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) —— 展开上述两个 pass 未接手的
+- [`LowerPipelineLoops`](29-lower_pipeline_loops.md) —— 展开上述两个 pass 未接手的
   流水线作用域时，消费规范化后的返回值
-- [`DeriveCallDirections`](37-derive_call_directions.md) —— 后续基于本
+- [`DeriveCallDirections`](38-derive_call_directions.md) —— 后续基于本
   Pass 规范化的返回形态分析调用签名
 - [PTO 代码生成总览](../codegen/00-pto_codegen.md) 与
   [编排代码生成](../codegen/01-orchestration_codegen.md) —— 直接消费规范

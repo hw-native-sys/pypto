@@ -7,12 +7,12 @@
 `pld.tensor.reduce_scatter`, `pld.tensor.allgather`,
 `pld.tensor.all_to_all`, and `pld.tensor.all_to_all_v` into compiler-internal
 builtin chip dispatches. It runs
-after [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md), so
+after [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md), so
 each window-bound data tensor and explicit or synthesized signal tensor already has a
 `WindowBuffer` back-reference and belongs to an inferred communication domain.
 
 The pass does not change non-host functions. InCore allreduce calls continue to
-use [`LowerCompositeOps`](12-lower_composite_ops.md).
+use [`LowerCompositeOps`](13-lower_composite_ops.md).
 
 ## Position in the pipeline
 
@@ -120,7 +120,7 @@ with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
 
 `all_to_all_v`'s single-use Set(1)/wait≥1 signal cannot be reused across a
-`for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md),
+`for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md),
 which runs immediately before this pass, rejects that case up front (the same
 restriction `LowerCompositeOps` enforces on the InCore path). On an explicit
 static device subset, `all_to_all_v`'s signal `shape[0]` must exactly equal

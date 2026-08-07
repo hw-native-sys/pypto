@@ -132,5 +132,5 @@ the tutorials chapter covers end to end.
 - [Functions and Programs](01-functions.md) — the alternative to `pl.at`: a separate `@pl.jit.incore` function.
 - [Control Flow](02-control-flow.md) — the loops these scopes sit inside.
 - [Memory and Data Movement](03-memory.md) — what the placed code does with buffers.
-- [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) — how `pl.at` becomes a function.
-- [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) — what `pl.split` drives.
+- [OutlineIncoreScopes](../../dev/passes/09-outline_incore_scopes.md) — how `pl.at` becomes a function.
+- [ExpandMixedKernel](../../dev/passes/22-expand_mixed_kernel.md) — what `pl.split` drives.

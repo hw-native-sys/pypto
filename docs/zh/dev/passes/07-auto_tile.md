@@ -112,7 +112,7 @@ schedule、grid、work unit、tile/strip/chunk extent、pipeline depth、UB 峰�
 ### Pointwise stream
 
 过大的 pointwise region 沿一个轴切成 strip。发射的 strip loop 是两阶段
-`ForKind::Pipeline`；经过 [`LowerPipelineLoops`](27-lower_pipeline_loops.md) 后，一个
+`ForKind::Pipeline`；经过 [`LowerPipelineLoops`](29-lower_pipeline_loops.md) 后，一个
 strip 的 load/store 可与另一个 strip 的 Vector 工作重叠。所有返回值都由 loop carry
 并写回，不引入中间 GM tensor。经过 DMA 对齐的物理 tile 会在每个生成运算后保留精确
 的逻辑 valid shape，因此 ragged store 不会写入 padding 的行或列。

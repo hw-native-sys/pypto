@@ -4,7 +4,7 @@
 
 ## 概览
 
-结果 tile 位于 `Mem.Mat` 的 `tile.slice` 是一种合法的高层「Mat tile 子窗口」构造。[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 在展开 `tile.batch_matmul` 的 batch 维时，会为每个 batch page 生成一个这样的 slice：page 偏移为 `batch_index * page_rows`；当 batch 前导维为 1 时该偏移为 0、窗口覆盖整个 tile——但它仍然是一个 `tile.slice`。
+结果 tile 位于 `Mem.Mat` 的 `tile.slice` 是一种合法的高层「Mat tile 子窗口」构造。[`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) 在展开 `tile.batch_matmul` 的 batch 维时，会为每个 batch page 生成一个这样的 slice：page 偏移为 `batch_index * page_rows`；当 batch 前导维为 1 时该偏移为 0、窗口覆盖整个 tile——但它仍然是一个 `tile.slice`。
 
 PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运），因此当消费者能直接接受 subview SSA 时，独立的 Mat slice 是合法的。但是，触发惰性实例化（通过 `MaterializeSubviewOperandIfNeeded`）的消费者会尝试生成 `loc=mat → loc=mat` 的 `pto.textract`——这是 Ascend 910C 等目标不支持的 L1→L1 DMA 路径。本 pass 为了效率，通过把可规范化消费者（extract/matmul）对应的 Mat-resident `tile.slice` 偏移折叠进消费者来消除这些 slice，随后删除已死的 slice。消费者不可规范化的 Mat slice（如 `tile.move`）保持原样——它会下沉为合法的 `pto.subview`。
 
@@ -15,9 +15,9 @@ PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运�
 | 目标**地址**正确 | `AllocateMemoryAddr` 会把 `ConstInt` 偏移折叠成 `base + off`；但**动态**偏移无法编码为 `ConstInt` 地址，会退化到裸源基址——抽出的窗口于是落到源 tile 的第 0 行（#1640）。 |
 | 目标**布局**一致 | slice 缓冲区是稠密的（行间距 = slice 列数），而源窗口是跨步的（行间距 = 源列数）。二者只有在窗口**连续**时才相同：单行，或覆盖全部列。多行 tile 的列切片（`t[:, a:b]`）会在自己仍然存活的源上做 跨步 → 稠密 的重排并将其摧毁——只有第 0 行幸存，因为它的稠密目标地址恰好等于其源地址（#2010）。 |
 
-只要任一条件不成立，该操作数就会被替换为新的 `tile.extract(..., target_memory=Vec)`，其结果获得独立、非继承的分配。`tile.extract` 注册为 `not_inplace_safe()`，因此 [`MemoryReuse`](33-memory_reuse.md) 也不会把这块新缓冲区重新放回源 tile 上。若实例化本身就是恒等拷贝，则该 slice 保持原样——它继续共享源缓冲区，而不必付出一份重复分配的代价。
+只要任一条件不成立，该操作数就会被替换为新的 `tile.extract(..., target_memory=Vec)`，其结果获得独立、非继承的分配。`tile.extract` 注册为 `not_inplace_safe()`，因此 [`MemoryReuse`](34-memory_reuse.md) 也不会把这块新缓冲区重新放回源 tile 上。若实例化本身就是恒等拷贝，则该 slice 保持原样——它继续共享源缓冲区，而不必付出一份重复分配的代价。
 
-**Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](17-infer_tile_memory_space.md)。
+**Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](18-infer_tile_memory_space.md)。
 
 **前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。
 
@@ -58,7 +58,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 ### slice 折叠进 `tile.extract`
 
-[`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) 为前导维为 1 的 batch 操作数生成的偏移为 0、全形状的 slice：
+[`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) 为前导维为 1 的 batch 操作数生成的偏移为 0、全形状的 slice：
 
 **改写前 (Before)**：
 
@@ -175,5 +175,5 @@ scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(hi_ext, 
 
 ## 参见
 
-- [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) —— 上游 pass；生成本 pass 下沉的 Mat-resident batch-page `tile.slice`
-- [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) —— 上游 pass；生成消费 batch-page slice 的 `tile.extract`
+- [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) —— 上游 pass；生成本 pass 下沉的 Mat-resident batch-page `tile.slice`
+- [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) —— 上游 pass；生成消费 batch-page slice 的 `tile.extract`

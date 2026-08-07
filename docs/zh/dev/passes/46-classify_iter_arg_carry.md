@@ -24,8 +24,8 @@ count；若一个 `Sequential` 循环把该数组穿过内层 `pl.parallel` 向�
 的 extent。
 
 **何时运行**：在 `Default` 策略中紧跟
-[`MaterializeRuntimeScopes`](44-materialize_runtime_scopes.md) 之后、
-[`InsertCommFence`](46-insert_comm_fence.md) 之前运行。跑得这么靠后意味着被分类
+[`MaterializeRuntimeScopes`](45-materialize_runtime_scopes.md) 之后、
+[`InsertCommFence`](47-insert_comm_fence.md) 之前运行。跑得这么靠后意味着被分类
 的 IR 与 codegen 实际降级的 IR 完全一致 —— `InsertCommFence` 只会追加 InCore 的
 fence 算子，不会改动 Orchestration `ForStmt` 的 iter_arg。
 
@@ -120,6 +120,6 @@ carry 被强制置为 `rebind`，尺寸取自外层循环的常量 trip count；
 
 ## 参见
 
-- [MaterializeRuntimeScopes](44-materialize_runtime_scopes.md) —— 紧邻的前一个 pass
+- [MaterializeRuntimeScopes](45-materialize_runtime_scopes.md) —— 紧邻的前一个 pass
 - [Orchestration codegen](../codegen/01-orchestration_codegen.md) —— 本 plan 的消费者
 - [Pass manager](00-pass_manager.md)

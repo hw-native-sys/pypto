@@ -4,7 +4,7 @@
 
 ## 概述
 
-`pl.pipeline(N, stage=F)` 表达的是乒乓缓冲的诉求。[`LowerPipelineLoops`](28-lower_pipeline_loops.md) 用**复制**来兑现：把循环体复制 `F` 份，每份都有全新的定义变量，于是各份的 tile 是彼此独立的 MemRef，`MemoryReuse` 不允许把它们合并。这条路可行，但代价是 `F` 倍的代码量、一套静态/动态余数派发，以及为了隔开各份副本而存在的 `pipeline_membership` 机制。
+`pl.pipeline(N, stage=F)` 表达的是乒乓缓冲的诉求。[`LowerPipelineLoops`](29-lower_pipeline_loops.md) 用**复制**来兑现：把循环体复制 `F` 份，每份都有全新的定义变量，于是各份的 tile 是彼此独立的 MemRef，`MemoryReuse` 不允许把它们合并。这条路可行，但代价是 `F` 倍的代码量、一套静态/动态余数派发，以及为了隔开各份副本而存在的 `pipeline_membership` 机制。
 
 本 pass 用 ptoas 本来就认识的形式表达同一个意图。`pl.MemRef(name, slots=F)` 的含义正是**"一个分配、F 个等大 slot、本次使用取第 k 个"**（见[Slots](../language/00-python_syntax.md#slots)），而 PTO codegen 恰好把它下降为 `pto.alloc_multi_tile` + `pto.multi_tile_get`。于是循环只保留**一份**循环体，每个按 stage 私有的缓冲变成合成声明的第 `iv % F` 个 slot：
 
@@ -21,19 +21,19 @@ for i in pl.range(64):
     pl.tile.store(x, [i * 128], out)
 ```
 
-**不引入新的 IR op，也不新增用户可见开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](31-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
+**不引入新的 IR op，也不新增用户可见开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](32-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
 
 由于边界、步长和 `iter_args` 都没有改动，不存在需要派发的余数——动态 trip count 完全不需要特殊处理。
 
 **依赖属性**：SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水位置**：在 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 之后，紧接 [`LowerPipelineLoops`](28-lower_pipeline_loops.md) 之前。足够晚，内存空间已推断、tile 结构已定型；又足够早，`InitMemRef` 还没有给这些 tile 分配编译器自己的 MemRef。
+**流水位置**：在 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 之后，紧接 [`LowerPipelineLoops`](29-lower_pipeline_loops.md) 之前。足够晚，内存空间已推断、tile 结构已定型；又足够早，`InitMemRef` 还没有给这些 tile 分配编译器自己的 MemRef。
 
 ## 两个 pass 是互补关系，不是二选一
 
 两者都会执行，且按此顺序。本 pass 只接手能证明安全的循环并将其降级；**凡是它不接手的循环都保持 `ForKind::Pipeline`**，由 `LowerPipelineLoops` 照旧复制。不会因为本 pass 的存在而让任何循环失去乒乓——matmul L0 stage 循环、嵌套 pipeline、形状特殊的循环都仍然走复制路径。
 
-这与 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) 的做法同构：它处理跨核 pipeline 循环，其余原样留下。
+这与 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) 的做法同构：它处理跨核 pipeline 循环，其余原样留下。
 
 ## 自门控于 `memory_planner=PTOAS`
 
@@ -72,7 +72,7 @@ with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
 
 循环体顶层、且作者尚未自行绑定的**全部** `tile.load` 结果。
 
-- **只取 load。** 需要保持私有的是 load 缓冲——这样第 `i+1` 次迭代的预取才能与第 `i` 次的计算重叠；计算中间结果可以合并。这与 [`MemoryReuse`](33-memory_reuse.md) 通过 `pipeline_load_tiles` 划出的界线一致。给**所有** tile 都开 `F` 份私有缓冲会在真实 kernel 上撑爆片上预算——`stage=4` 的 RMSNorm 需要 `4 x 67 KB > 188 KB` UB。`tile.read` **不在其中**：它返回的是标量元素而非 tile，没有可轮转的缓冲。
+- **只取 load。** 需要保持私有的是 load 缓冲——这样第 `i+1` 次迭代的预取才能与第 `i` 次的计算重叠；计算中间结果可以合并。这与 [`MemoryReuse`](34-memory_reuse.md) 通过 `pipeline_load_tiles` 划出的界线一致。给**所有** tile 都开 `F` 份私有缓冲会在真实 kernel 上撑爆片上预算——`stage=4` 的 RMSNorm 需要 `4 x 67 KB > 188 KB` UB。`tile.read` **不在其中**：它返回的是标量元素而非 tile，没有可轮转的缓冲。
 - **顶层。** 仅限循环体 `SeqStmts` 的直接成员；嵌套在内层循环或 `if` 中的 load 属于那个区域。
 - **不做循环不变性过滤。** 顶层未绑定的 load 一律入选，包括实参从未提到归纳变量的那些。是否循环不变无法用归纳变量判断：经由循环携带的 `IterArg` 寻址的 load，每次迭代读到的数据都不同，却从不出现 `iv`；一旦同循环内另有候选把循环降级，跳过它就会让它既拿不到 slot、也进不了复制。而对真正循环不变的 load 开槽也不比回退更亏——`LowerPipelineLoops` 同样会把它的缓冲复制 `F` 份。
 - 作者已经绑定到声明分配的 tile 仍归作者所有。
@@ -133,8 +133,8 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 
 ## 相关
 
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) —— 复制路径，仍然处理本 pass 拒绝的每一个循环
-- [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) —— 跨核 pipeline 循环上的同构做法
-- [`InitMemRef`](31-init_memref.md) —— 解析合成出来的声明
+- [`LowerPipelineLoops`](29-lower_pipeline_loops.md) —— 复制路径，仍然处理本 pass 拒绝的每一个循环
+- [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) —— 跨核 pipeline 循环上的同构做法
+- [`InitMemRef`](32-init_memref.md) —— 解析合成出来的声明
 - [PTO codegen](../codegen/00-pto_codegen.md) —— 把 slot 下降为 ptoas region
 - [Python 语法：Slots](../language/00-python_syntax.md#slots) —— 同一声明的手写形式

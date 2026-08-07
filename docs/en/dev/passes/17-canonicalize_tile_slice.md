@@ -4,7 +4,7 @@ Lowers a `tile.slice` into the canonical `tile.extract` form so that movement is
 
 ## Overview
 
-A `tile.slice` whose result tile is `Mem.Mat` is a legal high-level "sub-window of a Mat tile" construct. [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) emits one per batch page when it unrolls a `tile.batch_matmul`: the page offset is `batch_index * page_rows`, and for a leading-dim-1 batch that offset is 0 and the window covers the whole tile — but it is still a `tile.slice`.
+A `tile.slice` whose result tile is `Mem.Mat` is a legal high-level "sub-window of a Mat tile" construct. [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) emits one per batch page when it unrolls a `tile.batch_matmul`: the page offset is `batch_index * page_rows`, and for a leading-dim-1 batch that offset is 0 and the window covers the whole tile — but it is still a `tile.slice`.
 
 PTO ISA supports `pto.subview` on Mat as a zero-copy alias (no data movement), so a standalone Mat slice is valid when its consumer accepts the subview SSA directly. However, consumers that trigger lazy materialization (via `MaterializeSubviewOperandIfNeeded`) would attempt a `loc=mat → loc=mat` `pto.textract` — an unsupported L1→L1 DMA path on targets such as Ascend 910C. This pass eliminates Mat-resident `tile.slice` nodes whose consumers it can canonicalize (extract/matmul) by folding the offset into each consumer for efficiency, then drops the now-dead slice. A Mat slice with a consumer that is not canonicalized (e.g. `tile.move`) is left intact — it lowers to a valid `pto.subview`.
 
@@ -15,9 +15,9 @@ The pass also canonicalizes a **Vec** `tile.slice` consumed by the `tile.col_exp
 | The destination **address** is right | `AllocateMemoryAddr` folds a `ConstInt` offset into `base + off`, but a **dynamic** offset cannot be encoded as a `ConstInt` address and falls back to the bare source base — the extracted window lands on the source's row 0 (#1640). |
 | The destination **layout** matches | The slice's buffer is dense (row pitch = slice cols) while the source window is strided (row pitch = source cols). These coincide only for a **contiguous** window: a single row, or one spanning every column. A column slice of a multi-row tile (`t[:, a:b]`) repacks strided → dense on top of its own source and destroys it — only row 0 survives, because its dense destination happens to equal its source address (#2010). |
 
-When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](33-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
+When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](34-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
 
-**Pipeline position**: After [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](17-infer_tile_memory_space.md).
+**Pipeline position**: After [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](18-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
 
@@ -58,7 +58,7 @@ The pass is a `FunctionPass`; functions are returned unchanged when no canonical
 
 ### Slice folded into `tile.extract`
 
-The offset-0 full-shape slice [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) emits for a leading-dim-1 batch operand:
+The offset-0 full-shape slice [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) emits for a leading-dim-1 batch operand:
 
 **Before**:
 
@@ -175,5 +175,5 @@ Without the rewrite, `hi` allocates a dense `[16, 64]` buffer at `t + 256 B` —
 
 ## See also
 
-- [`FlattenTileNdTo2D`](13-flatten_tile_nd_to_2d.md) — upstream pass; emits the Mat-resident batch-page `tile.slice` this pass lowers
-- [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md) — upstream pass; emits the `tile.extract`s that consume the batch-page slices
+- [`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) — upstream pass; emits the Mat-resident batch-page `tile.slice` this pass lowers
+- [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) — upstream pass; emits the `tile.extract`s that consume the batch-page slices

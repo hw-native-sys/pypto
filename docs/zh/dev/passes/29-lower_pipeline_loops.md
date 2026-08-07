@@ -5,7 +5,7 @@
 ## 概述
 
 > **`pl.pipeline` 有两条下降路径，这是其中之一。**
-> [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md) 紧接在本 pass 之前运行，在
+> [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) 紧接在本 pass 之前运行，在
 > `memory_planner=PTOAS` 下把能处理的循环改为单份循环体轮转同一分配的多个槽位。它会把接手的
 > 循环全部降级，因此本 pass 看到并复制的，只有它拒绝的循环，以及默认 PyPTO planner 下的全部
 > 循环。复制仍然是通用路径。
@@ -26,7 +26,7 @@
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水线位置**: 位于 [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md)（及 [`NormalizeReturnOrder`](25-normalize_return_order.md)）之后、`CanonicalizeIOOrder` 与 `InitMemRef` 之前。跨核（cube/vector）pipeline 循环已被上游 skew pass 改写为 `ForKind::Sequential`，因此到这里只剩**同核** pipeline 循环（GM→L1、L1→L0、嵌套 matmul stage 循环）仍为 `ForKind::Pipeline`，由本 pass 复制。此时 tile 结构决策已完成；同时早于 `CanonicalizeIOOrder`/`InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
+**流水线位置**: 位于 [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md)（及 [`NormalizeReturnOrder`](26-normalize_return_order.md)）之后、`CanonicalizeIOOrder` 与 `InitMemRef` 之前。跨核（cube/vector）pipeline 循环已被上游 skew pass 改写为 `ForKind::Sequential`，因此到这里只剩**同核** pipeline 循环（GM→L1、L1→L0、嵌套 matmul stage 循环）仍为 `ForKind::Pipeline`，由本 pass 复制。此时 tile 结构决策已完成；同时早于 `CanonicalizeIOOrder`/`InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
 
 ## API
 
@@ -144,5 +144,5 @@ else:
 
 ## 相关
 
-- [`CanonicalizeIOOrder`](29-canonicalize_io_order.md) —— 下一个 Pass，对 `ForKind::Pipeline` 作用域内的 `SeqStmts` 做 IO 顺序规范化
+- [`CanonicalizeIOOrder`](30-canonicalize_io_order.md) —— 下一个 Pass，对 `ForKind::Pipeline` 作用域内的 `SeqStmts` 做 IO 顺序规范化
 - [`UnrollLoops`](02-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径

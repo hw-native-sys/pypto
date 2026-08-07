@@ -74,7 +74,7 @@ for i in pl.unroll(4): ...            # no init_values here
 
 `pl.parallel` 是一个断言而非请求：你在告诉编译器这些迭代彼此独立。如果它们其实不独立，结果就是竞态。
 
-`pl.pipeline(N, stage=F)` 把循环体在每个外层迭代里复制 `F` 份，使缓冲区可以乒乓。外层循环以 `stage * step` 为步长推进，当行程数不能整除时由一个尾部派发覆盖余数。`stage` 是必填的正整数（通常 2–4）。它在 tile 层由 [LowerPipelineLoops](../../dev/passes/28-lower_pipeline_loops.md) 降级；在 `memory_planner=PTOAS` 下则由 [LowerPipelineToSlots](../../dev/passes/27-lower_pipeline_to_slots.md) 接手，改为让单份循环体轮转同一块分配的多个 slot 而不复制。
+`pl.pipeline(N, stage=F)` 把循环体在每个外层迭代里复制 `F` 份，使缓冲区可以乒乓。外层循环以 `stage * step` 为步长推进，当行程数不能整除时由一个尾部派发覆盖余数。`stage` 是必填的正整数（通常 2–4）。它在 tile 层由 [LowerPipelineLoops](../../dev/passes/29-lower_pipeline_loops.md) 降级；在 `memory_planner=PTOAS` 下则由 [LowerPipelineToSlots](../../dev/passes/28-lower_pipeline_to_slots.md) 接手，改为让单份循环体轮转同一块分配的多个 slot 而不复制。
 
 ```python
 for i in pl.pipeline(64, stage=4):
@@ -158,5 +158,5 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 - [作用域与放置](04-scopes.md) —— 包含这些循环的放置作用域。
 - [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md) —— 本页规则的来源。
 - [UnrollLoops](../../dev/passes/02-unroll_loops.md) —— `pl.unroll` 变成什么。
-- [LowerPipelineToSlots](../../dev/passes/27-lower_pipeline_to_slots.md) —— `memory_planner=PTOAS` 下 `pl.pipeline` 变成什么。
-- [LowerPipelineLoops](../../dev/passes/28-lower_pipeline_loops.md) —— 其余情况下 `pl.pipeline` 变成什么。
+- [LowerPipelineToSlots](../../dev/passes/28-lower_pipeline_to_slots.md) —— `memory_planner=PTOAS` 下 `pl.pipeline` 变成什么。
+- [LowerPipelineLoops](../../dev/passes/29-lower_pipeline_loops.md) —— 其余情况下 `pl.pipeline` 变成什么。

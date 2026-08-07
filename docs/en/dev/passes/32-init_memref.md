@@ -61,7 +61,7 @@ program_with_memrefs = init_pass(program)
 author declared, where `<alloc>` is a `pl.MemRef("name")` referenced by variable (or the
 same one-argument form inline, which is what the printer emits). Tiles referencing the
 same allocation share it; `MemoryReuse` never packs anything else into it. This is manual reuse control — see
-[MemoryReuse](33-memory_reuse.md#declared-allocations) for why an author would want it.
+[MemoryReuse](34-memory_reuse.md#declared-allocations) for why an author would want it.
 
 **How the declaration reaches this pass.** The parser resolves a one-argument
 `pl.MemRef` to a `MemRef` whose `base_` Ptr is interned by name (so two annotations
@@ -119,7 +119,7 @@ bodies `LowerPipelineLoops` emits) preserve it through `MemRef`'s clone path.
 
 A fourth rule — tiles bound to **one slot** must not be live at the same time — needs
 lifetime information and is therefore checked in
-[MemoryReuse](33-memory_reuse.md#declared-allocations). Tiles on *different* slots are
+[MemoryReuse](34-memory_reuse.md#declared-allocations). Tiles on *different* slots are
 meant to be live together; that is what a multi-slot declaration is for.
 
 ```python

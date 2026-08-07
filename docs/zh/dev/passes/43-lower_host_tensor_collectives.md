@@ -6,12 +6,12 @@
 `pld.tensor.allreduce`、`pld.tensor.barrier`、`pld.tensor.broadcast`、
 `pld.tensor.reduce_scatter`、`pld.tensor.allgather`、
 `pld.tensor.all_to_all` 和 `pld.tensor.all_to_all_v` 调用改写为编译器内部的
-builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md) 之后运行，
+builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入或编译器合成的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
 
 该 pass 不修改非 host 函数。InCore allreduce 仍然走
-[`LowerCompositeOps`](12-lower_composite_ops.md)。
+[`LowerCompositeOps`](13-lower_composite_ops.md)。
 
 ## Pipeline 位置
 
@@ -104,7 +104,7 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 
 `all_to_all_v` 的单次使用 Set(1)/wait≥1 信号无法在 `host_orch` 的
 `for`/`while` 循环中复用——本 pass 之前紧邻运行的
-[`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md) 会提前
+[`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md) 会提前
 拒绝这种情况（与 `LowerCompositeOps` 在 InCore 路径上强制的限制相同）。在显式
 静态 device 子集上，`all_to_all_v` 的 signal `shape[0]` 必须与子集大小
 **精确相等**（而非其他 collective 所要求的 `>=`），因为 `MAX_RECV` 是由

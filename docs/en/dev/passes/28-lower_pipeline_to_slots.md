@@ -4,7 +4,7 @@ Multi-buffers a `pl.pipeline(N, stage=F)` loop by rotating one body through the 
 
 ## Overview
 
-`pl.pipeline(N, stage=F)` asks for ping-pong buffering. [`LowerPipelineLoops`](28-lower_pipeline_loops.md) delivers it by *replication*: `F` copies of the body, each with fresh def-vars, so each copy's tiles are distinct MemRefs that `MemoryReuse` is forbidden to coalesce. That works, but it costs `F` times the code, a static-or-dynamic remainder dispatch, and the `pipeline_membership` machinery that keeps the copies apart.
+`pl.pipeline(N, stage=F)` asks for ping-pong buffering. [`LowerPipelineLoops`](29-lower_pipeline_loops.md) delivers it by *replication*: `F` copies of the body, each with fresh def-vars, so each copy's tiles are distinct MemRefs that `MemoryReuse` is forbidden to coalesce. That works, but it costs `F` times the code, a static-or-dynamic remainder dispatch, and the `pipeline_membership` machinery that keeps the copies apart.
 
 This pass expresses the same intent in the form ptoas already understands. `pl.MemRef(name, slots=F)` says *"one allocation, F uniform slots, this use takes slot k"* — see [Slots](../language/00-python_syntax.md#slots) — and PTO codegen lowers exactly that to `pto.alloc_multi_tile` + `pto.multi_tile_get`. So the loop keeps **one** body and each per-stage buffer becomes slot `iv % F` of a synthesized declaration:
 
@@ -21,19 +21,19 @@ for i in pl.range(64):
     pl.tile.store(x, [i * 128], out)
 ```
 
-**No new IR op and no new user-facing switch.** The synthesized MemRef is shaped exactly like an author's declaration, so [`InitMemRef`](31-init_memref.md) resolves it through the same path and codegen sees no difference between a rotation the author wrote and one the compiler derived.
+**No new IR op and no new user-facing switch.** The synthesized MemRef is shaped exactly like an author's declaration, so [`InitMemRef`](32-init_memref.md) resolves it through the same path and codegen sees no difference between a rotation the author wrote and one the compiler derived.
 
 Because bounds, step and `iter_args` are untouched, there is no remainder to dispatch — a dynamic trip count needs no special case at all.
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md), immediately before [`LowerPipelineLoops`](28-lower_pipeline_loops.md). Late enough that memory spaces are inferred and the tile structure is final; early enough that `InitMemRef` has not yet handed the tiles compiler-owned MemRefs.
+**Pipeline position**: After [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md), immediately before [`LowerPipelineLoops`](29-lower_pipeline_loops.md). Late enough that memory spaces are inferred and the tile structure is final; early enough that `InitMemRef` has not yet handed the tiles compiler-owned MemRefs.
 
 ## The two passes are complementary, not alternatives
 
 Both run, in this order. This pass takes the loops it can prove safe and demotes them; every loop it declines keeps `ForKind::Pipeline` and is replicated by `LowerPipelineLoops` exactly as before. Nothing loses its ping-pong because this pass exists — matmul L0 stage loops, nested pipelines and unusual loop shapes all keep the replication path.
 
-This mirrors [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md), which handles cross-core pipeline loops the same way and leaves the rest intact.
+This mirrors [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md), which handles cross-core pipeline loops the same way and leaves the rest intact.
 
 ## Gated on `memory_planner=PTOAS`
 
@@ -72,7 +72,7 @@ For a `ForStmt(kind == ForKind::Pipeline, attrs["pipeline_stages"] == F)` with `
 
 Every top-level `tile.load` result the author has not already bound.
 
-- **Loads only.** A load buffer is what must stay private so iteration `i+1`'s prefetch overlaps iteration `i`'s compute; compute intermediates may coalesce. This is the same distinction [`MemoryReuse`](33-memory_reuse.md) already draws with `pipeline_load_tiles`. Giving *every* tile `F` private copies overflows the on-chip budget on real kernels — a `stage=4` RMSNorm would need `4 x 67 KB > 188 KB` UB. `tile.read` is **not** included: it returns a scalar element, not a tile, so there is no buffer to rotate.
+- **Loads only.** A load buffer is what must stay private so iteration `i+1`'s prefetch overlaps iteration `i`'s compute; compute intermediates may coalesce. This is the same distinction [`MemoryReuse`](34-memory_reuse.md) already draws with `pipeline_load_tiles`. Giving *every* tile `F` private copies overflows the on-chip budget on real kernels — a `stage=4` RMSNorm would need `4 x 67 KB > 188 KB` UB. `tile.read` is **not** included: it returns a scalar element, not a tile, so there is no buffer to rotate.
 - **Top-level.** Only direct members of the loop body's `SeqStmts`; a load nested in an inner loop or `if` belongs to that region.
 - **No loop-invariance filter.** Every unbound top-level load qualifies, including one whose arguments never mention the induction variable. Invariance cannot be read off the induction variable: a load addressed through a loop-carried `IterArg` reads different data each iteration without naming `iv`, and skipping it would strand it with neither a slot nor a replicated copy once a sibling candidate demotes the loop. Slotting a genuinely invariant load costs nothing over the fallback either — `LowerPipelineLoops` replicates its buffer `F` times all the same.
 - A tile the author already bound to a declared allocation stays the author's.
@@ -142,8 +142,8 @@ The loop strides by its original step with a single body, and the region carries
 
 ## Related
 
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) — the replication path, which still handles every loop this pass declines
-- [`SkewCrossCorePipeline`](26-skew_cross_core_pipeline.md) — same structure for cross-core pipeline loops
-- [`InitMemRef`](31-init_memref.md) — resolves the synthesized declaration
+- [`LowerPipelineLoops`](29-lower_pipeline_loops.md) — the replication path, which still handles every loop this pass declines
+- [`SkewCrossCorePipeline`](27-skew_cross_core_pipeline.md) — same structure for cross-core pipeline loops
+- [`InitMemRef`](32-init_memref.md) — resolves the synthesized declaration
 - [PTO codegen](../codegen/00-pto_codegen.md) — lowers the slots to a ptoas region
 - [Python syntax: Slots](../language/00-python_syntax.md#slots) — the hand-written form of the same declaration

@@ -13,16 +13,16 @@ carried 的 `iter_arg`/`initValue` MemRef 沿 yield/producer 链向下传播来�
 - **机会别名（可选）：** 生命周期不冲突的两块独立 buffer *可以*共享存储以省内存,
   属于优化。
 
-本 pass 只处理**强制别名**。它从 [`MemoryReuse`](33-memory_reuse.md) 中拆出
+本 pass 只处理**强制别名**。它从 [`MemoryReuse`](34-memory_reuse.md) 中拆出
 （原来是那个 pass 的 "Step 0"），以便机会性的生命周期复用可以被独立跳过：
 
 - `MemoryPlanner.DSA_RP` 保留独立分配身份，交给进程内 DSA-RP 求解器放置。
 - `MemoryPlanner.PTOAS` 把生命周期复用和地址分配交给 ptoas。
 
-**使用时机**：在 [`InitMemRef`](31-init_memref.md)（创建 MemRef）之后、所选内存
+**使用时机**：在 [`InitMemRef`](32-init_memref.md)（创建 MemRef）之后、所选内存
 规划器之前运行。它总是运行。`PYPTO` 随后运行
-[`MemoryReuse`](33-memory_reuse.md)；`DSA_RP` 在
-[`AllocateMemoryAddr`](34-allocate_memory_addr.md) 中消费这些分配身份。
+[`MemoryReuse`](34-memory_reuse.md)；`DSA_RP` 在
+[`AllocateMemoryAddr`](35-allocate_memory_addr.md) 中消费这些分配身份。
 
 ## API
 

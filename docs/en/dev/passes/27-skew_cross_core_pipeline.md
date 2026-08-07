@@ -1,6 +1,6 @@
 # SkewCrossCorePipeline Pass
 
-Software-pipelines mixed cube/vector (cross-core) `pl.pipeline` loops so the two cores overlap, replacing the legacy unroll+IO-cluster handling of cross-core loops. Runs immediately before [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md), and so ahead of [`LowerPipelineLoops`](28-lower_pipeline_loops.md).
+Software-pipelines mixed cube/vector (cross-core) `pl.pipeline` loops so the two cores overlap, replacing the legacy unroll+IO-cluster handling of cross-core loops. Runs immediately before [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md), and so ahead of [`LowerPipelineLoops`](29-lower_pipeline_loops.md).
 
 ## Overview
 
@@ -17,7 +17,7 @@ The output is `ForKind::Sequential` with no `pipeline_stages` marker, so `LowerP
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After [`NormalizeReturnOrder`](25-normalize_return_order.md), immediately before [`LowerPipelineToSlots`](27-lower_pipeline_to_slots.md), which in turn runs immediately before [`LowerPipelineLoops`](28-lower_pipeline_loops.md). A cross-core loop is therefore skewed (→ Sequential, no `pipeline_stages` marker) before either pass sees it, so neither slots nor replicates it.
+**Pipeline position**: After [`NormalizeReturnOrder`](26-normalize_return_order.md), immediately before [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md), which in turn runs immediately before [`LowerPipelineLoops`](29-lower_pipeline_loops.md). A cross-core loop is therefore skewed (→ Sequential, no `pipeline_stages` marker) before either pass sees it, so neither slots nor replicates it.
 
 ## API
 
@@ -104,6 +104,6 @@ The **effective** depth needs `trip % D == 0` and `trip >= 2·D`; when the reque
 
 ## Related
 
-- [`LowerPipelineLoops`](28-lower_pipeline_loops.md) — replicates the remaining (same-core) pipeline loops for ping-pong.
-- [`CanonicalizeIOOrder`](29-canonicalize_io_order.md) — clusters same-core IO within pipeline bodies (cross-core loops no longer reach it; they are Sequential by here).
-- [`SplitVectorKernel`](23-split_vector_kernel.md) — `UP_DOWN` vector split, orthogonal to the skew and composable with it.
+- [`LowerPipelineLoops`](29-lower_pipeline_loops.md) — replicates the remaining (same-core) pipeline loops for ping-pong.
+- [`CanonicalizeIOOrder`](30-canonicalize_io_order.md) — clusters same-core IO within pipeline bodies (cross-core loops no longer reach it; they are Sequential by here).
+- [`SplitVectorKernel`](24-split_vector_kernel.md) — `UP_DOWN` vector split, orthogonal to the skew and composable with it.

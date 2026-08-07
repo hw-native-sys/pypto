@@ -4,7 +4,7 @@ Inserts compiler-generated `tile.tget_scale_addr` bindings before MX matmul cons
 
 ## Overview
 
-After [`InferTileMemorySpace`](17-infer_tile_memory_space.md) has resolved `Left` / `LeftScale` / `Right` / `RightScale` and inserted any required `tile.move`s, this pass materializes the A5 scale-address bind:
+After [`InferTileMemorySpace`](18-infer_tile_memory_space.md) has resolved `Left` / `LeftScale` / `Right` / `RightScale` and inserted any required `tile.move`s, this pass materializes the A5 scale-address bind:
 
 ```text
 bound_scale = tile.tget_scale_addr(scale, data)
@@ -13,7 +13,7 @@ matmul_mx(..., bound_scale, ...)
 
 `tile.tget_scale_addr` is intentionally absent from the public `pypto.language` API. Users write only the high-level `matmul_mx` family; the compiler derives the Left/Right side from the matmul operand slots. The low-level `ir.op.tile.tget_scale_addr` remains available for compiler construction and IR parsing. It accepts only the resolved pairs `(LeftScale, Left)` and `(RightScale, Right)`.
 
-**Pipeline position**: Immediately after [`InferTileMemorySpace`](17-infer_tile_memory_space.md), before [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md).
+**Pipeline position**: Immediately after [`InferTileMemorySpace`](18-infer_tile_memory_space.md), before [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md).
 
 **Requirements**: `SSAForm`, `IncoreTileOps`, `SplitIncoreOrch`, `NormalizedStmtStructure`, `TileMemoryInferred`.
 
@@ -52,5 +52,5 @@ This rule also applies when the scale operand is already the bound result of an 
 ## Related
 
 - Op registration / type checks: `src/ir/op/tile_ops/matmul_mx.cpp`
-- Memory-space solving for MX operands: [`InferTileMemorySpace`](17-infer_tile_memory_space.md)
+- Memory-space solving for MX operands: [`InferTileMemorySpace`](18-infer_tile_memory_space.md)
 - PTOAS may reorder `tget_scale_addr` before Mat→Scale `tmov` (`PTOA5NormalizeTMovPass`)

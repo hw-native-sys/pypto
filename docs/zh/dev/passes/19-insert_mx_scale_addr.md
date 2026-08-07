@@ -4,7 +4,7 @@
 
 ## 概述
 
-[`InferTileMemorySpace`](17-infer_tile_memory_space.md) 解析完 `Left` / `LeftScale` / `Right` / `RightScale` 并插入必要的 `tile.move` 之后，本 pass 物化 A5 的 scale 地址绑定：
+[`InferTileMemorySpace`](18-infer_tile_memory_space.md) 解析完 `Left` / `LeftScale` / `Right` / `RightScale` 并插入必要的 `tile.move` 之后，本 pass 物化 A5 的 scale 地址绑定：
 
 ```text
 bound_scale = tile.tget_scale_addr(scale, data)
@@ -13,7 +13,7 @@ matmul_mx(..., bound_scale, ...)
 
 `tile.tget_scale_addr` 有意不暴露在公共 `pypto.language` API 中。用户只编写高层 `matmul_mx` 算子族；编译器根据 matmul 操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 仍供编译器构造与 IR 解析使用，且只接受已解析的 `(LeftScale, Left)` 与 `(RightScale, Right)` 配对。
 
-**流水线位置**：紧接在 [`InferTileMemorySpace`](17-infer_tile_memory_space.md) 之后，[`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) 之前。
+**流水线位置**：紧接在 [`InferTileMemorySpace`](18-infer_tile_memory_space.md) 之后，[`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) 之前。
 
 **前置属性**：`SSAForm`、`IncoreTileOps`、`SplitIncoreOrch`、`NormalizedStmtStructure`、`TileMemoryInferred`。
 
@@ -52,5 +52,5 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 ## 相关
 
 - 算子注册与类型检查：`src/ir/op/tile_ops/matmul_mx.cpp`
-- MX 操作数 memory space 求解：[`InferTileMemorySpace`](17-infer_tile_memory_space.md)
+- MX 操作数 memory space 求解：[`InferTileMemorySpace`](18-infer_tile_memory_space.md)
 - PTOAS 可能把 `tget_scale_addr` 重排到 Mat→Scale `tmov` 之前（`PTOA5NormalizeTMovPass`）
