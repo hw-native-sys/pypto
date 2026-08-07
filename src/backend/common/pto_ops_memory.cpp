@@ -796,7 +796,8 @@ static std::string MakeSyncFlagCodegenPTO(bool is_set, const char* op_name, cons
     INTERNAL_CHECK_SPAN(event_id >= 0 && event_id <= 7, op->span_)
         << op_name << " static event_id must be in [0, 7] (PTO_EventEnum has EVENT_ID0..EVENT_ID7), got "
         << event_id;
-    oss << (is_set ? "pto.set_flag[" : "pto.wait_flag[") << pipe_operands << ", <EVENT_ID" << event_id << ">]";
+    oss << (is_set ? "pto.set_flag[" : "pto.wait_flag[") << pipe_operands << ", <EVENT_ID" << event_id
+        << ">]";
   } else {
     oss << (is_set ? "pto.set_flag_dyn[" : "pto.wait_flag_dyn[") << pipe_operands << ", "
         << codegen.GetExprAsCode(op->args_[0]) << "]";
@@ -1104,7 +1105,6 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
   reg("system.sync_dst", [](const CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeSyncFlagCodegenPTO(/*is_set=*/false, "system.sync_dst", op, codegen);
   });
-
 }
 }  // namespace backend
 }  // namespace pypto

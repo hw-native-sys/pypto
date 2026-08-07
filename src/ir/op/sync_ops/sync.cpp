@@ -48,8 +48,8 @@ constexpr int kMaxSyncFlagEventId = 7;
 // pto.wait_flag_dyn (see MakeSyncFlagCodegenPTO in
 // src/backend/common/pto_ops_memory.cpp).
 TypePtr DeduceSyncFlagType(const std::vector<ExprPtr>& args,
-                          const std::vector<std::pair<std::string, std::any>>& kwargs,
-                          const std::string& op_name) {
+                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                           const std::string& op_name) {
   CHECK(args.size() <= 1) << op_name << " accepts at most one dynamic event-id operand, got " << args.size();
 
   bool has_static_event_id = false;
@@ -99,11 +99,13 @@ TypePtr DeduceSyncFlagType(const std::vector<ExprPtr>& args,
 REGISTER_OP("system.sync_src")
     .set_description("Send a synchronization signal (Set Flag)")
     .set_op_category("SyncOp")
-    .add_argument("event_id_dyn", "Optional dynamic event id (ScalarType(INDEX)); omit when event_id is static")
+    .add_argument("event_id_dyn",
+                  "Optional dynamic event id (ScalarType(INDEX)); omit when event_id is static")
     .set_attr<int>("set_pipe")
     .set_attr<int>("wait_pipe")
     .set_attr<int>("event_id")
-    .f_deduce_type([](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs) {
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSyncFlagType(args, kwargs, "system.sync_src");
     });
 
@@ -113,11 +115,13 @@ REGISTER_OP("system.sync_src")
 REGISTER_OP("system.sync_dst")
     .set_description("Wait for a synchronization signal (Wait Flag)")
     .set_op_category("SyncOp")
-    .add_argument("event_id_dyn", "Optional dynamic event id (ScalarType(INDEX)); omit when event_id is static")
+    .add_argument("event_id_dyn",
+                  "Optional dynamic event id (ScalarType(INDEX)); omit when event_id is static")
     .set_attr<int>("set_pipe")
     .set_attr<int>("wait_pipe")
     .set_attr<int>("event_id")
-    .f_deduce_type([](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs) {
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceSyncFlagType(args, kwargs, "system.sync_dst");
     });
 
