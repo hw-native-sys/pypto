@@ -113,6 +113,30 @@ schedule、grid、work unit、tile/strip/chunk extent、pipeline depth、UB 峰�
 经 silicon 验证的 scheduler model 原样移植而来，没有重新拟合；AutoTile 改变的是规划
 与发射的归属，而不是这些测量数据。
 
+## 调度报告
+
+每个成功编译 AutoTile function 的 `ir.compile()` 还会写出两个小型、确定性的 artifact：
+
+```text
+<output_dir>/report/auto_tile/<function>.json
+<output_dir>/report/auto_tile/<function>.txt
+```
+
+JSON 文件是带版本号的 compiler-artifact schema。它记录选中的 grid、平衡 partition、
+代表性 region、strip/chunk loop、串行 tail、phase 运算顺序、边界输入 lifetime、逻辑与
+物理 tile extent、各 dtype 的 element size、UB 峰值、流量和 modeled cycle。该格式面向
+工具使用，目前尚不是稳定的公共 API。
+
+文本文件把同一个结构化 descriptor 渲染成以 tile 为中心的伪代码。它描述一个代表性的
+SPMD work unit，而不是绘制所有 core。例如 online-softmax 报告会分别显示串行首 chunk、
+两阶段 statistics loop、存在时的串行 ragged tail，以及两阶段 apply/store loop；ping/pong
+slot 和持久 running statistic 都会显式显示。`lifetime ends: x(t0)` 这样的行表示逻辑上的
+最后使用点，并不意味着 IR 中存在显式 free 指令。
+
+直接调用 `passes.auto_tile()` 时没有编译 artifact 目录，因此仍只输出简洁的 `INFO`
+日志。调度报告可与 [IR Lowering Trace](../07-ir-lower-trace.md) 配合检查 transformation，
+并与 [Memory Map](../07-memory-map.md) 配合检查最终 UB 地址和物理复用。
+
 ## 调度族
 
 ### Materialized

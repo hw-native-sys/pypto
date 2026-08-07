@@ -145,8 +145,8 @@ class CallbackInstrument : public PassInstrument {
 /**
  * @brief Instrument that names the directory pipeline artifacts are written to.
  *
- * It observes no pass itself; its only job is to carry `output_dir` so that
- * `DiagnosticInstrument` knows where to append `perf_hints.log`. Register it in
+ * It observes no pass itself; its only job is to carry `output_dir` so compiler
+ * passes and `DiagnosticInstrument` can persist reports there. Register it in
  * the context whenever a compilation should produce on-disk diagnostics.
  *
  * Usage (Python):
@@ -167,9 +167,9 @@ class ReportInstrument : public PassInstrument {
   /**
    * @brief Path of the directory that holds report files.
    *
-   * Exposed so that `DiagnosticInstrument` can append its perf-hint log
-   * (`perf_hints.log`) into the same folder when this instrument is present
-   * in the active context.
+   * Exposed so compiler passes and `DiagnosticInstrument` can write their
+   * artifacts into the same folder when this instrument is present in the
+   * active context.
    */
   [[nodiscard]] const std::string& GetOutputDir() const { return output_dir_; }
 

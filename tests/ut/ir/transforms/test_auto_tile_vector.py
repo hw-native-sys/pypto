@@ -17,7 +17,10 @@ the planned algorithm (loads, phases, loops, and live-out stores).
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
+from typing import Any
 
 import pypto.language as pl
 import pytest
@@ -98,6 +101,17 @@ def _logged_plan(program: ir.Program, capfd: pytest.CaptureFixture[str]) -> tupl
     lines = [line for line in capfd.readouterr().err.splitlines() if "AutoTile[" in line]
     assert len(lines) == 1
     return after, lines[0]
+
+
+def _run_with_schedule_reports(program: ir.Program, report_dir: Path) -> ir.Program:
+    """Run AutoTile with the same report instrument installed by ir.compile."""
+    with passes.PassContext([passes.ReportInstrument(str(report_dir))]):
+        return _run_auto_tile(program)
+
+
+def _read_schedule_report(report_dir: Path, function: str) -> tuple[dict[str, Any], str]:
+    base = report_dir / "auto_tile" / function
+    return json.loads(base.with_suffix(".json").read_text()), base.with_suffix(".txt").read_text()
 
 
 @pl.program
@@ -1149,6 +1163,120 @@ def test_native_cast_chain_uses_one_physical_granule_and_keeps_logical_shape(
     for _dtype, physical, valid in casts.boxes:
         assert physical[1] % required_granule == 0
         assert valid[1] <= 33 < physical[1]
+
+
+@pytest.mark.parametrize(
+    ("program", "function", "schedule", "pseudocode_marker"),
+    [
+        (MaterializedMultiOutputProgram, "materialized", "materialized", "body: materialize"),
+        (WidePointwiseProgram, "wide", "pointwise_stream", "body strips:"),
+        (RowReductionProgram, "reduce", "reduction_folded", "stats init:"),
+        (ReductionApplyProgram, "rms", "reduction_spanning", "apply chunks:"),
+        (SoftmaxProgram, "softmax", "softmax", "running_max, running_sum"),
+    ],
+)
+def test_schedule_report_explains_every_vector_schedule_family(
+    program, function, schedule, pseudocode_marker, tmp_path
+):
+    report_dir = tmp_path / "report"
+    _run_with_schedule_reports(program, report_dir)
+    descriptor, pseudocode = _read_schedule_report(report_dir, function)
+
+    assert descriptor["schema_version"] == 1
+    assert descriptor["function"] == function
+    assert descriptor["backend"] == "Ascend910B"
+    assert descriptor["kernel_kind"] == "vector"
+    assert descriptor["schedule"] == schedule
+    grid = descriptor["grid"]
+    assert grid["work_units"] == grid["rows"] * grid["cols"]
+    assert len(descriptor["phases"]) == 4
+    assert {phase["name"] for phase in descriptor["phases"]} == {
+        "body",
+        "stats",
+        "apply",
+        "finalize",
+    }
+    assert descriptor["cost"]["modeled_cycles"] > 0
+    assert f"AutoTile schedule for {function}" in pseudocode
+    assert f"schedule: {schedule}" in pseudocode
+    assert pseudocode_marker in pseudocode
+    assert "physical tensor granules (elements):" in pseudocode
+
+
+def test_schedule_report_records_reuse_and_cast_padding(tmp_path):
+    reuse_dir = tmp_path / "reuse"
+    _run_with_schedule_reports(RepeatedInputProgram, reuse_dir)
+    reuse, reuse_pseudocode = _read_schedule_report(reuse_dir, "square")
+    body = next(phase for phase in reuse["phases"] if phase["name"] == "body")
+    assert len(body["inputs"]) == 1
+    assert body["inputs"][0]["use_count"] == 2
+    assert reuse_pseudocode.count("= GM.load(") == 1
+    input_id = body["inputs"][0]["tensor"]
+    input_name = next(tensor["name"] for tensor in reuse["tensors"] if tensor["id"] == input_id)
+    assert input_name == "x"
+    assert "__ssa" not in reuse_pseudocode
+    assert f"lifetime ends: {input_name}(t{input_id})" in reuse_pseudocode
+
+    cast_dir = tmp_path / "cast"
+    _run_with_schedule_reports(RaggedInt8CastProgram, cast_dir)
+    cast, cast_pseudocode = _read_schedule_report(cast_dir, "cast_output")
+    tensors = cast["tensors"]
+    assert {tensor["dtype"] for tensor in tensors} == {"fp32", "fp16", "int8"}
+    assert {tensor["element_bytes"] for tensor in tensors} == {1, 2, 4}
+    assert len({tensor["physical_shape_class"] for tensor in tensors}) == 1
+    assert {tensor["physical_element_granule"] for tensor in tensors} == {32}
+    body = next(phase for phase in cast["phases"] if phase["name"] == "body")
+    assert body["inputs"][0]["logical_tile"] == [1, 33]
+    assert body["inputs"][0]["physical_tile"] == [1, 64]
+    assert "logical=[1x33], dtype=int8, element_bytes=1, granule=32" in cast_pseudocode
+
+
+def test_schedule_reports_are_deterministic_and_separate_per_function(tmp_path):
+    @pl.program
+    class TwoKernels:
+        @pl.function(attrs={"auto_tile": True})
+        def first(self, x: pl.Tensor[[8, 128], pl.FP32]) -> pl.Tensor[[8, 128], pl.FP32]:
+            return pl.exp(x)
+
+        @pl.function(attrs={"auto_tile": True})
+        def second(self, x: pl.Tensor[[8, 128], pl.FP32]) -> pl.Tensor[[8, 128], pl.FP32]:
+            return pl.abs(x)
+
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    _run_with_schedule_reports(TwoKernels, first_dir)
+    _run_with_schedule_reports(TwoKernels, second_dir)
+    for function in ("first", "second"):
+        for suffix in (".json", ".txt"):
+            first = first_dir / "auto_tile" / f"{function}{suffix}"
+            second = second_dir / "auto_tile" / f"{function}{suffix}"
+            assert first.is_file()
+            assert first.read_bytes() == second.read_bytes()
+
+
+def test_schedule_report_is_optional_for_bare_pass_and_reports_io_failures(tmp_path, capfd):
+    _, bare_log = _logged_plan(PointwiseProgram, capfd)
+    assert " report=" not in bare_log
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    with pytest.raises(ValueError, match="could not create schedule report directory"):
+        _run_with_schedule_reports(PointwiseProgram, blocked)
+
+
+def test_compile_writes_auto_tile_schedule_report_without_pass_dumps(tmp_path):
+    output_dir = tmp_path / "compiled"
+    ir.compile(
+        PointwiseProgram,
+        output_dir=str(output_dir),
+        dump_passes=False,
+        skip_ptoas=True,
+    )
+    descriptor = json.loads((output_dir / "report" / "auto_tile" / "pointwise.json").read_text())
+    pseudocode = (output_dir / "report" / "auto_tile" / "pointwise.txt").read_text()
+    assert descriptor["function"] == "pointwise"
+    assert descriptor["schedule"] == "pointwise_stream"
+    assert "spmd " in pseudocode
 
 
 @pytest.mark.parametrize(

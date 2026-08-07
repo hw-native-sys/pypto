@@ -13,6 +13,7 @@
 #include <map>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
@@ -28,6 +29,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "src/ir/transforms/auto_tile/vector_emit.h"
 #include "src/ir/transforms/auto_tile/vector_plan.h"
+#include "src/ir/transforms/auto_tile/vector_report.h"
 
 namespace pypto {
 namespace ir {
@@ -113,6 +115,7 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
     CHECK_SPAN(plan.feasible, function->span_)
         << "AutoTile cannot realize the entire marked function as one capacity-safe Ascend910B vector kernel";
     FunctionPtr emitted = auto_tile::EmitVectorSchedule(graph, plan, calls.called());
+    const std::optional<std::string> report_path = auto_tile::WriteVectorScheduleReport(graph, plan);
     LOG_INFO << "AutoTile[" << function->name_
              << "]: vector schedule=" << auto_tile::ScheduleKindName(plan.kind)
              << " grid=" << plan.m_partition.parts << "x" << plan.n_partition.parts
@@ -140,7 +143,8 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
              << static_cast<int64_t>(plan.modeled_phase_output_bytes[2]) << ","
              << static_cast<int64_t>(plan.modeled_phase_output_bytes[3]) << "]"
              << " reduction_model=" << (plan.used_reduction_fallback ? "legacy_fallback" : "grounded")
-             << " modeled_cycles=" << plan.modeled_cycles;
+             << " modeled_cycles=" << plan.modeled_cycles
+             << (report_path.has_value() ? " report=" + *report_path : "");
     functions.emplace(global, emitted);
     changed = true;
   }

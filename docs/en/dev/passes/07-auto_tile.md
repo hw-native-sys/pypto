@@ -133,6 +133,37 @@ reduction estimate is grounded or a fallback. The Ascend 910B coefficients are
 ported without refitting from the silicon-grounded scheduler model; AutoTile
 changes ownership of planning and emission, not those measurements.
 
+## Schedule reports
+
+Every successful `ir.compile()` of an AutoTile function also writes two small,
+deterministic artifacts:
+
+```text
+<output_dir>/report/auto_tile/<function>.json
+<output_dir>/report/auto_tile/<function>.txt
+```
+
+The JSON file is a versioned compiler-artifact schema. It records the selected
+grid, balanced partitions, representative region, strip/chunk loops, serial
+tails, phase operation order, boundary-input lifetimes, logical and physical
+tile extents, dtype-specific element sizes, UB peaks, traffic, and modeled
+cycles. It is intended for tooling and is not yet a stable public API.
+
+The text file renders the same structured descriptor as tile-centric
+pseudocode. It describes one representative SPMD work unit rather than drawing
+all cores. For example, an online-softmax report separates the serial first
+chunk, the two-stage statistics loop, a serial ragged tail when present, and the
+two-stage apply/store loop. Ping/pong slots and persistent running statistics
+are explicit. A line such as `lifetime ends: x(t0)` describes the logical
+last-use point; it does not imply that the IR contains an explicit free
+instruction.
+
+Bare calls to `passes.auto_tile()` have no compilation artifact directory and
+therefore keep the concise `INFO` log only. Use the schedule report together
+with [IR Lowering Trace](../07-ir-lower-trace.md) to inspect the transformation
+and [Memory Map](../07-memory-map.md) to inspect final UB addresses and physical
+reuse.
+
 ## Schedule families
 
 ### Materialized
