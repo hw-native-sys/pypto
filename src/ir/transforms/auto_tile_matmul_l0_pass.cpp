@@ -121,6 +121,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -150,12 +151,14 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -227,6 +230,52 @@ uint32_t DTypeBytes(const DataType& dt) {
   size_t bits = dt.GetBit();
   if (bits % 8 != 0) return 0;
   return static_cast<uint32_t>(bits / 8);
+}
+
+/// Reject a manually materialized cube operand that cannot physically fit in
+/// its L0 space.  This check is deliberately narrower than the allocator's
+/// whole-space capacity check: it fires only when one static Left/Right tile is
+/// impossible by itself, so reuse, pipeline-depth shedding, and planner choice
+/// cannot change the outcome.
+void CheckExplicitL0OperandCapacity(const VarPtr& operand, const TileTypePtr& tile,
+                                    MemorySpace expected_space, const char* operand_role,
+                                    const char* hardware_name, const char* op_name,
+                                    const backend::BackendHandler* handler) {
+  if (!operand || !tile || !handler || tile->GetMemorySpace() != expected_space) return;
+
+  const auto required = utils::StaticPhysicalAllocationBytes(tile, expected_space, handler);
+  if (!required) return;  // This targeted diagnostic requires an exact static footprint.
+
+  uint64_t capacity = 0;
+  switch (expected_space) {
+    case MemorySpace::Left:
+      capacity = handler->GetL0aCapacityBytes();
+      break;
+    case MemorySpace::Right:
+      capacity = handler->GetL0bCapacityBytes();
+      break;
+    default:
+      INTERNAL_UNREACHABLE_SPAN(operand->span_)
+          << "Internal error: explicit matmul operand capacity check only accepts Left or Right";
+  }
+  if (capacity == 0 || *required <= capacity) return;
+
+  // This is a user-authored scheduling error, not an internal pass invariant.
+  // Construct the ValueError directly so the diagnostic keeps the DSL source
+  // location without appending FatalLogger's implementation-facing
+  // "Check failed" line.
+  std::ostringstream message;
+  message << op_name << " " << operand_role << " operand '"
+          << auto_name::GetCompatibleBaseName(operand->name_hint_) << "' is already resident in "
+          << MemorySpaceToString(expected_space) << " (" << hardware_name << ") with physical shape "
+          << FormatShape(tile->shape_) << " and dtype " << tile->dtype_.ToString() << ", requiring "
+          << *required << " bytes, but the active backend provides " << capacity
+          << " bytes. AutoTileMatmulL0 does not retile operands already placed in Left or Right. Keep this "
+             "operand in Mat and pass it directly to "
+          << op_name << " so AutoTileMatmulL0 can choose legal L0 tiles, or manually extract a smaller "
+          << MemorySpaceToString(expected_space) << " tile.";
+  if (operand->span_.is_valid()) message << " [" << operand->span_.to_string() << "]";
+  throw pypto::ValueError(message.str());
 }
 
 /// Build a ``tile.extract(source, idx_row, idx_col, [shape],
@@ -652,6 +701,23 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     if (!acc_tile || acc_tile->shape_.size() != 2) return std::nullopt;
   }
 
+  // The ordinary rewrite below deliberately owns only Mat/Vec -> L0 tiling.
+  // Already-Left/Right operands express a manual L0 schedule and are otherwise
+  // left untouched.  Diagnose the one unambiguously invalid manual case here:
+  // an individual operand whose physical tile is larger than the entire L0
+  // space.  Failing before MemoryReuse avoids a misleading packing fallback
+  // warning for a failure no packing strategy can repair.
+  const auto* ctx = PassContext::Current();
+  const auto* diagnostic_handler =
+      pypto::backend::BackendConfig::IsConfigured()
+          ? (ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler())
+          : nullptr;
+  const char* op_name = is_matmul ? "tile.matmul" : "tile.matmul_acc";
+  CheckExplicitL0OperandCapacity(lhs, lhs_tile, MemorySpace::Left, "left", "L0A", op_name,
+                                 diagnostic_handler);
+  CheckExplicitL0OperandCapacity(rhs, rhs_tile, MemorySpace::Right, "right", "L0B", op_name,
+                                 diagnostic_handler);
+
   // Operand source residency, with static 2D shapes.  The right (B) operand
   // must be Mat — it is loaded from DDR into L1 and fed into L0B.  The left (A)
   // operand may be Mat (the QK pattern) or Vec (the fused-attention PV /
@@ -688,13 +754,9 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     return std::nullopt;
   }
 
-  // Prefer the active PassContext's BackendHandler (the production path runs
-  // under PassPipeline::Run, which establishes a context).  Fall back to the
-  // global default backend so direct callers — e.g. tests that call
-  // PassManager strategies' run_passes() without wrapping in a PassContext —
-  // still work; this mirrors the env-var fallback documented in
-  // .claude/rules/pass-context-config.md.
-  const auto* ctx = PassContext::Current();
+  // A Mat/Vec-resident matmul reaches the chooser and therefore requires an
+  // active backend. Preserve the historical fail-loud behavior here; the
+  // explicit-L0 diagnostic above is optional when capacity is unavailable.
   const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
   INTERNAL_CHECK(handler) << "Internal error: BackendHandler is null";
 
