@@ -159,8 +159,6 @@ def run_one(script: Path, export_root: Path, platform: str) -> int:
     sys.argv = [str(script), "-p", platform]
     runpy.run_path(str(script), run_name="__main__")
     count = sum(1 for _ in export_root.rglob("*.dsa.json"))
-    if count == 0:
-        raise RuntimeError(f"model completed without exporting a DSA problem: {script}")
     print(f"EXPORTED_DSA_PROBLEMS={count}")
     return 0
 
@@ -256,6 +254,12 @@ def _run_export_subprocess(
     return ("EXPORTED" if completed.returncode == 0 else "FAILED"), completed.returncode
 
 
+def _classify_export_status(status: str, problem_count: int) -> str:
+    if status == "EXPORTED" and problem_count == 0:
+        return "NO_DSA"
+    return status
+
+
 def export_corpus(args: argparse.Namespace) -> int:
     args.output_root = args.output_root.resolve()
     args.pypto_lib_root = args.pypto_lib_root.resolve()
@@ -329,6 +333,7 @@ def export_corpus(args: argparse.Namespace) -> int:
             timeout=args.timeout,
         )
         count = sum(1 for _ in export_root.rglob("*.dsa.json")) if export_root.exists() else 0
+        status = _classify_export_status(status, count)
         status_rows.append(
             {
                 "script": relative,

@@ -123,6 +123,43 @@ def test_selects_model_positive_large_gap_and_forced_candidates(tmp_path: Path) 
     assert by_tag[tags[0]]["pool_names"] == "Vec"
     assert len(by_tag[tags[0]]["problem_sha256"]) == _SHA256_HEX_LENGTH
     assert len(by_tag[tags[0]]["native_geometry_ff_solution_sha256"]) == _SHA256_HEX_LENGTH
+    assert len(by_tag[tags[0]]["structural_class_sha256"]) == _SHA256_HEX_LENGTH
+    assert sum(row["structural_class_representative"] for row in candidates) == 1
+
+
+def test_prefers_smallest_source_program_for_device_preflight(tmp_path: Path) -> None:
+    tag = "positive-aaaaaaaaaaaaaaaa"
+    screen_root = tmp_path / "screen"
+    problems = tmp_path / "problems"
+    problems.mkdir()
+    _write_problem(problems / f"{tag}.dsa.json")
+    _write_native_solutions(screen_root, tag)
+    invocations = [
+        {"problem_fingerprint": tag.rsplit("-", 1)[-1], "script": "models/large.py"},
+        {"problem_fingerprint": tag.rsplit("-", 1)[-1], "script": "models/small.py"},
+        {"problem_fingerprint": "another", "script": "models/large.py"},
+    ]
+    candidates = selector.build_candidate_rows(
+        selector.CandidateInputs(
+            separation_rows=[_separation(tag, better=1)],
+            screen_rows=_screen_rows(tag, 10, 9),
+            invocations=invocations,
+            problems_dir=problems,
+            screen_root=screen_root,
+            min_geometry_advantage=20,
+            forced={},
+        )
+    )
+    assert candidates[0]["preferred_source_script"] == "models/small.py"
+    assert candidates[0]["preferred_source_problem_count"] == 1
+    assert selector._preferred_parent_rows(candidates) == [
+        {
+            "source_script": "models/small.py",
+            "candidate_count": 1,
+            "candidate_tags": tag,
+            "measurement_state": "NEEDS_PARENT_AND_DISPATCH_PREFLIGHT",
+        }
+    ]
 
 
 def test_rejects_native_placements_that_depend_on_screened_pool(tmp_path: Path) -> None:

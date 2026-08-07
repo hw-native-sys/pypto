@@ -87,6 +87,12 @@ def test_export_status_launch_mode_is_reusable(tmp_path: Path) -> None:
     assert exporter.read_export_plan(manifest, "a2a3sim") == [("models/a2a3.py", "a2a3")]
 
 
+def test_successful_entry_point_without_dsa_is_not_a_compile_failure() -> None:
+    assert exporter._classify_export_status("EXPORTED", 0) == "NO_DSA"
+    assert exporter._classify_export_status("EXPORTED", 2) == "EXPORTED"
+    assert exporter._classify_export_status("FAILED", 0) == "FAILED"
+
+
 def test_golden_patch_injects_compile_only_dsa_configuration(tmp_path: Path) -> None:
     calls: list[dict] = []
 
