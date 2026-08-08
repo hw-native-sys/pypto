@@ -8,7 +8,7 @@ day-to-day debugging.
 
 | Subsystem | Source | Sink | Threshold knob |
 | --------- | ------ | ---- | -------------- |
-| PyPTO C++ logger | Compiler core (`src/`, passes, codegen, diagnostics) | stderr | `pypto.set_log_level()` / `PYPTO_LOG_LEVEL` |
+| PyPTO C++ logger | Compiler core (`src/`, passes, codegen, diagnostics) | stderr | `pypto.set_log_level()` / `pypto.get_log_level()` / `PYPTO_LOG_LEVEL` |
 | PyPTO runtime logger | On-device runtime (`runtime/`, simpler Python + C++) | stderr via Python `logging` | `pypto.runtime.configure_log()` / `PYPTO_RUNTIME_LOG` |
 
 They are deliberately separate: the compile-time logger and the run-time
@@ -43,10 +43,29 @@ each level.
 **Programmatic** (preferred in tests and library code):
 
 ```python
-from pypto import LogLevel, set_log_level
+from pypto import LogLevel, get_log_level, set_log_level
 
 set_log_level(LogLevel.WARN)   # mute INFO/DEBUG
 ```
+
+The threshold is **process-global**, so a library or test that lowers it
+must put it back. `get_log_level()` reads the global back for exactly that
+save-restore pair:
+
+```python
+saved = get_log_level()
+set_log_level(LogLevel.ERROR)
+try:
+    compile_something_noisy()
+finally:
+    set_log_level(saved)
+```
+
+Leaving it lowered does not just mute chatter — it silences `Warning` and
+`PerfHint` diagnostics for everything that runs afterwards in the same
+process, which reads downstream as "the compiler had nothing to say".
+Unit tests get this for free: `tests/ut/conftest.py::_reset_log_level`
+pins the level around every test.
 
 **Environment variable** (`PYPTO_LOG_LEVEL`) — case-insensitive, accepts
 the names above. Read once at C++ logger init:
@@ -146,13 +165,20 @@ env bootstrap chose.
 
 The integration-test harness exposes both subsystems as CLI options
 ([tests/st/conftest.py](../../../tests/st/conftest.py)).
-They are applied in `pytest_configure` so collection-time logs already
-respect them.
 
 | Option | Default | Drives |
 | ------ | ------- | ------ |
-| `--pypto-log-level` | `ERROR` | PyPTO C++ logger via `set_log_level(LogLevel[name])` |
+| `--pypto-log-level` | `ERROR` | PyPTO C++ logger, as a **thread-local** override applied per ST item |
 | `--runtime-log-level` | unset (keeps `timing`) | PyPTO runtime logger via `configure_log(level)` — note this **does not** pass `sync_pypto=True` |
+
+`--pypto-log-level` deliberately does *not* call `set_log_level()`. That
+threshold is process-global, and `tests/st/conftest.py` is loaded in mixed
+ST/UT sessions too, so setting it in `pytest_configure` muted the
+diagnostics that later unit tests assert on. It is instead installed via
+`_set_thread_log_level` in a `pytest_runtest_protocol` wrapper around each
+ST item and cleared in a `finally` — forked runtime workers still inherit
+it, and nothing survives the item. Compile pools take the same level
+through their `ThreadPoolExecutor(initializer=...)`.
 
 ```bash
 # Quiet PyPTO compile chatter, verbose runtime logs

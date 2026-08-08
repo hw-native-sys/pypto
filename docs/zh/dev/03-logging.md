@@ -7,7 +7,7 @@ PyPTO 内部存在 **两套相互独立的日志子系统**，调试时务必先
 
 | 子系统 | 来源 | 输出 | 阈值开关 |
 | ------ | ---- | ---- | -------- |
-| PyPTO C++ 日志 | 编译器核心（`src/`、Pass、Codegen、Diagnostics） | stderr | `pypto.set_log_level()` / `PYPTO_LOG_LEVEL` |
+| PyPTO C++ 日志 | 编译器核心（`src/`、Pass、Codegen、Diagnostics） | stderr | `pypto.set_log_level()` / `pypto.get_log_level()` / `PYPTO_LOG_LEVEL` |
 | PyPTO runtime 日志 | 运行时（`runtime/`、simpler 的 Python 与 C++） | 经 Python `logging` 输出到 stderr | `pypto.runtime.configure_log()` / `PYPTO_RUNTIME_LOG` |
 
 两者刻意保持独立：编译期日志的读者是 kernel 作者，运行期日志的读者是
@@ -40,10 +40,27 @@ Diagnostics（`Warning`、`PerfHint`）；各级别在何处触发请参考
 **编程方式**（推荐用于测试与库代码）：
 
 ```python
-from pypto import LogLevel, set_log_level
+from pypto import LogLevel, get_log_level, set_log_level
 
 set_log_level(LogLevel.WARN)   # 屏蔽 INFO / DEBUG
 ```
+
+该阈值是 **进程全局** 的，因此临时调低它的库代码或测试必须负责还原。
+`get_log_level()` 正是为这种 save-restore 配对而提供的读取接口：
+
+```python
+saved = get_log_level()
+set_log_level(LogLevel.ERROR)
+try:
+    compile_something_noisy()
+finally:
+    set_log_level(saved)
+```
+
+不还原的后果不只是"少了些啰嗦输出"：同进程内后续所有代码的 `Warning`
+与 `PerfHint` 诊断都会被一并静音，下游看到的现象是"编译器什么都没说"。
+单元测试无需自行处理：`tests/ut/conftest.py::_reset_log_level` 会在每个
+测试前后固定该级别。
 
 **环境变量** `PYPTO_LOG_LEVEL`（大小写不敏感，取值同上表）。在 C++
 日志器初始化时一次性读取：
@@ -137,14 +154,20 @@ PYPTO_RUNTIME_LOG=debug PYPTO_RUNTIME_LOG_SYNC=1 python -m my_test
 ## 3. pytest 选项（`tests/st/`）
 
 集成测试 harness 把两套子系统都暴露成命令行参数，定义见
-[tests/st/conftest.py](../../../tests/st/conftest.py)，
-并在 `pytest_configure` 中提前应用，因此 collection 阶段的日志也会
-受影响。
+[tests/st/conftest.py](../../../tests/st/conftest.py)。
 
 | 选项 | 默认值 | 作用 |
 | ---- | ------ | ---- |
-| `--pypto-log-level` | `ERROR` | 通过 `set_log_level(LogLevel[name])` 控制 PyPTO C++ 日志 |
+| `--pypto-log-level` | `ERROR` | 以 **线程局部** 覆盖的形式，逐个 ST 用例控制 PyPTO C++ 日志 |
 | `--runtime-log-level` | 未设置（保留 `timing`） | 通过 `configure_log(level)` 控制 PyPTO runtime 日志；**不会** 同时传 `sync_pypto=True` |
+
+`--pypto-log-level` 刻意 *不* 调用 `set_log_level()`：该阈值是进程全局的，
+而 `tests/st/conftest.py` 在 ST/UT 混合会话中同样会被加载，因此在
+`pytest_configure` 里设置它会把后续单元测试所断言的诊断输出一并静音。
+现在改为在 `pytest_runtest_protocol` 包装器中用 `_set_thread_log_level`
+对每个 ST 用例生效，并在 `finally` 中清除——fork 出的 runtime worker 仍
+能继承该级别，而任何状态都不会越过该用例。编译线程池通过
+`ThreadPoolExecutor(initializer=...)` 取得同一级别。
 
 ```bash
 # 抑制编译噪声，放大 runtime 日志
