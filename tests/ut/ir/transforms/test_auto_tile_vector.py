@@ -296,6 +296,58 @@ class ReductionApplyProgram:
 
 
 @pl.program
+class LayerNormProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def layer_norm(
+        self,
+        x: pl.Tensor[[512, 256], pl.FP32],
+        gamma: pl.Tensor[[1, 256], pl.FP32],
+        beta: pl.Tensor[[1, 256], pl.FP32],
+    ) -> pl.Tensor[[512, 256], pl.FP32]:
+        scaled_x: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, 1.0 / 256.0)
+        mean: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(scaled_x)
+        centered: pl.Tensor[[512, 256], pl.FP32] = pl.sub(x, mean)
+        squared: pl.Tensor[[512, 256], pl.FP32] = pl.mul(centered, centered)
+        square_sum: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(squared)
+        variance: pl.Tensor[[512, 1], pl.FP32] = pl.mul(square_sum, 1.0 / 256.0)
+        std: pl.Tensor[[512, 1], pl.FP32] = pl.sqrt(pl.add(variance, 1.0e-5))
+        normalized: pl.Tensor[[512, 256], pl.FP32] = pl.div(centered, std)
+        scaled: pl.Tensor[[512, 256], pl.FP32] = pl.mul(normalized, gamma)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.add(scaled, beta)
+        return out
+
+
+@pl.program
+class OversizedLayerNormProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def layer_norm(
+        self,
+        x: pl.Tensor[[1, 16384], pl.FP32],
+        gamma: pl.Tensor[[1, 16384], pl.FP32],
+        beta: pl.Tensor[[1, 16384], pl.FP32],
+    ) -> pl.Tensor[[1, 16384], pl.FP32]:
+        mean: pl.Tensor[[1, 1], pl.FP32] = pl.row_sum(pl.mul(x, 1.0 / 16384.0))
+        centered: pl.Tensor[[1, 16384], pl.FP32] = pl.sub(x, mean)
+        square_sum: pl.Tensor[[1, 1], pl.FP32] = pl.row_sum(pl.mul(centered, centered))
+        variance: pl.Tensor[[1, 1], pl.FP32] = pl.mul(square_sum, 1.0 / 16384.0)
+        normalized: pl.Tensor[[1, 16384], pl.FP32] = pl.div(centered, pl.sqrt(pl.add(variance, 1.0e-5)))
+        out: pl.Tensor[[1, 16384], pl.FP32] = pl.add(pl.mul(normalized, gamma), beta)
+        return out
+
+
+@pl.program
+class SiluProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def silu(self, x: pl.Tensor[[512, 256], pl.FP32]) -> pl.Tensor[[512, 256], pl.FP32]:
+        negative: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, -1.0)
+        exponential: pl.Tensor[[512, 256], pl.FP32] = pl.exp(negative)
+        denominator: pl.Tensor[[512, 256], pl.FP32] = pl.add(exponential, 1.0)
+        sigmoid: pl.Tensor[[512, 256], pl.FP32] = pl.recip(denominator)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, sigmoid)
+        return out
+
+
+@pl.program
 class ReductionMultiOutputProgram:
     @pl.function(attrs={"auto_tile": True})
     def reduce_live_out(
@@ -1411,6 +1463,20 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
     assert ir.FunctionType.Spmd in function_types
 
 
+def test_multi_reduction_dag_requires_a_capacity_safe_materialized_region(capfd):
+    after, plan = _logged_plan(LayerNormProgram, capfd)
+    assert "schedule=materialized" in plan
+    structure = _structure(after)
+    assert structure.spmd == 1
+    assert structure.pipeline_loops == 0
+    assert structure.ops["tensor.row_sum"] == 2
+    assert structure.ops["tensor.sqrt"] == 1
+    assert structure.ops["tensor.assemble"] == 1
+
+    with pytest.raises(ValueError, match="one capacity-safe Ascend910B vector kernel"):
+        _run_auto_tile(OversizedLayerNormProgram)
+
+
 @pytest.mark.parametrize(
     "program",
     [
@@ -1429,6 +1495,8 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         NarrowRowReductionProgram,
         RowMaxProgram,
         ReductionApplyProgram,
+        LayerNormProgram,
+        SiluProgram,
         ReductionMultiOutputProgram,
         BranchedLiveOutProgram,
         RaggedRowReductionProgram,

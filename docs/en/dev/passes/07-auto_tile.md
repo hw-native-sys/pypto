@@ -65,6 +65,8 @@ The initial implementation supports the following closed surface:
   `exp`, `log`, `abs`, `sqrt`, `rsqrt`, `recip`, and `fmod`;
 - `row_sum`, `row_max`, `col_sum`, and `col_max`;
 - one reduction plus an elementwise producer or consumer DAG;
+- multiple same-axis reductions when the complete per-core DAG fits a
+  materialized schedule;
 - the canonical five-operation row softmax graph;
 - multiple returned pointwise values and capacity-fitting materialized
   reduction live-outs; and
@@ -180,6 +182,13 @@ reuse.
 The complete per-core region fits in UB. Boundary tensors are sliced once per
 phase, reused through their last topological use, and every returned value stays
 live through its distinct `tensor.assemble` store.
+
+General DAGs with multiple reductions, such as LayerNorm's mean followed by
+variance, are materialized-only. Their reductions execute in source topological
+order and the ordinary lifetime model accounts for every intervening full-frame
+and thin value. If no spatial partition makes that complete live set fit in UB,
+AutoTile rejects the function rather than applying the single-reduction streaming
+schedule to an inexpressible dependency chain.
 
 ### Pointwise stream
 

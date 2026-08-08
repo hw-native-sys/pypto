@@ -27,14 +27,23 @@ import pypto.language as pl
 import pytest
 import torch
 from examples.advanced.auto_tile_vector import (
+    LAYER_EPS,
+    LAYER_HIDDEN,
+    LAYER_ROWS,
     RMS_EPS,
     RMS_HIDDEN,
     RMS_ROWS,
+    SILU_COLS,
+    SILU_ROWS,
     SOFTMAX_COLS,
     SOFTMAX_ROWS,
+    AutoTileLayerNormProgram,
     AutoTileRmsNormProgram,
+    AutoTileSiluProgram,
     AutoTileSoftmaxProgram,
+    manual_layer_norm,
     manual_rms_norm,
+    manual_silu,
     manual_softmax,
 )
 from pypto import ir
@@ -125,14 +134,42 @@ def _manual_softmax_32x8192(
     x: pl.Tensor[[32, 8192], pl.FP32],
     y: pl.Out[pl.Tensor[[32, 8192], pl.FP32]],
 ):
-    for row in pl.parallel(0, 32, 1):
+    # Eight rows keep the [8, 1] running statistics 32-byte aligned.  Stream
+    # the wide axis so the reference remains within UB instead of materializing
+    # an 8x8192 tile.
+    for row in pl.parallel(0, 32, 8):
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="softmax_rows"):
-            tile_x = x[row : row + 1, :]
-            maximum = pl.row_max(tile_x)
-            shifted = pl.row_expand_sub(tile_x, maximum)
-            exponent = pl.exp(shifted)
-            total = pl.row_sum(exponent)
-            y[row : row + 1, :] = pl.row_expand_div(exponent, total)
+            first = x[row : row + 8, 0:480]
+            running_max = pl.row_max(first)
+            first_exp = pl.exp(pl.row_expand_sub(first, running_max))
+            running_sum = pl.row_sum(first_exp)
+
+            for chunk_index in pl.range(1, 17):
+                col = chunk_index * 480
+                tile_x = x[row : row + 8, col : col + 480]
+                local_max = pl.row_max(tile_x)
+                next_max = pl.maximum(running_max, local_max)
+                correction = pl.exp(pl.sub(running_max, next_max))
+                local_exp = pl.exp(pl.row_expand_sub(tile_x, next_max))
+                local_sum = pl.row_sum(local_exp)
+                running_sum = pl.add(pl.mul(running_sum, correction), local_sum)
+                running_max = next_max
+
+            tail = x[row : row + 8, 8160:8192]
+            tail_max = pl.row_max(tail)
+            final_max = pl.maximum(running_max, tail_max)
+            correction = pl.exp(pl.sub(running_max, final_max))
+            tail_exp = pl.exp(pl.row_expand_sub(tail, final_max))
+            final_sum = pl.add(pl.mul(running_sum, correction), pl.row_sum(tail_exp))
+
+            for chunk_index in pl.range(17):
+                col = chunk_index * 480
+                tile_x = x[row : row + 8, col : col + 480]
+                exponent = pl.exp(pl.row_expand_sub(tile_x, final_max))
+                y[row : row + 8, col : col + 480] = pl.row_expand_div(exponent, final_sum)
+            tail = x[row : row + 8, 8160:8192]
+            tail_exp = pl.exp(pl.row_expand_sub(tail, final_max))
+            y[row : row + 8, 8160:8192] = pl.row_expand_div(tail_exp, final_sum)
     return y
 
 
@@ -375,5 +412,47 @@ class TestAutoTileVectorPerformance:
             config=test_config,
             output_dir=tmp_path,
             tolerance=(1.0e-2, 1.0e-2),
+            record_property=record_property,
+        )
+
+    def test_layer_norm_manual_vs_auto_tile(self, test_config, tmp_path, record_property):
+        torch.manual_seed(2)
+        x = torch.randn((LAYER_ROWS, LAYER_HIDDEN), dtype=torch.float32)
+        gamma = torch.randn((1, LAYER_HIDDEN), dtype=torch.float32)
+        beta = torch.randn((1, LAYER_HIDDEN), dtype=torch.float32)
+        mean = x.mean(dim=1, keepdim=True)
+        variance = (x - mean).square().mean(dim=1, keepdim=True)
+        expected = (x - mean) / torch.sqrt(variance + LAYER_EPS) * gamma + beta
+        reference_out = torch.zeros_like(x)
+        auto_out = torch.zeros_like(x)
+        _compare(
+            name="layer_norm",
+            reference=manual_layer_norm,
+            auto_program=AutoTileLayerNormProgram,
+            reference_args=[x, gamma, beta, reference_out],
+            auto_args=[x, gamma, beta, auto_out],
+            expected=expected,
+            config=test_config,
+            output_dir=tmp_path,
+            tolerance=(1.0e-2, 1.0e-2),
+            record_property=record_property,
+        )
+
+    def test_silu_manual_vs_auto_tile(self, test_config, tmp_path, record_property):
+        torch.manual_seed(3)
+        x = torch.randn((SILU_ROWS, SILU_COLS), dtype=torch.float32)
+        expected = torch.nn.functional.silu(x)
+        reference_out = torch.zeros_like(x)
+        auto_out = torch.zeros_like(x)
+        _compare(
+            name="silu",
+            reference=manual_silu,
+            auto_program=AutoTileSiluProgram,
+            reference_args=[x, reference_out],
+            auto_args=[x, auto_out],
+            expected=expected,
+            config=test_config,
+            output_dir=tmp_path,
+            tolerance=(1.0e-5, 1.0e-5),
             record_property=record_property,
         )

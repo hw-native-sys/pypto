@@ -26,6 +26,7 @@ from pypto.runtime.runner import RunConfig
 _FP16_TOL = RunConfig(rtol=1e-2, atol=1e-2)
 _BF16_TOL = RunConfig(rtol=2e-2, atol=2e-2)
 _RSQRT_TOL = RunConfig(rtol=1e-2, atol=1e-2)
+_NORM_TOL = RunConfig(rtol=1e-2, atol=1e-2)
 
 
 class _AutoTileCase(PTOTestCase):
@@ -235,6 +236,79 @@ class RmsCase(_AutoTileCase):
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         x = tensors["x"]
         tensors["out"][:] = x * torch.rsqrt(x.square().mean(dim=1, keepdim=True) + 1.0e-6)
+
+
+@pl.program
+class LayerNormProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[512, 256], pl.FP32],
+        gamma: pl.Tensor[[1, 256], pl.FP32],
+        beta: pl.Tensor[[1, 256], pl.FP32],
+    ) -> pl.Tensor[[512, 256], pl.FP32]:
+        scaled_x: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, 1.0 / 256.0)
+        mean: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(scaled_x)
+        centered: pl.Tensor[[512, 256], pl.FP32] = pl.sub(x, mean)
+        squared: pl.Tensor[[512, 256], pl.FP32] = pl.mul(centered, centered)
+        square_sum: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(squared)
+        variance: pl.Tensor[[512, 1], pl.FP32] = pl.mul(square_sum, 1.0 / 256.0)
+        std: pl.Tensor[[512, 1], pl.FP32] = pl.sqrt(pl.add(variance, 1.0e-5))
+        normalized: pl.Tensor[[512, 256], pl.FP32] = pl.div(centered, std)
+        scaled: pl.Tensor[[512, 256], pl.FP32] = pl.mul(normalized, gamma)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.add(scaled, beta)
+        return out
+
+
+class LayerNormCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_layer_norm"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [512, 256], DataType.FP32, init_value=torch.randn),
+            TensorSpec("gamma", [1, 256], DataType.FP32, init_value=torch.randn),
+            TensorSpec("beta", [1, 256], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [512, 256], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return LayerNormProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        x = tensors["x"]
+        mean = x.mean(dim=1, keepdim=True)
+        variance = (x - mean).square().mean(dim=1, keepdim=True)
+        tensors["out"][:] = (x - mean) / torch.sqrt(variance + 1.0e-5) * tensors["gamma"] + tensors["beta"]
+
+
+@pl.program
+class SiluProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[512, 256], pl.FP32]) -> pl.Tensor[[512, 256], pl.FP32]:
+        negative: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, -1.0)
+        exponential: pl.Tensor[[512, 256], pl.FP32] = pl.exp(negative)
+        denominator: pl.Tensor[[512, 256], pl.FP32] = pl.add(exponential, 1.0)
+        sigmoid: pl.Tensor[[512, 256], pl.FP32] = pl.recip(denominator)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.mul(x, sigmoid)
+        return out
+
+
+class SiluCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_silu"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [512, 256], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [512, 256], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SiluProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.nn.functional.silu(tensors["x"])
 
 
 @pl.program
@@ -487,6 +561,8 @@ class TestAutoTileVector:
             (IntermediateSoftmaxCase, None),
             (RaggedSoftmaxCase, None),
             (RmsCase, _RSQRT_TOL),
+            (LayerNormCase, _NORM_TOL),
+            (SiluCase, None),
             (RowMaxCase, None),
             (NarrowRowSumCase, None),
             (ColSumCase, None),

@@ -61,6 +61,7 @@ no-op。
   `abs`、`sqrt`、`rsqrt`、`recip` 和 `fmod`；
 - `row_sum`、`row_max`、`col_sum` 和 `col_max`；
 - 一个归约及其逐元素 producer 或 consumer DAG；
+- 当每个 core 的完整 DAG 可放入 materialized 调度时，支持多个同轴归约；
 - 规范的五运算 row softmax 图；
 - 多个 pointwise 返回值，以及容量允许时物化的 reduction live-out；
 - 能由一个非原子 kernel 调度容纳的行、列归约。
@@ -149,6 +150,11 @@ slot 和持久 running statistic 都会显式显示。`lifetime ends: x(t0)` 这
 
 完整的每核 region 可放入 UB。每个 phase 的边界 tensor 只 slice 一次，并复用到最后
 一次拓扑使用；每个返回值都存活到各自独立的 `tensor.assemble` store。
+
+包含多个归约的一般 DAG（例如 LayerNorm 先计算均值、再计算方差）只支持 materialized
+调度。这些归约按源码拓扑顺序执行，普通 lifetime model 会计入中间所有 full-frame 与
+thin 值。如果不存在可让完整 live set 放入 UB 的空间 partition，AutoTile 会拒绝该函数，
+而不会把单归约 streaming 调度错误地套用到无法表达的依赖链上。
 
 ### Pointwise stream
 

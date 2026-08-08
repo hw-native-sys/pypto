@@ -12,7 +12,7 @@ Advanced examples — performance and low-level techniques.
 
   01_split_k.py          — split-K matmul (parallel K reduction, atomic-add)
   02_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
-  03_auto_tile_vector.py — compiler-driven vector tiling for softmax and RMSNorm
+  03_auto_tile_vector.py — compiler-driven vector tiling for softmax, norms, and SiLU
 """
 
 import importlib

@@ -535,6 +535,12 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
           feasible = true;
         }
       }
+    } else if (graph.reduction_count > 1 && !graph.softmax.matched) {
+      // A general multi-reduction DAG is valid only when the complete
+      // topological replay above fits in UB.  The streaming schedule below
+      // carries one reduction state and cannot represent dependent reductions
+      // such as LayerNorm's mean followed by variance.
+      continue;
     } else if (graph.softmax.matched || graph.reduction_op != std::numeric_limits<size_t>::max()) {
       // Multi-live-out reduction DAGs remain eligible for a materialized plan
       // on a smaller spatial region.  They simply cannot use the two-pass

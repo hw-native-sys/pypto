@@ -118,6 +118,7 @@ struct VectorGraph {
   std::unordered_map<const Var*, size_t> tensor_by_var;
   SoftmaxPattern softmax;
   int reduced_axis = 0;  // 0 = none, 1 = width, 2 = height
+  int reduction_count = 0;
   size_t reduction_op = std::numeric_limits<size_t>::max();
 };
 

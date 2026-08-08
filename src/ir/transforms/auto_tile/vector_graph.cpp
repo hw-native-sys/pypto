@@ -506,6 +506,7 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   }
   graph.iteration_rows = iteration_rows;
   graph.iteration_cols = iteration_cols;
+  graph.reduction_count = reduction_count;
   AssignPhysicalShapeClasses(&graph);
   ValidateCastPhysicalShapeClasses(graph);
 
@@ -526,8 +527,6 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
                        graph.required_outputs[0] == sink_op.output;
     if (exact) graph.softmax = {true, max_op.inputs[0], 0, 2, 3, 4};
   }
-  CHECK_SPAN(reduction_count <= 1 || graph.softmax.matched, function->span_)
-      << "AutoTile supports multiple reductions only for the canonical online softmax graph";
   return graph;
 }
 
