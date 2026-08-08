@@ -69,14 +69,12 @@ class TestOrchestrationMore:
                     out = pl.assemble(out, c_vec, [m0, 0])
                 return out
 
-        # VerificationLevel.NONE: a dynamic ``pl.spmd`` block count lands on the
-        # outlined Spmd function as a ``core_num`` attr that references a local
-        # defined in the *caller* Orchestration function. The printer emits that
-        # attr verbatim, but the roundtrip parser rejects the standalone function
-        # (the var is out of scope) — a known print/parse gap unrelated to the
-        # codegen ordering under test here.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynPipeProgram)
+        # Runs under the session's verification settings (roundtrip by default in
+        # this suite): a dynamic ``pl.spmd`` block count is the case where
+        # OutlineIncoreScopes promotes an Opaque body to Orchestration, so the
+        # ``m = pl.tensor.dim(a, 0)`` read must fold onto the param's dyn-dim
+        # symbol there — otherwise the printed IR no longer parses back to itself.
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynPipeProgram)
         orch_func = next(
             f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
         )

@@ -13,7 +13,9 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.parser.text_parser import parse as text_parse
 
 
 class TestOutlineIncoreScopes:
@@ -2083,6 +2085,193 @@ class TestOutlineReboundOutCapture:
 
         assert base_names(direct) == base_names(via_ssa) == ["a", "c"]
         assert list(direct.param_directions) == list(via_ssa.param_directions)
+
+
+class TestPromotionFoldsParamDimReads:
+    """Promoting Opaque -> Orchestration folds ``tensor.dim`` on a param dyn-dim axis.
+
+    A tensor's declared extent *is* its runtime extent, so reading it back mints a
+    second scalar for one quantity. The DSL parser folds that read onto the symbol
+    the signature already names, but only in an Orchestration body. A body written
+    as Opaque keeps the read, so the promotion here must fold it — otherwise the IR
+    this pass emits no longer parses back to itself.
+    """
+
+    M_DYN = pl.dynamic("M_DYN")
+
+    @staticmethod
+    def _main_stmts(program: ir.Program) -> list[ir.Stmt]:
+        main = program.get_function("main")
+        assert main is not None
+        body = main.body
+        assert isinstance(body, ir.SeqStmts), f"expected a SeqStmts body, got {type(body).__name__}"
+        return list(body.stmts)
+
+    @staticmethod
+    def _dim_reads(stmts: list[ir.Stmt]) -> list[ir.Stmt]:
+        dim = ir.get_op("tensor.dim").name
+        return [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call) and s.value.op.name == dim
+        ]
+
+    def test_promotion_matches_the_parser_folded_form(self):
+        """The promoted body equals what the parser produces for the same source.
+
+        ``Expected`` is the identical program declared Orchestration, where the
+        parser folds ``m`` at parse time. Both go through the same passes, so any
+        divergence is the promotion failing to establish the same normal form.
+        """
+        M_DYN = self.M_DYN
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_DYN, 128], pl.FP32]],
+            ) -> pl.Tensor[[M_DYN, 128], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                with pl.spmd(m // 16):
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [i * 16, 0], [16, 128])
+                    out = pl.store(pl.add(t, t), [i * 16, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_DYN, 128], pl.FP32]],
+            ) -> pl.Tensor[[M_DYN, 128], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                with pl.spmd(m // 16):
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [i * 16, 0], [16, 128])
+                    out = pl.store(pl.add(t, t), [i * 16, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+            ExpectedAfter = passes.outline_incore_scopes()(passes.convert_to_ssa()(Expected))
+
+        assert self._dim_reads(self._main_stmts(After)) == []
+        ir.assert_structural_equal(After, ExpectedAfter)
+
+    def test_promotion_folds_transitive_dim_read(self):
+        """A read exposed *by* an earlier fold folds too, in the same pass.
+
+        Folding ``m`` retypes the local ``tmp`` from ``[m, 128]`` to ``[M_DYN, 128]``,
+        which makes ``n = tensor.dim(tmp, 0)`` foldable in turn. Missing that second
+        read leaves the printed IR parsing back to one statement fewer -- exactly the
+        roundtrip mismatch this fold exists to remove.
+        """
+        M_DYN = self.M_DYN
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_DYN, 128], pl.FP32]],
+            ) -> pl.Tensor[[M_DYN, 128], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                tmp: pl.Tensor[[M_DYN, 128], pl.FP32] = pl.create_tensor([m, 128], dtype=pl.FP32)
+                n = pl.tensor.dim(tmp, 0)
+                with pl.spmd(n // 16):
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [i * 16, 0], [16, 128])
+                    out = pl.store(pl.add(t, t), [i * 16, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        assert self._dim_reads(self._main_stmts(After)) == []
+
+        # The invariant itself: the emitted IR parses back to itself.
+        printed = python_print(After, format=False)
+        ir.assert_structural_equal(After, text_parse(printed, filename="<roundtrip>"))
+
+    def test_promotion_folds_symbol_used_inside_incore_body(self):
+        """A read consumed *inside* the scope folds too, and is captured as the symbol."""
+        M_DYN = self.M_DYN
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_DYN, 128], pl.FP32]],
+            ) -> pl.Tensor[[M_DYN, 128], pl.FP32]:
+                m = pl.tensor.dim(a, 0)
+                with pl.spmd(m // 16):
+                    i = pl.tile.get_block_idx()
+                    lim = m - 16
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [pl.min(i * 16, lim), 0], [16, 128])
+                    out = pl.store(pl.add(t, t), [i * 16, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        assert self._dim_reads(self._main_stmts(After)) == []
+
+        # The extent crosses into the outlined kernel as a scalar parameter, and
+        # the caller passes the symbol itself rather than a copy of it.
+        incore = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore) == 1, f"expected one outlined InCore function, got {len(incore)}"
+        assert isinstance(incore[0].params[0].type, ir.ScalarType)
+        assert incore[0].params[0].name_hint == "M_DYN"
+
+    def test_static_extent_dim_read_is_kept(self):
+        """A statically-shaped axis has no symbol to fold onto — the read must stay."""
+        M_DYN = self.M_DYN
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[M_DYN, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[M_DYN, 128], pl.FP32]],
+            ) -> pl.Tensor[[M_DYN, 128], pl.FP32]:
+                cols = pl.tensor.dim(a, 1)  # 128 — a constant extent, not a symbol
+                with pl.spmd(cols // 16):
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [i * 16, 0], [16, 128])
+                    out = pl.store(pl.add(t, t), [i * 16, 0], out)
+                return out
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        assert len(self._dim_reads(self._main_stmts(After))) == 1
+
+    def test_opaque_without_incore_scope_keeps_dim_read(self):
+        """No InCore scope means no promotion — an Opaque body keeps its read."""
+        M_DYN = self.M_DYN
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, a: pl.Tensor[[M_DYN, 128], pl.FP32]) -> pl.Scalar[pl.INDEX]:
+                m = pl.tensor.dim(a, 0)
+                return m
+
+        with passes.PassContext([]):
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        main = After.get_function("main")
+        assert main is not None
+        assert main.func_type == ir.FunctionType.Opaque
+        assert len(self._dim_reads(self._main_stmts(After))) == 1
 
 
 if __name__ == "__main__":
