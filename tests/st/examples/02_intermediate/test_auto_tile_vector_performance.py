@@ -19,10 +19,11 @@ fragile across firmware, runtime, PTOAS, and shared-device conditions.
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import pypto.language as pl
 import pytest
 import torch
 from examples.advanced.auto_tile_vector import (
@@ -42,6 +43,133 @@ from pypto.runtime import BenchmarkStats, RunConfig, benchmark
 _WARMUP = 5
 _ROUNDS = 15
 _REPETITIONS = 2
+
+
+@dataclass(frozen=True)
+class _SoftmaxPerformanceCase:
+    """One preselected shape and its paired manual/AutoTile programs."""
+
+    name: str
+    rows: int
+    cols: int
+    manual: Any
+    auto_program: Any
+
+
+@pl.jit
+def _manual_softmax_256x512(
+    x: pl.Tensor[[256, 512], pl.FP32],
+    y: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+):
+    for row in pl.parallel(0, 256, 32):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="softmax_rows"):
+            tile_x = x[row : row + 32, :]
+            maximum = pl.row_max(tile_x)
+            shifted = pl.row_expand_sub(tile_x, maximum)
+            exponent = pl.exp(shifted)
+            total = pl.row_sum(exponent)
+            y[row : row + 32, :] = pl.row_expand_div(exponent, total)
+    return y
+
+
+@pl.program
+class _AutoTileSoftmax256x512Program:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[256, 512], pl.FP32],
+        y: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+    ) -> pl.Tensor[[256, 512], pl.FP32]:
+        maximum: pl.Tensor[[256, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[256, 512], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[256, 512], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[256, 1], pl.FP32] = pl.row_sum(exponent)
+        y = pl.div(exponent, total)
+        return y
+
+
+@pl.jit
+def _manual_softmax_128x1024(
+    x: pl.Tensor[[128, 1024], pl.FP32],
+    y: pl.Out[pl.Tensor[[128, 1024], pl.FP32]],
+):
+    for row in pl.parallel(0, 128, 16):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="softmax_rows"):
+            tile_x = x[row : row + 16, :]
+            maximum = pl.row_max(tile_x)
+            shifted = pl.row_expand_sub(tile_x, maximum)
+            exponent = pl.exp(shifted)
+            total = pl.row_sum(exponent)
+            y[row : row + 16, :] = pl.row_expand_div(exponent, total)
+    return y
+
+
+@pl.program
+class _AutoTileSoftmax128x1024Program:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[128, 1024], pl.FP32],
+        y: pl.Out[pl.Tensor[[128, 1024], pl.FP32]],
+    ) -> pl.Tensor[[128, 1024], pl.FP32]:
+        maximum: pl.Tensor[[128, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[128, 1024], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[128, 1024], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[128, 1], pl.FP32] = pl.row_sum(exponent)
+        y = pl.div(exponent, total)
+        return y
+
+
+@pl.jit
+def _manual_softmax_32x8192(
+    x: pl.Tensor[[32, 8192], pl.FP32],
+    y: pl.Out[pl.Tensor[[32, 8192], pl.FP32]],
+):
+    for row in pl.parallel(0, 32, 1):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="softmax_rows"):
+            tile_x = x[row : row + 1, :]
+            maximum = pl.row_max(tile_x)
+            shifted = pl.row_expand_sub(tile_x, maximum)
+            exponent = pl.exp(shifted)
+            total = pl.row_sum(exponent)
+            y[row : row + 1, :] = pl.row_expand_div(exponent, total)
+    return y
+
+
+@pl.program
+class _AutoTileSoftmax32x8192Program:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[32, 8192], pl.FP32],
+        y: pl.Out[pl.Tensor[[32, 8192], pl.FP32]],
+    ) -> pl.Tensor[[32, 8192], pl.FP32]:
+        maximum: pl.Tensor[[32, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[32, 8192], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[32, 8192], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[32, 1], pl.FP32] = pl.row_sum(exponent)
+        y = pl.div(exponent, total)
+        return y
+
+
+_SOFTMAX_PERFORMANCE_CASES = (
+    _SoftmaxPerformanceCase(
+        "softmax_512x256",
+        SOFTMAX_ROWS,
+        SOFTMAX_COLS,
+        manual_softmax,
+        AutoTileSoftmaxProgram,
+    ),
+    _SoftmaxPerformanceCase(
+        "softmax_256x512", 256, 512, _manual_softmax_256x512, _AutoTileSoftmax256x512Program
+    ),
+    _SoftmaxPerformanceCase(
+        "softmax_128x1024", 128, 1024, _manual_softmax_128x1024, _AutoTileSoftmax128x1024Program
+    ),
+    _SoftmaxPerformanceCase(
+        "softmax_32x8192", 32, 8192, _manual_softmax_32x8192, _AutoTileSoftmax32x8192Program
+    ),
+)
 
 
 def _compile_manual(jit_function, args: Sequence[torch.Tensor], config: RunConfig, output_dir: Path):
@@ -210,16 +338,17 @@ def _compare(
 class TestAutoTileVectorPerformance:
     """Correctness-gated, register-once performance comparisons on Ascend 910B."""
 
-    def test_softmax_manual_vs_auto_tile(self, test_config, tmp_path, record_property):
+    @pytest.mark.parametrize("case", _SOFTMAX_PERFORMANCE_CASES, ids=lambda case: case.name)
+    def test_softmax_manual_vs_auto_tile(self, test_config, tmp_path, record_property, case):
         torch.manual_seed(0)
-        x = torch.randn((SOFTMAX_ROWS, SOFTMAX_COLS), dtype=torch.float32)
+        x = torch.randn((case.rows, case.cols), dtype=torch.float32)
         expected = torch.softmax(x, dim=1)
         reference_out = torch.zeros_like(x)
         auto_out = torch.zeros_like(x)
         _compare(
-            name="softmax",
-            reference=manual_softmax,
-            auto_program=AutoTileSoftmaxProgram,
+            name=case.name,
+            reference=case.manual,
+            auto_program=case.auto_program,
             reference_args=[x, reference_out],
             auto_args=[x, auto_out],
             expected=expected,

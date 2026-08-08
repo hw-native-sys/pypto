@@ -435,6 +435,25 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
       return record_phase(target, phase_id, rows, cols, iterations, stages, outputs, compute_work);
     };
 
+    // A recognized softmax has two legal algorithms when its complete region
+    // fits in UB: replay the source DAG once with all intermediates resident,
+    // or use the chunked online statistics/apply schedule below.  Preserve
+    // both candidates and let the same modeled-cycle comparison used for
+    // grids and chunks choose between them.
+    VectorSchedulePlan materialized_softmax;
+    double materialized_softmax_latency = std::numeric_limits<double>::infinity();
+    if (graph.softmax.matched && candidate.full_peak_ub_bytes <= hardware_.ub_bytes) {
+      materialized_softmax = candidate;
+      materialized_softmax.kind = VectorScheduleKind::Materialized;
+      PopulatePhase(&materialized_softmax.phases[PhaseIndex(VectorPhase::Body)], graph, all_ops);
+      materialized_softmax.strip_h = materialized_softmax.tile_h;
+      materialized_softmax.strip_w = materialized_softmax.tile_w;
+      materialized_softmax.chunk_peak_ub_bytes = materialized_softmax.full_peak_ub_bytes;
+      materialized_softmax_latency =
+          price_phase(&materialized_softmax, VectorPhase::Body, materialized_softmax.tile_h,
+                      materialized_softmax.tile_w, 1, 1, all_outputs);
+    }
+
     double latency = 0.0;
     bool feasible = false;
     if (candidate.full_peak_ub_bytes <= hardware_.ub_bytes && !graph.softmax.matched) {
@@ -676,6 +695,13 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
         latency = best_reduction_latency;
         feasible = true;
       }
+    }
+
+    if (std::isfinite(materialized_softmax_latency) &&
+        (!feasible || materialized_softmax_latency < latency)) {
+      candidate = std::move(materialized_softmax);
+      latency = materialized_softmax_latency;
+      feasible = true;
     }
 
     if (!feasible) continue;

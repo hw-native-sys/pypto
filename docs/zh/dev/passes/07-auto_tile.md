@@ -164,10 +164,18 @@ stats phase 对固定大小 chunk 做归约并携带细长 accumulator。folded 
 一次剩余的细长操作；spanning 调度则对宽输入进行第二次 chunk pass，并应用归约统计量。
 完整 chunk 可使用两阶段 pipeline；初始化与 ragged tail 串行执行。
 
-### Online softmax
+### Softmax
 
 规范 softmax 调度在 chunk 间携带 running maximum 和修正后的 running sum，然后执行
 一次 chunk 化输出 pass。无需在 GM 中物化 exponential 即可保持数值稳定。
+
+若每个 work unit 的完整 softmax live set 可放入 UB，planner 还会枚举一个单 pass
+materialized 候选。该候选只重放一次源 DAG，并将 exponential 与两个 reduction
+结果保留在片上直到最终 divide。普通 lifetime model 会计入其完整 UB footprint、
+一次输入读取、一次输出写回，以及每个源操作的一次执行。online 候选仍以
+statistics 和 apply 两个 pass 独立计价。两者中 modeled cost 较低者胜出；可放入
+UB 只是 materialization 的可行性条件，而不是无条件偏好。完整 live set 无法放入的
+宽行仍使用 online schedule。
 
 ### 列归约
 

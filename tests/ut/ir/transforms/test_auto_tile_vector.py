@@ -344,6 +344,42 @@ class SmallSoftmaxProgram:
 
 
 @pl.program
+class CapacityFitSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def softmax(self, x: pl.Tensor[[512, 256], pl.FP32]) -> pl.Tensor[[512, 256], pl.FP32]:
+        maximum: pl.Tensor[[512, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[512, 256], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[512, 256], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+@pl.program
+class IntermediateSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def softmax(self, x: pl.Tensor[[128, 1024], pl.FP32]) -> pl.Tensor[[128, 1024], pl.FP32]:
+        maximum: pl.Tensor[[128, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[128, 1024], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[128, 1024], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[128, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[128, 1024], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+@pl.program
+class RaggedSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def softmax(self, x: pl.Tensor[[130, 272], pl.FP32]) -> pl.Tensor[[130, 272], pl.FP32]:
+        maximum: pl.Tensor[[130, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[130, 272], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[130, 272], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[130, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[130, 272], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+@pl.program
 class Fp16SoftmaxProgram:
     @pl.function(attrs={"auto_tile": True})
     def softmax(self, x: pl.Tensor[[8, 128], pl.FP16]) -> pl.Tensor[[8, 128], pl.FP16]:
@@ -997,6 +1033,38 @@ def test_generated_softmax_work_and_phase_traffic_are_exact(capfd):
     assert "phase_output_bytes=[0,0,1048576,0]" in plan
 
 
+@pytest.mark.parametrize(
+    ("program", "grid", "tile", "full_peak", "phase_bytes"),
+    [
+        (CapacityFitSoftmaxProgram, "16x1", "32x256", 65664, 524288),
+        (IntermediateSoftmaxProgram, "16x1", "8x1024", 65568, 524288),
+        (RaggedSoftmaxProgram, "12x1", "11x272", 34880, 143616),
+    ],
+)
+def test_softmax_shape_matrix_selects_one_pass_materialization_when_cheaper(
+    program, grid, tile, full_peak, phase_bytes, capfd
+):
+    after, plan = _logged_plan(program, capfd)
+    assert "schedule=materialized" in plan
+    assert f"grid={grid}" in plan
+    assert f"tile={tile}" in plan
+    assert f"strip={tile}" in plan
+    assert "chunks=0x0+0" in plan
+    assert f"peak_ub={full_peak}" in plan
+    assert f"full_peak_ub={full_peak}" in plan
+    # The selected one-pass candidate loads and stores the complete (possibly
+    # max-region-priced) frame exactly once. It replays each source op once and
+    # contains no online statistics/apply pipeline.
+    assert f"phase_input_bytes=[{phase_bytes},0,0,0]" in plan
+    assert f"phase_output_bytes=[{phase_bytes},0,0,0]" in plan
+    structure = _structure(after)
+    assert structure.pipeline_loops == 0
+    assert structure.ops["tensor.row_max"] == 1
+    assert structure.ops["tensor.exp"] == 1
+    assert structure.ops["tensor.row_sum"] == 1
+    assert structure.ops["tensor.assemble"] == 1
+
+
 def test_reduction_multi_live_out_uses_a_capacity_safe_materialized_region():
     after = _run_auto_tile(ReductionMultiOutputProgram)
     structure = _structure(after)
@@ -1367,6 +1435,9 @@ def test_called_marked_helper_keeps_its_output_internal_and_lowers_fully():
         Fp16RowReductionProgram,
         ColReductionApplyProgram,
         SoftmaxProgram,
+        CapacityFitSoftmaxProgram,
+        IntermediateSoftmaxProgram,
+        RaggedSoftmaxProgram,
         Fp16SoftmaxProgram,
         Int8OutputProgram,
         RaggedInt8CastProgram,
@@ -1575,6 +1646,27 @@ def test_auto_tile_is_idempotent_after_consuming_the_marker():
             lambda torch: (torch.randn(8, 128),),
             lambda torch, x: torch.softmax(x, dim=1),
             (slice(0, 1), slice(0, 128)),
+        ),
+        (
+            CapacityFitSoftmaxProgram,
+            "softmax",
+            lambda torch: (torch.randn(512, 256),),
+            lambda torch, x: torch.softmax(x, dim=1),
+            (slice(0, 22), slice(0, 256)),
+        ),
+        (
+            IntermediateSoftmaxProgram,
+            "softmax",
+            lambda torch: (torch.randn(128, 1024),),
+            lambda torch, x: torch.softmax(x, dim=1),
+            (slice(0, 8), slice(0, 1024)),
+        ),
+        (
+            RaggedSoftmaxProgram,
+            "softmax",
+            lambda torch: (torch.randn(130, 272),),
+            lambda torch, x: torch.softmax(x, dim=1),
+            (slice(0, 11), slice(0, 272)),
         ),
         (
             BroadcastProgram,

@@ -199,11 +199,21 @@ A spanning schedule makes a second chunked pass over the wide input and applies
 the reduced statistic. Full chunks may use a two-stage pipeline; initialization
 and the ragged tail are serial.
 
-### Online softmax
+### Softmax
 
 The canonical softmax schedule carries a running maximum and corrected running
 sum across chunks, then makes one chunked output pass. It is numerically stable
 without materializing exponentials in GM.
+
+When the complete per-work-unit softmax live set fits in UB, the planner also
+enumerates a one-pass materialized candidate. That candidate replays the source
+DAG once, keeping the exponential and both reduction results on chip through
+the final divide. The ordinary lifetime model prices its complete UB footprint,
+one input read, one output write, and one execution of every source operation.
+The online candidate remains independently costed with its statistics and apply
+passes. The lower modeled cost wins; fitting in UB is a feasibility condition,
+not an unconditional preference for materialization. Wide rows whose complete
+live set does not fit retain the online schedule.
 
 ### Column reduction
 

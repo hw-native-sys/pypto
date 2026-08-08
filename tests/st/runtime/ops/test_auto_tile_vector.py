@@ -121,6 +121,93 @@ class SoftmaxCase(_AutoTileCase):
 
 
 @pl.program
+class CapacityFitSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[512, 256], pl.FP32]) -> pl.Tensor[[512, 256], pl.FP32]:
+        maximum: pl.Tensor[[512, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[512, 256], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[512, 256], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[512, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[512, 256], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+class CapacityFitSoftmaxCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_softmax_capacity_fit"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [512, 256], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [512, 256], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return CapacityFitSoftmaxProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.softmax(tensors["x"], dim=1)
+
+
+@pl.program
+class IntermediateSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[128, 1024], pl.FP32]) -> pl.Tensor[[128, 1024], pl.FP32]:
+        maximum: pl.Tensor[[128, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[128, 1024], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[128, 1024], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[128, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[128, 1024], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+class IntermediateSoftmaxCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_softmax_intermediate"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [128, 1024], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [128, 1024], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return IntermediateSoftmaxProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.softmax(tensors["x"], dim=1)
+
+
+@pl.program
+class RaggedSoftmaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(self, x: pl.Tensor[[130, 272], pl.FP32]) -> pl.Tensor[[130, 272], pl.FP32]:
+        maximum: pl.Tensor[[130, 1], pl.FP32] = pl.row_max(x)
+        shifted: pl.Tensor[[130, 272], pl.FP32] = pl.sub(x, maximum)
+        exponent: pl.Tensor[[130, 272], pl.FP32] = pl.exp(shifted)
+        total: pl.Tensor[[130, 1], pl.FP32] = pl.row_sum(exponent)
+        out: pl.Tensor[[130, 272], pl.FP32] = pl.div(exponent, total)
+        return out
+
+
+class RaggedSoftmaxCase(_AutoTileCase):
+    def get_name(self) -> str:
+        return "auto_tile_vector_softmax_ragged"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [130, 272], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [130, 272], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return RaggedSoftmaxProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.softmax(tensors["x"], dim=1)
+
+
+@pl.program
 class RmsProgram:
     @pl.function(attrs={"auto_tile": True})
     def kernel(self, x: pl.Tensor[[128, 8192], pl.FP32]) -> pl.Tensor[[128, 8192], pl.FP32]:
@@ -396,6 +483,9 @@ class TestAutoTileVector:
             (RaggedPointwiseCase, None),
             (MultiOutputCase, None),
             (SoftmaxCase, None),
+            (CapacityFitSoftmaxCase, None),
+            (IntermediateSoftmaxCase, None),
+            (RaggedSoftmaxCase, None),
             (RmsCase, _RSQRT_TOL),
             (RowMaxCase, None),
             (NarrowRowSumCase, None),
