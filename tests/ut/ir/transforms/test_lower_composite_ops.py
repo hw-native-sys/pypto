@@ -28,16 +28,19 @@ import pytest
 from pypto import ir, passes
 from pypto.language.parser.diagnostics.exceptions import ParserError
 
+_OP_PLD_TILE_REMOTE_LOAD = ir.get_op("pld.tile.remote_load").name
+_OP_TILE_LOAD = ir.get_op("tile.load").name
+
 # Primitive tile ops the decomposition is allowed to emit (besides framework
 # infrastructure ops like tile.load / tile.store / tile.move that wrap the
 # decomposed body).
 _DECOMP_PRIMITIVES = {
-    "tile.muls",
-    "tile.adds",
-    "tile.add",
-    "tile.sub",
-    "tile.mul",
-    "tile.cast",
+    ir.get_op("tile.muls").name,
+    ir.get_op("tile.adds").name,
+    ir.get_op("tile.add").name,
+    ir.get_op("tile.sub").name,
+    ir.get_op("tile.mul").name,
+    ir.get_op("tile.cast").name,
 }
 
 
@@ -481,17 +484,17 @@ _ALLREDUCE_REDUCE_CASES = [
 
 # Ops the chunked mesh decomposition must emit.
 _ALLREDUCE_REQUIRED_OPS = {
-    "pld.system.get_comm_ctx",
-    "pld.system.nranks",
-    "pld.system.rank",
-    "pld.system.notify",  # Ready and per-chunk read-complete barriers
-    "pld.system.wait",  # Ready and per-chunk read-complete barriers
-    "pld.tile.remote_load",  # Peer chunk load
-    "tile.fillpad_inplace",  # Zero ragged padding before accumulation
-    "tile.add",  # Accumulate peer chunks
-    "tile.load",  # Self chunk load + user-side load
-    "tile.set_validshape",  # Narrow the final ragged chunk
-    "tile.store",  # Per-chunk result + user-side store
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,  # Ready and per-chunk read-complete barriers
+    ir.get_op("pld.system.wait").name,  # Ready and per-chunk read-complete barriers
+    ir.get_op("pld.tile.remote_load").name,  # Peer chunk load
+    ir.get_op("tile.fillpad_inplace").name,  # Zero ragged padding before accumulation
+    ir.get_op("tile.add").name,  # Accumulate peer chunks
+    ir.get_op("tile.load").name,  # Self chunk load + user-side load
+    ir.get_op("tile.set_validshape").name,  # Narrow the final ragged chunk
+    ir.get_op("tile.store").name,  # Per-chunk result + user-side store
 }
 
 
@@ -1063,8 +1066,8 @@ def test_allreduce_mesh_lowering_preserves_partial_valid_shape():
 
     collector = CallCollector()
     collector.visit_program(After)
-    load = next(call for call in collector.calls if call.op.name == "tile.load")
-    remote_load = next(call for call in collector.calls if call.op.name == "pld.tile.remote_load")
+    load = next(call for call in collector.calls if call.op.name == _OP_TILE_LOAD)
+    remote_load = next(call for call in collector.calls if call.op.name == _OP_PLD_TILE_REMOTE_LOAD)
     load_shape = load.args[2]
     load_valid_shape = load.args[3]
     remote_shape = remote_load.args[3]
@@ -1614,11 +1617,11 @@ def test_allreduce_lowers_every_reduce_op(reduce_op, expected_tile_op):
 
 _BARRIER_NRANKS = 2
 _BARRIER_REQUIRED_OPS = {
-    "pld.system.get_comm_ctx",
-    "pld.system.nranks",
-    "pld.system.rank",
-    "pld.system.notify",
-    "pld.system.wait",
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,
+    ir.get_op("pld.system.wait").name,
 }
 
 
@@ -1681,13 +1684,13 @@ def test_barrier_lowering_is_idempotent():
 _BROADCAST_SIZE = 16
 _BROADCAST_NRANKS = 2
 _BROADCAST_REQUIRED_OPS = {
-    "pld.system.get_comm_ctx",
-    "pld.system.nranks",
-    "pld.system.rank",
-    "pld.system.notify",
-    "pld.system.wait",
-    "tile.create",
-    "pld.tile.get",
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,
+    ir.get_op("pld.system.wait").name,
+    ir.get_op("tile.create").name,
+    ir.get_op("pld.tile.get").name,
 }
 
 
@@ -1753,13 +1756,13 @@ def test_broadcast_lowering_is_idempotent():
 _ALLGATHER_SIZE = 16
 _ALLGATHER_NRANKS = 2
 _ALLGATHER_REQUIRED_OPS = {
-    "pld.system.get_comm_ctx",
-    "pld.system.nranks",
-    "pld.system.rank",
-    "pld.system.notify",
-    "pld.system.wait",
-    "pld.tile.put",
-    "tile.create",
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,
+    ir.get_op("pld.system.wait").name,
+    ir.get_op("pld.tile.put").name,
+    ir.get_op("tile.create").name,
 }
 
 
@@ -1831,15 +1834,15 @@ def test_allgather_lowering_is_idempotent():
 _REDUCE_SCATTER_SIZE = 16
 _REDUCE_SCATTER_NRANKS = 2
 _REDUCE_SCATTER_REQUIRED_OPS = {
-    "pld.system.get_comm_ctx",
-    "pld.system.nranks",
-    "pld.system.rank",
-    "pld.system.notify",
-    "pld.system.wait",
-    "pld.tile.remote_load",
-    "tile.add",
-    "tile.load",
-    "tile.store",
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,
+    ir.get_op("pld.system.wait").name,
+    ir.get_op("pld.tile.remote_load").name,
+    ir.get_op("tile.add").name,
+    ir.get_op("tile.load").name,
+    ir.get_op("tile.store").name,
 }
 
 

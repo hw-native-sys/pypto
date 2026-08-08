@@ -100,7 +100,7 @@ def test_array_type_rejects_dynamic_extent():
 def test_array_create_op():
     call = ir_array.create(16, DataType.INT32)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "array.create"
+    assert call.op.name == ir.get_op("array.create").name
     assert isinstance(call.type, ir.ArrayType)
     array_type = cast(ir.ArrayType, call.type)
     assert array_type.dtype == DataType.INT32
@@ -112,7 +112,7 @@ def test_array_get_element_op_returns_scalar():
     arr = ir_array.create(8, DataType.INT32)
     idx = ir.ConstInt(3, DataType.INT32, ir.Span.unknown())
     call = ir_array.get_element(arr, idx)
-    assert call.op.name == "array.get_element"
+    assert call.op.name == ir.get_op("array.get_element").name
     assert isinstance(call.type, ir.ScalarType)
     assert call.type.dtype == DataType.INT32
 
@@ -122,7 +122,7 @@ def test_array_update_element_op_returns_array():
     idx = ir.ConstInt(3, DataType.INT32, ir.Span.unknown())
     val = ir.ConstInt(42, DataType.INT32, ir.Span.unknown())
     call = ir_array.update_element(arr, idx, val)
-    assert call.op.name == "array.update_element"
+    assert call.op.name == ir.get_op("array.update_element").name
     array_type = cast(ir.ArrayType, call.type)
     assert array_type.dtype == DataType.INT32
     assert _extent(array_type) == 8

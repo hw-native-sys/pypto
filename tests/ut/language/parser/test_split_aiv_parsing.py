@@ -23,6 +23,8 @@ import pytest
 from pypto import ir
 from pypto.language.parser.diagnostics.exceptions import InvalidOperationError, ParserSyntaxError
 
+_OP_TILE_GET_SUBBLOCK_IDX = ir.get_op("tile.get_subblock_idx").name
+
 
 def _count_descendants(node, cls):
     count = 0
@@ -147,7 +149,7 @@ class TestSplitAivBuildsNode:
         first_stmt = _first_body_stmt(region)
         assert isinstance(first_stmt, ir.AssignStmt)
         assert isinstance(first_stmt.value, ir.Call)
-        assert first_stmt.value.op.name == "tile.get_subblock_idx"
+        assert first_stmt.value.op.name == _OP_TILE_GET_SUBBLOCK_IDX
         assert first_stmt.var.name_hint == "aiv_id"
 
     def test_top_level_wrapped_in_incore(self):
@@ -205,7 +207,7 @@ class TestSplitAivBuildsNode:
         first_stmt = _first_body_stmt(region)
         assert isinstance(first_stmt, ir.AssignStmt)
         assert isinstance(first_stmt.value, ir.Call)
-        assert first_stmt.value.op.name == "tile.get_subblock_idx"
+        assert first_stmt.value.op.name == _OP_TILE_GET_SUBBLOCK_IDX
         assert first_stmt.var.name_hint == "aiv_id"
 
     def test_none_mode_print_roundtrips(self):

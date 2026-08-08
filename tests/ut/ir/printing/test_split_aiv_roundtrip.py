@@ -302,7 +302,7 @@ class _DropAivIdBinding(ir.IRMutator):
                 isinstance(first, ir.AssignStmt)
                 and isinstance(first.value, ir.Call)
                 and isinstance(first.value.op, ir.Op)
-                and first.value.op.name == "tile.get_subblock_idx"
+                and first.value.op.name == ir.get_op("tile.get_subblock_idx").name
             ):
                 new_body = ir.SeqStmts(list(body.stmts[1:]), body.span)
                 return ir.SplitAivScopeStmt(op.split, op.count, op.name_hint, body=new_body, span=op.span)

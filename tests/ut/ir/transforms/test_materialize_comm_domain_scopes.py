@@ -56,6 +56,10 @@ import pytest
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.pypto_core import DataType, ir, passes
 
+_OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER = ir.get_op("pld.tensor.alloc_window_buffer").name
+_OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
+_OP_PLD_TENSOR_WINDOW = ir.get_op("pld.tensor.window").name
+
 
 @pytest.fixture(autouse=True)
 def _basic_verification_context():
@@ -95,7 +99,7 @@ def _find_window_calls(func: ir.Function) -> list[ir.AssignStmt]:
 
     def walk(stmt: ir.Stmt) -> None:
         if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.tensor.window":
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW:
                 found.append(stmt)
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -318,7 +322,7 @@ def test_explicit_allreduce_assignment_keeps_user_signal():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     assert synthetic_assigns == []
@@ -357,7 +361,7 @@ def test_implicit_allreduce_signal_is_materialized_in_data_comm_domain():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.window"
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
         and stmt.var.name_hint.startswith("__allreduce_signal_")
     ]
     allreduces = [
@@ -365,7 +369,7 @@ def test_implicit_allreduce_signal_is_materialized_in_data_comm_domain():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     assert len(signal_windows) == 1
@@ -407,7 +411,7 @@ def test_optional_signal_allreduce_round_trips_before_materialization():
         for stmt in _flatten_stmts(host.body)
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     assert "pld.tensor.allreduce(" in printed
@@ -443,14 +447,14 @@ def test_synthesize_allreduce_signals_normalizes_host_allreduce():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
     signal_windows = [
         stmt
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.window"
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
         and stmt.var.name_hint.startswith("__allreduce_signal_")
     ]
 
@@ -484,7 +488,7 @@ def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == ir.get_op("pld.tensor.window").name
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
         and stmt.var.name_hint.startswith("__allreduce_signal_")
     )
     alloc_stmt = next(
@@ -492,7 +496,7 @@ def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == ir.get_op("pld.tensor.alloc_window_buffer").name
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
         and stmt.var.name_hint.startswith("__allreduce_signal_buf_")
     )
     allreduce = next(
@@ -500,7 +504,7 @@ def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == ir.get_op("pld.tensor.allreduce").name
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     )
 
     signal_type = window_stmt.var.type
@@ -547,7 +551,7 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.alloc_window_buffer"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
         and stmt.var.name_hint.startswith("__allreduce_signal_buf_")
     ]
     windows = [
@@ -555,7 +559,7 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.window"
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
         and stmt.var.name_hint.startswith("__allreduce_signal_")
     ]
     allreduces = [
@@ -563,7 +567,7 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     printed_ast = ast.parse(printed)
@@ -646,7 +650,7 @@ def test_implicit_allreduce_signal_names_are_program_unique():
         for stmt in _flatten_stmts(host.body)
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
     world_size_vars = [
         stmt.var.name_hint
@@ -739,7 +743,7 @@ def test_synthesize_allreduce_signals_reserves_existing_alloc_names():
         for stmt in _flatten_stmts(_get_func(synthesized, "host_orch").body)
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.alloc_window_buffer"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
     ]
 
     assert alloc_names == ["__allreduce_signal_buf_0", "__allreduce_signal_buf_1"]
@@ -810,7 +814,7 @@ def test_return_implicit_allreduce_is_lifted_for_host_lowering():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
     returns = [stmt for stmt in stmts if isinstance(stmt, ir.ReturnStmt)]
 
@@ -862,7 +866,7 @@ def test_return_explicit_allreduce_is_lifted_for_host_lowering():
         for stmt in stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.tensor.allreduce"
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
     returns = [stmt for stmt in stmts if isinstance(stmt, ir.ReturnStmt)]
 
@@ -899,7 +903,7 @@ def test_implicit_allreduce_eval_stmt_gets_signal():
         for stmt in stmts
         if isinstance(stmt, ir.EvalStmt)
         and isinstance(stmt.expr, ir.Call)
-        and stmt.expr.op.name == "pld.tensor.allreduce"
+        and stmt.expr.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     assert len(allreduces) == 1
@@ -946,7 +950,7 @@ def test_explicit_allreduce_eval_stmt_keeps_user_signal():
         for stmt in stmts
         if isinstance(stmt, ir.EvalStmt)
         and isinstance(stmt.expr, ir.Call)
-        and stmt.expr.op.name == "pld.tensor.allreduce"
+        and stmt.expr.op.name == _OP_PLD_TENSOR_ALLREDUCE
     ]
 
     assert synthetic_assigns == []

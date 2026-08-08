@@ -138,7 +138,7 @@ def test_remote_store_round_trips_through_printer():
     # The call still lifts to the same op name post-parse.
     after_func = _get_func(After, "kernel")
     after_call = _find_call(after_func, "pld.tile.remote_store")
-    assert after_call.op.name == "pld.tile.remote_store"
+    assert after_call.op.name == ir.get_op("pld.tile.remote_store").name
 
 
 # ---------------------------------------------------------------------------

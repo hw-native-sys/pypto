@@ -500,6 +500,10 @@ _AT_STASH_KWARGS = {
 # would build IR that cannot be printed back.
 _TASK_DUMMY_ONLY_ATTRS = frozenset({"manual_dep_edges", "dummy_task"})
 
+# The op a bare ``predicate=None`` lowers to. Resolved through the registry getter so a rename
+# fails at import instead of silently dropping the hint from the error message below.
+_TASK_INVALID_OP = ir.get_op("system.task_invalid").name
+
 
 def _split_spmd_for_loop_name_hints(name_hint: str) -> tuple[str, str]:
     """Map one ``for i in pl.spmd(..., name_hint=...)`` hint to Spmd vs InCore names.
@@ -6782,7 +6786,7 @@ class ASTParser:
             got = type(predicate).__name__
             extra = (
                 " (to dispatch unconditionally, omit predicate= entirely)"
-                if isinstance(predicate, ir.Call) and predicate.op.name == "system.task_invalid"
+                if isinstance(predicate, ir.Call) and predicate.op.name == _TASK_INVALID_OP
                 else ""
             )
             raise ParserSyntaxError(

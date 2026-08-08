@@ -23,7 +23,7 @@ class _CastTargetCollector(ir.IRVisitor):
         self.pairs: list[tuple[str, str]] = []
 
     def visit_call(self, op: ir.Call) -> None:
-        if op.op.name == "tile.cast":
+        if op.op.name == ir.get_op("tile.cast").name:
             src_ty = op.args[0].type
             assert isinstance(src_ty, ir.TileType)
             src = str(src_ty.dtype)

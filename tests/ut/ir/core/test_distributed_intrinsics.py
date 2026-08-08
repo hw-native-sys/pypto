@@ -34,7 +34,7 @@ def test_dist_make_tensor_call():
     rt_var = _make_var("rt")
     count = ir.ConstInt(1024, DataType.INT32, _span())
     call = ir.Call(op, [rt_var, count], _span())
-    assert call.op.name == "dist.make_tensor"
+    assert call.op.name == ir.get_op("dist.make_tensor").name
     assert len(call.args) == 2
 
 
@@ -44,7 +44,7 @@ def test_dist_tree_reduce_call():
     rt_var = _make_var("rt")
     leaves_var = _make_var("leaves")
     call = ir.Call(op, [rt_var, leaves_var], _span())
-    assert call.op.name == "dist.tree_reduce"
+    assert call.op.name == ir.get_op("dist.tree_reduce").name
     assert len(call.args) == 2
 
 
@@ -53,7 +53,7 @@ def test_dist_submit_worker_call():
     op = ir.Op("dist.submit_worker")
     rt_var = _make_var("rt")
     call = ir.Call(op, [rt_var], _span())
-    assert call.op.name == "dist.submit_worker"
+    assert call.op.name == ir.get_op("dist.submit_worker").name
 
 
 def test_dist_submit_orchestrator_call():
@@ -61,7 +61,7 @@ def test_dist_submit_orchestrator_call():
     op = ir.Op("dist.submit_orchestrator")
     rt_var = _make_var("rt")
     call = ir.Call(op, [rt_var], _span())
-    assert call.op.name == "dist.submit_orchestrator"
+    assert call.op.name == ir.get_op("dist.submit_orchestrator").name
 
 
 def test_dist_future_get_call():
@@ -69,7 +69,7 @@ def test_dist_future_get_call():
     op = ir.Op("dist.future_get")
     future_var = _make_var("future")
     call = ir.Call(op, [future_var], _span())
-    assert call.op.name == "dist.future_get"
+    assert call.op.name == ir.get_op("dist.future_get").name
     assert len(call.args) == 1
 
 

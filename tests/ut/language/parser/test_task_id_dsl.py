@@ -16,6 +16,9 @@ from pypto import ir
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import DataType
 
+_OP_SYSTEM_TASK_DUMMY = ir.get_op("system.task_dummy").name
+_OP_SYSTEM_TASK_INVALID = ir.get_op("system.task_invalid").name
+
 
 def _first_runtime_scope(stmt):
     if isinstance(stmt, ir.RuntimeScopeStmt):
@@ -74,7 +77,7 @@ class TestTaskIdNamespace:
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
         # The ``prev_tid = None`` assignment lowers to a system.task_invalid Call.
-        invalid_calls = [c for c in _calls_in(scope.body) if c.op.name == "system.task_invalid"]
+        invalid_calls = [c for c in _calls_in(scope.body) if c.op.name == _OP_SYSTEM_TASK_INVALID]
         assert len(invalid_calls) == 1
         assert isinstance(invalid_calls[0].type, ir.ScalarType)
         assert invalid_calls[0].type.dtype == DataType.TASK_ID
@@ -127,7 +130,7 @@ class TestTaskDummyParsing:
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == "system.task_dummy")
+        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == _OP_SYSTEM_TASK_DUMMY)
         attrs = dict(dummy_call.attrs)
         assert attrs["dummy_task"] is True
         edges = attrs["manual_dep_edges"]
@@ -160,7 +163,7 @@ class TestTaskDummyParsing:
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == "system.task_dummy")
+        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == _OP_SYSTEM_TASK_DUMMY)
         dummy_edges = dict(dummy_call.attrs)["manual_dep_edges"]
         assert len(dummy_edges) == 1
         assert isinstance(dummy_edges[0].type, ir.ScalarType)

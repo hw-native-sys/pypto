@@ -23,6 +23,10 @@ from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
+# Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
+# rather than silently dropping out of the membership test below.
+_LOAD_LIKE_OPS = frozenset({ir.get_op("tile.load").name, ir.get_op("tile.read").name})
+
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
@@ -4342,7 +4346,7 @@ class TestPipelineStageSeparation:
                 var_type = stmt.var.type
                 if isinstance(var_type, ir.TileType) and var_type.memref is not None:
                     val = stmt.value
-                    is_load = isinstance(val, ir.Call) and val.op.name in ("tile.load", "tile.read")
+                    is_load = isinstance(val, ir.Call) and val.op.name in _LOAD_LIKE_OPS
                     defs.append((is_load, var_type.memref.base_.name_hint))
                 super().visit_assign_stmt(stmt)
 

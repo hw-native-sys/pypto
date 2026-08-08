@@ -24,6 +24,25 @@ import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tensor
 
+_OP_TENSOR_CREATE = ir.get_op("tensor.create").name
+_OP_TENSOR_DIM = ir.get_op("tensor.dim").name
+_OP_TENSOR_EXPAND_CLONE = ir.get_op("tensor.expand_clone").name
+_OP_TENSOR_FMODS = ir.get_op("tensor.fmods").name
+_OP_TENSOR_GATHER = ir.get_op("tensor.gather").name
+_OP_TENSOR_GATHER_MASK = ir.get_op("tensor.gather_mask").name
+_OP_TENSOR_MAXIMUM = ir.get_op("tensor.maximum").name
+_OP_TENSOR_MINIMUM = ir.get_op("tensor.minimum").name
+_OP_TENSOR_READ = ir.get_op("tensor.read").name
+_OP_TENSOR_RESHAPE = ir.get_op("tensor.reshape").name
+_OP_TENSOR_RSQRT = ir.get_op("tensor.rsqrt").name
+_OP_TENSOR_SCATTER = ir.get_op("tensor.scatter").name
+_OP_TENSOR_SCATTER_MASK = ir.get_op("tensor.scatter_mask").name
+_OP_TENSOR_SCATTER_UPDATE = ir.get_op("tensor.scatter_update").name
+_OP_TENSOR_SET_VALIDSHAPE = ir.get_op("tensor.set_validshape").name
+_OP_TENSOR_SLICE = ir.get_op("tensor.slice").name
+_OP_TENSOR_TRANSPOSE = ir.get_op("tensor.transpose").name
+_OP_TENSOR_WRITE = ir.get_op("tensor.write").name
+
 
 def test_tensor_create():
     """Test tensor.create operation."""
@@ -31,7 +50,7 @@ def test_tensor_create():
     call = ir.op.tensor.create([4, 8], DataType.FP32)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.create"
+    assert call.op.name == _OP_TENSOR_CREATE
 
     # Check result type
     result_type = call.type
@@ -54,7 +73,7 @@ def test_tensor_slice():
     call = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.slice"
+    assert call.op.name == _OP_TENSOR_SLICE
 
     # Check result type
     result_type = call.type
@@ -81,7 +100,7 @@ def test_tensor_matmul():
     call = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP32)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.matmul"
+    assert call.op.name == ir.get_op("tensor.matmul").name
 
     # Check result type - should be [4, 16]
     result_type = call.type
@@ -132,7 +151,7 @@ def test_tensor_matmul_acc():
     call = ir.op.tensor.matmul_acc(acc, lhs, rhs)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.matmul_acc"
+    assert call.op.name == ir.get_op("tensor.matmul_acc").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -225,7 +244,7 @@ def test_tensor_row_max():
     call = ir.op.tensor.row_max(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_max"
+    assert call.op.name == ir.get_op("tensor.row_max").name
 
     # Check result type - should be [64, 1]
     result_type = call.type
@@ -248,7 +267,7 @@ def test_tensor_row_sum():
     call = ir.op.tensor.row_sum(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_sum"
+    assert call.op.name == ir.get_op("tensor.row_sum").name
 
     # Check result type - should be [64, 1]
     result_type = call.type
@@ -268,7 +287,7 @@ def test_tensor_col_sum():
     call = ir.op.tensor.col_sum(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_sum"
+    assert call.op.name == ir.get_op("tensor.col_sum").name
 
     # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
     result_type = call.type
@@ -289,7 +308,7 @@ def test_tensor_row_prod():
     call = ir.op.tensor.row_prod(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_prod"
+    assert call.op.name == ir.get_op("tensor.row_prod").name
 
     # Row reduction collapses the last axis (keepdim): [64, 128] -> [64, 1].
     result_type = call.type
@@ -312,7 +331,7 @@ def test_tensor_col_prod():
     call = ir.op.tensor.col_prod(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_prod"
+    assert call.op.name == ir.get_op("tensor.col_prod").name
 
     # Column reduction collapses axis=-2 (keepdim): [64, 128] -> [1, 128].
     result_type = call.type
@@ -499,7 +518,7 @@ def test_tensor_row_argmax():
     call = ir.op.tensor.row_argmax(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_argmax"
+    assert call.op.name == ir.get_op("tensor.row_argmax").name
 
     # Row reduction collapses the last axis (keepdim): [64, 128] -> [64, 1]; dtype -> int32.
     result_type = call.type
@@ -522,7 +541,7 @@ def test_tensor_row_argmin():
     call = ir.op.tensor.row_argmin(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_argmin"
+    assert call.op.name == ir.get_op("tensor.row_argmin").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.INT32
@@ -544,7 +563,7 @@ def test_tensor_col_argmax():
     call = ir.op.tensor.col_argmax(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_argmax"
+    assert call.op.name == ir.get_op("tensor.col_argmax").name
 
     # Column reduction collapses axis=-2 (keepdim): [64, 128] -> [1, 128]; dtype -> int32.
     result_type = call.type
@@ -567,7 +586,7 @@ def test_tensor_col_argmin():
     call = ir.op.tensor.col_argmin(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_argmin"
+    assert call.op.name == ir.get_op("tensor.col_argmin").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.INT32
@@ -590,7 +609,7 @@ def test_tensor_col_max():
     call = ir.op.tensor.col_max(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_max"
+    assert call.op.name == ir.get_op("tensor.col_max").name
 
     # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
     result_type = call.type
@@ -612,7 +631,7 @@ def test_tensor_col_min():
     call = ir.op.tensor.col_min(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_min"
+    assert call.op.name == ir.get_op("tensor.col_min").name
 
     # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
     result_type = call.type
@@ -635,7 +654,7 @@ def test_tensor_exp():
     call = ir.op.tensor.exp(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.exp"
+    assert call.op.name == ir.get_op("tensor.exp").name
 
     # Check result type - should preserve shape and dtype
     result_type = call.type
@@ -663,7 +682,7 @@ def test_tensor_log_contract_and_precision(dtype, high_precision):
     call = ir.op.tensor.log(tensor_var, high_precision=high_precision)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.log"
+    assert call.op.name == ir.get_op("tensor.log").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == dtype
@@ -702,7 +721,7 @@ def test_tensor_sin_creates_call():
     call = ir.op.tensor.sin(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.sin"
+    assert call.op.name == ir.get_op("tensor.sin").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -721,7 +740,7 @@ def test_tensor_cos_creates_call():
     call = ir.op.tensor.cos(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.cos"
+    assert call.op.name == ir.get_op("tensor.cos").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -781,7 +800,7 @@ def test_tensor_neg():
     call = ir.op.tensor.neg(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.neg"
+    assert call.op.name == ir.get_op("tensor.neg").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -818,7 +837,7 @@ def test_tensor_abs():
     call = ir.op.tensor.abs(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.abs"
+    assert call.op.name == ir.get_op("tensor.abs").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.BF16
@@ -854,7 +873,7 @@ def test_tensor_recip():
     call = ir.op.tensor.recip(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.recip"
+    assert call.op.name == ir.get_op("tensor.recip").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -886,7 +905,7 @@ def test_tensor_sqrt():
     call = ir.op.tensor.sqrt(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.sqrt"
+    assert call.op.name == ir.get_op("tensor.sqrt").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -928,7 +947,7 @@ def test_tensor_rsqrt():
     call = ir.op.tensor.rsqrt(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.rsqrt"
+    assert call.op.name == _OP_TENSOR_RSQRT
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -969,7 +988,7 @@ def test_tensor_rsqrt_high_precision_kwarg():
 
     call = ir.op.tensor.rsqrt(tensor_var, high_precision=True)
 
-    assert call.op.name == "tensor.rsqrt"
+    assert call.op.name == _OP_TENSOR_RSQRT
     kwargs = dict(call.kwargs)
     assert kwargs.get("high_precision") is True
 
@@ -988,7 +1007,7 @@ def test_tensor_cast():
     call = ir.op.tensor.cast(tensor_var, DataType.FP32)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.cast"
+    assert call.op.name == ir.get_op("tensor.cast").name
 
     # Check result type - should preserve shape but change dtype
     result_type = call.type
@@ -1031,7 +1050,7 @@ def test_tensor_assemble():
     call = ir.op.tensor.assemble(target, source, [0, 0])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.assemble"
+    assert call.op.name == ir.get_op("tensor.assemble").name
 
     # Check result type - should be target type
     result_type = call.type
@@ -1053,7 +1072,7 @@ def test_tensor_row_expand_mul():
     call = ir.op.tensor.row_expand_mul(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_mul"
+    assert call.op.name == ir.get_op("tensor.row_expand_mul").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -1085,7 +1104,7 @@ def test_tensor_row_expand_max():
     tensor_var, row_var = _row_expand_pair()
     call = ir.op.tensor.row_expand_max(tensor_var, row_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_max"
+    assert call.op.name == ir.get_op("tensor.row_expand_max").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1095,7 +1114,7 @@ def test_tensor_row_expand_min():
     tensor_var, row_var = _row_expand_pair()
     call = ir.op.tensor.row_expand_min(tensor_var, row_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_min"
+    assert call.op.name == ir.get_op("tensor.row_expand_min").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1105,7 +1124,7 @@ def test_tensor_row_expand_expdif():
     tensor_var, row_var = _row_expand_pair()
     call = ir.op.tensor.row_expand_expdif(tensor_var, row_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_expdif"
+    assert call.op.name == ir.get_op("tensor.row_expand_expdif").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1115,7 +1134,7 @@ def test_tensor_col_expand_max():
     tensor_var, col_var = _col_expand_pair()
     call = ir.op.tensor.col_expand_max(tensor_var, col_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_max"
+    assert call.op.name == ir.get_op("tensor.col_expand_max").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1125,7 +1144,7 @@ def test_tensor_col_expand_min():
     tensor_var, col_var = _col_expand_pair()
     call = ir.op.tensor.col_expand_min(tensor_var, col_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_min"
+    assert call.op.name == ir.get_op("tensor.col_expand_min").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1135,7 +1154,7 @@ def test_tensor_col_expand_expdif():
     tensor_var, col_var = _col_expand_pair()
     call = ir.op.tensor.col_expand_expdif(tensor_var, col_var)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_expdif"
+    assert call.op.name == ir.get_op("tensor.col_expand_expdif").name
     assert isinstance(call.type, ir.TensorType)
     assert len(call.type.shape) == 2
 
@@ -1189,7 +1208,7 @@ def test_tensor_row_expand_div():
     call = ir.op.tensor.row_expand_div(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_div"
+    assert call.op.name == ir.get_op("tensor.row_expand_div").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -1245,7 +1264,7 @@ def test_tensor_col_expand_mul():
     call = ir.op.tensor.col_expand_mul(tensor_var, col_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_mul"
+    assert call.op.name == ir.get_op("tensor.col_expand_mul").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -1304,7 +1323,7 @@ def test_tensor_maximum():
     call = ir.op.tensor.maximum(var_a, var_b)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.maximum"
+    assert call.op.name == _OP_TENSOR_MAXIMUM
 
 
 def test_tensor_maximum_scalar():
@@ -1315,7 +1334,7 @@ def test_tensor_maximum_scalar():
     var_a = ir.Var("a", type_a, span)
 
     call = ir.op.tensor.maximum(var_a, 0.5)
-    assert call.op.name == "tensor.maximum"
+    assert call.op.name == _OP_TENSOR_MAXIMUM
 
 
 def test_tensor_minimum():
@@ -1327,10 +1346,10 @@ def test_tensor_minimum():
     var_b = ir.Var("b", type_a, span)
 
     call_tt = ir.op.tensor.minimum(var_a, var_b)
-    assert call_tt.op.name == "tensor.minimum"
+    assert call_tt.op.name == _OP_TENSOR_MINIMUM
 
     call_ts = ir.op.tensor.minimum(var_a, 1.0)
-    assert call_ts.op.name == "tensor.minimum"
+    assert call_ts.op.name == _OP_TENSOR_MINIMUM
 
 
 def test_tensor_mul():
@@ -1349,7 +1368,7 @@ def test_tensor_mul():
     call = ir.op.tensor.mul(tensor_var, scalar_tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.mul"
+    assert call.op.name == ir.get_op("tensor.mul").name
 
 
 def test_tensor_add():
@@ -1366,7 +1385,7 @@ def test_tensor_add():
     call = ir.op.tensor.add(var_a, var_b)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.add"
+    assert call.op.name == ir.get_op("tensor.add").name
 
 
 def test_tensor_sub():
@@ -1383,7 +1402,7 @@ def test_tensor_sub():
     call = ir.op.tensor.sub(var_a, var_b)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.sub"
+    assert call.op.name == ir.get_op("tensor.sub").name
 
 
 def test_tensor_div_precision_kwarg_and_scalar_dispatch():
@@ -1399,7 +1418,7 @@ def test_tensor_div_precision_kwarg_and_scalar_dispatch():
 
     assert dict(default_call.kwargs) == {}
     assert dict(high_precision_call.kwargs) == {"high_precision": True}
-    assert scalar_call.op.name == "tensor.divs"
+    assert scalar_call.op.name == ir.get_op("tensor.divs").name
     assert dict(scalar_call.kwargs) == {}
     with pytest.raises(ValueError, match=r"requires a Tensor rhs"):
         ir.op.tensor.div(lhs, 2.0, high_precision=True)
@@ -1425,7 +1444,7 @@ def test_tensor_div_accepts_ptoas_dtype_union(dtype):
     call = tensor.div(lhs, rhs)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.div"
+    assert call.op.name == ir.get_op("tensor.div").name
     assert isinstance(call.type, ir.TensorType)
     assert call.type.dtype == dtype
 
@@ -1525,17 +1544,17 @@ def test_tensor_fmod():
     # tensor-tensor -> tensor.fmod
     call = ir.op.tensor.fmod(var_a, var_b)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.fmod"
+    assert call.op.name == ir.get_op("tensor.fmod").name
 
     # tensor-scalar via fmod auto-dispatch -> tensor.fmods
     call_scalar = ir.op.tensor.fmod(var_a, 3.0)
     assert isinstance(call_scalar, ir.Call)
-    assert call_scalar.op.name == "tensor.fmods"
+    assert call_scalar.op.name == _OP_TENSOR_FMODS
 
     # explicit fmods -> tensor.fmods
     call_fmods = ir.op.tensor.fmods(var_a, 3.0)
     assert isinstance(call_fmods, ir.Call)
-    assert call_fmods.op.name == "tensor.fmods"
+    assert call_fmods.op.name == _OP_TENSOR_FMODS
 
 
 def test_const_float():
@@ -1577,7 +1596,7 @@ def test_tensor_read():
     call = ir.op.tensor.read(tensor_var, [2, 3])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.read"
+    assert call.op.name == _OP_TENSOR_READ
 
     # Result should be ScalarType with tensor's element dtype
     result_type = call.type
@@ -1599,7 +1618,7 @@ def test_tensor_read_with_expr_indices():
     call = ir.op.tensor.read(tensor_var, [idx_var])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.read"
+    assert call.op.name == _OP_TENSOR_READ
     result_type = call.type
     assert isinstance(result_type, ir.ScalarType)
     assert result_type.dtype == DataType.FP16
@@ -1620,7 +1639,7 @@ def test_tensor_dim():
     call = ir.op.tensor.dim(tensor_var, 1)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.dim"
+    assert call.op.name == _OP_TENSOR_DIM
 
     # Result should be ScalarType(INDEX) — tensor.dim returns machine-word index type
     result_type = call.type
@@ -1642,7 +1661,7 @@ def test_tensor_dim_negative_axis():
     call = ir.op.tensor.dim(tensor_var, -1)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.dim"
+    assert call.op.name == _OP_TENSOR_DIM
     result_type = call.type
     assert isinstance(result_type, ir.ScalarType)
     assert result_type.dtype == DataType.INDEX
@@ -1657,7 +1676,7 @@ def test_tensor_create_dynamic_shape():
     call = ir.op.tensor.create([dim_n, 128], DataType.FP32)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.create"
+    assert call.op.name == _OP_TENSOR_CREATE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -1709,7 +1728,7 @@ def test_tensor_reshape():
     call = ir.op.tensor.reshape(tensor_var, [32])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.reshape"
+    assert call.op.name == _OP_TENSOR_RESHAPE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -1737,7 +1756,7 @@ def test_tensor_reshape_dynamic():
     call = ir.op.tensor.reshape(tensor_var, [dim_k])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.reshape"
+    assert call.op.name == _OP_TENSOR_RESHAPE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
 
@@ -1926,7 +1945,7 @@ def test_tensor_transpose():
     call = ir.op.tensor.transpose(tensor_var, 0, 2)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.transpose"
+    assert call.op.name == _OP_TENSOR_TRANSPOSE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -1948,7 +1967,7 @@ def test_tensor_transpose_negative_axis():
     call = ir.op.tensor.transpose(tensor_var, -2, -1)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.transpose"
+    assert call.op.name == _OP_TENSOR_TRANSPOSE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
 
@@ -2164,7 +2183,7 @@ def test_tensor_slice_with_valid_shape():
     call = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[4, 8])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.slice"
+    assert call.op.name == _OP_TENSOR_SLICE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -2181,7 +2200,7 @@ def test_tensor_slice_drop_dims_rank_reduces():
 
     call = ir.op.tensor.slice(tensor_var, [1, 1, 64, 64], [3, 5, 0, 0], drop_dims=[0, 1])
 
-    assert call.op.name == "tensor.slice"
+    assert call.op.name == _OP_TENSOR_SLICE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 64]
@@ -2264,7 +2283,7 @@ def test_tensor_slice_with_pad_value():
     call = tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.zero)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.slice"
+    assert call.op.name == _OP_TENSOR_SLICE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.tensor_view is not None
@@ -2659,7 +2678,7 @@ def test_tensor_fillpad_clears_valid_shape():
     call = ir.op.tensor.fillpad(tensor_var, pad_value=ir.PadValue.min)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.fillpad"
+    assert call.op.name == ir.get_op("tensor.fillpad").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -2682,7 +2701,7 @@ def test_tensor_fillpad_expand():
     call = ir.op.tensor.fillpad_expand(tensor_var, [64, 128], pad_value=ir.PadValue.zero)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.fillpad_expand"
+    assert call.op.name == ir.get_op("tensor.fillpad_expand").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -2718,7 +2737,7 @@ def test_tensor_set_validshape():
     call = ir.op.tensor.set_validshape(tensor_var, 16, 24)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.set_validshape"
+    assert call.op.name == _OP_TENSOR_SET_VALIDSHAPE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -2738,7 +2757,7 @@ def test_tensor_set_validshape_dynamic():
     call = ir.op.tensor.set_validshape(tensor_var, vr, vc)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.set_validshape"
+    assert call.op.name == _OP_TENSOR_SET_VALIDSHAPE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.tensor_view is not None
@@ -2833,7 +2852,7 @@ def test_tensor_reshape_with_valid_shape():
     call = ir.op.tensor.reshape(tensor_var, [32], valid_shape=[16])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.reshape"
+    assert call.op.name == _OP_TENSOR_RESHAPE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3018,7 +3037,7 @@ def test_tensor_transpose_with_valid_shape():
     call = ir.op.tensor.transpose(tensor_var, 0, 1, valid_shape=[16, 8])
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.transpose"
+    assert call.op.name == _OP_TENSOR_TRANSPOSE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3046,7 +3065,7 @@ class TestTensorScalarMemoryOps:
         call = tensor.read(tensor_var, [idx])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.read"
+        assert call.op.name == _OP_TENSOR_READ
         assert isinstance(call.type, ir.ScalarType)
         assert call.type.dtype == DataType.FP32
 
@@ -3062,7 +3081,7 @@ class TestTensorScalarMemoryOps:
 
         call = tensor.read(tensor_var, [i, j])
 
-        assert call.op.name == "tensor.read"
+        assert call.op.name == _OP_TENSOR_READ
         assert isinstance(call.type, ir.ScalarType)
         assert call.type.dtype == DataType.FP32
 
@@ -3078,7 +3097,7 @@ class TestTensorScalarMemoryOps:
         call = tensor.write(tensor_var, [idx], value)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.write"
+        assert call.op.name == _OP_TENSOR_WRITE
 
     def test_write_2d(self):
         """Test tensor.write with 2D indices."""
@@ -3093,7 +3112,7 @@ class TestTensorScalarMemoryOps:
 
         call = tensor.write(tensor_var, [i, j], value)
 
-        assert call.op.name == "tensor.write"
+        assert call.op.name == _OP_TENSOR_WRITE
 
     def test_read_type_mismatch(self):
         """Test tensor.read with wrong argument types raises error."""
@@ -3124,7 +3143,7 @@ def test_tensor_row_min(dtype):
     call = ir.op.tensor.row_min(tensor_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_min"
+    assert call.op.name == ir.get_op("tensor.row_min").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == dtype
@@ -3160,7 +3179,7 @@ def test_tensor_row_expand():
     call = ir.op.tensor.row_expand(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand"
+    assert call.op.name == ir.get_op("tensor.row_expand").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3201,7 +3220,7 @@ def test_tensor_row_expand_add_accepts_ptoas_dtype_union(dtype):
     call = tensor.row_expand_add(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_add"
+    assert call.op.name == ir.get_op("tensor.row_expand_add").name
     assert isinstance(call.type, ir.TensorType)
     assert call.type.dtype == dtype
     assert [dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)] == [64, 128]
@@ -3252,7 +3271,7 @@ def test_tensor_row_expand_sub():
     call = ir.op.tensor.row_expand_sub(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.row_expand_sub"
+    assert call.op.name == ir.get_op("tensor.row_expand_sub").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3313,7 +3332,7 @@ def test_tensor_col_expand():
     call = ir.op.tensor.col_expand(tensor_var, col_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand"
+    assert call.op.name == ir.get_op("tensor.col_expand").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3374,7 +3393,7 @@ def test_tensor_col_expand_div():
     call = ir.op.tensor.col_expand_div(tensor_var, col_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_div"
+    assert call.op.name == ir.get_op("tensor.col_expand_div").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3420,7 +3439,7 @@ def test_tensor_col_expand_sub():
     call = ir.op.tensor.col_expand_sub(tensor_var, col_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_sub"
+    assert call.op.name == ir.get_op("tensor.col_expand_sub").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3466,7 +3485,7 @@ def test_tensor_col_expand_add():
     call = ir.op.tensor.col_expand_add(tensor_var, col_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.col_expand_add"
+    assert call.op.name == ir.get_op("tensor.col_expand_add").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3526,7 +3545,7 @@ def test_tensor_expands():
     call = ir.op.tensor.expands(tensor_var, scalar_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.expands"
+    assert call.op.name == ir.get_op("tensor.expands").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3555,7 +3574,7 @@ def test_tensor_expand_clone_dim0():
     call = ir.op.tensor.expand_clone(input_var, target_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.expand_clone"
+    assert call.op.name == _OP_TENSOR_EXPAND_CLONE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3582,7 +3601,7 @@ def test_tensor_expand_clone_dim1():
     call = ir.op.tensor.expand_clone(input_var, target_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.expand_clone"
+    assert call.op.name == _OP_TENSOR_EXPAND_CLONE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3609,7 +3628,7 @@ def test_tensor_expand_clone_dim2():
     call = ir.op.tensor.expand_clone(input_var, target_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.expand_clone"
+    assert call.op.name == _OP_TENSOR_EXPAND_CLONE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3632,7 +3651,7 @@ def test_tensor_concat():
     call = tensor.concat(t0_var, t1_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.concat"
+    assert call.op.name == ir.get_op("tensor.concat").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -3691,7 +3710,7 @@ def test_tensor_scatter_update_2d():
     call = ir.op.tensor.scatter_update(input_var, -2, index_var, src_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.scatter_update"
+    assert call.op.name == _OP_TENSOR_SCATTER_UPDATE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
@@ -3720,7 +3739,7 @@ def test_tensor_scatter_update_4d():
     call = ir.op.tensor.scatter_update(input_var, -2, index_var, src_var)
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.scatter_update"
+    assert call.op.name == _OP_TENSOR_SCATTER_UPDATE
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.BF16
@@ -3944,7 +3963,7 @@ def test_tensor_sort32():
 
     call = ir.op.tensor.sort32(src, idx)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.sort32"
+    assert call.op.name == ir.get_op("tensor.sort32").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -3975,7 +3994,7 @@ def test_tensor_mrgsort_format1():
 
     call = ir.op.tensor.mrgsort(src, block_len=64)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.mrgsort_format1"
+    assert call.op.name == ir.get_op("tensor.mrgsort_format1").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -4006,7 +4025,7 @@ def test_tensor_mrgsort_format2():
 
     call = ir.op.tensor.mrgsort(*srcs)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.mrgsort_format2"
+    assert call.op.name == ir.get_op("tensor.mrgsort_format2").name
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
@@ -4063,7 +4082,7 @@ def test_tensor_gather_basic():
     inp, idx = _make_gather_inputs()
     call = ir.op.tensor.gather(inp, dim=-1, index=idx)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.gather"
+    assert call.op.name == _OP_TENSOR_GATHER
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -4076,7 +4095,7 @@ def test_tensor_gather_dim_last_axis_positive():
     """dim=rank-1 is accepted as an alias for dim=-1."""
     inp, idx = _make_gather_inputs()
     call = ir.op.tensor.gather(inp, dim=1, index=idx)
-    assert call.op.name == "tensor.gather"
+    assert call.op.name == _OP_TENSOR_GATHER
 
 
 def test_tensor_gather_rejects_bad_dim():
@@ -4090,7 +4109,7 @@ def test_tensor_gather_accepts_int16_index_with_16bit_input():
     """INT16 index is accepted when the input is a 16-bit dtype (FP16/INT16)."""
     inp, idx = _make_gather_inputs(src_dtype=DataType.FP16, idx_dtype=DataType.INT16)
     call = ir.op.tensor.gather(inp, dim=-1, index=idx)
-    assert call.op.name == "tensor.gather"
+    assert call.op.name == _OP_TENSOR_GATHER
     assert isinstance(call.type, ir.TensorType)
     assert call.type.dtype == DataType.FP16
 
@@ -4153,7 +4172,7 @@ def test_tensor_gather_mask_p0101_halves_last_dim():
     inp = _make_gather_mask_input(rows=8, cols=64)
     call = ir.op.tensor.gather(inp, mask_pattern=1)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.gather_mask"
+    assert call.op.name == _OP_TENSOR_GATHER_MASK
     rt = call.type
     assert isinstance(rt, ir.TensorType)
     assert rt.dtype == DataType.FP32
@@ -4184,7 +4203,7 @@ def test_tensor_gather_mask_output_dtype_reinterpret():
     """output_dtype reinterprets bits to a same-bit-width dtype."""
     inp = _make_gather_mask_input(rows=2, cols=32, dtype=DataType.FP32)
     call = ir.op.tensor.gather(inp, mask_pattern=2, output_dtype=DataType.UINT32)
-    assert call.op.name == "tensor.gather_mask"
+    assert call.op.name == _OP_TENSOR_GATHER_MASK
     rt = call.type
     assert isinstance(rt, ir.TensorType)
     assert rt.dtype == DataType.UINT32
@@ -4242,7 +4261,7 @@ def test_tensor_scatter_basic():
     inp, idx, src = _make_scatter_inputs()
     call = ir.op.tensor.scatter(inp, dim=-1, index=idx, src=src)
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.scatter"
+    assert call.op.name == _OP_TENSOR_SCATTER
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
@@ -4264,7 +4283,7 @@ def test_tensor_scatter_positive_dim():
     """dim=1 is accepted as an alias for dim=-1 (rank-2 last axis)."""
     inp, idx, src = _make_scatter_inputs()
     call = ir.op.tensor.scatter(inp, dim=1, index=idx, src=src)
-    assert call.op.name == "tensor.scatter"
+    assert call.op.name == _OP_TENSOR_SCATTER
 
 
 def test_tensor_scatter_rejects_unsupported_dim():
@@ -4314,7 +4333,7 @@ def test_tensor_scatter_mask_p0101_doubles_last_dim():
     inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
     dst = ir.Var("dst", ir.TensorType([R, C2], DataType.FP32), span)
     call = ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
-    assert call.op.name == "tensor.scatter_mask"
+    assert call.op.name == _OP_TENSOR_SCATTER_MASK
     rt = call.type
     assert isinstance(rt, ir.TensorType)
     assert rt.dtype == DataType.FP32
@@ -4328,7 +4347,7 @@ def test_tensor_scatter_mask_p1111_keeps_last_dim():
     inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
     dst = ir.Var("dst", ir.TensorType([R, C], DataType.FP32), span)
     call = ir.op.tensor.scatter(inp, mask_pattern=7, dst=dst)
-    assert call.op.name == "tensor.scatter_mask"
+    assert call.op.name == _OP_TENSOR_SCATTER_MASK
 
 
 def test_tensor_scatter_mask_rejects_bad_pattern():
@@ -4758,7 +4777,7 @@ def test_tensor_not():
     call = ir.op.tensor.not_(_bitwise_tensor_var([64, 128], dtype=DataType.INT16))
 
     assert isinstance(call, ir.Call)
-    assert call.op.name == "tensor.not"
+    assert call.op.name == ir.get_op("tensor.not").name
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.INT16

@@ -56,6 +56,13 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-op-name-literals
+          name: check-op-name-literals
+          entry: python tests/lint/check_op_name_literals.py
+          language: python
+          language_version: python3
+          pass_filenames: false
+
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:

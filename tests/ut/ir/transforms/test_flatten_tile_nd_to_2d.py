@@ -20,6 +20,20 @@ from pypto.ir import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 
+_OP_TENSOR_VIEW = ir.get_op("tensor.view").name
+_OP_TILE_CREATE = ir.get_op("tile.create").name
+_OP_TILE_LOAD = ir.get_op("tile.load").name
+_OP_TILE_MOVE = ir.get_op("tile.move").name
+_OP_TILE_SLICE = ir.get_op("tile.slice").name
+_OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
+_OP_TILE_ASSEMBLE = ir.get_op("tile.assemble").name
+_OP_TILE_BATCH_MATMUL = ir.get_op("tile.batch_matmul").name
+_OP_TILE_BATCH_MATMUL_ACC = ir.get_op("tile.batch_matmul_acc").name
+_OP_TILE_MATMUL = ir.get_op("tile.matmul").name
+_OP_TILE_MATMUL_ACC = ir.get_op("tile.matmul_acc").name
+_OP_TILE_RESHAPE = ir.get_op("tile.reshape").name
+_OP_TILE_STORE = ir.get_op("tile.store").name
+
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
@@ -548,7 +562,7 @@ class TestFlattenTileNdTo2DDynamicValid:
         tile_calls = _tile_calls(after_func.body)
         assert tile_calls, "expected flattened tile ops in the rewritten body"
         assert all(len(cast(ir.TileType, call.type).shape) == 2 for call in tile_calls)
-        loads = [c for c in tile_calls if c.op.name == "tile.load"]
+        loads = [c for c in tile_calls if c.op.name == _OP_TILE_LOAD]
         assert loads, "expected a tile.load in the flattened body"
         load_type = cast(ir.TileType, loads[0].type)
         # Physical shape flattened to 2D and is fully static.
@@ -1400,12 +1414,12 @@ class TestFlattenTileNdTo2DBatchMatmul:
         func = self._flattened_incore(Before)
         calls = self._top_level_calls(func)
         assert [call.op.name for call in calls[:4]] == [
-            "tile.load",
-            "tile.load",
-            "tile.slice",
-            "tile.slice",
+            _OP_TILE_LOAD,
+            _OP_TILE_LOAD,
+            _OP_TILE_SLICE,
+            _OP_TILE_SLICE,
         ]
-        load_calls = [call for call in calls if call.op.name == "tile.load"]
+        load_calls = [call for call in calls if call.op.name == _OP_TILE_LOAD]
         assert len(load_calls) == 2
         assert [cast(ir.TileType, call.type).memory_space for call in load_calls] == [
             ir.MemorySpace.Vec,
@@ -1417,7 +1431,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
             [2, 16, 128],
             [2, 128, 64],
         ]
-        slice_calls = [call for call in calls if call.op.name == "tile.slice"]
+        slice_calls = [call for call in calls if call.op.name == _OP_TILE_SLICE]
         assert [cast(ir.TileType, call.type).shape for call in slice_calls[:2]] == [[16, 128], [128, 64]]
 
     def test_batch_matmul_broadcasts_and_unrolls(self):
@@ -1783,8 +1797,8 @@ class TestFlattenTileNdTo2DBatchMatmul:
                 "out_shape": [2, 16, 64],
                 "lhs_transpose": False,
                 "rhs_transpose": False,
-                "expected_op_seq": ["tensor.view", "tile.load", "tensor.view", "tile.load"]
-                + ["tile.slice", "tile.slice", "tile.matmul", "tile.store"] * 2,
+                "expected_op_seq": [_OP_TENSOR_VIEW, _OP_TILE_LOAD, _OP_TENSOR_VIEW, _OP_TILE_LOAD]
+                + [_OP_TILE_SLICE, _OP_TILE_SLICE, _OP_TILE_MATMUL, _OP_TILE_STORE] * 2,
                 "expected_lhs_load_offsets": [[0, 0]],
                 "expected_rhs_load_offsets": [[0, 0]],
                 "expected_lhs_load_shapes": [[32, 128]],
@@ -1807,14 +1821,14 @@ class TestFlattenTileNdTo2DBatchMatmul:
                 "lhs_transpose": False,
                 "rhs_transpose": False,
                 "expected_op_seq": [
-                    "tensor.view",
-                    "tile.load",
-                    "tensor.view",
-                    "tile.load",
-                    "tile.slice",
-                    "tile.slice",
-                    "tile.matmul",
-                    "tile.store",
+                    _OP_TENSOR_VIEW,
+                    _OP_TILE_LOAD,
+                    _OP_TENSOR_VIEW,
+                    _OP_TILE_LOAD,
+                    _OP_TILE_SLICE,
+                    _OP_TILE_SLICE,
+                    _OP_TILE_MATMUL,
+                    _OP_TILE_STORE,
                 ],
                 "expected_lhs_load_offsets": [[0, 0]],
                 "expected_rhs_load_offsets": [[0, 0]],
@@ -1925,8 +1939,8 @@ class TestFlattenTileNdTo2DBatchMatmul:
         # recovered by row slices of those whole loads. The two whole loads
         # appear first (lhs then rhs), then the per-batch slices alternate
         # lhs, rhs, lhs, rhs, ...
-        load_calls = [call for call in calls if call.op.name == "tile.load"]
-        slice_calls = [call for call in calls if call.op.name == "tile.slice"]
+        load_calls = [call for call in calls if call.op.name == _OP_TILE_LOAD]
+        slice_calls = [call for call in calls if call.op.name == _OP_TILE_SLICE]
         lhs_load, rhs_load = load_calls[0], load_calls[1]
         actual_lhs_load_offsets = [self._tuple_const_values(lhs_load.args[1])]
         actual_rhs_load_offsets = [self._tuple_const_values(rhs_load.args[1])]
@@ -1951,7 +1965,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
         assert actual_lhs_slice_shapes == case["expected_lhs_slice_shapes"]
         assert actual_rhs_slice_shapes == case["expected_rhs_slice_shapes"]
 
-        store_calls = [call for call in calls if call.op.name == "tile.store"]
+        store_calls = [call for call in calls if call.op.name == ir.get_op("tile.store").name]
         assert [self._tuple_const_values(call.args[1]) for call in store_calls] == case[
             "expected_store_offsets"
         ]
@@ -2117,16 +2131,16 @@ class TestFlattenTileNdTo2DBatchMatmul:
         # load and are sliced once at [0, 0] before the matmul + store. No
         # `tile.reshape` survives.
         assert op_names == [
-            "tensor.view",
-            "tile.load",
-            "tensor.view",
-            "tile.load",
-            "tile.slice",
-            "tile.slice",
-            "tile.matmul",
-            "tile.store",
+            _OP_TENSOR_VIEW,
+            _OP_TILE_LOAD,
+            _OP_TENSOR_VIEW,
+            _OP_TILE_LOAD,
+            _OP_TILE_SLICE,
+            _OP_TILE_SLICE,
+            _OP_TILE_MATMUL,
+            _OP_TILE_STORE,
         ]
-        assert "tile.reshape" not in op_names
+        assert _OP_TILE_RESHAPE not in op_names
 
     def test_rank3_mat_load_under_if_preserves_explicit_tile_view(self):
         """Regression for #1540: a rank>2 ``tile.load`` whose downstream
@@ -2201,7 +2215,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
             for stmt in cast(ir.SeqStmts, after_func.body).stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tile.load"
+            and stmt.value.op.name == _OP_TILE_LOAD
             and cast(ir.TileType, stmt.value.type).get_effective_tile_view().slayout
             == ir.TileLayout.col_major
         ]
@@ -2288,7 +2302,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tile.load"
+            and stmt.value.op.name == _OP_TILE_LOAD
         )
         actual_type = cast(ir.TileType, flat_load.value.type)
 
@@ -2445,22 +2459,22 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         names = [c.op.name for c in calls]
 
         # Both batch ops are fully unrolled.
-        assert "tile.batch_matmul" not in names
-        assert "tile.batch_matmul_acc" not in names
+        assert _OP_TILE_BATCH_MATMUL not in names
+        assert _OP_TILE_BATCH_MATMUL_ACC not in names
 
         # Two batches × {matmul, matmul_acc} = 2 + 2.
-        assert names.count("tile.matmul") == 2
-        assert names.count("tile.matmul_acc") == 2
+        assert names.count(_OP_TILE_MATMUL) == 2
+        assert names.count(_OP_TILE_MATMUL_ACC) == 2
 
         # General path still uses slice/assemble around per-batch matmul_acc.
-        assert "tile.slice" in names
-        assert "tile.assemble" in names
+        assert _OP_TILE_SLICE in names
+        assert _OP_TILE_ASSEMBLE in names
 
         # Core invariant (issue #1235): LowerBatchMatmulAcc no longer emits any
         # tile.move targeting Acc. The remaining moves (target=Vec) come from
         # LowerBatchMatmul staging per-batch matmul results, not from the
         # accumulator round-trip path.
-        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == "tile.move"]
+        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == _OP_TILE_MOVE]
         assert pl.MemorySpace.Acc not in move_targets, (
             f"FlattenTileNdTo2D must not emit tile.move(target_memory=Acc) on "
             f"the batch_matmul_acc accumulator — that belongs to "
@@ -2486,14 +2500,14 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         names = [c.op.name for c in calls]
 
         # Sanity: batch ops still gone, slice/assemble preserved.
-        assert "tile.batch_matmul" not in names
-        assert "tile.batch_matmul_acc" not in names
-        assert "tile.slice" in names
-        assert "tile.assemble" in names
+        assert _OP_TILE_BATCH_MATMUL not in names
+        assert _OP_TILE_BATCH_MATMUL_ACC not in names
+        assert _OP_TILE_SLICE in names
+        assert _OP_TILE_ASSEMBLE in names
 
         # InferTileMemorySpace must have inserted at least one tile.move to Acc
         # to satisfy tile.matmul_acc's input_constraints[0] = {Acc}.
-        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == "tile.move"]
+        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == _OP_TILE_MOVE]
         assert pl.MemorySpace.Acc in move_targets, (
             f"InferTileMemorySpace should insert a Vec→Acc move on matmul_acc's "
             f"acc input. Got move_targets={move_targets}"
@@ -2532,13 +2546,13 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         names = [c.op.name for c in calls]
 
         # batch_matmul_acc was unrolled into a single 2D matmul_acc (batch=1 fast path).
-        assert "tile.batch_matmul_acc" not in names
-        assert names.count("tile.matmul_acc") == 1
+        assert _OP_TILE_BATCH_MATMUL_ACC not in names
+        assert names.count(_OP_TILE_MATMUL_ACC) == 1
 
         # Core invariant: no Vec/Acc round-trip emitted by FlattenTileNdTo2D.
         # This is what previously triggered "cross-core move destination must
         # be Vec, Mat, Left, or Right, got Acc" in mixed CUBE/VECTOR kernels.
-        assert "tile.move" not in names, (
+        assert _OP_TILE_MOVE not in names, (
             f"FlattenTileNdTo2D must not emit tile.move around the singleton "
             f"batch matmul_acc accumulator. Got call sequence: {names}"
         )
@@ -2584,7 +2598,7 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
         ]
-        creates = [c for c in top_level if c.op.name == "tile.create"]
+        creates = [c for c in top_level if c.op.name == _OP_TILE_CREATE]
         assert len(creates) == 1, f"expected exactly one tile.create, got {len(creates)}"
         assert creates[0].kwargs.get("target_memory") == pl.MemorySpace.Acc, (
             f"InferTileMemorySpace should back-propagate the matmul_acc Acc "
@@ -2599,7 +2613,7 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         # lhs/rhs operands to satisfy tile.matmul_acc's input_constraints[1,2];
         # those are unrelated to issue #1235.
         all_calls = self._collect_calls_recursive(fn.body)
-        all_move_targets = [c.kwargs.get("target_memory") for c in all_calls if c.op.name == "tile.move"]
+        all_move_targets = [c.kwargs.get("target_memory") for c in all_calls if c.op.name == _OP_TILE_MOVE]
         assert pl.MemorySpace.Acc not in all_move_targets, (
             f"the dummy create accumulator chain must not require any Vec→Acc "
             f"move after flatten+infer (back-propagation should land the create "
@@ -2650,8 +2664,8 @@ class TestNdTensorMatmulConversion:
             if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
                 names.append(stmt.value.op.name)
         # ND tensor.matmul should have become tile.batch_matmul (not tile.matmul).
-        assert "tile.batch_matmul" in names
-        assert "tile.matmul" not in names
+        assert _OP_TILE_BATCH_MATMUL in names
+        assert _OP_TILE_MATMUL not in names
 
     def test_nd_tensor_matmul_acc_dispatch_and_flatten(self):
         """tensor.matmul_acc with 2D × 3D operand emits tile.batch_matmul_acc, then flattens.
@@ -2706,20 +2720,20 @@ class TestNdTensorMatmulConversion:
 
         # After conversion: ND ops dispatch to the batch variants.
         names_convert = collect_names(after_convert)
-        assert "tile.batch_matmul" in names_convert
-        assert "tile.batch_matmul_acc" in names_convert
-        assert "tile.matmul" not in names_convert
-        assert "tile.matmul_acc" not in names_convert
+        assert _OP_TILE_BATCH_MATMUL in names_convert
+        assert _OP_TILE_BATCH_MATMUL_ACC in names_convert
+        assert _OP_TILE_MATMUL not in names_convert
+        assert _OP_TILE_MATMUL_ACC not in names_convert
 
         # After flatten: batch ops disappear; one per-batch tile.matmul (from
         # batch_matmul) and one per-batch tile.matmul_acc (from batch_matmul_acc)
         # remain (batch=1 fast path).
         after_flatten = passes.flatten_tile_nd_to_2d()(after_convert)
         names_flatten = collect_names(after_flatten)
-        assert "tile.batch_matmul" not in names_flatten
-        assert "tile.batch_matmul_acc" not in names_flatten
-        assert names_flatten.count("tile.matmul") == 1
-        assert names_flatten.count("tile.matmul_acc") == 1
+        assert _OP_TILE_BATCH_MATMUL not in names_flatten
+        assert _OP_TILE_BATCH_MATMUL_ACC not in names_flatten
+        assert names_flatten.count(_OP_TILE_MATMUL) == 1
+        assert names_flatten.count(_OP_TILE_MATMUL_ACC) == 1
 
 
 # ----------------------------------------------------------------------------
@@ -2824,7 +2838,7 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tile.load"
+            and stmt.value.op.name == _OP_TILE_LOAD
         )
         flat_var_type = cast(ir.TileType, flat_load.var.type)
         flat_call_type = cast(ir.TileType, flat_load.value.type)
@@ -2864,7 +2878,7 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tensor.view"
+            and stmt.value.op.name == _OP_TENSOR_VIEW
         )
         view_type = cast(ir.TensorType, view_stmt.var.type)
         assert view_type.shape == [32, 128]
@@ -2874,7 +2888,7 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tile.load"
+            and stmt.value.op.name == _OP_TILE_LOAD
         )
         load_call = cast(ir.Call, flat_load.value)
         load_source = cast(ir.Var, load_call.args[0])
@@ -2941,7 +2955,7 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "tensor.view"
+            and stmt.value.op.name == _OP_TENSOR_VIEW
         )
         view_type = cast(ir.TensorType, view_stmt.var.type)
         assert isinstance(view_stmt.value, ir.Call)
@@ -3018,7 +3032,7 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
 
         # Every emitted tile.transpose must be a genuine 2D transpose: the
         # input page [A=3, B=8] -> [B=8, A=3], so input/tmp ranks agree (2 == 2).
-        transposes = [c for c in calls if c.op.name == "tile.transpose"]
+        transposes = [c for c in calls if c.op.name == _OP_TILE_TRANSPOSE]
         assert len(transposes) == 2, f"expected 2 per-batch transposes, got {len(transposes)}"
         for t in transposes:
             in_type = cast(ir.TileType, t.args[0].type)
@@ -3031,7 +3045,7 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         # Non-padded path: exactly one tile.assemble per batch (no per-batch
         # padding copy), assembling each [8, 3] page into the merged flat output
         # [batch*B, A] = [2*8, 3] = [16, 3].
-        assembles = [c for c in calls if c.op.name == "tile.assemble"]
+        assembles = [c for c in calls if c.op.name == ir.get_op("tile.assemble").name]
         assert len(assembles) == 2
         final_out_type = cast(ir.TileType, assembles[-1].type)
         assert final_out_type.shape == [16, 3]
@@ -3068,7 +3082,7 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         assert after_func is not None
         calls = self._all_calls(after_func)
 
-        transposes = [c for c in calls if c.op.name == "tile.transpose"]
+        transposes = [c for c in calls if c.op.name == _OP_TILE_TRANSPOSE]
         assert len(transposes) == 1, f"expected 1 transpose, got {len(transposes)}"
         t = transposes[0]
         # Codegen-ready 4-arg form with a materialized scratch operand.
@@ -3081,7 +3095,7 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         assert res_type.shape == [8, 3]
 
         # The scratch is a freshly created tile (shape == source page).
-        creates = [c for c in calls if c.op.name == "tile.create"]
+        creates = [c for c in calls if c.op.name == _OP_TILE_CREATE]
         assert any(cast(ir.TileType, c.type).shape == [3, 8] for c in creates)
 
     def test_batch_axis_transpose_rejected(self):
@@ -3159,11 +3173,11 @@ def _collect_def_use(fn) -> tuple[set[int], set[int], list[tuple[ir.Var, str]]]:
         # AssignStmt / ReturnStmt / YieldStmt / EvalStmt.
         if isinstance(node, ir.AssignStmt):
             defined.add(node.var.unique_id)
-            if isinstance(node.value, ir.Call) and node.value.op.name == "tensor.view":
+            if isinstance(node.value, ir.Call) and node.value.op.name == _OP_TENSOR_VIEW:
                 src = node.value.args[0]
                 if isinstance(src, ir.Var):
                     view_sources[node.var.unique_id] = view_sources.get(src.unique_id, src.name_hint)
-            elif isinstance(node.value, ir.Call) and node.value.op.name == "tile.load":
+            elif isinstance(node.value, ir.Call) and node.value.op.name == _OP_TILE_LOAD:
                 src = node.value.args[0]
                 if isinstance(src, ir.Var):
                     loads.append((node.var, view_sources.get(src.unique_id, src.name_hint)))

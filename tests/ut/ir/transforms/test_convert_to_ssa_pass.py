@@ -958,7 +958,7 @@ class TestEdgeCases:
 
         def walk(stmt: ir.Stmt) -> None:
             if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                if stmt.value.op.name == "tensor.slice":
+                if stmt.value.op.name == ir.get_op("tensor.slice").name:
                     slice_calls.append(stmt.value)
             if isinstance(stmt, ir.SeqStmts):
                 for s in stmt.stmts:

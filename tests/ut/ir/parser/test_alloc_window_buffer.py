@@ -35,6 +35,8 @@ from pypto import DataType
 from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
+_OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER = ir.get_op("pld.tensor.alloc_window_buffer").name
+
 
 def _get_host_orch(program: ir.Program, name: str = "host_orch") -> ir.Function:
     gvar = program.get_global_var(name)
@@ -47,7 +49,7 @@ def _find_alloc_assignment(func: ir.Function) -> ir.AssignStmt:
 
     def walk(stmt: ir.Stmt) -> ir.AssignStmt | None:
         if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.tensor.alloc_window_buffer":
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER:
                 return stmt
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -150,7 +152,7 @@ def test_alloc_window_buffer_returns_singleton_ptr_type():
 
     def walk(stmt: ir.Stmt) -> None:
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "pld.tensor.alloc_window_buffer":
+            if stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER:
                 allocs.append(stmt)
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -179,7 +181,7 @@ def test_alloc_window_buffer_long_form():
     func = _get_host_orch(P)
     stmt = _find_alloc_assignment(func)
     assert isinstance(stmt.value, ir.Call)
-    assert stmt.value.op.name == "pld.tensor.alloc_window_buffer"
+    assert stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
     assert stmt.value.kwargs["name"] == "buf"
 
 
@@ -270,7 +272,7 @@ def test_alloc_window_buffer_shaped_static():
     stmt = _find_alloc_assignment(func)
     assert isinstance(stmt.value, ir.Call)
     call = stmt.value
-    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
     assert call.kwargs["name"] == "buf"
     assert "dtype" not in call.kwargs
     assert len(call.args) == 1
@@ -295,7 +297,7 @@ def test_alloc_window_buffer_shaped_long_form():
     stmt = _find_alloc_assignment(func)
     assert isinstance(stmt.value, ir.Call)
     call = stmt.value
-    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
     assert call.kwargs["name"] == "buf"
     assert len(call.args) == 1
     # Static shape must fold to a single ConstInt byte-size arg.
@@ -352,7 +354,7 @@ def test_alloc_window_buffer_shaped_dynamic():
     stmt = _find_alloc_assignment(func)
     assert isinstance(stmt.value, ir.Call)
     call = stmt.value
-    assert call.op.name == "pld.tensor.alloc_window_buffer"
+    assert call.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
     assert call.kwargs["name"] == "buf"
     assert "dtype" not in call.kwargs
     assert len(call.args) == 1

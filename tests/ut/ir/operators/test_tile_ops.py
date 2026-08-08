@@ -19,6 +19,14 @@ from pypto import DataType, ir
 from pypto.ir.op import tile
 from pypto.language.parser.diagnostics import InvalidOperationError
 
+_OP_TILE_EXTRACT = ir.get_op("tile.extract").name
+_OP_TILE_FILLPAD_EXPAND = ir.get_op("tile.fillpad_expand").name
+_OP_TILE_MSCATTER = ir.get_op("tile.mscatter").name
+_OP_TILE_ROW_EXPAND_ADD = ir.get_op("tile.row_expand_add").name
+_OP_TILE_SET_VALIDSHAPE = ir.get_op("tile.set_validshape").name
+_OP_TILE_SLICE = ir.get_op("tile.slice").name
+_OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
+
 
 def _operand_dtype(expr: ir.Expr) -> DataType:
     """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
@@ -153,7 +161,7 @@ class TestTileElementwiseOps:
 
         assert dict(default_call.kwargs) == {}
         assert dict(high_precision_call.kwargs) == {"high_precision": True}
-        assert scalar_call.op.name == "tile.divs"
+        assert scalar_call.op.name == ir.get_op("tile.divs").name
         assert dict(scalar_call.kwargs) == {}
         with pytest.raises(ValueError, match=r"requires a Tile rhs"):
             tile.div(lhs, 2.0, high_precision=True)
@@ -524,7 +532,7 @@ class TestTileUnaryOps:
         call = tile.sin(tile_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.sin"
+        assert call.op.name == ir.get_op("tile.sin").name
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -540,7 +548,7 @@ class TestTileUnaryOps:
         call = tile.cos(tile_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.cos"
+        assert call.op.name == ir.get_op("tile.cos").name
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -1441,7 +1449,7 @@ class TestTileBroadcastOps:
         )
 
         call = tile.row_expand_add(main, packed_row)
-        assert call.op.name == "tile.row_expand_add"
+        assert call.op.name == _OP_TILE_ROW_EXPAND_ADD
         assert len(call.args) == 2
 
     def test_tile_row_expand_add_rejects_invalid_packed_valid_width_and_tmp_type(self):
@@ -1526,7 +1534,7 @@ class TestTileBroadcastOps:
             ir.TileType([8, 1], DataType.FP32, tile_view=matching_row_view),
             span,
         )
-        assert tile.row_expand_add(main, matching_row).op.name == "tile.row_expand_add"
+        assert tile.row_expand_add(main, matching_row).op.name == _OP_TILE_ROW_EXPAND_ADD
 
         unrelated_row_view = ir.TileView(
             valid_shape=[other_rows, 1],
@@ -2443,7 +2451,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -2462,7 +2470,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, valid_n])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -2555,7 +2563,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.zero)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -2662,7 +2670,7 @@ class TestTileSliceReshapeOps:
         call = tile.reshape(tile_var, [8, 4])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.reshape"
+        assert call.op.name == ir.get_op("tile.reshape").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2804,7 +2812,7 @@ class TestTileSliceReshapeOps:
         call = tile.fillpad_expand(src, [64, 128], pad_value=ir.PadValue.zero)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.fillpad_expand"
+        assert call.op.name == _OP_TILE_FILLPAD_EXPAND
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2837,7 +2845,7 @@ class TestTileSliceReshapeOps:
         src = ir.Var("src", src_type, span)
 
         call = tile.fillpad_expand(src, [32, 32], pad_value=ir.PadValue.zero)
-        assert call.op.name == "tile.fillpad_expand"
+        assert call.op.name == _OP_TILE_FILLPAD_EXPAND
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         dim0 = result_type.shape[0]
@@ -2889,7 +2897,7 @@ class TestTileSliceReshapeOps:
         call = tile.transpose(tile_var, 0, 1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -2910,7 +2918,7 @@ class TestTileSliceReshapeOps:
         call = tile.transpose(tile_var, -2, -1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
@@ -2948,7 +2956,7 @@ class TestTileSliceReshapeOps:
         call = tile.set_validshape(tile_var, 16, 24)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.set_validshape"
+        assert call.op.name == _OP_TILE_SET_VALIDSHAPE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2969,7 +2977,7 @@ class TestTileSliceReshapeOps:
         call = tile.set_validshape(tile_var, valid_rows, valid_cols)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.set_validshape"
+        assert call.op.name == _OP_TILE_SET_VALIDSHAPE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -3249,7 +3257,7 @@ class TestTileBatchMatMulOps:
         call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul"
+        assert call.op.name == ir.get_op("tile.batch_matmul").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -3347,7 +3355,7 @@ class TestTileBatchMatMulOps:
         call = tile.batch_matmul_acc(acc, lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul_acc"
+        assert call.op.name == ir.get_op("tile.batch_matmul_acc").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -3412,7 +3420,7 @@ class TestTileBatchMatMulOps:
         call = tile.transpose(tile_var, 0, 2)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -3433,7 +3441,7 @@ class TestTileBatchMatMulOps:
         call = tile.row_max(tile_var, tmp_tile)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.row_max"
+        assert call.op.name == ir.get_op("tile.row_max").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -3455,7 +3463,7 @@ class TestTileBatchMatMulOps:
         call = tile.slice(tile_var, new_shape, offset)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -4795,7 +4803,7 @@ class TestTileAssembleOp:
         call = tile.assemble(target_var, source_var, [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.assemble"
+        assert call.op.name == ir.get_op("tile.assemble").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -4839,7 +4847,7 @@ class TestTileExtractOp:
         call = tile.extract(src_var, 0, 0, shape=[64, 64], target_memory=ir.MemorySpace.Left)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -4907,7 +4915,7 @@ class TestTileExtractOp:
 
         call = tile.extract(src_var, 0, 0, shape=[32, 32], target_memory=ir.MemorySpace.Mat)
 
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -4924,7 +4932,7 @@ class TestTileExtractOp:
 
         call = tile.extract(src_var, row, col, shape=[16, 16], target_memory=ir.MemorySpace.Left)
 
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         rows, cols = result_type.shape
@@ -5007,7 +5015,7 @@ class TestTileScatterUpdateOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter_update"
+        assert call.op.name == ir.get_op("tile.scatter_update").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == dtype
@@ -5078,7 +5086,7 @@ class TestTileMscatterOps:
         call = tile.mscatter(src_var, idx_var, out_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.mscatter"
+        assert call.op.name == _OP_TILE_MSCATTER
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -5099,7 +5107,7 @@ class TestTileMscatterOps:
         out_var = ir.Var("out", tensor_type, span)
 
         call = tile.mscatter(src_var, idx_var, out_var)
-        assert call.op.name == "tile.mscatter"
+        assert call.op.name == _OP_TILE_MSCATTER
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP16
@@ -5260,7 +5268,7 @@ class TestTileScatterOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter"
+        assert call.op.name == ir.get_op("tile.scatter").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == dtype
@@ -5416,7 +5424,7 @@ class TestTileScatterMaskOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter_mask"
+        assert call.op.name == ir.get_op("tile.scatter_mask").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -5505,7 +5513,7 @@ class TestTileConcatOps:
         call = tile.concat(t0_var, t1_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.concat"
+        assert call.op.name == ir.get_op("tile.concat").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32

@@ -60,7 +60,7 @@ def _find_alloc_var(func: ir.Function) -> ir.Var:
         if (
             isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "pld.tensor.alloc_window_buffer"
+            and stmt.value.op.name == ir.get_op("pld.tensor.alloc_window_buffer").name
         ):
             return stmt.var
         if isinstance(stmt, ir.SeqStmts):
@@ -219,7 +219,7 @@ def test_window_long_form():
 
     func = _get_host_orch(P)
     call = _find_call(func, "pld.tensor.window")
-    assert call.op.name == "pld.tensor.window"
+    assert call.op.name == ir.get_op("pld.tensor.window").name
     assert isinstance(call.type, ir.DistributedTensorType)
 
 

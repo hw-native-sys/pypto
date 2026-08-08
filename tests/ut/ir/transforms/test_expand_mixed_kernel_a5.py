@@ -31,15 +31,15 @@ from pypto import ir, passes
 
 
 _AUTO_PIPE_SETUP_OPS = {
-    "system.reserve_buffer",
-    "system.import_peer_buffer",
-    "system.aic_initialize_pipe",
-    "system.aiv_initialize_pipe",
+    ir.get_op("system.reserve_buffer").name,
+    ir.get_op("system.import_peer_buffer").name,
+    ir.get_op("system.aic_initialize_pipe").name,
+    ir.get_op("system.aiv_initialize_pipe").name,
 }
 
 _AUTO_TFREE_OPS = {
-    "system.tfree_to_aic",
-    "system.tfree_to_aiv",
+    ir.get_op("system.tfree_to_aic").name,
+    ir.get_op("system.tfree_to_aiv").name,
 }
 
 
@@ -2434,10 +2434,10 @@ class TestAutoPipeSetup:
                 call = None
             if not isinstance(call, ir.Call):
                 continue
-            if call.op.name == "tile.tpop_from_aiv":
+            if call.op.name == ir.get_op("tile.tpop_from_aiv").name:
                 assert isinstance(stmt, ir.AssignStmt)
                 tpop_var = stmt.var
-            elif call.op.name == "system.tfree_to_aiv":
+            elif call.op.name == ir.get_op("system.tfree_to_aiv").name:
                 tfree_call = call
 
         assert tpop_var is not None

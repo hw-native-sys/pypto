@@ -1216,7 +1216,7 @@ class TestPromotedSinCos:
         assert isinstance(result, Tensor)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.sin"
+        assert call.op.name == ir.get_op("tensor.sin").name
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -1229,7 +1229,7 @@ class TestPromotedSinCos:
         assert isinstance(result, Tensor)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.cos"
+        assert call.op.name == ir.get_op("tensor.cos").name
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -1290,7 +1290,7 @@ class TestPromotedTileSinCos:
         assert isinstance(result, Tile)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.sin"
+        assert call.op.name == ir.get_op("tile.sin").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -1303,7 +1303,7 @@ class TestPromotedTileSinCos:
         assert isinstance(result, Tile)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.cos"
+        assert call.op.name == ir.get_op("tile.cos").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32

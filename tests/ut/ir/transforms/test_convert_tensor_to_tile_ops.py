@@ -212,7 +212,7 @@ class _StampExpectedMatBridgeLoads(ir.IRMutator):
         expr = super().visit_call(op)
         call = expr if isinstance(expr, ir.Call) else op
         if (
-            call.op.name == "tile.load"
+            call.op.name == ir.get_op("tile.load").name
             and isinstance(call.type, ir.TileType)
             and call.type.memory_space == MemorySpace.Mat
         ):

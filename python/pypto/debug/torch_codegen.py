@@ -726,11 +726,14 @@ def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:
     return f"_cross_core_rt.pop_from_aiv({_split_kwarg(kw)})"
 
 
+# Built through the registry getter, which raises on an unregistered name, so a renamed operator
+# fails at import. A bare literal here would instead drop silently out of the membership test in
+# _collect_cross_core_split_from_expr and route the call down the wrong codegen path.
 _CROSS_CORE_SPLIT_OPS = {
-    "tile.tpush_to_aiv",
-    "tile.tpush_to_aic",
-    "tile.tpop_from_aic",
-    "tile.tpop_from_aiv",
+    _ir.get_op("tile.tpush_to_aiv").name,
+    _ir.get_op("tile.tpush_to_aic").name,
+    _ir.get_op("tile.tpop_from_aic").name,
+    _ir.get_op("tile.tpop_from_aiv").name,
 }
 
 

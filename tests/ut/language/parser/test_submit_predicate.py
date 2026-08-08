@@ -33,6 +33,8 @@ from pypto.language.parser.diagnostics.exceptions import (
     UnsupportedFeatureError,
 )
 
+_OP_TENSOR_READ = ir.get_op("tensor.read").name
+
 
 def _flatten(stmt):
     if isinstance(stmt, ir.SeqStmts):
@@ -65,7 +67,7 @@ def _pred_read(p) -> ir.Call:
         return e
 
     def is_read(e):
-        return isinstance(e, ir.Call) and e.op.name == "tensor.read"
+        return isinstance(e, ir.Call) and e.op.name == _OP_TENSOR_READ
 
     lhs, rhs = strip_cast(p.left), strip_cast(p.right)
     read = lhs if is_read(lhs) else rhs
@@ -149,7 +151,7 @@ def test_predicate_populates_submit_fields():
     pred = expert_sub.predicate
     assert isinstance(pred, ir.Gt)
     read = _pred_read(pred)
-    assert read.op.name == "tensor.read"
+    assert read.op.name == _OP_TENSOR_READ
     assert isinstance(read.args[0], ir.Var)  # operand tensor
     assert len(_pred_indices(pred)) == 2  # one index per rank-2 axis
     assert _pred_const(pred).value == 0
@@ -205,7 +207,7 @@ def test_reversed_operand_order_is_normalized():
     # `0 < rc[0,0]` keeps its written `Lt` kind in the IR; orchestration codegen
     # flips it to the runtime's `operand OP target` orientation (GT).
     assert isinstance(expert_sub.predicate, ir.Lt)
-    assert _pred_read(expert_sub.predicate).op.name == "tensor.read"
+    assert _pred_read(expert_sub.predicate).op.name == _OP_TENSOR_READ
     assert _pred_const(expert_sub.predicate).value == 0
 
 
@@ -456,7 +458,7 @@ def test_scope_predicate_lands_on_scope_attrs():
     assert isinstance(predicate, ir.Gt)
     assert _pred_const(predicate).value == 0
     # Reuses tensor.read rather than a bespoke encoding.
-    assert _pred_read(predicate).op.name == "tensor.read"
+    assert _pred_read(predicate).op.name == _OP_TENSOR_READ
     assert [c.value for c in _pred_indices(predicate)] == [0, 0]
 
 

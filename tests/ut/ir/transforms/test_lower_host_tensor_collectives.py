@@ -469,11 +469,11 @@ def test_host_allreduce_resolves_non_innermost_comm_domain_scope():
         for loop in loops
         if isinstance(loop.body, ir.EvalStmt)
         and isinstance(loop.body.expr, ir.Call)
-        and loop.body.expr.op.name == "builtin.tensor.allreduce"
+        and loop.body.expr.op.name == ir.get_op("builtin.tensor.allreduce").name
     ]
     assert len(builtin_loops) == 1
     assert isinstance(builtin_loops[0].stop, ir.Call)
-    assert builtin_loops[0].stop.op.name == "pld.system.world_size"
+    assert builtin_loops[0].stop.op.name == ir.get_op("pld.system.world_size").name
 
 
 def test_host_allreduce_rejects_static_signal_smaller_than_explicit_device_count():
