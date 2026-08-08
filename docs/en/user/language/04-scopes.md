@@ -26,8 +26,8 @@ separate function when it deserves a name or is called from more than one place.
 
 Placement is not the same as **ordering** — what must finish before a task starts. The
 runtime derives that from the parameter directions in [Types](00-types.md) and the buffers
-each task touches. That machinery, and the interfaces for steering it by hand, get their
-own chapter; this page is only about where code lands.
+each task touches. That machinery, and the interfaces for steering it by hand, are
+[Tasks and Ordering](../tasks/index.md); this page is only about where code lands.
 
 ## Quickstart: mark a region as device work
 
@@ -132,5 +132,6 @@ the tutorials chapter covers end to end.
 - [Functions and Programs](01-functions.md) — the alternative to `pl.at`: a separate `@pl.jit.incore` function.
 - [Control Flow](02-control-flow.md) — the loops these scopes sit inside.
 - [Memory and Data Movement](03-memory.md) — what the placed code does with buffers.
+- [Tasks and Ordering](../tasks/index.md) — when the placed work runs relative to everything else.
 - [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) — how `pl.at` becomes a function.
 - [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) — what `pl.split` drives.
