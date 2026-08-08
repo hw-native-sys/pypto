@@ -36,8 +36,8 @@ struct TcvtAdjacency {
   std::vector<std::pair<DataType, DataType>> edges;
 };
 
-/** Backend facts required to admit and tile one tensor-level vector graph. */
-struct VectorAutoTileTarget {
+/** Ascend 910B facts required to admit and tile one tensor-level vector graph. */
+struct VectorAutoTile910BTarget {
   std::string model_name;
   uint32_t dma_alignment_bytes = 0;
   uint32_t vector_register_bytes = 0;
@@ -433,10 +433,10 @@ class BackendHandler {
   [[nodiscard]] virtual const TcvtAdjacency& GetTcvtAdjacency() const = 0;
 
   /**
-   * @brief Vector AutoTile target descriptor, or nullopt when this backend has
-   *        no validated whole-function vector model.
+   * @brief Ascend 910B Vector AutoTile target descriptor, or nullopt when this
+   *        backend cannot use the 910B-specific whole-function vector model.
    */
-  [[nodiscard]] virtual std::optional<VectorAutoTileTarget> GetVectorAutoTileTarget() const {
+  [[nodiscard]] virtual std::optional<VectorAutoTile910BTarget> GetVectorAutoTile910BTarget() const {
     return std::nullopt;
   }
 };

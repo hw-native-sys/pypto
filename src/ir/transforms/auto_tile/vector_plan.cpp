@@ -69,14 +69,14 @@ int64_t AlignUp(int64_t value, int64_t alignment) {
 
 int64_t DmaElementGranule(const DataType& dtype, int64_t dma_alignment_bytes) {
   const int64_t bytes = DTypeBytes(dtype);
-  CHECK(bytes > 0 && dma_alignment_bytes > 0);
+  INTERNAL_CHECK(bytes > 0 && dma_alignment_bytes > 0);
   return dma_alignment_bytes / std::gcd(dma_alignment_bytes, bytes);
 }
 
 std::vector<int64_t> PhysicalElementGranules(const VectorGraph& graph, int64_t dma_alignment_bytes) {
   size_t class_count = 0;
   for (const VectorTensor& tensor : graph.tensors) {
-    CHECK(tensor.physical_shape_class != std::numeric_limits<size_t>::max())
+    INTERNAL_CHECK(tensor.physical_shape_class != std::numeric_limits<size_t>::max())
         << "AutoTile vector graph has an unresolved physical-shape class";
     class_count = std::max(class_count, tensor.physical_shape_class + 1);
   }
@@ -247,7 +247,8 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
 
 double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, int64_t rows, int64_t cols,
                      int64_t iterations, int64_t work_units, int64_t vector_register_bytes,
-                     bool* used_reduction_fallback = nullptr) {
+                     bool* used_reduction_fallback = nullptr, bool* used_generic_pointwise_proxy = nullptr,
+                     bool* used_cast_proxy = nullptr) {
   double per_frame = 0.0;
   bool stream_start = true;
   for (size_t op_index : ops) {
@@ -262,6 +263,9 @@ double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, i
       continue;
     }
     const VectorTensor& output = graph.tensors[op.output];
+    if (used_generic_pointwise_proxy != nullptr && op.primitive == VectorPrimitive::Generic)
+      *used_generic_pointwise_proxy = true;
+    if (used_cast_proxy != nullptr && op.primitive == VectorPrimitive::Cast) *used_cast_proxy = true;
     int64_t frame_rows = FrameRows(output, rows);
     int64_t frame_cols = FrameCols(output, cols);
     for (size_t input : op.inputs) {
@@ -313,6 +317,10 @@ void PopulatePhase(VectorPhasePlan* phase, const VectorGraph& graph, std::vector
                    const std::unordered_set<size_t>& substituted = {}) {
   phase->ops = std::move(ops);
   phase->inputs = BuildInputLifetimes(graph, phase->ops, substituted);
+  phase->generated_algorithm =
+      phase->ops.empty()
+          ? std::nullopt
+          : std::optional<VectorGeneratedAlgorithm>(VectorGeneratedAlgorithm::SourceOperations);
 }
 
 void ClearModeledCosts(VectorSchedulePlan* plan) {
@@ -324,6 +332,8 @@ void ClearModeledCosts(VectorSchedulePlan* plan) {
   plan->modeled_phase_input_bytes.fill(0.0);
   plan->modeled_phase_output_bytes.fill(0.0);
   plan->used_reduction_fallback = false;
+  plan->used_generic_pointwise_proxy = false;
+  plan->used_cast_proxy = false;
 }
 
 bool LexicographicallyBetter(const VectorSchedulePlan& lhs, const VectorSchedulePlan& rhs) {
@@ -353,9 +363,26 @@ const char* ScheduleKindName(VectorScheduleKind kind) {
   return "unknown";
 }
 
+const char* GeneratedAlgorithmName(VectorGeneratedAlgorithm algorithm) {
+  switch (algorithm) {
+    case VectorGeneratedAlgorithm::SourceOperations:
+      return "source_operations";
+    case VectorGeneratedAlgorithm::OnlineSoftmaxUpdate:
+      return "online_softmax_update";
+  }
+  return "unknown";
+}
+
+const char* PointwiseCostModelName(const VectorSchedulePlan& plan) {
+  if (plan.used_generic_pointwise_proxy && plan.used_cast_proxy) return "generic_and_cast_proxy";
+  if (plan.used_generic_pointwise_proxy) return "generic_proxy";
+  if (plan.used_cast_proxy) return "cast_proxy";
+  return "grounded";
+}
+
 VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
-  CHECK(hardware_.vector_cores > 0 && hardware_.ub_bytes > 0 && hardware_.dma_alignment_bytes > 0 &&
-        hardware_.vector_register_bytes > 0)
+  INTERNAL_CHECK(hardware_.vector_cores > 0 && hardware_.ub_bytes > 0 && hardware_.dma_alignment_bytes > 0 &&
+                 hardware_.vector_register_bytes > 0)
       << "AutoTile vector planner received an invalid Ascend 910B hardware descriptor";
 
   const int64_t iteration_rows = graph.iteration_rows;
@@ -428,9 +455,11 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
                            double extra_compute_work = 0.0) {
       bool fallback = false;
       const VectorPhasePlan& phase = target->phases[PhaseIndex(phase_id)];
-      const double compute_work = ComputeCycles(graph, phase.ops, rows, cols, iterations, target->work_units,
-                                                hardware_.vector_register_bytes, &fallback) +
-                                  extra_compute_work;
+      const double compute_work =
+          ComputeCycles(graph, phase.ops, rows, cols, iterations, target->work_units,
+                        hardware_.vector_register_bytes, &fallback, &target->used_generic_pointwise_proxy,
+                        &target->used_cast_proxy) +
+          extra_compute_work;
       target->used_reduction_fallback |= fallback;
       return record_phase(target, phase_id, rows, cols, iterations, stages, outputs, compute_work);
     };
@@ -572,6 +601,8 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
         candidate.phases[PhaseIndex(VectorPhase::Stats)].ops.clear();
         candidate.phases[PhaseIndex(VectorPhase::Stats)].inputs = {
             {graph.softmax.input, 0, 0, {{graph.softmax.max_op, 0}}}};
+        candidate.phases[PhaseIndex(VectorPhase::Stats)].generated_algorithm =
+            VectorGeneratedAlgorithm::OnlineSoftmaxUpdate;
       }
 
       VectorSchedulePlan best_reduction;

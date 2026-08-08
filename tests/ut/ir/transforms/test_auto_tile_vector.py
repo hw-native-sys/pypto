@@ -560,6 +560,91 @@ class PointwiseVocabularyProgram:
 
 
 @pl.program
+class PartPointwiseProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def part(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        y: pl.Tensor[[64, 256], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        out: pl.Tensor[[64, 256], pl.FP32] = pl.part_add(x, y)
+        return out
+
+
+@pl.program
+class Fp16FmodProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def fmod(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP16],
+        y: pl.Tensor[[64, 256], pl.FP16],
+    ) -> pl.Tensor[[64, 256], pl.FP16]:
+        return pl.fmod(x, y)
+
+
+@pl.program
+class Fp16FmodsProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def fmods(self, x: pl.Tensor[[64, 256], pl.FP16]) -> pl.Tensor[[64, 256], pl.FP16]:
+        return pl.fmods(x, 3.0)
+
+
+@pl.program
+class BroadcastFmodProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def fmod(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        row: pl.Tensor[[64, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        return pl.fmod(x, row)
+
+
+@pl.program
+class BroadcastPartAddProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def part(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        row: pl.Tensor[[64, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        return pl.part_add(x, row)
+
+
+@pl.program
+class BroadcastPartMulProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def part(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        row: pl.Tensor[[64, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        return pl.part_mul(x, row)
+
+
+@pl.program
+class BroadcastPartMaxProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def part(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        row: pl.Tensor[[64, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        return pl.part_max(x, row)
+
+
+@pl.program
+class BroadcastPartMinProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def part(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        row: pl.Tensor[[64, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        return pl.part_min(x, row)
+
+
+@pl.program
 class HighPrecisionRsqrtProgram:
     @pl.function(attrs={"auto_tile": True})
     def rsqrt(self, x: pl.Tensor[[128, 8192], pl.FP32]) -> pl.Tensor[[128, 8192], pl.FP32]:
@@ -1048,6 +1133,11 @@ def test_grounded_pointwise_chain_and_row_expand_count_mode_costs(capfd):
     assert "compute_cycles=26 " in aligned
     assert "compute_cycles=48 " in count_mode
 
+    _, proxy = _logged_plan(PointwiseVocabularyProgram, capfd)
+    _, cast_proxy = _logged_plan(RaggedInt8CastProgram, capfd)
+    assert "pointwise_model=generic_proxy" in proxy
+    assert "pointwise_model=cast_proxy" in cast_proxy
+
 
 def test_grounded_reduction_tables_are_observable(capfd):
     _, row = _logged_plan(NarrowRowReductionProgram, capfd)
@@ -1315,10 +1405,19 @@ def test_schedule_report_explains_every_vector_schedule_family(
         "finalize",
     }
     assert descriptor["cost"]["modeled_cycles"] > 0
+    assert descriptor["cost"]["pointwise_model"] in {
+        "grounded",
+        "generic_proxy",
+        "cast_proxy",
+        "generic_and_cast_proxy",
+    }
     assert f"AutoTile schedule for {function}" in pseudocode
     assert f"schedule: {schedule}" in pseudocode
     assert pseudocode_marker in pseudocode
     assert "physical tensor granules (elements):" in pseudocode
+    if schedule == "softmax":
+        stats = next(phase for phase in descriptor["phases"] if phase["name"] == "stats")
+        assert stats["generated_algorithm"] == "online_softmax_update"
 
 
 def test_schedule_report_records_reuse_and_cast_padding(tmp_path):
@@ -1403,6 +1502,7 @@ def test_compile_writes_auto_tile_schedule_report_without_pass_dumps(tmp_path):
         (RaggedPointwiseProgram, "tensor.add"),
         (Fp16PointwiseProgram, "tensor.mul"),
         (PointwiseVocabularyProgram, "tensor.fmod"),
+        (PartPointwiseProgram, "tensor.part_add"),
         (HighPrecisionRsqrtProgram, "tensor.rsqrt"),
     ],
 )
@@ -1427,6 +1527,23 @@ def test_unified_broadcasts_normalize_to_explicit_row_and_column_ops():
     assert structure.ops["tensor.row_expand_add"] == 1
     assert structure.ops["tensor.col_expand_add"] == 1
     assert structure.ops["tensor.add"] == 0
+
+
+@pytest.mark.parametrize(
+    ("program", "message"),
+    [
+        (Fp16FmodProgram, "tensor.fmod and tensor.fmods support FP32 only"),
+        (Fp16FmodsProgram, "tensor.fmod and tensor.fmods support FP32 only"),
+        (BroadcastFmodProgram, "tensor.fmod requires identical operand shapes"),
+        (BroadcastPartAddProgram, r"tensor\.part_\* requires identical operand shapes"),
+        (BroadcastPartMulProgram, r"tensor\.part_\* requires identical operand shapes"),
+        (BroadcastPartMaxProgram, r"tensor\.part_\* requires identical operand shapes"),
+        (BroadcastPartMinProgram, r"tensor\.part_\* requires identical operand shapes"),
+    ],
+)
+def test_a2a3_fmod_and_part_shape_contracts_fail_during_admission(program, message):
+    with pytest.raises(ValueError, match=message):
+        _run_auto_tile(program)
 
 
 @pytest.mark.parametrize(

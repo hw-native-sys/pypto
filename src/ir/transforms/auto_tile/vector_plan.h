@@ -42,6 +42,11 @@ enum class VectorPhase : uint8_t {
   Finalize = 3,
 };
 
+enum class VectorGeneratedAlgorithm : uint8_t {
+  SourceOperations,
+  OnlineSoftmaxUpdate,
+};
+
 inline constexpr size_t PhaseIndex(VectorPhase phase) { return static_cast<size_t>(phase); }
 
 struct AxisPartition {
@@ -70,6 +75,7 @@ struct VectorInputLifetime {
 struct VectorPhasePlan {
   std::vector<size_t> ops;
   std::vector<VectorInputLifetime> inputs;
+  std::optional<VectorGeneratedAlgorithm> generated_algorithm;
   int64_t first_chunk = 0;
   int64_t trip_count = 0;
   int pipeline_stages = 1;
@@ -111,6 +117,8 @@ struct VectorSchedulePlan {
   double modeled_compute_cycles = 0.0;
   double modeled_transfer_cycles = 0.0;
   bool used_reduction_fallback = false;
+  bool used_generic_pointwise_proxy = false;
+  bool used_cast_proxy = false;
 };
 
 struct VectorHardware {
@@ -131,6 +139,8 @@ class VectorPlanner910B {
 };
 
 [[nodiscard]] const char* ScheduleKindName(VectorScheduleKind kind);
+[[nodiscard]] const char* GeneratedAlgorithmName(VectorGeneratedAlgorithm algorithm);
+[[nodiscard]] const char* PointwiseCostModelName(const VectorSchedulePlan& plan);
 
 }  // namespace auto_tile
 }  // namespace pass

@@ -230,7 +230,7 @@ class VectorEmitter {
     const VectorPhasePlan& finalize = plan_.phases[PhaseIndex(VectorPhase::Finalize)];
     const auto is_empty = [](const VectorPhasePlan& phase) {
       return phase.ops.empty() && phase.inputs.empty() && phase.first_chunk == 0 && phase.trip_count == 0 &&
-             phase.pipeline_stages == 1;
+             phase.pipeline_stages == 1 && !phase.generated_algorithm.has_value();
     };
     const auto expected_stages = [](int64_t trips) { return trips >= 2 ? 2 : 1; };
     switch (plan_.kind) {
@@ -277,10 +277,14 @@ class VectorEmitter {
               << "Internal error: spanning reduction descriptor is incomplete";
         }
         if (plan_.kind == VectorScheduleKind::Softmax) {
-          INTERNAL_CHECK_SPAN(graph_.softmax.matched && stats.ops.empty() && stats.inputs.size() == 1, span_)
+          INTERNAL_CHECK_SPAN(graph_.softmax.matched && stats.ops.empty() && stats.inputs.size() == 1 &&
+                                  stats.generated_algorithm == VectorGeneratedAlgorithm::OnlineSoftmaxUpdate,
+                              span_)
               << "Internal error: online-softmax descriptor is incomplete";
         } else {
-          INTERNAL_CHECK_SPAN(!stats.ops.empty(), span_)
+          INTERNAL_CHECK_SPAN(
+              !stats.ops.empty() && stats.generated_algorithm == VectorGeneratedAlgorithm::SourceOperations,
+              span_)
               << "Internal error: reduction stats descriptor has no operations";
         }
         break;
@@ -783,7 +787,10 @@ class VectorEmitter {
   }
 
   void EmitSoftmax(std::vector<StmtPtr>& outer) {
-    INTERNAL_CHECK_SPAN(graph_.softmax.matched && graph_.required_outputs.size() == 1, span_)
+    const VectorPhasePlan& stats = plan_.phases[PhaseIndex(VectorPhase::Stats)];
+    INTERNAL_CHECK_SPAN(graph_.softmax.matched && graph_.required_outputs.size() == 1 &&
+                            stats.generated_algorithm == VectorGeneratedAlgorithm::OnlineSoftmaxUpdate,
+                        span_)
         << "Internal error: AutoTile softmax descriptor is incomplete";
     const size_t output = graph_.required_outputs.front();
     auto region =
@@ -792,7 +799,6 @@ class VectorEmitter {
     std::vector<StmtPtr> body;
     auto [running_max, running_sum] =
         EmitSoftmaxChunk(plan_.chunk, Index(0, span_), free, nullptr, nullptr, body);
-    const VectorPhasePlan& stats = plan_.phases[PhaseIndex(VectorPhase::Stats)];
     if (stats.trip_count > 0) {
       auto chunk_index =
           std::make_shared<Var>(Fresh("chunk"), std::make_shared<ScalarType>(DataType::INDEX), span_);

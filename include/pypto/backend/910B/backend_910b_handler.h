@@ -58,8 +58,8 @@ class Ascend910BHandler : public BackendHandler {
   /// (ISA Supported Conversions, pto-isa tcvt docs).
   [[nodiscard]] const TcvtAdjacency& GetTcvtAdjacency() const override;
 
-  [[nodiscard]] std::optional<VectorAutoTileTarget> GetVectorAutoTileTarget() const override {
-    return VectorAutoTileTarget{"ascend910b", 32, 256};
+  [[nodiscard]] std::optional<VectorAutoTile910BTarget> GetVectorAutoTile910BTarget() const override {
+    return VectorAutoTile910BTarget{"ascend910b", 32, 256};
   }
 
   [[nodiscard]] uint32_t GetGmAccessGranularityBytes() const override { return 512; }

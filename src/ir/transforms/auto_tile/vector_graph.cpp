@@ -135,6 +135,11 @@ bool IsSupportedTensorDType(const DataType& dtype) {
   return IsSupportedCastDType(dtype) || dtype == DataType::INT8;
 }
 
+bool IsPartOp(const CallPtr& call) {
+  return IsOp(call, "tensor.part_add") || IsOp(call, "tensor.part_mul") || IsOp(call, "tensor.part_max") ||
+         IsOp(call, "tensor.part_min");
+}
+
 void AssignPhysicalShapeClasses(VectorGraph* graph) {
   std::vector<size_t> parent(graph->tensors.size());
   std::iota(parent.begin(), parent.end(), 0);
@@ -352,9 +357,37 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
       CHECK_SPAN(IsSupportedComputeDType(output_type->dtype_), call->span_)
           << "AutoTile Ascend910B vector arithmetic supports FP16 and FP32; BF16 tensors are supported "
              "only as tensor.cast sources or destinations";
+      if (IsOp(call, "tensor.fmod") || IsOp(call, "tensor.fmods")) {
+        bool all_fp32 = output_type->dtype_ == DataType::FP32;
+        for (size_t input : op.inputs) all_fp32 &= graph.tensors[input].dtype == DataType::FP32;
+        CHECK_SPAN(all_fp32, call->span_)
+            << "AutoTile Ascend910B tensor.fmod and tensor.fmods support FP32 only";
+      }
       for (size_t input : op.inputs) {
         CHECK_SPAN(graph.tensors[input].dtype == output_type->dtype_, call->span_)
             << "AutoTile requires explicit tensor.cast for mixed tensor dtypes";
+      }
+      if (IsOp(call, "tensor.fmod")) {
+        CHECK_SPAN(op.inputs.size() == 2, call->span_) << "AutoTile tensor.fmod requires two tensor operands";
+        const VectorTensor& lhs = graph.tensors[op.inputs[0]];
+        const VectorTensor& rhs = graph.tensors[op.inputs[1]];
+        const VectorTensor& result = graph.tensors[output];
+        CHECK_SPAN(lhs.rows == rhs.rows && lhs.cols == rhs.cols && lhs.rows == result.rows &&
+                       lhs.cols == result.cols,
+                   call->span_)
+            << "AutoTile Ascend910B tensor.fmod requires identical operand shapes; broadcast fmod has no "
+               "A2/A3 instruction";
+      }
+      if (IsPartOp(call)) {
+        const VectorTensor& result = graph.tensors[output];
+        bool identical_shapes = true;
+        for (size_t input : op.inputs) {
+          const VectorTensor& tensor = graph.tensors[input];
+          identical_shapes &= tensor.rows == result.rows && tensor.cols == result.cols;
+        }
+        CHECK_SPAN(identical_shapes, call->span_)
+            << "AutoTile Ascend910B tensor.part_* requires identical operand shapes; broadcast part_* has "
+               "no A2/A3 row/column-expand instruction";
       }
     }
     if (IsOp(call, "tensor.cast")) {

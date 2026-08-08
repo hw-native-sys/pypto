@@ -73,7 +73,7 @@ VectorTargetContext ReadVectorTarget(const Span& span) {
   const backend::BackendHandler* handler =
       context != nullptr ? context->GetBackendHandler() : backend->GetHandler();
   CHECK_SPAN(handler != nullptr, span) << "AutoTile could not obtain the active backend handler";
-  const std::optional<backend::VectorAutoTileTarget> target = handler->GetVectorAutoTileTarget();
+  const std::optional<backend::VectorAutoTile910BTarget> target = handler->GetVectorAutoTile910BTarget();
   CHECK_SPAN(target.has_value(), span) << "AutoTile vector scheduling currently supports Ascend910B only";
   VectorTargetContext result;
   result.handler = handler;
@@ -143,6 +143,7 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
              << static_cast<int64_t>(plan.modeled_phase_output_bytes[2]) << ","
              << static_cast<int64_t>(plan.modeled_phase_output_bytes[3]) << "]"
              << " reduction_model=" << (plan.used_reduction_fallback ? "legacy_fallback" : "grounded")
+             << " pointwise_model=" << auto_tile::PointwiseCostModelName(plan)
              << " modeled_cycles=" << plan.modeled_cycles
              << (report_path.has_value() ? " report=" + *report_path : "");
     functions.emplace(global, emitted);

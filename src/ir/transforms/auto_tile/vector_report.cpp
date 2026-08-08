@@ -145,11 +145,8 @@ VectorScheduleReport BuildReport(const VectorGraph& graph, const VectorScheduleP
     if (plan.tail > 0 && (phase == VectorPhase::Stats || phase == VectorPhase::Apply)) {
       target.tail_frame = PhaseFrame(graph, plan, phase, plan.tail);
     }
-    if (plan.kind == VectorScheduleKind::Softmax && phase == VectorPhase::Stats) {
-      target.generated_algorithm = "online_softmax_update";
-    } else if (!target.ops.empty()) {
-      target.generated_algorithm = "source_operations";
-    }
+    if (source.generated_algorithm.has_value())
+      target.generated_algorithm = GeneratedAlgorithmName(*source.generated_algorithm);
     const bool reduction_layout = graph.reduced_axis != 0 && (phase != VectorPhase::Body ||
                                                               plan.kind == VectorScheduleKind::Materialized);
     target.inputs = BuildInputs(graph, plan, source, target.frame, reduction_layout);
@@ -258,7 +255,7 @@ std::string RenderJson(const VectorScheduleReport& report) {
   out << ",\"transfer_cycles\":";
   WriteDouble(out, plan.modeled_transfer_cycles);
   out << ",\"reduction_model\":" << JsonEscape(plan.used_reduction_fallback ? "legacy_fallback" : "grounded")
-      << "},\n";
+      << ",\"pointwise_model\":" << JsonEscape(PointwiseCostModelName(plan)) << "},\n";
   out << "  \"tensors\":[\n";
   for (size_t i = 0; i < graph.tensors.size(); ++i) {
     const VectorTensor& tensor = graph.tensors[i];

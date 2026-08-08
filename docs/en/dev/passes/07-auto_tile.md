@@ -61,8 +61,9 @@ The initial implementation supports the following closed surface:
 - FP32 and FP16 vector computation;
 - BF16 tensor storage and native cast-chain endpoints;
 - a terminal, unconsumed FP32-to-INT8 cast;
-- elementwise arithmetic, scalar forms, `part_*`, row/column broadcasts,
-  `exp`, `log`, `abs`, `sqrt`, `rsqrt`, `recip`, and `fmod`;
+- elementwise arithmetic, scalar forms, same-shape `part_*`, row/column
+  broadcasts, `exp`, `log`, `abs`, `sqrt`, `rsqrt`, `recip`, FP32
+  same-shape `fmod`, and FP32 `fmods`;
 - `row_sum`, `row_max`, `col_sum`, and `col_max`;
 - one reduction plus an elementwise producer or consumer DAG;
 - multiple same-axis reductions when the complete per-core DAG fits a
@@ -77,6 +78,11 @@ operations before emission. Ambiguous `[1,1]` tensor broadcasts and a
 broadcasted left operand of non-commutative subtraction or division are rejected.
 Broadcast division supports FP16 and FP32; its high-precision form is not part
 of this contract.
+
+The Ascend 910B A2/A3 `TFMOD` instruction accepts FP32 equal-shape operands,
+and `TFMODS` accepts FP32. AutoTile rejects FP16 fmod and tensor-fmod
+broadcasts during admission. The `part_*` instruction family likewise has no
+row/column-expand form, so its two tensor operands must have identical shapes.
 
 The validated Ascend 910B A2/A3 AutoTile arithmetic surface is FP16/FP32;
 PTOAS rejects direct BF16 `TADD` on this target. AutoTile therefore rejects
@@ -127,6 +133,8 @@ contains:
 - row and column partitions and the exact work-unit count;
 - full-region and streamed strip or chunk extents;
 - phase operation lists and boundary-input first/last-use records;
+- an explicit generated-algorithm tag for phases such as the online-softmax
+  update, whose work is synthesized rather than replayed from source ops;
 - pipeline trip counts and depths;
 - logical and DMA-padded reduction extents;
 - full and emitted UB peaks plus modeled compute and transfer cycles.
@@ -139,8 +147,9 @@ priced.
 
 At `INFO` log level, every successful rewrite prints one `AutoTile[name]` line
 containing the selected schedule, grid, work units, tile/strip/chunk extents,
-pipeline depths, UB peaks, phase traffic, modeled cycles, and whether the
-reduction estimate is grounded or a fallback. The Ascend 910B coefficients are
+pipeline depths, UB peaks, phase traffic, modeled cycles, whether the
+reduction estimate is grounded or a fallback, and whether pointwise estimates
+use a generic or cast proxy. The Ascend 910B coefficients are
 ported without refitting from the silicon-grounded scheduler model; AutoTile
 changes ownership of planning and emission, not those measurements.
 
@@ -257,11 +266,19 @@ The cost model combines:
    serial sum; and
 5. task and wave fill terms.
 
-Every capacity-safe reduction chunk is evaluated and the minimum modeled cost
-wins; the largest fitting chunk is not assumed fastest. Both admitted compute
-dtypes use grounded reduction tables. The implementation retains an explicit
-conservative fallback for future backend expansion rather than presenting an
-ungrounded estimate as measured data.
+Every supported candidate in the bounded reduction search is evaluated and the
+minimum modeled cost wins; the largest fitting chunk is not assumed fastest.
+The search considers the complete reduced extent and 16-element-aligned chunks
+up to 4096 elements, subject to UB capacity. Both admitted compute dtypes use
+grounded reduction tables. The implementation retains an explicit conservative
+fallback for future backend expansion rather than presenting an ungrounded
+estimate as measured data.
+
+Most pointwise primitives use the transferred 910B grounding. Operations
+classified as generic and native cast hops use explicit conservative proxy
+coefficients: the generic proxy is not an operation-specific measurement, and
+the cast proxy does not distinguish individual source/destination dtype pairs.
+The plan log and schedule report expose this provenance as `pointwise_model`.
 
 The model intentionally keeps the conservative summed directional GM term. It
 does not assume independent MTE2/MTE3 overlap, fit a new bandwidth coefficient,

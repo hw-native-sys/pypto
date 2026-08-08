@@ -57,8 +57,9 @@ no-op。
 - FP32 和 FP16 Vector 计算；
 - BF16 tensor 存储和原生 cast 链端点；
 - 作为终端且不再被消费的 FP32-to-INT8 cast；
-- 逐元素算术、scalar 形式、`part_*`、行/列 broadcast、`exp`、`log`、
-  `abs`、`sqrt`、`rsqrt`、`recip` 和 `fmod`；
+- 逐元素算术、scalar 形式、同 shape 的 `part_*`、行/列 broadcast、`exp`、
+  `log`、`abs`、`sqrt`、`rsqrt`、`recip`、FP32 同 shape `fmod` 和 FP32
+  `fmods`；
 - `row_sum`、`row_max`、`col_sum` 和 `col_max`；
 - 一个归约及其逐元素 producer 或 consumer DAG；
 - 当每个 core 的完整 DAG 可放入 materialized 调度时，支持多个同轴归约；
@@ -69,6 +70,11 @@ no-op。
 统一二元操作在发射前会规范化为显式 row-expand 或 col-expand 操作。含 `[1,1]`
 tensor 的歧义 broadcast，以及非交换减法或除法中位于左侧的 broadcast 操作数会被
 拒绝。broadcast 除法支持 FP16 和 FP32；其高精度形式不在本契约中。
+
+Ascend 910B A2/A3 的 `TFMOD` 指令仅接受 FP32 且 shape 相同的两个操作数，
+`TFMODS` 也仅接受 FP32。AutoTile 会在准入阶段拒绝 FP16 fmod 和 tensor-fmod
+broadcast。`part_*` 指令族同样没有 row/column-expand 形式，因此两个 tensor
+操作数必须具有相同 shape。
 
 经过验证的 Ascend 910B A2/A3 AutoTile 算术范围是 FP16/FP32；PTOAS 会在该目标上拒绝
 直接 BF16 `TADD`。因此 AutoTile 会在准入阶段、规划或 PTOAS 编译之前拒绝 BF16 算术。
@@ -106,6 +112,8 @@ planner 首先构造带类型的 Vector 图。Tensor 节点记录静态 shape、
 - 行列 partition 和精确 work-unit 数；
 - 完整 region 与流式 strip/chunk extent；
 - phase 运算列表和边界输入 first/last-use；
+- 对 online-softmax update 这类由 planner 合成、而不是直接重放源 op 的 phase，记录显式
+  generated-algorithm 标记；
 - pipeline trip 数与深度；
 - 逻辑及 DMA padding 后的 reduction extent；
 - 完整及实际发射的 UB 峰值，以及计算/传输周期。
@@ -116,7 +124,8 @@ emitter 在生成 IR 前根据源图验证 descriptor。它不会重新推导 ti
 
 在 `INFO` 日志级别，每次成功改写都会输出一行 `AutoTile[name]`，其中包含选中的
 schedule、grid、work unit、tile/strip/chunk extent、pipeline depth、UB 峰值、各 phase
-流量、modeled cycle，以及 reduction 估计来自实测表还是 fallback。Ascend 910B 系数从
+流量、modeled cycle、reduction 估计来自实测表还是 fallback，以及 pointwise 估计是否使用
+generic 或 cast proxy。Ascend 910B 系数从
 经 silicon 验证的 scheduler model 原样移植而来，没有重新拟合；AutoTile 改变的是规划
 与发射的归属，而不是这些测量数据。
 
@@ -211,10 +220,16 @@ cost model 组合：
 4. 只有实际发射两阶段 pipeline 的 phase 才使用 `max(compute, transfer)`，否则串行相加；
 5. task 与 wave fill 项。
 
-planner 会评估每个容量安全的 reduction chunk，并选择 modeled cost 最小者；不会假定
-最大可容纳 chunk 最快。当前准入的两种计算 dtype 都使用 grounded reduction table。
-实现仍为未来 backend 扩展保留显式保守 fallback，而不会把未 grounded 的估计伪装成
-实测数据。
+planner 会评估有界 reduction 搜索中的每个受支持候选，并选择 modeled cost 最小者；不会
+假定最大可容纳 chunk 最快。搜索包含完整 reduction extent，以及不超过 4096 元素且按
+16 元素对齐、同时满足 UB 容量的 chunk。当前准入的两种计算 dtype 都使用 grounded
+reduction table。实现仍为未来 backend 扩展保留显式保守 fallback，而不会把未 grounded
+的估计伪装成实测数据。
+
+大多数 pointwise primitive 使用移植的 910B grounding。被归类为 generic 的运算和原生
+cast hop 使用显式保守 proxy 系数：generic proxy 不是针对具体运算的测量值，cast proxy
+也不区分具体源/目标 dtype 对。plan 日志和 schedule report 通过 `pointwise_model` 暴露
+该来源。
 
 模型有意保留保守的双向 GM 流量和。它不会假设 MTE2/MTE3 相互独立重叠，不会拟合
 新的带宽系数，也不会推断 IR 中不存在的隐式 pipeline。
