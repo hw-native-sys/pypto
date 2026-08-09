@@ -2,11 +2,32 @@
 
 ## Length Limits
 
-**Strict limits for maintainability and readability:**
+| File class | Limit | Why |
+| ---------- | ----- | --- |
+| `docs/**.md` | ≤500 lines | Read by humans on demand; scannability |
+| `.claude/rules/*.md` | ≤200 lines **per file** and **≤2500 lines total** across the directory | Always-on context |
+| `.claude/skills/*/SKILL.md` | ≤200 lines | Entry point — must be actionable at a glance |
+| `.claude/skills/**` supporting files (`reference.md`, templates, scripts) | ≤500 lines | Loaded on demand, like docs |
 
-- **Documentation files** (`docs/`): ≤500 lines
-- **AI rules** (`.claude/rules/`): ≤200 lines
-- **AI skills** (`.claude/skills/`): ≤200 lines
+**The aggregate budget is the binding constraint for rules.** Every file in
+`.claude/rules/` is injected into the system prompt of *every* session, so the
+directory total — not any single file — is what costs tokens and dilutes
+attention. Nineteen 200-line files would each "comply" and still be unusable.
+Check it before adding a rule file:
+
+```bash
+wc -l .claude/rules/*.md | tail -1   # keep the total ≤ 2500
+```
+
+When the total approaches the budget, **merge or delete a rule** rather than
+splitting an oversized one into two always-loaded files — a split lowers the
+per-file count while leaving the aggregate unchanged.
+
+**Skills are load-on-demand, so only the entry point is tightly capped.** Keep
+`SKILL.md` under 200 lines and push detail (full API tables, long worked
+examples, step-by-step recipes) into sibling reference files that the skill
+links to — the 500-line docs limit governs those. A `SKILL.md` over the cap is a
+signal to move content into a reference file, not to request an exception.
 
 ## When to Split vs Condense
 
@@ -85,11 +106,15 @@ Combine similar sections that repeat the same pattern.
 - Reference other files instead of duplicating
 - Use numbered/bulleted lists
 
+For skills specifically: `SKILL.md` states *what to do and when*; a reference
+file holds *everything you need to look up while doing it*.
+
 ## Quality Checklist
 
 Before finalizing, verify:
 
-- [ ] File ≤ target length (500 for docs, 200 for AI files)
+- [ ] File ≤ its target length (see "Length Limits")
+- [ ] For a new/grown rule file: `.claude/rules/` total still ≤2500 lines
 - [ ] All examples work and are necessary
 - [ ] No redundant explanations
 - [ ] Tables used for comparisons
