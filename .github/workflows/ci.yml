@@ -711,7 +711,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: false  # TEMPORARY: disabled while validating the toolchain bundle; revert before merge
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -757,6 +757,7 @@ jobs:
         with:
           checkout-path: st-direct-checkout
           needs-device: 'true'
+          toolchain: bundle
           pip-cache-name: pip-st-direct
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
@@ -856,7 +857,7 @@ jobs:
     # doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: false  # TEMPORARY: disabled while validating the toolchain bundle; revert before merge
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -900,6 +901,7 @@ jobs:
         with:
           checkout-path: dist-checkout
           needs-device: 'true'
+          toolchain: bundle
           pip-cache-name: pip-dist
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
           unset-ring: 'true'
@@ -940,7 +942,7 @@ jobs:
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
     # Docs-only gate (see the `changes` job) — prose cannot break a build.
     needs: [changes, toolchain, pre-commit, clang-tidy]
-    if: false  # TEMPORARY: disabled while validating the toolchain bundle; revert before merge
+    if: needs.changes.outputs.docs_only != 'true'
     # Checkout + clone pypto-lib + test only — no write scopes needed on GITHUB_TOKEN.
     permissions:
       contents: read
@@ -984,6 +986,7 @@ jobs:
         with:
           checkout-path: lib-checkout
           needs-device: 'true'
+          toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
