@@ -383,6 +383,22 @@ runs:
         fi
         cat >> activate.sh <<'EOF'
         source "$_PYPTO_TOOLCHAIN/activate.sh"
+        # TEMPORARY, for bundles up to 2026.08.4. Those put lib/bundled FIRST on
+        # LD_LIBRARY_PATH, and everything launched from this environment
+        # inherits it -- host programs included. HCE2's /usr/bin/ssh, which
+        # simpler's build invokes, then loaded AlmaLinux's libcrypto.so.1.1
+        # instead of the vendor build it was linked against and died on a
+        # missing EVP_sm4_ctr. These copies exist for hosts that LACK a library,
+        # so they belong last. gcc/lib64 is untouched: its libstdc++ must win,
+        # because ptoas needs GLIBCXX_3.4.29 and the host stops at 3.4.28.
+        #
+        # Idempotent, and a no-op against a bundle that already orders it this
+        # way; delete once the fleet is past 2026.08.4.
+        _pypto_bundled="$PYPTO_TOOLCHAIN/lib/bundled"
+        LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' \
+            | grep -vFx "$_pypto_bundled" | paste -sd: -)"
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$_pypto_bundled"
+        unset _pypto_bundled
         # BASH_SOURCE, not $GITHUB_WORKSPACE: a task-submit child's truncated
         # env snapshot may not carry the workspace path.
         _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
