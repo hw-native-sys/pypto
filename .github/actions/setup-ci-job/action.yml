@@ -76,6 +76,19 @@ inputs:
       nothing and keeps ccache in the default namespace.
     required: false
     default: ''
+  toolchain:
+    description: >-
+      Where the Python and GCC come from. 'conda' is the historical path: a
+      per-machine conda env under CONDA_ROOT, layered with a
+      --system-site-packages venv. 'bundle' uses the pinned pypto-toolchain
+      bundle installed at /opt/pypto/toolchain/current, which is byte-identical
+      on every host and carries its own ccache and uv.
+
+      Default stays 'conda' so a runner that has not been provisioned yet keeps
+      working: the two can coexist while the fleet is migrated one label at a
+      time, and any job can be reverted on its own.
+    required: false
+    default: 'conda'
   unset-ring:
     description: >-
       When 'true', activate.sh unsets PTO2_RING_* — the dist HCCL tests break with
@@ -99,6 +112,7 @@ runs:
         INSTALL_TOOLCHAIN: ${{ inputs.install-toolchain }}
         PTO_ISA_COMMIT_IN: ${{ inputs.pto-isa-commit }}
         PIP_CACHE_NAME: ${{ inputs.pip-cache-name }}
+        TOOLCHAIN_IN: ${{ inputs.toolchain }}
       run: |
         set -uo pipefail
         # A device job that installs the toolchain must have a pto-isa commit to
@@ -109,7 +123,10 @@ runs:
         fi
         # Prerequisites CI does not create, so they must already be there. The
         # codegen job needs no Ascend env, so CANN_ROOT is device-jobs-only.
-        required="CONDA_ROOT"
+        required=""
+        if [ "${TOOLCHAIN_IN:-conda}" = "conda" ]; then
+          required="CONDA_ROOT"
+        fi
         if [ "$NEEDS_DEVICE" = "true" ]; then
           required="$required CANN_ROOT"
         fi
@@ -262,6 +279,7 @@ runs:
         git checkout ${{ inputs.pto-isa-commit }}
 
     - name: Bootstrap conda + per-job venv + write activate.sh
+      if: ${{ inputs.toolchain == 'conda' }}
       # Per-job venv layered on the conda env; activate.sh lets each later step
       # (and every task-submit child) enter the env with a single
       # `source activate.sh`. For device jobs it also sources set_env.sh, which
@@ -321,6 +339,64 @@ runs:
         if [ "$UNSET_RING" = "true" ]; then
           printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
         fi
+
+    - name: Enter the toolchain bundle + per-job venv + write activate.sh
+      if: ${{ inputs.toolchain == 'bundle' }}
+      # Same contract as the conda step it replaces: a per-job venv and an
+      # activate.sh that any later step, and any task-submit child, enters with
+      # one `source activate.sh`. What changes is where Python and GCC come from.
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      env:
+        NEEDS_DEVICE: ${{ inputs.needs-device }}
+        UNSET_RING: ${{ inputs.unset-ring }}
+      run: |
+        # Assert what this build needs rather than a bundle version, so the
+        # fleet can be upgraded without editing this file. ccache >= 4.8 is a
+        # correctness requirement: below it CCACHE_NAMESPACE is silently
+        # ignored, and that is how the compile cache is scoped to the pinned
+        # pto-isa commit (issue #1139).
+        pypto-toolchain verify \
+          --require python=3.10 --require 'gcc>=15' --require 'ccache>=4.8'
+        source /opt/pypto/toolchain/current/activate.sh
+
+        rm -rf venv
+        # No --system-site-packages. Nothing outside the venv is depended on
+        # now, which also retires the trap that flag created: with it, a failed
+        # install in the venv was masked by a copy of pypto in the base env.
+        python3.10 -m venv venv
+
+        # PYPTO_TOOLCHAIN is written in as a literal, exactly as the conda roots
+        # were: activate.sh is also sourced by task-submit children, whose env
+        # snapshot is truncated and carries neither GITHUB_ENV nor this value.
+        echo "_PYPTO_TOOLCHAIN=$PYPTO_TOOLCHAIN" > activate.sh
+        if [ "$NEEDS_DEVICE" = "true" ]; then
+          echo "_PYPTO_CANN_ROOT=$CANN_ROOT" >> activate.sh
+        fi
+        # Ordering matters. CANN's set_env.sh prepends its own directories to
+        # LD_LIBRARY_PATH, so the bundle is sourced AFTER it to keep the
+        # bundle's libstdc++ first — which is what the conda path did by
+        # prepending $CONDA_PREFIX/lib last. ptoas needs GLIBCXX_3.4.29 and the
+        # host libstdc++ stops at 3.4.28, so losing that order breaks ptoas.
+        if [ "$NEEDS_DEVICE" = "true" ]; then
+          printf '%s\n' 'source "$_PYPTO_CANN_ROOT/set_env.sh"' >> activate.sh
+        fi
+        cat >> activate.sh <<'EOF'
+        source "$_PYPTO_TOOLCHAIN/activate.sh"
+        # BASH_SOURCE, not $GITHUB_WORKSPACE: a task-submit child's truncated
+        # env snapshot may not carry the workspace path.
+        _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        source "$_PYPTO_ENV_DIR/venv/bin/activate"
+        EOF
+        if [ "$UNSET_RING" = "true" ]; then
+          printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
+        fi
+
+        # Prove the file works before ten minutes of building depend on it.
+        ( source activate.sh
+          command -v python3.10 g++-15 ccache uv >/dev/null
+          python3.10 -c 'import sys; assert sys.version_info[:2]==(3,10)' )
+        echo "toolchain: $(source activate.sh >/dev/null 2>&1; g++-15 -dumpversion) / $(source activate.sh >/dev/null 2>&1; python3.10 -V 2>&1)"
 
     - name: Show ccache stats (before)
       shell: bash

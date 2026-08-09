@@ -541,6 +541,9 @@ jobs:
           needs-device: 'false'
           install-toolchain: 'false'
           pip-cache-name: pip-codegen
+          # The cpu runners carry the bundle too. This job is the cheapest way
+          # to cover that runner class: no device, no ptoas, no simpler.
+          toolchain: bundle
 
       - name: Test codegen (codegen-only, no device)
         # test_torch_codegen_paged_attention does a numeric golden compare whose
@@ -640,6 +643,10 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-st
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          # First job off conda. The npu runners carry the pypto-toolchain
+          # bundle; every other job stays on conda until its runners do, so a
+          # problem here is reverted by this one line.
+          toolchain: bundle
 
       - name: Test system tests (batched shard A — heavy dirs, all but ops/cross_core)
         timeout-minutes: 30
