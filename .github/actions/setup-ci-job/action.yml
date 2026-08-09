@@ -412,6 +412,22 @@ runs:
         rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
         python -m pip install --upgrade pip
         pip install scikit-build-core nanobind cmake ninja
+        # torch first, and explicitly the CPU build. These are Ascend hosts, and
+        # left to resolve `torch>=2.0.0` on its own pip now selects a version
+        # whose aarch64 wheel drags in the entire CUDA stack — torch 427 MB,
+        # cudnn 444 MB, cusparselt 221 MB and more, none of it usable here.
+        #
+        # The conda path never hit this: its base env already carried a torch,
+        # so with --system-site-packages pip saw the requirement satisfied and
+        # skipped it. Isolating the venv removed that accident, and with it the
+        # only thing that was pinning torch at all. Installing it up front means
+        # the dependency is already satisfied when pypto's metadata is resolved.
+        #
+        # It is also a no-op on the conda path, where torch is already visible.
+        if ! pip install torch --index-url https://download.pytorch.org/whl/cpu; then
+          echo "note: download.pytorch.org unreachable — falling back to a pinned torch"
+          pip install 'torch==2.6.0'
+        fi
         pip install --no-build-isolation .[dev]
         # simpler (./runtime) is only needed on the codegen -> device path; the
         # --codegen-only job skips it (install-toolchain=false).
