@@ -180,13 +180,16 @@ build containing the `--pto-insert-sync-summary` experiment flag.
 
 The default export is `pypto_hard_v1`: standard DSA geometry with fixed memory
 spaces, one conservative allocation-lifetime hull, capacities/reservations,
-alignment, typed separations, and PyPTO's `no_partial_overlaps` backend-safety
-relations. A `no_partial_overlaps` pair may use byte-identical ranges (true
-in-place execution) or disjoint ranges, but never staggered or containment
-overlap. This is a hard correctness constraint, not a reuse penalty or part of
-the experimental objective. Other lifetime-disjoint buffers may partially
-reuse freed regions, including the subdivision required by #1908. If strict
-pipeline intent does not fit, the adapter explicitly creates a cost-aware
+alignment, and typed separations. Distinct source and result allocations of one
+execution operation are temporally co-live; a streaming instruction may read
+and write them concurrently. Therefore standard lifetime interference, rather
+than a geometric overlap restriction, keeps them disjoint. An alias selected
+explicitly before DSA (for example a view or an output already bound to an
+input MemRef) is collapsed to one exported buffer. Merely registering an
+operation as in-place-safe describes a capability; it does not select that
+alias for the DSA solver. Other lifetime-disjoint buffers may partially reuse
+freed regions, including the subdivision required by #1908. If strict pipeline
+intent does not fit, the adapter explicitly creates a cost-aware
 `pypto_research_v1` relaxation and emits `PH-DSA-001`. Legacy
 `pypto_structured` documents remain readable in the standalone tools but are no
 longer emitted. The complete problem and objective definition is maintained by
@@ -221,18 +224,16 @@ When `MemoryPlanner.DSA` is active, step 4 is replaced by this guarded path:
    SSA-member gaps are not treated as physical dead time: loop carries, views,
    and in-place aliases can preserve a value across such a gap. Multi-interval
    reuse requires a separate proof that the physical value is dead in each hole.
-3. Convert PyPTO statement points into half-open read/write events. A definition
-   starts at `2 * def + 1`; the final read ends at `2 * last_use + 1`. A value
-   with no later read receives one write event. Consequently, an input's final
-   read may share an address with the result written by that statement.
+3. Convert PyPTO statement points into half-open execution events. A definition
+   starts at `2 * def + 1`; the final read remains live through
+   `2 * last_use + 2`. Consequently, a distinct input and result of the same
+   execution operation overlap in time and cannot share storage. For a
+   tuple-returning operation, every physical tile result starts at the producing
+   call, not at its later `TupleGetItem` name binding. A value with no later read
+   still receives one write event.
 4. Export fixed memory pools, backend capacities, a leading reserved range, and
    hard separation pairs for declared allocations, pipeline clones, backend
-   hazards, and op-specific no-alias rules. For an in-place-safe operation,
-   also export a hard `no_partial_overlaps` relation between its result and each
-   eligible input whose final read shares the result's write statement. That
-   relation preserves exact in-place reuse while rejecting staggered or
-   containment overlap, which can overwrite source elements before the
-   instruction reads them. Every declared allocation is
+   hazards, and op-specific no-alias rules. Every declared allocation is
    separated from unrelated allocations in its memory space. Every requested
    pipeline stage initially receives a distinct residue, and every cross-stage
    member pair is hard-separated. Each separation retains its typed source.

@@ -154,12 +154,13 @@ placement 的下游同步开销。该选项要求 PTOAS 构建包含实验性
 `--pto-insert-sync-summary` 参数。
 
 默认导出使用 `pypto_hard_v1`：标准 DSA 几何、固定内存空间、单个保守的分配
-生命周期包络、容量/保留区、对齐、带类型的 separation，以及 PyPTO 后端安全所需的
-`no_partial_overlaps` 关系。`no_partial_overlaps` pair 可以使用字节范围完全相同的
-地址（真正的原地执行）或完全不相交的地址，但不能使用 staggered overlap 或
-containment overlap。这是 hard correctness constraint，不是 reuse penalty，也不属于
-实验性 objective。其他生命周期不相交的缓冲仍可部分复用已释放区域，包括 #1908
-所需的区域细分。若 strict pipeline
+生命周期包络、容量/保留区、对齐以及带类型的 separation。同一个执行算子的独立
+source 与 result allocation 在时间上共同存活；流式指令可能并发读写两者。因此，
+标准生命周期干涉会使两者保持不相交，而不需要额外的几何 overlap 限制。DSA 之前
+已经显式选定的 alias（例如 view，或已绑定到输入 MemRef 的输出）会折叠为一个导出
+buffer。仅把算子注册为 in-place-safe 只是描述能力，并不代表 DSA solver 已经选择了
+该 alias。其他生命周期不相交的缓冲仍可部分复用已释放区域，包括 #1908 所需的区域
+细分。若 strict pipeline
 intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relaxation，
 并发出 `PH-DSA-001`。独立工具仍可读取旧的 `pypto_structured` 文档，但 PyPTO
 不再生成该 profile。完整问题与 objective 定义由独立 solver 维护，见
@@ -189,15 +190,13 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
    gap 不会被视为物理内存已经失效，因为 loop carry、view 和原地 alias 可能让值跨越
    该 gap 继续存活。只有单独证明每个 hole 中的物理值确实失效后，才能启用
    multi-interval 复用。
-3. 把 PyPTO statement point 转成半开区间的读/写 event。定义从
-   `2 * def + 1` 开始，最后一次读在 `2 * last_use + 1` 结束；没有后续读取的值仍占用
-   一个写 event。因此，一个输入的最后一次读取可以和同一语句写出的结果共用地址。
+3. 把 PyPTO statement point 转成半开区间的执行 event。定义从
+   `2 * def + 1` 开始，最后一次读持续到 `2 * last_use + 2`。因此，同一个执行算子中
+   独立的输入和结果在时间上重叠，不能共享存储。对于返回 tuple 的算子，每个物理
+   tile result 从产生它的 call 开始，而不是从后续 `TupleGetItem` 名称绑定开始。没有
+   后续读取的值仍占用一个写 event。
 4. 导出固定 memory pool、后端容量、前导 reserved range，以及声明式分配、pipeline
-   clone、后端 hazard 和算子专用 no-alias 规则产生的 hard separation pair。对于
-   in-place-safe 算子，还会在结果与每个 eligible input 之间导出 hard
-   `no_partial_overlaps` 关系；这些 input 的最后一次读取与结果写入位于同一 statement。
-   该关系保留 exact in-place reuse，同时拒绝 staggered overlap 和 containment
-   overlap，避免指令尚未读取 source element 就被输出覆盖。每个
+   clone、后端 hazard 和算子专用 no-alias 规则产生的 hard separation pair。每个
    声明式分配都与同一内存空间中的无关分配分离。每个 requested
    pipeline stage 首先获得独立 residue，所有 cross-stage member pair 都保持
    hard-separated；每条 separation 都保留其类型化来源。

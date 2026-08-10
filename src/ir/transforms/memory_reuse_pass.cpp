@@ -1044,12 +1044,31 @@ class LifetimeAnalyzer : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     int order = current_order_++;
 
+    // A tuple-valued execution call writes its physical tile results at the
+    // call, not at the later TupleGetItem statements that merely bind names to
+    // those results. Preserve that execution point as the tile definition so
+    // DSA can model the call's input reads and output writes as one operation.
+    // Conventional MemoryReuse still permits an exact read-before-write reuse
+    // at this touching point; the DSA adapter deliberately models distinct
+    // allocations more conservatively (see ConvertAllocationLifetime).
+    int definition_order = order;
+    if (const auto get_item = As<TupleGetItemExpr>(op->value_)) {
+      if (const auto tuple = AsVarLike(get_item->tuple_)) {
+        const auto producer = tuple_producer_order_.find(tuple.get());
+        if (producer != tuple_producer_order_.end()) definition_order = producer->second;
+      }
+    }
+
     // Record TileType variable definitions
     auto tile_type = As<TileType>(op->var_->GetType());
     if (tile_type) {
       ordered_defs_.push_back(op->var_);
-      var_def_order_[op->var_] = order;
+      var_def_order_[op->var_] = definition_order;
       var_def_stmt_[op->var_] = op;
+    }
+
+    if (As<TupleType>(op->var_->GetType()) && transform_utils::AsCallOrSubmitView(op->value_)) {
+      tuple_producer_order_[op->var_.get()] = order;
     }
 
     // Collect variable uses from value expression (for ALL AssignStmt)
@@ -1174,6 +1193,8 @@ class LifetimeAnalyzer : public IRVisitor {
   std::map<VarPtr, int> var_def_order_;
   std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
   std::map<VarPtr, StmtPtr> var_def_stmt_;
+  // Tuple temporary -> execution statement that produced its physical results.
+  std::map<const Var*, int> tuple_producer_order_;
 
   // Maps ForStmt/WhileStmt return_vars to their corresponding initValue vars.
   // YieldFixup will place return_vars into initValue's MemRef buffer,
@@ -1585,7 +1606,6 @@ class HazardInputCollector : public IRVisitor {
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
 using ForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
-using NoPartialOverlapMap = std::map<const Var*, std::vector<VarPtr>>;
 
 // Resolve a tile Var to its MemRef base pointer (nullptr if it is not a tile or
 // has no MemRef yet).  View ops share their source's base, so a view and its
@@ -1623,10 +1643,6 @@ class ForbidAliasCollector : public IRVisitor {
         if (pending != tuple_forbidden_.end()) {
           RecordForOutput(op->var_, pending->second, &forbidden_, &tuple_forbidden_);
         }
-        const auto partial = tuple_no_partial_.find(tuple.get());
-        if (partial != tuple_no_partial_.end()) {
-          RecordForOutput(op->var_, partial->second, &no_partial_, &tuple_no_partial_);
-        }
       }
     }
 
@@ -1635,9 +1651,7 @@ class ForbidAliasCollector : public IRVisitor {
       if (reg.IsRegistered(call->op_->name_)) {
         const auto& entry = reg.GetEntry(call->op_->name_);
         std::vector<VarPtr> forbidden_inputs;
-        std::set<size_t> forbidden_indices;
         auto forbid_arg = [&](size_t i) {
-          forbidden_indices.insert(i);
           if (i < call->args_.size()) {
             if (auto v = AsVarLike(call->args_[i])) forbidden_inputs.push_back(v);
           }
@@ -1662,16 +1676,7 @@ class ForbidAliasCollector : public IRVisitor {
           auto in_t = As<TileType>(call->args_[0]->GetType());
           if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
-        std::vector<VarPtr> no_partial_inputs;
-        if (entry.IsInplaceSafe() && entry.HasExecutionMemoryAccess()) {
-          for (size_t i = 0; i < call->args_.size(); ++i) {
-            if (forbidden_indices.count(i) != 0) continue;
-            auto input = AsVarLike(call->args_[i]);
-            if (input && As<TileType>(input->GetType())) no_partial_inputs.push_back(input);
-          }
-        }
         RecordForOutput(op->var_, forbidden_inputs, &forbidden_, &tuple_forbidden_);
-        RecordForOutput(op->var_, no_partial_inputs, &no_partial_, &tuple_no_partial_);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -1681,7 +1686,6 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   ForbidAliasMap TakeForbidden() { return std::move(forbidden_); }
-  NoPartialOverlapMap TakeNoPartialOverlaps() { return std::move(no_partial_); }
 
  private:
   void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& inputs,
@@ -1700,9 +1704,7 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   ForbidAliasMap forbidden_;
-  NoPartialOverlapMap no_partial_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
-  std::map<const Var*, std::vector<VarPtr>> tuple_no_partial_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
@@ -3444,7 +3446,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
   ForbidAliasCollector forbid_collector(analysis.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);
   const ForbidAliasMap forbid_alias = forbid_collector.TakeForbidden();
-  const NoPartialOverlapMap no_partial_overlap = forbid_collector.TakeNoPartialOverlaps();
   // (1) Pipeline double-buffer separations. Export the full requested pipeline
   // intent first: every distinct source stage gets its own residue and remains
   // hard-separated from every other stage in the group. Capacity pressure is
@@ -3549,35 +3550,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     }
   }
 
-  // (4) Exact-in-place operands. OpRegistry's in-place contract permits an
-  // output to reuse these input allocations at exactly the same byte range.
-  // It does not permit a solver to slide the output part-way across the input:
-  // forward-streaming vector instructions can then overwrite source elements
-  // before reading them. Ordinary lifetime interference already keeps a
-  // still-live operand disjoint, so emit this relation only at the
-  // read-before-write boundary where exact reuse is actually available.
-  std::set<std::pair<size_t, size_t>> no_partial_overlap_pairs;
-  for (size_t output = 0; output < intervals.size(); ++output) {
-    const auto found = no_partial_overlap.find(intervals[output].variable.get());
-    if (found == no_partial_overlap.end()) continue;
-    for (const VarPtr& operand : found->second) {
-      auto memref = GetTypeMemRef(operand->GetType());
-      if (!memref.has_value() || !memref.value()) continue;
-      const auto input = base_to_index.find(memref.value()->base_.get());
-      if (input == base_to_index.end() || input->second == output) continue;
-      if (intervals[input->second].memory_space != intervals[output].memory_space ||
-          intervals[input->second].last_use_point != intervals[output].def_point) {
-        continue;
-      }
-      size_t first = input->second;
-      size_t second = output;
-      if (second < first) std::swap(first, second);
-      if (separation_reasons.count({first, second}) == 0) {
-        no_partial_overlap_pairs.emplace(first, second);
-      }
-    }
-  }
-
   plan.separations.reserve(separation_reasons.size());
   for (const auto& [indices, reasons] : separation_reasons) {
     AllocationSeparation separation;
@@ -3585,10 +3557,6 @@ AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
     separation.second = indices.second;
     separation.reasons.assign(reasons.begin(), reasons.end());
     plan.separations.push_back(std::move(separation));
-  }
-  plan.no_partial_overlaps.reserve(no_partial_overlap_pairs.size());
-  for (const auto& [first, second] : no_partial_overlap_pairs) {
-    plan.no_partial_overlaps.push_back({first, second});
   }
   return plan;
 }

@@ -160,7 +160,7 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
     ir.assert_structural_equal(After, Expected)
     if passes.is_dsa_solver_available():
         DsaAfter = _allocate_with_dsa(Initialized)
-        assert _vec_peak(DsaAfter) == 4096 + 16384
+        assert _vec_peak(DsaAfter) == 4096 + 2 * 16384
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -1063,8 +1063,8 @@ def _allocate_with_dsa(
 
 
 @requires_dsa
-def test_dsa_planner_reuses_at_read_before_write_boundary():
-    """The standalone planner jointly reuses and places unmerged buffers."""
+def test_dsa_planner_keeps_same_operation_operands_live():
+    """Distinct source and result allocations overlap during one execution op."""
     base = _dsa_chain_program()
     bump = passes.allocate_memory_addr()(base)
     planned = _allocate_with_dsa(base)
@@ -1072,9 +1072,9 @@ def test_dsa_planner_reuses_at_read_before_write_boundary():
     bump_peak = _vec_peak(bump)
     plan_peak = _vec_peak(planned)
     assert bump_peak == 3 * 16384  # bump: three distinct 16 KB slots
-    # Every producer's last read precedes its consumer's write at the same
-    # statement point, so all three buffers may use one physical slot.
-    assert plan_peak == 16384
+    # A/B and B/C are source/result pairs of one instruction and must remain
+    # disjoint. A and C are not co-live, so they may still share one slot.
+    assert plan_peak == 2 * 16384
 
 
 @requires_dsa
@@ -1142,9 +1142,9 @@ def test_dsa_loose_reference_spreads_only_the_selected_function(tmp_path):
         reference_target="some_other_kernel",
     )
 
-    assert _vec_peak(compact) == 16384
+    assert _vec_peak(compact) == 2 * 16384
     assert _vec_peak(loose) == 3 * 16384
-    assert _vec_peak(unmatched) == 16384
+    assert _vec_peak(unmatched) == 2 * 16384
 
     compact_problem = compact_dir / "pypto_read_before_write_chain.dsa.json"
     loose_problem = loose_dir / "pypto_read_before_write_chain.dsa.json"
@@ -1189,16 +1189,12 @@ def test_dsa_export_is_deterministic_pypto_hard_v1(tmp_path):
     assert [buffer["id"] for buffer in buffers] == [0, 1, 2]
     assert [buffer["size"] for buffer in buffers] == [16384, 16384, 16384]
     assert [buffer["live_intervals"] for buffer in buffers] == [
-        [{"lower": 7, "upper": 9}],
-        [{"lower": 9, "upper": 11}],
-        [{"lower": 11, "upper": 13}],
+        [{"lower": 7, "upper": 10}],
+        [{"lower": 9, "upper": 12}],
+        [{"lower": 11, "upper": 14}],
     ]
     assert document["problem"]["constraints"] == {
         "colocations": [],
-        "no_partial_overlaps": [
-            {"first": 0, "second": 1},
-            {"first": 1, "second": 2},
-        ],
         "pinned_allocations": [],
         "separations": [],
         "temporal_exclusions": [],
@@ -1237,7 +1233,7 @@ def test_dsa_replays_fingerprinted_solution(tmp_path):
     assert len(solution["problem_fingerprint"]) == 16
     assert solution["placements"] == [
         {"buffer": 0, "offset": 0, "pool": 1},
-        {"buffer": 1, "offset": 0, "pool": 1},
+        {"buffer": 1, "offset": 16384, "pool": 1},
         {"buffer": 2, "offset": 0, "pool": 1},
     ]
 
@@ -1766,6 +1762,23 @@ def test_dsa_preserves_tuple_result_semantic_separations(tmp_path):
         for forbidden_input in ("source", "tmp")
     }
 
+    # TupleGetItem only binds names to results that the gather_compare call has
+    # already written. Both physical results therefore start at the producer
+    # call and overlap the call's final reads, rather than starting at the later
+    # unpack statements.
+    intervals = {
+        member: document["problem"]["buffers"][alias["buffer"]]["live_intervals"][0]
+        for alias in document["problem"]["pypto_structure"]["alias_classes"]
+        for member in alias["members"]
+    }
+
+    def overlaps(first: dict, second: dict) -> bool:
+        return first["lower"] < second["upper"] and second["lower"] < first["upper"]
+
+    assert intervals["dst"]["lower"] == intervals["count"]["lower"]
+    assert overlaps(intervals["source"], intervals["dst"])
+    assert overlaps(intervals["source"], intervals["count"])
+
 
 def _dsa_expand_semantic_separation_program():
     """Expand target may alias exactly; its broadcast operand may not alias."""
@@ -1808,7 +1821,7 @@ def _dsa_inplace_unary_program():
 
 @requires_dsa
 def test_dsa_preserves_expand_operand_alias_contracts(tmp_path):
-    """DSA exports exact-or-disjoint and always-disjoint input contracts directly."""
+    """DSA exports the expand operand that is never allowed to alias."""
 
     _allocate_with_dsa(_dsa_expand_semantic_separation_program(), str(tmp_path))
     document = json.loads((tmp_path / "pypto_expand_semantic_separation.dsa.json").read_text())
@@ -1826,34 +1839,27 @@ def test_dsa_preserves_expand_operand_alias_contracts(tmp_path):
     assert "result" in separated_members
     assert {"column", "column_storage"} <= separated_members
 
-    no_partial_pairs = {
-        frozenset((next(iter(aliases[edge["first"]])), next(iter(aliases[edge["second"]]))))
-        for edge in document["problem"]["constraints"]["no_partial_overlaps"]
-    }
-    assert no_partial_pairs == {frozenset(("target", "result"))}
-
 
 @requires_dsa
-def test_dsa_replay_rejects_staggered_inplace_overlap(tmp_path):
-    """Independent replay validation rejects a legal-in-place pair shifted by one alignment unit."""
+def test_dsa_does_not_infer_inplace_alias_from_registry_capability(tmp_path):
+    """An in-place-safe op remains out-of-place unless aliasing was selected explicitly."""
 
-    base = _dsa_inplace_unary_program()
-    _allocate_with_dsa(base, str(tmp_path))
-    problem_path = tmp_path / "pypto_inplace_unary.dsa.json"
-    solution_path = tmp_path / "pypto_inplace_unary.dsa.solution.json"
-    document = json.loads(problem_path.read_text())
-    solution = json.loads(solution_path.read_text())
+    _allocate_with_dsa(_dsa_inplace_unary_program(), str(tmp_path))
+    document = json.loads((tmp_path / "pypto_inplace_unary.dsa.json").read_text())
+    solution = json.loads((tmp_path / "pypto_inplace_unary.dsa.solution.json").read_text())
     aliases = {
         member: alias["buffer"]
         for alias in document["problem"]["pypto_structure"]["alias_classes"]
         for member in alias["members"]
     }
-    placements = {entry["buffer"]: entry for entry in solution["placements"]}
-    placements[aliases["result"]]["offset"] = placements[aliases["source"]]["offset"] + 32
-    solution_path.write_text(json.dumps(solution, indent=2) + "\n")
+    intervals = {buffer["id"]: buffer["live_intervals"][0] for buffer in document["problem"]["buffers"]}
+    source = aliases["source"]
+    result = aliases["result"]
+    assert intervals[source]["lower"] < intervals[result]["upper"]
+    assert intervals[result]["lower"] < intervals[source]["upper"]
 
-    with pytest.raises(ValueError, match="no-partial-overlap buffers"):
-        _allocate_with_dsa(base, solution_dir=str(tmp_path))
+    placements = {entry["buffer"]: entry["offset"] for entry in solution["placements"]}
+    assert placements[source] != placements[result]
 
 
 @requires_dsa
@@ -2417,13 +2423,15 @@ def _dsa_fragmentation_program():
 
 @requires_dsa
 def test_dsa_planner_subdivides_a_freed_larger_region(tmp_path):
-    """Regression for #1908: later co-live buffers subdivide one freed region."""
+    """Regression for #1908: later co-live inputs subdivide one freed region."""
     base = _dsa_fragmentation_program()
     bump = passes.allocate_memory_addr()(base)
     planned = _allocate_with_dsa(base, str(tmp_path))
 
     assert _vec_peak(bump) == (64 + 32 + 32 + 32) * 1024
-    assert _vec_peak(planned) == 64 * 1024
+    # left/right subdivide producer's freed 64 KB region. Their add result is a
+    # distinct same-operation output, so it needs one additional 32 KB slot.
+    assert _vec_peak(planned) == 96 * 1024
 
     corpus_file = tmp_path / "pypto_issue_1908_fragmentation.dsa.json"
     document = json.loads(corpus_file.read_text())

@@ -34,7 +34,7 @@ def _problem(*, with_cost: bool) -> dict:
         "profile": "pypto_research_v1" if with_cost else "pypto_hard_v1",
         "instance": "sample",
         "metadata": {
-            "lifetime_ordering": "pypto_read_before_write",
+            "lifetime_ordering": "pypto_execution_overlap_v1",
             "solver_input": "pre_memory_reuse",
         },
         "problem": {
@@ -119,23 +119,6 @@ def test_fingerprint_canonicalizes_alias_member_labels(ablation: ModuleType):
 
     renamed["problem"]["pypto_structure"]["alias_classes"][0]["members"].append("another_member")
     assert ablation._fingerprint(original) != ablation._fingerprint(renamed)
-
-
-def test_validate_solution_enforces_no_partial_overlap(ablation: ModuleType):
-    problem = _problem(with_cost=True)
-    problem["problem"]["constraints"]["no_partial_overlaps"] = [{"first": 0, "second": 1}]
-
-    exact = _solution(ablation, problem)
-    ablation._validate_solution(problem, exact)
-
-    disjoint = _solution(ablation, problem)
-    disjoint["placements"][1]["offset"] = 64
-    ablation._validate_solution(problem, disjoint)
-
-    partial = _solution(ablation, problem)
-    partial["placements"][1]["offset"] = 32
-    with pytest.raises(ValueError, match="partially overlap"):
-        ablation._validate_solution(problem, partial)
 
 
 def test_prepare_rebinds_hard_base_and_emits_checked_variant(ablation: ModuleType, tmp_path: Path):

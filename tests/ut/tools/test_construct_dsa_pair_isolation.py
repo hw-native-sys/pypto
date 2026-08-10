@@ -42,7 +42,7 @@ def _problem(*, capacity: int = 512, conflicting_pair: bool = False) -> dict:
         "profile": "pypto_research_v1",
         "instance": "pair_sample",
         "metadata": {
-            "lifetime_ordering": "pypto_read_before_write",
+            "lifetime_ordering": "pypto_execution_overlap_v1",
             "solver_input": "pre_memory_reuse",
         },
         "problem": {

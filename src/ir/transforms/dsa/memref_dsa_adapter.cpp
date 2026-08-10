@@ -99,10 +99,14 @@ std::vector<::dsa::Interval> ConvertAllocationLifetime(const LifetimeInterval& l
       << "]";
 
   // Split each statement point into a read sub-point (2*p) and a write
-  // sub-point (2*p+1). An input last read at p ends exactly where an output
-  // defined at p begins, preserving PyPTO's read-before-write reuse rule.
+  // sub-point (2*p+1). A distinct input allocation remains live through the
+  // operation's write: hardware instructions may stream reads and writes
+  // concurrently, so statement order is not evidence that the input is dead
+  // before the output starts. This makes an input last-read at p overlap an
+  // output defined at p. Exact aliases that were explicitly selected before
+  // DSA already share one MemRef base and therefore one exported buffer.
   const int64_t lower = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
-  const int64_t last_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 1;
+  const int64_t last_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 2;
   // A definition with no later use still occupies the write sub-point. All
   // other ranges end immediately after their final read sub-point.
   const int64_t upper = std::max(lower + 1, last_read_end);
@@ -142,7 +146,7 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
   exported.document.profile = ::dsa::BenchmarkProfile::kPyptoHardV1;
   exported.document.instance = func->name_;
   exported.document.metadata = {
-      {"lifetime_ordering", "pypto_read_before_write"},
+      {"lifetime_ordering", "pypto_execution_overlap_v1"},
       {"memory_space_ids", "pypto_memory_space_enum_v1"},
       {"producer", "pypto"},
       {"solver_input", "pre_memory_reuse"},
@@ -254,23 +258,6 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     separation.second = pair.second;
     separation.reasons.assign(reasons.begin(), reasons.end());
     exported.document.problem.separations.push_back(std::move(separation));
-  }
-
-  std::set<BufferPair> no_partial_overlaps;
-  for (const AllocationNoPartialOverlap& constraint : allocation_plan.no_partial_overlaps) {
-    INTERNAL_CHECK(constraint.first < buffer_id_by_interval.size() &&
-                   constraint.second < buffer_id_by_interval.size())
-        << "DSA no-partial-overlap constraint references an out-of-range lifetime index";
-    const auto& first_buffer = buffer_id_by_interval[constraint.first];
-    const auto& second_buffer = buffer_id_by_interval[constraint.second];
-    if (!first_buffer.has_value() || !second_buffer.has_value()) continue;
-    auto first = first_buffer.value();
-    auto second = second_buffer.value();
-    if (second < first) std::swap(first, second);
-    if (first != second) no_partial_overlaps.emplace(first, second);
-  }
-  for (const auto& [first, second] : no_partial_overlaps) {
-    exported.document.problem.no_partial_overlaps.push_back({first, second});
   }
 
   ReusePenaltyRecognition recognition =
