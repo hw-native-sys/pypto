@@ -79,23 +79,21 @@ assert restored.kwargs["a_trans"] == True
 Hardware-specific memory allocation details are fully preserved:
 
 ```python
-# Create MemRef and TileView
-memref = ir.MemRef(
-    ir.ConstInt(0x1000, DataType.INT64, span),
-    512, 0
-)
+span = ir.Span.unknown()
 
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+# TileView is immutable — construct it with all values
+memref = ir.MemRef("mem_left_0", 0, 512)
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16])
 
-# Create TileType with memory info
-tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
+# Create TileType with memory info, and a Var that carries it
+tile_type = ir.TileType([16, 16], DataType.FP16, memref, tile_view, ir.Mem.Left)
+tile_var = ir.Var("t", tile_type, span)
 
 # Serialize and deserialize
 restored = ir.deserialize(ir.serialize(tile_var))
 assert restored.type.memory_space == ir.Mem.Left
 assert len(restored.type.tile_view.valid_shape) == 2
+assert restored.type.memref.size_ == 512
 ```
 
 ## MessagePack Format
@@ -126,7 +124,7 @@ assert len(restored.type.tile_view.valid_shape) == 2
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
 | **TensorType** | Map | `type_kind`, `dtype`, `shape`, optional `memref` |
-| **TileType** | Map | `type_kind`, `dtype`, `shape`, optional `memref`, optional `tile_view` |
+| **TileType** | Map | `type_kind`, `dtype`, `shape`, optional `memref`, optional `tile_view`, optional `memory_space` |
 | **Op/GlobalVar** | Map | `name`, `is_global_var` |
 
 ### MemRef and TileView Format
@@ -135,9 +133,13 @@ assert len(restored.type.tile_view.valid_shape) == 2
 // MemRef (optional field in TensorType/TileType)
 {
   "memref": {
-    "memory_space": 3,    // uint8: MemorySpace enum
-    "addr": {...},        // Expr node
-    "size": 512           // uint64
+    "base": "mem_left_0", // string: the base Ptr's name
+    "base_node": {...},   // Node: the base Ptr itself
+    "byte_offset": {...}, // Expr node
+    "size": 512,          // uint64
+    "is_pinned": true,    // bool,      omitted when false
+    "slot_count": 2,      // uint64,    omitted when 1
+    "slot_index": {...}   // Expr node, omitted when absent
   }
 }
 
@@ -155,6 +157,17 @@ assert len(restored.type.tile_view.valid_shape) == 2
   }
 }
 ```
+
+`base` and `base_node` both describe the allocation, and both are written.
+`base` is the name old blobs carry and old readers expect; `base_node` is the
+base `Ptr` as a real node, which is what preserves allocation identity —
+identity is `base_` *pointer* identity, and the node graph shares one object
+across every reference to it, including the alloc statement that defines the
+`Ptr`. Reconstructing a base from its name alone would give each MemRef a `Var`
+that is not the alloc's, and the address allocator could no longer match them.
+
+The memory space is **not** a `MemRef` field: it is serialized on `TileType`
+as `memory_space` (uint8), and `TensorType` is canonically DDR.
 
 Blobs written before the `compact` field was introduced omit that key and
 deserialize as `CompactMode.null`.

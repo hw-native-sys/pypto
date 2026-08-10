@@ -394,18 +394,23 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 描述张量/Tile 共享的内存分配元数据。对于 Tile，内存空间保存在
 `TileType.memory_space_`；`TensorType` 的规范内存空间固定为 DDR。
 
+`MemRef` 是 `Var` 的子类，因而是一等表达式。一个 MemRef 标识一块分配
+(`base_`) 以及其中的一段字节区间 (`byte_offset_`、`size_`)；别名关系由
+`MemRef.same_allocation(a, b)` 和 `MemRef.may_alias(a, b)` 判定。
+
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `addr_` | ExprPtr | 基地址 |
-| `size_` | size_t | 大小（字节） |
-| `id_` | uint64_t | 稳定的 MemRef 标识符 |
+| `base_` | VarPtr | 分配身份标识 —— 来自 `tile.alloc` / `tensor.alloc` 的 Ptr `Var`。只有共享该字段的两个 MemRef 才可能别名。 |
+| `byte_offset_` | ExprPtr | 相对 `base_` 的字节偏移（整块分配为 0，视图则为其偏移） |
+| `size_` | uint64_t | 该区间的大小（字节） |
+| `is_pinned_` | bool | 用户显式声明的分配 (`pl.MemRef("name")`)，在 `InitMemRef` 解析之前为真 |
+| `slot_count_` | uint64_t | 该声明包含的等长 slot 数 (`pl.MemRef("name", slots=N)`)；省略 `slots` 时为 1 |
+| `slot_index_` | ExprPtr \| None | 该 MemRef 指向哪个 slot (`l0c[k]`)；未选定 slot 前为 None，且可以是运行期值 |
 
 ```python
-memref = ir.MemRef(
-    ir.ConstInt(0x1000, DataType.INT64, span),
-    1024,  # bytes
-    0     # id
-)
+# base allocation name, byte offset within it, size in bytes
+memref = ir.MemRef("mem_left_0", 0, 1024)
+assert ir.MemRef.same_allocation(memref, memref)
 ```
 
 > **注意：** `ir.Mem` 是 `ir.MemorySpace` 的简写别名。
@@ -416,15 +421,23 @@ memref = ir.MemRef(
 
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `valid_shape` | list[ExprPtr] | 有效维度 |
+| `valid_shape` | list[ExprPtr] | 有效维度（为空表示等同完整 shape） |
 | `stride` | list[ExprPtr] | 每维步长 |
 | `start_offset` | ExprPtr | 起始偏移量 |
+| `blayout` | TileLayout | 块布局 (block layout)，默认 `row_major` |
+| `slayout` | TileLayout | 散布布局 (scatter layout)，默认 `none_box` |
+| `fractal` | uint64_t | 分形 (fractal) 大小，单位是**字节**而非元素（默认 512） |
+| `pad` | PadValue | 访问越出 `valid_shape` 时的填充模式（默认 `null`） |
+| `compact` | CompactMode | 部分有效 Tile 的紧凑模式（默认 `null`） |
 
 ```python
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+# TileView is immutable: pass every field to the constructor.
+# valid_shape / stride / start_offset accept int or Expr.
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16], start_offset=0)
+
+# Expr form, for symbolic dimensions
+rows = ir.Var("rows", ir.ScalarType(DataType.INT64), span)
+symbolic_view = ir.TileView(valid_shape=[rows, ir.ConstInt(16, DataType.INT64, span)])
 ```
 
 ## Function 节点
