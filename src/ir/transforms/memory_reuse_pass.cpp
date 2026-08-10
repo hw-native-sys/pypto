@@ -1621,7 +1621,8 @@ class ForbidAliasCollector : public IRVisitor {
             if (auto v = AsVarLike(call->args_[i])) forbidden_inputs.push_back(v);
           }
         };
-        if (!entry.IsInplaceSafe()) {
+        const bool auto_tile_cast_no_alias = call->GetAttr<bool>(kAutoTileCastNoAliasAttr, false);
+        if (!entry.IsInplaceSafe() || auto_tile_cast_no_alias) {
           // Non-in-place ops forbid output aliasing active inputs. A5 TPRELU
           // retains tmp (arg 2) in the ABI but does not read it, so only src
           // and slope remain active.
@@ -1629,6 +1630,17 @@ class ForbidAliasCollector : public IRVisitor {
           for (size_t i = 0; i < forbidden_arg_count; ++i) forbid_arg(i);
         } else {
           for (size_t i : entry.ForbidOutputAliasArgs()) forbid_arg(i);
+        }
+        // A dtype-widening cast (output element wider than its input) cannot run
+        // in place: element i is read at i*in_bytes but written at i*out_bytes,
+        // so with out_bytes > in_bytes the write cursor outruns the read cursor
+        // and clobbers input elements not yet converted. AutoTile casts use the
+        // call-local attr above for every direction because their cost/emit
+        // contract prices a distinct dtype-sized destination.
+        if (IsOp(call, "tile.cast") && !call->args_.empty()) {
+          auto out_t = As<TileType>(op->var_->GetType());
+          auto in_t = As<TileType>(call->args_[0]->GetType());
+          if (out_t && in_t && out_t->dtype_.GetBit() > in_t->dtype_.GetBit()) forbid_arg(0);
         }
         RecordForOutput(op->var_, forbidden_inputs);
         // tile.transpose is registered not_inplace_safe(), so its output is
@@ -2981,18 +2993,17 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Va
   return SeqStmts::Flatten(std::move(new_seq_stmts), body->span_);
 }
 
-/// Strip the transient ``pipeline_membership`` attr from every Call once
-/// MemoryReuse has consumed it (in ComputeLifetimes). The attr exists only to
-/// carry pipeline-stage identity from LowerPipelineLoops to here; leaving it on
-/// the IR would ride downstream into later passes and codegen. Stripping at the
-/// end of MemoryReuse keeps the post-reuse IR clean.
-class StripPipelineMembershipMutator : public IRMutator {
+/// Strip transient reuse-contract attrs after MemoryReuse consumes them.
+class StripReuseContractAttrsMutator : public IRMutator {
  public:
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto visited = IRMutator::VisitExpr_(op);
     auto call = As<Call>(visited);
-    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
+    if (!call || (!call->HasAttr(kPipelineMembershipAttr) && !call->HasAttr(kAutoTileCastNoAliasAttr))) {
+      return visited;
+    }
     auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    new_attrs = StripAttr(new_attrs, kAutoTileCastNoAliasAttr);
     return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                   call->GetType(), call->span_);
   }
@@ -3252,10 +3263,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto used_bases = memref_collectors::CollectUsedBasePtrs(new_body);
   new_body = RemoveUnusedAllocStatements(new_body, used_bases);
 
-  // Step 6: Strip the now-consumed pipeline_membership attr so it does not ride
-  // downstream into later passes / codegen. It was only needed to carry stage
-  // identity from LowerPipelineLoops to the reuse decision above.
-  new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+  // Step 6: Strip the now-consumed reuse-contract attrs so they do not ride
+  // downstream into later passes / codegen.
+  new_body = StripReuseContractAttrsMutator().VisitStmt(new_body);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,

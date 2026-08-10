@@ -1616,6 +1616,33 @@ def test_cast_plans_contain_the_complete_native_910b_conversion_path(program, ex
     ir.assert_structural_equal(passes.legalize_tile_cast()(tiled), tiled)
 
 
+def test_auto_tile_cast_keeps_source_and_destination_distinct_through_memory_reuse():
+    """AutoTile's priced cast storage survives the production memory planner."""
+
+    class CastAllocations(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pairs: list[tuple[ir.MemRef, ir.MemRef]] = []
+
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            call = op.value
+            if isinstance(call, ir.Call) and call.op.name == ir.get_op("tile.cast").name:
+                source = call.args[0]
+                assert isinstance(source.type, ir.TileType)
+                assert isinstance(op.var.type, ir.TileType)
+                assert source.type.memref is not None
+                assert op.var.type.memref is not None
+                assert "__auto_tile_cast_no_alias" not in call.attrs
+                self.pairs.append((source.type.memref, op.var.type.memref))
+            super().visit_assign_stmt(op)
+
+    allocations = CastAllocations()
+    allocations.visit_program(_run_default(Fp16ToBf16CastProgram))
+    assert allocations.pairs
+    for source, destination in allocations.pairs:
+        assert source.base_.name_hint != destination.base_.name_hint
+
+
 @pytest.mark.parametrize(
     ("program", "expected_targets", "required_granule", "expected_peak_ub"),
     [

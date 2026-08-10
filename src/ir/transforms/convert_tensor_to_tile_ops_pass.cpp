@@ -607,6 +607,15 @@ class TensorToTileMutator : public TypePropagatingMutator {
     // Revisit result after mutating prologue — prologue conversions may have
     // remapped vars that the result expression references.
     auto new_result = VisitExpr(conv_result.result);
+    if (call->HasAttr(kAutoTileCastNoAliasAttr)) {
+      auto result_call = As<Call>(new_result);
+      INTERNAL_CHECK_SPAN(result_call != nullptr && IsOp(result_call, "tile.cast"), call->span_)
+          << "Internal error: AutoTile cast no-alias evidence did not lower to tile.cast";
+      auto attrs = result_call->attrs_;
+      attrs.emplace_back(kAutoTileCastNoAliasAttr, true);
+      new_result = std::make_shared<Call>(result_call->op_, result_call->args_, result_call->kwargs_,
+                                          std::move(attrs), result_call->GetType(), result_call->span_);
+    }
 
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, new_result->GetType(), op->var_->span_);

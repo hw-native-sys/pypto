@@ -474,6 +474,15 @@ class VectorEmitter {
         std::swap(args[0], args[1]);
       }
       auto call = registry.Create(op.emission_op, args, op.call->kwargs_, span_);
+      // AutoTile replays tensor.cast here; ConvertTensorToTileOps later lowers
+      // it to tile.cast while preserving compiler attrs. Accept tile.cast too
+      // so this stays correct if replay moves below that lowering in future.
+      if (op.emission_op == "tensor.cast" || op.emission_op == "tile.cast") {
+        auto attrs = call->attrs_;
+        attrs.emplace_back(kAutoTileCastNoAliasAttr, true);
+        call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                      call->GetType(), call->span_);
+      }
       result = std::make_shared<Var>(Fresh("v"), call->GetType(), span_);
       body.push_back(std::make_shared<AssignStmt>(result, call, span_));
       const VectorTensor& output = graph_.tensors[op.output];

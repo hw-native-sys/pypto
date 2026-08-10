@@ -36,6 +36,14 @@ namespace ir {
 /// order.  ``AutoTile`` consumes and strips the attribute before emitting IR.
 inline constexpr const char* kAutoTileReturnedOutParamIndicesAttr = "__auto_tile_returned_out_param_indices";
 
+/// Transient ``bool`` attr on compiler-generated ``tile.cast`` calls emitted by
+/// vector AutoTile.  The AutoTile planner prices a distinct, dtype-sized
+/// destination for every native conversion, so MemoryReuse must not coalesce
+/// that destination with the cast source.  Keeping the evidence call-local
+/// avoids changing the legacy memory contract of unrelated hand-tiled kernels;
+/// the selected in-tree allocator consumes and strips the attr before codegen.
+inline constexpr const char* kAutoTileCastNoAliasAttr = "__auto_tile_cast_no_alias";
+
 /// Private provenance on every compiler-generated ``tile.load(GM -> Mat)``
 /// call introduced while bridging a Tensor operand to tile IR.
 /// ``InferTileMemorySpace`` consumes this evidence when deciding whether a

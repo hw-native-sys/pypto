@@ -136,14 +136,17 @@ std::string ReservedBytesNote(const ReserveBufferResolution& resolution, MemoryS
   return note;
 }
 
-class StripPipelineMembershipMutator : public IRMutator {
+class StripAllocationContractAttrsMutator : public IRMutator {
  public:
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto visited = IRMutator::VisitExpr_(op);
     auto call = As<Call>(visited);
-    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
-    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
-                                  StripAttr(call->attrs_, kPipelineMembershipAttr), call->GetType(),
+    if (!call || (!call->HasAttr(kPipelineMembershipAttr) && !call->HasAttr(kAutoTileCastNoAliasAttr))) {
+      return visited;
+    }
+    auto attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    attrs = StripAttr(attrs, kAutoTileCastNoAliasAttr);
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs), call->GetType(),
                                   call->span_);
   }
 };
@@ -616,10 +619,10 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 
   auto new_body = mutator.VisitStmt(func->body_);
   if (planner == MemoryPlanner::DsaRP) {
-    // DSA-RP consumed the transient stage provenance while constructing its
-    // strict pipeline separations. The legacy planner strips the same
-    // attribute at the end of MemoryReuse.
-    new_body = StripPipelineMembershipMutator().VisitStmt(new_body);
+    // DSA-RP consumed the transient allocation constraints while constructing
+    // its plan. The legacy planner strips the same attrs at the end of
+    // MemoryReuse.
+    new_body = StripAllocationContractAttrsMutator().VisitStmt(new_body);
     // MaterializeSemanticAliases can make the producer's original allocation
     // unreachable. MemoryReuse normally removes those declarations, but
     // DSA-RP deliberately skips that pass.

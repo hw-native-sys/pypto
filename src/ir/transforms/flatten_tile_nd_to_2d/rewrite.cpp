@@ -942,10 +942,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         CallPtr new_call;
         if (op_name.substr(0, 5) == "tile.") {
           auto deduced = op_registry.Create(op_name, new_args, call->kwargs_, span);
-          new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, deduced->attrs_,
+          new_call = std::make_shared<Call>(deduced->op_, deduced->args_, deduced->kwargs_, call->attrs_,
                                             WithCarriedMemRef(deduced->GetType(), assign), deduced->span_);
         } else {
-          new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+          new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_, call->GetType(),
+                                            call->span_);
         }
 
         auto new_var =

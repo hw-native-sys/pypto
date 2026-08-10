@@ -68,10 +68,10 @@ program_optimized = reuse_pass(program)
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - 缓冲区大小取其**最大**成员；由于按最大优先装箱，后纳入的成员都不大于代表，故无需显式字节大小检查（复用方向也不再被限制为「先定义且更大」）
-- **No-alias 守护**（算子语义）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区——因为硬件在**写输出的同时读取**这些输入,原地写会中途破坏该算子。三个来源汇入同一个"每个输出禁止 alias 的输入集合"（`ForbidAliasCollector`）：
+- **No-alias 守护**（算子语义或编译器已证事实）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区——因为硬件在**写输出的同时读取**这些输入,原地写会中途破坏该算子。三个来源汇入同一个"每个输出禁止 alias 的输入集合"（`ForbidAliasCollector`）：
   - `not_inplace_safe()` —— 该算子无法以 `src == dst` 运行，因此其输出不得 alias **任何**输入操作数。
   - `forbid_output_alias(i)` —— 该算子对其值操作数 in-place-safe，但在写输出时读取**某个特定**操作数，因此输出不得 alias 该操作数的缓冲区。
-  - **`tile.cast`**（`not_inplace_safe()`）—— PTO `TCVT` 在所有 dtype 方向上都是源、目标 tile 分离的转换。显式等字节数的 `tile.reinterpret_view` 是零拷贝/bitcast opt-in。
+  - 编译器调用点证据 —— vector AutoTile 会标记其生成的每一条 `tile.cast`，因为规划器为转换定价了独立、按 dtype 计大小的目标 tile；所选的树内分配器会消费并剥离该私有标记。通用 widening cast 也保持分离，因为写入较宽元素会追上尚未读取的输入；旧有 narrowing cast 保持既有装箱契约。
 
   MemoryReuse 拒绝将输出放到任一禁止操作数的**物理缓冲区**上,并通过 reuse-map 合并**与** VIEW 继承（`reshape`/`slice` 共享其源的 MemRef base）解析每个操作数——因此间接到达的禁止操作数（其 owner tile 被复用到别的缓冲区,或经 view 占用）也能被捕获。对于返回 tuple 的算子，约束会从 tuple 临时变量传播到每个 tile 类型的 `TupleGetItem` 结果。
 
@@ -88,7 +88,7 @@ program_optimized = reuse_pass(program)
   | `tile.sels` | 感知 target | `TSELS` 始终要求 `dst` 与 predicate mask 分离，并允许复用 `src` 或 `tmp`；A2/A3 会先将 scalar 写入 `tmp`，再通过 `set_cmpmask` 读取它，之后才写 `dst`，因此 `tmp` 可以 alias `dst`，但不得与 mask/src 重叠；A5 保留但不读取 ABI 中的 `tmp`，允许其 alias 任一操作数 |
   | `tile.prelu` | 感知 target | A2/A3 的 `TPRELU` 在写 `dst` 时读取 `src`、`slope` 与 `tmp`，因此是 `not_inplace_safe`；A5 保留 ABI 要求的 `tmp` 操作数但不读取它，所以 `dst` 可复用 `tmp`，但不可复用仍参与运算的 `src`/`slope` |
   | `tile.{row,col}_expand{,_mul,_add,_sub,_div}` | `forbid_output_alias(1)`（广播向量） | 行/列向量（arg 1）会被**每个**输出行/列重读,输出若 alias 它则在第一行/列后被覆盖 |
-  | `tile.cast` | `not_inplace_safe` | `TCVT` 要求源、目标 tile 分离；显式等字节数零拷贝重解释请使用 `tile.reinterpret_view` |
+  | AutoTile `tile.cast`；通用 widening `tile.cast` | 私有调用点证据；widening 检查 | AutoTile 的 plan/emit 契约为独立、按 dtype 计大小的 tile 定价；通用 widening 不能安全覆盖尚未读取的窄元素。显式等字节数零拷贝重解释使用 `tile.reinterpret_view` |
 
 - **流水线 stage 守卫**（容量门控，仅针对复制路径）：`pl.pipeline(stage=F)` 将循环体复制 `F` 份以实现 ping-pong，`LowerPipelineLoops` 给每个副本产生 tile 的 `Call` 打上 `pipeline_membership` `(group, stage)`（见 [29-lower_pipeline_loops.md](29-lower_pipeline_loops.md)）。本守卫只作用于这条复制路径。在 `memory_planner=PTOAS` 下，合格循环会先被 [`LowerPipelineToSlots`](28-lower_pipeline_to_slots.md) 接手：它给每个 load 一个以 `iv % F` 索引的 `pl.MemRef(..., slots=F)`，循环体只有一份——没有副本，也没有 `pipeline_membership`，而且该流水线本就跳过 MemoryReuse。以下描述仅适用于被那个 pass 拒绝的循环。`F` 份副本在调度器下并发执行，因此它们程序序不相交的生命周期**不是**安全的复用信号——把并发副本合并到同一块缓冲会注入一条虚假的写后读（write-after-read），使各 stage 串行化（即 #1475 的 cube matmul 操作数坍缩）。MemoryReuse 因此在**每个内存空间**（包括 L0 matmul 空间 Left/Right/Acc/Bias，且无论 tile 是 load 还是 `tile.move` 的结果）都把并发副本保持在**不同的缓冲**中，最多到**可负担的双缓冲深度** `F_g = min(depth_g, ⌊C_s / slot_g⌋)`：stage `k` 的副本落在残数 `ordinal(k) mod F_g`（**稠密**的 stage 序号，因此稀疏 stage ID 如 `{0, 2}` 不会因 `2 mod 2 == 0 mod 2` 而错误合并），因此并发副本永不共享（放得下时是完整 ping-pong，空间紧张时尽量分散）。分离是否放得下由**精确的按空间分配器足迹**（`SpaceFootprint`，与 `AllocateMemoryAddr` 共享——按构造保证一致）决定，而非估算。当某空间在所有 group 的可负担深度下仍然溢出时，采用**优雅的跨 group 削减**：将某个 group 的深度降低一个残数并重新打包（按 `MaxRelief` 启发式选择 group——优先释放最多字节，平局取最小 group id）；若削减耗尽，则整体回退到 **legacy 重新打包**（`force_legacy`），从而绝不会在 legacy 打包本可放下的情况下溢出。容量未知的空间（未配置 backend）使用 legacy 判据，因此容量门控路径绝不比 legacy 更差。当门控把某个 group 的深度降到其请求的 `stage=` 之下（或某空间触发 legacy 回退）时，MemoryReuse 通过统一诊断通道发出诊断——一条 `PH-MR-001` **性能提示**（回退情形则为 **warning**），指出请求深度与实际深度以及修复方式（把每 stage 的 tile 缩小到 `≤ C_s / stage`，或把 `stage=` 降到能放下的值）——因此容量导致的串行化绝不会静默发生。若单个物理 buffer 自身已经超过整个内存空间，则不发出该 fallback warning：这不是复用或 stage 深度退化，而是不可能完成的分配，应由面向具体算子的检查或 `AllocateMemoryAddr` 作为硬错误报告。复用决策完成后，MemoryReuse 会剥离已消费的 `pipeline_membership` attr，使其不会带到下游 pass 或 codegen。
 - `DSA_RP` 跳过 `MemoryReuse`；它把请求的流水线深度表示为硬分离，并在
@@ -96,7 +96,7 @@ program_optimized = reuse_pass(program)
 
 **不再有 shape / dtype / TileView 兼容性门槛**：共享同一物理 MemRef 的 tile 可以携带**不同**的 shape、dtype 或 `TileView` 属性。PTO codegen 为每个 tile 绑定一条 per-variable 的 `alloc_tile`，因此每个别名都以各自的静态 shape / dtype / layout / `valid_shape` 声明共享基址。这允许例如：
 
-- 跨 dtype 复用 —— 生命周期不相交且彼此无关的 BF16/FP32 tile 可以共享缓冲区；同一条 `tile.cast` 的源与目标不得共享；
+- 跨 dtype 复用 —— 生命周期不相交且彼此无关的 BF16/FP32 tile 可以共享缓冲区；AutoTile cast 与通用 widening cast 的源和目标保持分离；
 - `tile.fillpad` 输出复用其输入，以及两个 `pad` 不同的 fillpad 输出共享一个缓冲区；
 - N-D tile 在 `valid_shape` 不同的情况下共享缓冲区（各自在自己的 `alloc_tile` 上保留各自的 `valid_shape`）；
 - L0 cube 输入 `Left` / `Right` 中 shape 不同的子 tile 共享同一槽位（例如 fused-attention QK 的 `Right` `[k, SEQ]` 被 PV 的 `Right` `[k', HEAD]` 复用，将 L0B 峰值减半 —— issue #1595）。
@@ -259,7 +259,7 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
   - `tile.sels` —— 输出始终不得 alias mask；A2/A3 与 A5 均允许 tmp/输出 alias，但 A2/A3 backend 仍会拒绝 tmp 与 mask/src 重叠
   - `tile.prelu` —— A2/A3 输出不得 alias 任一输入；A5 输出仅可 alias 未使用的 `tmp`
   - `tile.col_expand_mul` —— 输出不得 alias 广播向量
-  - `tile.cast` —— 任意 dtype 方向上输出都不得 alias 输入
+  - AutoTile `tile.cast` 的所有 dtype 方向以及通用 widening cast —— 输出不得 alias 输入
   - 经 VIEW 间接到达的禁止操作数也被遵守（物理缓冲区解析）
 - 测试切片操作的 MemRef 共享保持
 - 测试冗余 alloc 语句移除
