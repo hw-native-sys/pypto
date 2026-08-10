@@ -138,9 +138,8 @@ generic 或 cast proxy。Ascend 910B 系数从
 <output_dir>/report/auto_tile/<function>.txt
 ```
 
-这些文件与其他 compiler report 一样，通过当前 `ReportInstrument` 发布。每个完整
-artifact 先写入唯一的同目录临时文件，再以原子方式安装；因此，共享同一输出目录的并发
-编译不会互相截断 report。
+这些文件与其他 compiler report 一样，通过当前 `ReportInstrument` 发布。report 目录归
+一次编译独占；并发编译的调用方必须提供不同的输出目录。
 
 JSON 文件是带版本号的 compiler-artifact schema。它记录选中的 grid、平衡 partition、
 代表性 region、strip/chunk loop、串行 tail、phase 运算顺序、边界输入 lifetime、逻辑与

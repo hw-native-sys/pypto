@@ -164,9 +164,8 @@ deterministic artifacts:
 ```
 
 These files are published through the active `ReportInstrument`, like other
-compiler reports. Each complete artifact is written to a unique sibling
-temporary and atomically installed, so concurrent compilations sharing one
-output directory cannot truncate each other's reports.
+compiler reports. The report directory belongs to one compilation; callers
+running concurrent compilations must provide distinct output directories.
 
 The JSON file is a versioned compiler-artifact schema. It records the selected
 grid, balanced partitions, representative region, strip/chunk loops, serial

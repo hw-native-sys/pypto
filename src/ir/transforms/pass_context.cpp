@@ -11,17 +11,11 @@
 
 #include "pypto/ir/transforms/pass_context.h"
 
-#include <unistd.h>
-
 #include <algorithm>
-#include <cerrno>
 #include <cstddef>
-#include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <ios>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -164,69 +158,6 @@ std::string FindReportOutputDir() {
 }
 
 }  // namespace
-
-bool ReportArtifactPublishingEnabled() { return !FindReportOutputDir().empty(); }
-
-std::optional<std::string> WriteReportArtifact(const std::string& relative_path, const std::string& content,
-                                               const Span& span) {
-  const std::string report_root = FindReportOutputDir();
-  if (report_root.empty()) return std::nullopt;
-
-  const std::filesystem::path relative(relative_path);
-  INTERNAL_CHECK_SPAN(!relative.empty() && relative.is_relative(), span)
-      << "Internal error: report artifact path must be non-empty and relative, got '" << relative_path << "'";
-  for (const auto& component : relative) {
-    INTERNAL_CHECK_SPAN(component != "..", span)
-        << "Internal error: report artifact path must stay below the report directory, got '" << relative_path
-        << "'";
-  }
-
-  const std::filesystem::path destination = std::filesystem::path(report_root) / relative;
-  std::error_code error;
-  std::filesystem::create_directories(destination.parent_path(), error);
-  CHECK_SPAN(!error, span) << "Could not create report artifact directory "
-                           << destination.parent_path().string() << ": " << error.message();
-
-  std::string temporary_template =
-      (destination.parent_path() / ("." + destination.filename().string() + ".tmp.XXXXXX")).string();
-  std::vector<char> temporary_chars(temporary_template.begin(), temporary_template.end());
-  temporary_chars.push_back('\0');
-  int fd = ::mkstemp(temporary_chars.data());
-  CHECK_SPAN(fd >= 0, span) << "Could not create temporary report artifact for " << destination.string()
-                            << ": " << std::strerror(errno);
-  const std::filesystem::path temporary(temporary_chars.data());
-
-  size_t written = 0;
-  int write_error = 0;
-  while (written < content.size()) {
-    const ssize_t count = ::write(fd, content.data() + written, content.size() - written);
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      write_error = errno;
-      break;
-    }
-    if (count == 0) {
-      write_error = EIO;
-      break;
-    }
-    written += static_cast<size_t>(count);
-  }
-  if (::close(fd) != 0 && write_error == 0) write_error = errno;
-  if (write_error != 0) {
-    std::filesystem::remove(temporary, error);
-    CHECK_SPAN(false, span) << "Could not write report artifact " << destination.string() << ": "
-                            << std::strerror(write_error);
-  }
-
-  std::filesystem::rename(temporary, destination, error);
-  if (error) {
-    std::error_code cleanup_error;
-    std::filesystem::remove(temporary, cleanup_error);
-    CHECK_SPAN(false, span) << "Could not publish report artifact " << destination.string() << ": "
-                            << error.message();
-  }
-  return destination.string();
-}
 
 void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& phase_label) {
   if (diags.empty()) return;

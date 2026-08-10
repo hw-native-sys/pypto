@@ -14,7 +14,6 @@
 
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,30 +50,6 @@ class Pass;
  *        (e.g. "pipeline_input", "pipeline_output", a pass name).
  */
 void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& phase_label);
-
-/**
- * @brief Whether the active PassContext has a ReportInstrument output directory.
- *
- * Passes may use this guard before constructing an optional report so bare
- * pass runs do not pay report-analysis or rendering costs.
- */
-[[nodiscard]] bool ReportArtifactPublishingEnabled();
-
-/**
- * @brief Atomically publish one file below the active ReportInstrument directory.
- *
- * The artifact is first written to a uniquely named sibling temporary file and
- * then atomically renamed into place.  Concurrent compilations targeting the
- * same report directory therefore publish complete files without sharing or
- * truncating a predictable `.tmp` path.
- *
- * @param relative_path Path below `ReportInstrument.output_dir`.
- * @param content Complete artifact contents.
- * @param span Source location used for actionable filesystem diagnostics.
- * @return Published path, or `std::nullopt` when no ReportInstrument is active.
- */
-[[nodiscard]] std::optional<std::string> WriteReportArtifact(const std::string& relative_path,
-                                                             const std::string& content, const Span& span);
 
 /**
  * @brief Controls when property verification runs
@@ -192,9 +167,9 @@ class ReportInstrument : public PassInstrument {
   /**
    * @brief Path of the directory that holds report files.
    *
-   * Used by the shared report-publication helpers and `DiagnosticInstrument`.
-   * Compiler passes should call `WriteReportArtifact` instead of opening paths
-   * below this directory directly.
+   * Exposed so compiler passes and `DiagnosticInstrument` can write their
+   * artifacts into the same folder when this instrument is present in the
+   * active context.
    */
   [[nodiscard]] const std::string& GetOutputDir() const { return output_dir_; }
 

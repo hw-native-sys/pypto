@@ -436,24 +436,40 @@ class SSAConverter {
   void RecordAutoTileOutputLineage(const FunctionPtr& original, Function* converted) const {
     if (!original->GetAttr<bool>("auto_tile", false)) return;
 
-    std::unordered_map<const Var*, int32_t> latest_out_to_param;
-    for (size_t i = 0; i < orig_params_.size(); ++i) {
-      if (orig_param_directions_[i] != ParamDirection::Out) continue;
-      auto latest = cur_.find(orig_params_[i].get());
-      if (latest != cur_.end()) {
-        latest_out_to_param.emplace(latest->second.get(), static_cast<int32_t>(i));
-      }
-    }
-    if (latest_out_to_param.empty()) return;
-
     const ReturnStmtPtr ret = return_lineage::FindFirstReturn(converted->body_);
     if (!ret) return;
     std::vector<int32_t> returned_out_params;
-    returned_out_params.reserve(ret->value_.size());
-    for (const ExprPtr& value : ret->value_) {
-      const VarPtr var = AsVarLike(value);
-      const auto found = var ? latest_out_to_param.find(var.get()) : latest_out_to_param.end();
-      returned_out_params.push_back(found == latest_out_to_param.end() ? -1 : found->second);
+    if (original->HasAttr(kAutoTileReturnedOutParamIndicesAttr)) {
+      returned_out_params = original->GetAttr<std::vector<int32_t>>(kAutoTileReturnedOutParamIndicesAttr, {});
+      INTERNAL_CHECK_SPAN(returned_out_params.size() == ret->value_.size(), original->span_)
+          << "Internal error: AutoTile output lineage arity changed across SSA conversion";
+      std::unordered_set<int32_t> seen;
+      for (int32_t param : returned_out_params) {
+        if (param < 0) continue;
+        INTERNAL_CHECK_SPAN(static_cast<size_t>(param) < orig_params_.size() &&
+                                orig_param_directions_[param] == ParamDirection::Out,
+                            original->span_)
+            << "Internal error: AutoTile output lineage references a parameter that is not Out";
+        INTERNAL_CHECK_SPAN(seen.insert(param).second, original->span_)
+            << "Internal error: AutoTile output lineage targets one Out parameter more than once";
+      }
+    } else {
+      std::unordered_map<const Var*, int32_t> latest_out_to_param;
+      for (size_t i = 0; i < orig_params_.size(); ++i) {
+        if (orig_param_directions_[i] != ParamDirection::Out) continue;
+        auto latest = cur_.find(orig_params_[i].get());
+        if (latest != cur_.end()) {
+          latest_out_to_param.emplace(latest->second.get(), static_cast<int32_t>(i));
+        }
+      }
+      if (latest_out_to_param.empty()) return;
+
+      returned_out_params.reserve(ret->value_.size());
+      for (const ExprPtr& value : ret->value_) {
+        const VarPtr var = AsVarLike(value);
+        const auto found = var ? latest_out_to_param.find(var.get()) : latest_out_to_param.end();
+        returned_out_params.push_back(found == latest_out_to_param.end() ? -1 : found->second);
+      }
     }
 
     std::vector<std::pair<std::string, std::any>> attrs;

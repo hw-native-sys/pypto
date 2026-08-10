@@ -18,9 +18,7 @@ the planned algorithm (loads, phases, loops, and live-out stores).
 from __future__ import annotations
 
 import json
-import threading
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -1007,7 +1005,14 @@ def test_called_explicit_out_kernel_preserves_its_declared_signature(program):
 def test_equal_typed_swapped_returns_follow_out_lineage_for_call_and_submit(program):
     prepared = passes.convert_to_ssa()(program)
     # The transient int-vector provenance must survive pass-dump round trips.
-    ir.assert_structural_equal(pl.parse_program(str(prepared)), prepared)
+    round_tripped = pl.parse_program(str(prepared))
+    ir.assert_structural_equal(round_tripped, prepared)
+    default_after = _run_default(round_tripped)
+    assert "__auto_tile_returned_out_param_indices" not in _function(default_after, "kernel").attrs
+    # Default runs ConvertToSSA again after a pass-dump resume. Preserve the
+    # already-proven mapping instead of trying to reconstruct it from new SSA
+    # Var identities.
+    prepared = passes.convert_to_ssa()(round_tripped)
     prepared = passes.simplify()(prepared)
     prepared = passes.normalize_stmt_structure()(prepared)
     prepared = passes.flatten_call_expr()(prepared)
@@ -1255,6 +1260,31 @@ def test_singleton_column_reduction_load_and_compute_layouts_match_after_default
     assert contract.loads > 0
     assert contract.row_sums > 0
     assert contract.col_sums == 0
+
+
+def test_singleton_column_reduction_pto_view_is_zero_copy(tmp_path):
+    output_dir = tmp_path / "column_reduction"
+    ir.compile(
+        SingleColumnReductionProgram,
+        output_dir=str(output_dir),
+        dump_passes=False,
+        skip_ptoas=True,
+    )
+    pto_files = list((output_dir / "kernels" / "aiv").glob("*.pto"))
+    assert len(pto_files) == 1
+    pto = pto_files[0].read_text()
+
+    # The row-equivalent schedule must alias the original GM argument instead
+    # of materializing a transposed tensor.
+    assert (
+        "pto.make_tensor_view %arg0, shape = [%c1_index, %c8192_index], "
+        "strides = [%c8192_index, %c1_index] {layout = #pto.layout<nd>}" in pto
+    )
+    assert "!pto.partition_tensor_view<1x1456xf32>" in pto
+    assert "rows=8, cols=1456" in pto
+    assert "blayout=row_major" in pto
+    assert "pto.trowsum" in pto
+    assert "pto.tcolsum" not in pto
 
 
 def test_singleton_column_reduction_with_full_frame_output_declines_before_emission():
@@ -1725,45 +1755,13 @@ def test_schedule_reports_are_deterministic_and_separate_per_function(tmp_path):
             assert first.read_bytes() == second.read_bytes()
 
 
-def test_schedule_reports_publish_atomically_under_concurrent_compiles(tmp_path):
-    report_dir = tmp_path / "shared"
-    auto_tile_dir = report_dir / "auto_tile"
-    auto_tile_dir.mkdir(parents=True)
-    # These are the predictable temporary names used by the old writer. A
-    # concurrent publisher may already own either path, so the shared report
-    # machinery must neither truncate nor rename them.
-    legacy_temporaries = [
-        auto_tile_dir / "pointwise.json.tmp",
-        auto_tile_dir / "pointwise.txt.tmp",
-    ]
-    for path in legacy_temporaries:
-        path.write_text("foreign writer sentinel")
-    rendezvous = threading.Barrier(2)
-
-    def publish_repeatedly() -> None:
-        rendezvous.wait()
-        for _ in range(8):
-            _run_with_schedule_reports(PointwiseProgram, report_dir)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(publish_repeatedly) for _ in range(2)]
-        for future in futures:
-            future.result()
-
-    descriptor, pseudocode = _read_schedule_report(report_dir, "pointwise")
-    assert descriptor["function"] == "pointwise"
-    assert pseudocode.startswith("AutoTile schedule for pointwise\n")
-    assert all(path.read_text() == "foreign writer sentinel" for path in legacy_temporaries)
-    assert list(auto_tile_dir.glob(".*.tmp.*")) == []
-
-
 def test_schedule_report_is_optional_for_bare_pass_and_reports_io_failures(tmp_path, capfd):
     _, bare_log = _logged_plan(PointwiseProgram, capfd)
     assert " report=" not in bare_log
 
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
-    with pytest.raises(ValueError, match="Could not create report artifact directory"):
+    with pytest.raises(ValueError, match="AutoTile could not create schedule report directory"):
         _run_with_schedule_reports(PointwiseProgram, blocked)
 
 

@@ -14,11 +14,14 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>  // NOLINT(build/c++17)
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -516,21 +519,52 @@ std::string RenderPseudocode(const VectorScheduleReport& report) {
   return out.str();
 }
 
+std::optional<std::filesystem::path> CurrentReportDirectory() {
+  const PassContext* context = PassContext::Current();
+  if (context == nullptr) return std::nullopt;
+  for (const auto& instrument : context->GetInstruments()) {
+    if (const auto* report = dynamic_cast<const ReportInstrument*>(instrument.get())) {
+      return std::filesystem::path(report->GetOutputDir());
+    }
+  }
+  return std::nullopt;
+}
+
+void WriteAtomically(const std::filesystem::path& path, const std::string& content, const Span& span) {
+  std::filesystem::path temporary = path;
+  temporary += ".tmp";
+  {
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    CHECK_SPAN(output.is_open(), span) << "AutoTile could not open schedule report " << temporary.string();
+    output << content;
+    output.close();
+    CHECK_SPAN(output.good(), span) << "AutoTile could not write schedule report " << temporary.string();
+  }
+  std::error_code error;
+  std::filesystem::rename(temporary, path, error);
+  CHECK_SPAN(!error, span) << "AutoTile could not publish schedule report " << path.string() << ": "
+                           << error.message();
+}
+
 }  // namespace
 
 std::optional<std::string> WriteVectorScheduleReport(const VectorGraph& graph,
                                                      const VectorSchedulePlan& plan) {
-  if (!ReportArtifactPublishingEnabled()) return std::nullopt;
+  const std::optional<std::filesystem::path> report_root = CurrentReportDirectory();
+  if (!report_root.has_value()) return std::nullopt;
   INTERNAL_CHECK(graph.function != nullptr) << "Internal error: AutoTile report has no source function";
   const VectorScheduleReport report = BuildReport(graph, plan);
+  const std::filesystem::path directory = *report_root / "auto_tile";
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  CHECK_SPAN(!error, graph.function->span_) << "AutoTile could not create schedule report directory "
+                                            << directory.string() << ": " << error.message();
   const std::string stem = EncodeFilename(graph.function->name_);
-  const std::optional<std::string> json_path =
-      WriteReportArtifact("auto_tile/" + stem + ".json", RenderJson(report), graph.function->span_);
-  const std::optional<std::string> text_path =
-      WriteReportArtifact("auto_tile/" + stem + ".txt", RenderPseudocode(report), graph.function->span_);
-  INTERNAL_CHECK_SPAN(json_path.has_value() == text_path.has_value(), graph.function->span_)
-      << "Internal error: AutoTile report publication disagrees across artifacts";
-  return text_path;
+  const std::filesystem::path json_path = directory / (stem + ".json");
+  const std::filesystem::path text_path = directory / (stem + ".txt");
+  WriteAtomically(json_path, RenderJson(report), graph.function->span_);
+  WriteAtomically(text_path, RenderPseudocode(report), graph.function->span_);
+  return text_path.string();
 }
 
 }  // namespace auto_tile
