@@ -122,6 +122,26 @@ struct VectorGraph {
   size_t reduction_op = std::numeric_limits<size_t>::max();
 };
 
+/** Whether a tensor's singleton row axis broadcasts over the graph's iteration frame. */
+[[nodiscard]] inline bool IsRowBroadcast(const VectorGraph& graph, const VectorTensor& tensor) {
+  return tensor.rows == 1 && graph.iteration_rows > 1;
+}
+
+/** Whether a tensor's singleton column axis broadcasts over the graph's iteration frame. */
+[[nodiscard]] inline bool IsColBroadcast(const VectorGraph& graph, const VectorTensor& tensor) {
+  return tensor.cols == 1 && graph.iteration_cols > 1;
+}
+
+/** Whether a singleton row is the thin output axis of a column reduction. */
+[[nodiscard]] inline bool IsThinReductionRow(const VectorGraph& graph, const VectorTensor& tensor) {
+  return tensor.rows == 1 && graph.reduced_axis == 2;
+}
+
+/** Whether a singleton column is the thin output axis of a row reduction. */
+[[nodiscard]] inline bool IsThinReductionCol(const VectorGraph& graph, const VectorTensor& tensor) {
+  return tensor.cols == 1 && graph.reduced_axis == 1;
+}
+
 /** Fail-closed result of admitting one tensor-level function to vector AutoTile. */
 struct VectorAdmissionResult {
   bool supported = false;

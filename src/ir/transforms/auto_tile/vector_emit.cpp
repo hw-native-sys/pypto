@@ -357,14 +357,20 @@ class VectorEmitter {
     auto& registry = OpRegistry::GetInstance();
     const VectorTensor& input = graph_.tensors[tensor];
     const int64_t granule = plan_.tensor_element_granules.at(tensor);
-    const bool broadcast_row = input.rows == 1;
-    const bool broadcast_col = input.cols == 1;
+    const bool broadcast_row = IsRowBroadcast(graph_, input);
+    const bool broadcast_col = IsColBroadcast(graph_, input);
     const int64_t valid_rows = broadcast_row ? 1 : rows;
     const int64_t valid_cols = broadcast_col ? 1 : cols;
-    const int64_t alloc_rows = broadcast_row ? 1 : (reduction_layout ? AlignUp(rows, granule) : rows);
-    const int64_t alloc_cols = broadcast_col ? 1 : AlignUp(cols, granule);
-    const ExprPtr input_row = broadcast_row ? Index(0, span_) : row_offset;
-    const ExprPtr input_col = broadcast_col ? Index(0, span_) : col_offset;
+    const bool pad_rows = reduction_layout && !broadcast_row && !IsThinReductionRow(graph_, input);
+    const bool pad_cols = !broadcast_col && !IsThinReductionCol(graph_, input);
+    const int64_t alloc_rows = pad_rows ? AlignUp(valid_rows, granule) : valid_rows;
+    const int64_t alloc_cols = pad_cols ? AlignUp(valid_cols, granule) : valid_cols;
+    // A statically singleton source always starts at zero, regardless of
+    // whether it is a graph-relative broadcast or the graph's full extent.
+    // Broadcast classification controls physical padding above; it need not
+    // make a provably-zero address dynamic.
+    const ExprPtr input_row = input.rows == 1 ? Index(0, span_) : row_offset;
+    const ExprPtr input_col = input.cols == 1 ? Index(0, span_) : col_offset;
     std::vector<ExprPtr> args{input.var, IndexTuple({alloc_rows, alloc_cols}, span_),
                               Pair(input_row, input_col, span_)};
     if (alloc_rows != valid_rows || alloc_cols != valid_cols) {

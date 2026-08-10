@@ -100,15 +100,18 @@ TileExtent PhaseFrame(const VectorGraph& graph, const VectorSchedulePlan& plan, 
                                  : TileExtent{reduced_extent, plan.free_tile};
 }
 
-TileExtent InputLogicalExtent(const VectorTensor& tensor, const TileExtent& frame) {
-  return {tensor.rows == 1 ? 1 : frame.rows, tensor.cols == 1 ? 1 : frame.cols};
+TileExtent InputLogicalExtent(const VectorGraph& graph, const VectorTensor& tensor, const TileExtent& frame) {
+  return {IsRowBroadcast(graph, tensor) ? 1 : frame.rows, IsColBroadcast(graph, tensor) ? 1 : frame.cols};
 }
 
-TileExtent InputPhysicalExtent(const VectorTensor& tensor, const TileExtent& frame, int64_t granule,
-                               bool reduction_layout) {
-  TileExtent logical = InputLogicalExtent(tensor, frame);
-  return {tensor.rows == 1 ? 1 : (reduction_layout ? AlignUp(logical.rows, granule) : logical.rows),
-          tensor.cols == 1 ? 1 : AlignUp(logical.cols, granule)};
+TileExtent InputPhysicalExtent(const VectorGraph& graph, const VectorTensor& tensor, const TileExtent& frame,
+                               int64_t granule, bool reduction_layout) {
+  TileExtent logical = InputLogicalExtent(graph, tensor, frame);
+  const bool pad_rows =
+      reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor);
+  const bool pad_cols = !IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor);
+  return {pad_rows ? AlignUp(logical.rows, granule) : logical.rows,
+          pad_cols ? AlignUp(logical.cols, granule) : logical.cols};
 }
 
 std::vector<ReportInput> BuildInputs(const VectorGraph& graph, const VectorSchedulePlan& plan,
@@ -122,8 +125,8 @@ std::vector<ReportInput> BuildInputs(const VectorGraph& graph, const VectorSched
     const VectorTensor& tensor = graph.tensors[input.tensor];
     const int64_t granule = plan.tensor_element_granules[input.tensor];
     result.push_back({input.tensor, input.first_use, input.last_use, input.uses.size(),
-                      InputLogicalExtent(tensor, frame),
-                      InputPhysicalExtent(tensor, frame, granule, reduction_layout)});
+                      InputLogicalExtent(graph, tensor, frame),
+                      InputPhysicalExtent(graph, tensor, frame, granule, reduction_layout)});
   }
   return result;
 }

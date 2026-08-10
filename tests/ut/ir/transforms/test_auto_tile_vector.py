@@ -30,6 +30,8 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 _TENSOR_ASSEMBLE = ir.get_op("tensor.assemble").name
 _TENSOR_CAST = ir.get_op("tensor.cast").name
+_TENSOR_COL_SUM = ir.get_op("tensor.col_sum").name
+_TENSOR_ROW_SUM = ir.get_op("tensor.row_sum").name
 
 
 @pytest.fixture(autouse=True)
@@ -251,6 +253,24 @@ class RowReductionProgram:
     @pl.function(attrs={"auto_tile": True})
     def reduce(self, x: pl.Tensor[[64, 4096], pl.FP32]) -> pl.Tensor[[64, 1], pl.FP32]:
         out: pl.Tensor[[64, 1], pl.FP32] = pl.row_sum(x)
+        return out
+
+
+@pl.program
+class SingleRowReductionProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[1, 8192], pl.FP32]) -> pl.Tensor[[1, 1], pl.FP32]:
+        values: pl.Tensor[[1, 8192], pl.FP32] = pl.exp(x)
+        out: pl.Tensor[[1, 1], pl.FP32] = pl.row_sum(values)
+        return out
+
+
+@pl.program
+class SingleColumnReductionProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[8192, 1], pl.FP32]) -> pl.Tensor[[1, 1], pl.FP32]:
+        values: pl.Tensor[[8192, 1], pl.FP32] = pl.exp(x)
+        out: pl.Tensor[[1, 1], pl.FP32] = pl.col_sum(values)
         return out
 
 
@@ -1024,6 +1044,77 @@ def test_folded_and_spanning_reductions_emit_planned_phases():
     assert spanning.ops["tensor.rsqrt"] >= 1
     assert spanning.ops["tensor.assemble"] >= 1
     assert spanning.pipeline_loops >= 1
+
+
+@pytest.mark.parametrize(
+    ("program", "reduction_op", "source_aligned_axis", "result_shape", "report_axis"),
+    [
+        (SingleRowReductionProgram, _TENSOR_ROW_SUM, 0, (8, 1), 0),
+        (SingleColumnReductionProgram, _TENSOR_COL_SUM, 1, (1, 8), 1),
+    ],
+)
+def test_singleton_reduction_axis_is_padded_as_full_frame(
+    program, reduction_op, source_aligned_axis, result_shape, report_axis, tmp_path
+):
+    """A singleton iteration axis is full-frame, not an implicit broadcast."""
+
+    def static_shape(type_: ir.TensorType) -> tuple[int, int]:
+        assert len(type_.shape) == 2
+        assert all(isinstance(dim, ir.ConstInt) for dim in type_.shape)
+        return tuple(int(dim.value) for dim in type_.shape)  # type: ignore[return-value,union-attr]
+
+    class ReductionShapes(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sources: list[tuple[int, int]] = []
+            self.results: list[tuple[int, int]] = []
+
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            call = op.value
+            if isinstance(call, ir.Call) and call.op.name == reduction_op:
+                assert isinstance(call.args[0].type, ir.TensorType)
+                assert isinstance(op.var.type, ir.TensorType)
+                self.sources.append(static_shape(call.args[0].type))
+                self.results.append(static_shape(op.var.type))
+            super().visit_assign_stmt(op)
+
+    report_dir = tmp_path / "report"
+    after = _run_with_schedule_reports(program, report_dir)
+    descriptor, _ = _read_schedule_report(report_dir, "reduce")
+
+    # Once the full-frame singleton is padded, materializing the complete
+    # exp+reduction DAG exceeds UB and the planner correctly selects streaming.
+    assert descriptor["schedule"] == "reduction_folded"
+    assert descriptor["memory"]["full_peak_ub_bytes"] > 188416
+    assert descriptor["memory"]["stream_peak_ub_bytes"] <= 188416
+
+    shapes = ReductionShapes()
+    shapes.visit_program(after)
+    assert shapes.sources
+    assert shapes.results
+    assert all(shape[source_aligned_axis] == 8 for shape in shapes.sources)
+    assert set(shapes.results) == {result_shape}
+
+    stats = next(phase for phase in descriptor["phases"] if phase["name"] == "stats")
+    assert stats["inputs"]
+    for input_ in stats["inputs"]:
+        assert input_["logical_tile"][report_axis] == 1
+        assert input_["physical_tile"][report_axis] == 8
+
+
+def test_schedule_report_keeps_true_broadcast_axes_singleton(tmp_path):
+    """A singleton axis remains unpadded when it broadcasts over a larger frame."""
+    report_dir = tmp_path / "report"
+    _run_with_schedule_reports(BroadcastProgram, report_dir)
+    descriptor, _ = _read_schedule_report(report_dir, "broadcast")
+    names = {tensor["id"]: tensor["name"] for tensor in descriptor["tensors"]}
+    body = next(phase for phase in descriptor["phases"] if phase["name"] == "body")
+    inputs = {names[input_["tensor"]]: input_ for input_ in body["inputs"]}
+
+    assert inputs["col"]["logical_tile"][0] == 1
+    assert inputs["col"]["physical_tile"][0] == 1
+    assert inputs["row"]["logical_tile"][1] == 1
+    assert inputs["row"]["physical_tile"][1] == 1
 
 
 def test_folded_reduction_init_rolled_tail_ir_is_exact():

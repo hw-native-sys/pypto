@@ -101,28 +101,31 @@ int64_t FrameCols(const VectorTensor& tensor, int64_t cols) {
   return tensor.cols == 1 ? 1 : std::min(tensor.cols, cols);
 }
 
-int64_t TensorFrameBytes(const VectorTensor& tensor, int64_t element_granule, int64_t rows, int64_t cols,
-                         bool reduction_layout) {
+int64_t TensorFrameBytes(const VectorGraph& graph, const VectorTensor& tensor, int64_t element_granule,
+                         int64_t rows, int64_t cols, bool reduction_layout) {
   const int64_t bytes = DTypeBytes(tensor.dtype);
   int64_t frame_rows = FrameRows(tensor, rows);
   int64_t frame_cols = FrameCols(tensor, cols);
-  // A logical extent of one is not necessarily a broadcast.  The emitter
-  // pads a non-broadcast reduction tile to the DMA granule even when a
-  // balanced partition happens to contain one row/column.  Key padding on
-  // the source tensor's shape, exactly as SliceInput does, so the planner
-  // cannot under-price the common one-row softmax region.
-  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, element_granule);
-  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, element_granule);
+  // Extent one is a broadcast only when the graph's iteration frame is wider
+  // on that axis. A [1,N] row-reduction input is a full-frame singleton, so
+  // its col-major reduction layout still needs one DMA-aligned physical
+  // column. The symmetric rule applies to [M,1] column reductions.
+  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor))
+    frame_rows = AlignUp(frame_rows, element_granule);
+  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor))
+    frame_cols = AlignUp(frame_cols, element_granule);
   return frame_rows * frame_cols * bytes;
 }
 
-int64_t RowReductionScratchBytes(const VectorTensor& tensor, int64_t element_granule, int64_t rows,
-                                 int64_t cols, bool reduction_layout) {
+int64_t RowReductionScratchBytes(const VectorGraph& graph, const VectorTensor& tensor,
+                                 int64_t element_granule, int64_t rows, int64_t cols, bool reduction_layout) {
   const int64_t bytes = DTypeBytes(tensor.dtype);
   int64_t frame_rows = FrameRows(tensor, rows);
   int64_t frame_cols = FrameCols(tensor, cols);
-  if (reduction_layout && tensor.rows != 1) frame_rows = AlignUp(frame_rows, element_granule);
-  if (tensor.cols != 1) frame_cols = AlignUp(frame_cols, element_granule);
+  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor))
+    frame_rows = AlignUp(frame_rows, element_granule);
+  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor))
+    frame_cols = AlignUp(frame_cols, element_granule);
   // OpConversionRegistry::RegisterReductionOps pads the scratch's final
   // dimension to at least 128 elements for row reductions. Column reductions
   // lower directly to one-operand tile ops and allocate no scratch.
@@ -203,14 +206,14 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
   std::unordered_set<size_t> live;
   auto allocate = [&](size_t tensor) {
     if (!live.insert(tensor).second) return;
-    current +=
-        TensorFrameBytes(graph.tensors[tensor], element_granules.at(tensor), rows, cols, reduction_layout);
+    current += TensorFrameBytes(graph, graph.tensors[tensor], element_granules.at(tensor), rows, cols,
+                                reduction_layout);
     peak = std::max(peak, current);
   };
   auto release = [&](size_t tensor) {
     if (live.erase(tensor) == 0) return;
-    current -=
-        TensorFrameBytes(graph.tensors[tensor], element_granules.at(tensor), rows, cols, reduction_layout);
+    current -= TensorFrameBytes(graph, graph.tensors[tensor], element_granules.at(tensor), rows, cols,
+                                reduction_layout);
   };
 
   for (size_t tensor : substituted) allocate(tensor);
@@ -225,12 +228,12 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
     int64_t implicit_scratch = 0;
     if (op.kind == VectorOpKind::RowSum || op.kind == VectorOpKind::RowMax) {
       const size_t input = op.inputs.front();
-      implicit_scratch = RowReductionScratchBytes(graph.tensors[input], element_granules.at(input), rows,
-                                                  cols, reduction_layout);
+      implicit_scratch = RowReductionScratchBytes(graph, graph.tensors[input], element_granules.at(input),
+                                                  rows, cols, reduction_layout);
     } else if (IsOp(op.call, "tensor.rsqrt") && op.call->GetKwarg<bool>("high_precision", false)) {
       const size_t input = op.inputs.front();
-      implicit_scratch =
-          TensorFrameBytes(graph.tensors[input], element_granules.at(input), rows, cols, reduction_layout);
+      implicit_scratch = TensorFrameBytes(graph, graph.tensors[input], element_granules.at(input), rows, cols,
+                                          reduction_layout);
     }
     if (implicit_scratch != 0) {
       current += implicit_scratch;
@@ -617,8 +620,9 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
         const int64_t thin_cols = graph.reduced_axis == 1 ? 1 : candidate.free_tile;
         int64_t stats_peak;
         if (graph.softmax.matched) {
-          const int64_t x_bytes = TensorFrameBytes(
-              graph.tensors[graph.softmax.input], element_granules.at(graph.softmax.input), rows, cols, true);
+          const int64_t x_bytes =
+              TensorFrameBytes(graph, graph.tensors[graph.softmax.input],
+                               element_granules.at(graph.softmax.input), rows, cols, true);
           const int64_t thin_bytes = candidate.free_tile_alloc * DTypeBytes(reduction_dtype);
           stats_peak = 2 * (6 * x_bytes + 4 * thin_bytes);
         } else {
