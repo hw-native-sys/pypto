@@ -166,6 +166,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-perf
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          toolchain: bundle
 
       - name: Clone pypto-lib (Qwen3-14B decode forward)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of the perf-checkout checkout
