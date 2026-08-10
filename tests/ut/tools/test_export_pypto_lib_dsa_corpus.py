@@ -87,10 +87,21 @@ def test_export_status_launch_mode_is_reusable(tmp_path: Path) -> None:
     assert exporter.read_export_plan(manifest, "a2a3sim") == [("models/a2a3.py", "a2a3")]
 
 
+def test_partial_export_launch_mode_is_reusable(tmp_path: Path) -> None:
+    manifest = tmp_path / "export-status.tsv"
+    manifest.write_text(
+        "script\tstatus\tlaunch_mode\treturncode\tproblems\nmodels/a2a3.py\tPARTIAL\tfinal-a2a3\t1\t2\n",
+        encoding="utf-8",
+    )
+    assert exporter.read_export_plan(manifest, "a2a3sim") == [("models/a2a3.py", "a2a3")]
+
+
 def test_successful_entry_point_without_dsa_is_not_a_compile_failure() -> None:
     assert exporter._classify_export_status("EXPORTED", 0) == "NO_DSA"
     assert exporter._classify_export_status("EXPORTED", 2) == "EXPORTED"
     assert exporter._classify_export_status("FAILED", 0) == "FAILED"
+    assert exporter._classify_export_status("FAILED", 2) == "PARTIAL"
+    assert exporter._classify_export_status("TIMEOUT", 2) == "PARTIAL"
 
 
 def test_golden_patch_injects_compile_only_dsa_configuration(tmp_path: Path) -> None:

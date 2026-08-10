@@ -65,7 +65,7 @@ def read_export_plan(manifest: Path, requested_platform: str) -> list[tuple[str,
     plan: list[tuple[str, str]] = []
     with manifest.open(encoding="utf-8", newline="") as source:
         for row in csv.reader(source, delimiter="\t"):
-            if not row or row[0].startswith("#") or len(row) < 2 or row[1] != "EXPORTED":
+            if not row or row[0].startswith("#") or len(row) < 2 or row[1] not in {"EXPORTED", "PARTIAL"}:
                 continue
             mode = row[2] if len(row) > 2 else ""
             platform = requested_platform
@@ -75,7 +75,7 @@ def read_export_plan(manifest: Path, requested_platform: str) -> list[tuple[str,
                 platform = "a5"
             plan.append((row[0], platform))
     if not plan:
-        raise ValueError(f"manifest contains no EXPORTED scripts: {manifest}")
+        raise ValueError(f"manifest contains no reusable EXPORTED or PARTIAL scripts: {manifest}")
     return plan
 
 
@@ -257,6 +257,8 @@ def _run_export_subprocess(
 def _classify_export_status(status: str, problem_count: int) -> str:
     if status == "EXPORTED" and problem_count == 0:
         return "NO_DSA"
+    if status != "EXPORTED" and problem_count > 0:
+        return "PARTIAL"
     return status
 
 
@@ -349,12 +351,12 @@ def export_corpus(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(output, fieldnames=list(status_rows[0]), delimiter="\t")
         writer.writeheader()
         writer.writerows(status_rows)
-    successful_roots = {
+    inventory_roots = {
         root: script
         for root, script in script_by_root.items()
-        if any(row["script"] == script and row["status"] == "EXPORTED" for row in status_rows)
+        if any(row["script"] == script and row["status"] in {"EXPORTED", "PARTIAL"} for row in status_rows)
     }
-    invocations, unique, penalties = build_inventory(args.output_root, successful_roots)
+    invocations, unique, penalties = build_inventory(args.output_root, inventory_roots)
     print(
         f"CORPUS invocations={invocations} unique={unique} penalty_bearing={penalties}",
         flush=True,
