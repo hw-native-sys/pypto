@@ -32,9 +32,11 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -266,6 +268,7 @@ class SSAConverter {
     result->params_ = std::move(new_params);
     result->param_directions_ = std::move(new_dirs);
     result->body_ = std::move(new_body);
+    RecordAutoTileOutputLineage(func, result.get());
     return result;
   }
 
@@ -422,6 +425,44 @@ class SSAConverter {
     auto var = std::make_shared<Var>(BuildAutoNamedVersion(key->name_hint_, "ssa", v), SubstType(type), span);
     cur_[key] = var;
     return var;
+  }
+
+  /// Preserve the exact source-level association between each returned SSA
+  /// value and an explicit Out parameter for the immediately following
+  /// AutoTile pass.  Parameter and assignment Vars share one identity before
+  /// SSA conversion, so ``cur_`` is authoritative here; after this pass only
+  /// their independently allocated SSA Vars remain and positional/type-based
+  /// reconstruction would be ambiguous.
+  void RecordAutoTileOutputLineage(const FunctionPtr& original, Function* converted) const {
+    if (!original->GetAttr<bool>("auto_tile", false)) return;
+
+    std::unordered_map<const Var*, int32_t> latest_out_to_param;
+    for (size_t i = 0; i < orig_params_.size(); ++i) {
+      if (orig_param_directions_[i] != ParamDirection::Out) continue;
+      auto latest = cur_.find(orig_params_[i].get());
+      if (latest != cur_.end()) {
+        latest_out_to_param.emplace(latest->second.get(), static_cast<int32_t>(i));
+      }
+    }
+    if (latest_out_to_param.empty()) return;
+
+    const ReturnStmtPtr ret = return_lineage::FindFirstReturn(converted->body_);
+    if (!ret) return;
+    std::vector<int32_t> returned_out_params;
+    returned_out_params.reserve(ret->value_.size());
+    for (const ExprPtr& value : ret->value_) {
+      const VarPtr var = AsVarLike(value);
+      const auto found = var ? latest_out_to_param.find(var.get()) : latest_out_to_param.end();
+      returned_out_params.push_back(found == latest_out_to_param.end() ? -1 : found->second);
+    }
+
+    std::vector<std::pair<std::string, std::any>> attrs;
+    attrs.reserve(converted->attrs_.size() + 1);
+    for (const auto& attr : converted->attrs_) {
+      if (attr.first != kAutoTileReturnedOutParamIndicesAttr) attrs.push_back(attr);
+    }
+    attrs.emplace_back(kAutoTileReturnedOutParamIndicesAttr, std::move(returned_out_params));
+    converted->attrs_ = std::move(attrs);
   }
 
   /// Register pre-existing iter_args from the original loop into cur_.

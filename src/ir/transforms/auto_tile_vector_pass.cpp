@@ -118,6 +118,7 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
     const std::optional<std::string> report_path = auto_tile::WriteVectorScheduleReport(graph, plan);
     LOG_INFO << "AutoTile[" << function->name_
              << "]: vector schedule=" << auto_tile::ScheduleKindName(plan.kind)
+             << " coordinate_transform=" << auto_tile::CoordinateTransformName(graph.coordinate_transform)
              << " grid=" << plan.m_partition.parts << "x" << plan.n_partition.parts
              << " work_units=" << plan.work_units << " tile=" << plan.tile_h << "x" << plan.tile_w
              << " strip=" << plan.strip_h << "x" << plan.strip_w << " chunks=" << plan.full_chunks << "x"

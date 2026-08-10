@@ -138,10 +138,15 @@ generic 或 cast proxy。Ascend 910B 系数从
 <output_dir>/report/auto_tile/<function>.txt
 ```
 
+这些文件与其他 compiler report 一样，通过当前 `ReportInstrument` 发布。每个完整
+artifact 先写入唯一的同目录临时文件，再以原子方式安装；因此，共享同一输出目录的并发
+编译不会互相截断 report。
+
 JSON 文件是带版本号的 compiler-artifact schema。它记录选中的 grid、平衡 partition、
 代表性 region、strip/chunk loop、串行 tail、phase 运算顺序、边界输入 lifetime、逻辑与
-物理 tile extent、各 dtype 的 element size、UB 峰值、流量和 modeled cycle。该格式面向
-工具使用，目前尚不是稳定的公共 API。
+物理 tile extent、各 dtype 的 element size、UB 峰值、流量和 modeled cycle。当生成算法
+变换坐标系时，`coordinate_transform` 会标明该变换，每个 tensor 同时记录程序 shape 与
+调度 shape。该格式面向工具使用，目前尚不是稳定的公共 API。
 
 文本文件把同一个结构化 descriptor 渲染成以 tile 为中心的伪代码。它描述一个代表性的
 SPMD work unit，而不是绘制所有 core。例如 online-softmax 报告会分别显示串行首 chunk、
@@ -199,13 +204,20 @@ UB 只是 materialization 的可行性条件，而不是无条件偏好。完整
 原子 partial store；若列归约图不能由一个容量安全的 kernel 实现，则拒绝整个 marked
 function。
 
+Ascend 910B 将 `[N,1]` GM tensor 表示为 DN，而 A2/A3 vector 算术与 reduction 需要
+row-major Vec tile。对于返回值均为标量 reduction 后继的单列图，AutoTile 会创建零拷贝
+ND `[1,N]` tensor view，并调度等价的行 reduction。planner、emitter 与 schedule report
+都使用该变换后的坐标系；GM 流量不变。若单列图返回完整 `[N,1]` frame，则在 emitter
+能够不借助中间 GM tensor 恢复输出 layout 之前会提前拒绝该图。
+
 ## UB 与传输计价
 
 UB 规划感知 dtype 和 lifetime。它计入边界 load、中间值、所有返回 live-out、DMA
 padding、两阶段 pipeline 的第二个 bank、tensor-to-tile lowering 插入并按最小宽度
 padding 的行 reduction scratch、高精度 `rsqrt` scratch 和细 accumulator。仅修改元数据
 的 `set_validshape` alias 不会分配第二个 buffer。列 reduction lowering 不分配 scratch，
-模型也不会为它计费。
+模型也不会为它计费。规范化后的单列情况会作为行 reduction lowering，因此会计入相应的
+行 reduction scratch。
 
 普通 cast 是源、目标存储彼此独立的转换；MemoryReuse 不得把 `tile.cast` 变成原地操作。
 显式请求等字节数的 `tile.reinterpret_view` 仍是零拷贝 opt-in，并通过 bitcast/view 路径
@@ -238,8 +250,10 @@ cast hop 使用显式保守 proxy 系数：generic proxy 不是针对具体运�
 
 对于入口函数，返回 tensor 会变成显式 `Out` 参数，同时保留原始 return tuple 供后续
 规范化。对于程序内被调用的 marked helper，输出存储在 helper 内创建，以保持调用签名
-有效。多个 live-out 始终拥有不同 store。已有的显式 `Out` 参数按位置复用；直接调用与
-`Submit` site 都保持该声明签名。
+有效。多个 live-out 始终拥有不同 store。已有的显式 `Out` 参数按精确的 source-to-SSA
+lineage 复用，而不是按 return 位置或 tensor 类型推断。因此 helper 可以用不同于 `Out`
+参数声明的顺序返回同类型输出；直接调用与 `Submit` site 仍保持声明签名，同时不会改变
+每个 buffer 对应的计算。
 
 成功发射包含一个 `pl.spmd` scope 和一个非 split 的 Vector InCore body。因此后续层次
 outline 会为该 marked tensor DAG 生成一个 AIV kernel。

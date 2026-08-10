@@ -18,7 +18,9 @@ the planned algorithm (loads, phases, loops, and live-out stores).
 from __future__ import annotations
 
 import json
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,10 @@ _TENSOR_ASSEMBLE = ir.get_op("tensor.assemble").name
 _TENSOR_CAST = ir.get_op("tensor.cast").name
 _TENSOR_COL_SUM = ir.get_op("tensor.col_sum").name
 _TENSOR_ROW_SUM = ir.get_op("tensor.row_sum").name
+_TENSOR_VIEW = ir.get_op("tensor.view").name
+_TILE_COL_SUM = ir.get_op("tile.col_sum").name
+_TILE_LOAD = ir.get_op("tile.load").name
+_TILE_ROW_SUM = ir.get_op("tile.row_sum").name
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +213,55 @@ class ExplicitOutSubmitProgram:
 
 
 @pl.program
+class SwappedExplicitOutDirectCallProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[1, 64], pl.FP32],
+        first: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        second: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        first = pl.exp(x)
+        second = pl.abs(x)
+        return second, first
+
+    @pl.function
+    def main(
+        self,
+        x: pl.Tensor[[1, 64], pl.FP32],
+        first: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        second: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        returned_second, returned_first = self.kernel(x, first, second)
+        return returned_second, returned_first
+
+
+@pl.program
+class SwappedExplicitOutSubmitProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def kernel(
+        self,
+        x: pl.Tensor[[1, 64], pl.FP32],
+        first: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        second: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        first = pl.exp(x)
+        second = pl.abs(x)
+        return second, first
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[1, 64], pl.FP32],
+        first: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        second: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 64], pl.FP32], pl.Tensor[[1, 64], pl.FP32]]:
+        with pl.manual_scope():
+            (returned_second, returned_first), _tid = pl.submit(self.kernel, x, first, second)
+        return returned_second, returned_first
+
+
+@pl.program
 class MultiOutputProgram:
     @pl.function(attrs={"auto_tile": True})
     def live_out(
@@ -271,6 +326,15 @@ class SingleColumnReductionProgram:
     def reduce(self, x: pl.Tensor[[8192, 1], pl.FP32]) -> pl.Tensor[[1, 1], pl.FP32]:
         values: pl.Tensor[[8192, 1], pl.FP32] = pl.exp(x)
         out: pl.Tensor[[1, 1], pl.FP32] = pl.col_sum(values)
+        return out
+
+
+@pl.program
+class SingletonColumnReductionFullFrameOutputProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def reduce(self, x: pl.Tensor[[8192, 1], pl.FP32]) -> pl.Tensor[[8192, 1], pl.FP32]:
+        total: pl.Tensor[[1, 1], pl.FP32] = pl.col_sum(x)
+        out: pl.Tensor[[8192, 1], pl.FP32] = pl.add(x, total)
         return out
 
 
@@ -939,6 +1003,46 @@ def test_called_explicit_out_kernel_preserves_its_declared_signature(program):
     ]
 
 
+@pytest.mark.parametrize("program", [SwappedExplicitOutDirectCallProgram, SwappedExplicitOutSubmitProgram])
+def test_equal_typed_swapped_returns_follow_out_lineage_for_call_and_submit(program):
+    prepared = passes.convert_to_ssa()(program)
+    # The transient int-vector provenance must survive pass-dump round trips.
+    ir.assert_structural_equal(pl.parse_program(str(prepared)), prepared)
+    prepared = passes.simplify()(prepared)
+    prepared = passes.normalize_stmt_structure()(prepared)
+    prepared = passes.flatten_call_expr()(prepared)
+    original_main = _function(prepared, "main")
+
+    after = passes.auto_tile()(prepared)
+    ir.assert_structural_equal(_function(after, "main"), original_main)
+    kernel = _function(after, "kernel")
+    assert "__auto_tile_returned_out_param_indices" not in kernel.attrs
+
+    class Writes(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.definitions: dict[int, ir.Call] = {}
+            self.output_primitives: dict[str, str] = {}
+
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+            if isinstance(op.value, ir.Call):
+                self.definitions[op.var.unique_id] = op.value
+                if op.value.op.name == _TENSOR_ASSEMBLE:
+                    target, source = op.value.args[:2]
+                    assert isinstance(target, ir.Var)
+                    assert isinstance(source, ir.Var)
+                    source_call = self.definitions[source.unique_id]
+                    self.output_primitives[target.name_hint] = source_call.op.name
+            super().visit_assign_stmt(op)
+
+    writes = Writes()
+    writes.visit_function(kernel)
+    assert writes.output_primitives == {
+        "first__ssa_v0": ir.get_op("tensor.exp").name,
+        "second__ssa_v0": ir.get_op("tensor.abs").name,
+    }
+
+
 @pytest.mark.parametrize("kind", ["count", "type"])
 def test_explicit_out_mapping_is_all_or_none_and_type_exact(kind: str):
     if kind == "count":
@@ -1046,16 +1150,7 @@ def test_folded_and_spanning_reductions_emit_planned_phases():
     assert spanning.pipeline_loops >= 1
 
 
-@pytest.mark.parametrize(
-    ("program", "reduction_op", "source_aligned_axis", "result_shape", "report_axis"),
-    [
-        (SingleRowReductionProgram, _TENSOR_ROW_SUM, 0, (8, 1), 0),
-        (SingleColumnReductionProgram, _TENSOR_COL_SUM, 1, (1, 8), 1),
-    ],
-)
-def test_singleton_reduction_axis_is_padded_as_full_frame(
-    program, reduction_op, source_aligned_axis, result_shape, report_axis, tmp_path
-):
+def test_singleton_row_reduction_axis_is_padded_as_full_frame(tmp_path):
     """A singleton iteration axis is full-frame, not an implicit broadcast."""
 
     def static_shape(type_: ir.TensorType) -> tuple[int, int]:
@@ -1071,7 +1166,7 @@ def test_singleton_reduction_axis_is_padded_as_full_frame(
 
         def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
             call = op.value
-            if isinstance(call, ir.Call) and call.op.name == reduction_op:
+            if isinstance(call, ir.Call) and call.op.name == _TENSOR_ROW_SUM:
                 assert isinstance(call.args[0].type, ir.TensorType)
                 assert isinstance(op.var.type, ir.TensorType)
                 self.sources.append(static_shape(call.args[0].type))
@@ -1079,7 +1174,7 @@ def test_singleton_reduction_axis_is_padded_as_full_frame(
             super().visit_assign_stmt(op)
 
     report_dir = tmp_path / "report"
-    after = _run_with_schedule_reports(program, report_dir)
+    after = _run_with_schedule_reports(SingleRowReductionProgram, report_dir)
     descriptor, _ = _read_schedule_report(report_dir, "reduce")
 
     # Once the full-frame singleton is padded, materializing the complete
@@ -1092,14 +1187,79 @@ def test_singleton_reduction_axis_is_padded_as_full_frame(
     shapes.visit_program(after)
     assert shapes.sources
     assert shapes.results
-    assert all(shape[source_aligned_axis] == 8 for shape in shapes.sources)
-    assert set(shapes.results) == {result_shape}
+    assert all(shape[0] == 8 for shape in shapes.sources)
+    assert set(shapes.results) == {(8, 1)}
 
     stats = next(phase for phase in descriptor["phases"] if phase["name"] == "stats")
     assert stats["inputs"]
     for input_ in stats["inputs"]:
-        assert input_["logical_tile"][report_axis] == 1
-        assert input_["physical_tile"][report_axis] == 8
+        assert input_["logical_tile"][0] == 1
+        assert input_["physical_tile"][0] == 8
+
+
+def test_singleton_column_reduction_uses_a_zero_copy_row_view(tmp_path):
+    report_dir = tmp_path / "report"
+    after = _run_with_schedule_reports(SingleColumnReductionProgram, report_dir)
+    descriptor, pseudocode = _read_schedule_report(report_dir, "reduce")
+    structure = _structure(after)
+
+    assert descriptor["coordinate_transform"] == "singleton_column_to_row"
+    x = next(tensor for tensor in descriptor["tensors"] if tensor["name"] == "x")
+    assert x["shape"] == [8192, 1]
+    assert x["schedule_shape"] == [1, 8192]
+    assert descriptor["reduction"]["axis"] == 1
+    assert {op["operation"] for op in descriptor["operations"]} == {
+        ir.get_op("tensor.exp").name,
+        _TENSOR_ROW_SUM,
+    }
+    assert structure.ops[_TENSOR_VIEW] >= 1
+    assert structure.ops[_TENSOR_ROW_SUM] >= 1
+    assert structure.ops[_TENSOR_COL_SUM] == 0
+    assert "zero-copy GM view [N,1] -> [1,N]" in pseudocode
+
+    stats = next(phase for phase in descriptor["phases"] if phase["name"] == "stats")
+    assert stats["inputs"]
+    assert all(input_["logical_tile"][0] == 1 for input_ in stats["inputs"])
+    assert all(input_["physical_tile"][0] == 8 for input_ in stats["inputs"])
+
+
+def test_singleton_column_reduction_load_and_compute_layouts_match_after_default_pipeline():
+    lowered = _run_default(SingleColumnReductionProgram)
+
+    class LayoutContract(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loads = 0
+            self.row_sums = 0
+            self.col_sums = 0
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_LOAD:
+                source = op.args[0].type
+                target = op.type
+                assert isinstance(source, ir.TensorType)
+                assert isinstance(target, ir.TileType)
+                assert source.tensor_view is not None
+                assert source.tensor_view.layout == ir.TensorLayout.ND
+                assert target.tile_view is not None
+                assert target.tile_view.blayout == ir.TileLayout.row_major
+                self.loads += 1
+            elif op.op.name == _TILE_ROW_SUM:
+                self.row_sums += 1
+            elif op.op.name == _TILE_COL_SUM:
+                self.col_sums += 1
+            super().visit_call(op)
+
+    contract = LayoutContract()
+    contract.visit_program(lowered)
+    assert contract.loads > 0
+    assert contract.row_sums > 0
+    assert contract.col_sums == 0
+
+
+def test_singleton_column_reduction_with_full_frame_output_declines_before_emission():
+    with pytest.raises(ValueError, match="full-frame output from a singleton-column reduction"):
+        _run_auto_tile(SingletonColumnReductionFullFrameOutputProgram)
 
 
 def test_schedule_report_keeps_true_broadcast_axes_singleton(tmp_path):
@@ -1565,13 +1725,45 @@ def test_schedule_reports_are_deterministic_and_separate_per_function(tmp_path):
             assert first.read_bytes() == second.read_bytes()
 
 
+def test_schedule_reports_publish_atomically_under_concurrent_compiles(tmp_path):
+    report_dir = tmp_path / "shared"
+    auto_tile_dir = report_dir / "auto_tile"
+    auto_tile_dir.mkdir(parents=True)
+    # These are the predictable temporary names used by the old writer. A
+    # concurrent publisher may already own either path, so the shared report
+    # machinery must neither truncate nor rename them.
+    legacy_temporaries = [
+        auto_tile_dir / "pointwise.json.tmp",
+        auto_tile_dir / "pointwise.txt.tmp",
+    ]
+    for path in legacy_temporaries:
+        path.write_text("foreign writer sentinel")
+    rendezvous = threading.Barrier(2)
+
+    def publish_repeatedly() -> None:
+        rendezvous.wait()
+        for _ in range(8):
+            _run_with_schedule_reports(PointwiseProgram, report_dir)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(publish_repeatedly) for _ in range(2)]
+        for future in futures:
+            future.result()
+
+    descriptor, pseudocode = _read_schedule_report(report_dir, "pointwise")
+    assert descriptor["function"] == "pointwise"
+    assert pseudocode.startswith("AutoTile schedule for pointwise\n")
+    assert all(path.read_text() == "foreign writer sentinel" for path in legacy_temporaries)
+    assert list(auto_tile_dir.glob(".*.tmp.*")) == []
+
+
 def test_schedule_report_is_optional_for_bare_pass_and_reports_io_failures(tmp_path, capfd):
     _, bare_log = _logged_plan(PointwiseProgram, capfd)
     assert " report=" not in bare_log
 
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
-    with pytest.raises(ValueError, match="could not create schedule report directory"):
+    with pytest.raises(ValueError, match="Could not create report artifact directory"):
         _run_with_schedule_reports(PointwiseProgram, blocked)
 
 

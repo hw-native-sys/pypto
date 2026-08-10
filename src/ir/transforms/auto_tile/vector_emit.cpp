@@ -81,7 +81,7 @@ std::vector<std::pair<std::string, std::any>> WithoutAutoTile(
   std::vector<std::pair<std::string, std::any>> result;
   result.reserve(attrs.size());
   for (const auto& attr : attrs) {
-    if (attr.first != "auto_tile") {
+    if (attr.first != "auto_tile" && attr.first != kAutoTileReturnedOutParamIndicesAttr) {
       result.push_back(attr);
     }
   }
@@ -371,7 +371,20 @@ class VectorEmitter {
     // make a provably-zero address dynamic.
     const ExprPtr input_row = input.rows == 1 ? Index(0, span_) : row_offset;
     const ExprPtr input_col = input.cols == 1 ? Index(0, span_) : col_offset;
-    std::vector<ExprPtr> args{input.var, IndexTuple({alloc_rows, alloc_cols}, span_),
+    ExprPtr source = input.var;
+    const auto [source_rows, source_cols] = StaticTensorShape(input.var->GetType());
+    if (source_rows != input.rows || source_cols != input.cols) {
+      INTERNAL_CHECK_SPAN(graph_.coordinate_transform == VectorCoordinateTransform::SingletonColumnToRow &&
+                              source_rows == input.cols && source_cols == input.rows,
+                          input.var->span_)
+          << "Internal error: AutoTile boundary tensor shape disagrees with its coordinate transform";
+      auto view = registry.Create("tensor.view", {source, IndexTuple({input.rows, input.cols}, span_)},
+                                  {{"layout", TensorLayout::ND}}, span_);
+      auto viewed = std::make_shared<Var>(Fresh("gm_row_view"), view->GetType(), span_);
+      body.push_back(std::make_shared<AssignStmt>(viewed, view, span_));
+      source = viewed;
+    }
+    std::vector<ExprPtr> args{source, IndexTuple({alloc_rows, alloc_cols}, span_),
                               Pair(input_row, input_col, span_)};
     if (alloc_rows != valid_rows || alloc_cols != valid_cols) {
       args.push_back(IndexTuple({valid_rows, valid_cols}, span_));

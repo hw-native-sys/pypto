@@ -163,11 +163,18 @@ deterministic artifacts:
 <output_dir>/report/auto_tile/<function>.txt
 ```
 
+These files are published through the active `ReportInstrument`, like other
+compiler reports. Each complete artifact is written to a unique sibling
+temporary and atomically installed, so concurrent compilations sharing one
+output directory cannot truncate each other's reports.
+
 The JSON file is a versioned compiler-artifact schema. It records the selected
 grid, balanced partitions, representative region, strip/chunk loops, serial
 tails, phase operation order, boundary-input lifetimes, logical and physical
 tile extents, dtype-specific element sizes, UB peaks, traffic, and modeled
-cycles. It is intended for tooling and is not yet a stable public API.
+cycles. When the generated algorithm changes coordinates, `coordinate_transform`
+names that transform and each tensor records both its program shape and scheduled
+shape. It is intended for tooling and is not yet a stable public API.
 
 The text file renders the same structured descriptor as tile-centric
 pseudocode. It describes one representative SPMD work unit rather than drawing
@@ -241,6 +248,15 @@ streaming apply phase. AutoTile does not emit a seed kernel or atomic partial
 stores: if a column-reduction graph cannot be realized by one capacity-safe
 kernel, the marked function is rejected.
 
+An Ascend 910B `[N,1]` GM tensor is represented as DN, while A2/A3 vector
+arithmetic and reductions require row-major Vec tiles. For a singleton-column
+graph whose returned values are scalar reduction descendants, AutoTile therefore
+creates a zero-copy ND `[1,N]` tensor view and schedules the equivalent row
+reduction. Planning, emission, and the schedule report all use that transformed
+coordinate system; GM traffic is unchanged. A singleton-column graph returning a
+full-frame `[N,1]` value is rejected until the emitter can restore that output
+layout without an intermediate GM tensor.
+
 ## UB and transfer accounting
 
 UB planning is dtype- and lifetime-aware. It accounts for boundary loads,
@@ -248,7 +264,9 @@ intermediates, all returned live-outs, DMA padding, the second bank of a
 two-stage pipeline, padded row-reduction scratch tiles inserted by tensor-to-tile
 lowering, high-precision `rsqrt` scratch, and thin accumulators. Metadata-only
 `set_validshape` aliases do not allocate a second buffer. Column reductions
-lower without a scratch tile and are priced that way.
+normally lower without a scratch tile and are priced that way. The normalized
+singleton-column case lowers as a row reduction, so its row-reduction scratch is
+included instead.
 
 Ordinary casts are conversions with distinct source and destination storage;
 MemoryReuse must not turn `tile.cast` into an in-place operation. An explicitly
@@ -290,8 +308,11 @@ For an entry function, returned tensors become explicit `Out` parameters while
 the original return tuple is retained for later normalization. For a marked
 helper called elsewhere in the program, output storage is created inside the
 helper so its call signature remains valid. Multiple live-outs always receive
-distinct stores. Existing explicit `Out` parameters are reused positionally;
-direct calls and `Submit` sites keep that declared signature.
+distinct stores. Existing explicit `Out` parameters are reused by exact
+source-to-SSA lineage, not by return position or tensor type. A helper may
+therefore return equal-typed outputs in a different order from its `Out`
+parameter declarations; direct calls and `Submit` sites keep that declared
+signature without changing which computation writes each buffer.
 
 Successful emission contains one `pl.spmd` scope and one non-split Vector
 InCore body. Later hierarchy outlining therefore produces one AIV kernel for

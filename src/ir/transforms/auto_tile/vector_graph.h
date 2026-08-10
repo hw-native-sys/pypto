@@ -69,6 +69,11 @@ enum class VectorGeometry : uint8_t {
   ColExpand,
 };
 
+enum class VectorCoordinateTransform : uint8_t {
+  None,
+  SingletonColumnToRow,
+};
+
 struct VectorTensor {
   VarPtr var;
   int64_t rows = 0;
@@ -113,14 +118,19 @@ struct VectorGraph {
   std::vector<VectorOp> ops;
   std::vector<size_t> required_outputs;
   std::vector<size_t> required_output_ops;
-  // Empty for return-only functions; otherwise positional with required_outputs.
+  // Empty for return-only functions; otherwise mapped by source-level Out
+  // lineage and ordered with required_outputs.
   std::vector<VarPtr> required_output_buffers;
   std::unordered_map<const Var*, size_t> tensor_by_var;
   SoftmaxPattern softmax;
+  VectorCoordinateTransform coordinate_transform = VectorCoordinateTransform::None;
   int reduced_axis = 0;  // 0 = none, 1 = width, 2 = height
   int reduction_count = 0;
   size_t reduction_op = std::numeric_limits<size_t>::max();
 };
+
+/** Stable report/log name for a generated coordinate transform. */
+[[nodiscard]] const char* CoordinateTransformName(VectorCoordinateTransform transform);
 
 /** Whether a tensor's singleton row axis broadcasts over the graph's iteration frame. */
 [[nodiscard]] inline bool IsRowBroadcast(const VectorGraph& graph, const VectorTensor& tensor) {

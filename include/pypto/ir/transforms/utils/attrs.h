@@ -24,6 +24,18 @@
 namespace pypto {
 namespace ir {
 
+/// Transient return-position -> explicit ``Out`` parameter lineage produced by
+/// ``ConvertToSSA`` for a function marked ``auto_tile``.  Each entry is the
+/// parameter index whose source-level variable produced that return position,
+/// or ``-1`` when the return is not rooted in an ``Out`` parameter.
+///
+/// AutoTile runs after SSA conversion, where reassignment has split one
+/// source-level ``Out`` variable into distinct SSA Vars.  This provenance keeps
+/// the exact source identity across that split, so equal-typed multi-output
+/// functions never have to infer their destination from return or parameter
+/// order.  ``AutoTile`` consumes and strips the attribute before emitting IR.
+inline constexpr const char* kAutoTileReturnedOutParamIndicesAttr = "__auto_tile_returned_out_param_indices";
+
 /// Private provenance on every compiler-generated ``tile.load(GM -> Mat)``
 /// call introduced while bridging a Tensor operand to tile IR.
 /// ``InferTileMemorySpace`` consumes this evidence when deciding whether a

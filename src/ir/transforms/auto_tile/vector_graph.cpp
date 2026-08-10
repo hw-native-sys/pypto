@@ -27,6 +27,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -138,6 +139,54 @@ bool IsSupportedTensorDType(const DataType& dtype) {
 bool IsPartOp(const CallPtr& call) {
   return IsOp(call, "tensor.part_add") || IsOp(call, "tensor.part_mul") || IsOp(call, "tensor.part_max") ||
          IsOp(call, "tensor.part_min");
+}
+
+std::string RowEquivalentEmissionOp(const std::string& emission_op) {
+  const OpPtr op = OpRegistry::GetInstance().GetOp(emission_op);
+  if (IsOp(op, "tensor.col_sum")) return "tensor.row_sum";
+  if (IsOp(op, "tensor.col_max")) return "tensor.row_max";
+  if (IsOp(op, "tensor.col_expand_add")) return "tensor.row_expand_add";
+  if (IsOp(op, "tensor.col_expand_sub")) return "tensor.row_expand_sub";
+  if (IsOp(op, "tensor.col_expand_mul")) return "tensor.row_expand_mul";
+  if (IsOp(op, "tensor.col_expand_div")) return "tensor.row_expand_div";
+  if (IsOp(op, "tensor.col_expand_max")) return "tensor.row_expand_max";
+  if (IsOp(op, "tensor.col_expand_min")) return "tensor.row_expand_min";
+  if (IsOp(op, "tensor.col_expand_expdif")) return "tensor.row_expand_expdif";
+  return emission_op;
+}
+
+void NormalizeSingletonColumnReduction(VectorGraph* graph, const ReturnStmtPtr& return_stmt) {
+  if (graph->reduced_axis != 2 || graph->iteration_cols != 1) return;
+
+  for (size_t tensor : graph->required_outputs) {
+    const VectorTensor& output = graph->tensors[tensor];
+    CHECK_SPAN(output.rows == 1 && output.cols == 1, return_stmt->span_)
+        << "AutoTile does not yet support a full-frame output from a singleton-column reduction; "
+           "return scalar reduction descendants or express the computation over a row-oriented [1,N] input";
+  }
+  for (const VectorOp& op : graph->ops) {
+    CHECK_SPAN(op.geometry != VectorGeometry::RowExpand, op.stmt->span_)
+        << "AutoTile does not yet support a degenerate row-expand operation inside a singleton-column "
+           "reduction; express the computation over a row-oriented [1,N] input";
+  }
+
+  // A packed [N,1] GM tensor is physically one contiguous vector, but PTOAS
+  // gives it DN layout while A2/A3 vector arithmetic and reductions require
+  // row-major tiles. Reinterpret the same bytes as [1,N] ND and schedule the
+  // exact transposed coordinate system. This is zero-copy; the emitter creates
+  // tensor.view aliases for boundary inputs before their tensor.slice loads.
+  graph->coordinate_transform = VectorCoordinateTransform::SingletonColumnToRow;
+  std::swap(graph->iteration_rows, graph->iteration_cols);
+  graph->reduced_axis = 1;
+  for (VectorTensor& tensor : graph->tensors) std::swap(tensor.rows, tensor.cols);
+  for (VectorOp& op : graph->ops) {
+    if (op.kind == VectorOpKind::ColSum) op.kind = VectorOpKind::RowSum;
+    if (op.kind == VectorOpKind::ColMax) op.kind = VectorOpKind::RowMax;
+    if (op.primitive == VectorPrimitive::ColSum) op.primitive = VectorPrimitive::RowSum;
+    if (op.primitive == VectorPrimitive::ColExtrema) op.primitive = VectorPrimitive::RowExtrema;
+    if (op.geometry == VectorGeometry::ColExpand) op.geometry = VectorGeometry::RowExpand;
+    op.emission_op = RowEquivalentEmissionOp(op.emission_op);
+  }
 }
 
 void AssignPhysicalShapeClasses(VectorGraph* graph) {
@@ -462,25 +511,41 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   }
   CHECK_SPAN(!graph.ops.empty(), function->span_) << "AutoTile found no tensor operations to schedule";
 
+  std::vector<size_t> out_param_indices;
   for (size_t i = 0; i < function->params_.size(); ++i) {
     const ParamDirection direction =
         i < function->param_directions_.size() ? function->param_directions_[i] : ParamDirection::In;
     if (direction != ParamDirection::Out) continue;
     CHECK_SPAN(As<TensorType>(function->params_[i]->GetType()) != nullptr, function->params_[i]->span_)
         << "AutoTile explicit Out parameters must be tensors";
-    graph.required_output_buffers.push_back(function->params_[i]);
+    out_param_indices.push_back(i);
   }
-  if (!graph.required_output_buffers.empty()) {
-    CHECK_SPAN(graph.required_output_buffers.size() == graph.required_outputs.size(), function->span_)
-        << "AutoTile requires all returned tensors to map positionally to explicit Out parameters; got "
-        << graph.required_outputs.size() << " returns and " << graph.required_output_buffers.size()
-        << " Out parameters";
+  if (!out_param_indices.empty()) {
+    const std::vector<int32_t> return_to_out =
+        function->GetAttr<std::vector<int32_t>>(kAutoTileReturnedOutParamIndicesAttr, {});
+    CHECK_SPAN(out_param_indices.size() == graph.required_outputs.size() &&
+                   return_to_out.size() == graph.required_outputs.size(),
+               function->span_)
+        << "AutoTile requires exact SSA lineage from every returned tensor to one explicit Out parameter; "
+           "got "
+        << graph.required_outputs.size() << " returns, " << out_param_indices.size()
+        << " Out parameters, and " << return_to_out.size() << " lineage entries";
+    std::unordered_set<size_t> mapped_out_params;
     for (size_t i = 0; i < graph.required_outputs.size(); ++i) {
+      CHECK_SPAN(return_to_out[i] >= 0 && static_cast<size_t>(return_to_out[i]) < function->params_.size(),
+                 return_stmt->span_)
+          << "AutoTile returned tensor " << i << " has no proven explicit Out destination";
+      const size_t param_index = static_cast<size_t>(return_to_out[i]);
+      CHECK_SPAN(function->param_directions_[param_index] == ParamDirection::Out, return_stmt->span_)
+          << "AutoTile returned tensor " << i << " maps to a parameter that is not declared Out";
+      CHECK_SPAN(mapped_out_params.insert(param_index).second, return_stmt->span_)
+          << "AutoTile does not support multiple returned tensors targeting the same explicit Out parameter";
       const TypePtr& produced_type = graph.tensors[graph.required_outputs[i]].var->GetType();
-      const VarPtr& output_buffer = graph.required_output_buffers[i];
+      const VarPtr& output_buffer = function->params_[param_index];
       CHECK_SPAN(structural_equal(produced_type, output_buffer->GetType()), output_buffer->span_)
           << "AutoTile returned tensor " << i << " is not type-compatible with explicit Out parameter '"
           << output_buffer->name_hint_ << "'";
+      graph.required_output_buffers.push_back(output_buffer);
     }
   }
 
@@ -540,6 +605,7 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   graph.iteration_rows = iteration_rows;
   graph.iteration_cols = iteration_cols;
   graph.reduction_count = reduction_count;
+  NormalizeSingletonColumnReduction(&graph, return_stmt);
   AssignPhysicalShapeClasses(&graph);
   ValidateCastPhysicalShapeClasses(graph);
 
@@ -564,6 +630,16 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
 }
 
 }  // namespace
+
+const char* CoordinateTransformName(VectorCoordinateTransform transform) {
+  switch (transform) {
+    case VectorCoordinateTransform::None:
+      return "none";
+    case VectorCoordinateTransform::SingletonColumnToRow:
+      return "singleton_column_to_row";
+  }
+  return "unknown";
+}
 
 VectorAdmissionResult AdmitVectorGraph(const FunctionPtr& function, const ProgramPtr& program,
                                        const backend::TcvtAdjacency& cast_table) {
