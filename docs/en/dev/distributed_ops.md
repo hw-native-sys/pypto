@@ -41,6 +41,82 @@ There are **thirteen ops** and **four ABI enums**:
 The five side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
 
+## Ergonomic collective API — auto-managed signals
+
+The `pld.tensor.*` collectives require an explicit window-bound INT32 signal
+buffer per call. The ergonomic short forms (`pld.all_reduce`, `pld.all_gather`,
+`pld.reduce_scatter`, `pld.broadcast`, `pld.all_to_all`, `pld.all_to_all_v`,
+`pld.barrier`) allocate a **fresh, correctly shaped** signal automatically and
+delegate to the corresponding `pld.tensor.*` HOST builtin:
+
+```python
+data = pld.all_reduce(data, op=pld.ReduceOp.Sum)          # mesh: no signal needed (host synthesis)
+data = pld.all_reduce(data, mode="ring", nranks=2)        # ring: [2*(NR-1)+1, NR] signal auto-allocated
+data = pld.all_gather(local, target)
+data = pld.reduce_scatter(target, op=pld.ReduceOp.Sum)
+data = pld.broadcast(target, root=0)
+data = pld.all_to_all(input, target)
+data = pld.all_to_all_v(input, target, send_counts, recv_counts, nranks=NR)
+sig  = pld.barrier(sig)                                    # requires an explicit, covered signal
+```
+
+Semantics and constraints:
+
+- **HOST-orchestration only.** The wrappers build on the host-only
+  `alloc_window_buffer` / `window` / `world_size` primitives; operands are
+  window-bound `DistributedTensor`s, exactly as for `pld.tensor.*`.
+- **Signal shape** is chosen per op and matches the HOST builtin's requirement:
+  `broadcast` / `reduce_scatter` use a rank-1 `[world_size]` signal;
+  `all_gather` / `all_to_all` use a rank-2 `[world_size, 1]` signal;
+  `all_to_all_v` uses a rank-2 `[nranks, 1]` signal (static `nranks` required);
+  `allreduce mode="mesh"` needs no signal (the compiler synthesizes
+  it), while `mode="ring"` needs a static `[2*(NR-1)+1, NR]` signal, so
+  `nranks` is required.
+- **Fresh per call.** Signals self-clear under the credit-barrier protocol
+  (pypto #2175, merged), so they are safe to reuse across back-to-back calls;
+  the wrappers still allocate a fresh buffer per call, which remains correct
+  and is the simplest safe default.
+- **`pld.barrier(sig)` needs an explicit signal** with comm-domain coverage — a
+  barrier has no data buffer from which coverage could be inherited, so an
+  auto-allocated signal would be rejected by `MaterializeCommDomainScopes`.
+  Pass an INT32 window that is also consumed by a device-tagged dispatch (see
+  `tests/st/distributed/test_l3_host_tensor_barrier.py`); a zero-arg auto
+  barrier lands with pypto #2243 (plan 65).
+- **Loops (HOST rail).** The wrappers target the HOST builtins, and the HOST
+  `allreduce` is not self-clearing — `SynthesizeAllReduceSignals` still rejects
+  an allreduce inside `for` / `while` loops, so the wrappers remain
+  loop-restricted. #2175's self-clearing protocol makes only the InCore
+  composite rail loop-safe, which the wrappers do not target.
+- **`pld.all_to_all_v`** (HOST) requires the `builtin.tensor.all_to_all_v`
+  rail (pypto #2243, plan 65); until it merges, the HOST path is rejected.
+
+### Putting it together: publish → collective → consume
+
+The wrappers auto-manage the **signal** only; the **data** window, the
+per-rank publish dispatches, and the read-back are still explicit. A complete
+HOST-orchestrator allreduce looks like:
+
+```python
+data_buf = pld.alloc_window_buffer(64 * pl.FP32.get_byte())
+for r in pl.range(pld.world_size()):
+    data = pld.window(data_buf, [1, 64], dtype=pl.FP32)
+    self.publish_orch(inputs[r], data, device=r)   # user InCore publish step
+data = pld.window(data_buf, [1, 64], dtype=pl.FP32)
+data = pld.all_reduce(data, op=pld.ReduceOp.Sum)   # mesh: signal auto-synthesized
+for r in pl.range(pld.world_size()):
+    self.consume_orch(data, outputs[r], device=r)  # user InCore consume step
+```
+
+Only the `pld.all_reduce` line is collective-specific; the publish / consume
+steps are plain cross-scope dispatches you write once per kernel (full program:
+`tests/st/distributed/test_l3_ergonomic_api.py`).
+
+**Mesh vs ring:** the default `mode="mesh"` is a direct all-to-all exchange —
+simplest, best for small payloads. `mode="ring"` streams data in `2*(NR-1)`
+pipelined steps with a smaller signal footprint and usually wins for large
+payloads / high NR; it requires `nranks` (a static world size) and currently
+supports `ReduceOp.Sum` + FP32 only.
+
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
 The namespace encodes the IR level the op lives at, not an arbitrary grouping:

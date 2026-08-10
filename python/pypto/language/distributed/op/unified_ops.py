@@ -16,15 +16,31 @@ canonical 3-segment surface — preserving signatures and docstrings for IDE
 help with zero call-chain indirection.
 """
 
+from .collective_api import (
+    all_gather,
+    all_reduce,
+    all_to_all,
+    all_to_all_v,
+    barrier,
+    broadcast,
+    reduce_scatter,
+)
 from .system_ops import get_comm_ctx, nranks, rank, world_size
 from .tensor_ops import alloc_window_buffer, window
 from .tile_ops import remote_load, remote_store
 
 __all__ = [
     "alloc_window_buffer",
+    "all_gather",
+    "all_reduce",
+    "all_to_all",
+    "all_to_all_v",
+    "barrier",
+    "broadcast",
     "get_comm_ctx",
     "nranks",
     "rank",
+    "reduce_scatter",
     "remote_load",
     "remote_store",
     "window",
