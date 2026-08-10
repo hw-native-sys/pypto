@@ -129,6 +129,30 @@ nb::list RecognizeDsaReusePenaltiesForTesting(const ir::FunctionPtr& func) {
 }
 
 /**
+ * @brief Return the product adapter's normalized DSA allocation lifetimes.
+ *
+ * The research adapter serializes the same facts. Exposing the in-memory side
+ * here lets unit tests compare both representations without running either
+ * solver or relying on placement tie-breaking.
+ */
+nb::list GetDsaAllocationLifetimesForTesting(const ir::FunctionPtr& func) {
+  const ir::dsa_adapter::AllocationPlan plan = ir::dsa_adapter::BuildDsaAllocationPlan(func);
+
+  nb::list result;
+  for (const ir::LifetimeInterval& interval : plan.intervals) {
+    const ir::dsa_adapter::DsaExecutionLifetime lifetime =
+        ir::dsa_adapter::ConvertToDsaExecutionLifetime(interval);
+    nb::dict record;
+    record["name"] = interval.variable->name_hint_;
+    record["size"] = interval.size;
+    record["begin"] = lifetime.begin;
+    record["end"] = lifetime.end;
+    result.append(std::move(record));
+  }
+  return result;
+}
+
+/**
  * @brief Return exact backend pipe inference for a Call, or None.
  */
 nb::object TryInferPipeForTesting(const ir::CallPtr& call) {
@@ -194,6 +218,9 @@ void BindTesting(nb::module_& m) {
 
   testing.def("recognize_dsa_reuse_penalties", &RecognizeDsaReusePenaltiesForTesting, nb::arg("function"),
               "Return recognized DSA-RP edges without running placement");
+
+  testing.def("get_dsa_allocation_lifetimes", &GetDsaAllocationLifetimesForTesting, nb::arg("function"),
+              "Return normalized product DSA allocation lifetimes");
 
   testing.def("try_infer_pipe", &TryInferPipeForTesting, nb::arg("call"),
               "Return the exact backend pipe for a Call, or None");

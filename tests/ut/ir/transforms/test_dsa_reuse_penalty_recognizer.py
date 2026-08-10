@@ -33,7 +33,7 @@ def _recognized_pairs(program) -> set[frozenset[str]]:
     return {frozenset((first, second)) for first, second, _cost in _recognized_edges(program)}
 
 
-def _find_call(program, op_name: str) -> ir.Call:
+def _find_calls(program, op_name: str) -> list[ir.Call]:
     function = next(iter(program.functions.values()))
     calls: list[ir.Call] = []
 
@@ -44,6 +44,11 @@ def _find_call(program, op_name: str) -> ir.Call:
             super().visit_call(call)
 
     _CallCollector().visit_stmt(function.body)
+    return calls
+
+
+def _find_call(program, op_name: str) -> ir.Call:
+    calls = _find_calls(program, op_name)
     assert len(calls) == 1
     return calls[0]
 
@@ -102,10 +107,12 @@ def test_dsa_rp_recognizes_cross_pipe_war(ascend_backend):
             return pl.store(next_value, [0, 0], output)
 
     assert _recognized_edges(Before) == {
-        ("prior", "_consumed", 1),
         ("prior", "next_value", 1),
         ("_consumed", "next_value", 1),
     }
+    # prior and _consumed are source/result operands of one operation. Their
+    # shared execution lifetimes overlap, so they form a hard conflict rather
+    # than a legal soft reuse edge.
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["prior"], ranges["next_value"])
 
@@ -696,12 +703,12 @@ def test_dsa_rp_recognizes_l0_to_l1_route(ascend_backend):
 
 
 @pytest.mark.parametrize(
-    ("ascend_backend", "expect_edge"),
+    ("ascend_backend", "expect_route"),
     [(BackendType.Ascend910B, False), (BackendType.Ascend950, True)],
     indirect=["ascend_backend"],
 )
-def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, expect_edge):
-    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it."""
+def test_backend_memory_graph_exposes_acc_to_vec_route(ascend_backend, expect_route):
+    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively decline it."""
 
     @pl.program
     class Before:
@@ -719,12 +726,12 @@ def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, e
             rhs_l0 = pl.tile.move(rhs_l1, target_memory=pl.Mem.Right)
             product = pl.matmul(lhs_l0, rhs_l0)
             _moved = pl.tile.move(product, target_memory=pl.Mem.Vec)
-            _consumed = pl.add(_moved, _moved)
             later = pl.load(later_input, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
             return pl.store(later, [0, 0], output)
 
-    pair = frozenset(("_moved", "_consumed"))
-    assert (pair in _recognized_pairs(Before)) is expect_edge
+    moves = _find_calls(Before, "tile.move")
+    assert len(moves) == 3
+    assert (testing.try_infer_pipe(moves[-1]) is not None) is expect_route
 
 
 @pytest.mark.parametrize("consume_view", [False, True])

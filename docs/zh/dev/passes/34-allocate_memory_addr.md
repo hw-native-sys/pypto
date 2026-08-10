@@ -9,31 +9,36 @@
 `tile.alloc` 语句。它不会创建分配操作：InitMemRef 已经用未分配地址创建了这些操作。
 
 默认的 `MemoryPlanner.PYPTO` 路径在 MemoryReuse 之后保留现有的对齐 bump 放置。
-可选的 `MemoryPlanner.DSA` 路径接收尚未机会性合并的分配 identity，导出与 benchmark
-框架相同的 structured problem，调用独立 solver，独立验证结果，再把验证过的 offset 写回。
+`MemoryPlanner.DSA_RP` 构建进程内 DSA-RP problem，并运行内置 canonical greedy solver。
+可选的研究路径 `MemoryPlanner.DSA` 接收相同的、尚未机会性合并的分配 identity，导出
+benchmark 框架使用的 schema-v1 problem，调用独立 solver，独立验证结果，再把验证过的
+offset 写回。
 
 **核心职责**：
 
 - 从 TileType 变量中收集唯一的 MemRef 对象
 - 在每个函数中把 `system.reserve_buffer` 的 base 解析成显式地址
 - 在每个内存空间内分配顺序的、32 字节对齐的地址
-- 或在 DSA 模式下，由独立 solver 联合选择生命周期复用与 offset
+- 或在 DSA 模式下，由内置或独立 solver 联合选择生命周期复用与 offset
 - 更新所有变量类型 (Type) 中的 MemRef 地址
 - 保留 `tile.alloc` 指针声明，同时更新所有 MemRef 使用点
 
 **使用时机**：在代码生成前运行，作为内存管理的最后一个 Pass。默认流水线在
-MemoryReuse 之后运行它。DSA 流水线会刻意跳过 MemoryReuse，但仍先运行
-MaterializeSemanticAliases，因此 view、循环 carry 值和原地操作的强制 identity 不变。
+MemoryReuse 之后运行它。两条 DSA 流水线都会刻意跳过 MemoryReuse，但仍先运行
+MaterializeSemanticAliases，因此 view、循环 carry 值和已显式选定的原地操作保留其
+强制 identity。
 
 ## Planner 模式
 
 | 模式 | 本 Pass 的输入 | 放置方式 | 失败行为 |
 | ---- | -------------- | -------- | -------- |
 | `MemoryPlanner.PYPTO` | MemoryReuse 机会性合并后的 MemRef | 后端策略控制的对齐 bump 分配 | 现有 verifier 报告非法地址或超容量 |
+| `MemoryPlanner.DSA_RP` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 内置 DSA-RP canonical greedy，使用编译器导出的 hard constraint 与非负 reuse penalty | 非法构造、不可行或独立 validator 失败会终止编译；只有 pipeline-stage intent 可使用已记录的 soft fallback |
 | `MemoryPlanner.DSA` | MaterializeSemanticAliases 后未机会性合并的 MemRef | 独立 schema-v1 DSA solver：first-fit 初始化、对显式识别的 reuse cost 使用 canonical greedy、其他情况使用受限 structured search，并且仅在严格问题无法装入容量时显式放宽流水线意图 | 非法导出、能力不匹配、不可行或 validator 失败都会终止编译；不会静默回退 |
 | `MemoryPlanner.PTOAS` | 无 | 跳过本 Pass；ptoas `PlanMemory` 负责放置 | 交给 ptoas |
 
-DSA 支持是可选的 CMake 依赖。先构建并安装 `dsa-solver` 0.10 package，再让
+内置 `DSA_RP` planner 始终参与构建。独立 `DSA` 研究路径是可选的 CMake 依赖。
+先构建并安装 `dsa-solver` 0.10 package，再让
 PyPTO 使用它：
 
 ```bash
@@ -111,8 +116,9 @@ edge policy 保留这类记录以及 distance-one loop handoff，但仍只是实
 [DSA 复用惩罚建模](../proposals/dsa_reuse_penalty_modeling.md)。
 
 初始 frontier 是这些关系下
-所有极小访问组成的 antichain，而不是词法上的第一次访问。
-partial view 和同一操作内部的交接会被记录，但不会定价。实验性的 v5 policy 先把
+所有极小访问组成的 antichain，而不是词法上的第一次访问。partial-view handoff
+只用于报告。same-operation access relation 也可能作为诊断 candidate 出现，但共享的
+execution lifetime 会把它变成 hard conflict，因此绝不会成为 soft edge。实验性的 v5 policy 先把
 符合条件的 cross-resource 记录聚合为每个 buffer pair 一条 soft edge，再通过独立的
 实验性模型赋予单位权重。结构化控制流内部完整的 distance-zero 与 distance-one
 交接都可以构造 edge，SSA order 只作为 provenance 而不是 filter。same-resource、
@@ -133,8 +139,9 @@ write” hazard 构造的近似：PyPTO 尚不具备 PTOAS 最终的 completion 
 2. 将每次访问映射到抽象 source/destination route 和执行资源。
 3. 保留极大的终止访问和完整的极小初始访问 antichain。只有所有极小访问都是已验证
    写入时才能构造 edge；否则 candidate 只用于报告。
-4. 比较同一地址空间内生命周期不相交的 allocation，并覆盖兼容的嵌套控制流和显式的
-   distance-one 循环交接。
+4. 为诊断比较同一地址空间内 coarse statement lifetime 兼容的 allocation；共享的
+   execution lifetime 会从 soft edge 中排除 same-operation pair，而兼容的嵌套控制流与
+   distance-one loop handoff 仍然可用。
 5. 为每个 candidate 记录 WAR/WAW、route、range、控制流和顺序证据。只有完整、
    full-range、distance-zero 或 distance-one 的 cross-resource 证据会构造 pair
    edge；权重在之后赋值。
@@ -165,6 +172,15 @@ intent 无法 fit，adapter 会显式创建 cost-aware `pypto_research_v1` relax
 并发出 `PH-DSA-001`。独立工具仍可读取旧的 `pypto_structured` 文档，但 PyPTO
 不再生成该 profile。完整问题与 objective 定义由独立 solver 维护，见
 [PyPTO 与动态存储分配](https://github.com/tonibohnlein/dsa-solver/blob/main/docs/pypto_dsa.md)。
+
+## 共享的 DSA 生命周期语义
+
+两种 DSA adapter 都调用同一个 `ConvertToDsaExecutionLifetime` helper。statement `p`
+的读 event 位于 `2*p`，写 event 位于 `2*p+1`；allocation 的半开区间从
+`2*def+1` 开始，并让最后一次读取持续到 `2*last_use+2`。因此同一个操作的独立输入
+与结果共同存活，不能共享存储。MaterializeSemanticAliases 显式选定的 alias 在进入
+DSA 前已经是一个 allocation identity，并保持为一个 DSA buffer。仅把操作标记为
+in-place-safe 并不会选择该 alias。
 
 ## 算法
 
@@ -331,11 +347,12 @@ Pass AllocateMemoryAddr();
 
 - `memref_collectors::CollectMemRefsWithSpace` 收集唯一的 MemRef 及其内存空间
 - `AllocateMemoryAddresses` 使用 `MemoryAllocatorPolicy` 在每个内存空间内分配顺序对齐的地址
-- `dsa_adapter::BuildStructuredProblem` 导出与 IR 解耦的 schema-v1 problem
-- `dsa_adapter::Solve` 对所选 standalone solver 做 capability matching，并独立验证结果
+- `dsa_adapter::BuildDsaAllocationPlan` 与 `dsa_adapter::BuildProblem` 构建内置 `DSA_RP` problem
+- `dsa_research_adapter::BuildStructuredProblem` 导出与 IR 解耦的 schema-v1 problem
+- `dsa_research_adapter::Solve` 对所选 standalone solver 做 capability matching，并独立验证结果
 - DSA 路径首先强制完整请求的 pipeline depth；若找不到可装入的 placement，则显式放松
   仅带 `pipeline_stage` 的 separation，最小化对应 reuse cost，并发出 `PH-DSA-001`
-- `dsa_adapter::BuildMemRefReplacements` 完成保留 view offset 的写回
+- 两个 adapter namespace 都提供保留 view offset 的 `BuildMemRefReplacements`
 - `MemRefUpdateMutator` 在一次遍历中同时更新变量类型和 `tile.alloc` 语句参数
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
@@ -357,7 +374,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 MemRef 去重的原始指针唯一性
 - 测试无后端配置时的默认策略行为
 - 测试容量诊断会归因跨核流水 ring 预留的字节数（见下文）
-- 测试 DSA 读先于写的复用、reserved range、view offset 写回与确定性导出
+- 测试共享的 DSA execution-overlap 生命周期、reserved range、view offset 写回与确定性导出
+- 测试 product/research 生命周期一致性以及显式 alias 的保留
 - 测试 alias class、类型化 separation、strict pipeline intent、显式 reuse-cost fallback
   及其性能提示
 - 通过 exporter、独立 solver、validator 和 writeback 重放 #1908 fragmentation 形状

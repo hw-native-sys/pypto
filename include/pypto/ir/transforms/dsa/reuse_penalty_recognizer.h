@@ -43,9 +43,9 @@ struct RecognizedReusePenalty {
  *
  * The recognizer emits one unit-weight relation per buffer pair for which
  * physical reuse can introduce a cross-pipe WAR or WAW handoff. It requires
- * a complete access set, full-allocation handoff endpoints, and a verified
- * initial write. Same-pipe, partial-view, structurally ambiguous, and
- * uncertain handoffs remain unpenalized.
+ * disjoint shared execution lifetimes, a complete access set, full-allocation
+ * handoff endpoints, and a verified initial write. Same-pipe, partial-view,
+ * structurally ambiguous, and uncertain handoffs remain unpenalized.
  *
  * The active backend supplies execution-pipe classification for supported
  * operation and direct-memory-route combinations. The recognizer does not

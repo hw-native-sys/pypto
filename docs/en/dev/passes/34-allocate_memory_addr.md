@@ -10,34 +10,39 @@ This pass is the physical-address boundary for non-DDR MemRefs. It resolves
 operations: InitMemRef has already created them with unallocated addresses.
 
 The default `MemoryPlanner.PYPTO` path keeps the existing aligned bump placement
-after MemoryReuse. The optional `MemoryPlanner.DSA` path receives the unmerged
-allocation identities, exports the same structured problem used by the benchmark
-framework, invokes the standalone solver, independently validates its result, and
-writes the validated offsets back.
+after MemoryReuse. `MemoryPlanner.DSA_RP` builds an in-memory DSA-RP problem and
+runs the in-tree canonical greedy solver. The optional research
+`MemoryPlanner.DSA` path receives the same unmerged allocation identities,
+exports a schema-v1 problem for the benchmark framework, invokes the standalone
+solver, independently validates its result, and writes the validated offsets
+back.
 
 **Key responsibilities**:
 
 - Collect unique MemRef objects from TileType variables
 - Resolve `system.reserve_buffer` bases to explicit addresses per function
 - Allocate sequential, 32-byte aligned addresses within each memory space
-- Or, in DSA mode, jointly choose lifetime reuse and offsets with the standalone solver
+- Or, in a DSA mode, jointly choose lifetime reuse and offsets with the in-tree or standalone solver
 - Update MemRef addresses in all variable types
 - Preserve `tile.alloc` pointer declarations while updating every MemRef use
 
 **When to use**: Run before code generation as the final memory-management pass.
-The default pipeline runs it after MemoryReuse. The DSA pipeline deliberately
-skips MemoryReuse, but still runs MaterializeSemanticAliases first so views,
-loop-carried values, and in-place operations retain their mandatory identities.
+The default pipeline runs it after MemoryReuse. Both DSA pipelines deliberately
+skip MemoryReuse, but still run MaterializeSemanticAliases first so views,
+loop-carried values, and explicitly selected in-place operations retain their
+mandatory identities.
 
 ## Planner modes
 
 | Mode | Input to this pass | Placement | Failure behavior |
 | ---- | ------------------ | --------- | ---------------- |
 | `MemoryPlanner.PYPTO` | Opportunistically merged MemRefs from MemoryReuse | Backend-policy aligned bump allocation | Existing verifier reports invalid or over-capacity addresses |
+| `MemoryPlanner.DSA_RP` | Unmerged MemRefs after MaterializeSemanticAliases | In-tree DSA-RP canonical greedy over compiler-derived hard constraints and nonnegative reuse penalties | Invalid construction, infeasibility, or independent validator failure stops compilation; only pipeline-stage intent may use the documented soft fallback |
 | `MemoryPlanner.DSA` | Unmerged MemRefs after MaterializeSemanticAliases | Standalone schema-v1 DSA solver: first-fit initialization, canonical greedy for explicitly recognized reuse costs, bounded structured search otherwise, and explicit pipeline-intent relaxation only when the strict problem does not fit | Invalid export, capability mismatch, infeasibility, or validator failure stops compilation; no silent fallback |
 | `MemoryPlanner.PTOAS` | None | This pass is skipped; ptoas `PlanMemory` owns placement | Deferred to ptoas |
 
-DSA support is an optional CMake dependency. Build and consume an installed
+The in-tree `DSA_RP` planner is always built. The standalone `DSA` research path
+is an optional CMake dependency. Build and consume an installed
 `dsa-solver` 0.10 package as follows:
 
 ```bash
@@ -123,9 +128,10 @@ the implementation/evidence boundary and the current completion-frontier
 conjecture.
 
 The initial frontier is the complete antichain of accesses minimal under those
-relations, rather than the lexically first access. Partial-view and
-same-operation handoffs are reported
-but remain unpriced. The experimental v5 policy first constructs one soft edge
+relations, rather than the lexically first access. Partial-view handoffs remain
+report-only. Same-operation access relations can appear as diagnostic candidate
+records, but the shared execution lifetime makes them hard-conflicting, so they
+never become soft edges. The experimental v5 policy first constructs one soft edge
 per qualifying cross-resource buffer pair, then applies a separate experimental
 unit-weight model. Complete distance-zero and distance-one handoffs inside
 structured control are eligible, and SSA order remains provenance rather than
@@ -152,8 +158,9 @@ The construction is deterministic:
 3. Retain maximal terminal accesses and the complete minimal initial-access
    antichain. Require every minimal access to be a verified write; otherwise
    keep the candidate report-only.
-4. Compare lifetime-disjoint allocations in the same address space, including
-   compatible nested control and explicit distance-one loop handoffs.
+4. Compare coarse statement-lifetime-compatible allocations in the same address
+   space for diagnostics. Shared execution lifetimes exclude same-operation
+   pairs from soft edges; compatible nested and distance-one loop handoffs remain eligible.
 5. Record every candidate with its WAR/WAW, route, range, control, and ordering
    evidence. Construct a pair edge only from complete, full-range
    cross-resource evidence at distance zero or one; assign its weight
@@ -195,6 +202,17 @@ intent does not fit, the adapter explicitly creates a cost-aware
 longer emitted. The complete problem and objective definition is maintained by
 the standalone solver in
 [PyPTO and Dynamic Storage Allocation](https://github.com/tonibohnlein/dsa-solver/blob/main/docs/pypto_dsa.md).
+
+## Shared DSA lifetime semantics
+
+Both DSA adapters consume the same `ConvertToDsaExecutionLifetime` helper.
+Statement `p` has a read event at `2*p` and a write event at `2*p+1`; an
+allocation's half-open interval begins at `2*def+1` and its final read remains
+live through `2*last_use+2`. A distinct input and result of one operation are
+therefore co-live and cannot share storage. An alias explicitly selected by
+MaterializeSemanticAliases is already one allocation identity and remains one
+DSA buffer. Merely marking an operation as in-place-safe does not select that
+alias.
 
 ## Algorithm
 
@@ -385,12 +403,13 @@ Pass AllocateMemoryAddr();
 
 - `memref_collectors::CollectMemRefsWithSpace` collects unique MemRefs and their memory spaces
 - `AllocateMemoryAddresses` assigns sequential aligned addresses per memory space using a `MemoryAllocatorPolicy`
-- `dsa_adapter::BuildStructuredProblem` exports the IR-free schema-v1 problem
-- `dsa_adapter::Solve` capability-matches a selected standalone solver and independently validates
+- `dsa_adapter::BuildDsaAllocationPlan` and `dsa_adapter::BuildProblem` build the in-tree `DSA_RP` problem
+- `dsa_research_adapter::BuildStructuredProblem` exports the IR-free schema-v1 problem
+- `dsa_research_adapter::Solve` capability-matches a selected standalone solver and independently validates
 - the DSA path first enforces full requested pipeline depth; if no fitting
   placement is found, it explicitly relaxes only `pipeline_stage` separations,
   minimizes the resulting reuse costs, and emits `PH-DSA-001`
-- `dsa_adapter::BuildMemRefReplacements` performs view-aware writeback
+- both adapter namespaces provide view-aware `BuildMemRefReplacements`
 - `MemRefUpdateMutator` updates both variable types and `tile.alloc` statement arguments in a single traversal
 
 **Python binding**: `python/bindings/modules/passes.cpp`
@@ -412,7 +431,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests raw pointer uniqueness for MemRef deduplication
 - Tests default policy behavior without a backend configured
 - Tests the capacity diagnostic attributes reserved cross-core pipe bytes (see below)
-- Tests DSA read-before-write reuse, reserved ranges, view-offset writeback, and deterministic export
+- Tests shared DSA execution-overlap lifetimes, reserved ranges, view-offset writeback, and deterministic export
+- Tests product/research lifetime parity and preservation of explicitly selected aliases
 - Tests alias-class, typed separation, strict pipeline intent, explicit
   reuse-cost fallback, and its performance warning
 - Replays the #1908 fragmentation shape through exporter, standalone solver, validator, and writeback

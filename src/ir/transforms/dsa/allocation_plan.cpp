@@ -35,6 +35,15 @@ namespace pypto {
 namespace ir {
 namespace dsa_adapter {
 
+DsaExecutionLifetime ConvertToDsaExecutionLifetime(const LifetimeInterval& lifetime) {
+  INTERNAL_CHECK(lifetime.def_point >= 0 && lifetime.last_use_point >= lifetime.def_point)
+      << "Invalid allocation lifetime [" << lifetime.def_point << ", " << lifetime.last_use_point << "]";
+
+  const int64_t begin = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
+  const int64_t final_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 2;
+  return {begin, std::max(begin + 1, final_read_end)};
+}
+
 AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
   LifetimeAnalysisResult analysis = AnalyzeAllocationLifetimes(func);
   const AllocationConstraintAnalysis constraints = AnalyzeAllocationConstraints(func, analysis, "DSA-RP");

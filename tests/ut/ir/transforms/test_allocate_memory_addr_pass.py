@@ -996,6 +996,28 @@ def _vec_peak(func) -> int:
     return peak
 
 
+def _allocated_tile_ranges(program) -> dict[str, tuple[int, int]]:
+    """Collect constant half-open Tile allocation ranges by SSA name."""
+    ranges: dict[str, tuple[int, int]] = {}
+    function = next(iter(program.functions.values()))
+
+    class _RangeCollector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            tile_type = stmt.var.type
+            if isinstance(tile_type, ir.TileType) and tile_type.memref is not None:
+                offset = tile_type.memref.byte_offset_
+                assert isinstance(offset, ir.ConstInt)
+                ranges[stmt.var.name_hint] = (offset.value, offset.value + tile_type.memref.size_)
+            super().visit_assign_stmt(stmt)
+
+    _RangeCollector().visit_stmt(function.body)
+    return ranges
+
+
+def _ranges_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    return first[0] < second[1] and second[0] < first[1]
+
+
 def _dsa_chain_program():
     """InCore (AIV) kernel with a chain a->b->c; tile_a[def..b] and tile_c are
     lifetime-disjoint, so tile_c can reuse tile_a's slot. AIV is required — a
@@ -1062,6 +1084,24 @@ def _allocate_with_dsa(
         return passes.allocate_memory_addr()(base)
 
 
+def _allocate_with_dsa_rp(base):
+    """Run the in-tree DSA-RP planner through its PassContext-owned adapter."""
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+        return passes.allocate_memory_addr()(base)
+
+
+def test_dsa_rp_keeps_same_operation_operands_live():
+    """Product DSA-RP must not overlap a distinct input with its operation result."""
+    planned = _allocate_with_dsa_rp(_dsa_chain_program())
+    ranges = _allocated_tile_ranges(planned)
+
+    # A/B and B/C are same-operation input/result pairs. Whether the solver
+    # also reuses the legal A/C pair is an objective decision, not this test's
+    # contract.
+    assert not _ranges_overlap(ranges["tile_a"], ranges["tile_b"])
+    assert not _ranges_overlap(ranges["tile_b"], ranges["tile_c"])
+
+
 @requires_dsa
 def test_dsa_planner_keeps_same_operation_operands_live():
     """Distinct source and result allocations overlap during one execution op."""
@@ -1075,6 +1115,83 @@ def test_dsa_planner_keeps_same_operation_operands_live():
     # A/B and B/C are source/result pairs of one instruction and must remain
     # disjoint. A and C are not co-live, so they may still share one slot.
     assert plan_peak == 2 * 16384
+
+
+@requires_dsa
+def test_dsa_planners_share_same_operation_lifetime_semantics(tmp_path):
+    """Product and research problems encode identical execution lifetimes."""
+    base = _dsa_chain_program()
+    product = _allocate_with_dsa_rp(base)
+    research = _allocate_with_dsa(base, str(tmp_path))
+
+    for planned in (product, research):
+        ranges = _allocated_tile_ranges(planned)
+        assert not _ranges_overlap(ranges["tile_a"], ranges["tile_b"])
+        assert not _ranges_overlap(ranges["tile_b"], ranges["tile_c"])
+
+    document = json.loads((tmp_path / "pypto_read_before_write_chain.dsa.json").read_text())
+    research_lifetimes = {
+        member: {
+            "size": document["problem"]["buffers"][alias["buffer"]]["size"],
+            "begin": document["problem"]["buffers"][alias["buffer"]]["live_intervals"][0]["lower"],
+            "end": document["problem"]["buffers"][alias["buffer"]]["live_intervals"][0]["upper"],
+        }
+        for alias in document["problem"]["pypto_structure"]["alias_classes"]
+        for member in alias["members"]
+    }
+    function = next(iter(base.functions.values()))
+    product_lifetimes = {
+        lifetime["name"]: {
+            "size": lifetime["size"],
+            "begin": lifetime["begin"],
+            "end": lifetime["end"],
+        }
+        for lifetime in pypto.testing.get_dsa_allocation_lifetimes(function)
+    }
+    assert product_lifetimes == research_lifetimes
+
+    def overlaps(first: dict[str, int], second: dict[str, int]) -> bool:
+        return first["begin"] < second["end"] and second["begin"] < first["end"]
+
+    assert overlaps(research_lifetimes["tile_a"], research_lifetimes["tile_b"])
+    assert overlaps(research_lifetimes["tile_b"], research_lifetimes["tile_c"])
+    assert not overlaps(research_lifetimes["tile_a"], research_lifetimes["tile_c"])
+
+
+def _dsa_explicit_inplace_alias_program():
+    """An explicit in-place operation whose source and result are one allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def explicit_inplace_alias(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            source = pl.load(input_a, [0, 0], [64, 64])
+            padded = pl.tile.fillpad_inplace(source, pad_value=pl.PadValue.zero)
+            return pl.store(padded, [0, 0], output)
+
+    return passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+
+
+@requires_dsa
+def test_dsa_planners_preserve_explicit_inplace_alias(tmp_path):
+    """An alias selected before DSA remains one allocation in both adapters."""
+    base = _dsa_explicit_inplace_alias_program()
+    product = _allocate_with_dsa_rp(base)
+    research = _allocate_with_dsa(base, str(tmp_path))
+
+    assert _vec_peak(product) == _vec_peak(research) == 16384
+    assert ir.python_print(product).count("pl.tile.alloc(pl.Mem.Vec") == 1
+    assert ir.python_print(research).count("pl.tile.alloc(pl.Mem.Vec") == 1
+
+    document = json.loads((tmp_path / "pypto_explicit_inplace_alias.dsa.json").read_text())
+    alias_classes = document["problem"]["pypto_structure"]["alias_classes"]
+    assert len(document["problem"]["buffers"]) == 1
+    assert len(alias_classes) == 1
+    assert {"source", "padded"} <= set(alias_classes[0]["members"])
 
 
 @requires_dsa

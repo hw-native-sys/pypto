@@ -36,6 +36,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -481,6 +482,12 @@ std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& f
     compact_summaries.push_back(CompactSummary(summary));
   }
 
+  std::vector<DsaExecutionLifetime> execution_lifetimes;
+  execution_lifetimes.reserve(allocation_plan.intervals.size());
+  for (const LifetimeInterval& lifetime : allocation_plan.intervals) {
+    execution_lifetimes.push_back(ConvertToDsaExecutionLifetime(lifetime));
+  }
+
   std::unordered_set<PairKey, PairKeyHash> separated;
   separated.reserve(allocation_plan.separations.size());
   for (const AllocationSeparation& separation : allocation_plan.separations) {
@@ -505,12 +512,8 @@ std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& f
     static_cast<void>(space);
     std::vector<size_t> by_definition = indices;
     std::vector<size_t> by_end = std::move(indices);
-    const auto def_key = [&](size_t index) {
-      return std::pair{allocation_plan.intervals[index].def_point, index};
-    };
-    const auto end_key = [&](size_t index) {
-      return std::pair{allocation_plan.intervals[index].last_use_point, index};
-    };
+    const auto def_key = [&](size_t index) { return std::pair{execution_lifetimes[index].begin, index}; };
+    const auto end_key = [&](size_t index) { return std::pair{execution_lifetimes[index].end, index}; };
     std::sort(by_definition.begin(), by_definition.end(),
               [&](size_t lhs, size_t rhs) { return def_key(lhs) < def_key(rhs); });
     std::sort(by_end.begin(), by_end.end(),
@@ -519,9 +522,9 @@ std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& f
     size_t end_cursor = 0;
     std::map<StructuredPath, ResourceBuckets> buckets_by_path;
     for (size_t current : by_definition) {
-      const int current_definition = allocation_plan.intervals[current].def_point;
+      const int64_t current_definition = execution_lifetimes[current].begin;
       while (end_cursor < by_end.size() &&
-             allocation_plan.intervals[by_end[end_cursor]].last_use_point <= current_definition) {
+             execution_lifetimes[by_end[end_cursor]].end <= current_definition) {
         const size_t reusable = by_end[end_cursor++];
         if (!compact_summaries[reusable]) continue;
         const CompactAccessSummary& summary = *compact_summaries[reusable];

@@ -69,8 +69,9 @@ struct SolverRun {
  * remain one identity with a conservative allocation-level lifetime hull;
  * per-member SSA gaps are not physical dead-time proofs. Opportunistic reuse
  * remains entirely for the standalone solver. PyPTO statement points are
- * expanded into read/write sub-points so an input's last read may share an
- * address with an output written by the same statement.
+ * expanded into read/write sub-points so a distinct input remains live while
+ * an output of the same operation is written. Only aliases selected before DSA
+ * are represented by one buffer.
  */
 [[nodiscard]] ExportedProblem BuildStructuredProblem(
     const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,

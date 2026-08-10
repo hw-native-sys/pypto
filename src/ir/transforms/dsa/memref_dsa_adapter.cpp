@@ -55,17 +55,6 @@ uint64_t SaturatingAdd(uint64_t first, uint64_t second) {
                                                                : first + second;
 }
 
-dsa::Interval ConvertLifetime(const LifetimeInterval& lifetime) {
-  INTERNAL_CHECK(lifetime.def_point >= 0 && lifetime.last_use_point >= lifetime.def_point)
-      << "Invalid allocation lifetime [" << lifetime.def_point << ", " << lifetime.last_use_point << "]";
-
-  // Reads happen at 2*p and writes at 2*p+1. Thus an input whose final read is
-  // at statement p may share storage with an output written by that statement.
-  const int64_t begin = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
-  const int64_t final_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 1;
-  return {begin, std::max(begin + 1, final_read_end)};
-}
-
 }  // namespace
 
 PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allocation_plan,
@@ -100,8 +89,12 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     const MemRefPtr memref = GetDefinedMemRef(tile_type);
 
     const uint64_t alignment = std::max<uint64_t>(1, policy.AlignAddress(1, lifetime.memory_space));
-    prepared.strict_problem.buffers.push_back(
-        {id, lifetime.size, alignment, ToPoolId(lifetime.memory_space), ConvertLifetime(lifetime)});
+    const DsaExecutionLifetime execution_lifetime = ConvertToDsaExecutionLifetime(lifetime);
+    prepared.strict_problem.buffers.push_back({id,
+                                               lifetime.size,
+                                               alignment,
+                                               ToPoolId(lifetime.memory_space),
+                                               {execution_lifetime.begin, execution_lifetime.end}});
     buffer_by_interval[index] = id;
 
     const auto inserted = prepared.buffer_id_by_base.emplace(memref->base_.get(), id);

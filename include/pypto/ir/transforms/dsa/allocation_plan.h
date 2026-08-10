@@ -52,6 +52,23 @@ struct AllocationPlan {
 };
 
 /**
+ * @brief Half-open execution lifetime used by every DSA representation.
+ *
+ * PyPTO statement ``p`` is split into a read event ``2*p`` and a write event
+ * ``2*p+1``. Distinct source and result allocations of one operation overlap:
+ * an input's final read remains live through the operation's write event.
+ */
+struct DsaExecutionLifetime {
+  int64_t begin;
+  int64_t end;
+};
+
+/**
+ * @brief Convert one allocation lifetime to the shared DSA event convention.
+ */
+[[nodiscard]] DsaExecutionLifetime ConvertToDsaExecutionLifetime(const LifetimeInterval& lifetime);
+
+/**
  * @brief Build conservative DSA lifetimes and mandatory separations.
  */
 [[nodiscard]] AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func);

@@ -47,6 +47,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/research_reuse_penalty_recognizer.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -79,38 +80,6 @@ namespace {
       return ::dsa::SeparationReason::kGeneric;
   }
   return ::dsa::SeparationReason::kGeneric;
-}
-
-std::vector<::dsa::Interval> ConvertAllocationLifetime(const LifetimeInterval& lifetime) {
-  // A LifetimeInterval represents one physical allocation identity after
-  // views, loop carries, in-place results, and other mandatory aliases have
-  // already been coalesced by base_ identity. The individual SSA member ranges
-  // are not a proof that the stored value is dead between two members: control
-  // flow can carry the value through an untracked iter_arg/return_var and a
-  // later alias can read it again. Exposing those gaps let the standalone
-  // solver place foreign scratch in a live-through accumulator (#1980,
-  // DeepSeek-v4 ratio-4 softmax pool).
-  //
-  // Export the same conservative allocation hull that MemoryReuse uses for
-  // non-phi sharing. Safe multi-interval reuse requires an explicit physical-
-  // liveness proof; per-member SSA liveness alone is insufficient.
-  INTERNAL_CHECK(lifetime.def_point >= 0 && lifetime.last_use_point >= lifetime.def_point)
-      << "Invalid PyPTO allocation lifetime [" << lifetime.def_point << ", " << lifetime.last_use_point
-      << "]";
-
-  // Split each statement point into a read sub-point (2*p) and a write
-  // sub-point (2*p+1). A distinct input allocation remains live through the
-  // operation's write: hardware instructions may stream reads and writes
-  // concurrently, so statement order is not evidence that the input is dead
-  // before the output starts. This makes an input last-read at p overlap an
-  // output defined at p. Exact aliases that were explicitly selected before
-  // DSA already share one MemRef base and therefore one exported buffer.
-  const int64_t lower = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
-  const int64_t last_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 2;
-  // A definition with no later use still occupies the write sub-point. All
-  // other ranges end immediately after their final read sub-point.
-  const int64_t upper = std::max(lower + 1, last_read_end);
-  return {{lower, upper}};
 }
 
 std::string CorpusFileStem(const std::string& instance) {
@@ -179,7 +148,9 @@ ExportedProblem BuildStructuredProblem(const FunctionPtr& func, const Allocation
     buffer.name = memref->base_->name_hint_;
     buffer.size = lifetime.size;
     buffer.alignment = std::max<uint64_t>(1, policy.AlignAddress(1, lifetime.memory_space));
-    buffer.live_intervals = ConvertAllocationLifetime(lifetime);
+    const dsa_adapter::DsaExecutionLifetime execution_lifetime =
+        dsa_adapter::ConvertToDsaExecutionLifetime(lifetime);
+    buffer.live_intervals = {{execution_lifetime.begin, execution_lifetime.end}};
     buffer.allowed_pools = {ToPoolId(lifetime.memory_space)};
     exported.document.problem.buffers.push_back(std::move(buffer));
     buffer_id_by_interval[index] = id;
