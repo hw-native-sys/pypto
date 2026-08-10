@@ -119,7 +119,7 @@ jobs:
     #
     # No container: each perf sample borrows an NPU via `task-submit --device
     # auto` (mechanism B), so the job holds no card and runs on a CPU runner.
-    # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh).
+    # Host setup mirrors dist-system-tests (toolchain bundle + venv + activate.sh).
     needs: toolchain
     # Perf sampling only reads the repo — no write scopes needed on GITHUB_TOKEN.
     permissions:

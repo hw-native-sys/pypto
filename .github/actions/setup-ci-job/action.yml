@@ -24,13 +24,13 @@ description: >-
     CI_CACHE_ROOT  dir CI may keep its caches in (created if absent; all runners)
     CANN_ROOT      CANN toolkit — device runners only (needs-device)
 
-  and may set, when its layout differs from the fleet default:
-
-    TOOLCHAIN_BUNDLE_ROOT  dir to source the bundle's activate.sh from
-                           (toolchain: bundle); defaults to
-                           /opt/pypto/toolchain/current. Not named
-                           PYPTO_TOOLCHAIN_ROOT — `pypto-toolchain` reads that
-                           name itself, as its install root.
+  The bundle (toolchain: bundle) deliberately has no entry here: its location is
+  not a free choice, so there is nothing for a host to declare. The prefix
+  /opt/pypto/toolchain/<version> is compiled into the bundle's gcc and python, so
+  a bundle unpacked anywhere else is subtly broken. A host that needs the bytes on
+  another filesystem symlinks /opt/pypto at it, or moves `pypto-toolchain`'s
+  install root in its own pypto-env.conf — both of which the tool resolves, and
+  this action follows it there by asking the tool rather than by naming a path.
 
   Beyond those, the host is expected to provide (by name, not by path): a conda
   env `py310` under CONDA_ROOT, and task-submit / npu-smi / ccache / git / curl on
@@ -89,7 +89,7 @@ inputs:
       Where the Python and GCC come from. 'conda' is the historical path: a
       per-machine conda env under CONDA_ROOT, layered with a
       --system-site-packages venv. 'bundle' uses the pinned pypto-toolchain
-      bundle the runner declares in TOOLCHAIN_BUNDLE_ROOT, which is
+      bundle that `pypto-toolchain` has selected on the host, which is
       byte-identical on every host and carries its own ccache and uv.
 
       Default stays 'conda' so a runner that has not been provisioned yet keeps
@@ -377,27 +377,28 @@ runs:
         # pto-isa commit (issue #1139).
         pypto-toolchain verify \
           --require python=3.10 --require 'gcc>=15' --require 'ccache>=4.8'
-        # Where the bundle lives is host layout, so it comes from the runner's
-        # .env like CONDA_ROOT and CANN_ROOT — the default is only what the
-        # fleet happens to use today, not something a differently-laid-out host
-        # has to adopt.
+        # Enter the bundle through the same tool that just verified it, rather
+        # than by naming a path. `export` re-emits the selected bundle's own
+        # activate.sh, resolved through the install root and `current` symlink
+        # verify resolved — so "the bundle we checked" and "the bundle we build
+        # with" cannot become two different bundles.
         #
-        # Deliberately NOT named PYPTO_TOOLCHAIN_ROOT: `pypto-toolchain` reads
-        # that one itself, as its install root — the dir holding each installed
-        # version, with `current` a symlink it manages via `use <version>`.
-        # Exporting our path under that name pointed the tool one level too
-        # deep and it reported "no bundle is installed under
-        # /opt/pypto/toolchain/current" on a host where the bundle was present.
-        # This variable names the dir to source activate.sh from; it is ours,
-        # and it must stay outside the PYPTO_TOOLCHAIN* namespace the tool owns.
-        TOOLCHAIN_BUNDLE_ROOT="${TOOLCHAIN_BUNDLE_ROOT:-/opt/pypto/toolchain/current}"
-        if [ ! -r "$TOOLCHAIN_BUNDLE_ROOT/activate.sh" ]; then
-          echo "::error::no toolchain bundle at $TOOLCHAIN_BUNDLE_ROOT"
-          echo "Install it there, or point this runner at its own location by"
-          echo "adding a bare TOOLCHAIN_BUNDLE_ROOT=... line to <runner-root>/.env."
+        # A repo-side root override would reintroduce exactly that split, and
+        # would promise a portability the bundle does not have: the prefix
+        # /opt/pypto/toolchain/<version> is compiled into its gcc and python
+        # (cc1plus carries the string, sysconfig reports it to every extension
+        # build), so a bundle unpacked elsewhere is subtly broken. Relocation is
+        # a symlink at /opt/pypto, or the install root in the host's own
+        # pypto-env.conf; the tool resolves both and this step follows it.
+        bundle_env="$(pypto-toolchain export)" || exit 1
+        eval "$bundle_env"
+        # activate.sh exports PYPTO_TOOLCHAIN as the versioned prefix, and the
+        # generated per-job file below is written around it — so a silent empty
+        # here would surface much later as a venv built by the host python.
+        if [ -z "${PYPTO_TOOLCHAIN:-}" ]; then
+          echo "::error::pypto-toolchain export did not set PYPTO_TOOLCHAIN"
           exit 1
         fi
-        source "$TOOLCHAIN_BUNDLE_ROOT/activate.sh"
 
         rm -rf venv
         # No --system-site-packages. Nothing outside the venv is depended on
@@ -431,11 +432,13 @@ runs:
           printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
         fi
 
-        # Prove the file works before ten minutes of building depend on it, and
-        # re-assert the requirements against the tools it actually puts on PATH.
-        # `pypto-toolchain verify` above speaks for the bundle that command
-        # manages, which is not necessarily the one at TOOLCHAIN_BUNDLE_ROOT; only
-        # this check sees what the build will really run.
+        # Prove the file works before ten minutes of building depend on it. This
+        # is a self-test of the file assembled just above — which `verify` cannot
+        # cover, since it is generated here and did not exist when verify ran —
+        # not a second opinion about the bundle: verify and the activation above
+        # now resolve the same one. A fault here is a bug in this step's own
+        # composition (wrong venv, lost PATH order), and it is worth catching at
+        # second ten rather than as a compile error at minute ten.
         ( source activate.sh
           command -v python3.10 g++-15 ccache uv >/dev/null
           python3.10 -c 'import sys; assert sys.version_info[:2]==(3,10)'
