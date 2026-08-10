@@ -30,6 +30,21 @@ from pypto.pypto_core import passes as _core_passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig
 
+# Tolerance for the plain FP32 matmul goldens below. The cube accumulates the K
+# reduction in a different order than torch's single-pass BLAS matmul, so results
+# drift by a few FP32 ULP *of the partial sums* — measured on 910B over 489 runs
+# of the cases below at K=64..128: median 1.1e-5, peak 3.4e-5 absolute. That
+# drift is set by the partial-sum magnitude, not by |result|, so on a
+# cancellation-heavy element — where `torch.isclose`'s `atol + rtol * |golden|`
+# bound collapses to roughly `atol` — it exceeds the 1e-5 default; this is what
+# made `test_matmul_mixed_add_btranspose` flake on a single element in 2048. Note
+# it needs NO K-split — a single full-K `TMATMUL` already shows it — so every
+# FP32 randn matmul here is exposed, not just the K-split cases PR #1945
+# right-sized. Against the 1e-4 floor that peak drift is 0.34x, i.e. ~3x margin
+# even where the golden is ~0 and rtol contributes nothing.
+_FP32_MATMUL_RTOL = 1e-4
+_FP32_MATMUL_ATOL = 1e-4
+
 
 def _planner_tag(planner: MemoryPlanner) -> str:
     return {
@@ -106,6 +121,9 @@ class TestMatmul(PTOTestCase):
 
     def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        if config is None:
+            self.config.rtol = _FP32_MATMUL_RTOL
+            self.config.atol = _FP32_MATMUL_ATOL
         self.M = m
         self.K = k
         self.N = n
@@ -166,6 +184,9 @@ class TestMatmulBTranspose(PTOTestCase):
 
     def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        if config is None:
+            self.config.rtol = _FP32_MATMUL_RTOL
+            self.config.atol = _FP32_MATMUL_ATOL
         self.M = m
         self.K = k
         self.N = n
@@ -227,6 +248,9 @@ class TestMatmulATranspose(PTOTestCase):
 
     def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        if config is None:
+            self.config.rtol = _FP32_MATMUL_RTOL
+            self.config.atol = _FP32_MATMUL_ATOL
         self.M = m
         self.K = k
         self.N = n
@@ -288,6 +312,9 @@ class TestMatmulABTranspose(PTOTestCase):
 
     def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        if config is None:
+            self.config.rtol = _FP32_MATMUL_RTOL
+            self.config.atol = _FP32_MATMUL_ATOL
         self.M = m
         self.K = k
         self.N = n
@@ -1419,6 +1446,9 @@ class TestMixedAddBTrans(PTOTestCase):
 
     def __init__(self, m: int = 16, k: int = 64, n: int = 128, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        if config is None:
+            self.config.rtol = _FP32_MATMUL_RTOL
+            self.config.atol = _FP32_MATMUL_ATOL
         self.M = m
         self.K = k
         self.N = n
