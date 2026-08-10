@@ -112,4 +112,4 @@ Where an operator takes a scalar in a position the dispatcher cannot infer, the 
 - [Catalog](01-catalog.md) — what exists in each namespace.
 - [Memory and Data Movement](../language/03-memory.md) — why the tile-only movement operators are shaped as they are.
 - [Programming Model](../03-programming-model.md#quickstart-the-three-levels-in-one-program) — the same computation written at both levels.
-- [ConvertTensorToTileOps](../../dev/passes/10-convert_tensor_to_tile_ops.md) — the pass that turns the first into the second.
+- [ConvertTensorToTileOps](../../dev/passes/11-convert_tensor_to_tile_ops.md) — the pass that turns the first into the second.
