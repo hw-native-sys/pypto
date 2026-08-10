@@ -8,14 +8,15 @@
 
 普通的 kernel 调用也会成为任务，但你拿不到它的句柄。要声明一条推导够不着的边，你需要一个 **TaskId** —— 指代某一次派发的句柄 —— 以及把它作为依赖交给后续任务的办法。
 
-有两种写法，用哪一种取决于函数是怎么写的，而不是偏好：
+有三种写法，用哪些取决于函数是怎么写的，而不是偏好：
 
 | 写法 | 可用于 | 命名的是 |
 | ---- | ------ | -------- |
 | `with pl.at(level=..., deps=[...]) as tid:` | `@pl.jit` 与 `@pl.function` | 一个内联区域 |
+| `with pl.spmd(n, deps=[...]) as tid:` | `@pl.jit` 与 `@pl.function` | 一个内联的多 block 区域 |
 | `result, tid = pl.submit(self.kernel, ...)` | 仅 `@pl.program` 类 | 一个预先声明的 kernel |
 
-`pl.submit` 要求被调方写成 `self.<kernel>` —— 外层 `@pl.program` 类的一个方法。在 `@pl.jit` 函数里够不着它，因为那里的 kernel 是普通的模块级函数。两种写法喂给的是同一套 `deps=` 机制。
+两种作用域写法用 `as` 绑定 TaskId；`pl.submit` 则是返回它。`pl.submit` 要求被调方写成 `self.<kernel>` —— 外层 `@pl.program` 类的一个方法 —— 所以在 `@pl.jit` 函数里够不着它，因为那里的 kernel 是普通的模块级函数。三者喂给的是同一套 `deps=` 机制。
 
 **显式边与手动作用域无关。** `deps=` 与自动跟踪是叠加的 —— 最终等待集合是两者的并集 —— 所以显式边待在普通的 auto 作用域里完全正常。在那里把它当作精修工具，补上推导够不着的那一条边；只有当你想要整张图时才动用 [`pl.manual_scope`](01-scopes.md)。
 
@@ -57,7 +58,22 @@ def two_stage(
 | `dumps=[...]` | 标记为选择性 dump 的张量 |
 | `allow_early_resolve=True` | 调度提示 —— 见 [精修依赖图](03-tuning.md) |
 
-`pl.at` 没有 `predicate=`。派发谓词只存在于下面的 submit 写法上。
+`pl.at` 没有 `predicate=`。需要带谓词的区域请用 `pl.spmd` 或某种 submit 写法。
+
+### 把 `pl.spmd` 当作任务边界
+
+`pl.spmd(n)` 作为放置构造在 [作用域与放置](../language/04-scopes.md) 里已有说明；它同样是一次派发，所以也能用同样的方式命名一个任务：
+
+```python
+with pl.spmd(4, name_hint="stage1") as first:
+    ...
+with pl.spmd(4, name_hint="stage2", deps=[first]) as second:
+    ...
+```
+
+它接受 `deps=`、`predicate=` 与 `allow_early_resolve=`，这使它成为唯一带派发谓词的内联写法。
+
+**`deps=` 只有 `as` 形式接受。** 用 `as` 绑定才拿得到 TaskId；裸 `with pl.spmd(4):` 与 `for i in pl.spmd(4):` 照样执行同样的工作但不给它命名，向这两种形式传 `deps=` 会被拒绝并报 `pl.spmd() does not accept 'deps=' here`。
 
 ### `pl.submit`
 
@@ -109,10 +125,11 @@ out, _ = pl.submit(self.consumer, data, out, deps=[tids])
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **`pl.submit(...) first argument must be a self.<kernel> method reference`** | 在 `@pl.jit` 函数里用了 `pl.submit` | 改用那里可用的写法 `with pl.at(..., deps=[...]) as tid:` |
+| **`pl.submit(...) first argument must be a self.<kernel> method reference`** | 在 `@pl.jit` 函数里用了 `pl.submit` | 改用 `with pl.at(..., deps=[...]) as tid:` —— 多 block 派发则用 `with pl.spmd(n, deps=[...]) as tid:` |
 | **`pl.submit is a DSL parser construct and cannot be called directly`** | 在被装饰函数体外使用 | 移进被装饰的函数体内 |
 | **`unpacks 1 result value(s) but kernel returns 0`** | kernel 写的是 `Out` 参数且没声明返回类型 | 只解包 kernel 真正返回的东西，或给它加上返回类型 |
 | **`deps= entries must be a TaskId variable`** | TaskId 是对扁平 submit 结果做下标得到的 | 把 TaskId 绑定到独立的名字再传 |
+| **`pl.spmd() does not accept 'deps=' here`** | 向裸 `with` 或 `for` 形式传了 `deps=` | 用 `as tid:` 绑定该区域 —— 只有这种形式接受 `deps=` |
 | **`core_num` 缺失** | 它是 `pl.spmd_submit` 的必需关键字 | 传 `core_num=N`；位置槽是 kernel 的实参 |
 | **消费者只等到了循环的最后一个生产者** | 复用了一个 TaskId 而没有收集 | 收进 `pl.TASK_ID` 的 `pl.array` 并把数组传入 |
 | **auto 作用域里显式边似乎被忽略** | 并没有 —— 等待集合是并集 | 去别处找**缺失**的边，而不是被丢弃的边 |

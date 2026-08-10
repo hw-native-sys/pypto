@@ -13,7 +13,7 @@ genuinely different operations — reaching for the wrong one is the usual mista
 | You want | Reach for |
 | -------- | --------- |
 | An inferred edge gone, because it is not a real dependency | An **opt-out**: `manual_scope`, `manual_dep=True`, or `pl.no_dep` |
-| The task not to run at all when a runtime value says so | A **dispatch predicate**: `predicate=` |
+| The task not to run at all when a runtime value says so | A **dispatch predicate**: `predicate=` on `pl.submit` / `pl.spmd_submit` / `pl.spmd` |
 | The same graph, dispatched sooner | A **scheduling hint**: `allow_early_resolve=` |
 
 Only the first changes correctness guarantees. The predicate changes what runs; the hint
@@ -68,8 +68,9 @@ thing.
 
 ### `predicate=`
 
-Only `pl.submit` and `pl.spmd_submit` carry a predicate — `pl.at` has no `predicate=`
-keyword, so this one is reachable from the `@pl.program` form alone.
+Carried by `pl.submit`, `pl.spmd_submit` and `pl.spmd` — but **not** by `pl.at`. In a
+`@pl.jit` function `pl.spmd` is the form that has it; reach for it rather than `pl.at` when
+the region needs a predicate.
 
 Skips a task whose need is only known at run time. The scheduler evaluates the comparison
 at the **dispatch point** — after dependencies are satisfied, so the value is current
@@ -93,9 +94,13 @@ Only `tensor[indices] OP int-literal` is expressible: one comparison, with `==` 
 supports a single comparison. Reduce anything richer to one gate value in a prior kernel
 and predicate on that.
 
-**Contract:** the operand tensor's producer must be one of this submit's `deps=`, so the
+**Contract:** the operand tensor's producer must be one of this task's `deps=`, so the
 dispatch-point read sees the current value. The parser enforces this where it is statically
-provable; beyond that it is yours to honour.
+provable; beyond that it is yours to honour. On a `pl.spmd` region this forces the `as tid`
+form: only that spelling accepts `deps=` at all — `with pl.spmd(n, deps=[...]):` and
+`for i in pl.spmd(n, deps=[...]):` are rejected outright. A bare `with pl.spmd(n,
+predicate=...):` does parse, but it has no way to name the producer, so honouring the
+contract is on you.
 
 ### `allow_early_resolve=`
 

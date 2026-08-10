@@ -10,17 +10,19 @@ An ordinary kernel call becomes a task, but you never get a handle to it. To dec
 the inference cannot reach, you need a **TaskId** — a handle naming one dispatch — and a way
 to pass it to a later task as a dependency.
 
-There are two spellings, and which one you can use is decided by how the function is
+There are three spellings, and which ones you can use is decided by how the function is
 written, not by preference:
 
 | Spelling | Available in | Names the task |
 | -------- | ------------ | -------------- |
 | `with pl.at(level=..., deps=[...]) as tid:` | `@pl.jit` and `@pl.function` | An inline region |
+| `with pl.spmd(n, deps=[...]) as tid:` | `@pl.jit` and `@pl.function` | An inline multi-block region |
 | `result, tid = pl.submit(self.kernel, ...)` | `@pl.program` classes only | A pre-declared kernel |
 
-`pl.submit` requires its callee to be written as `self.<kernel>` — a method of the enclosing
-`@pl.program` class. It is not reachable from a `@pl.jit` function, where kernels are plain
-module-level functions. Both spellings feed the same `deps=` machinery.
+The two scope forms bind the TaskId with `as`; `pl.submit` returns it. `pl.submit` requires
+its callee to be written as `self.<kernel>` — a method of the enclosing `@pl.program` class
+— so it is not reachable from a `@pl.jit` function, where kernels are plain module-level
+functions. All three feed the same `deps=` machinery.
 
 **Explicit edges are not tied to manual scope.** `deps=` composes with automatic tracking —
 the final wait set is the union of both — so an explicit edge is perfectly at home in an
@@ -67,7 +69,27 @@ The dependency keywords are:
 | `dumps=[...]` | Tensors to mark for selective dump |
 | `allow_early_resolve=True` | Scheduling hint — see [Refining the graph](03-tuning.md) |
 
-`pl.at` has no `predicate=`. Dispatch predicates exist only on the submit spellings below.
+`pl.at` has no `predicate=`. For a predicated region use `pl.spmd` or a submit form.
+
+### `pl.spmd` as a task boundary
+
+`pl.spmd(n)` — covered as a placement construct in
+[Scopes and Placement](../language/04-scopes.md) — is also one dispatch, so it names a task
+the same way:
+
+```python
+with pl.spmd(4, name_hint="stage1") as first:
+    ...
+with pl.spmd(4, name_hint="stage2", deps=[first]) as second:
+    ...
+```
+
+It accepts `deps=`, `predicate=` and `allow_early_resolve=`, which makes it the one inline
+form that carries a dispatch predicate.
+
+**`deps=` requires the `as` form.** Binding with `as` is what gives you the TaskId; the bare
+`with pl.spmd(4):` and `for i in pl.spmd(4):` forms run the same work without naming it, and
+passing `deps=` to either is rejected with `pl.spmd() does not accept 'deps=' here`.
 
 ### `pl.submit`
 
@@ -132,10 +154,11 @@ like any other. See [Control Flow](../language/02-control-flow.md).
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **`pl.submit(...) first argument must be a self.<kernel> method reference`** | `pl.submit` used in a `@pl.jit` function | Use `with pl.at(..., deps=[...]) as tid:`, the spelling available there |
+| **`pl.submit(...) first argument must be a self.<kernel> method reference`** | `pl.submit` used in a `@pl.jit` function | Use `with pl.at(..., deps=[...]) as tid:` — or `with pl.spmd(n, deps=[...]) as tid:` for a multi-block dispatch |
 | **`pl.submit is a DSL parser construct and cannot be called directly`** | Used outside a decorated function body | Move it inside the decorated body |
 | **`unpacks 1 result value(s) but kernel returns 0`** | The kernel writes an `Out` parameter and declares no return type | Unpack only what the kernel returns, or give it a return type |
 | **`deps= entries must be a TaskId variable`** | A TaskId reached by indexing a flat submit result | Bind the TaskId to its own name and pass that |
+| **`pl.spmd() does not accept 'deps=' here`** | `deps=` was passed to the bare `with` or the `for` form | Bind the region with `as tid:` — only that form takes `deps=` |
 | **`core_num` missing** | It is a required keyword on `pl.spmd_submit` | Pass `core_num=N`; positional slots are the kernel's arguments |
 | **A consumer only waits on the last producer of a loop** | One TaskId was reused instead of collected | Collect into a `pl.array` of `pl.TASK_ID` and pass the array |
 | **Explicit edge seems ignored in auto scope** | It is not — the wait set is the union | Look for a *missing* edge elsewhere, not a discarded one |
