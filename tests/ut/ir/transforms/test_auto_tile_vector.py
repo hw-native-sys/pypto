@@ -28,6 +28,9 @@ from pypto import LogLevel, backend, ir, passes, set_log_level
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
+_TENSOR_ASSEMBLE = ir.get_op("tensor.assemble").name
+_TENSOR_CAST = ir.get_op("tensor.cast").name
+
 
 @pytest.fixture(autouse=True)
 def _ascend_910b_backend():
@@ -62,7 +65,7 @@ class _Structure(ir.IRVisitor):
 
     def visit_call(self, op: ir.Call) -> None:
         self.ops[op.op.name] += 1
-        if op.op.name == "tensor.assemble" and op.kwargs.get("atomic", 0) != 0:
+        if op.op.name == _TENSOR_ASSEMBLE and op.kwargs.get("atomic", 0) != 0:
             self.atomic_stores += 1
         super().visit_call(op)
 
@@ -1304,7 +1307,7 @@ def test_cast_plans_contain_the_complete_native_910b_conversion_path(program, ex
             self.targets: list[ir.DataType] = []
 
         def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == "tensor.cast":
+            if op.op.name == _TENSOR_CAST:
                 self.targets.append(op.kwargs["target_type"])
             super().visit_call(op)
 
@@ -1353,7 +1356,7 @@ def test_native_cast_chain_uses_one_physical_granule_and_keeps_logical_shape(
 
         def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
             call = op.value
-            if isinstance(call, ir.Call) and call.op.name == "tensor.cast":
+            if isinstance(call, ir.Call) and call.op.name == _TENSOR_CAST:
                 source = call.args[0]
                 assert isinstance(source.type, ir.TensorType)
                 assert isinstance(op.var.type, ir.TensorType)
