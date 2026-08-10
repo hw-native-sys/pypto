@@ -189,8 +189,15 @@ def test_remote_load_without_valid_shape_uses_source_valid_extent():
     assert "sizes = [%c1_index, %c8_index]" in remote_partition, remote_partition
 
 
-def test_remote_load_rejects_type_only_dynamic_partition_extent():
-    """A repeated type-only symbol is not a runtime codegen binding."""
+def test_remote_load_binds_type_only_dynamic_partition_extent():
+    """A type-only symbol becomes a runtime argument instead of being rejected.
+
+    Was ``..._rejects_...``: a symbol named only in a valid_shape used to have no
+    binding, so codegen refused it. MaterializeValidShapeSymbols now prepends it as
+    a Scalar[INDEX] parameter fed from the call site, so the partition extent is a
+    real SSA value. The ``shape_anchor`` trick in the next test remains valid; it
+    is simply no longer the only way to supply the extent.
+    """
     n = pl.dynamic("REMOTE_VALID_N")
 
     @pl.program
@@ -215,8 +222,15 @@ def test_remote_load_rejects_type_only_dynamic_partition_extent():
             )
             return pl.store(tile, [0, 0], out)
 
-    with pytest.raises(ValueError, match="depends on unbound symbol 'REMOTE_VALID_N'"):
-        _generate_mlir(P)
+    mlir = _generate_mlir(P)
+    assert "func.func @kernel" in mlir
+    # The symbol is a scalar parameter now, so the peer partition reads a real
+    # SSA value rather than an empty operand.
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
+    assert "sizes = [%c1_index, ]" not in remote_partition, remote_partition
 
 
 def test_remote_load_intersects_runtime_bound_dynamic_source_valid_extent():

@@ -29,6 +29,7 @@ from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
 from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION
+from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core import arith as _arith
 
@@ -268,6 +269,35 @@ def _get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
             return None
         return list(view.valid_shape)
     return None
+
+
+def _collect_type_symbol_ids(param_type: ir.Type) -> set[int]:
+    """Return ``id()`` of every Var read by a parameter type's shape metadata.
+
+    Used to detect a scalar parameter that shadows a ``pl.dynamic()`` symbol an
+    earlier parameter annotation already resolved, which cannot be rebound.
+    """
+    symbol_ids: set[int] = set()
+
+    def walk(expr: ir.Expr | None) -> None:
+        if expr is None:
+            return
+        if isinstance(expr, ir.Var):
+            symbol_ids.add(id(expr))
+            return
+        for attr in ("left", "right", "operand"):
+            operand = getattr(expr, attr, None)
+            if isinstance(operand, ir.Expr):
+                walk(operand)
+
+    if isinstance(param_type, ir.TensorType):
+        for dim in param_type.shape:
+            walk(dim)
+        view = param_type.tensor_view
+        if view is not None:
+            for dim in list(view.valid_shape) + list(view.stride):
+                walk(dim)
+    return symbol_ids
 
 
 def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
@@ -826,6 +856,67 @@ class ASTParser:
             self._loop_kind_stack.pop()
             self._split_aiv_mode_stack.pop()
 
+    def _bind_dynvar_to_scalar_param(
+        self,
+        param_name: str,
+        param_type: ir.Type,
+        param_var: ir.Var,
+        param_span: ir.Span,
+        symbols_used_so_far: set[int],
+    ) -> None:
+        """Re-point a same-named ``pl.dynamic()`` symbol at this scalar parameter.
+
+        A ``pl.Scalar[pl.INDEX]`` parameter that shadows a ``pl.dynamic()`` symbol
+        of the same name IS that symbol. ``MaterializeValidShapeSymbols`` turns an
+        unbindable valid_shape symbol into a parameter, and the printer keeps its
+        ``pl.dynamic()`` declaration so the annotations naming it still resolve
+        (Python evaluates annotations in the enclosing scope, before parameters
+        exist). Without this, the annotation would read a second, unbound Var of
+        the same name.
+
+        Only ``INDEX`` scalars qualify: a ``DynVar`` is an INDEX-valued dimension,
+        so rebinding one to, say, a ``pl.Scalar[pl.FP32]`` parameter would put an
+        FP32 Var in a shape expression.
+
+        Annotations resolve in declaration order, so the parameter has to precede
+        every annotation that names it. When an earlier parameter's type already
+        read the symbol, rebinding now would leave that earlier type pointing at a
+        different Var — which later reads as an unbound symbol and materializes a
+        second, redundant argument. Reject that ordering instead.
+
+        Args:
+            param_name: Parameter name as written in the signature
+            param_type: Resolved parameter type
+            param_var: The Var just created for the parameter
+            param_span: Span of the parameter, for diagnostics
+            symbols_used_so_far: ``id()`` of every Var already read by an earlier
+                parameter's type annotation
+
+        Raises:
+            ParserTypeError: If an earlier parameter annotation already read the
+                shadowed symbol.
+        """
+        declared = self.expr_evaluator.closure_vars.get(param_name)
+        if not isinstance(declared, DynVar):
+            return
+        if not isinstance(param_type, ir.ScalarType) or param_type.dtype != DataType.INDEX:
+            return
+        previous = declared._ir_var
+        if previous is not None and id(previous) in symbols_used_so_far:
+            raise ParserTypeError(
+                f"Parameter '{param_name}' shadows the dynamic symbol '{param_name}', "
+                f"which an earlier parameter's type annotation already uses",
+                span=param_span,
+                hint=(
+                    f"Declare '{param_name}: pl.Scalar[pl.INDEX]' before the parameter whose "
+                    f"pl.TensorView(valid_shape=...) names it, so the annotation resolves to "
+                    f"the parameter"
+                ),
+            )
+        declared._ir_var = param_var
+        declared.expr = param_var
+        self.expr_evaluator.dynvar_cache[param_name] = param_var
+
     def parse_function(
         self,
         func_def: ast.FunctionDef,
@@ -889,6 +980,10 @@ class ASTParser:
             attrs=func_attrs,
             requires_runtime_binding=requires_runtime_binding,
         ) as f:
+            # Vars already read by an earlier parameter's type annotation, by id().
+            # A scalar parameter shadowing one of these arrives too late to bind it.
+            symbols_used_so_far: set[int] = set()
+
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg
@@ -909,6 +1004,11 @@ class ASTParser:
 
                 # Add parameter to function with direction
                 param_var = f.param(param_name, param_type, param_span, direction=param_direction)
+
+                self._bind_dynvar_to_scalar_param(
+                    param_name, param_type, param_var, param_span, symbols_used_so_far
+                )
+                symbols_used_so_far.update(_collect_type_symbol_ids(param_type))
 
                 # A bare ``pl.dynamic()`` Var in a tensor param's shape names that
                 # argument's runtime extent. Orchestration codegen defines exactly

@@ -263,6 +263,13 @@ class PassManager:
             # adjacent to their notify through codegen; additive InCore-only
             # insertion that touches no property.
             passes.insert_comm_fence,
+            # Give every device-kernel valid_shape symbol that the kernel cannot
+            # bind (not a physical tensor dim, not a scalar param) a leading
+            # Scalar[INDEX] parameter, fed from the caller's actual valid extent.
+            # Runs dead last: it only extends signatures and call arg lists, and
+            # by here both are final, so no later pass has to account for the
+            # appended parameter.
+            passes.materialize_valid_shape_symbols,
         )
         return tensor_prefix_passes + tensor_only_passes + tile_pto_passes
 

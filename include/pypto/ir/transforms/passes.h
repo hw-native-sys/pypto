@@ -252,6 +252,21 @@ Pass LowerHostTensorCollectives();
 Pass MaterializeDistTensorCtx();
 
 /**
+ * @brief Materialize a scalar parameter per unbindable device-kernel valid_shape symbol.
+ *
+ * A ``pl.dynamic()`` symbol named only in a parameter's
+ * ``pl.TensorView(valid_shape=...)`` is neither a physical tensor dimension (which
+ * the kernel wrapper recovers from the runtime tensor's ``shapes[]``) nor a scalar
+ * parameter, so a precompiled kernel has no value for it. This pass adds the
+ * symbol itself as a *leading* ``Scalar[INDEX]`` parameter and passes the caller's
+ * actual extent at every call/submit site, lowering the annotation form into the
+ * scalar-parameter form the backend already supports. The parameter leads because
+ * the text form declares parameters left to right, and the annotation that names
+ * the symbol has to resolve to it.
+ */
+Pass MaterializeValidShapeSymbols();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop

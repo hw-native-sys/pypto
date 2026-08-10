@@ -46,11 +46,13 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace codegen {
@@ -769,6 +771,35 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // params on the MLIR signature (Site B further down) -- a single source of
   // truth keeps the two in lockstep.
   const std::vector<VarPtr> dyn_vars = CollectTensorShapeDynVars(func);
+
+  // Attribute every symbol that appears in a parameter's valid_shape but NOT in
+  // any physical shape to the parameter that declares it. Such a symbol gets no
+  // trailing %argN slot (CollectTensorShapeDynVars walks shape_ only) and is
+  // bound at the call site, so the kernel cannot materialize it. Recording the
+  // origin here lets GetVarName name the parameter if the symbol ever reaches
+  // an emitted expression.
+  {
+    std::set<const ir::Var*> shape_bound;
+    for (const auto& dyn_var : dyn_vars) shape_bound.insert(dyn_var.get());
+    for (const auto& param : func->params_) {
+      auto tensor_type = ir::AsTensorTypeLike(param->GetType());
+      if (!tensor_type) continue;
+      std::vector<VarPtr> valid_vars;
+      std::set<const ir::Var*> seen;
+      for (const auto& dim : ir::GetEffectiveTensorValidShape(*tensor_type)) {
+        CollectVarsFromShapeExprImpl(dim, seen, valid_vars);
+      }
+      // Report the author's parameter name, not its SSA-renamed form: the
+      // diagnostic points at DSL source the user can actually edit.
+      std::string param_name = ir::auto_name::GetCompatibleBaseName(param->name_hint_);
+      if (param_name.empty()) param_name = param->name_hint_;
+      for (const auto& valid_var : valid_vars) {
+        if (shape_bound.count(valid_var.get()) == 0) {
+          fs_.valid_shape_symbol_origin.emplace(valid_var.get(), param_name);
+        }
+      }
+    }
+  }
 
   // Reserve %argN names upfront so NewNamedTemp never collides with them
   for (size_t i = 0; i < func->params_.size(); i++) {
@@ -2054,7 +2085,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // same shape the `s = pl.mul(...)`-style yield (no bare alias) already
       // gets. Under PyPTO (emit_tile_addr_) the baked address already aliases
       // the two allocs, so this is a no-op there and is left untouched.
-      const std::string rhs_ssa = GetVarName(rhs_var);
+      const std::string rhs_ssa = LookupVarName(rhs_var);
       if (!rhs_ssa.empty()) {
         BindVarToMlir(op->var_, rhs_ssa);
         return;
@@ -2191,7 +2222,7 @@ void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::Var* base_ptr) {
   fs_.var_to_memref[GetVarKey(var)] = base_ptr;
 }
 
-std::string PTOCodegen::GetVarName(const VarPtr& var) const {
+std::string PTOCodegen::LookupVarName(const VarPtr& var) const {
   auto key = GetVarKey(var);
   auto it = fs_.var_to_mlir.find(key);
   if (it != fs_.var_to_mlir.end()) {
@@ -2212,8 +2243,34 @@ std::string PTOCodegen::GetVarName(const VarPtr& var) const {
       return mlir_name;
     }
   }
-  LOG_ERROR << "Variable " << var->name_hint_ << " not found in MLIR mapping";
   return "";
+}
+
+std::string PTOCodegen::DescribeUnbindableSymbol(const VarPtr& var) const {
+  auto origin = fs_.valid_shape_symbol_origin.find(GetVarKey(var));
+  if (origin != fs_.valid_shape_symbol_origin.end()) {
+    return "it appears only in the valid_shape of parameter '" + origin->second +
+           "', and MaterializeValidShapeSymbols did not turn it into a parameter (that pass runs "
+           "last in the Default strategy — a custom pass list that omits it leaves the symbol "
+           "unbound)";
+  }
+  return "it is not a physical tensor dimension, a scalar parameter, or a loop variable of this "
+         "kernel";
+}
+
+std::string PTOCodegen::GetVarName(const VarPtr& var) const {
+  // An unresolvable symbol must fail here. Emitting an empty operand instead
+  // produces MLIR that ptoas rejects with an opaque "expected SSA operand"
+  // several stages downstream, far from the annotation that caused it.
+  std::string name = LookupVarName(var);
+  CHECK_SPAN(!name.empty(), var->span_)
+      << "PTO codegen cannot materialize symbol '" << var->name_hint_ << "' in function '"
+      << (fs_.current_function ? fs_.current_function->name_ : "<unknown>")
+      << "': " << DescribeUnbindableSymbol(var)
+      << ". Pass the extent as a pl.Scalar[pl.INDEX] parameter and use it in "
+         "pl.load(..., valid_shape=[...]) instead of naming it in the parameter's "
+         "pl.TensorView(valid_shape=...) annotation.";
+  return name;
 }
 
 std::string PTOCodegen::NewTemp() {

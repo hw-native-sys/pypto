@@ -53,6 +53,12 @@ inline const PassProperties kMaterializeDistTensorCtxProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
     .produced = {IRProperty::CommDomainScopesMaterialized}};
 
+// -- MaterializeValidShapeSymbols pass (runs last) ---------------------------
+//    Prepends a Scalar[INDEX] parameter per device-kernel valid_shape symbol that
+//    the kernel cannot bind, and passes the actual extent at every call site.
+//    Signature-and-call rewrite only; touches no structural property.
+inline const PassProperties kMaterializeValidShapeSymbolsProperties{};
+
 // -- MaterializeRuntimeScopes pass (runs last, after the final Simplify) ------
 //    Inserts explicit AUTO RuntimeScopeStmt nodes for the orchestration function
 //    body and for/if bodies so codegen emits PTO2_SCOPE 1:1 from the IR.

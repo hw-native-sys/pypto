@@ -284,6 +284,7 @@ nav:
           - en/dev/passes/44-materialize_runtime_scopes.md
           - en/dev/passes/45-classify_iter_arg_carry.md
           - en/dev/passes/46-insert_comm_fence.md
+          - en/dev/passes/47-materialize_valid_shape_symbols.md
           - en/dev/passes/91-utility_passes.md
           - en/dev/passes/92-diagnostics.md
           - en/dev/passes/99-verifier.md

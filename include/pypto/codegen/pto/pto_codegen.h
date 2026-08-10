@@ -150,6 +150,24 @@ class PTOCodegen : public CodegenBase {
    */
   void EmitStructural(const std::string& line);
 
+  /**
+   * @brief Resolve @p var to its MLIR SSA name, or "" when nothing binds it.
+   *
+   * The lenient counterpart to GetVarName, for the rare caller that can
+   * genuinely proceed without a binding. GetVarName is the default: an
+   * unresolvable symbol there is a user error, and emitting an empty operand
+   * would produce MLIR that only fails much later inside ptoas.
+   */
+  [[nodiscard]] std::string LookupVarName(const ir::VarPtr& var) const;
+
+  /**
+   * @brief Explain why @p var has no SSA binding, for the GetVarName failure.
+   *
+   * Names the parameter whose valid_shape introduced the symbol when the origin
+   * is known, so the diagnostic points at editable DSL source.
+   */
+  [[nodiscard]] std::string DescribeUnbindableSymbol(const ir::VarPtr& var) const;
+
   // PTO-specific helper methods for operator codegen functions
 
   /**
@@ -890,6 +908,11 @@ class PTOCodegen : public CodegenBase {
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
 
     std::map<const ir::Var*, std::string> var_to_mlir;
+    /// Symbols that appear ONLY in a tensor parameter's valid_shape, mapped to
+    /// that parameter's name. Such a symbol is bound at the call site, so a
+    /// precompiled kernel never receives it — read on the GetVarName failure
+    /// path to name the parameter the unbindable symbol came from.
+    std::map<const ir::Var*, std::string> valid_shape_symbol_origin;
     std::map<const ir::Var*, std::string> tensor_to_view;
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
@@ -987,6 +1010,7 @@ class PTOCodegen : public CodegenBase {
       constants_indent.clear();
 
       var_to_mlir.clear();
+      valid_shape_symbol_origin.clear();
       tensor_to_view.clear();
       tensor_to_base_ptr.clear();
       view_ssa_to_base_ptr.clear();

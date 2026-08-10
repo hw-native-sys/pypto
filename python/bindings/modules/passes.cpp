@@ -565,6 +565,12 @@ void BindPass(nb::module_& m) {
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
   passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
              "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
+  passes.def("materialize_valid_shape_symbols", &pass::MaterializeValidShapeSymbols,
+             "Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.\n\n"
+             "A pl.dynamic() symbol named only in a parameter's pl.TensorView(valid_shape=...) is\n"
+             "neither a physical tensor dimension nor a scalar parameter, so a precompiled kernel\n"
+             "never receives it. Adds the symbol as a leading Scalar[INDEX] parameter and passes\n"
+             "the caller's actual extent at every call/submit site.");
   passes.def("stamp_tfree_split", &pass::StampTfreeSplit,
              "Copy each cross-core tpop's split/pipe-id onto its matching tfree op so codegen\n"
              "reads them from the op directly. Covers mixed-kernel and explicit AIC/AIV tfrees.");

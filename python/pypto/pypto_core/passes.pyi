@@ -699,6 +699,16 @@ def lower_host_tensor_collectives() -> Pass:
 def materialize_dist_tensor_ctx() -> Pass:
     """Materialize CommCtx parameters and arguments for DistributedTensor function parameters."""
 
+def materialize_valid_shape_symbols() -> Pass:
+    """Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.
+
+    A ``pl.dynamic()`` symbol named only in a parameter's
+    ``pl.TensorView(valid_shape=...)`` is neither a physical tensor dimension nor a
+    scalar parameter, so a precompiled kernel never receives it. Adds the symbol
+    as a leading ``Scalar[INDEX]`` parameter and passes the caller's actual extent
+    at every call/submit site.
+    """
+
 def stamp_tfree_split() -> Pass:
     """Copy each cross-core tpop's split/pipe-id onto its matching tfree op.
 
@@ -971,6 +981,7 @@ __all__ = [
     "simplify",
     "lower_composite_ops",
     "materialize_dist_tensor_ctx",
+    "materialize_valid_shape_symbols",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

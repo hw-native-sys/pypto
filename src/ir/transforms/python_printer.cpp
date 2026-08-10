@@ -2871,10 +2871,57 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
   }
 
+  // A parameter whose name is ALSO read inside a parameter *type annotation*
+  // still needs its pl.dynamic() declaration: Python evaluates annotations in the
+  // enclosing scope, before any parameter exists, so without the declaration the
+  // printed signature raises NameError on re-parse. MaterializeValidShapeSymbols
+  // produces exactly this shape — the valid_shape symbol becomes a scalar
+  // parameter while the tensor parameter's annotation keeps naming it — and the
+  // parser re-unifies the two (see ast_parser's DynVar re-point on f.param).
+  // Collected separately from the pass above: that one dedups through seen_ptrs,
+  // which would swallow every repeat occurrence.
+  // Deliberately narrow (issue #854 keeps the other two cases undeclared):
+  //   * a body-local var read in a valid_shape stays undeclared — it is defined
+  //     in the body, so the annotation resolves against the local;
+  //   * a param read as a *physical* dim stays undeclared — orchestration codegen
+  //     defines those symbols from the runtime tensor's shapes[].
+  // Only a param read in a valid_shape has neither escape, which is exactly what
+  // MaterializeValidShapeSymbols produces.
+  std::unordered_set<const Var*> read_in_param_types;
+  {
+    std::unordered_set<const Var*> param_vars;
+    for (const auto& [gvar, func] : program->functions_) {
+      for (const auto& param : func->params_) param_vars.insert(param.get());
+    }
+    std::function<void(const ExprPtr&)> collect_reads = [&](const ExprPtr& expr) {
+      if (!expr) return;
+      if (auto var = As<Var>(expr)) {
+        if (param_vars.count(var.get()) > 0) read_in_param_types.insert(var.get());
+      } else if (auto bin = As<BinaryExpr>(expr)) {
+        collect_reads(bin->left_);
+        collect_reads(bin->right_);
+      } else if (auto unary = As<UnaryExpr>(expr)) {
+        collect_reads(unary->operand_);
+      }
+    };
+    for (const auto& [gvar, func] : program->functions_) {
+      for (const auto& param : func->params_) {
+        // AsTensorTypeLike, not As<TensorType>: DistributedTensorType has its own
+        // ObjectKind and carries valid_shape symbols the same way.
+        auto tensor_type = AsTensorTypeLike(param->GetType());
+        if (!tensor_type || !tensor_type->tensor_view_.has_value()) continue;
+        for (const auto& dim : tensor_type->tensor_view_->valid_shape) collect_reads(dim);
+      }
+    }
+  }
+
   // Filter out locally-defined vars and function params: they should not get
-  // pl.dynamic() declarations — only truly free dimension variables should.
+  // pl.dynamic() declarations — only truly free dimension variables should, plus
+  // the params that a parameter annotation reads (see read_in_param_types above).
   dyn_var_ptrs.erase(std::remove_if(dyn_var_ptrs.begin(), dyn_var_ptrs.end(),
-                                    [&defined_vars](const Var* v) { return defined_vars.count(v) > 0; }),
+                                    [&defined_vars, &read_in_param_types](const Var* v) {
+                                      return defined_vars.count(v) > 0 && read_in_param_types.count(v) == 0;
+                                    }),
                      dyn_var_ptrs.end());
 
   // Phase 2: Assign unique printed names, disambiguating collisions.

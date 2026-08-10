@@ -59,6 +59,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 44 | `44-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1 |
 | 45 | `45-classify_iter_arg_carry.md` | Classifies each Orchestration ForStmt iter_arg (trivial alias vs materialised rebind carry) and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes |
 | 46 | `46-insert_comm_fence.md` | Last pass (distributed: inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after all statement-reordering passes so the inserted ops stay adjacent to notify through codegen) |
+| 47 | `47-materialize_valid_shape_symbols.md` | Runs dead last; turns each device-kernel `valid_shape` symbol the kernel cannot bind (not a physical dim, not a scalar param) into a leading `Scalar[INDEX]` param fed from the call site's actual valid extent |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
