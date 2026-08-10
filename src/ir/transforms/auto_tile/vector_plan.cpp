@@ -14,22 +14,24 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/common.h"
-#include "pypto/core/error.h"
-#include "pypto/ir/kind_traits.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/type.h"
 #include "src/ir/transforms/auto_tile/vector_cost_910b.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
 
 namespace pypto {
 namespace ir {
@@ -110,10 +112,12 @@ int64_t TensorFrameBytes(const VectorGraph& graph, const VectorTensor& tensor, i
   // on that axis. A [1,N] row-reduction input is a full-frame singleton, so
   // its col-major reduction layout still needs one DMA-aligned physical
   // column. The symmetric rule applies to [M,1] column reductions.
-  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor))
+  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor)) {
     frame_rows = AlignUp(frame_rows, element_granule);
-  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor))
+  }
+  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor)) {
     frame_cols = AlignUp(frame_cols, element_granule);
+  }
   return frame_rows * frame_cols * bytes;
 }
 
@@ -122,10 +126,12 @@ int64_t RowReductionScratchBytes(const VectorGraph& graph, const VectorTensor& t
   const int64_t bytes = DTypeBytes(tensor.dtype);
   int64_t frame_rows = FrameRows(tensor, rows);
   int64_t frame_cols = FrameCols(tensor, cols);
-  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor))
+  if (reduction_layout && !IsRowBroadcast(graph, tensor) && !IsThinReductionRow(graph, tensor)) {
     frame_rows = AlignUp(frame_rows, element_granule);
-  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor))
+  }
+  if (!IsColBroadcast(graph, tensor) && !IsThinReductionCol(graph, tensor)) {
     frame_cols = AlignUp(frame_cols, element_granule);
+  }
   // OpConversionRegistry::RegisterReductionOps pads the scratch's final
   // dimension to at least 128 elements for row reductions. Column reductions
   // lower directly to one-operand tile ops and allocate no scratch.
@@ -148,8 +154,9 @@ std::vector<size_t> AncestorsOf(const VectorGraph& graph, size_t sink,
   };
   visit(sink);
   std::vector<size_t> result;
-  for (size_t i = 0; i < needed.size(); ++i)
+  for (size_t i = 0; i < needed.size(); ++i) {
     if (needed[i]) result.push_back(i);
+  }
   return result;
 }
 
@@ -219,8 +226,9 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
   for (size_t tensor : substituted) allocate(tensor);
   for (size_t step = 0; step < ops.size(); ++step) {
     const VectorOp& op = graph.ops[ops[step]];
-    for (size_t tensor : op.inputs)
+    for (size_t tensor : op.inputs) {
       if (first[tensor] == step) allocate(tensor);
+    }
     // ConvertTensorToTileOps lowers row reductions with a scratch tile. It is
     // live together with the source and the thin result for the reduction
     // instruction, so account for its exact padded shape here rather than
@@ -241,8 +249,9 @@ int64_t PeakBytes(const VectorGraph& graph, const std::vector<size_t>& ops, int6
     }
     allocate(op.output);
     current -= implicit_scratch;
-    for (size_t tensor : op.inputs)
+    for (size_t tensor : op.inputs) {
       if (last[tensor] == step) release(tensor);
+    }
     if (last[op.output] == step) release(op.output);
   }
   return peak * std::max(1, bands);
@@ -266,8 +275,9 @@ double ComputeCycles(const VectorGraph& graph, const std::vector<size_t>& ops, i
       continue;
     }
     const VectorTensor& output = graph.tensors[op.output];
-    if (used_generic_pointwise_proxy != nullptr && op.primitive == VectorPrimitive::Generic)
+    if (used_generic_pointwise_proxy != nullptr && op.primitive == VectorPrimitive::Generic) {
       *used_generic_pointwise_proxy = true;
+    }
     if (used_cast_proxy != nullptr && op.primitive == VectorPrimitive::Cast) *used_cast_proxy = true;
     int64_t frame_rows = FrameRows(output, rows);
     int64_t frame_cols = FrameCols(output, cols);
@@ -397,17 +407,21 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
   std::iota(all_ops.begin(), all_ops.end(), 0);
 
   std::vector<int64_t> task_counts;
-  for (int64_t count = 1; count <= 2LL * hardware_.vector_cores; ++count)
-    if (hardware_.vector_cores % count == 0 || (2LL * hardware_.vector_cores) % count == 0)
+  for (int64_t count = 1; count <= 2LL * hardware_.vector_cores; ++count) {
+    if (hardware_.vector_cores % count == 0 || (2LL * hardware_.vector_cores) % count == 0) {
       task_counts.push_back(count);
+    }
+  }
 
   std::vector<std::pair<int64_t, int64_t>> grids;
   if (graph.reduced_axis == 1) {
-    for (int64_t count : task_counts)
+    for (int64_t count : task_counts) {
       if (count <= iteration_rows) grids.emplace_back(count, 1);
+    }
   } else if (graph.reduced_axis == 2) {
-    for (int64_t count : task_counts)
+    for (int64_t count : task_counts) {
       if (count <= iteration_cols) grids.emplace_back(1, count);
+    }
   } else {
     for (int64_t count : task_counts) {
       for (int64_t parts_m = 1; parts_m <= count; ++parts_m) {
@@ -748,9 +762,9 @@ VectorSchedulePlan VectorPlanner910B::Plan(const VectorGraph& graph) const {
     if (!feasible) continue;
 
     const int64_t body_tasks = candidate.work_units;
+    const int64_t body_waves = (body_tasks + hardware_.vector_cores - 1) / hardware_.vector_cores;
     latency += kPerTaskCycles * static_cast<double>(body_tasks);
-    latency += kKernelFillCycles *
-               static_cast<double>((body_tasks + hardware_.vector_cores - 1) / hardware_.vector_cores);
+    latency += kKernelFillCycles * static_cast<double>(body_waves);
     candidate.modeled_cycles = latency;
     candidate.feasible = true;
     if (!best.feasible || LexicographicallyBetter(candidate, best)) best = std::move(candidate);

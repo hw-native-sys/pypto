@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 
+#include "src/ir/transforms/auto_tile/vector_graph.h"
 #include "src/ir/transforms/auto_tile/vector_plan.h"
 
 namespace pypto {

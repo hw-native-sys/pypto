@@ -10,16 +10,18 @@
  */
 
 #include <nanobind/nanobind.h>
-#include <nanobind/stl/optional.h>
-#include <nanobind/stl/pair.h>
-#include <nanobind/stl/shared_ptr.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/tuple.h>
-#include <nanobind/stl/vector.h>
+#include <nanobind/stl/optional.h>    // NOLINT(misc-include-cleaner) -- registers optional casters
+#include <nanobind/stl/pair.h>        // NOLINT(misc-include-cleaner) -- registers pair casters
+#include <nanobind/stl/shared_ptr.h>  // NOLINT(misc-include-cleaner) -- registers shared_ptr casters
+#include <nanobind/stl/string.h>      // NOLINT(misc-include-cleaner) -- registers string casters
+#include <nanobind/stl/tuple.h>       // NOLINT(misc-include-cleaner) -- registers tuple casters
+#include <nanobind/stl/vector.h>      // NOLINT(misc-include-cleaner) -- registers vector casters
 
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -33,11 +35,14 @@
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
@@ -46,6 +51,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
@@ -1849,7 +1855,7 @@ void BindIR(nb::module_& m) {
   // Pass None to unregister. The callback receives a code string and returns formatted code.
   ir.def(
       "register_format_callback",
-      [](nb::object cb) {
+      [](const nb::object& cb) {
         if (cb.is_none()) {
           RegisterFormatCallback(nullptr);
         } else {

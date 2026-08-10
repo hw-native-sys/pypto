@@ -14,10 +14,9 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
-#include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "src/ir/transforms/auto_tile/vector_graph.h"

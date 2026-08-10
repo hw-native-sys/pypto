@@ -13,21 +13,25 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>  // NOLINT(build/c++17)
 #include <fstream>
 #include <iomanip>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
-#include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
+#include "src/ir/transforms/auto_tile/vector_plan.h"
 
 namespace pypto {
 namespace ir {
@@ -148,8 +152,9 @@ VectorScheduleReport BuildReport(const VectorGraph& graph, const VectorScheduleP
     if (plan.tail > 0 && (phase == VectorPhase::Stats || phase == VectorPhase::Apply)) {
       target.tail_frame = PhaseFrame(graph, plan, phase, plan.tail);
     }
-    if (source.generated_algorithm.has_value())
+    if (source.generated_algorithm.has_value()) {
       target.generated_algorithm = GeneratedAlgorithmName(*source.generated_algorithm);
+    }
     const bool reduction_layout = graph.reduced_axis != 0 && (phase != VectorPhase::Body ||
                                                               plan.kind == VectorScheduleKind::Materialized);
     target.inputs = BuildInputs(graph, plan, source, target.frame, reduction_layout);
@@ -237,23 +242,23 @@ std::string RenderJson(const VectorScheduleReport& report) {
   out << "  \"coordinate_transform\":" << JsonEscape(CoordinateTransformName(graph.coordinate_transform))
       << ",\n";
   out << "  \"schedule\":" << JsonEscape(ScheduleKindName(plan.kind)) << ",\n";
-  out << "  \"grid\":{\"rows\":" << plan.m_partition.parts << ",\"cols\":" << plan.n_partition.parts
+  out << R"(  "grid":{"rows":)" << plan.m_partition.parts << ",\"cols\":" << plan.n_partition.parts
       << ",\"work_units\":" << plan.work_units << "},\n";
-  out << "  \"partitions\":{\"rows\":{\"small\":" << plan.m_partition.small
+  out << R"(  "partitions":{"rows":{"small":)" << plan.m_partition.small
       << ",\"big\":" << plan.m_partition.big << ",\"num_big\":" << plan.m_partition.num_big
-      << "},\"cols\":{\"small\":" << plan.n_partition.small << ",\"big\":" << plan.n_partition.big
+      << R"(},"cols":{"small":)" << plan.n_partition.small << ",\"big\":" << plan.n_partition.big
       << ",\"num_big\":" << plan.n_partition.num_big << "}},\n";
-  out << "  \"region\":{\"logical_max\":[" << plan.tile_h << ',' << plan.tile_w << "],\"strip\":["
+  out << R"(  "region":{"logical_max":[)" << plan.tile_h << ',' << plan.tile_w << "],\"strip\":["
       << plan.strip_h << ',' << plan.strip_w << "],\"row_strips\":" << plan.row_strips
       << ",\"width_strips\":" << plan.width_strips << "},\n";
-  out << "  \"reduction\":{\"axis\":" << graph.reduced_axis << ",\"free_tile\":" << plan.free_tile
+  out << R"(  "reduction":{"axis":)" << graph.reduced_axis << ",\"free_tile\":" << plan.free_tile
       << ",\"free_tile_alloc\":" << plan.free_tile_alloc << ",\"extent\":" << plan.reduced_extent
       << ",\"chunk\":" << plan.chunk << ",\"full_chunks\":" << plan.full_chunks << ",\"tail\":" << plan.tail
       << "},\n";
-  out << "  \"memory\":{\"dma_alignment_bytes\":" << plan.dma_alignment_bytes
+  out << R"(  "memory":{"dma_alignment_bytes":)" << plan.dma_alignment_bytes
       << ",\"full_peak_ub_bytes\":" << plan.full_peak_ub_bytes
       << ",\"stream_peak_ub_bytes\":" << plan.chunk_peak_ub_bytes << "},\n";
-  out << "  \"cost\":{\"modeled_cycles\":";
+  out << R"(  "cost":{"modeled_cycles":)";
   WriteDouble(out, plan.modeled_cycles);
   out << ",\"compute_cycles\":";
   WriteDouble(out, plan.modeled_compute_cycles);

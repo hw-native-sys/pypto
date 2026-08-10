@@ -14,6 +14,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+
+#include "pypto/core/dtype.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
 
 namespace pypto {
 namespace ir {
@@ -286,8 +291,9 @@ double GeneratedSoftmaxCycles910B(bool update, int64_t free_tile, int64_t chunk_
       RowReductionCost(VectorOpKind::RowMax, dtype, free, chunk_extent, vector_register_bytes);
   const VectorReductionCost row_sum =
       RowReductionCost(VectorOpKind::RowSum, dtype, free, chunk_extent, vector_register_bytes);
-  if (used_reduction_fallback != nullptr)
+  if (used_reduction_fallback != nullptr) {
     *used_reduction_fallback |= row_max.used_fallback || row_sum.used_fallback;
+  }
 
   const PrimitiveCost add = PrimitiveGrounding(VectorPrimitive::Add);
   const PrimitiveCost exp = PrimitiveGrounding(VectorPrimitive::Exp);

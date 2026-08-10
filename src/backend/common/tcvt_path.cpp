@@ -14,11 +14,15 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <queue>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 
 namespace pypto {
 namespace backend {

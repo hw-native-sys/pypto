@@ -14,6 +14,7 @@
 
 #include <cstdint>
 
+#include "pypto/core/dtype.h"
 #include "src/ir/transforms/auto_tile/vector_graph.h"
 
 namespace pypto {

@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -22,10 +25,18 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/tcvt_path.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
@@ -48,14 +59,18 @@ struct OpAdmission {
 };
 
 OpAdmission AdmitOp(const CallPtr& call) {
-  if (IsOp(call, "tensor.row_sum"))
+  if (IsOp(call, "tensor.row_sum")) {
     return {{OpDescriptor{VectorOpKind::RowSum, VectorPrimitive::RowSum, VectorGeometry::Flat}}, {}};
-  if (IsOp(call, "tensor.row_max"))
+  }
+  if (IsOp(call, "tensor.row_max")) {
     return {{OpDescriptor{VectorOpKind::RowMax, VectorPrimitive::RowExtrema, VectorGeometry::Flat}}, {}};
-  if (IsOp(call, "tensor.col_sum"))
+  }
+  if (IsOp(call, "tensor.col_sum")) {
     return {{OpDescriptor{VectorOpKind::ColSum, VectorPrimitive::ColSum, VectorGeometry::Flat}}, {}};
-  if (IsOp(call, "tensor.col_max"))
+  }
+  if (IsOp(call, "tensor.col_max")) {
     return {{OpDescriptor{VectorOpKind::ColMax, VectorPrimitive::ColExtrema, VectorGeometry::Flat}}, {}};
+  }
 
   VectorGeometry geometry = VectorGeometry::Flat;
   if (IsOp(call, "tensor.row_expand_add") || IsOp(call, "tensor.row_expand_sub") ||
@@ -228,8 +243,9 @@ void AssignPhysicalShapeClasses(VectorGraph* graph) {
 void ValidateCastPhysicalShapeClasses(const VectorGraph& graph) {
   std::unordered_set<size_t> cast_classes;
   for (const VectorOp& op : graph.ops) {
-    if (op.primitive == VectorPrimitive::Cast)
+    if (op.primitive == VectorPrimitive::Cast) {
       cast_classes.insert(graph.tensors[op.output].physical_shape_class);
+    }
   }
 
   // Reduction emission owns a separately padded accumulator/result box. The
@@ -307,10 +323,11 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   };
 
   std::vector<StmtPtr> statements;
-  if (auto sequence = As<SeqStmts>(function->body_))
+  if (auto sequence = As<SeqStmts>(function->body_)) {
     statements = sequence->stmts_;
-  else
+  } else {
     statements.push_back(function->body_);
+  }
 
   ReturnStmtPtr return_stmt;
   for (const StmtPtr& stmt : statements) {
@@ -550,8 +567,9 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
   }
 
   std::unordered_map<size_t, size_t> use_count;
-  for (const VectorOp& op : graph.ops)
+  for (const VectorOp& op : graph.ops) {
     for (size_t input : op.inputs) ++use_count[input];
+  }
   for (size_t tensor = 0; tensor < graph.tensors.size(); ++tensor) {
     if (graph.tensors[tensor].dtype != DataType::INT8) continue;
     CHECK_SPAN(graph.tensors[tensor].required_output && use_count[tensor] == 0,

@@ -10,7 +10,9 @@
  */
 
 #include <cstdint>
+#include <exception>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -18,16 +20,20 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "src/ir/transforms/auto_tile/vector_emit.h"
+#include "src/ir/transforms/auto_tile/vector_graph.h"
 #include "src/ir/transforms/auto_tile/vector_plan.h"
 #include "src/ir/transforms/auto_tile/vector_report.h"
 
@@ -44,14 +50,16 @@ class CalledFunctionCollector : public IRVisitor {
 
  protected:
   void VisitExpr_(const CallPtr& call) override {
-    if (call != nullptr && call->op_ != nullptr && program_->GetFunction(call->op_->name_) != nullptr)
+    if (call != nullptr && call->op_ != nullptr && program_->GetFunction(call->op_->name_) != nullptr) {
       called_.insert(call->op_->name_);
+    }
     IRVisitor::VisitExpr_(call);
   }
 
   void VisitExpr_(const SubmitPtr& submit) override {
-    if (submit != nullptr && submit->op_ != nullptr && program_->GetFunction(submit->op_->name_) != nullptr)
+    if (submit != nullptr && submit->op_ != nullptr && program_->GetFunction(submit->op_->name_) != nullptr) {
       called_.insert(submit->op_->name_);
+    }
     IRVisitor::VisitExpr_(submit);
   }
 
