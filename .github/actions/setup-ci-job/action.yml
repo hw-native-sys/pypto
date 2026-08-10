@@ -20,9 +20,17 @@ description: >-
   runs). That is where the absolute paths live — not in git — so no workflow names
   one and a differently-laid-out host needs no repo change. The runner must set:
 
-    CONDA_ROOT     conda install to layer the per-job venv on (all runners)
+    CONDA_ROOT     conda install to layer the per-job venv on (toolchain: conda)
     CI_CACHE_ROOT  dir CI may keep its caches in (created if absent; all runners)
     CANN_ROOT      CANN toolkit — device runners only (needs-device)
+
+  and may set, when its layout differs from the fleet default:
+
+    TOOLCHAIN_BUNDLE_ROOT  dir to source the bundle's activate.sh from
+                           (toolchain: bundle); defaults to
+                           /opt/pypto/toolchain/current. Not named
+                           PYPTO_TOOLCHAIN_ROOT — `pypto-toolchain` reads that
+                           name itself, as its install root.
 
   Beyond those, the host is expected to provide (by name, not by path): a conda
   env `py310` under CONDA_ROOT, and task-submit / npu-smi / ccache / git / curl on
@@ -81,8 +89,8 @@ inputs:
       Where the Python and GCC come from. 'conda' is the historical path: a
       per-machine conda env under CONDA_ROOT, layered with a
       --system-site-packages venv. 'bundle' uses the pinned pypto-toolchain
-      bundle installed at /opt/pypto/toolchain/current, which is byte-identical
-      on every host and carries its own ccache and uv.
+      bundle the runner declares in TOOLCHAIN_BUNDLE_ROOT, which is
+      byte-identical on every host and carries its own ccache and uv.
 
       Default stays 'conda' so a runner that has not been provisioned yet keeps
       working: the two can coexist while the fleet is migrated one label at a
@@ -121,6 +129,17 @@ runs:
           echo "::error::install-toolchain=true requires pto-isa-commit (pass needs.toolchain.outputs.pto_isa_commit)"
           exit 1
         fi
+        # Both bootstrap steps below are gated on an exact `toolchain` match, so
+        # an unknown value silently skips both and the first symptom is an
+        # unrelated "activate.sh: No such file" ten minutes into the build.
+        # Reject it here, where the message can still name the real cause.
+        case "${TOOLCHAIN_IN:-conda}" in
+          conda|bundle) ;;
+          *)
+            echo "::error::toolchain must be 'conda' or 'bundle', got '$TOOLCHAIN_IN'"
+            exit 1
+            ;;
+        esac
         # Prerequisites CI does not create, so they must already be there. The
         # codegen job needs no Ascend env, so CANN_ROOT is device-jobs-only.
         required=""
@@ -358,7 +377,27 @@ runs:
         # pto-isa commit (issue #1139).
         pypto-toolchain verify \
           --require python=3.10 --require 'gcc>=15' --require 'ccache>=4.8'
-        source /opt/pypto/toolchain/current/activate.sh
+        # Where the bundle lives is host layout, so it comes from the runner's
+        # .env like CONDA_ROOT and CANN_ROOT — the default is only what the
+        # fleet happens to use today, not something a differently-laid-out host
+        # has to adopt.
+        #
+        # Deliberately NOT named PYPTO_TOOLCHAIN_ROOT: `pypto-toolchain` reads
+        # that one itself, as its install root — the dir holding each installed
+        # version, with `current` a symlink it manages via `use <version>`.
+        # Exporting our path under that name pointed the tool one level too
+        # deep and it reported "no bundle is installed under
+        # /opt/pypto/toolchain/current" on a host where the bundle was present.
+        # This variable names the dir to source activate.sh from; it is ours,
+        # and it must stay outside the PYPTO_TOOLCHAIN* namespace the tool owns.
+        TOOLCHAIN_BUNDLE_ROOT="${TOOLCHAIN_BUNDLE_ROOT:-/opt/pypto/toolchain/current}"
+        if [ ! -r "$TOOLCHAIN_BUNDLE_ROOT/activate.sh" ]; then
+          echo "::error::no toolchain bundle at $TOOLCHAIN_BUNDLE_ROOT"
+          echo "Install it there, or point this runner at its own location by"
+          echo "adding a bare TOOLCHAIN_BUNDLE_ROOT=... line to <runner-root>/.env."
+          exit 1
+        fi
+        source "$TOOLCHAIN_BUNDLE_ROOT/activate.sh"
 
         rm -rf venv
         # No --system-site-packages. Nothing outside the venv is depended on
@@ -392,10 +431,34 @@ runs:
           printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
         fi
 
-        # Prove the file works before ten minutes of building depend on it.
+        # Prove the file works before ten minutes of building depend on it, and
+        # re-assert the requirements against the tools it actually puts on PATH.
+        # `pypto-toolchain verify` above speaks for the bundle that command
+        # manages, which is not necessarily the one at TOOLCHAIN_BUNDLE_ROOT; only
+        # this check sees what the build will really run.
         ( source activate.sh
           command -v python3.10 g++-15 ccache uv >/dev/null
-          python3.10 -c 'import sys; assert sys.version_info[:2]==(3,10)' )
+          python3.10 -c 'import sys; assert sys.version_info[:2]==(3,10)'
+          gxx_version=$(g++-15 -dumpversion)
+          gxx_major=${gxx_version%%.*}
+          case "$gxx_major" in
+            ''|*[!0-9]*)
+              echo "::error::cannot read a g++-15 major version from '$gxx_version'"
+              exit 1 ;;
+          esac
+          if [ "$gxx_major" -lt 15 ]; then
+            echo "::error::g++-15 reports $gxx_version, need >= 15"
+            exit 1
+          fi
+          # Probe the behaviour, not the version string. `namespace` is a
+          # ccache 4.x key; 3.x drops CCACHE_NAMESPACE with no error and no
+          # warning, so the cache silently stops being scoped to the pinned
+          # pto-isa commit and #1139 comes back as a moving segfault.
+          if ! ccache -p | grep -q 'namespace'; then
+            echo "::error::this ccache ignores CCACHE_NAMESPACE (needs >= 4.8)"
+            echo "ccache: $(command -v ccache) $(ccache --version | head -1)"
+            exit 1
+          fi )
         echo "toolchain: $(source activate.sh >/dev/null 2>&1; g++-15 -dumpversion) / $(source activate.sh >/dev/null 2>&1; python3.10 -V 2>&1)"
 
     - name: Show ccache stats (before)
