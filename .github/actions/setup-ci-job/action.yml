@@ -486,10 +486,20 @@ runs:
         # only thing that was pinning torch at all. Installing it up front means
         # the dependency is already satisfied when pypto's metadata is resolved.
         #
+        # The version is pinned to what the conda fleet already carries, so this
+        # migration changes the toolchain and nothing else. Unpinned, pip took
+        # the newest (2.13.0) and tests/st/codegen/torch/
+        # test_torch_codegen_paged_attention.py started failing its golden
+        # compare at max abs diff 7.35e-02 against a 5e-2 tolerance — a pure-CPU
+        # torch-vs-torch comparison over bf16 inputs, so a torch upgrade moves it
+        # with no PyPTO change involved. Bumping this pin is a deliberate,
+        # separate decision; it must not ride along on an infrastructure change.
+        #
         # It is also a no-op on the conda path, where torch is already visible.
-        if ! pip install torch --index-url https://download.pytorch.org/whl/cpu; then
-          echo "note: download.pytorch.org unreachable — falling back to a pinned torch"
-          pip install 'torch==2.6.0'
+        TORCH_PIN='torch==2.10.0'
+        if ! pip install "$TORCH_PIN" --index-url https://download.pytorch.org/whl/cpu; then
+          echo "note: download.pytorch.org unreachable — falling back to PyPI"
+          pip install "$TORCH_PIN"
         fi
         pip install --no-build-isolation .[dev]
         # simpler (./runtime) is only needed on the codegen -> device path; the
