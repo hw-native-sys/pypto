@@ -15,7 +15,7 @@ Intermediate examples — real-kernel patterns, ordered by complexity.
   03_normalization.py   — RMSNorm, LayerNorm
   04_matmul_acc.py      — cube unit matmul with K-dimension tiling/accumulation
   05_assemble.py        — tile assembly patterns (Acc->Mat, Vec->Vec)
-  06_dyn_valid_shape.py — dynamic valid_shape via if/else and loop patterns
+  06_dyn_valid_shape.py — dynamic valid_shape via scalar, if/else and loop patterns
 """
 
 import importlib

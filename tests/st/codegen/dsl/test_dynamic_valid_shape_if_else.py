@@ -7,52 +7,50 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Lowering smoke tests for dynamic valid_shape branch selection.
+"""Lowering smoke tests for dynamic valid_shape selected by an in-DSL if/else.
 
-The pre-JIT version of this test exercised a single-call kernel that
-selected ``vlen`` via an in-DSL ``if/else`` based on an ``is_last`` flag.
-In the @pl.jit world the specializer's alpha-renamer rewrites the
-rebinding of ``vlen`` in the else-branch to a distinct alias, which then
-fails ``ConvertToSSA`` ("used outside its defining scope").  The current
-recommended workaround -- documented in
-``examples/intermediate/06_dyn_valid_shape.py`` -- is to push the
-``vlen`` selection to the caller.
+``dyn_valid_shape_if_else`` reads ``[is_last, last_valid_len, full_len]`` from
+a config tensor and picks the tile's valid length with an in-DSL ``if``/``else``.
+Because the three values are read at runtime rather than passed as scalar
+parameters, the branch is not folded at specialization time -- it lowers to an
+``scf.if`` whose result feeds the tile's ``valid_col``.
 
-These tests verify that the JIT pipeline succeeds for both branches of
-the original ``if/else``:
+One specialization covers both branches (only ``cfg`` contents differ), so
+these tests vary ``is_last`` to confirm the shared kernel lowers for either
+config:
 
-  * is_last=True  -> ``vlen = last_valid_len`` (partial)
-  * is_last=False -> ``vlen = full_len`` (full)
+  * is_last=1 -> ``vlen = last_valid_len`` (partial, ``vlen < BLOCK_COL``)
+  * is_last=0 -> ``vlen = full_len``       (full, fillpad is a no-op)
+
+The generated PTO is asserted in
+``tests/ut/codegen/test_dynamic_valid_shape_if_else.py``.
 """
 
 import pytest
 import torch
-from examples.intermediate.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
+from examples.intermediate.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape_if_else
 
 
 class TestDynValidShapeIfElse:
-    """Lowering smoke for the two branches of the (now caller-side) if/else.
-
-    The original kernel computed ``vlen`` from an ``is_last`` flag inside
-    the kernel.  Each test below picks the same ``vlen`` value the kernel
-    would have used if the corresponding branch had been taken.
-    """
+    """Lowering smoke for both branches of the in-DSL if/else."""
 
     def test_last_block(self):
-        """is_last=True path: partial valid_len (48) -- vlen < physical."""
+        """is_last=1 path: partial valid_len (48) -- vlen < physical."""
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.lower(data, 2.0, 48, out)
+        cfg = torch.tensor([1, 48, BLOCK_COL], dtype=torch.int64)
+        program = dyn_valid_shape_if_else.lower(data, cfg, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"
         )
 
     def test_full_block(self):
-        """is_last=False path: full valid_len (= BLOCK_COL) -- fillpad no-op."""
+        """is_last=0 path: full valid_len (= BLOCK_COL) -- fillpad no-op."""
         data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
         out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.lower(data, 2.0, BLOCK_COL, out)
+        cfg = torch.tensor([0, 48, BLOCK_COL], dtype=torch.int64)
+        program = dyn_valid_shape_if_else.lower(data, cfg, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"
