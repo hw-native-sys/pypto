@@ -555,7 +555,9 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
                  return_stmt->span_)
           << "AutoTile returned tensor " << i << " has no proven explicit Out destination";
       const size_t param_index = static_cast<size_t>(return_to_out[i]);
-      CHECK_SPAN(function->param_directions_[param_index] == ParamDirection::Out, return_stmt->span_)
+      CHECK_SPAN(param_index < function->param_directions_.size() &&
+                     function->param_directions_[param_index] == ParamDirection::Out,
+                 return_stmt->span_)
           << "AutoTile returned tensor " << i << " maps to a parameter that is not declared Out";
       CHECK_SPAN(mapped_out_params.insert(param_index).second, return_stmt->span_)
           << "AutoTile does not support multiple returned tensors targeting the same explicit Out parameter";

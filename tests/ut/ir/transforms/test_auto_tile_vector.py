@@ -24,7 +24,7 @@ from typing import Any, cast
 
 import pypto.language as pl
 import pytest
-from pypto import LogLevel, backend, ir, passes, set_log_level
+from pypto import LogLevel, backend, get_log_level, ir, passes, set_log_level
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
@@ -102,11 +102,12 @@ def _function(program: ir.Program, name: str) -> ir.Function:
 def _logged_plan(program: ir.Program, capfd: pytest.CaptureFixture[str]) -> tuple[ir.Program, str]:
     """Run AutoTile and return its single machine-readable selected-plan log."""
     capfd.readouterr()
+    previous_log_level = get_log_level()
     set_log_level(LogLevel.INFO)
     try:
         after = _run_auto_tile(program)
     finally:
-        set_log_level(LogLevel.INFO)
+        set_log_level(previous_log_level)
     lines = [line for line in capfd.readouterr().err.splitlines() if "AutoTile[" in line]
     assert len(lines) == 1
     return after, lines[0]
@@ -1567,16 +1568,16 @@ def test_online_softmax_recurrence_and_apply_wiring_are_exact():
     assert ("tensor.row_expand_div", ("__auto_tile_v55", "__auto_tile_valid41")) in calls.calls
 
 
-def test_terminal_fp32_to_int8_uses_dtype_exact_tiling():
-    for program in (Int8OutputProgram, ReductionInt8OutputProgram):
-        after = _run_auto_tile(program)
-        structure = _structure(after)
-        assert structure.spmd == 1
-        # Reduction schedules replay the same two-hop path in both full-chunk
-        # and tail regions, so static IR can contain more than two calls.
-        assert structure.ops["tensor.cast"] >= 2
-        assert structure.ops["tensor.cast"] % 2 == 0
-        assert structure.ops["tensor.assemble"] >= 1
+@pytest.mark.parametrize("program", [Int8OutputProgram, ReductionInt8OutputProgram])
+def test_terminal_fp32_to_int8_uses_dtype_exact_tiling(program):
+    after = _run_auto_tile(program)
+    structure = _structure(after)
+    assert structure.spmd == 1
+    # Reduction schedules replay the same two-hop path in both full-chunk
+    # and tail regions, so static IR can contain more than two calls.
+    assert structure.ops["tensor.cast"] >= 2
+    assert structure.ops["tensor.cast"] % 2 == 0
+    assert structure.ops["tensor.assemble"] >= 1
 
 
 def test_direct_reduction_result_cast_declines_until_its_physical_box_can_be_realized():
@@ -1844,7 +1845,7 @@ def test_ragged_and_half_width_pointwise_are_admitted(program, op):
 def test_bf16_arithmetic_is_rejected_during_910b_admission(program):
     with pytest.raises(
         ValueError,
-        match="Ascend910B vector arithmetic supports FP16 and FP32.*BF16 tensors are supported only",
+        match=r"Ascend910B vector arithmetic supports FP16 and FP32.*BF16 tensors are supported only",
     ):
         _run_auto_tile(program)
 

@@ -124,6 +124,10 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
         << "AutoTile cannot realize the entire marked function as one capacity-safe Ascend910B vector kernel";
     FunctionPtr emitted = auto_tile::EmitVectorSchedule(graph, plan, calls.called());
     const std::optional<std::string> report_path = auto_tile::WriteVectorScheduleReport(graph, plan);
+    const size_t body = auto_tile::PhaseIndex(auto_tile::VectorPhase::Body);
+    const size_t stats = auto_tile::PhaseIndex(auto_tile::VectorPhase::Stats);
+    const size_t apply = auto_tile::PhaseIndex(auto_tile::VectorPhase::Apply);
+    const size_t finalize = auto_tile::PhaseIndex(auto_tile::VectorPhase::Finalize);
     LOG_INFO << "AutoTile[" << function->name_
              << "]: vector schedule=" << auto_tile::ScheduleKindName(plan.kind)
              << " coordinate_transform=" << auto_tile::CoordinateTransformName(graph.coordinate_transform)
@@ -138,19 +142,20 @@ ProgramPtr TransformAutoTileVector(const ProgramPtr& program) {
              << " peak_ub=" << plan.chunk_peak_ub_bytes << " full_peak_ub=" << plan.full_peak_ub_bytes
              << " compute_cycles=" << plan.modeled_compute_cycles
              << " transfer_cycles=" << plan.modeled_transfer_cycles << " phase_compute=["
-             << plan.modeled_phase_compute_cycles[0] << "," << plan.modeled_phase_compute_cycles[1] << ","
-             << plan.modeled_phase_compute_cycles[2] << "," << plan.modeled_phase_compute_cycles[3] << "]"
-             << " phase_transfer=[" << plan.modeled_phase_transfer_cycles[0] << ","
-             << plan.modeled_phase_transfer_cycles[1] << "," << plan.modeled_phase_transfer_cycles[2] << ","
-             << plan.modeled_phase_transfer_cycles[3] << "]"
-             << " phase_input_bytes=[" << static_cast<int64_t>(plan.modeled_phase_input_bytes[0]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_input_bytes[1]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_input_bytes[2]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_input_bytes[3]) << "]"
-             << " phase_output_bytes=[" << static_cast<int64_t>(plan.modeled_phase_output_bytes[0]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_output_bytes[1]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_output_bytes[2]) << ","
-             << static_cast<int64_t>(plan.modeled_phase_output_bytes[3]) << "]"
+             << plan.modeled_phase_compute_cycles[body] << "," << plan.modeled_phase_compute_cycles[stats]
+             << "," << plan.modeled_phase_compute_cycles[apply] << ","
+             << plan.modeled_phase_compute_cycles[finalize] << "]"
+             << " phase_transfer=[" << plan.modeled_phase_transfer_cycles[body] << ","
+             << plan.modeled_phase_transfer_cycles[stats] << "," << plan.modeled_phase_transfer_cycles[apply]
+             << "," << plan.modeled_phase_transfer_cycles[finalize] << "]"
+             << " phase_input_bytes=[" << static_cast<int64_t>(plan.modeled_phase_input_bytes[body]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[stats]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[apply]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_input_bytes[finalize]) << "]"
+             << " phase_output_bytes=[" << static_cast<int64_t>(plan.modeled_phase_output_bytes[body]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[stats]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[apply]) << ","
+             << static_cast<int64_t>(plan.modeled_phase_output_bytes[finalize]) << "]"
              << " reduction_model=" << (plan.used_reduction_fallback ? "legacy_fallback" : "grounded")
              << " pointwise_model=" << auto_tile::PointwiseCostModelName(plan)
              << " modeled_cycles=" << plan.modeled_cycles

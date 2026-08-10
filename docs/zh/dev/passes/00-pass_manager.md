@@ -64,7 +64,7 @@ struct PassProperties {
 | UnrollLoops | TypeChecked | TypeChecked | — |
 | CtrlFlowTransform | TypeChecked | TypeChecked, StructuredCtrlFlow | — |
 | ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
-| FlattenCallExpr | SSAForm | SSAForm, NoNestedCalls | NormalizedStmtStructure |
+| FlattenCallExpr | SSAForm, NormalizedStmtStructure | SSAForm, NoNestedCalls, NormalizedStmtStructure | — |
 | AutoTile | SSAForm, NoNestedCalls, NormalizedStmtStructure | SSAForm, NoNestedCalls, NormalizedStmtStructure | — |
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | — |
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |

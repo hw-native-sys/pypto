@@ -35,6 +35,11 @@ AdjList BuildAdjacency(const TcvtAdjacency& table) {
   for (const auto& [from, to] : table.edges) {
     if (from != to) adjacency[from.Code()].push_back(to);
   }
+  for (auto& [_, neighbors] : adjacency) {
+    std::sort(neighbors.begin(), neighbors.end(),
+              [](DataType lhs, DataType rhs) { return lhs.Code() < rhs.Code(); });
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+  }
   return adjacency;
 }
 

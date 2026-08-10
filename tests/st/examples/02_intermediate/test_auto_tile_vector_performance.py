@@ -51,7 +51,6 @@ from pypto.runtime import BenchmarkStats, RunConfig, benchmark
 
 _WARMUP = 5
 _ROUNDS = 15
-_REPETITIONS = 2
 
 
 @dataclass(frozen=True)
@@ -359,7 +358,7 @@ def _compare(
             / statistics.median(_effective_samples([auto_run])),
         )
     print(
-        f"AUTOTILE_PERF pair={name} repetitions={_REPETITIONS} "
+        f"AUTOTILE_PERF pair={name} repetitions={len(reference_runs)} "
         f"rounds={_ROUNDS} warmup={_WARMUP} "
         f"manual_device_wall_us={reference_device:.3f} "
         f"auto_tile_device_wall_us={auto_device:.3f} "

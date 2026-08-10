@@ -20,3 +20,17 @@ add_test(
     NAME pypto_dsa_reuse_penalty_solver_test
     COMMAND pypto_dsa_reuse_penalty_solver_test
 )
+
+add_executable(pypto_tcvt_path_test
+    tcvt_path_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/backend/common/tcvt_path.cpp
+)
+
+target_include_directories(pypto_tcvt_path_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+add_test(
+    NAME pypto_tcvt_path_test
+    COMMAND pypto_tcvt_path_test
+)

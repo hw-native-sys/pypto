@@ -1729,7 +1729,7 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  * on real kernels (groups few, depth 2–4) — so this stays the same O(M^2) class as
  * the prior greedy in practice; the FFD base was already O(M^2) pre-#1475.
  */
-// Cross-group shed objective (see docs/en/dev/passes/29-memory_reuse.md, pipeline-stage guard): when a
+// Cross-group shed objective (see docs/en/dev/passes/33-memory_reuse.md, pipeline-stage guard): when a
 // space overflows at every group's max-affordable depth,
 // the packer lowers one pipeline group's double-buffering depth by a residue. The MaxRelief heuristic
 // selects **which** group loses a level — lower score sheds first; ties always break by lowest group id

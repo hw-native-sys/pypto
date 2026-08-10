@@ -264,9 +264,10 @@ double GeneratedReductionMergeCycles910B(int reduced_axis, int64_t free_tile, in
                                          int64_t vector_register_bytes) {
   if (iterations <= 0) return 0.0;
   const int64_t epr = std::max<int64_t>(1, vector_register_bytes / DTypeBytes(dtype));
-  const int64_t repeats = (std::max<int64_t>(1, free_tile) + epr - 1) / epr;
+  const int64_t free = std::max<int64_t>(1, free_tile);
+  const int64_t repeats = (free + epr - 1) / epr;
   const PrimitiveCost add = PrimitiveGrounding(VectorPrimitive::Add);
-  const bool count_mode = reduced_axis == 1 || free_tile % epr != 0;
+  const bool count_mode = reduced_axis == 1 || free % epr != 0;
   const double per_task =
       add.slope * static_cast<double>(repeats) + add.fixed + (count_mode ? kCountModeFloorCycles : 0.0);
   return per_task * static_cast<double>(iterations) * static_cast<double>(std::max<int64_t>(1, work_units));
