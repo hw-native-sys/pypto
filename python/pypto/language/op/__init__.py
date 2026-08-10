@@ -245,7 +245,6 @@ __all__ = [
     "col_expand_max",
     "col_expand_min",
     "col_expand_expdif",
-    "expand_clone",
     "expands",
     "neg",
     "read",

@@ -1101,6 +1101,19 @@ class TestPromotedOps:
             f"names bound to different objects in pypto.language vs pypto.language.op: {divergent}"
         )
 
+    @pytest.mark.parametrize("module", [pl, language_op], ids=["pl", "pl.op"])
+    def test_all_lists_each_name_once(self, module):
+        """``__all__`` must not repeat a name.
+
+        ``pypto.language.op.__all__`` groups names by dispatch category
+        (unified / tile-only / tensor-only). A name listed under two groups is
+        invisible at runtime — ``from ... import *`` de-duplicates — but it
+        makes the groups drift, and lets a later edit delete one entry while
+        the name still looks unexported.
+        """
+        duplicates = sorted({name for name in module.__all__ if module.__all__.count(name) > 1})
+        assert not duplicates, f"{module.__name__}.__all__ lists these names more than once: {duplicates}"
+
     def test_create_tile_single_binding(self):
         """``create_tile`` is the ``tile_ops.create`` alias in both namespaces."""
         assert pl.create_tile is language_op.create_tile is tile_ops.create
@@ -1167,7 +1180,7 @@ class TestPromotedOps:
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.create([64], dtype=pl.FP32)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -1180,7 +1193,7 @@ class TestPromotedOps:
 
         @pl.function
         def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Scalar[pl.INT64]:
-            d: pl.Scalar[pl.INT64] = pl.dim(a, 0)
+            d: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)
             return d
 
         ir.assert_structural_equal(unified, explicit)
