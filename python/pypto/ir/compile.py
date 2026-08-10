@@ -196,6 +196,7 @@ def compile(  # noqa: PLR0913
     platform: str | None = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
+    emit_source_loc: bool | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -220,6 +221,11 @@ def compile(  # noqa: PLR0913
         backend_type: Backend type for passes and codegen (default: Ascend910B)
         skip_ptoas: Skip the ptoas compilation step and emit raw MLIR (.pto) files
             instead of compiled C++ kernel wrappers.
+        emit_source_loc: When True, each generated ``.pto`` operation carries an
+            MLIR ``loc("file":line:col)`` derived from the IR ``Span``, so a ptoas
+            diagnostic names the user's source line rather than a line in the
+            generated artifact. ``None`` (default) reads the
+            ``PYPTO_EMIT_PTO_LOC`` environment variable, which defaults to on.
         verification_level: Override verification level for this compilation via
             PassContext. None uses the default (Basic, or PYPTO_VERIFY_LEVEL env var).
         diagnostic_phase: Override the diagnostic phase gate for this compilation
@@ -343,6 +349,7 @@ def compile(  # noqa: PLR0913
                     output_dir,
                     skip_ptoas=skip_ptoas,
                     memory_planner=mplan,
+                    emit_source_loc=emit_source_loc,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

@@ -43,6 +43,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -77,6 +78,58 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Escape a source path for an MLIR `"..."` string literal. A path is an
+// arbitrary OS byte string — on POSIX every byte except `/` and NUL is legal, so
+// a quote, a backslash, or a raw control character in one must not be able to
+// break the module. MLIR's lexer accepts `\\`, `\"`, `\n`, `\t` and `\xx` hex
+// escapes, and rejects an unescaped control character inside a literal, so
+// anything outside printable ASCII is emitted as a hex escape.
+std::string EscapeMlirString(const std::string& str) {
+  static constexpr char kHexDigits[] = "0123456789ABCDEF";
+  std::string escaped;
+  escaped.reserve(str.size());
+  for (char c : str) {
+    const auto byte = static_cast<unsigned char>(c);
+    if (c == '\\' || c == '"') {
+      escaped.push_back('\\');
+      escaped.push_back(c);
+    } else if (c == '\n') {
+      escaped += "\\n";
+    } else if (c == '\t') {
+      escaped += "\\t";
+    } else if (byte < 0x20 || byte == 0x7F) {
+      escaped += "\\";
+      escaped.push_back(kHexDigits[byte >> 4]);
+      escaped.push_back(kHexDigits[byte & 0x0F]);
+    } else {
+      escaped.push_back(c);
+    }
+  }
+  return escaped;
+}
+
+// True when `inner` is a source range nested inside `outer` — the invariant a
+// sub-expression's span satisfies with respect to its enclosing statement's span.
+//
+// This is what rejects a Call span that a pass overwrote with a coarser one.
+// ConvertTensorToTileOps rebuilds every tile op it synthesizes with the enclosing
+// *function*'s span (convert_tensor_to_tile_ops_pass.cpp), which begins before the
+// statement and therefore fails containment — so the statement's own span, which
+// that rewrite preserved, is kept instead.
+bool SpanContains(const ir::Span* outer, const ir::Span& inner) {
+  if (!inner.is_valid() || inner.filename_.empty()) return false;
+  // No usable enclosing span means nothing contradicts the inner one.
+  if (outer == nullptr || !outer->is_valid() || outer->filename_.empty()) return true;
+  if (outer->filename_ != inner.filename_) return false;
+  // An unknown end line (-1) degenerates to a single-line range at the start.
+  const int outer_end = outer->end_line_ > 0 ? outer->end_line_ : outer->begin_line_;
+  const int inner_end = inner.end_line_ > 0 ? inner.end_line_ : inner.begin_line_;
+  // Both ends must sit inside the statement. Checking only the start would accept
+  // a rebuilt span that begins within the statement but runs past its last line,
+  // which is exactly the untrustworthy case this predicate exists to reject.
+  return inner.begin_line_ >= outer->begin_line_ && inner_end <= outer_end;
+}
 
 // Full-MemRef-identity key used by PTOAS memory-planner codegen to decide when
 // two tile variables denote the *same* buffer (and must share one tile_buf
@@ -541,8 +594,10 @@ const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return ba
 // Generate entry and GenerateFunction
 // ========================================================================
 
-std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr) {
+std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   emit_tile_addr_ = emit_tile_addr;
+  emit_source_loc_ = emit_source_loc;
+  current_span_ = nullptr;
   stream_.str("");
   stream_.clear();
   fs_.constants_section.str("");
@@ -1082,6 +1137,9 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
     if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a memref
 
+    // ptoas rejects a malformed view (bad strides / layout) on this line, so
+    // attribute it to the parameter that declared the tensor.
+    SpanScope param_loc(this, &param->span_);
     std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
 
@@ -1136,8 +1194,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // ``tensor_view_->stride`` is empty.
     auto emit_stride_mul = [&](const std::string& lhs, size_t dim_idx, size_t stride_slot) -> std::string {
       std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride_slot));
-      stream_ << GetIndent() << mul_name << " = arith.muli " << lhs << ", " << shape_dim_names[dim_idx]
-              << " : index\n";
+      Emit(mul_name + " = arith.muli " + lhs + ", " + shape_dim_names[dim_idx] + " : index");
       return mul_name;
     };
 
@@ -1204,24 +1261,27 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
     }
 
-    stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
-    stream_ << GetVarName(param);
+    // Buffer the statement so Emit() writes it as one line and can suffix the
+    // parameter's source location.
+    std::ostringstream view_line;
+    view_line << tensor_view << " = pto.make_tensor_view ";
+    view_line << GetVarName(param);
 
     // Emit shape (verbatim from IR — canonical).
-    stream_ << ", shape = [";
+    view_line << ", shape = [";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << ", ";
-      stream_ << shape_dim_names[j];
+      if (j > 0) view_line << ", ";
+      view_line << shape_dim_names[j];
     }
-    stream_ << "],";
+    view_line << "],";
 
     // Emit strides.
-    stream_ << " strides = [";
+    view_line << " strides = [";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << ", ";
-      stream_ << stride_names[j];
+      if (j > 0) view_line << ", ";
+      view_line << stride_names[j];
     }
-    stream_ << "]";
+    view_line << "]";
 
     std::string layout_str = "nd";
     switch (layout) {
@@ -1240,14 +1300,15 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       case ir::TensorLayout::ND:
         break;
     }
-    stream_ << " {layout = #pto.layout<" << layout_str << ">} : ";
+    view_line << " {layout = #pto.layout<" << layout_str << ">} : ";
 
-    stream_ << "!pto.tensor_view<";
+    view_line << "!pto.tensor_view<";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << "x";
-      stream_ << "?";
+      if (j > 0) view_line << "x";
+      view_line << "?";
     }
-    stream_ << "x" << GetTypeString(tensor_type->dtype_) << ">\n";
+    view_line << "x" << GetTypeString(tensor_type->dtype_) << ">";
+    Emit(view_line.str());
   }
 }
 
@@ -1538,9 +1599,11 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
     // point of describing the slots to it. Under the PyPTO planner no region is
     // planned at all (see PlanMultiBufferRegions). Both extents are always present —
     // planning rejects an allocation whose valid shape it cannot state statically.
-    stream_ << GetIndent() << region.region_ssa << " = pto.alloc_multi_tile"
-            << " valid_row = " << region.valid_row_ssa << " valid_col = " << region.valid_col_ssa << " : "
-            << region.mtb_type_str << "\n";
+    // Region declarations are synthesized from the whole allocation rather than
+    // one statement, so the base variable's span is the closest true source.
+    SpanScope base_loc(this, &base->span_);
+    Emit(region.region_ssa + " = pto.alloc_multi_tile valid_row = " + region.valid_row_ssa +
+         " valid_col = " + region.valid_col_ssa + " : " + region.mtb_type_str);
   }
 }
 
@@ -1811,18 +1874,23 @@ void PTOCodegen::EmitExtraAllocTiles() {
   // Regions first: every `pto.multi_tile_get` in the body reads one, so the
   // declaration has to dominate them all.
   EmitMultiBufferRegionAllocs();
+  // These allocations are hoisted out of the body (e.g. reshape outputs), so no
+  // single statement owns them; the function is the closest true source.
+  SpanScope func_loc(this, fs_.current_function ? &fs_.current_function->span_ : nullptr);
   for (const auto& alloc : fs_.extra_alloc_tiles) {
-    stream_ << GetIndent() << alloc.name << " = pto.alloc_tile";
+    std::ostringstream line;
+    line << alloc.name << " = pto.alloc_tile";
     if (emit_tile_addr_ && !alloc.addr_ssa.empty()) {
-      stream_ << " addr = " << alloc.addr_ssa;
+      line << " addr = " << alloc.addr_ssa;
     }
     if (!alloc.valid_row_ssa.empty()) {
-      stream_ << " valid_row = " << alloc.valid_row_ssa;
+      line << " valid_row = " << alloc.valid_row_ssa;
     }
     if (!alloc.valid_col_ssa.empty()) {
-      stream_ << " valid_col = " << alloc.valid_col_ssa;
+      line << " valid_col = " << alloc.valid_col_ssa;
     }
-    stream_ << " : " << alloc.type_string << "\n";
+    line << " : " << alloc.type_string;
+    Emit(line.str());
   }
 }
 
@@ -1838,6 +1906,11 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   INTERNAL_CHECK_SPAN(!ir::As<ir::SplitAivScopeStmt>(stmt), stmt->span_)
       << "Internal error: SplitAivScopeStmt reached PTO codegen; it must be lowered and erased by "
          "LowerAutoVectorSplit (pass 20).";
+  // Primary location source: every op lowered under this statement is attributed
+  // to the statement's source line unless a nested Call refines it (see
+  // VisitExpr_(CallPtr)). The statement span is what passes reliably preserve —
+  // they frequently rebuild the Call underneath it with a coarser span.
+  SpanScope stmt_loc(this, &stmt->span_);
   ir::IRVisitor::VisitStmt(stmt);
 }
 
@@ -2016,6 +2089,10 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
   if (op_info == nullptr) {
     ThrowNoCodegenForCall(op_name);
   }
+  // Refine to the Call's own (column-accurate) span when it is genuinely nested
+  // in the enclosing statement; otherwise keep the statement span, which is the
+  // trustworthy one for any Call a pass rebuilt.
+  SpanScope call_loc(this, SpanContains(current_span_, op->span_) ? &op->span_ : nullptr);
   std::string mlir_line = op_info->codegen_func(op, *this);
   if (!mlir_line.empty()) {
     Emit(mlir_line);
@@ -2040,7 +2117,23 @@ std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr&
   return collector.elements();
 }
 
-void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << "\n"; }
+void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << LocSuffix() << "\n"; }
+
+void PTOCodegen::EmitStructural(const std::string& line) { stream_ << GetIndent() << line << "\n"; }
+
+std::string PTOCodegen::LocSuffix() const {
+  if (!emit_source_loc_ || current_span_ == nullptr) return "";
+  const ir::Span& span = *current_span_;
+  // Without a filename there is nothing to attribute, and MLIR's FileLineColLoc
+  // needs non-negative coordinates. Emitting nothing leaves the op exactly as it
+  // was before locations existed (ptoas then reports the .pto line) — strictly
+  // better than a misleading `loc("":0:0)`.
+  if (span.filename_.empty() || !span.is_valid()) return "";
+  // is_valid() admits an unknown column (-1); MLIR does not.
+  const int column = span.begin_column_ > 0 ? span.begin_column_ : 1;
+  return " loc(\"" + EscapeMlirString(span.filename_) + "\":" + std::to_string(span.begin_line_) + ":" +
+         std::to_string(column) + ")";
+}
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   if (auto var = As<ir::Var>(expr)) {

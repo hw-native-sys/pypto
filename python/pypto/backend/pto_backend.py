@@ -51,6 +51,27 @@ logger = logging.getLogger(__name__)
 
 _PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
 
+_EMIT_SOURCE_LOC_ENV = "PYPTO_EMIT_PTO_LOC"
+_FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def emit_source_loc_default() -> bool:
+    """Whether generated ``.pto`` operations carry a trailing MLIR ``loc(...)``.
+
+    ptoas propagates ``loc()`` verbatim into its diagnostics, so emitting spans
+    makes every ptoas rejection name the user's ``.py`` line instead of a line in
+    the generated artifact. On by default; ``PYPTO_EMIT_PTO_LOC=0`` turns it off.
+
+    The env var exists because ptoas ships independently of PyPTO: if a ptoas
+    build ever rejects a trailing location, users need a switch that does not
+    require rebuilding PyPTO. Read per call so tests can monkeypatch the
+    environment.
+
+    Returns:
+        True unless the environment disables source locations.
+    """
+    return os.environ.get(_EMIT_SOURCE_LOC_ENV, "1").strip().lower() not in _FALSY_ENV_VALUES
+
 
 class PartialCodegenError(RuntimeError):
     """Codegen failed after producing some output files."""
@@ -1242,6 +1263,7 @@ def generate(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner | None = None,
+    emit_source_loc: bool | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -1259,12 +1281,19 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
+        memory_planner: Who plans on-chip buffer memory. None uses ``MemoryPlanner.PYPTO``.
+        emit_source_loc: When True, suffix each emitted ``.pto`` operation with an
+            MLIR ``loc("file":line:col)`` from the IR Span so ptoas diagnostics
+            name the user's source. None reads the ``PYPTO_EMIT_PTO_LOC``
+            environment default (on).
 
     Returns:
         Dict mapping relative file paths to their content.
     """
     if memory_planner is None:
         memory_planner = _passes.MemoryPlanner.PYPTO
+    if emit_source_loc is None:
+        emit_source_loc = emit_source_loc_default()
 
     # Check for distributed functions (level >= HOST = Linqu level 3)
     has_distributed = any(
@@ -1274,7 +1303,11 @@ def generate(
 
     if has_distributed:
         return _generate_with_distributed(
-            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
+            transformed_program,
+            output_dir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            emit_source_loc=emit_source_loc,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -1288,10 +1321,20 @@ def generate(
     )
     if orch_count > 1:
         return _generate_multi_chip(
-            transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner
+            transformed_program,
+            output_dir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            emit_source_loc=emit_source_loc,
         )
 
-    return _generate_single_chip(transformed_program, output_dir, skip_ptoas, memory_planner=memory_planner)
+    return _generate_single_chip(
+        transformed_program,
+        output_dir,
+        skip_ptoas,
+        memory_planner=memory_planner,
+        emit_source_loc=emit_source_loc,
+    )
 
 
 def _generate_with_distributed(
@@ -1300,6 +1343,7 @@ def _generate_with_distributed(
     skip_ptoas: bool,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    emit_source_loc: bool = True,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -1327,7 +1371,11 @@ def _generate_with_distributed(
             chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
             chip_subdir = os.path.join(output_dir, "next_levels", func.name)
             chip_files = _generate_single_chip(
-                chip_program, chip_subdir, skip_ptoas, memory_planner=memory_planner
+                chip_program,
+                chip_subdir,
+                skip_ptoas,
+                memory_planner=memory_planner,
+                emit_source_loc=emit_source_loc,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1519,6 +1567,7 @@ def _generate_multi_chip(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    emit_source_loc: bool = True,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -1537,7 +1586,11 @@ def _generate_multi_chip(
         chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
         chip_subdir = os.path.join(output_dir, "next_levels", func.name)
         chip_files = _generate_single_chip(
-            chip_program, chip_subdir, skip_ptoas, memory_planner=memory_planner
+            chip_program,
+            chip_subdir,
+            skip_ptoas,
+            memory_planner=memory_planner,
+            emit_source_loc=emit_source_loc,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -1550,6 +1603,7 @@ def _generate_single_chip(
     skip_ptoas: bool = False,
     *,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    emit_source_loc: bool = True,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -1598,6 +1652,8 @@ def _generate_single_chip(
     # When ptoas owns memory planning, omit the physical `pto.alloc_tile addr`
     # so ptoas runs at --pto-level=level2 (which rejects any addr operand).
     emit_tile_addr = memory_planner != _passes.MemoryPlanner.PTOAS
+    # Source locations let ptoas name the user's .py line instead of a line in
+    # the generated artifact (which, under @pl.jit, the user never sees).
     units: list[_CodegenUnit] = []
 
     # Grouped functions: one MLIR module per group
@@ -1619,7 +1675,9 @@ def _generate_single_chip(
             grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(grouped_program, emit_tile_addr=emit_tile_addr)
+            pto_code = _codegen_core.PTOCodegen().generate(
+                grouped_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+            )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
             units.append(_CodegenUnit(group_name, pto_code, members, is_group=True, stage_record=stage))
@@ -1643,7 +1701,9 @@ def _generate_single_chip(
             single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
-            pto_code = _codegen_core.PTOCodegen().generate(single_program, emit_tile_addr=emit_tile_addr)
+            pto_code = _codegen_core.PTOCodegen().generate(
+                single_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+            )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
             units.append(_CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage))

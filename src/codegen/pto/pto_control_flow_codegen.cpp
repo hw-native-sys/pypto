@@ -222,19 +222,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 
   if (op->return_vars_.empty()) {
     // Simple scf.if (no return values)
-    Emit("scf.if " + condition + " {");
+    EmitStructural("scf.if " + condition + " {");
     indent_level_++;
     VisitStmt(op->then_body_);
     indent_level_--;
 
     const auto& else_body = op->else_body_;
     if (else_body) {
-      Emit("} else {");
+      EmitStructural("} else {");
       indent_level_++;
       VisitStmt(*else_body);
       indent_level_--;
     }
-    Emit("}");
+    EmitStructural("}");
   } else {
     // Like loops, keep tile return values out of scf.if results. Pre-declare
     // tile buffers for return_vars using the canonical MemRef address (assigned
@@ -328,10 +328,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
 
     if (!scf_return_names.empty()) {
-      Emit(JoinCommaSep(scf_return_names) + " = scf.if " + condition + " -> (" +
-           JoinCommaSep(scf_return_types) + ") {");
+      EmitStructural(JoinCommaSep(scf_return_names) + " = scf.if " + condition + " -> (" +
+                     JoinCommaSep(scf_return_types) + ") {");
     } else {
-      Emit("scf.if " + condition + " {");
+      EmitStructural("scf.if " + condition + " {");
     }
     indent_level_++;
 
@@ -472,14 +472,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     emit_branch(op->then_body_, "then");
     indent_level_--;
 
-    Emit("} else {");
+    EmitStructural("} else {");
     indent_level_++;
     const auto& else_body = op->else_body_;
     INTERNAL_CHECK_SPAN(else_body.has_value(), op->span_)
         << "Internal error: IfStmt with return_vars has no else_body";
     emit_branch(*else_body, "else");
     indent_level_--;
-    Emit("}");
+    EmitStructural("}");
 
     // Bind in-place return vars (array / tensor) to the shared backing SSA both
     // branches mutated in place. Reads after the IfStmt then resolve to that
@@ -612,7 +612,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
   if (!has_scalar_iter_args) {
     // Simple scf.for (no iter_args, or all iter_args are non-scalar)
-    Emit("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
+    EmitStructural("scf.for " + loop_var_name + " = " + start + " to " + stop + " step " + step + " {");
     indent_level_++;
 
     fs_.yield_buffer.clear();
@@ -620,7 +620,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     fs_.yield_buffer.clear();
 
     indent_level_--;
-    Emit("}");
+    EmitStructural("}");
   } else {
     // scf.for with scalar iter_args only
     std::vector<std::string> init_values;
@@ -654,9 +654,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     // Emit: %ret0 = scf.for %i = %start to %stop step %step
     //           iter_args(%acc = %init) -> (type) {
-    Emit(JoinCommaSep(return_var_names) + " = scf.for " + loop_var_name + " = " + start + " to " + stop +
-         " step " + step + " iter_args(" + JoinPairs(iter_arg_names, " = ", init_values) + ") -> (" +
-         JoinCommaSep(iter_arg_types) + ") {");
+    EmitStructural(JoinCommaSep(return_var_names) + " = scf.for " + loop_var_name + " = " + start + " to " +
+                   stop + " step " + step + " iter_args(" + JoinPairs(iter_arg_names, " = ", init_values) +
+                   ") -> (" + JoinCommaSep(iter_arg_types) + ") {");
     indent_level_++;
 
     fs_.yield_buffer.clear();
@@ -691,7 +691,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     fs_.yield_buffer.clear();
 
     indent_level_--;
-    Emit("}");
+    EmitStructural("}");
   }
 }
 
@@ -762,7 +762,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
 
   if (!has_scalar_iter_args) {
     // Simple scf.while (no iter_args, or all iter_args are non-scalar)
-    Emit("scf.while : () -> () {");
+    EmitStructural("scf.while : () -> () {");
     indent_level_++;
 
     VisitExpr(op->condition_);
@@ -771,7 +771,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     Emit("scf.condition(" + cond + ")");
 
     indent_level_--;
-    Emit("} do {");
+    EmitStructural("} do {");
     indent_level_++;
 
     fs_.yield_buffer.clear();
@@ -781,7 +781,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     fs_.yield_buffer.clear();
 
     indent_level_--;
-    Emit("}");
+    EmitStructural("}");
   } else {
     // scf.while with scalar iter_args only
     std::vector<std::string> init_values;
@@ -827,8 +827,9 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     std::string types_str = "(" + JoinCommaSep(iter_arg_types) + ")";
 
     // Emit: %ret0, %ret1 = scf.while (%before0 = %init0, ...) : (types) -> (types) {
-    Emit(JoinCommaSep(return_var_names) + " = scf.while (" + JoinPairs(before_arg_names, " = ", init_values) +
-         ") : " + types_str + " -> " + types_str + " {");
+    EmitStructural(JoinCommaSep(return_var_names) + " = scf.while (" +
+                   JoinPairs(before_arg_names, " = ", init_values) + ") : " + types_str + " -> " + types_str +
+                   " {");
     indent_level_++;
 
     // Before region: register before-region args, evaluate condition
@@ -843,10 +844,10 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
          JoinCommaSep(iter_arg_types));
 
     indent_level_--;
-    Emit("} do {");
+    EmitStructural("} do {");
 
     // After region: emit ^bb0 block header with typed arguments
-    Emit("^bb0(" + JoinPairs(after_arg_names, " : ", iter_arg_types) + "):");
+    EmitStructural("^bb0(" + JoinPairs(after_arg_names, " : ", iter_arg_types) + "):");
     indent_level_++;
 
     // Re-register iter_args with after-region SSA names
@@ -874,7 +875,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     fs_.yield_buffer.clear();
 
     indent_level_--;
-    Emit("}");
+    EmitStructural("}");
   }
 }
 

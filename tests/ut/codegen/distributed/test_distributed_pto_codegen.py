@@ -43,6 +43,7 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
@@ -926,7 +927,7 @@ def test_wait_casts_loop_induction_expected_to_i32():
 
     mlir = _generate_mlir(P)
     twait_line = next(line for line in mlir.splitlines() if "pto.comm.twait(" in line)
-    assert twait_line.rstrip().endswith("i32) {cmp = #pto<wait_cmp ge>}"), twait_line
+    assert strip_loc(twait_line).endswith("i32) {cmp = #pto<wait_cmp ge>}"), twait_line
     body = mlir.split("func.func @kernel", 1)[1]
     assert "arith.index_cast" in body and "to i32" in body, body
 
@@ -951,7 +952,7 @@ def test_notify_casts_loop_induction_value_to_i32():
 
     mlir = _generate_mlir(P)
     tnotify_line = next(line for line in mlir.splitlines() if "pto.comm.tnotify(" in line)
-    assert tnotify_line.rstrip().endswith("i32) {notifyOp = #pto<notify_op set>}"), tnotify_line
+    assert strip_loc(tnotify_line).endswith("i32) {notifyOp = #pto<notify_op set>}"), tnotify_line
     body = mlir.split("func.func @kernel", 1)[1]
     assert "arith.index_cast" in body and "to i32" in body, body
 

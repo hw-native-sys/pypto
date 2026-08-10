@@ -20,6 +20,7 @@ import warnings
 
 import pypto.language as pl
 import pytest
+from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -682,7 +683,7 @@ class TestB01PrecisionAndRowExpandAddCodegen:
         default_line = self._op_line(self._generate_mlir(DefaultProg), "pto.tdiv")
         high_precision_line = self._op_line(self._generate_mlir(HighPrecisionProg), "pto.tdiv")
         assert "precisionType" not in default_line
-        assert high_precision_line.endswith("{precisionType = #pto<div_precision high_precision>}")
+        assert strip_loc(high_precision_line).endswith("{precisionType = #pto<div_precision high_precision>}")
         assert ") outs(" in high_precision_line
         assert high_precision_line.index("outs(") < high_precision_line.index("precisionType")
 
@@ -699,7 +700,7 @@ class TestB01PrecisionAndRowExpandAddCodegen:
                 return result
 
         log_line = self._op_line(self._generate_mlir(LogProg), "pto.tlog")
-        assert log_line.endswith("{precisionType = #pto<log_precision high_precision>}")
+        assert strip_loc(log_line).endswith("{precisionType = #pto<log_precision high_precision>}")
 
     def test_trowexpandadd_emits_two_and_three_operand_forms(self):
         @pl.program
@@ -2456,7 +2457,9 @@ class TestSetValidShapeCodegen:
                 return pl.store(narrowed, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        set_validshape_line = next(line.strip() for line in mlir.splitlines() if "pto.set_validshape" in line)
+        set_validshape_line = next(
+            strip_loc(line) for line in mlir.splitlines() if "pto.set_validshape" in line
+        )
         narrowed_alloc_lines = [
             line.strip() for line in mlir.splitlines() if "%narrowed" in line and "pto.alloc_tile" in line
         ]
@@ -3745,7 +3748,7 @@ class TestB03TriAndGatherCodegen:
     def _alloc_tile_type(cls, mlir: str, ssa: str) -> str:
         actual_ssa = cls._resolve_ssa(mlir, ssa)
         line = next(
-            line.strip()
+            strip_loc(line)
             for line in mlir.splitlines()
             if line.strip().startswith(f"{actual_ssa} = pto.alloc_tile")
         )
@@ -3768,7 +3771,7 @@ class TestB03TriAndGatherCodegen:
             if line.strip().startswith(f"{actual_result} = pto.partition_view")
         )
         assert line.startswith(f"{actual_result} = pto.partition_view {actual_source}, offsets = [")
-        assert line.endswith(f" -> {result_type}")
+        assert strip_loc(line).endswith(f" -> {result_type}")
 
     @classmethod
     def _assert_mgather(
@@ -3781,7 +3784,7 @@ class TestB03TriAndGatherCodegen:
         result_type: str,
         attributes: str,
     ) -> None:
-        line = next(line.strip() for line in mlir.splitlines() if "pto.mgather" in line)
+        line = next(strip_loc(line) for line in mlir.splitlines() if "pto.mgather" in line)
         actual_operands = [cls._resolve_ssa(mlir, operand) for operand in operands]
         actual_result = cls._resolve_ssa(mlir, result)
         expected = (
@@ -3806,7 +3809,7 @@ class TestB03TriAndGatherCodegen:
         mlir = self._generate_mlir(Prog)
         mask_ssa = self._resolve_ssa(mlir, "%mask")
         mask_type = self._alloc_tile_type(mlir, "%mask")
-        line = next(line.strip() for line in mlir.splitlines() if '"pto.ttri"' in line)
+        line = next(strip_loc(line) for line in mlir.splitlines() if '"pto.ttri"' in line)
         assert "%c1_i32 = arith.constant 1 : i32" in mlir
         assert line == (
             f'"pto.ttri"(%c1_i32, {mask_ssa}) {{upperOrLower = 1 : i32}} : (i32, {mask_type}) -> ()'
@@ -3863,7 +3866,7 @@ class TestB03TriAndGatherCodegen:
         src_ssa = self._resolve_ssa(mlir, "%src_tile")
         offset_ssa = self._resolve_ssa(mlir, "%offset_tile")
         gathered_ssa = self._resolve_ssa(mlir, "%gathered")
-        line = next(line.strip() for line in mlir.splitlines() if "pto.tgatherb" in line)
+        line = next(strip_loc(line) for line in mlir.splitlines() if "pto.tgatherb" in line)
         assert line == (
             f"pto.tgatherb ins({src_ssa}, {offset_ssa} : {src_type}, {offset_type}) "
             f"outs({gathered_ssa} : {gathered_type})"

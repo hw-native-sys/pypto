@@ -24,6 +24,7 @@ import re
 
 import pypto.language as pl
 import pytest
+from _pto_loc_common import strip_loc
 from pypto import ir as _ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -59,9 +60,14 @@ def _emit_incore_pto(program, planner: passes.MemoryPlanner) -> str:
 
 
 def _sole_line(mlir: str, needle: str) -> str:
+    """The unique line containing `needle`, without its trailing MLIR location.
+
+    `_result_type` / `_operand_type` slice from the end of the line, so the
+    `loc("file":line:col)` suffix codegen appends must come off here.
+    """
     lines = [ln for ln in mlir.splitlines() if needle in ln]
     assert len(lines) == 1, f"expected exactly one {needle!r} line, got {lines}:\n{mlir}"
-    return lines[0]
+    return strip_loc(lines[0])
 
 
 # ── reserve_buffer: base resolution deferred to ptoas ────────────────────────
