@@ -383,21 +383,6 @@ runs:
         fi
         cat >> activate.sh <<'EOF'
         source "$_PYPTO_TOOLCHAIN/activate.sh"
-        # TEMPORARY, for bundles up to 2026.08.4: drop lib/bundled from the
-        # search path entirely. LD_LIBRARY_PATH is consulted before the ldconfig
-        # cache at ANY position, so merely moving it last still displaced
-        # /usr/lib64 -- HCE2's /usr/bin/ssh, which simpler's build invokes, kept
-        # loading AlmaLinux's libcrypto.so.1.1 and dying on a missing
-        # EVP_sm4_ctr. Only removing it lets a host use its own libraries.
-        #
-        # Nothing in the bundle loses its libraries: Python carries an RPATH
-        # over lib/bundled from link time, which is what these copies are for.
-        # gcc/lib64 stays, since ptoas needs a libstdc++ the host does not have.
-        _pypto_bundled="$PYPTO_TOOLCHAIN/lib/bundled"
-        LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' \
-            | grep -vFx "$_pypto_bundled" | paste -sd: -)"
-        export LD_LIBRARY_PATH
-        unset _pypto_bundled
         # BASH_SOURCE, not $GITHUB_WORKSPACE: a task-submit child's truncated
         # env snapshot may not carry the workspace path.
         _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
