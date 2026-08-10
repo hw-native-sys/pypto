@@ -12,187 +12,107 @@
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
-#include <limits>
 #include <map>
 #include <optional>
-#include <set>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/backend/common/backend.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/pass_context.h"
-#include "pypto/ir/transforms/utils/lifetime_analysis.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
-#include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 namespace dsa_adapter {
 namespace {
 
+// Complexity is O(N log N + E), where N is IR/allocation input size and E is
+// the number of cross-pipe candidate relations examined. Access collection
+// and summary construction are linear. Structured control paths receive
+// constant-size IDs during traversal, so sorting lifetimes and path-bucket
+// maintenance cost O(N log N). Candidate enumeration visits only
+// lifetime-compatible allocations in a different backend pipe bucket. E can be
+// quadratic in the number of reusable allocations. This output-sensitive
+// exception is inherent in the opt-in explicit pairwise DSA-RP model: a kernel
+// can genuinely produce Theta(B^2) penalty edges for B buffers. No access-pair
+// antichain or per-pair dependency walk is performed beyond materializing those
+// relations.
+
 enum class AccessKind : uint8_t {
   Read,
   Write,
 };
 
-struct BranchChoice {
+constexpr size_t kResourceCount = static_cast<size_t>(PipeType::ALL) + 1;
+
+size_t ResourceIndex(PipeType resource) { return static_cast<size_t>(resource); }
+
+struct StructuredPath {
   size_t id = 0;
-  bool alternative = false;
-  size_t loop_depth = 0;
+  bool in_loop = false;
 
-  bool operator<(const BranchChoice& other) const {
-    return std::tie(id, alternative, loop_depth) < std::tie(other.id, other.alternative, other.loop_depth);
-  }
+  bool operator==(const StructuredPath& other) const { return id == other.id; }
 
-  bool operator==(const BranchChoice& other) const {
-    return id == other.id && alternative == other.alternative && loop_depth == other.loop_depth;
-  }
-};
+  bool operator!=(const StructuredPath& other) const { return !(*this == other); }
 
-struct RegionRepresentative {
-  size_t region = 0;
-  const Stmt* statement = nullptr;
+  bool operator<(const StructuredPath& other) const { return id < other.id; }
 };
 
 struct AccessEndpoint {
-  size_t region = 0;
-  size_t statement_index = 0;
   size_t global_order = 0;
-  size_t resource_issue_index = 0;
-  const Stmt* statement = nullptr;
-  std::vector<RegionRepresentative> region_representatives;
-  RecognizedAccessRoute route;
-  MemorySpace memory_space = MemorySpace::ScalarLocal;
+  PipeType resource = PipeType::S;
   AccessKind access_kind = AccessKind::Read;
-  std::vector<BranchChoice> branch_path;
-  std::vector<size_t> loop_stack;
-  uint64_t byte_offset = 0;
-  uint64_t byte_size = 0;
-  bool range_known = false;
+  StructuredPath path;
   bool full_allocation = false;
 };
 
 struct AllocationAccessSummary {
   std::vector<AccessEndpoint> accesses;
-  size_t unsupported_accesses = 0;
+  bool has_unknown_access = false;
 };
 
-using FrontierKey = std::tuple<RecognizedAccessResource, MemorySpace, std::vector<BranchChoice>,
-                               std::vector<size_t>, bool, uint64_t, uint64_t>;
+struct CompactAccessSummary {
+  StructuredPath path;
+  AccessEndpoint initial_write;
+  std::array<std::optional<AccessEndpoint>, kResourceCount> terminal_by_resource;
+};
 
-FrontierKey GetFrontierKey(const AccessEndpoint& endpoint) {
-  return {endpoint.route.resource, endpoint.memory_space, endpoint.branch_path, endpoint.loop_stack,
-          endpoint.range_known,    endpoint.byte_offset,  endpoint.byte_size};
-}
+struct PairKey {
+  size_t first = 0;
+  size_t second = 0;
 
-using CompletionOrdered = std::function<bool(const AccessEndpoint& earlier, const AccessEndpoint& later)>;
+  bool operator==(const PairKey& other) const { return first == other.first && second == other.second; }
+};
 
-std::vector<AccessEndpoint> BuildTerminalFrontier(const AllocationAccessSummary& summary,
-                                                  const CompletionOrdered& ordered) {
-  std::map<FrontierKey, AccessEndpoint> terminal;
-  for (const AccessEndpoint& endpoint : summary.accesses) {
-    const FrontierKey key = GetFrontierKey(endpoint);
-    const auto found = terminal.find(key);
-    if (found == terminal.end() || found->second.resource_issue_index <= endpoint.resource_issue_index) {
-      terminal[key] = endpoint;
-    }
+struct PairKeyHash {
+  size_t operator()(const PairKey& pair) const {
+    const size_t first_hash = std::hash<size_t>{}(pair.first);
+    const size_t second_hash = std::hash<size_t>{}(pair.second);
+    return first_hash ^ (second_hash + 0x9e3779b9U + (first_hash << 6U) + (first_hash >> 2U));
   }
-  std::vector<AccessEndpoint> result;
-  result.reserve(terminal.size());
-  for (const auto& [key, endpoint] : terminal) {
-    static_cast<void>(key);
-    result.push_back(endpoint);
-  }
-  std::vector<AccessEndpoint> maximal;
-  maximal.reserve(result.size());
-  for (const AccessEndpoint& candidate : result) {
-    const bool dominated = std::any_of(result.begin(), result.end(), [&](const AccessEndpoint& other) {
-      return candidate.statement != other.statement && ordered(candidate, other);
-    });
-    if (!dominated) maximal.push_back(candidate);
-  }
-  return maximal;
-}
+};
 
-std::vector<AccessEndpoint> BuildInitialWriteFrontier(const AllocationAccessSummary& summary,
-                                                      const CompletionOrdered& ordered,
-                                                      bool* conservative_fallback) {
-  if (conservative_fallback != nullptr) *conservative_fallback = false;
-  if (summary.accesses.empty()) return {};
-
-  // A source-order "first access" is not sufficient inside structured
-  // control: two writes in opposite branches can both be minimal under the
-  // completion relation.  Keep the complete minimal antichain instead.
-  std::vector<AccessEndpoint> result;
-  result.reserve(summary.accesses.size());
-  for (const AccessEndpoint& candidate : summary.accesses) {
-    const bool has_predecessor =
-        std::any_of(summary.accesses.begin(), summary.accesses.end(), [&](const AccessEndpoint& other) {
-          return candidate.statement != other.statement && ordered(other, candidate);
-        });
-    if (!has_predecessor) result.push_back(candidate);
-  }
-
-  // Axiom A3 requires every minimal access to define the allocation.  A
-  // minimal read (or an access not covered by the computed antichain) is kept
-  // as a conservative anchor for reporting, but the resulting pair must not
-  // be promoted to a penalty edge.
-  if (std::any_of(result.begin(), result.end(),
-                  [](const AccessEndpoint& endpoint) { return endpoint.access_kind != AccessKind::Write; })) {
-    if (conservative_fallback != nullptr) *conservative_fallback = true;
-  }
-  for (const AccessEndpoint& access : summary.accesses) {
-    const bool covered = std::any_of(result.begin(), result.end(), [&](const AccessEndpoint& anchor) {
-      return anchor.statement == access.statement || ordered(anchor, access);
-    });
-    if (!covered) {
-      if (conservative_fallback != nullptr) *conservative_fallback = true;
-      result.push_back(access);
-    }
-  }
-  return result;
-}
-
-bool ControlPathsCompatible(const AccessEndpoint& first, const AccessEndpoint& second,
-                            std::optional<size_t> crossed_loop_depth) {
-  for (const BranchChoice& first_choice : first.branch_path) {
-    for (const BranchChoice& second_choice : second.branch_path) {
-      if (first_choice.id != second_choice.id || first_choice.alternative == second_choice.alternative) {
-        continue;
-      }
-      // Branches inside a crossed loop may choose different arms in different
-      // iterations. Branches outside that loop remain mutually exclusive.
-      if (!crossed_loop_depth || first_choice.loop_depth < *crossed_loop_depth) return false;
-    }
-  }
-  return true;
-}
-
-std::vector<std::pair<size_t, size_t>> SharedLoopContexts(const AccessEndpoint& first,
-                                                          const AccessEndpoint& second) {
-  std::vector<std::pair<size_t, size_t>> result;
-  const size_t limit = std::min(first.loop_stack.size(), second.loop_stack.size());
-  for (size_t index = 0; index < limit && first.loop_stack[index] == second.loop_stack[index]; ++index) {
-    result.emplace_back(first.loop_stack[index], index + 1);
-  }
-  return result;
+PairKey NormalizePair(size_t first, size_t second) {
+  return first < second ? PairKey{first, second} : PairKey{second, first};
 }
 
 std::optional<MemorySpace> GetMemorySpace(const TypePtr& type) {
@@ -205,61 +125,6 @@ std::optional<MemorySpace> GetMemorySpace(const VarPtr& var) {
   return var ? GetMemorySpace(var->GetType()) : std::nullopt;
 }
 
-RecognizedMemoryClass ClassifyMemory(MemorySpace space) {
-  switch (space) {
-    case MemorySpace::DDR:
-      return RecognizedMemoryClass::External;
-    case MemorySpace::Vec:
-      return RecognizedMemoryClass::Ub;
-    case MemorySpace::Mat:
-      return RecognizedMemoryClass::L1;
-    case MemorySpace::Left:
-    case MemorySpace::Right:
-    case MemorySpace::Acc:
-    case MemorySpace::Bias:
-    case MemorySpace::LeftScale:
-    case MemorySpace::RightScale:
-      return RecognizedMemoryClass::L0;
-    case MemorySpace::ScalarLocal:
-      return RecognizedMemoryClass::Scalar;
-  }
-  throw pypto::ValueError("Unknown memory space in DSA route classifier");
-}
-
-std::optional<RecognizedAccessRoute> LookupTransferRoute(RecognizedMemoryClass source,
-                                                         RecognizedMemoryClass destination) {
-  using Memory = RecognizedMemoryClass;
-  using Resource = RecognizedAccessResource;
-  if (source == Memory::External && (destination == Memory::Ub || destination == Memory::L1)) {
-    return RecognizedAccessRoute{source, destination, Resource::InboundDma};
-  }
-  if ((source == Memory::Ub || source == Memory::L1) && destination == Memory::External) {
-    return RecognizedAccessRoute{source, destination, Resource::OutboundDma};
-  }
-  if (source == Memory::L0 && destination == Memory::External) {
-    return RecognizedAccessRoute{source, destination, Resource::L0ToExternal};
-  }
-  if (source == Memory::L1 && destination == Memory::L0) {
-    return RecognizedAccessRoute{source, destination, Resource::L1ToL0};
-  }
-  if (source == Memory::L0 && destination == Memory::L1) {
-    return RecognizedAccessRoute{source, destination, Resource::L0ToL1};
-  }
-  if (source == Memory::Ub && destination == Memory::L1) {
-    return RecognizedAccessRoute{source, destination, Resource::UbToL1};
-  }
-  if (source == Memory::L1 && destination == Memory::Ub) {
-    return RecognizedAccessRoute{source, destination, Resource::L1ToUb};
-  }
-  if (source == Memory::Ub && destination == Memory::L0) {
-    return RecognizedAccessRoute{source, destination, Resource::UbToL0};
-  }
-  if (source == Memory::L0 && destination == Memory::Ub) {
-    return RecognizedAccessRoute{source, destination, Resource::L0ToUb};
-  }
-  return std::nullopt;
-}
-
 bool SameAllocation(const VarPtr& first, const VarPtr& second) {
   const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
   const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
@@ -267,110 +132,24 @@ bool SameAllocation(const VarPtr& first, const VarPtr& second) {
   return GetDefinedMemRef(first_tile)->base_.get() == GetDefinedMemRef(second_tile)->base_.get();
 }
 
-bool HasExecutionMemoryAccess(const CallPtr& call) {
-  if (!call || !call->op_) return false;
-  const auto& registry = OpRegistry::GetInstance();
-  return !registry.IsRegistered(call->op_->name_) ||
-         registry.GetEntry(call->op_->name_).HasExecutionMemoryAccess();
+bool SameAllocationOffset(const VarPtr& first, const VarPtr& second) {
+  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
+  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
+  if (!first_tile || !second_tile || !first_tile->memref_ || !second_tile->memref_) return false;
+  const MemRefPtr first_memref = GetDefinedMemRef(first_tile);
+  const MemRefPtr second_memref = GetDefinedMemRef(second_tile);
+  return first_memref->base_.get() == second_memref->base_.get() &&
+         AreExprsEqual(first_memref->byte_offset_, second_memref->byte_offset_);
 }
 
-void CollectMemoryClasses(const TypePtr& type, std::set<RecognizedMemoryClass>* classes) {
-  if (!type || classes == nullptr) return;
-  if (const auto space = GetMemorySpace(type)) {
-    classes->insert(ClassifyMemory(*space));
-    return;
-  }
-  if (const auto tuple = As<TupleType>(type)) {
-    for (const TypePtr& element : tuple->types_) CollectMemoryClasses(element, classes);
-  }
-}
-
-std::optional<RecognizedAccessRoute> ClassifyOperationRoute(const CallPtr& call,
-                                                            const std::vector<VarPtr>& results) {
-  if (!call || !HasExecutionMemoryAccess(call)) return std::nullopt;
-  using Memory = RecognizedMemoryClass;
-  using Resource = RecognizedAccessResource;
-
-  std::set<Memory> result_classes;
-  for (const VarPtr& result : results) {
-    CollectMemoryClasses(result ? result->GetType() : nullptr, &result_classes);
-  }
-  if (result_classes.empty()) CollectMemoryClasses(call->GetType(), &result_classes);
-  const std::optional<Memory> result_class =
-      result_classes.size() == 1 ? std::optional<Memory>(*result_classes.begin()) : std::nullopt;
-  std::vector<std::pair<VarPtr, Memory>> inputs;
-  bool has_scalar_input = false;
-  for (const ExprPtr& argument : call->args_) {
-    const VarPtr var = AsVarLike(argument);
-    const auto space = GetMemorySpace(var);
-    if (space) {
-      inputs.emplace_back(var, ClassifyMemory(*space));
-    } else if (var && As<ScalarType>(var->GetType())) {
-      has_scalar_input = true;
-    }
-  }
-
-  const auto scalar_result = std::find_if(results.begin(), results.end(), [](const VarPtr& result) {
-    return result && As<ScalarType>(result->GetType());
-  });
-  if (scalar_result != results.end()) {
-    const auto local = std::find_if(inputs.begin(), inputs.end(), [](const auto& input) {
-      return input.second != Memory::External && input.second != Memory::Scalar;
-    });
-    if (local != inputs.end()) {
-      return RecognizedAccessRoute{local->second, Memory::Scalar, Resource::ScalarAccess};
-    }
-  }
-
-  if (result_class && *result_class != Memory::External && has_scalar_input &&
-      std::any_of(inputs.begin(), inputs.end(), [&](const auto& input) {
-        return input.second == *result_class &&
-               std::any_of(results.begin(), results.end(),
-                           [&](const VarPtr& result) { return SameAllocation(input.first, result); });
-      })) {
-    return RecognizedAccessRoute{Memory::Scalar, *result_class, Resource::ScalarAccess};
-  }
-
-  if (result_class && *result_class != Memory::External) {
-    if (std::any_of(inputs.begin(), inputs.end(),
-                    [](const auto& input) { return input.second == Memory::External; })) {
-      return LookupTransferRoute(Memory::External, *result_class);
-    }
-    std::set<Memory> local_inputs;
-    for (const auto& [var, memory] : inputs) {
-      static_cast<void>(var);
-      if (memory != Memory::External && memory != Memory::Scalar) local_inputs.insert(memory);
-    }
-    // Mutating operations such as tile.assemble read their destination and
-    // return an updated value in that same memory class.  The destination-side
-    // read does not define the transfer engine; remove it before identifying
-    // the unique source->destination route.
-    std::set<Memory> transfer_sources = local_inputs;
-    transfer_sources.erase(*result_class);
-    if (transfer_sources.size() == 1) {
-      if (const auto transfer = LookupTransferRoute(*transfer_sources.begin(), *result_class)) {
-        return transfer;
-      }
-    }
-    const bool all_ub =
-        *result_class == Memory::Ub && std::all_of(local_inputs.begin(), local_inputs.end(),
-                                                   [](Memory memory) { return memory == Memory::Ub; });
-    if (all_ub) return RecognizedAccessRoute{Memory::Ub, Memory::Ub, Resource::VectorCompute};
-    const bool all_l0 =
-        *result_class == Memory::L0 && std::all_of(local_inputs.begin(), local_inputs.end(),
-                                                   [](Memory memory) { return memory == Memory::L0; });
-    if (all_l0) return RecognizedAccessRoute{Memory::L0, Memory::L0, Resource::MatrixCompute};
-  }
-
-  if (result_class && *result_class == Memory::External) {
-    std::set<Memory> local_inputs;
-    for (const auto& [var, memory] : inputs) {
-      static_cast<void>(var);
-      if (memory != Memory::External && memory != Memory::Scalar) local_inputs.insert(memory);
-    }
-    if (local_inputs.size() == 1) return LookupTransferRoute(*local_inputs.begin(), Memory::External);
-  }
-  return std::nullopt;
+bool HasSameEffectiveLayout(const VarPtr& first, const VarPtr& second) {
+  const auto first_tile = first ? As<TileType>(first->GetType()) : nullptr;
+  const auto second_tile = second ? As<TileType>(second->GetType()) : nullptr;
+  if (!first_tile || !second_tile) return false;
+  const TileView first_view = tile_view_semantics::GetEffectiveTileView(*first_tile);
+  const TileView second_view = tile_view_semantics::GetEffectiveTileView(*second_tile);
+  return first_view.blayout == second_view.blayout && first_view.slayout == second_view.slayout &&
+         first_view.fractal == second_view.fractal;
 }
 
 using TupleResultElements = std::unordered_map<const Var*, std::map<int, VarPtr>>;
@@ -396,204 +175,62 @@ class TupleResultCollector : public IRVisitor {
 class AccessCollector : public IRVisitor {
  public:
   AccessCollector(const AllocationPlan& plan, std::unordered_map<const Var*, size_t> interval_by_base,
-                  TupleResultElements tuple_results)
+                  TupleResultElements tuple_results, const backend::Backend& backend)
       : plan_(plan),
         interval_by_base_(std::move(interval_by_base)),
         tuple_results_(std::move(tuple_results)),
+        backend_(backend),
         summaries_(plan.intervals.size()) {}
 
   void Collect(const StmtPtr& body) { VisitStmt(body); }
 
   const std::vector<AllocationAccessSummary>& Summaries() const { return summaries_; }
 
-  bool TransitivelyOrdered(const Stmt* earlier, const Stmt* later) {
-    return GetReachability(later).ancestors.count(earlier) != 0;
-  }
-
-  std::vector<RecognizedDependencyNode> TransitiveOrderingWitness(const Stmt* earlier, const Stmt* later) {
-    const DependencyReachability& reachability = GetReachability(later);
-    if (reachability.ancestors.count(earlier) == 0) return {};
-
-    std::vector<RecognizedDependencyNode> witness;
-    const Stmt* current = earlier;
-    while (current != nullptr) {
-      const auto location = node_locations_.find(current);
-      if (location == node_locations_.end()) return {};
-      witness.push_back(location->second);
-      if (current == later) return witness;
-      const auto successor = reachability.successor_toward_target.find(current);
-      if (successor == reachability.successor_toward_target.end()) return {};
-      current = successor->second;
-    }
-    return {};
-  }
-
-  std::vector<RecognizedDependencyNode> TransitiveOrderingWitness(const AccessEndpoint& earlier,
-                                                                  const AccessEndpoint& later) {
-    for (auto earlier_it = earlier.region_representatives.rbegin();
-         earlier_it != earlier.region_representatives.rend(); ++earlier_it) {
-      const auto later_it =
-          std::find_if(later.region_representatives.rbegin(), later.region_representatives.rend(),
-                       [&](const RegionRepresentative& representative) {
-                         return representative.region == earlier_it->region;
-                       });
-      if (later_it == later.region_representatives.rend()) continue;
-      if (earlier_it->statement == nullptr || later_it->statement == nullptr ||
-          earlier_it->statement == later_it->statement) {
-        return {};
-      }
-      return TransitiveOrderingWitness(earlier_it->statement, later_it->statement);
-    }
-    return {};
-  }
-
- private:
-  struct DependencyReachability {
-    std::unordered_set<const Stmt*> ancestors;
-    std::unordered_map<const Stmt*, const Stmt*> successor_toward_target;
-  };
-
-  const DependencyReachability& GetReachability(const Stmt* later) {
-    auto cached = transitive_predecessors_.find(later);
-    if (cached == transitive_predecessors_.end()) {
-      DependencyReachability reachability;
-      std::deque<const Stmt*> worklist{later};
-      while (!worklist.empty()) {
-        const Stmt* current = worklist.front();
-        worklist.pop_front();
-        const auto found = predecessors_.find(current);
-        if (found == predecessors_.end()) continue;
-        std::vector<const Stmt*> predecessors(found->second.begin(), found->second.end());
-        std::sort(predecessors.begin(), predecessors.end(), [&](const Stmt* lhs, const Stmt* rhs) {
-          const auto lhs_location = node_locations_.find(lhs);
-          const auto rhs_location = node_locations_.find(rhs);
-          INTERNAL_CHECK(lhs_location != node_locations_.end() && rhs_location != node_locations_.end())
-              << "dependency-graph node is missing its stable region location";
-          return std::tie(lhs_location->second.region, lhs_location->second.statement_index) <
-                 std::tie(rhs_location->second.region, rhs_location->second.statement_index);
-        });
-        for (const Stmt* predecessor : predecessors) {
-          if (reachability.ancestors.insert(predecessor).second) {
-            reachability.successor_toward_target.emplace(predecessor, current);
-            worklist.push_back(predecessor);
-          }
-        }
-      }
-      cached = transitive_predecessors_.emplace(later, std::move(reachability)).first;
-    }
-    return cached->second;
-  }
-
- public:
-  bool TransitivelyOrdered(const AccessEndpoint& earlier, const AccessEndpoint& later) {
-    // An access nested in structured control is represented by the enclosing
-    // If/For/While statement in its parent's dependency graph.  Compare the
-    // two accesses in their deepest common SeqStmts region so dependencies
-    // such as `if-result -> later consumer` are not lost at the region
-    // boundary.
-    for (auto earlier_it = earlier.region_representatives.rbegin();
-         earlier_it != earlier.region_representatives.rend(); ++earlier_it) {
-      const auto later_it =
-          std::find_if(later.region_representatives.rbegin(), later.region_representatives.rend(),
-                       [&](const RegionRepresentative& representative) {
-                         return representative.region == earlier_it->region;
-                       });
-      if (later_it == later.region_representatives.rend()) continue;
-      if (earlier_it->statement == nullptr || later_it->statement == nullptr ||
-          earlier_it->statement == later_it->statement) {
-        return false;
-      }
-      return TransitivelyOrdered(earlier_it->statement, later_it->statement);
-    }
-    return false;
-  }
-
  protected:
-  void VisitStmt_(const SeqStmtsPtr& op) override {
-    const size_t previous_region = current_region_;
-    const size_t previous_index = current_statement_index_;
-    current_region_ = next_region_++;
-    region_stack_.push_back({current_region_, nullptr});
-    for (size_t index = 0; index < op->stmts_.size(); ++index) {
-      node_locations_[op->stmts_[index].get()] = {current_region_, index};
-    }
-    const stmt_dep::StmtDependencyGraph graph = stmt_dep::BuildStmtDependencyGraph(op);
-    for (const auto& [statement, predecessors] : graph.predecessors) {
-      predecessors_[statement].insert(predecessors.begin(), predecessors.end());
-    }
-
-    for (size_t index = 0; index < op->stmts_.size(); ++index) {
-      current_statement_index_ = index;
-      region_stack_.back().statement = op->stmts_[index].get();
-      VisitStmt(op->stmts_[index]);
-    }
-    region_stack_.pop_back();
-    current_region_ = previous_region;
-    current_statement_index_ = previous_index;
-  }
-
   void VisitStmt_(const AssignStmtPtr& op) override {
-    const auto call = As<Call>(op->value_);
-    RecordCall(call, op->var_, op.get());
+    RecordCall(As<Call>(op->value_), op->var_);
     ++global_order_;
   }
 
   void VisitStmt_(const EvalStmtPtr& op) override {
-    RecordCall(As<Call>(op->expr_), nullptr, op.get());
+    RecordCall(As<Call>(op->expr_), nullptr);
     ++global_order_;
   }
 
   void VisitStmt_(const ReturnStmtPtr& op) override {
     for (const ExprPtr& value : op->value_) {
-      RecordCall(As<Call>(value), nullptr, op.get());
-      ++global_order_;
+      RecordCall(As<Call>(value), nullptr);
     }
+    ++global_order_;
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    const size_t branch_id = next_control_id_++;
-    branch_path_.push_back({branch_id, false, loop_stack_.size()});
+    const StructuredPath parent = current_path_;
+    current_path_ = {next_path_id_++, parent.in_loop};
     VisitStmt(op->then_body_);
-    branch_path_.pop_back();
+    current_path_ = parent;
     if (op->else_body_) {
-      branch_path_.push_back({branch_id, true, loop_stack_.size()});
+      current_path_ = {next_path_id_++, parent.in_loop};
       VisitStmt(*op->else_body_);
-      branch_path_.pop_back();
+      current_path_ = parent;
     }
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    const size_t loop_id = next_control_id_++;
-    loop_stack_.push_back(loop_id);
+    const StructuredPath parent = current_path_;
+    current_path_ = {next_path_id_++, true};
     VisitStmt(op->body_);
-    loop_stack_.pop_back();
+    current_path_ = parent;
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    const size_t loop_id = next_control_id_++;
-    loop_stack_.push_back(loop_id);
+    const StructuredPath parent = current_path_;
+    current_path_ = {next_path_id_++, true};
     VisitStmt(op->body_);
-    loop_stack_.pop_back();
+    current_path_ = parent;
   }
 
  private:
-  const AllocationPlan& plan_;
-  std::unordered_map<const Var*, size_t> interval_by_base_;
-  TupleResultElements tuple_results_;
-  std::vector<AllocationAccessSummary> summaries_;
-  std::unordered_map<const Stmt*, std::unordered_set<const Stmt*>> predecessors_;
-  std::unordered_map<const Stmt*, DependencyReachability> transitive_predecessors_;
-  std::unordered_map<const Stmt*, RecognizedDependencyNode> node_locations_;
-  size_t next_region_ = 0;
-  size_t current_region_ = 0;
-  size_t current_statement_index_ = 0;
-  size_t global_order_ = 0;
-  size_t next_control_id_ = 0;
-  std::vector<BranchChoice> branch_path_;
-  std::vector<size_t> loop_stack_;
-  std::vector<RegionRepresentative> region_stack_;
-  std::map<RecognizedAccessResource, size_t> next_resource_issue_;
-
   std::optional<size_t> FindInterval(const VarPtr& var) const {
     if (!var) return std::nullopt;
     const auto tile = As<TileType>(var->GetType());
@@ -617,154 +254,213 @@ class AccessCollector : public IRVisitor {
     return results;
   }
 
-  struct AccessRange {
-    uint64_t offset = 0;
-    uint64_t size = 0;
-    bool known = false;
-    bool full_allocation = false;
-  };
-
-  AccessRange GetAccessRange(const VarPtr& var, size_t interval) const {
-    AccessRange range;
+  bool IsFullAllocationAccess(const VarPtr& var, size_t interval) const {
     const auto tile = As<TileType>(var->GetType());
-    if (!tile || !tile->memref_) return range;
+    if (!tile || !tile->memref_) return false;
     const MemRefPtr memref = GetDefinedMemRef(tile);
     const auto offset = As<ConstInt>(memref->byte_offset_);
-    if (!offset || offset->value_ < 0) return range;
-    range.offset = static_cast<uint64_t>(offset->value_);
-    range.size = memref->size_;
-    range.known = true;
-    range.full_allocation =
-        range.offset == 0 && range.size == static_cast<uint64_t>(plan_.intervals[interval].size);
-    return range;
+    return offset && offset->value_ == 0 &&
+           memref->size_ == static_cast<uint64_t>(plan_.intervals[interval].size) &&
+           AreExprVectorsEqual(GetValidShape(tile), tile->shape_);
+  }
+
+  static bool IsFullyValidTile(const TileTypePtr& tile) {
+    return tile && AreExprVectorsEqual(GetValidShape(tile), tile->shape_);
+  }
+
+  static bool IsZeroOffsetTuple(const ExprPtr& expression, size_t expected_rank) {
+    const auto offsets = As<MakeTuple>(expression);
+    if (!offsets || offsets->elements_.size() != expected_rank) return false;
+    return std::all_of(offsets->elements_.begin(), offsets->elements_.end(), [](const ExprPtr& offset) {
+      const auto value = As<ConstInt>(offset);
+      return value && value->value_ == 0;
+    });
+  }
+
+  static bool IsProvablyWholeStore(const CallPtr& call) {
+    if (!IsOp(call, "tile.store") || call->args_.size() != 3) return false;
+    return IsFullyValidTile(As<TileType>(call->args_[0]->GetType()));
+  }
+
+  static bool IsProvablyWholeAssemble(const CallPtr& call, const std::vector<VarPtr>& results) {
+    if (!IsOp(call, "tile.assemble") || call->args_.size() != 3 || results.size() != 1) return false;
+
+    const VarPtr target_var = AsVarLike(call->args_[0]);
+    const VarPtr source_var = AsVarLike(call->args_[1]);
+    const VarPtr& result_var = results.front();
+    const auto target = target_var ? As<TileType>(target_var->GetType()) : nullptr;
+    const auto source = source_var ? As<TileType>(source_var->GetType()) : nullptr;
+    const auto result = result_var ? As<TileType>(result_var->GetType()) : nullptr;
+    if (!target || !source || !result || !target->memref_ || !source->memref_ || !result->memref_) {
+      return false;
+    }
+    if (!AreExprVectorsEqual(target->shape_, source->shape_) ||
+        !AreExprVectorsEqual(target->shape_, result->shape_)) {
+      return false;
+    }
+    if (!IsFullyValidTile(target) || !IsFullyValidTile(source) || !IsFullyValidTile(result)) return false;
+    if (!IsZeroOffsetTuple(call->args_[2], target->shape_.size())) return false;
+    return SameAllocation(target_var, result_var);
+  }
+
+  static bool IsProvablyElidedTileMove(const CallPtr& call, const std::vector<VarPtr>& results) {
+    if (!IsOp(call, "tile.move") || call->args_.size() != 1 || results.size() != 1) return false;
+    const VarPtr source = AsVarLike(call->args_.front());
+    const VarPtr& destination = results.front();
+    return SameAllocationOffset(source, destination) && HasSameEffectiveLayout(source, destination);
+  }
+
+  static ExecutionMemoryAccessEvidence ResolveAccessEvidence(const CallPtr& call,
+                                                             const std::vector<VarPtr>& results) {
+    // Codegen aliases this result to its source and emits no pto.tmov. Treat
+    // only semantic same-allocation moves as no-access here: opportunistic
+    // address equality is a placement decision and cannot be assumed while
+    // recognizing candidate edges.
+    if (IsProvablyElidedTileMove(call, results)) return ExecutionMemoryAccessEvidence::NoAccess;
+
+    const auto& registry = OpRegistry::GetInstance();
+    if (!registry.IsRegistered(call->op_->name_)) return ExecutionMemoryAccessEvidence::Unknown;
+
+    const ExecutionMemoryAccessEvidence registered =
+        registry.GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence();
+    if (registered != ExecutionMemoryAccessEvidence::Unknown) return registered;
+
+    // Destination-passing and subrange operations remain Unknown by default.
+    // These two cases are promoted locally only when their operands prove an
+    // exact whole-window access.
+    if (IsProvablyWholeStore(call) || IsProvablyWholeAssemble(call, results)) {
+      return ExecutionMemoryAccessEvidence::Functional;
+    }
+    return ExecutionMemoryAccessEvidence::Unknown;
+  }
+
+  void Poison(const std::vector<std::pair<size_t, VarPtr>>& reads,
+              const std::vector<std::pair<size_t, VarPtr>>& writes) {
+    std::unordered_set<size_t> touched;
+    for (const auto& [interval, var] : reads) {
+      static_cast<void>(var);
+      touched.insert(interval);
+    }
+    for (const auto& [interval, var] : writes) {
+      static_cast<void>(var);
+      touched.insert(interval);
+    }
+    for (size_t interval : touched) summaries_[interval].has_unknown_access = true;
   }
 
   void RecordAccess(size_t interval, AccessEndpoint endpoint, const VarPtr& var) {
     const auto memory_space = GetMemorySpace(var);
     if (!memory_space) {
-      ++summaries_[interval].unsupported_accesses;
+      summaries_[interval].has_unknown_access = true;
       return;
     }
-    const AccessRange range = GetAccessRange(var, interval);
-    endpoint.memory_space = *memory_space;
-    endpoint.byte_offset = range.offset;
-    endpoint.byte_size = range.size;
-    endpoint.range_known = range.known;
-    endpoint.full_allocation = range.full_allocation;
-    summaries_[interval].accesses.push_back(std::move(endpoint));
+    endpoint.full_allocation = IsFullAllocationAccess(var, interval);
+    summaries_[interval].accesses.push_back(endpoint);
   }
 
-  void RecordCall(const CallPtr& call, const VarPtr& result, const Stmt* statement) {
-    if (!call || !HasExecutionMemoryAccess(call)) return;
-    std::vector<std::pair<size_t, VarPtr>> reads;
-    for (const ExprPtr& argument : call->args_) {
-      const VarPtr var = AsVarLike(argument);
-      const auto interval = FindInterval(var);
-      if (interval) reads.emplace_back(*interval, var);
-    }
+  void RecordCall(const CallPtr& call, const VarPtr& result) {
+    if (!call || !call->op_) return;
+
     const std::vector<VarPtr> results = ResolveCallResults(result);
+    const bool whole_assemble = IsProvablyWholeAssemble(call, results);
+    std::vector<std::pair<size_t, VarPtr>> reads;
+    for (size_t argument_index = 0; argument_index < call->args_.size(); ++argument_index) {
+      // A whole-window assemble overwrites the target. Its old contents are
+      // not an input access; partial assemble remains Unknown and is poisoned.
+      if (whole_assemble && argument_index == 0) continue;
+      const VarPtr var = AsVarLike(call->args_[argument_index]);
+      if (const auto interval = FindInterval(var)) reads.emplace_back(*interval, var);
+    }
     std::vector<std::pair<size_t, VarPtr>> writes;
     for (const VarPtr& output : results) {
       if (const auto interval = FindInterval(output)) writes.emplace_back(*interval, output);
     }
     if (reads.empty() && writes.empty()) return;
 
-    const std::optional<RecognizedAccessRoute> route = ClassifyOperationRoute(call, results);
-    if (!route.has_value()) {
-      for (const auto& [interval, var] : reads) {
-        static_cast<void>(var);
-        ++summaries_[interval].unsupported_accesses;
-      }
-      for (const auto& [interval, output] : writes) {
-        static_cast<void>(output);
-        ++summaries_[interval].unsupported_accesses;
-      }
+    const ExecutionMemoryAccessEvidence evidence = ResolveAccessEvidence(call, results);
+    if (evidence == ExecutionMemoryAccessEvidence::NoAccess) return;
+    if (evidence == ExecutionMemoryAccessEvidence::Unknown) {
+      Poison(reads, writes);
+      return;
+    }
+
+    const std::optional<PipeType> resource = backend_.TryInferPipe(call);
+    if (!resource) {
+      Poison(reads, writes);
       return;
     }
 
     AccessEndpoint read_endpoint;
-    read_endpoint.region = current_region_;
-    read_endpoint.statement_index = current_statement_index_;
     read_endpoint.global_order = global_order_;
-    read_endpoint.statement = statement;
-    read_endpoint.region_representatives = region_stack_;
-    read_endpoint.route = *route;
-    read_endpoint.resource_issue_index = next_resource_issue_[route->resource]++;
+    read_endpoint.resource = *resource;
     read_endpoint.access_kind = AccessKind::Read;
-    read_endpoint.branch_path = branch_path_;
-    read_endpoint.loop_stack = loop_stack_;
+    read_endpoint.path = current_path_;
     AccessEndpoint write_endpoint = read_endpoint;
     write_endpoint.access_kind = AccessKind::Write;
-    for (const auto& [interval, var] : reads) {
-      RecordAccess(interval, read_endpoint, var);
-    }
+    for (const auto& [interval, var] : reads) RecordAccess(interval, read_endpoint, var);
     for (const auto& [interval, output] : writes) RecordAccess(interval, write_endpoint, output);
   }
+
+  const AllocationPlan& plan_;
+  std::unordered_map<const Var*, size_t> interval_by_base_;
+  TupleResultElements tuple_results_;
+  const backend::Backend& backend_;
+  std::vector<AllocationAccessSummary> summaries_;
+  size_t global_order_ = 0;
+  size_t next_path_id_ = 1;
+  StructuredPath current_path_;
 };
 
-bool LifetimesPermitReuse(const LifetimeInterval& first, const LifetimeInterval& second) {
-  return first.last_use_point <= second.def_point || second.last_use_point <= first.def_point;
+std::optional<CompactAccessSummary> CompactSummary(const AllocationAccessSummary& summary) {
+  if (summary.has_unknown_access || summary.accesses.empty()) return std::nullopt;
+
+  const StructuredPath& path = summary.accesses.front().path;
+  if (std::any_of(summary.accesses.begin(), summary.accesses.end(), [&](const AccessEndpoint& endpoint) {
+        return endpoint.path != path || !endpoint.full_allocation;
+      })) {
+    return std::nullopt;
+  }
+
+  const auto earliest = std::min_element(summary.accesses.begin(), summary.accesses.end(),
+                                         [](const AccessEndpoint& lhs, const AccessEndpoint& rhs) {
+                                           return lhs.global_order < rhs.global_order;
+                                         });
+  INTERNAL_CHECK(earliest != summary.accesses.end()) << "Non-empty access summary has no first access";
+  const size_t earliest_order = earliest->global_order;
+  std::optional<AccessEndpoint> initial_write;
+  for (const AccessEndpoint& endpoint : summary.accesses) {
+    if (endpoint.global_order != earliest_order) continue;
+    if (endpoint.access_kind != AccessKind::Write) return std::nullopt;
+    if (initial_write && initial_write->resource != endpoint.resource) return std::nullopt;
+    initial_write = endpoint;
+  }
+  if (!initial_write) return std::nullopt;
+
+  CompactAccessSummary compact;
+  compact.path = path;
+  compact.initial_write = *initial_write;
+  for (const AccessEndpoint& endpoint : summary.accesses) {
+    std::optional<AccessEndpoint>& terminal = compact.terminal_by_resource[ResourceIndex(endpoint.resource)];
+    if (!terminal || terminal->global_order < endpoint.global_order ||
+        (terminal->global_order == endpoint.global_order && terminal->access_kind == AccessKind::Read &&
+         endpoint.access_kind == AccessKind::Write)) {
+      terminal = endpoint;
+    }
+  }
+  return compact;
 }
+
+struct ResourceBuckets {
+  std::array<std::vector<size_t>, kResourceCount> terminal;
+  std::array<std::vector<size_t>, kResourceCount> initial;
+};
 
 }  // namespace
 
-std::string RecognizedMemoryClassToString(RecognizedMemoryClass memory_class) {
-  switch (memory_class) {
-    case RecognizedMemoryClass::External:
-      return "external";
-    case RecognizedMemoryClass::Ub:
-      return "ub";
-    case RecognizedMemoryClass::L1:
-      return "l1";
-    case RecognizedMemoryClass::L0:
-      return "l0";
-    case RecognizedMemoryClass::Scalar:
-      return "scalar";
-  }
-  throw pypto::ValueError("Unknown DSA recognizer memory class");
-}
-
-std::string RecognizedAccessResourceToString(RecognizedAccessResource resource) {
-  switch (resource) {
-    case RecognizedAccessResource::InboundDma:
-      return "inbound_dma";
-    case RecognizedAccessResource::OutboundDma:
-      return "outbound_dma";
-    case RecognizedAccessResource::L0ToExternal:
-      return "l0_to_external";
-    case RecognizedAccessResource::L1ToL0:
-      return "l1_to_l0";
-    case RecognizedAccessResource::L0ToL1:
-      return "l0_to_l1";
-    case RecognizedAccessResource::UbToL1:
-      return "ub_to_l1";
-    case RecognizedAccessResource::L1ToUb:
-      return "l1_to_ub";
-    case RecognizedAccessResource::UbToL0:
-      return "ub_to_l0";
-    case RecognizedAccessResource::L0ToUb:
-      return "l0_to_ub";
-    case RecognizedAccessResource::VectorCompute:
-      return "vector_compute";
-    case RecognizedAccessResource::MatrixCompute:
-      return "matrix_compute";
-    case RecognizedAccessResource::ScalarAccess:
-      return "scalar_access";
-  }
-  throw pypto::ValueError("Unknown DSA recognizer access resource");
-}
-
-std::string RecognizedAccessRouteToString(const RecognizedAccessRoute& route) {
-  return RecognizedMemoryClassToString(route.source) + "->" +
-         RecognizedMemoryClassToString(route.destination) + "@" +
-         RecognizedAccessResourceToString(route.resource);
-}
-
-ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
-                                                        const AllocationPlan& allocation_plan,
-                                                        DsaReusePenaltyRecognizer recognizer) {
-  ReusePenaltyRecognition result;
-  if (recognizer == DsaReusePenaltyRecognizer::Disabled || !func) return result;
+std::vector<RecognizedReusePenalty> RecognizeReusePenalties(const FunctionPtr& func,
+                                                            const AllocationPlan& allocation_plan,
+                                                            const backend::Backend& backend) {
+  if (!func || allocation_plan.intervals.empty()) return {};
 
   std::unordered_map<const Var*, size_t> interval_by_base;
   for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
@@ -772,270 +468,107 @@ ReusePenaltyRecognition RecognizeReusePenaltyCandidates(const FunctionPtr& func,
     if (!tile || !tile->memref_) continue;
     interval_by_base.emplace(GetDefinedMemRef(tile)->base_.get(), index);
   }
+
   TupleResultCollector tuple_result_collector;
   tuple_result_collector.VisitStmt(func->body_);
-  AccessCollector collector(allocation_plan, std::move(interval_by_base), tuple_result_collector.Elements());
+  AccessCollector collector(allocation_plan, std::move(interval_by_base), tuple_result_collector.Elements(),
+                            backend);
   collector.Collect(func->body_);
-  const auto& summaries = collector.Summaries();
-  result.supported_allocations = static_cast<size_t>(
-      std::count_if(summaries.begin(), summaries.end(), [](const AllocationAccessSummary& summary) {
-        return summary.unsupported_accesses == 0 && !summary.accesses.empty();
-      }));
-  result.partially_supported_allocations = static_cast<size_t>(
-      std::count_if(summaries.begin(), summaries.end(), [](const AllocationAccessSummary& summary) {
-        return summary.unsupported_accesses != 0 && !summary.accesses.empty();
-      }));
-  for (const AllocationAccessSummary& summary : summaries) {
-    for (const AccessEndpoint& access : summary.accesses) result.observed_routes.push_back(access.route);
-  }
-  std::sort(result.observed_routes.begin(), result.observed_routes.end(),
-            [](const RecognizedAccessRoute& lhs, const RecognizedAccessRoute& rhs) {
-              return std::tie(lhs.source, lhs.destination, lhs.resource) <
-                     std::tie(rhs.source, rhs.destination, rhs.resource);
-            });
-  result.observed_routes.erase(
-      std::unique(result.observed_routes.begin(), result.observed_routes.end(),
-                  [](const RecognizedAccessRoute& lhs, const RecognizedAccessRoute& rhs) {
-                    return std::tie(lhs.source, lhs.destination, lhs.resource) ==
-                           std::tie(rhs.source, rhs.destination, rhs.resource);
-                  }),
-      result.observed_routes.end());
 
-  std::vector<std::vector<AccessEndpoint>> terminal_frontiers;
-  std::vector<std::vector<AccessEndpoint>> initial_write_frontiers;
-  std::vector<bool> conservative_initial_anchors;
-  conservative_initial_anchors.reserve(summaries.size());
-  terminal_frontiers.reserve(summaries.size());
-  initial_write_frontiers.reserve(summaries.size());
-  const CompletionOrdered completion_ordered = [&](const AccessEndpoint& earlier,
-                                                   const AccessEndpoint& later) {
-    if (!ControlPathsCompatible(earlier, later, std::nullopt)) return false;
-    if (earlier.route.resource == later.route.resource) {
-      return earlier.resource_issue_index < later.resource_issue_index;
-    }
-    // The v4 baseline uses SSA def-use reachability as an ordering proxy.
-    // Exact-placement experiments show that this does not necessarily carry
-    // asynchronous physical-access completion across resources, so callers
-    // must retain the witness as provenance rather than treat it as a
-    // production-safe suppression proof. Bare lexical order is not used.
-    return earlier.statement != later.statement && collector.TransitivelyOrdered(earlier, later);
-  };
-  for (const AllocationAccessSummary& summary : summaries) {
-    terminal_frontiers.push_back(BuildTerminalFrontier(summary, completion_ordered));
-    bool conservative_initial_anchor = false;
-    initial_write_frontiers.push_back(
-        BuildInitialWriteFrontier(summary, completion_ordered, &conservative_initial_anchor));
-    conservative_initial_anchors.push_back(conservative_initial_anchor);
+  std::vector<std::optional<CompactAccessSummary>> compact_summaries;
+  compact_summaries.reserve(collector.Summaries().size());
+  for (const AllocationAccessSummary& summary : collector.Summaries()) {
+    compact_summaries.push_back(CompactSummary(summary));
   }
 
-  std::set<std::pair<size_t, size_t>> separated;
+  std::unordered_set<PairKey, PairKeyHash> separated;
+  separated.reserve(allocation_plan.separations.size());
   for (const AllocationSeparation& separation : allocation_plan.separations) {
-    separated.insert(std::minmax(separation.first, separation.second));
+    separated.insert(NormalizePair(separation.first, separation.second));
   }
 
-  std::set<std::pair<size_t, size_t>> candidate_pairs;
-  std::set<std::pair<size_t, size_t>> ordered_pairs;
-  auto emit_handoff = [&](size_t prior, size_t next, const AccessEndpoint& terminal,
-                          const AccessEndpoint& initial, bool require_adjacent,
-                          std::optional<std::pair<size_t, size_t>> crossed_loop) {
-    const bool loop_carried = crossed_loop.has_value();
-    if (!ControlPathsCompatible(terminal, initial,
-                                loop_carried ? std::optional<size_t>(crossed_loop->second) : std::nullopt)) {
-      return;
-    }
-    if (!loop_carried && terminal.global_order > initial.global_order) return;
-    if (loop_carried && terminal.global_order <= initial.global_order) {
-      return;
-    }
-    if (require_adjacent &&
-        (terminal.region != initial.region || terminal.statement_index + 1 != initial.statement_index)) {
-      return;
-    }
-
-    const auto canonical_pair = std::minmax(prior, next);
-    candidate_pairs.insert(canonical_pair);
-    const bool same_operation = terminal.statement == initial.statement;
-    const bool ordered = !same_operation && collector.TransitivelyOrdered(terminal, initial);
-    const std::vector<RecognizedDependencyNode> ordering_witness =
-        ordered ? collector.TransitiveOrderingWitness(terminal, initial)
-                : std::vector<RecognizedDependencyNode>{};
-    if (ordered) ordered_pairs.insert(canonical_pair);
-    const RecognizedReuseHazard hazard = terminal.route.resource == initial.route.resource
-                                             ? RecognizedReuseHazard::SameResource
-                                             : RecognizedReuseHazard::CrossResource;
-    const RecognizedReuseDependence dependence = terminal.access_kind == AccessKind::Read
-                                                     ? RecognizedReuseDependence::WriteAfterRead
-                                                     : RecognizedReuseDependence::WriteAfterWrite;
-    const bool nested_control = !terminal.branch_path.empty() || !initial.branch_path.empty() ||
-                                !terminal.loop_stack.empty() || !initial.loop_stack.empty();
-    const bool partial_access = !terminal.full_allocation || !initial.full_allocation;
-    const bool incomplete_access_set =
-        summaries[prior].unsupported_accesses != 0 || summaries[next].unsupported_accesses != 0;
-    result.candidates.push_back({canonical_pair.first,
-                                 canonical_pair.second,
-                                 prior,
-                                 next,
-                                 hazard,
-                                 dependence,
-                                 terminal.route,
-                                 initial.route,
-                                 terminal.memory_space,
-                                 initial.memory_space,
-                                 terminal.global_order,
-                                 initial.global_order,
-                                 terminal.byte_offset,
-                                 terminal.byte_size,
-                                 initial.byte_offset,
-                                 initial.byte_size,
-                                 loop_carried ? crossed_loop->first : std::numeric_limits<size_t>::max(),
-                                 ordered,
-                                 ordering_witness,
-                                 same_operation,
-                                 partial_access,
-                                 incomplete_access_set,
-                                 conservative_initial_anchors[next],
-                                 nested_control,
-                                 !terminal.loop_stack.empty() || !initial.loop_stack.empty(),
-                                 loop_carried});
+  std::vector<RecognizedReusePenalty> penalties;
+  std::unordered_set<PairKey, PairKeyHash> recognized;
+  auto emit = [&](size_t first, size_t second) {
+    if (first == second) return;
+    const PairKey pair = NormalizePair(first, second);
+    if (separated.count(pair) != 0 || !recognized.insert(pair).second) return;
+    penalties.push_back({pair.first, pair.second, 1});
   };
 
-  auto consider = [&](size_t first, size_t second, bool require_adjacent) {
-    if (first == second || separated.count(std::minmax(first, second)) != 0) return;
-    const LifetimeInterval& first_lifetime = allocation_plan.intervals[first];
-    const LifetimeInterval& second_lifetime = allocation_plan.intervals[second];
-    if (first_lifetime.memory_space != second_lifetime.memory_space ||
-        !LifetimesPermitReuse(first_lifetime, second_lifetime)) {
-      return;
-    }
+  std::map<MemorySpace, std::vector<size_t>> intervals_by_space;
+  for (size_t index = 0; index < allocation_plan.intervals.size(); ++index) {
+    intervals_by_space[allocation_plan.intervals[index].memory_space].push_back(index);
+  }
 
-    size_t earlier = first;
-    size_t later = second;
-    if (second_lifetime.last_use_point <= first_lifetime.def_point) std::swap(earlier, later);
-    for (const AccessEndpoint& terminal : terminal_frontiers[earlier]) {
-      for (const AccessEndpoint& initial : initial_write_frontiers[later]) {
-        emit_handoff(earlier, later, terminal, initial, require_adjacent, std::nullopt);
+  for (auto& [space, indices] : intervals_by_space) {
+    static_cast<void>(space);
+    std::vector<size_t> by_definition = indices;
+    std::vector<size_t> by_end = std::move(indices);
+    const auto def_key = [&](size_t index) {
+      return std::pair{allocation_plan.intervals[index].def_point, index};
+    };
+    const auto end_key = [&](size_t index) {
+      return std::pair{allocation_plan.intervals[index].last_use_point, index};
+    };
+    std::sort(by_definition.begin(), by_definition.end(),
+              [&](size_t lhs, size_t rhs) { return def_key(lhs) < def_key(rhs); });
+    std::sort(by_end.begin(), by_end.end(),
+              [&](size_t lhs, size_t rhs) { return end_key(lhs) < end_key(rhs); });
+
+    size_t end_cursor = 0;
+    std::map<StructuredPath, ResourceBuckets> buckets_by_path;
+    for (size_t current : by_definition) {
+      const int current_definition = allocation_plan.intervals[current].def_point;
+      while (end_cursor < by_end.size() &&
+             allocation_plan.intervals[by_end[end_cursor]].last_use_point <= current_definition) {
+        const size_t reusable = by_end[end_cursor++];
+        if (!compact_summaries[reusable]) continue;
+        const CompactAccessSummary& summary = *compact_summaries[reusable];
+        ResourceBuckets& buckets = buckets_by_path[summary.path];
+        buckets.initial[ResourceIndex(summary.initial_write.resource)].push_back(reusable);
+        for (size_t resource = 0; resource < kResourceCount; ++resource) {
+          if (summary.terminal_by_resource[resource]) buckets.terminal[resource].push_back(reusable);
+        }
       }
-    }
 
-    if (require_adjacent) return;
-    // A shared address inside a repeated loop also creates the cyclic handoff
-    // from the later value in iteration k to the earlier value in iteration
-    // k+1. This is the scratchpad analogue of SIRA's distance-one reuse edge.
-    for (const AccessEndpoint& terminal : terminal_frontiers[later]) {
-      for (const AccessEndpoint& initial : initial_write_frontiers[earlier]) {
-        for (const auto& context : SharedLoopContexts(terminal, initial)) {
-          emit_handoff(later, earlier, terminal, initial, false, context);
+      if (!compact_summaries[current]) continue;
+      const CompactAccessSummary& current_summary = *compact_summaries[current];
+      const auto path_buckets = buckets_by_path.find(current_summary.path);
+      if (path_buckets == buckets_by_path.end()) continue;
+      const ResourceBuckets& buckets = path_buckets->second;
+
+      const size_t initial_resource = ResourceIndex(current_summary.initial_write.resource);
+      for (size_t terminal_resource = 0; terminal_resource < kResourceCount; ++terminal_resource) {
+        if (terminal_resource == initial_resource) continue;
+        for (size_t prior : buckets.terminal[terminal_resource]) {
+          if (prior == current || !compact_summaries[prior]) continue;
+          const AccessEndpoint& terminal = *compact_summaries[prior]->terminal_by_resource[terminal_resource];
+          if (terminal.global_order <= current_summary.initial_write.global_order) emit(prior, current);
+        }
+      }
+
+      // A later value in iteration k can hand storage back to an earlier value
+      // in iteration k+1. Exact structured-path equality is a conservative,
+      // deterministic proof that both endpoints cross the same loop backedge.
+      if (!current_summary.path.in_loop) continue;
+      for (size_t terminal_resource = 0; terminal_resource < kResourceCount; ++terminal_resource) {
+        const std::optional<AccessEndpoint>& terminal =
+            current_summary.terminal_by_resource[terminal_resource];
+        if (!terminal) continue;
+        for (size_t prior_initial_resource = 0; prior_initial_resource < kResourceCount;
+             ++prior_initial_resource) {
+          if (terminal_resource == prior_initial_resource) continue;
+          for (size_t prior : buckets.initial[prior_initial_resource]) {
+            if (prior == current || !compact_summaries[prior]) continue;
+            const AccessEndpoint& initial = compact_summaries[prior]->initial_write;
+            if (terminal->global_order > initial.global_order) emit(prior, current);
+          }
         }
       }
     }
-  };
-
-  INTERNAL_CHECK(recognizer == DsaReusePenaltyRecognizer::Quadratic)
-      << "Internal error: unrecognized DSA reuse-penalty recognizer";
-  // Explicitly approved research mode: compare all allocation pairs. This is
-  // intentionally not the default compiler path.
-  for (size_t first = 0; first < summaries.size(); ++first) {
-    for (size_t second = first + 1; second < summaries.size(); ++second) {
-      consider(first, second, false);
-    }
   }
-
-  result.candidate_pairs = candidate_pairs.size();
-  result.already_ordered_pairs = ordered_pairs.size();
-
-  std::sort(result.candidates.begin(), result.candidates.end(),
-            [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
-              return std::tie(lhs.first_interval, lhs.second_interval, lhs.prior_interval, lhs.next_interval,
-                              lhs.prior_route.source, lhs.prior_route.destination, lhs.prior_route.resource,
-                              lhs.next_route.source, lhs.next_route.destination, lhs.next_route.resource,
-                              lhs.prior_memory_space, lhs.next_memory_space, lhs.dependence,
-                              lhs.ordered_by_logical_dag, lhs.prior_access_order, lhs.next_access_order,
-                              lhs.prior_byte_offset, lhs.prior_byte_size, lhs.next_byte_offset,
-                              lhs.next_byte_size, lhs.loop_id, lhs.requires_alias_contract,
-                              lhs.partial_access, lhs.incomplete_access_set, lhs.conservative_initial_anchor,
-                              lhs.nested_control, lhs.in_loop, lhs.loop_carried) <
-                     std::tie(rhs.first_interval, rhs.second_interval, rhs.prior_interval, rhs.next_interval,
-                              rhs.prior_route.source, rhs.prior_route.destination, rhs.prior_route.resource,
-                              rhs.next_route.source, rhs.next_route.destination, rhs.next_route.resource,
-                              rhs.prior_memory_space, rhs.next_memory_space, rhs.dependence,
-                              rhs.ordered_by_logical_dag, rhs.prior_access_order, rhs.next_access_order,
-                              rhs.prior_byte_offset, rhs.prior_byte_size, rhs.next_byte_offset,
-                              rhs.next_byte_size, rhs.loop_id, rhs.requires_alias_contract,
-                              rhs.partial_access, rhs.incomplete_access_set, rhs.conservative_initial_anchor,
-                              rhs.nested_control, rhs.in_loop, rhs.loop_carried);
-            });
-  result.candidates.erase(
-      std::unique(
-          result.candidates.begin(), result.candidates.end(),
-          [](const RecognizedReuseCandidate& lhs, const RecognizedReuseCandidate& rhs) {
-            return std::tie(lhs.first_interval, lhs.second_interval, lhs.prior_interval, lhs.next_interval,
-                            lhs.prior_route.source, lhs.prior_route.destination, lhs.prior_route.resource,
-                            lhs.next_route.source, lhs.next_route.destination, lhs.next_route.resource,
-                            lhs.prior_memory_space, lhs.next_memory_space, lhs.dependence,
-                            lhs.ordered_by_logical_dag, lhs.prior_access_order, lhs.next_access_order,
-                            lhs.prior_byte_offset, lhs.prior_byte_size, lhs.next_byte_offset,
-                            lhs.next_byte_size, lhs.loop_id, lhs.requires_alias_contract, lhs.partial_access,
-                            lhs.incomplete_access_set, lhs.conservative_initial_anchor, lhs.nested_control,
-                            lhs.in_loop, lhs.loop_carried) ==
-                   std::tie(rhs.first_interval, rhs.second_interval, rhs.prior_interval, rhs.next_interval,
-                            rhs.prior_route.source, rhs.prior_route.destination, rhs.prior_route.resource,
-                            rhs.next_route.source, rhs.next_route.destination, rhs.next_route.resource,
-                            rhs.prior_memory_space, rhs.next_memory_space, rhs.dependence,
-                            rhs.ordered_by_logical_dag, rhs.prior_access_order, rhs.next_access_order,
-                            rhs.prior_byte_offset, rhs.prior_byte_size, rhs.next_byte_offset,
-                            rhs.next_byte_size, rhs.loop_id, rhs.requires_alias_contract, rhs.partial_access,
-                            rhs.incomplete_access_set, rhs.conservative_initial_anchor, rhs.nested_control,
-                            rhs.in_loop, rhs.loop_carried);
-          }),
-      result.candidates.end());
-  for (const RecognizedReuseCandidate& candidate : result.candidates) {
-    if (candidate.hazard == RecognizedReuseHazard::CrossResource) {
-      ++result.cross_resource_candidates;
-    } else {
-      ++result.same_resource_candidates;
-    }
-    if (candidate.dependence == RecognizedReuseDependence::WriteAfterRead) {
-      ++result.write_after_read_candidates;
-    } else {
-      ++result.write_after_write_candidates;
-    }
-    if (candidate.ordered_by_logical_dag) ++result.ordered_evidence_candidates;
-    if (candidate.requires_alias_contract) ++result.alias_contract_candidates;
-    if (candidate.partial_access) ++result.partial_access_candidates;
-    if (candidate.incomplete_access_set) ++result.incomplete_access_candidates;
-    if (candidate.conservative_initial_anchor) {
-      ++result.conservative_initial_anchor_candidates;
-    }
-    if (candidate.nested_control) ++result.nested_control_candidates;
-    if (candidate.in_loop) ++result.in_loop_candidates;
-    if (candidate.loop_carried) ++result.loop_carried_candidates;
-  }
-  return result;
-}
-
-void ConstructExperimentalPairEdges(ReusePenaltyRecognition* recognition) {
-  if (recognition == nullptr) return;
-  recognition->edges.clear();
-  std::set<std::pair<size_t, size_t>> promoted;
-  for (const RecognizedReuseCandidate& candidate : recognition->candidates) {
-    if (candidate.hazard != RecognizedReuseHazard::CrossResource || candidate.requires_alias_contract ||
-        candidate.partial_access || candidate.incomplete_access_set ||
-        candidate.conservative_initial_anchor) {
-      continue;
-    }
-    if (!promoted.emplace(candidate.first_interval, candidate.second_interval).second) continue;
-    recognition->edges.push_back(
-        {candidate.first_interval, candidate.second_interval, candidate.hazard, candidate.nested_control});
-  }
-}
-
-void ApplyExperimentalUnitPenaltyWeights(ReusePenaltyRecognition* recognition) {
-  if (recognition == nullptr) return;
-  recognition->penalties.clear();
-  recognition->penalties.reserve(recognition->edges.size());
-  for (const RecognizedReuseEdge& edge : recognition->edges) {
-    recognition->penalties.push_back({edge.first_interval, edge.second_interval, 1, edge.hazard});
-  }
+  return penalties;
 }
 
 }  // namespace dsa_adapter

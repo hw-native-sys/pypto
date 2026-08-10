@@ -15,12 +15,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto {
 namespace ir {
@@ -45,6 +48,32 @@ struct LifetimeInterval {
   /// alias classes without depending on IR pointer identity.
   std::vector<std::string> alias_members;
 };
+
+/**
+ * @brief Shared result of allocation-lifetime analysis.
+ */
+struct LifetimeAnalysisResult {
+  std::vector<LifetimeInterval> lifetimes;
+  std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
+  std::map<const Var*, std::set<int>> phi_family_ids;
+  std::map<const Var*, std::pair<int, int>> var_liveness;
+  std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>> pipeline_membership;
+  std::set<const Var*> pipeline_load_tiles;
+};
+
+/**
+ * @brief Analyze conservative allocation lifetimes and alias families.
+ */
+[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body);
+
+/**
+ * @brief Analyze allocation lifetimes, including on-chip Tile parameters.
+ *
+ * Function parameters are live on entry and have no defining AssignStmt in the
+ * body. Function-wide allocation planners must use this overload so those
+ * allocation identities participate in placement and writeback.
+ */
+[[nodiscard]] LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func);
 
 enum class AllocationSeparationReason : uint8_t {
   Generic,

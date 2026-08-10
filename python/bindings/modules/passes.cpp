@@ -163,7 +163,9 @@ void BindPass(nb::module_& m) {
       .value("PYPTO", MemoryPlanner::PyPTO,
              "PyPTO's AllocateMemoryAddr bakes physical addresses (ptoas --pto-level=level3)")
       .value("DSA", MemoryPlanner::Dsa,
-             "Standalone DSA solver jointly reuses and places unmerged PyPTO buffers (level3)")
+             "External research DSA solver with export and replay controls (level3)")
+      .value("DSA_RP", MemoryPlanner::DsaRP,
+             "In-tree reuse-penalty planner using the canonical greedy solver (level3)")
       .value("PTOAS", MemoryPlanner::PtoAS,
              "Skip pypto allocation passes; ptoas PlanMemory allocates (--pto-level=level2)");
 

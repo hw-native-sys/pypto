@@ -107,7 +107,8 @@ def _validate_pass_context_conflicts(
         )
     if dsa_reuse_penalty_recognizer is not None and outer is not None:
         raise RuntimeError(
-            f"{operation}() was called with dsa_reuse_penalty_recognizer while a PassContext is already active. "
+            f"{operation}() was called with dsa_reuse_penalty_recognizer while a PassContext is already "
+            "active. "
             "Set the recognizer on the existing PassContext instead."
         )
     if dsa_reference_placement is not None and outer is not None:
@@ -256,10 +257,11 @@ def _run_pass_pipeline(  # noqa: PLR0913
             "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
             "resolution are deferred to ptoas — verify on-device."
         )
-    elif mplan == _passes.MemoryPlanner.DSA:
+    elif mplan in (_passes.MemoryPlanner.DSA, _passes.MemoryPlanner.DSA_RP):
         logger.info(
-            "memory_planner=DSA: skipping opportunistic MemoryReuse; the standalone solver "
-            "jointly chooses reuse and offsets, then PyPTO validates and writes them back."
+            "memory_planner=%s: skipping opportunistic MemoryReuse; the selected DSA planner "
+            "jointly chooses reuse and offsets, then PyPTO validates and writes them back.",
+            mplan.name,
         )
 
     prof = get_active_profiler()

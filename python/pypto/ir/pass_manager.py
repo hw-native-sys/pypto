@@ -324,6 +324,7 @@ class PassManager:
         # see the unmerged allocation identities, so only MemoryReuse is skipped.
         skipped_memory_passes = {
             passes.MemoryPlanner.PTOAS: {"MemoryReuse", "AllocateMemoryAddr"},
+            passes.MemoryPlanner.DSA_RP: {"MemoryReuse"},
             passes.MemoryPlanner.DSA: {"MemoryReuse"},
         }.get(self._construction_planner, set())
 

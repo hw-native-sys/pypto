@@ -215,6 +215,12 @@ def _resolve_case_memory_planner(
     return session_memory_planner
 
 
+def _optional_case_value(test_case: PTOTestCase, getter_name: str) -> Any:
+    """Read a research-only test-case setting without breaking legacy mocks."""
+    getter = getattr(test_case, getter_name, None)
+    return getter() if getter is not None else None
+
+
 def _default_work_dir(test_name: str) -> Path:
     """Return the default output path for a saved test: build_output/{testName}_{timestamp}."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -316,7 +322,8 @@ def _compile_for_cache(
     work_dir: Path,
     dump_passes: bool,
     analyze_auto_scopes_for_deps: bool,
-    codegen_only: bool,
+    session_memory_planner: MemoryPlanner | None = None,
+    codegen_only: bool = False,
 ) -> None:
     """Compile one test case into *work_dir* (called from thread pool).
 
@@ -342,12 +349,12 @@ def _compile_for_cache(
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
         memory_planner=_resolve_case_memory_planner(test_case, session_memory_planner),
         enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
-        dsa_export_dir=test_case.get_dsa_export_dir(),
-        dsa_solution_dir=test_case.get_dsa_solution_dir(),
-        dsa_reuse_penalty_recognizer=test_case.get_dsa_reuse_penalty_recognizer(),
-        dsa_reference_placement=test_case.get_dsa_reference_placement(),
-        dsa_reference_target=test_case.get_dsa_reference_target(),
-        ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
+        dsa_export_dir=_optional_case_value(test_case, "get_dsa_export_dir"),
+        dsa_solution_dir=_optional_case_value(test_case, "get_dsa_solution_dir"),
+        dsa_reuse_penalty_recognizer=_optional_case_value(test_case, "get_dsa_reuse_penalty_recognizer"),
+        dsa_reference_placement=_optional_case_value(test_case, "get_dsa_reference_placement"),
+        dsa_reference_target=_optional_case_value(test_case, "get_dsa_reference_target"),
+        ptoas_sync_summary_dir=_optional_case_value(test_case, "get_ptoas_sync_summary_dir"),
         skip_ptoas=codegen_only,
     )
     # External kernels are referenced in the manifest at their original path
@@ -409,6 +416,7 @@ def _fused_compile_task(
             work_dir,
             dump_passes,
             analyze_auto_scopes_for_deps,
+            session_memory_planner,
             bool(_pipeline_ctx.get("codegen_only")),
         )
         # Codegen-only runs skip assembly: the .so is never loaded by the
@@ -1017,7 +1025,6 @@ def start_pipeline(  # noqa: PLR0913
     task_queue_timeout: int = 1800,
     task_submit_device: str = "auto",
     execute_batch_size: int = 64,
-    memory_planner: MemoryPlanner | None = None,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
@@ -1401,12 +1408,14 @@ class TestRunner:
                 analyze_auto_scopes_for_deps=self.config.analyze_auto_scopes_for_deps,
                 memory_planner=_resolve_case_memory_planner(test_case, self.config.memory_planner),
                 enable_pypto_l0c_double_buffer=test_case.get_enable_pypto_l0c_double_buffer(),
-                dsa_export_dir=test_case.get_dsa_export_dir(),
-                dsa_solution_dir=test_case.get_dsa_solution_dir(),
-                dsa_reuse_penalty_recognizer=test_case.get_dsa_reuse_penalty_recognizer(),
-                dsa_reference_placement=test_case.get_dsa_reference_placement(),
-                dsa_reference_target=test_case.get_dsa_reference_target(),
-                ptoas_sync_summary_dir=test_case.get_ptoas_sync_summary_dir(),
+                dsa_export_dir=_optional_case_value(test_case, "get_dsa_export_dir"),
+                dsa_solution_dir=_optional_case_value(test_case, "get_dsa_solution_dir"),
+                dsa_reuse_penalty_recognizer=_optional_case_value(
+                    test_case, "get_dsa_reuse_penalty_recognizer"
+                ),
+                dsa_reference_placement=_optional_case_value(test_case, "get_dsa_reference_placement"),
+                dsa_reference_target=_optional_case_value(test_case, "get_dsa_reference_target"),
+                ptoas_sync_summary_dir=_optional_case_value(test_case, "get_ptoas_sync_summary_dir"),
                 skip_ptoas=self.config.codegen_only,
             )
 

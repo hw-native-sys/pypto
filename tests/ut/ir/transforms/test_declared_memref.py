@@ -22,8 +22,6 @@ The feature spans three passes, so the tests are grouped by what they pin down:
   * ``TestRejects``      — declarations the compiler must refuse
 """
 
-import re
-
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -73,16 +71,14 @@ def _const_offset(memref: ir.MemRef) -> int:
 def _tile_byte_ranges(program: ir.Program) -> list[tuple[str, str, int, int]]:
     """(tile name, base name, start, end) for every addressed on-chip tile MemRef.
 
-    Read off the printed program because after AllocateMemoryAddr the address IS
-    the MemRef's byte offset, and the printed form names the base it belongs to.
+    After AllocateMemoryAddr the address is the MemRef's byte offset. Inspect the
+    IR directly so slot metadata in the printed form cannot hide declared tiles.
     """
-    pattern = re.compile(r"(\w+): pl\.Tile\[.*?pl\.MemRef\((\w+), pl\.const\((\d+), pl\.INT64\), (\d+)\)")
     ranges = []
-    for line in program.as_python().splitlines():
-        m = pattern.search(line)
-        if m:
-            offset, size = int(m.group(3)), int(m.group(4))
-            ranges.append((m.group(1), m.group(2), offset, offset + size))
+    for name, memref in _tile_memrefs(program).items():
+        if isinstance(memref.byte_offset_, ir.ConstInt):
+            offset = memref.byte_offset_.value
+            ranges.append((name, memref.base_.name_hint, offset, offset + memref.size_))
     return ranges
 
 

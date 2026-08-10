@@ -231,9 +231,10 @@ class DiagnosticInstrument : public PassInstrument {
  * ptoas PlanMemory pass allocate at `--pto-level=level2`.
  */
 enum class MemoryPlanner {
-  PyPTO,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
-  PtoAS,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
-  Dsa,    ///< Standalone DSA solver allocates unmerged PyPTO buffers (level3)
+  PyPTO = 0,  ///< PyPTO allocates addresses (ptoas --pto-level=level3)
+  PtoAS = 1,  ///< ptoas PlanMemory allocates (ptoas --pto-level=level2)
+  DsaRP = 2,  ///< In-tree reuse-penalty planner with the canonical greedy solver.
+  Dsa = 3,    ///< External research planner with export, replay, and solver controls.
 };
 
 /**

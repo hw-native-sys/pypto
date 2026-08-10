@@ -998,8 +998,9 @@ def _get_ptoas_flags(
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
-    ``MemoryPlanner.PYPTO`` and ``MemoryPlanner.DSA`` bake physical addresses
-    in PyPTO and trust them (``--pto-level=level3``);
+    ``MemoryPlanner.PYPTO``, ``MemoryPlanner.DSA_RP``, and
+    ``MemoryPlanner.DSA`` bake physical addresses in PyPTO and trust them
+    (``--pto-level=level3``);
     ``MemoryPlanner.PTOAS`` emits no addresses and lets ptoas PlanMemory
     allocate (``--pto-level=level2``).
     """
@@ -1091,7 +1092,12 @@ def _emit_single_function_output(
         result_files[kernel_rel] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner, ptoas_sync_summary_dir)
+    if ptoas_sync_summary_dir is None:
+        ptoas_cpp = _compile_pto_module(pto_code, func.name, output_dir, memory_planner)
+    else:
+        ptoas_cpp = _compile_pto_module(
+            pto_code, func.name, output_dir, memory_planner, ptoas_sync_summary_dir
+        )
     result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
@@ -1110,7 +1116,12 @@ def _emit_group_output(
         result_files[os.path.join("kernels", f"{group_name}.pto")] = pto_code
         return
 
-    ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner, ptoas_sync_summary_dir)
+    if ptoas_sync_summary_dir is None:
+        ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir, memory_planner)
+    else:
+        ptoas_cpp = _compile_pto_module(
+            pto_code, group_name, output_dir, memory_planner, ptoas_sync_summary_dir
+        )
     group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(

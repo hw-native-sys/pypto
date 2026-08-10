@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
@@ -3183,28 +3184,26 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
     new_body = applier.VisitStmt(new_body);
   }
 
-  // Under memory_planner=PtoAS or Dsa the whole MemoryReuse pass is skipped, and
-  // with it YieldFixupMutator (its Step 4). That mutator is not an optimization: when a
-  // loop yields a value living in a different buffer than its iter_arg/return_var,
-  // it inserts the `tile.move` that writes the result back into the carry. Without
-  // it the carry is never updated and the loop silently becomes a no-op — the
-  // `[N, 1]` col-vector carry of an online softmax is the shape that hits this,
-  // because its branch producer runs on a `[1, N]` view in its own buffer.
-  //
-  // Run it here so both external planners reconcile carries. Under PyPTO it stays
-  // where it is: Step 4 must run *after* the reuse decisions, which can themselves
-  // create fresh mismatches.
-  //
-  // PTOAS needs only the ForStmt half: its addr-less codegen re-points a
-  // branch-local producer at the if-phi handle and copies in whatever it declines
-  // to re-point (#1956/#1985). DSA emits explicit addresses, so that codegen path
-  // is disabled; DSA must materialize both IfStmt and ForStmt fixups in the IR
-  // before lifetime export and placement.
+  // Alternative planners skip MemoryReuse, including correctness normalizations
+  // that normally run after opportunistic reuse. Explicit-address DSA planners
+  // must coalesce peeled accumulator phis, reconcile If/For yields, and repair
+  // identity copies before lifetime analysis. PTOAS needs only ForStmt fixup
+  // because its address-less codegen handles branch-local producer retargeting.
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr &&
-      (ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
-    const bool fixup_if_stmts = ctx->GetMemoryPlanner() == MemoryPlanner::Dsa;
-    YieldFixupMutator yield_fixup(fixup_if_stmts);
+      (ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP || ctx->GetMemoryPlanner() == MemoryPlanner::Dsa)) {
+    TopDownRetargeter acc_coalescer;
+    auto acc_rewrites = acc_coalescer.CoalesceAccumulatorIfPhis(new_body);
+    if (!acc_rewrites.empty()) {
+      RetypeApplier applier(std::move(acc_rewrites));
+      new_body = applier.VisitStmt(new_body);
+    }
+
+    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
+    new_body = yield_fixup.VisitStmt(new_body);
+    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+    YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/false);
     new_body = yield_fixup.VisitStmt(new_body);
   }
 
@@ -3239,18 +3238,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
-  HazardInputs hazard;
-  if (NeedsLoadTpopHazardGuard(func)) {
-    HazardInputCollector collector;
-    collector.VisitStmt(new_body);
-    hazard = collector.Take();
-  }
-
-  // Per-operand no-alias map (e.g. tile.sel's mask/tmp must not share the
-  // output's buffer). Op-semantic, not backend-gated, so always collected.
-  ForbidAliasCollector forbid_collector(analysis_result.var_sharing_groups);
-  forbid_collector.VisitStmt(new_body);
-  ForbidAliasMap forbid_alias = forbid_collector.TakeForbidden();
+  const AllocationConstraintAnalysis constraint_analysis =
+      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+  const HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
+  const ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
   // Per-space reserved end (the SpaceFootprint reserved_start for the exact fit check). Only meaningful
   // with a configured backend; empty otherwise ⇒ reserved_start defaults to 0.
@@ -3270,9 +3261,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // that shape must not fail open: an empty `pinned_bases` silently disables both
   // the packer isolation and the co-liveness check below, handing the author back
   // exactly the coalescing the binding was written to prevent.
-  const std::set<const Var*> pinned_bases = CollectPinnedAllocBases(new_body, func->span_, "MemoryReuse");
-
-  ValidateDeclaredAllocs(new_body, pinned_bases, analysis_result.var_liveness);
+  const std::set<const Var*>& pinned_bases = constraint_analysis.declared_allocation_bases;
 
   std::vector<Diagnostic> hints;
   auto reuse_map = IdentifyReuseOpportunities(
@@ -3341,12 +3330,50 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
 
 }  // namespace
 
+AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& func,
+                                                          const LifetimeAnalysisResult& lifetimes,
+                                                          const char* consumer) {
+  AllocationConstraintAnalysis result;
+  result.declared_allocation_sizes = CollectPinnedAllocSizes(func->body_, func->span_, consumer);
+  for (const auto& [base, size] : result.declared_allocation_sizes) {
+    static_cast<void>(size);
+    result.declared_allocation_bases.insert(base);
+  }
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+
+  for (const LifetimeInterval& interval : lifetimes.lifetimes) {
+    if (const auto layout_class = GetVecNzLayoutClass(interval.variable)) {
+      result.vec_nz_layout_class.emplace(interval.variable.get(), *layout_class);
+    }
+  }
+
+  result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
+  if (result.needs_load_tpop_hazard_guard) {
+    HazardInputCollector collector;
+    collector.VisitStmt(func->body_);
+    result.target_hazard_inputs = collector.Take();
+  }
+
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
+  forbid_collector.VisitStmt(func->body_);
+  result.forbid_alias = forbid_collector.TakeForbidden();
+  return result;
+}
+
+LifetimeAnalysisResult AnalyzeAllocationLifetimes(const StmtPtr& func_body) {
+  return AnalyzeAllocationLifetimesImpl(func_body);
+}
+
+LifetimeAnalysisResult AnalyzeAllocationLifetimes(const FunctionPtr& func) {
+  INTERNAL_CHECK(func != nullptr) << "Cannot analyze allocation lifetimes for a null function";
+  return AnalyzeAllocationLifetimesImpl(func->body_, func->params_);
+}
+
 // Shared entry point (see utils/lifetime_analysis.h): the DSA adapter reuses the
 // exact per-allocation intervals + pipeline-clone separations this pass computes,
-// so both plan from identical liveness. ComputeLifetimes has internal linkage but
-// is visible in this TU; PipelineMembershipsConflict comes from utils/attrs.h.
+// so both plan from identical liveness.
 AllocationPlan ComputeAllocationPlan(const FunctionPtr& func) {
-  auto analysis = ComputeLifetimes(func->body_);
+  auto analysis = AnalyzeAllocationLifetimes(func);
   const auto pinned_allocations = CollectPinnedAllocSizes(func->body_, func->span_, "DSA");
   std::set<const Var*> pinned_bases;
   for (const auto& [base, size] : pinned_allocations) {

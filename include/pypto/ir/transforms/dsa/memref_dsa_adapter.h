@@ -13,24 +13,22 @@
 #define PYPTO_IR_TRANSFORMS_DSA_MEMREF_DSA_ADAPTER_H_
 
 #include <cstdint>
-#include <map>
 #include <set>
-#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "dsa/model.h"
-#include "dsa/solver.h"
-#include "dsa/structured_problem.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
-#include "pypto/ir/transforms/pass_context.h"
-#include "pypto/ir/transforms/utils/lifetime_analysis.h"
+#include "pypto/ir/transforms/dsa/allocation_plan.h"
+#include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
 
 namespace pypto {
+namespace backend {
+class Backend;
+}
 namespace ir {
 
 class MemoryAllocatorPolicy;
@@ -40,87 +38,37 @@ namespace dsa_adapter {
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 
 /**
- * @brief A standalone structured problem plus its transient IR writeback map.
+ * @brief In-memory DSA-RP problem and transient writeback information.
  *
- * ``document`` is IR-free and safe to serialize into the benchmark corpus.
- * ``buffer_id_by_base`` remains inside PyPTO: it maps each allocation identity
- * to the standalone buffer whose placement must be written back.
+ * No schema or filesystem representation is involved. ``pipeline_pairs`` are
+ * exactly the hard separations that become legal if pipeline intent must be
+ * relaxed; target and semantic separations never appear in this list.
  */
-struct ExportedProblem {
-  ::dsa::StructuredProblemDocument document;
-  std::unordered_map<const Var*, ::dsa::BufferId> buffer_id_by_base;
+struct PreparedProblem {
+  dsa::DsaProblem strict_problem;
+  std::unordered_map<const Var*, dsa::BufferId> buffer_id_by_base;
   std::set<const Var*> declared_allocation_bases;
+  std::vector<dsa::Separation> pipeline_pairs;
 };
 
 /**
- * @brief Result of capability matching, solving, and independent validation.
+ * @brief Translate PyPTO allocation facts into the narrow in-tree DSA-RP model.
  */
-struct SolverRun {
-  ::dsa::SolverCompatibility compatibility;
-  ::dsa::DsaResult result;
-  std::vector<std::string> problem_errors;
-  std::vector<std::string> solution_errors;
-};
-
-/**
- * @brief Convert unmerged PyPTO allocation identities to schema-v1 structured DSA.
- *
- * Each MemRef ``base_`` becomes one fixed-pool buffer. Semantics-required aliases
- * remain one identity with a conservative allocation-level lifetime hull;
- * per-member SSA gaps are not physical dead-time proofs. Opportunistic reuse
- * remains entirely for the standalone solver. PyPTO statement points are
- * expanded into read/write sub-points so an input's last read may share an
- * address with an output written by the same statement.
- */
-[[nodiscard]] ExportedProblem BuildStructuredProblem(
+[[nodiscard]] PreparedProblem BuildProblem(
     const FunctionPtr& func, const AllocationPlan& allocation_plan, const MemoryAllocatorPolicy& policy,
     const std::unordered_map<MemorySpace, uint64_t>& reserved_end_by_space,
-    const std::unordered_map<MemorySpace, uint64_t>& pool_caps,
-    DsaReusePenaltyRecognizer reuse_penalty_recognizer = DsaReusePenaltyRecognizer::Disabled);
+    const std::unordered_map<MemorySpace, uint64_t>& pool_caps, const backend::Backend* backend);
 
 /**
- * @brief Write a deterministic ``<function>.dsa.json`` corpus artifact.
- *
- * External-library and filesystem exceptions are translated to PyPTO errors at
- * this boundary. The returned path is the exact file written.
+ * @brief Remove only pipeline-only hard relations and price the newly legal reuse.
  */
-[[nodiscard]] std::string WriteProblemJson(const ExportedProblem& exported, const std::string& directory);
+[[nodiscard]] dsa::DsaProblem RelaxPipelineIntent(const PreparedProblem& prepared);
 
 /**
- * @brief Write the validated placement selected for an exported problem.
- *
- * The solution artifact carries a fingerprint of the complete problem
- * document. A later compilation can therefore reject stale or mismatched
- * placements before any address is written back to PyPTO IR.
- */
-[[nodiscard]] std::string WriteSolutionJson(const ExportedProblem& exported,
-                                            const ::dsa::DsaSolution& solution, const std::string& directory,
-                                            std::map<std::string, std::string> metadata = {});
-
-/**
- * @brief Read the deterministic solution artifact for one function.
- */
-[[nodiscard]] ::dsa::StructuredSolutionDocument ReadSolutionJson(const std::string& instance,
-                                                                 const std::string& directory);
-
-/**
- * @brief Run one standalone solver and independently validate its result.
- */
-[[nodiscard]] SolverRun Solve(const ExportedProblem& exported, const ::dsa::DsaSolver& solver);
-
-/**
- * @brief Run the standalone deterministic baseline and independently validate it.
- */
-[[nodiscard]] SolverRun SolveWithFirstFit(const ExportedProblem& exported);
-
-/**
- * @brief Convert validated standalone placements to fresh PyPTO MemRefs.
- *
- * Every view preserves its relative ``byte_offset_`` within the newly placed
- * allocation base, matching AllocateMemoryAddr's legacy writeback semantics.
+ * @brief Convert validated offsets to fresh MemRefs, preserving view offsets.
  */
 [[nodiscard]] std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
-    const ExportedProblem& exported, const ::dsa::DsaSolution& solution,
+    const PreparedProblem& prepared, const dsa::DsaSolution& solution,
     const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy);
 
 }  // namespace dsa_adapter
