@@ -117,7 +117,11 @@ void BindPass(nb::module_& m) {
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
-             "for TaskId array carries), so orchestration codegen reads the carry lowering");
+             "for TaskId array carries), so orchestration codegen reads the carry lowering")
+      .value("AccToGmStoreValid", IRProperty::AccToGmStoreValid,
+             "Every tile.store draining an Acc-resident tile targets a GM tensor whose dtype the "
+             "backend fix-pipe can narrow into (INT32/FP32/FP16[/BF16]); INT8/INT16 must route "
+             "through a Vec tile instead");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

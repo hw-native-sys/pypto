@@ -68,6 +68,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::IterArgCarryClassified, CreateIterArgCarryClassifiedPropertyVerifier);
   Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
   Register(IRProperty::TileTypeCoherence, CreateTileTypeCoherencePropertyVerifier);
+  Register(IRProperty::AccToGmStoreValid, CreateAccToGmStoreValidPropertyVerifier);
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);

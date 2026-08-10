@@ -51,6 +51,13 @@ class Ascend910BHandler : public BackendHandler {
   // A2/A3 store pipe supports bf16 atomic-add (pto-isa set_atomic_bf16).
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return true; }
 
+  // A2/A3 fix-pipe Acc->GM destination whitelist (pto-isa a2a3 CheckAcc2gm,
+  // non-quant branch; ptoas rejects anything else at pto.tstore verification).
+  [[nodiscard]] bool SupportsAccToGmDtype(const DataType& dtype) const override {
+    return dtype == DataType::INT32 || dtype == DataType::FP32 || dtype == DataType::FP16 ||
+           dtype == DataType::BF16;
+  }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 

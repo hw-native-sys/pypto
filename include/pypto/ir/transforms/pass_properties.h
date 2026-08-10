@@ -203,7 +203,7 @@ inline const PassProperties kInferTileMemorySpaceProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
-                 IRProperty::AivSplitValid},
+                 IRProperty::AivSplitValid, IRProperty::AccToGmStoreValid},
     .invalidated = {IRProperty::AivSplitValid}};
 
 // -- Insert MX scale-address binding pass ------------------------------------

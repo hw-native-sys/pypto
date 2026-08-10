@@ -251,6 +251,29 @@ class BackendHandler {
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
 
   /**
+   * @brief Whether the cube fix-pipe may store an Acc-resident tile straight
+   *        into a GM tensor of @p dtype.
+   *
+   * The fix-pipe narrows an accumulator on its way to global memory, but only
+   * into a fixed destination set. pto-isa encodes this as the non-quant
+   * `CheckAcc2gm` whitelist and ptoas as a `pto.tstore` verifier rule:
+   *
+   *   Ascend910B (a2a3): INT32 / FP32 / FP16 / BF16
+   *   Ascend950  (a5)  : INT32 / FP32 / FP16   (no BF16)
+   *
+   * Anything else -- notably INT8/INT16 -- must reach GM either through a Vec
+   * tile (an explicit `pl.cast` narrows in the vector unit, then stores) or via
+   * the quantized fix-pipe path, never a plain Acc->GM store. Legality is
+   * therefore a property of the *tile's memory space*, not of the user-visible
+   * dtypes: the identical DSL program is legal when its matmul result routes
+   * through Vec and illegal when it stays in Acc.
+   *
+   * The two sets above mirror ptoas exactly; keep them in step when the pinned
+   * assembler moves (`toolchain/versions.env`, `runtime/pto_isa.pin`).
+   */
+  [[nodiscard]] virtual bool SupportsAccToGmDtype(const DataType& dtype) const = 0;
+
+  /**
    * @brief Compute the destination tile view for a cross-core transfer.
    *
    * Encapsulates the per-backend rule for how to lay out the bridge tile

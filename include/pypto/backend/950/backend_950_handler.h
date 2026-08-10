@@ -53,6 +53,12 @@ class Ascend950Handler : public BackendHandler {
   // rejects bfloat16_t on the a5 path); require an fp32 accumulator + cast.
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return false; }
 
+  // A5 fix-pipe Acc->GM destination whitelist (pto-isa kirinX90 CheckAcc2gm,
+  // non-quant branch) -- narrower than a2a3: no bf16.
+  [[nodiscard]] bool SupportsAccToGmDtype(const DataType& dtype) const override {
+    return dtype == DataType::INT32 || dtype == DataType::FP32 || dtype == DataType::FP16;
+  }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 
