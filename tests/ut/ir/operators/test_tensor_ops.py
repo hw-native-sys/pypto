@@ -44,6 +44,24 @@ _OP_TENSOR_TRANSPOSE = ir.get_op("tensor.transpose").name
 _OP_TENSOR_WRITE = ir.get_op("tensor.write").name
 
 
+def _tensor_var(name: str, shape: list[int], dtype: DataType = DataType.FP16) -> ir.Var:
+    """Build a Var of TensorType with the given static shape."""
+    span = ir.Span.unknown()
+    dims = [ir.ConstInt(d, DataType.INT32, span) for d in shape]
+    return ir.Var(name, ir.TensorType(dims, dtype), span)
+
+
+def _const_shape(call: ir.Call) -> list[int]:
+    """Return the deduced output shape of a tensor op call, requiring every dim static."""
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    dims = []
+    for dim in result_type.shape:
+        assert isinstance(dim, ir.ConstInt)
+        dims.append(dim.value)
+    return dims
+
+
 def test_tensor_create():
     """Test tensor.create operation."""
     # Create a 2D tensor [4, 8] with FP32
@@ -127,8 +145,63 @@ def test_tensor_matmul_with_transpose():
     call = ir.op.tensor.matmul(lhs, rhs, out_dtype=DataType.FP16, a_trans=True, b_trans=False)
 
     assert isinstance(call, ir.Call)
-    result_type = call.type
-    assert isinstance(result_type, ir.TensorType)
+    assert _const_shape(call) == [4, 4]
+
+
+def test_tensor_matmul_mat_vec_honors_a_trans():
+    """2D x 1D contracts over dim 0 of the lhs when a_trans is set."""
+    # lhs stored [K=128, M=64] with a_trans, rhs [K=128] -> [64]
+    call = ir.op.tensor.matmul(_tensor_var("a", [128, 64]), _tensor_var("b", [128]), a_trans=True)
+
+    assert _const_shape(call) == [64]
+
+
+def test_tensor_matmul_vec_mat_honors_b_trans():
+    """1D x 2D contracts over dim 1 of the rhs when b_trans is set."""
+    # lhs [K=64], rhs stored [N=128, K=64] with b_trans -> [128]
+    call = ir.op.tensor.matmul(_tensor_var("a", [64]), _tensor_var("b", [128, 64]), b_trans=True)
+
+    assert _const_shape(call) == [128]
+
+
+def test_tensor_matmul_mat_vec_a_trans_k_mismatch_fails():
+    """A transposed mat-vec whose K disagrees is rejected, not silently reshaped."""
+    # Real K is lhs dim 0 (128) under a_trans; rhs K is 64.
+    with pytest.raises(ValueError, match="lhs K=128 and rhs K=64"):
+        ir.op.tensor.matmul(_tensor_var("a", [128, 64]), _tensor_var("b", [64]), a_trans=True)
+
+
+def test_tensor_matmul_vec_mat_b_trans_k_mismatch_fails():
+    """A transposed vec-mat whose K disagrees is rejected, not silently reshaped."""
+    # Real K is rhs dim 1 (64) under b_trans; lhs K is 128.
+    with pytest.raises(ValueError, match="lhs K=128 and rhs K=64"):
+        ir.op.tensor.matmul(_tensor_var("a", [128]), _tensor_var("b", [128, 64]), b_trans=True)
+
+
+@pytest.mark.parametrize(
+    "lhs_shape, rhs_shape, kwargs, message",
+    [
+        ([64, 128], [128], {"b_trans": True}, "b_trans does not apply to a 1D rhs"),
+        ([64], [64, 128], {"a_trans": True}, "a_trans does not apply to a 1D lhs"),
+        ([64], [64], {"a_trans": True}, "a_trans does not apply to a 1D lhs"),
+        ([64], [64], {"b_trans": True}, "b_trans does not apply to a 1D rhs"),
+    ],
+)
+def test_tensor_matmul_rejects_transpose_on_1d_operand(lhs_shape, rhs_shape, kwargs, message):
+    """A vector has no axes to swap, so a transpose flag on it is a user error."""
+    with pytest.raises(ValueError, match=message):
+        ir.op.tensor.matmul(_tensor_var("a", lhs_shape), _tensor_var("b", rhs_shape), **kwargs)
+
+
+def test_tensor_matmul_mixed_1d_without_transpose_unchanged():
+    """The untransposed mat-vec / vec-mat / dot-product shapes are unaffected."""
+    mat_vec = ir.op.tensor.matmul(_tensor_var("a", [64, 128]), _tensor_var("b", [128]))
+    vec_mat = ir.op.tensor.matmul(_tensor_var("a", [128]), _tensor_var("b", [128, 64]))
+    dot = ir.op.tensor.matmul(_tensor_var("a", [64]), _tensor_var("b", [64]))
+
+    assert _const_shape(mat_vec) == [64]
+    assert _const_shape(vec_mat) == [64]
+    assert _const_shape(dot) == []
 
 
 def test_tensor_matmul_acc():

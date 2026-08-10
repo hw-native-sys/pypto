@@ -53,6 +53,21 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
   throw ValueError("Missing kwarg: " + key);
 }
 
+namespace {
+
+/// Verify that the two contraction extents agree, when both are statically known.
+/// `context` names the failing form, e.g. "tensor.matmul requires matching inner dimensions".
+void CheckContractionExtents(const ExprPtr& k_lhs, const ExprPtr& k_rhs, const std::string& context) {
+  auto k_lhs_const = As<ConstInt>(k_lhs);
+  auto k_rhs_const = As<ConstInt>(k_rhs);
+  if (k_lhs_const && k_rhs_const) {
+    CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+        << context << ", but got lhs K=" << k_lhs_const->value_ << " and rhs K=" << k_rhs_const->value_;
+  }
+}
+
+}  // namespace
+
 TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tensor.matmul requires exactly 2 Expr arguments (lhs, rhs)
@@ -89,6 +104,16 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
   bool a_trans = GetKwarg<bool>(kwargs, "a_trans", false);
   bool b_trans = GetKwarg<bool>(kwargs, "b_trans", false);
 
+  // A transpose flag names an axis swap on its own operand, which only exists once
+  // that operand is 2D. Honoring it silently on a 1D operand would deduce a shape
+  // the caller never asked for, so reject it with an actionable message instead.
+  CHECK(!a_trans || lhs_shape.size() >= 2)
+      << "tensor.matmul: a_trans does not apply to a 1D lhs (a vector has no axes to swap); "
+      << "drop a_trans or pass a 2D lhs";
+  CHECK(!b_trans || rhs_shape.size() >= 2)
+      << "tensor.matmul: b_trans does not apply to a 1D rhs (a vector has no axes to swap); "
+      << "drop b_trans or pass a 2D rhs";
+
   // Compute output shape based on transpose flags
   // For 2D: lhs [M, K] x rhs [K, N] -> [M, N]
   // With transpose: lhs [K, M]^T x rhs [N, K]^T -> [M, N]
@@ -97,34 +122,23 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 
   if (lhs_shape.size() == 1 && rhs_shape.size() == 1) {
     // Vector x vector (dot product): [K] x [K] -> scalar (0D tensor)
-    auto k_lhs_const = As<ConstInt>(lhs_shape[0]);
-    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
-    if (k_lhs_const && k_rhs_const) {
-      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-          << "tensor.matmul dot product requires matching dimensions, but got lhs K=" << k_lhs_const->value_
-          << " and rhs K=" << k_rhs_const->value_;
-    }
+    CheckContractionExtents(lhs_shape[0], rhs_shape[0],
+                            "tensor.matmul dot product requires matching dimensions");
     output_shape = {};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 1) {
     // Matrix x vector: [M, K] x [K] -> [M]
-    auto k_lhs_const = As<ConstInt>(lhs_shape[1]);
-    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
-    if (k_lhs_const && k_rhs_const) {
-      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
-          << " and rhs K=" << k_rhs_const->value_;
-    }
-    output_shape = {lhs_shape[0]};
+    // With a_trans the lhs is stored [K, M], so the contraction axis is dim 0.
+    ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
+    ExprPtr k_lhs = a_trans ? lhs_shape[0] : lhs_shape[1];
+    CheckContractionExtents(k_lhs, rhs_shape[0], "tensor.matmul requires matching inner dimensions");
+    output_shape = {m_dim};
   } else if (lhs_shape.size() == 1 && rhs_shape.size() == 2) {
     // Vector x matrix: [K] x [K, N] -> [N]
-    auto k_lhs_const = As<ConstInt>(lhs_shape[0]);
-    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
-    if (k_lhs_const && k_rhs_const) {
-      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
-          << " and rhs K=" << k_rhs_const->value_;
-    }
-    output_shape = {rhs_shape[1]};
+    // With b_trans the rhs is stored [N, K], so the contraction axis is dim 1.
+    ExprPtr k_rhs = b_trans ? rhs_shape[1] : rhs_shape[0];
+    ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
+    CheckContractionExtents(lhs_shape[0], k_rhs, "tensor.matmul requires matching inner dimensions");
+    output_shape = {n_dim};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 2) {
     // 2D x 2D matrix multiplication
     ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
@@ -133,13 +147,7 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
 
     // Verify K dimensions match (when statically known)
-    auto k_lhs_const = As<ConstInt>(k_lhs);
-    auto k_rhs_const = As<ConstInt>(k_rhs);
-    if (k_lhs_const && k_rhs_const) {
-      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
-          << " and rhs K=" << k_rhs_const->value_;
-    }
+    CheckContractionExtents(k_lhs, k_rhs, "tensor.matmul requires matching inner dimensions");
 
     output_shape = {m_dim, n_dim};
   } else {
@@ -170,13 +178,8 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     ExprPtr n_dim = b_trans ? rhs_shape[rhs_ndim - 2] : rhs_shape[rhs_ndim - 1];
 
     // Verify K dimensions match (when statically known)
-    auto k_lhs_const = As<ConstInt>(k_lhs);
-    auto k_rhs_const = As<ConstInt>(k_rhs);
-    if (k_lhs_const && k_rhs_const) {
-      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
-          << "tensor.matmul requires matching inner dimensions for batched matmul, but got lhs K="
-          << k_lhs_const->value_ << " and rhs K=" << k_rhs_const->value_;
-    }
+    CheckContractionExtents(k_lhs, k_rhs,
+                            "tensor.matmul requires matching inner dimensions for batched matmul");
 
     output_shape.push_back(m_dim);
     output_shape.push_back(n_dim);

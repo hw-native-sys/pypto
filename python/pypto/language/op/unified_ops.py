@@ -890,6 +890,12 @@ def matmul(
     tile level transposition is a *type* property, so passing any of them with a
     Tile operand raises rather than being dropped.
 
+    A transpose flag swaps its own operand's two trailing axes, so that operand
+    must be at least 2D — ``a_trans`` with a 1D ``lhs`` (or ``b_trans`` with a 1D
+    ``rhs``) raises rather than being ignored. On the mixed mat-vec / vec-mat
+    forms the flag applies to the matrix side: a ``lhs`` stored ``[K, M]`` with
+    ``a_trans=True`` against a ``[K]`` ``rhs`` deduces ``[M]``.
+
     ``out_dtype`` is likewise Tensor-only. ``tile.matmul``'s result dtype is
     fixed by the Cube accumulator (FP32 for float operands, INT32 for int), so
     the Tile path accepts ``out_dtype`` only when it already agrees with that

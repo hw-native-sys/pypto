@@ -644,8 +644,8 @@ def matmul(
         lhs: Left-hand side tensor
         rhs: Right-hand side tensor
         out_dtype: Output data type (optional, inferred if not provided)
-        a_trans: Whether to transpose lhs
-        b_trans: Whether to transpose rhs
+        a_trans: Whether to transpose lhs (requires a 2D+ lhs)
+        b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
 
     Returns:
