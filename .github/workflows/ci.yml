@@ -640,9 +640,9 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-st
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
-          # First job off conda. The npu runners carry the pypto-toolchain
-          # bundle; every other job stays on conda until its runners do, so a
-          # problem here is reverted by this one line.
+          # Python and GCC come from the pypto-toolchain bundle rather than a
+          # per-machine conda env. Per job on purpose: clang-tidy is still on
+          # conda, and a job is reverted by deleting this one line.
           toolchain: bundle
 
       - name: Test system tests (batched shard A — heavy dirs, all but ops/cross_core)
@@ -998,11 +998,6 @@ jobs:
         run: |
           rm -rf "$GITHUB_WORKSPACE/pypto-lib"
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
-
-      - name: Install pypto-lib runner dependencies
-        run: |
-          source activate.sh
-          pip install nanobind torch
 
       # Each model run borrows a card via task-submit for the whole `python ...`
       # invocation (compile + run). task-submit propagates the inner exit code,
