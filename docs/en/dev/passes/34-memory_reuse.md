@@ -17,8 +17,8 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 
 **When to use**: This is the opportunistic reuse stage for
 `MemoryPlanner.PYPTO`. It runs after
-[`MaterializeSemanticAliases`](32-materialize_semantic_aliases.md) and before
-[`AllocateMemoryAddr`](34-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
+[`MaterializeSemanticAliases`](33-materialize_semantic_aliases.md) and before
+[`AllocateMemoryAddr`](35-allocate_memory_addr.md). `MemoryPlanner.DSA_RP`
 skips it so independent buffers remain visible to the DSA-RP solver;
 `MemoryPlanner.PTOAS` skips it because ptoas owns lifetime reuse.
 Semantics-required loop-carry and in-place aliases are already materialized by
@@ -120,7 +120,7 @@ and the hardware must serialize work the scheduler could otherwise overlap.
 
 Referencing a declared `pl.MemRef("name")` in a tile annotation lets the author take an
 allocation out of the packer's hands. InitMemRef materializes it as a `tile.alloc(..., pinned=True)`
-(see [InitMemRef](31-init_memref.md#declared-allocations)), and this pass then treats it as
+(see [InitMemRef](32-init_memref.md#declared-allocations)), and this pass then treats it as
 closed: a pinned interval opens its own slot in the first-fit pack and that slot is
 skipped when placing every later candidate. (Isolation is a per-slot flag inside the
 packing loop rather than another `can_share` gate — `can_share` is the innermost step

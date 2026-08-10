@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pypto.language as pl
 import pytest
@@ -748,6 +748,18 @@ class BroadcastProgram:
     ) -> pl.Tensor[[64, 256], pl.FP32]:
         with_row: pl.Tensor[[64, 256], pl.FP32] = pl.add(x, row)
         out: pl.Tensor[[64, 256], pl.FP32] = pl.add(col, with_row)
+        return out
+
+
+@pl.program
+class AmbiguousScalarTensorBroadcastProgram:
+    @pl.function(attrs={"auto_tile": True})
+    def broadcast(
+        self,
+        x: pl.Tensor[[64, 256], pl.FP32],
+        scalar_tensor: pl.Tensor[[1, 1], pl.FP32],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        out: pl.Tensor[[64, 256], pl.FP32] = pl.add(x, scalar_tensor)
         return out
 
 
@@ -1589,7 +1601,7 @@ def test_cast_plans_contain_the_complete_native_910b_conversion_path(program, ex
 
         def visit_call(self, op: ir.Call) -> None:
             if op.op.name == _TENSOR_CAST:
-                self.targets.append(op.kwargs["target_type"])
+                self.targets.append(cast(ir.DataType, op.kwargs["target_type"]))
             super().visit_call(op)
 
     after = _run_auto_tile(program)
@@ -1618,17 +1630,21 @@ def test_native_cast_chain_uses_one_physical_granule_and_keeps_logical_shape(
 
     def static_shape(type_: ir.TensorType) -> tuple[int, int]:
         assert len(type_.shape) == 2
-        assert all(isinstance(dim, ir.ConstInt) for dim in type_.shape)
-        return tuple(int(dim.value) for dim in type_.shape)  # type: ignore[union-attr,return-value]
+        dimensions: list[int] = []
+        for dim in type_.shape:
+            assert isinstance(dim, ir.ConstInt)
+            dimensions.append(int(dim.value))
+        return dimensions[0], dimensions[1]
 
     def valid_shape(type_: ir.TensorType) -> tuple[int, int]:
         if type_.tensor_view is None or not type_.tensor_view.valid_shape:
             return static_shape(type_)
-        assert all(isinstance(dim, ir.ConstInt) for dim in type_.tensor_view.valid_shape)
-        return tuple(
-            int(dim.value)
-            for dim in type_.tensor_view.valid_shape  # type: ignore[union-attr,return-value]
-        )
+        dimensions: list[int] = []
+        for dim in type_.tensor_view.valid_shape:
+            assert isinstance(dim, ir.ConstInt)
+            dimensions.append(int(dim.value))
+        assert len(dimensions) == 2
+        return dimensions[0], dimensions[1]
 
     class CastBoxes(ir.IRVisitor):
         def __init__(self) -> None:
@@ -2013,7 +2029,7 @@ def test_marked_effectful_statement_fails_instead_of_being_dropped():
             x: pl.Tensor[[16, 64], pl.FP32],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            pl.tensor.write(out, [0, 0], 1.0)
+            pl.tensor.write(out, [0, 0], pl.const(1.0, pl.FP32))
             result: pl.Tensor[[16, 64], pl.FP32] = pl.exp(x)
             return result
 
@@ -2023,7 +2039,7 @@ def test_marked_effectful_statement_fails_instead_of_being_dropped():
 
 @pytest.mark.parametrize(
     "kind",
-    ["non_commutative_lhs", "ambiguous", "high_precision", "bf16_div"],
+    ["non_commutative_lhs", "high_precision", "bf16_div"],
 )
 def test_unsupported_broadcast_contracts_fail_during_auto_tile_admission(kind: str):
     if kind == "non_commutative_lhs":
@@ -2037,18 +2053,6 @@ def test_unsupported_broadcast_contracts_fail_during_auto_tile_admission(kind: s
                 row: pl.Tensor[[64, 1], pl.FP32],
             ) -> pl.Tensor[[64, 256], pl.FP32]:
                 out: pl.Tensor[[64, 256], pl.FP32] = pl.sub(row, x)
-                return out
-    elif kind == "ambiguous":
-
-        @pl.program
-        class Program:
-            @pl.function(attrs={"auto_tile": True})
-            def unsupported(
-                self,
-                x: pl.Tensor[[64, 256], pl.FP32],
-                scalar_tensor: pl.Tensor[[1, 1], pl.FP32],
-            ) -> pl.Tensor[[64, 256], pl.FP32]:
-                out: pl.Tensor[[64, 256], pl.FP32] = pl.add(x, scalar_tensor)
                 return out
     elif kind == "high_precision":
 
@@ -2077,6 +2081,14 @@ def test_unsupported_broadcast_contracts_fail_during_auto_tile_admission(kind: s
 
     with pytest.raises(ValueError, match="AutoTile"):
         _run_auto_tile(Program)
+
+
+def test_ambiguous_scalar_tensor_broadcast_fails_during_auto_tile_admission():
+    with pytest.raises(
+        ValueError,
+        match=r"explicit row/column expansion for an ambiguous \[1,1\] tensor broadcast",
+    ):
+        _run_auto_tile(AmbiguousScalarTensorBroadcastProgram)
 
 
 def test_auto_tile_is_idempotent_after_consuming_the_marker():

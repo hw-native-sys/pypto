@@ -385,10 +385,12 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
     if (op.geometry == VectorGeometry::Flat && IsUnifiedBroadcastOp(call) && op.inputs.size() == 2) {
       bool row_expand = false;
       bool col_expand = false;
+      bool scalar_expand = false;
       size_t narrow = 0;
       for (size_t i = 0; i < op.inputs.size(); ++i) {
         const VectorTensor& input = graph.tensors[op.inputs[i]];
         const VectorTensor& result = graph.tensors[op.output];
+        scalar_expand |= input.rows == 1 && input.cols == 1 && result.rows > 1 && result.cols > 1;
         if (input.rows == result.rows && input.cols == 1 && result.cols > 1) {
           row_expand = true;
           narrow = i;
@@ -398,7 +400,7 @@ VectorGraph BuildVectorGraphOrThrow(const FunctionPtr& function, const ProgramPt
           narrow = i;
         }
       }
-      CHECK_SPAN(!(row_expand && col_expand), call->span_)
+      CHECK_SPAN(!scalar_expand && !(row_expand && col_expand), call->span_)
           << "AutoTile requires an explicit row/column expansion for an ambiguous [1,1] tensor broadcast";
       if (row_expand || col_expand) {
         CHECK_SPAN(narrow != 0 || IsCommutativeBroadcastOp(call), call->span_)
