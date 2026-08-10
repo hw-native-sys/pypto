@@ -38,6 +38,7 @@ reached through ``@pl.jit``, where the specializer must leave the in-DSL
 # from type-checking annotations that reference module-level names.
 # pyright: reportUndefinedVariable=false
 
+import importlib
 import re
 
 import pypto.language as pl
@@ -264,51 +265,50 @@ def _valid_col_operand(alloc_line: str) -> str:
     return match.group(1)
 
 
+def _dyn_valid_shape_example():
+    """Import the numbered example module.
+
+    The package registers an unnumbered ``dyn_valid_shape`` alias in
+    ``sys.modules``, but that alias exists only at runtime, so a static import
+    of it does not resolve. Import the real module name instead, as
+    ``tests/st/runtime/framework_and_models/test_paged_attention_spmd.py`` does.
+    """
+    return importlib.import_module("examples.intermediate.06_dyn_valid_shape")
+
+
 @pytest.fixture(scope="module")
 def jit_if_else_mlir() -> str:
     """Codegen the @pl.jit if/else kernel once for all tests in this module."""
     torch = pytest.importorskip("torch")
-    from examples.intermediate.dyn_valid_shape import (  # noqa: PLC0415
-        BLOCK_COL,
-        Q_TILE,
-        dyn_valid_shape_if_else,
-    )
+    example = _dyn_valid_shape_example()
 
-    data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-    out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-    cfg = torch.tensor([1, 48, BLOCK_COL], dtype=torch.int64)
-    return _jit_device_mlir(dyn_valid_shape_if_else, data, cfg, out)
+    data = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    cfg = torch.tensor([1, 48, example.BLOCK_COL], dtype=torch.int64)
+    return _jit_device_mlir(example.dyn_valid_shape_if_else, data, cfg, out)
 
 
 @pytest.fixture(scope="module")
 def jit_loop_mlir() -> str:
     """Codegen the @pl.jit loop + if/else kernel once for all tests in this module."""
     torch = pytest.importorskip("torch")
-    from examples.intermediate.dyn_valid_shape import (  # noqa: PLC0415
-        BLOCK_COL,
-        N_ROW,
-        dyn_valid_shape_loop,
-    )
+    example = _dyn_valid_shape_example()
 
-    sij_buf = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
-    out = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
-    cfg = torch.tensor([2, 48, BLOCK_COL], dtype=torch.int64)
-    return _jit_device_mlir(dyn_valid_shape_loop, sij_buf, cfg, out)
+    sij_buf = torch.zeros((example.N_ROW, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.N_ROW, example.BLOCK_COL), dtype=torch.float32)
+    cfg = torch.tensor([2, 48, example.BLOCK_COL], dtype=torch.int64)
+    return _jit_device_mlir(example.dyn_valid_shape_loop, sij_buf, cfg, out)
 
 
 @pytest.fixture(scope="module")
 def jit_scalar_param_mlir() -> str:
     """Codegen the @pl.jit scalar-parameter kernel (the specialized-constant form)."""
     torch = pytest.importorskip("torch")
-    from examples.intermediate.dyn_valid_shape import (  # noqa: PLC0415
-        BLOCK_COL,
-        Q_TILE,
-        dyn_valid_shape,
-    )
+    example = _dyn_valid_shape_example()
 
-    data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-    out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-    return _jit_device_mlir(dyn_valid_shape, data, 2.0, 48, out)
+    data = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    return _jit_device_mlir(example.dyn_valid_shape, data, 2.0, 48, out)
 
 
 def test_jit_if_else_survives_specialization(jit_if_else_mlir: str):
