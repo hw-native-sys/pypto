@@ -69,6 +69,39 @@ static void CheckMxScaleTile(const TileTypePtr& scale_type, const ExprPtr& phys_
   CheckDimMatch(valid_cols, scale_valid[1], op_name, scale_name, "valid", "cols");
 }
 
+/// Logical ``[rows, cols]`` or packed-flat ``[1, rows*cols]`` from ``quant_mx(layout)``.
+/// ExpandMxPackedQuant inserts ``tile.reshape`` to the logical form before Infer.
+static void CheckMxScaleTileOrPackedFlat(const TileTypePtr& scale_type, const ExprPtr& phys_rows,
+                                         const ExprPtr& phys_cols, const ExprPtr& valid_rows,
+                                         const ExprPtr& valid_cols, const std::string& op_name,
+                                         const char* scale_name) {
+  CHECK(scale_type) << "The operator " << op_name << " requires " << scale_name << " to be a TileType";
+  CHECK(scale_type->dtype_ == DataType::FP8E8M0)
+      << "The operator " << op_name << " requires " << scale_name << " dtype FP8E8M0, but got "
+      << scale_type->dtype_.ToString();
+  CHECK(scale_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires " << scale_name << " to be 2D, but got "
+      << scale_type->shape_.size() << " dimensions";
+
+  auto shape0 = As<ConstInt>(scale_type->shape_[0]);
+  auto shape1 = As<ConstInt>(scale_type->shape_[1]);
+  auto rows = As<ConstInt>(phys_rows);
+  auto cols = As<ConstInt>(phys_cols);
+  if (shape0 && shape1 && rows && cols && shape0->value_ == 1 &&
+      shape1->value_ == rows->value_ * cols->value_) {
+    const auto scale_valid = GetValidShape(scale_type);
+    auto v0 = As<ConstInt>(scale_valid[0]);
+    auto v1 = As<ConstInt>(scale_valid[1]);
+    auto vr = As<ConstInt>(valid_rows);
+    auto vc = As<ConstInt>(valid_cols);
+    CHECK(v0 && v1 && v0->value_ == 1 && vr && vc && v1->value_ == vr->value_ * vc->value_)
+        << "The operator " << op_name << " packed-flat " << scale_name
+        << " requires valid_shape [1, valid_rows*valid_cols]";
+    return;
+  }
+  CheckMxScaleTile(scale_type, phys_rows, phys_cols, valid_rows, valid_cols, op_name, scale_name);
+}
+
 /// MX scale groups along K: ceil(K / 32). Valid K need not be a multiple of 32.
 static ExprPtr MxScaleKCeil(const ExprPtr& k_dim) {
   auto k_const = As<ConstInt>(k_dim);
@@ -203,10 +236,10 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   if (!rhs_scale_k_valid) {
     rhs_scale_k_valid = rhs_scale_k_phys;
   }
-  CheckMxScaleTile(lhs_scale_type, m_phys, lhs_scale_k_phys, m_valid, lhs_scale_k_valid, op_name,
-                   "lhs_scale");
-  CheckMxScaleTile(rhs_scale_type, rhs_scale_k_phys, n_phys, rhs_scale_k_valid, n_valid, op_name,
-                   "rhs_scale");
+  CheckMxScaleTileOrPackedFlat(lhs_scale_type, m_phys, lhs_scale_k_phys, m_valid, lhs_scale_k_valid,
+                               op_name, "lhs_scale");
+  CheckMxScaleTileOrPackedFlat(rhs_scale_type, rhs_scale_k_phys, n_phys, rhs_scale_k_valid, n_valid,
+                               op_name, "rhs_scale");
 
   std::vector<ExprPtr> output_shape = {m_phys, n_phys};
   TileView tile_view;
@@ -298,9 +331,11 @@ REGISTER_OP("tile.matmul_mx")
     .set_op_category("TileOp")
     .set_description("MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)")
     .add_argument("lhs", "Left-hand side tile (TileType, 2D, MXFP8 E4M3); physical M % 16 == 0, K % 64 == 0")
-    .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0); physical/valid [M, ceil(K/32)]")
+    .add_argument("lhs_scale",
+                  "Left scale tile (TileType, FP8E8M0); [M, ceil(K/32)] or packed-flat [1, M*ceil(K/32)]")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3); physical K % 64 == 0, N % 32 == 0")
-    .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0); physical/valid [ceil(K/32), N]")
+    .add_argument("rhs_scale",
+                  "Right scale tile (TileType, FP8E8M0); [ceil(K/32), N] or packed-flat [1, ceil(K/32)*N]")
     .set_input_memory(0, MemorySpace::Left)
     .set_input_memory(1, MemorySpace::LeftScale)
     .set_input_memory(2, MemorySpace::Right)

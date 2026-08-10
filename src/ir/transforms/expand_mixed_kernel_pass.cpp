@@ -748,6 +748,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
             push_source = tmov_var;
           }
+          {
+            auto push_src_type = std::dynamic_pointer_cast<const TileType>(push_source->GetType());
+            INTERNAL_CHECK_SPAN(push_src_type, stmt->span_) << "V->C tpush source must have TileType";
+            CHECK_SPAN(push_src_type->dtype_ != DataType::FP8E8M0, stmt->span_)
+                << "ExpandMixedKernel rejects FP8E8M0 V->C (tpush_to_aic): MX A-scale must be "
+                   "stored to GM and loaded on AIC via tensor.view(MX_A_ZZ) + tile.load(Mat) instead "
+                   "of cross-core V2C transfer";
+          }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split), stmt->span_));
         } else {

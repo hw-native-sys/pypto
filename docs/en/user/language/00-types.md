@@ -141,10 +141,12 @@ scale tensor** of an MX (microscaling) operand on Ascend950 — `MX_A_ZZ` for th
 scale pack, `MX_B_NN` for the right/B one — so that a Mat-to-scale `pl.move` can check the
 source layout instead of byte-copying incompatible data into `LeftScale` / `RightScale`.
 They are the one case where a layout marker on a `pl.Tensor` annotation is required rather
-than discouraged. Current limitations: an MX `pl.load` must pass `target_memory=pl.Mem.Mat`
-explicitly, MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`, `view`) and
-MX `remote_load` are rejected. The matmul itself is `pl.matmul_mx` and its `_acc` /
-`_bias` variants, which take a data tile and a scale tile per operand.
+than discouraged. An MX `pl.load` must pass `target_memory=pl.Mem.Mat` explicitly. Ordinary
+MX subviews (`slice`, `reshape`, `transpose`, and `reinterpret_view`) and MX `remote_load`
+are rejected. For FP8E8M0 A scales, `pl.tensor.view` supports a product-preserving shaped
+alias between an ND backing tensor and an `MX_A_ZZ` consumer tensor; shaped `MX_B_NN`
+views remain unsupported. The matmul itself is `pl.matmul_mx` and its `_acc` / `_bias`
+variants, which take a data tile and a scale tile per operand.
 
 ### Dynamic shapes
 
@@ -193,7 +195,7 @@ it — which is a race, not a diagnostic.
 | **`ParserTypeError` about the DN layout-only shorthand** | `pl.Tensor[..., pl.DN]` — removed, it forced two coordinate systems onto one annotation | Write the source shape with no marker; derive DN at the use site with `pl.transpose(x, -2, -1)`; or inherit it through a slice/reshape of a DN-producing op |
 | **Results wrong only when two tasks overlap** | A read-write buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
 | **Reading an `Out` parameter returns garbage** | `Out` promises write-before-read | Use `pl.InOut[...]` if the prior contents matter |
-| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) for multi-hop pairs |
+| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/16-legalize_tile_cast.md) for multi-hop pairs |
 | **Two dimensions that should match are treated as independent** | Two separate `pl.dynamic("M")` calls | Create the `DynVar` once and reuse the object |
 
 Not every `pl.cast` is one instruction. Whether a `(src, dst)` pair maps to a single
@@ -202,7 +204,7 @@ instruction on Ascend910B and lowers to `INT32 -> FP32 -> FP16` on Ascend950. Ea
 costs a `tcvt`, and where an intermediate is narrower than the source the result can
 differ from a directly rounded conversion by one ULP of the destination. This is expected
 behaviour, not a defect — see
-[LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) for the per-architecture
+[LegalizeTileCast](../../dev/passes/16-legalize_tile_cast.md) for the per-architecture
 tables.
 
 ## See Also
@@ -211,4 +213,4 @@ tables.
 - [Memory and Data Movement](03-memory.md) — moving data between the spaces these types name.
 - [Operations](../ops/index.md) — which operators accept `Tensor` versus `Tile`.
 - [IR Types](../../dev/ir/02-types.md) — the IR-level type system these annotations build.
-- [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.
+- [LegalizeTileCast](../../dev/passes/16-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.

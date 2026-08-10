@@ -11,13 +11,16 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -265,6 +268,13 @@ class LoweringBuilder {
     auto var = std::make_shared<Var>(MakeTempName(qualifier), expr->GetType(), span);
     stmts_.push_back(std::make_shared<AssignStmt>(var, expr, span));
     return var;
+  }
+
+  /// Append a side-effecting expression without manufacturing an unused SSA
+  /// result. This is used by destination-passing ops whose output buffers are
+  /// explicit operands.
+  void EmitEval(const ExprPtr& expr, const Span& span) {
+    stmts_.push_back(std::make_shared<EvalStmt>(expr, span));
   }
 
   // Primitive op builders -- type deduction is delegated to OpRegistry so the
@@ -819,6 +829,114 @@ ExprPtr LowerSinRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& builder) {
   ValidateTrigArgs(args, call->span_, "tile.cos");
   return LowerSinCos(args[0], /*is_cos=*/true, builder, call->span_);
+}
+
+// ============================================================================
+// ``tile.tquant_mx`` lowering — materialize source-dtype scratch, keep pto.tquant.mx.
+//
+// Rewrites the flat one-source form ``tile.tquant_mx(src)`` into the internal form
+// ``tile.tquant_mx_dps(src, max, scaling, dst, exp)``. All four PTOAS outputs are
+// explicit IR tiles, so the memory planner can keep their simultaneously-live
+// buffers disjoint from the source and from one another. The scratch are flat [1, groups]
+// (groups = M*K/32): the ptoas TQuantMxOp verifier only requires their valid
+// element count to equal src-elements/32, and a flat row is already 32-byte
+// aligned. Codegen lowers tile.tquant_mx_dps to the ptoas pto.tquant.mx
+// instruction.
+ExprPtr LowerTileTQuantMxRuleWithOutputs(const CallPtr& call, const std::vector<ExprPtr>& args,
+                                         LoweringBuilder& b, std::array<ExprPtr, 2>* public_outputs) {
+  const auto& span = call->span_;
+  auto& reg = OpRegistry::GetInstance();
+  auto src = args[0];
+
+  // --- extract M, K from the source tile (must be 2D, K divisible by 32) ---
+  auto src_tile = As<TileType>(src->GetType());
+  INTERNAL_CHECK_SPAN(src_tile && src_tile->shape_.size() == 2, span)
+      << "Internal error: tile.tquant_mx lowering requires 2D source tile";
+  auto m_const = As<ConstInt>(src_tile->shape_[0]);
+  auto k_const = As<ConstInt>(src_tile->shape_[1]);
+  INTERNAL_CHECK_SPAN(m_const && k_const, span)
+      << "Internal error: tile.tquant_mx lowering requires static M, K shapes";
+  INTERNAL_CHECK_SPAN(k_const->value_ % 32 == 0, span)
+      << "Internal error: tile.tquant_mx lowering requires K divisible by 32, got " << k_const->value_;
+  const int64_t k_groups = k_const->value_ / 32;
+  INTERNAL_CHECK_SPAN(m_const->value_ <= std::numeric_limits<int64_t>::max() / k_groups, span)
+      << "Internal error: tile.tquant_mx lowering scale-group count overflows int64";
+  int64_t groups = m_const->value_ * k_groups;
+
+  // Flat [1, groups] write-only scratch (pto-isa flattens per-group max /
+  // scaling to 1D). The ptoas TQuantMxOp verifier requires max/scaling element
+  // type to MATCH src, so the scratch carries src's dtype (fp32/fp16/bf16 for
+  // MXFP8). The valid element count must equal src-elements/32, and a flat row
+  // is already 32-byte aligned. As IR-level tile.create results the
+  // AllocateMemoryAddr pass gives them real on-chip addresses
+  // (codegen-internal scratch cannot get one at --pto-level=level3).
+  DataType scratch_dtype = src_tile->dtype_;
+  auto flat_shape = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{
+          std::make_shared<ConstInt>(1, DataType::INDEX, span),
+          std::make_shared<ConstInt>(groups, DataType::INDEX, span),
+      },
+      span);
+  auto max_tile = b.Bind("tq_max",
+                         reg.Create("tile.create", {flat_shape},
+                                    {{"dtype", scratch_dtype}, {"target_memory", MemorySpace::Vec}}, span),
+                         span);
+  auto scaling_tile =
+      b.Bind("tq_scaling",
+             reg.Create("tile.create", {flat_shape},
+                        {{"dtype", scratch_dtype}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  auto public_types = As<TupleType>(call->GetType());
+  INTERNAL_CHECK_SPAN(public_types && public_types->types_.size() == 2, span)
+      << "Internal error: tile.tquant_mx must return exactly two tile types";
+  auto bind_typed_create = [&](const std::string& name, const ExprPtr& shape, DataType dtype,
+                               const TypePtr& result_type) {
+    auto created = As<Call>(
+        reg.Create("tile.create", {shape}, {{"dtype", dtype}, {"target_memory", MemorySpace::Vec}}, span));
+    INTERNAL_CHECK_SPAN(created, span) << "Internal error: tile.create did not produce a Call";
+    auto typed_create = std::make_shared<Call>(created->op_, created->args_, created->kwargs_,
+                                               created->attrs_, result_type, span);
+    return b.Bind(name, typed_create, span);
+  };
+  auto public_dst_type = As<TileType>(public_types->types_[0]);
+  auto public_exp_type = As<TileType>(public_types->types_[1]);
+  INTERNAL_CHECK_SPAN(public_dst_type && public_dst_type->dtype_ == DataType::FP8E4M3FN, span)
+      << "Internal error: tile.tquant_mx public quantized output must be FP8E4M3FN";
+  INTERNAL_CHECK_SPAN(public_exp_type && public_exp_type->dtype_ == DataType::FP8E8M0, span)
+      << "Internal error: tile.tquant_mx public scale output must be FP8E8M0";
+  auto src_shape = std::make_shared<MakeTuple>(src_tile->shape_, span);
+  auto raw_dst_type = std::make_shared<TileType>(public_dst_type->shape_, DataType::INT8, std::nullopt,
+                                                 public_dst_type->tile_view_, MemorySpace::Vec);
+  auto raw_exp_type = std::make_shared<TileType>(public_exp_type->shape_, DataType::UINT8, std::nullopt,
+                                                 public_exp_type->tile_view_, MemorySpace::Vec);
+  auto raw_dst = bind_typed_create("tq_dst", src_shape, DataType::INT8, raw_dst_type);
+  auto raw_exp = bind_typed_create("tq_exp", flat_shape, DataType::UINT8, raw_exp_type);
+
+  // Emit the side-effecting internal DPS form. Keeping it as an EvalStmt makes
+  // the write to the explicit output buffers survive dead-code elimination
+  // even when the public tuple binding itself is unused.
+  std::string mode = call->GetKwarg<std::string>("mode", "mxfp8_e4m3");
+  auto dps = reg.Create("tile.tquant_mx_dps", {src, max_tile, scaling_tile, raw_dst, raw_exp},
+                        {{"mode", mode}}, span);
+  b.EmitEval(dps, span);
+
+  // The public result follows the selected quantization mode, while PTOAS
+  // writes raw byte destinations. These zero-copy aliases keep the low-level
+  // verifier contract internal to this pass.
+  auto dst_tile =
+      b.Bind("tq_quant",
+             reg.Create("tile.reinterpret_view", {raw_dst}, {{"dtype", DataType::FP8E4M3FN}}, span), span);
+  auto exp_tile = b.Bind(
+      "tq_scale", reg.Create("tile.reinterpret_view", {raw_exp}, {{"dtype", DataType::FP8E8M0}}, span), span);
+  if (public_outputs) {
+    *public_outputs = {dst_tile, exp_tile};
+  }
+  return std::make_shared<MakeTuple>(std::vector<ExprPtr>{dst_tile, exp_tile}, span);
+}
+
+ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  return LowerTileTQuantMxRuleWithOutputs(call, args, b, /*public_outputs=*/nullptr);
 }
 
 // ============================================================================
@@ -2195,10 +2313,10 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
 // total credit count it issued so the signal returns to all-zero after the
 // call.
 //
-// Today the rules are ``tile.sin`` / ``tile.cos`` and ``pld.tensor.*``
-// distributed collectives. Host-level allreduce is skipped here and lowered
-// later by LowerHostTensorCollectives. The pass is idempotent provided each
-// rule emits only ops not listed here.
+// Today the rules are ``tile.sin`` / ``tile.cos``, flat ``tile.tquant_mx``, and
+// ``pld.tensor.*`` distributed collectives. Host-level allreduce is skipped here
+// and lowered later by LowerHostTensorCollectives. The pass is idempotent
+// provided each rule emits only ops not listed here.
 //
 // When the table grows past a handful of entries — or a rule wants its own
 // translation unit — promote this back to a standalone registry under
@@ -2208,6 +2326,9 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
   static const std::unordered_map<std::string, CompositeLoweringFn> kRules = {
       {"tile.sin", &LowerSinRule},
       {"tile.cos", &LowerCosRule},
+      // tile.tquant_mx → tile.tquant_mx_dps: materialize source-dtype scratch as IR-level tiles
+      // so the memory planner addresses them; codegen emits pto.tquant.mx.
+      {"tile.tquant_mx", &LowerTileTQuantMxRule},
       {"pld.tensor.allreduce", &LowerTensorAllReduceRule},
       {"pld.tensor.allgather", &LowerTensorAllGatherRule},
       {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},
@@ -2233,14 +2354,100 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
 // The pass is idempotent provided each rule emits only ops that are not
 // themselves registered (see the dispatch-table comment above).
 // ============================================================================
+YieldStmtPtr GetTQuantMxControlFlowYield(const StmtPtr& body) {
+  if (auto seq = As<SeqStmts>(body)) {
+    if (seq->stmts_.empty()) return nullptr;
+    return GetTQuantMxControlFlowYield(seq->stmts_.back());
+  }
+  if (auto scope = As<RuntimeScopeStmt>(body)) {
+    return GetTQuantMxControlFlowYield(scope->body_);
+  }
+  if (auto scope = As<SplitAivScopeStmt>(body)) {
+    return GetTQuantMxControlFlowYield(scope->body_);
+  }
+  return As<YieldStmt>(body);
+}
+
 class LowerCompositeOpsMutator : public IRMutator {
  public:
   explicit LowerCompositeOpsMutator(bool skip_host_collectives = false)
       : skip_host_collectives_(skip_host_collectives) {}
 
+  ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
+    if (const Var* tuple_var = GetVarIdentity(op->tuple_)) {
+      if (auto it = tuple_outputs_.find(tuple_var); it != tuple_outputs_.end()) {
+        INTERNAL_CHECK_SPAN(op->index_ >= 0 && op->index_ < 2, op->span_)
+            << "Internal error: tile.tquant_mx tuple index out of range: " << op->index_;
+        return it->second[static_cast<size_t>(op->index_)];
+      }
+      CHECK_SPAN(unsupported_tquant_mx_control_flow_results_.find(tuple_var) ==
+                     unsupported_tquant_mx_control_flow_results_.end(),
+                 op->span_)
+          << "Passing the pl.quant_mx result pair through if/loop control flow is not supported; "
+             "unpack it first and carry the quantized tile and scale as separate values";
+    }
+    if (auto tuple_call = As<Call>(op->tuple_); IsOp(tuple_call, "tile.tquant_mx")) {
+      CHECK_SPAN(false, op->span_)
+          << "Direct indexing of pl.quant_mx(...) is not supported; bind the pair first, for example "
+             "'quant, scale = pl.quant_mx(src, layout=pl.MX_A_ZZ)' or "
+             "'result = pl.quant_mx(src, layout=pl.MX_A_ZZ); quant = result[0]'";
+    }
+    return IRMutator::VisitExpr_(op);
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    auto new_if = As<IfStmt>(result);
+    INTERNAL_CHECK_SPAN(new_if, op->span_) << "IfStmt mutated to a non-IfStmt";
+
+    std::vector<YieldStmtPtr> yields{GetTQuantMxControlFlowYield(new_if->then_body_)};
+    if (new_if->else_body_.has_value()) {
+      yields.push_back(GetTQuantMxControlFlowYield(*new_if->else_body_));
+    }
+    MarkUnsupportedControlFlowResults(new_if->return_vars_, yields);
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    for (const auto& iter_arg : op->iter_args_) {
+      MarkUnsupportedControlFlowResult(iter_arg.get(), iter_arg->initValue_);
+    }
+
+    auto result = IRMutator::VisitStmt_(op);
+    auto new_for = As<ForStmt>(result);
+    INTERNAL_CHECK_SPAN(new_for, op->span_) << "ForStmt mutated to a non-ForStmt";
+    MarkUnsupportedControlFlowResults(new_for->return_vars_, {GetTQuantMxControlFlowYield(new_for->body_)});
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& iter_arg : op->iter_args_) {
+      MarkUnsupportedControlFlowResult(iter_arg.get(), iter_arg->initValue_);
+    }
+
+    auto result = IRMutator::VisitStmt_(op);
+    auto new_while = As<WhileStmt>(result);
+    INTERNAL_CHECK_SPAN(new_while, op->span_) << "WhileStmt mutated to a non-WhileStmt";
+    MarkUnsupportedControlFlowResults(new_while->return_vars_,
+                                      {GetTQuantMxControlFlowYield(new_while->body_)});
+    return result;
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
     if (!call) {
+      if (const Var* source = GetVarIdentity(op->value_)) {
+        if (auto it = tuple_outputs_.find(source); it != tuple_outputs_.end()) {
+          tuple_outputs_[op->var_.get()] = it->second;
+          auto tuple_value =
+              std::make_shared<MakeTuple>(std::vector<ExprPtr>{it->second[0], it->second[1]}, op->span_);
+          return std::make_shared<AssignStmt>(op->var_, tuple_value, op->span_);
+        }
+        if (unsupported_tquant_mx_control_flow_results_.find(source) !=
+            unsupported_tquant_mx_control_flow_results_.end()) {
+          unsupported_tquant_mx_control_flow_results_.insert(op->var_.get());
+        }
+      }
       return IRMutator::VisitStmt_(op);
     }
     CompositeLoweringFn rule = LookupRule(call);
@@ -2253,7 +2460,14 @@ class LowerCompositeOpsMutator : public IRMutator {
     std::vector<ExprPtr> visited_args = VisitArgs(call->args_, op->span_);
 
     LoweringBuilder builder(op->var_->name_hint_, temp_counter_);
-    ExprPtr result = rule(call, visited_args, builder);
+    ExprPtr result;
+    if (IsOp(call, "tile.tquant_mx")) {
+      std::array<ExprPtr, 2> public_outputs;
+      result = LowerTileTQuantMxRuleWithOutputs(call, visited_args, builder, &public_outputs);
+      tuple_outputs_[op->var_.get()] = std::move(public_outputs);
+    } else {
+      result = rule(call, visited_args, builder);
+    }
 
     auto stmts = builder.TakeStmts();
     // Bind the final result to the original target Var (preserves uses
@@ -2336,6 +2550,37 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
  private:
+  [[nodiscard]] static const Var* GetVarIdentity(const ExprPtr& expr) {
+    if (auto var = As<Var>(expr)) return var.get();
+    if (auto iter_arg = As<IterArg>(expr)) return iter_arg.get();
+    return nullptr;
+  }
+
+  [[nodiscard]] bool IsTQuantMxControlFlowValue(const ExprPtr& expr) const {
+    const Var* var = GetVarIdentity(expr);
+    if (!var) return false;
+    return tuple_outputs_.find(var) != tuple_outputs_.end() ||
+           unsupported_tquant_mx_control_flow_results_.find(var) !=
+               unsupported_tquant_mx_control_flow_results_.end();
+  }
+
+  void MarkUnsupportedControlFlowResult(const Var* target, const ExprPtr& source) {
+    if (target && IsTQuantMxControlFlowValue(source)) {
+      unsupported_tquant_mx_control_flow_results_.insert(target);
+    }
+  }
+
+  void MarkUnsupportedControlFlowResults(const std::vector<VarPtr>& return_vars,
+                                         const std::vector<YieldStmtPtr>& yields) {
+    for (size_t i = 0; i < return_vars.size(); ++i) {
+      for (const auto& yield : yields) {
+        if (yield && i < yield->value_.size()) {
+          MarkUnsupportedControlFlowResult(return_vars[i].get(), yield->value_[i]);
+        }
+      }
+    }
+  }
+
   /// True for every ``pld.tensor.*`` cross-rank collective. Add new collectives
   /// here so they inherit the HOST-deferral skip.
   [[nodiscard]] static bool IsTensorCollective(const CallPtr& call) {
@@ -2373,6 +2618,8 @@ class LowerCompositeOpsMutator : public IRMutator {
   }
 
   std::size_t temp_counter_ = 0;
+  std::unordered_map<const Var*, std::array<ExprPtr, 2>> tuple_outputs_;
+  std::unordered_set<const Var*> unsupported_tquant_mx_control_flow_results_;
   bool skip_host_collectives_{false};
 };
 

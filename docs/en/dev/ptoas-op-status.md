@@ -6,7 +6,7 @@ baseline is Little-oil/PTOAS `main`
 `d852dd2dba3e5bf7a69ce8324eb88afc336e8a33`: 189 public interfaces from the manual
 plus 15 source-only compatibility/tile interfaces still present in `PTOOps.td`, for a
 total of 204. Column statuses were checked against the **current PyPTO source** (last
-updated 2026-07-27). When an op is added or changed, update only its corresponding row.
+updated 2026-08-05). When an op is added or changed, update only its corresponding row.
 
 The matrix includes public/compatibility interfaces even when their PyPTO level is
 `internal`. Separately, it excludes 32 additional `PTOOps.td` ops that exist only
@@ -208,9 +208,9 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tget_scale_addr | GetScaleAddr + TASSIGN | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen; Mat→scale `tmov` emitted in source order, PTOAS `PTOA5NormalizeTMovPass` reorders bind-before-fill; see [operators MX constraints](ir/05-operators.md#mx--ascend950-ptoas-constraints) |
 | pto.tmov.fp | TMOV_FP | tile | ✅ | ❌ | ❌ | ❌ | — | backend hook exists; IR/Python frontend and ST are missing |
 | pto.tquant | TQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tquant.mx | TQUANT (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | Ascend950/A5 only; internal `tile.tquant_mx`, public `pl.quant_mx(dtype=FP8E4M3FN)`; numerical ST covers exact E4M3 bytes and E8M0 codes |
 | pto.tstore_fp | TSTORE_FP | tile | ✅ | ❌ | ❌ | ❌ | — | the current backend emits `pto.tstore.fp` |
-| pto.tdequant | TDEQUANT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tdequant | TDEQUANT | tile | ✅ | ✅ | ✅ | ❌ | — | Ascend950/A5 only; `tile.tdequant` / `pl.tdequant`; numerical ST covers per-row scale and offset |
 | **Synchronization (8)** |  |  |  |  |  |  |  |  |
 | pto.barrier | pipe_barrier / dsb | internal | ✅ | — | — | ✅ | — | emitted automatically by compiler/system lowering |
 | pto.barrier_sync | barrier lowering | internal | ✅ | — | — | — | — | internal synchronization/scheduling primitive; no standalone ST |

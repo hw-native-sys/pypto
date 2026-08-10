@@ -133,4 +133,4 @@ the tutorials chapter covers end to end.
 - [Control Flow](02-control-flow.md) — the loops these scopes sit inside.
 - [Memory and Data Movement](03-memory.md) — what the placed code does with buffers.
 - [OutlineIncoreScopes](../../dev/passes/08-outline_incore_scopes.md) — how `pl.at` becomes a function.
-- [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md) — what `pl.split` drives.
+- [ExpandMixedKernel](../../dev/passes/23-expand_mixed_kernel.md) — what `pl.split` drives.

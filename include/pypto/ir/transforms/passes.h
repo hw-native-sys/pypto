@@ -602,6 +602,9 @@ Pass InferTileMemorySpace();
  * immediately before each ``tile.matmul_mx`` / ``_acc`` / ``_bias`` and rewrites
  * the matmul to consume the bound scale SSA values.
  *
+ * Applies to all InCore-variant functions (``InCore``, ``AIC``, ``AIV``), including
+ * mixed-kernel cube/vector bodies written directly as AIC/AIV.
+ *
  * Bindings are not reused across consumers because tget mutates a shared
  * physical scale buffer whose aliases cannot be represented by SSA identity.
  * The pass therefore inserts a fresh binding at every consumer even when its
@@ -717,15 +720,30 @@ Pass RunVerifier(const IRPropertySet& properties);
 Pass Simplify();
 
 /**
+ * @brief Early MX legalization: K-split then expand packed ``tile.tquant_mx``.
+ *
+ * Phase 1 splits static K>64 ``matmul_mx`` (and co-splits feeding packed
+ * ``tquant_mx(layout)``) into K=64 chunks. Phase 2 expands
+ * ``tile.tquant_mx(..., layout=MX_A_ZZ|MX_B_NN)`` into per-box flat quant +
+ * continuous ZZ/NN scale assembly (B also INT8-transposes to [K,N]).
+ *
+ * Must run before ``LowerCompositeOps`` so expanded flat ``tile.tquant_mx`` calls
+ * still receive DPS lowering. Public ``pl.quant_mx(layout=...)`` emits the packed
+ * form; this pass materializes its per-box implementation.
+ */
+Pass ExpandMxPackedQuant();
+
+/**
  * @brief Decompose composite tile/distributed ops into primitive ops.
  *
  * Lowering rules live in a file-local dispatch table inside
  * ``src/ir/transforms/lower_composite_ops_pass.cpp``. Today the pass handles
- * ``tile.sin`` / ``tile.cos`` and explicit-signal InCore
- * ``pld.tensor.allreduce``; host-level allreduce is skipped and lowered later
- * by ``LowerHostTensorCollectives``. Future composite ops (softmax, gelu,
- * layernorm, ...) are added by appending a rule function + one dispatch-table
- * row, without touching the mutator.
+ * ``tile.sin`` / ``tile.cos``, flat ``tile.tquant_mx``, and explicit-signal
+ * InCore ``pld.tensor.allreduce``; host-level allreduce is skipped and lowered
+ * later by ``LowerHostTensorCollectives``. Future single-result composite ops
+ * (softmax, gelu, layernorm, ...) are added by appending a rule function + one
+ * dispatch-table row. Multi-result rules may also need projection remapping in
+ * the mutator, as ``tile.tquant_mx`` does.
  *
  * FP32-only for the trig rules — non-FP32 inputs are rejected at
  * op-construction time by the op deducer, never reaching this pass.

@@ -94,7 +94,7 @@ class TestMxLoad:
             )
 
 
-class TestDtypeAndMemorySpace:
+class TestMxDtypeAndMemorySpace:
     def test_fp8e8m0_exists(self):
         assert DataType.FP8E8M0.get_bit() == 8
         assert DataType.FP8E8M0.to_string() == "fp8e8m0"
@@ -175,6 +175,18 @@ class TestMatmulMxTypes:
         bias = ir.Var("bias", ir.TileType([1, 32], DataType.FP32), span)
         bias_call = ir.op.tile.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, span)
         assert bias_call.op.name == ir.get_op("tile.matmul_mx_bias").name
+
+    def test_accepts_packed_flat_scale_shapes(self):
+        """quant_mx(layout) packed-flat [1,G] scales are accepted by matmul_mx*."""
+        span = ir.Span.unknown()
+        m, k, n = 16, 64, 32
+        lhs = ir.Var("lhs", ir.TileType([m, k], DataType.FP8E4M3FN), span)
+        lhs_scale = ir.Var("lhs_scale", ir.TileType([1, m * (k // 32)], DataType.FP8E8M0), span)
+        rhs = ir.Var("rhs", ir.TileType([k, n], DataType.FP8E4M3FN), span)
+        rhs_scale = ir.Var("rhs_scale", ir.TileType([1, (k // 32) * n], DataType.FP8E8M0), span)
+        call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP32
 
     def test_rejects_wrong_dtypes_and_alignment(self):
         span = ir.Span.unknown()

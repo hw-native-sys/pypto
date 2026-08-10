@@ -38,9 +38,10 @@ _MACOS = sys.platform == "darwin"
 # Matches the frame lines emitted by Backtrace::FormatStackTrace.
 _FRAME_RE = re.compile(r'^ File "([^"]+)", line (\d+)$', re.MULTILINE)
 
-# PyPTO's own C++ implementation — everything except the python/bindings/ entry points. CPython's
-# sources (Python/, Objects/, Modules/, Include/) do not match: its include dir is capitalised.
-_PYPTO_IMPL_RE = re.compile(r"(?:^|/)(?:src|include/pypto)/")
+# PyPTO's own C++ implementation — everything except the python/bindings/ entry points. Restrict
+# src/ to this repository's top-level components so build paths such as /usr/local/src/conda do not
+# misclassify CPython frames as PyPTO internals.
+_PYPTO_IMPL_RE = re.compile(r"(?:^|/)src/(?:backend|codegen|core|ir)/|(?:^|/)include/pypto/")
 
 
 def _assert_has_trace(message: str) -> list[str]:

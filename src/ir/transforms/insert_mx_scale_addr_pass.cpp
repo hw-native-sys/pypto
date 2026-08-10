@@ -16,13 +16,20 @@
  * Runs after InferTileMemorySpace so Left/LeftScale and Right/RightScale pairs
  * are already resolved. Because tget_scale_addr mutates shared physical scale
  * buffers in place, bindings are never reused across MX matmul consumers.
+ *
+ * Also legalizes Mat→Scale fills so each fill is dominated by its paired data
+ * tile. PTOAS ``PTOA5NormalizeTMovPass`` hoists ``tget_scale_addr`` before the
+ * Mat→Scale ``tmov``; if the fill still precedes the data definition, that
+ * hoist breaks SSA dominance (common when RightScale is staged before Right).
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,6 +67,71 @@ bool IsResolvedMxScaleDataPair(const VarPtr& scale, const VarPtr& data) {
   return is_left || is_right;
 }
 
+// Ensure Mat→Scale fills that feed tget_scale_addr appear after their data tiles
+// in the same SeqStmts, so PTOAS bind-before-fill reordering stays dominance-safe.
+StmtPtr LegalizeScaleFillOrder(const StmtPtr& body) {
+  auto seq = As<SeqStmts>(body);
+  if (!seq) return body;
+
+  std::unordered_map<uint64_t, size_t> def_index;
+  def_index.reserve(seq->stmts_.size());
+  for (size_t i = 0; i < seq->stmts_.size(); ++i) {
+    if (auto assign = As<AssignStmt>(seq->stmts_[i])) {
+      def_index[assign->var_->UniqueId()] = i;
+    }
+  }
+
+  // scale_def_idx -> latest data_def_idx that must precede it.
+  std::unordered_map<size_t, size_t> scale_fill_after_data;
+  for (const auto& stmt : seq->stmts_) {
+    auto assign = As<AssignStmt>(stmt);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!call || !IsOp(call, "tile.tget_scale_addr") || call->args_.size() < 2) continue;
+    auto scale = AsVarLike(call->args_[0]);
+    auto data = AsVarLike(call->args_[1]);
+    if (!scale || !data) continue;
+    auto scale_it = def_index.find(scale->UniqueId());
+    auto data_it = def_index.find(data->UniqueId());
+    if (scale_it == def_index.end() || data_it == def_index.end()) continue;
+    if (scale_it->second < data_it->second) {
+      auto& after = scale_fill_after_data[scale_it->second];
+      after = std::max(after, data_it->second);
+    }
+  }
+  if (scale_fill_after_data.empty()) return body;
+
+  std::vector<StmtPtr> pending_fills;
+  pending_fills.reserve(scale_fill_after_data.size());
+  std::unordered_map<size_t, size_t> pending_release;  // data_idx -> pending slot
+  std::vector<StmtPtr> out;
+  out.reserve(seq->stmts_.size());
+
+  auto flush_ready = [&](size_t data_idx) {
+    auto it = pending_release.find(data_idx);
+    if (it == pending_release.end()) return;
+    out.push_back(pending_fills[it->second]);
+    pending_release.erase(it);
+  };
+
+  for (size_t i = 0; i < seq->stmts_.size(); ++i) {
+    auto move_it = scale_fill_after_data.find(i);
+    if (move_it != scale_fill_after_data.end()) {
+      pending_release[move_it->second] = pending_fills.size();
+      pending_fills.push_back(seq->stmts_[i]);
+      continue;
+    }
+    out.push_back(seq->stmts_[i]);
+    flush_ready(i);
+  }
+  // Defensive: any unreleased fill (should not happen) appends at end.
+  for (const auto& [data_idx, slot] : pending_release) {
+    (void)data_idx;
+    out.push_back(pending_fills[slot]);
+  }
+
+  return SeqStmts::Flatten(std::move(out), seq->span_);
+}
+
 class MxScaleAddrInserter : public IRMutator {
  public:
   // Entry / control-flow body helper: NormalizedStmtStructure unwraps single-child
@@ -78,7 +150,7 @@ class MxScaleAddrInserter : public IRMutator {
     std::vector<StmtPtr> new_stmts;
     auto rewritten = InsertBindingsForMxMatmul(new_stmts, assign, call, changed);
     new_stmts.push_back(rewritten);
-    return SeqStmts::Flatten(std::move(new_stmts), body->span_);
+    return LegalizeScaleFillOrder(SeqStmts::Flatten(std::move(new_stmts), body->span_));
   }
 
  protected:
@@ -99,8 +171,9 @@ class MxScaleAddrInserter : public IRMutator {
       new_stmts.push_back(rewritten);
     }
 
-    if (!changed) return op;
-    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+    auto flattened = changed ? SeqStmts::Flatten(std::move(new_stmts), op->span_) : StmtPtr(op);
+    auto legalized = LegalizeScaleFillOrder(flattened);
+    return legalized;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
@@ -204,7 +277,9 @@ Pass InsertMxScaleAddr() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     for (const auto& [gvar, func] : program->functions_) {
-      if (func->func_type_ == FunctionType::InCore) {
+      // AIC/AIV are InCore variants used by mixed kernels and frontend-written
+      // cube/vector functions; they must get the same scale-address bindings.
+      if (IsInCoreType(func->func_type_)) {
         new_functions[gvar] = TransformInsertMxScaleAddr(func);
       } else {
         new_functions[gvar] = func;

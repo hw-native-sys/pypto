@@ -30,6 +30,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [内存图](07-memory-map.md) | 把 pass dump 渲染成可交互的片上内存 HTML 图 |
 | [分布式算子](distributed_ops.md) | N6 分布式算子家族 —— 对集合通信与低层原语的类型化 DSL 访问 |
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
+| [A5 Mixed MX Scale 传输](design/a5-mixed-mx-scale-transport.md) | V2C 传 scale 失败分析与「scale 强制 GM」决策 |
 
 ## 另请参阅
 

@@ -94,6 +94,27 @@ class TestMxScaleMemSpaces:
         assert view.slayout == ir.TileLayout.col_major
         assert view.fractal == 32
 
+    @pytest.mark.parametrize(
+        ("space", "source_layout", "result_layout"),
+        [
+            (ir.MemorySpace.LeftScale, ir.TileLayout.col_major, ir.TileLayout.row_major),
+            (ir.MemorySpace.RightScale, ir.TileLayout.row_major, ir.TileLayout.col_major),
+        ],
+    )
+    def test_scale_move_accepts_opposite_contiguous_source_layout(self, space, source_layout, result_layout):
+        src = _tile_var(
+            _const_shape(32, 8),
+            DataType.FP8E8M0,
+            memory=ir.MemorySpace.Mat,
+            view=ir.TileView(blayout=source_layout, slayout=source_layout, fractal=32),
+        )
+        out = tile.move(src, target_memory=space).type
+        assert isinstance(out, ir.TileType)
+        view = out.get_effective_tile_view()
+        assert view.blayout == result_layout
+        assert view.slayout == result_layout
+        assert view.fractal == 32
+
     def test_mx_layout_load_requires_explicit_mat(self):
         tensor = _mx_tensor_var("s", 16, 8)
         with pytest.raises(ValueError, match="requires explicit target_memory=MemorySpace.Mat"):
@@ -154,22 +175,6 @@ class TestMxScaleMemSpaces:
             (
                 ir.MemorySpace.LeftScale,
                 ir.TileView(
-                    blayout=ir.TileLayout.col_major,
-                    slayout=ir.TileLayout.col_major,
-                    fractal=32,
-                ),
-            ),
-            (
-                ir.MemorySpace.RightScale,
-                ir.TileView(
-                    blayout=ir.TileLayout.row_major,
-                    slayout=ir.TileLayout.row_major,
-                    fractal=32,
-                ),
-            ),
-            (
-                ir.MemorySpace.LeftScale,
-                ir.TileView(
                     blayout=ir.TileLayout.row_major,
                     slayout=ir.TileLayout.row_major,
                     fractal=512,
@@ -184,7 +189,7 @@ class TestMxScaleMemSpaces:
             memory=ir.MemorySpace.Mat,
             view=view,
         )
-        with pytest.raises(ValueError, match="matching.*layout"):
+        with pytest.raises(ValueError, match="consistent.*layout"):
             tile.move(src, target_memory=space)
 
     @pytest.mark.parametrize(

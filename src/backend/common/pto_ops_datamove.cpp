@@ -913,6 +913,54 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   codegen.Emit(oss.str());
 }
 
+// Helper for tile.tquant_mx (MX block-32 quant) → pto.tquant.mx:
+//   pto.tquant.mx ins(src : src_ty)
+//                 outs(dst, scale, max, scaling : dst_ty, scale_ty, max_ty, scaling_ty)
+//                 {quant_type = #pto<quant_type MXFP8>}
+// dst + scale (e8m0 exp) are the real DSL results (tuple indices 0,1). max + scaling
+// are write-only per-group scratch required by pto-isa TQuant(dst, src, exp, max,
+// scaling); no caller consumes them. LowerCompositeOps materializes them as
+// explicit IR operands so the memory planner assigns real addresses. PTOAS
+// requires pto.tquant.mx to carry all four outs plus a quant_type attribute.
+static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 5)
+      << "tile.tquant_mx_dps requires src, max, scaling, dst, and exp operands, but got " << op->args_.size();
+
+  // MXFP8 is the only supported quant_type (mode is validated upstream).
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetExprAsCode(op->args_[3]);
+  std::string scale = codegen.GetExprAsCode(op->args_[4]);
+  std::string dst_ty = codegen.GetExprTypeAnnotation(op->args_[3]);
+  std::string scale_ty = codegen.GetExprTypeAnnotation(op->args_[4]);
+  // Source-dtype scratch (max, scaling) — IR-level operands materialized by the tile.tquant_mx
+  // lowering rule, so the memory planner has already assigned them on-chip addresses
+  // (codegen-internal scratch cannot obtain one at --pto-level=level3).
+  std::string max_v = codegen.GetExprAsCode(op->args_[1]);
+  std::string scaling = codegen.GetExprAsCode(op->args_[2]);
+  std::string max_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string scaling_ty = codegen.GetExprTypeAnnotation(op->args_[2]);
+  INTERNAL_CHECK_SPAN(!dst_ty.empty(), op->span_)
+      << "Internal error: tile.tquant_mx_dps destination has no PTO type annotation";
+  INTERNAL_CHECK_SPAN(!scale_ty.empty(), op->span_)
+      << "Internal error: tile.tquant_mx_dps exponent has no PTO type annotation";
+  INTERNAL_CHECK_SPAN(!max_ty.empty(), op->span_)
+      << "Internal error: tile.tquant_mx_dps max scratch has no PTO type annotation";
+  INTERNAL_CHECK_SPAN(!scaling_ty.empty(), op->span_)
+      << "Internal error: tile.tquant_mx_dps scaling scratch has no PTO type annotation";
+
+  std::ostringstream oss;
+  oss << "pto.tquant.mx ins(" << src;
+  if (!src_ty.empty()) {
+    oss << " : " << src_ty;
+  }
+  oss << ") outs(" << dst << ", " << scale << ", " << max_v << ", " << scaling << " : " << dst_ty << ", "
+      << scale_ty << ", " << max_ty << ", " << scaling_ty << ") {quant_type = #pto<quant_type MXFP8>}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1152,6 +1200,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
   reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAssembleCodegenPTO(op, codegen);
+  });
+
+  reg("tile.tquant_mx_dps", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTQuantMxCodegenPTO(op, codegen);
   });
 
   reg("tile.gather_row", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

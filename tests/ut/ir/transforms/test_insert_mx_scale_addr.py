@@ -390,6 +390,90 @@ class TestInsertMxScaleAddr:
         events = self._collect_mx_binding_events(after)
         assert [event[0] for event in events] == ["then", "bind", "bind", "matmul"]
 
+    def test_early_right_scale_fill_moves_after_right(self):
+        """Mat→RightScale staged before Right must be delayed for PTOAS bind-before-fill."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                rhs_scale = pl.move(
+                    pl.load(b_s, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.RightScale,
+                )
+                lhs = pl.move(pl.load(a, [0, 0], [16, 64]), target_memory=pl.Mem.Left)
+                lhs_scale = pl.move(
+                    pl.load(a_s, [0, 0], [16, 2], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.LeftScale,
+                )
+                rhs = pl.move(pl.load(b, [0, 0], [64, 32]), target_memory=pl.Mem.Right)
+                c = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+                return pl.store(c, [0, 0], out)
+
+        after = self._run(Before)
+        events = []
+
+        class _Collect(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):
+                call = stmt.value if isinstance(stmt.value, ir.Call) else None
+                if call is None:
+                    return super().visit_assign_stmt(stmt)
+                if call.op.name == ir.get_op("tile.move").name:
+                    tgt = call.kwargs.get("target_memory")
+                    if tgt in (pl.MemorySpace.Right, pl.MemorySpace.RightScale):
+                        events.append(("move", tgt))
+                elif call.op.name == ir.get_op("tile.tget_scale_addr").name:
+                    events.append(
+                        ("tget", call.args[0].type.memory_space, call.args[1].type.memory_space)
+                    )
+                return super().visit_assign_stmt(stmt)
+
+        _Collect().visit_program(after)
+        right_i = next(i for i, e in enumerate(events) if e == ("move", pl.MemorySpace.Right))
+        right_scale_i = next(
+            i for i, e in enumerate(events) if e == ("move", pl.MemorySpace.RightScale)
+        )
+        assert right_i < right_scale_i
+        assert ("tget", pl.MemorySpace.RightScale, pl.MemorySpace.Right) in events
+
+    @pytest.mark.parametrize(
+        "func_type",
+        [ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV],
+        ids=["incore", "aic", "aiv"],
+    )
+    def test_incore_variants_get_bindings(self, func_type):
+        """AIC/AIV mixed-kernel bodies must receive tget_scale_addr, not only InCore."""
+        span = ir.Span.unknown()
+
+        def tile(name, shape, dtype, space):
+            return ir.Var(name, ir.TileType(shape, dtype, memory_space=space), span)
+
+        lhs = tile("lhs", [16, 64], ir.DataType.FP8E4M3FN, ir.MemorySpace.Left)
+        lhs_scale = tile("lhs_scale", [16, 2], ir.DataType.FP8E8M0, ir.MemorySpace.LeftScale)
+        rhs = tile("rhs", [64, 32], ir.DataType.FP8E4M3FN, ir.MemorySpace.Right)
+        rhs_scale = tile("rhs_scale", [2, 32], ir.DataType.FP8E8M0, ir.MemorySpace.RightScale)
+        mx_call = ir.op.tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, span)
+        assert isinstance(mx_call.type, ir.TileType)
+        c = ir.Var("c", mx_call.type, span)
+        body = ir.AssignStmt(c, mx_call, span)
+        func = ir.Function("kernel", [lhs, lhs_scale, rhs, rhs_scale], [], body, span, func_type)
+        program = ir.Program([func], "incore_variant_mx", span)
+
+        after = passes.insert_mx_scale_addr()(program)
+        tgets = self._collect_calls(after, "tile.tget_scale_addr")
+        matmuls = self._collect_calls(after, "tile.matmul_mx")
+        assert len(tgets) == 2
+        assert len(matmuls) == 1
+        assert matmuls[0].args[1].name_hint.endswith("_bound")
+        assert matmuls[0].args[3].name_hint.endswith("_bound")
+
     def test_iter_arg_data_and_scale_tiles_are_accepted(self):
         """pl.range init_values carrying data/scale tiles must not InternalError."""
 
