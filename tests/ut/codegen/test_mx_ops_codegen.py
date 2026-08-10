@@ -105,10 +105,55 @@ class TestMxMatmulCodegen:
         assert "make_tensor_view" in mlir and "#pto.layout<mx_a_zz>" in mlir
         assert "#pto.layout<mx_b_nn>" in mlir
         assert "pto.tload" in mlir
+        mx_a_view = next(line for line in mlir.splitlines() if "mx5d_view" in line and "mx_a_zz" in line)
+        mx_b_view = next(line for line in mlir.splitlines() if "mx5d_view" in line and "mx_b_nn" in line)
+        assert "shape = [%c1_index, %c8_index, %c1_index, %c16_index, %c2_index]" in mx_a_view
+        assert "strides = [%c256_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_a_view
+        assert "shape = [%c1_index, %c4_index, %c1_index, %c16_index, %c2_index]" in mx_b_view
+        assert "strides = [%c128_index, %c32_index, %c32_index, %c2_index, %c1_index]" in mx_b_view
         # Mat→scale fill stays source-order; PTOAS later reorders bind-before-fill.
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
+
+    def test_nd_backing_alias_only_emits_physical_rank5_mx_views(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[1, 32], pl.FP8E8M0],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[1, 64], pl.FP8E8M0],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                a_s_mx = pl.tensor.view(a_s, [16, 2], layout=pl.MX_A_ZZ)
+                b_s_mx = pl.tensor.view(b_s, [2, 32], layout=pl.MX_B_NN)
+                lhs = pl.move(
+                    pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
+                )
+                lhs_scale = pl.move(
+                    pl.load(a_s_mx, [0, 0], [16, 2], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.LeftScale,
+                )
+                rhs = pl.move(
+                    pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+                )
+                rhs_scale = pl.move(
+                    pl.load(b_s_mx, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.RightScale,
+                )
+                pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        mx_views = [
+            line for line in mlir.splitlines() if "pto.make_tensor_view" in line and "#pto.layout<mx_" in line
+        ]
+        assert len(mx_views) == 2
+        assert all(line.count("?") == 5 for line in mx_views)
+        assert any("#pto.layout<mx_a_zz>" in line for line in mx_views)
+        assert any("#pto.layout<mx_b_nn>" in line for line in mx_views)
 
     def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self):
         @pl.program
@@ -180,12 +225,16 @@ class TestMxMatmulCodegen:
                 b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
                 out: pl.Tensor[[16, 32], pl.FP32],
             ):
-                lhs = pl.move(pl.load(a, [0, 0], [16, 64]), target_memory=pl.Mem.Left)
+                lhs = pl.move(
+                    pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
+                )
                 lhs_scale = pl.move(
                     pl.load(a_s, [0, 0], [16, 2], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.LeftScale,
                 )
-                rhs = pl.move(pl.load(b, [0, 0], [64, 32]), target_memory=pl.Mem.Right)
+                rhs = pl.move(
+                    pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+                )
                 rhs_scale = pl.move(
                     pl.load(b_s, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.RightScale,
@@ -203,6 +252,43 @@ class TestMxMatmulCodegen:
         outs_acc = acc_line.split("outs(", 1)[1].split(":", 1)[0].strip()
         assert ins_acc == outs_acc
 
+    def test_mx_rank5_view_maps_aligned_logical_offsets(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 128], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[32, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[128, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[4, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.move(
+                    pl.load(a, [16, 64], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
+                )
+                lhs_scale = pl.move(
+                    pl.load(a_s, [16, 2], [16, 2], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.LeftScale,
+                )
+                rhs = pl.move(
+                    pl.load(b, [64, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+                )
+                rhs_scale = pl.move(
+                    pl.load(b_s, [2, 0], [2, 32], target_memory=pl.Mem.Mat),
+                    target_memory=pl.Mem.RightScale,
+                )
+                pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        partitions = [line for line in mlir.splitlines() if "partition_view" in line and "mx5d_view" in line]
+        assert any(
+            "offsets = [%c0_index, %c1_index, %c1_index, %c0_index, %c0_index]" in line for line in partitions
+        )
+        assert any(
+            "offsets = [%c0_index, %c0_index, %c1_index, %c0_index, %c0_index]" in line for line in partitions
+        )
+
     def test_matmul_mx_bias_emits_pto_op(self):
         @pl.program
         class Program:
@@ -216,18 +302,22 @@ class TestMxMatmulCodegen:
                 bias: pl.Tensor[[1, 32], pl.FP32],
                 out: pl.Tensor[[16, 32], pl.FP32],
             ):
-                lhs = pl.move(pl.load(a, [0, 0], [16, 64]), target_memory=pl.Mem.Left)
+                lhs = pl.move(
+                    pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
+                )
                 lhs_scale = pl.move(
                     pl.load(a_s, [0, 0], [16, 2], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.LeftScale,
                 )
-                rhs = pl.move(pl.load(b, [0, 0], [64, 32]), target_memory=pl.Mem.Right)
+                rhs = pl.move(
+                    pl.load(b, [0, 0], [64, 32], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Right
+                )
                 rhs_scale = pl.move(
                     pl.load(b_s, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.RightScale,
                 )
                 bias_mat = pl.move(
-                    pl.load(bias, [0, 0], [1, 32]),
+                    pl.load(bias, [0, 0], [1, 32], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.Mat,
                     blayout=pl.TileLayout.col_major,
                     slayout=pl.TileLayout.row_major,

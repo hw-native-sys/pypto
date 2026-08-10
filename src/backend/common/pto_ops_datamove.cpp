@@ -915,6 +915,107 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
   codegen.Emit(oss.str());
 }
 
+struct StaticValidTileView {
+  std::string ssa;
+  std::string type;
+};
+
+// PTOAS grouped TQUANT/X-to-ZZ require every operand to carry static physical
+// and valid shapes. PyPTO alloc_tile declarations deliberately use dynamic
+// v_row/v_col plus explicit valid_row/valid_col operands, so create a zero-copy
+// treshape view with the equivalent static-valid type at the instruction site.
+static StaticValidTileView EmitStaticValidTileView(codegen::PTOCodegen& codegen, const ir::ExprPtr& arg,
+                                                   const std::string& name_hint) {
+  auto tile_type = As<ir::TileType>(arg->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, arg->span_) << "Internal error: grouped MX operand must be a TileType";
+  const std::string source = codegen.GetExprAsCode(arg);
+  const std::string source_type = GetViewSourceType(codegen, arg);
+  const std::string static_type = codegen.GetViewTileBufTypeStringFromTileType(tile_type);
+  INTERNAL_CHECK_SPAN(!source_type.empty() && !static_type.empty(), arg->span_)
+      << "Internal error: grouped MX operand has no PTO type annotation";
+  INTERNAL_CHECK_SPAN(
+      static_type.find("v_row=?") == std::string::npos && static_type.find("v_col=?") == std::string::npos,
+      arg->span_)
+      << "Internal error: grouped MX operand must carry static valid dimensions";
+  const std::string view = codegen.NewNamedTemp(name_hint);
+  codegen.RegisterTileBufType(view, static_type);
+  codegen.Emit(view + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
+  return {view, static_type};
+}
+
+// Helper for tile.tquant_mx (MX block-32 quant) → pto.tquant.mx:
+//   pto.tquant.mx ins(src : src_ty)
+//                 outs(dst, scale, max, scaling : dst_ty, scale_ty, max_ty, scaling_ty)
+//                 {quant_type = #pto<quant_type MXFP8|MXFP4_E2M1>}
+// dst + scale (e8m0 exp) are the real DSL results (tuple indices 0,1). max + scaling
+// are write-only per-group scratch required by pto-isa TQuant(dst, src, exp, max,
+// scaling); no caller consumes them. LowerCompositeOps materializes them as
+// explicit IR operands so the memory planner assigns real addresses. PTOAS
+// requires pto.tquant.mx to carry all four outs plus a quant_type attribute.
+static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 5)
+      << "tile.tquant_mx_dps requires src, max, scaling, dst, and exp operands, but got " << op->args_.size();
+
+  const DataType dtype = op->GetKwarg<DataType>("dtype", DataType::FP8E4M3FN);
+  const bool is_mxfp8 = dtype == DataType::FP8E4M3FN;
+  const bool is_mxfp4 = dtype == DataType::FP4;
+  INTERNAL_CHECK_SPAN(is_mxfp8 || is_mxfp4, op->span_)
+      << "Internal error: tile.tquant_mx_dps reached codegen with unsupported dtype " << dtype.ToString();
+  const char* quant_type = is_mxfp4 ? "MXFP4_E2M1" : "MXFP8";
+
+  auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "tquant_src_static");
+  StaticValidTileView dst_view;
+  if (is_mxfp4) {
+    dst_view = {codegen.GetExprAsCode(op->args_[3]), GetViewSourceType(codegen, op->args_[3])};
+    INTERNAL_CHECK_SPAN(!dst_view.type.empty() && dst_view.type.find("v_row=?") == std::string::npos &&
+                            dst_view.type.find("v_col=?") == std::string::npos,
+                        op->args_[3]->span_)
+        << "Internal error: MXFP4 TQUANT destination allocation must carry static valid dimensions";
+  } else {
+    dst_view = EmitStaticValidTileView(codegen, op->args_[3], "tquant_dst_static");
+  }
+  auto scale_view = EmitStaticValidTileView(codegen, op->args_[4], "tquant_exp_static");
+  // Source-dtype scratch (max, scaling) — IR-level operands materialized by the tile.tquant_mx
+  // lowering rule, so the memory planner has already assigned them on-chip addresses
+  // (codegen-internal scratch cannot obtain one at --pto-level=level3).
+  auto max_view = EmitStaticValidTileView(codegen, op->args_[1], "tquant_max_static");
+  auto scaling_view = EmitStaticValidTileView(codegen, op->args_[2], "tquant_scaling_static");
+
+  std::ostringstream oss;
+  oss << "pto.tquant.mx ins(" << src_view.ssa << " : " << src_view.type;
+  const int group_axis = op->GetKwarg<int>("group_axis", 1);
+  INTERNAL_CHECK_SPAN(group_axis == 0 || group_axis == 1, op->span_)
+      << "Internal error: tile.tquant_mx_dps group_axis must be 0 or 1";
+  oss << ") outs(" << dst_view.ssa << ", " << scale_view.ssa << ", " << max_view.ssa << ", "
+      << scaling_view.ssa << " : " << dst_view.type << ", " << scale_view.type << ", " << max_view.type
+      << ", " << scaling_view.type << ") {quant_type = #pto<quant_type " << quant_type
+      << ">, grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// tile.tmov_x2zz_dps(src, tmp, dst) → the PTOAS PR 1197 non-scaling
+// third-operand form of pto.tmov. PTOAS classifies the Vec third operand as
+// X-to-ZZ (rather than the legacy Scaling ``fp`` operand).
+static std::string MakeTMovX2ZzCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CHECK(op->args_.size() == 3) << "tile.tmov_x2zz_dps requires src, tmp, and dst operands";
+  auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "x2zz_src_static");
+  auto tmp_view = EmitStaticValidTileView(codegen, op->args_[1], "x2zz_tmp_static");
+  auto dst_view = EmitStaticValidTileView(codegen, op->args_[2], "x2zz_dst_static");
+  const int group_axis = op->GetKwarg<int>("group_axis", 1);
+  INTERNAL_CHECK_SPAN(group_axis == 0 || group_axis == 1, op->span_)
+      << "Internal error: tile.tmov_x2zz_dps group_axis must be 0 or 1";
+
+  std::ostringstream oss;
+  oss << "pto.tmov ins(" << src_view.ssa << " : " << src_view.type << ", " << tmp_view.ssa << " : "
+      << tmp_view.type << ") outs(" << dst_view.ssa << " : " << dst_view.type
+      << ") {grpAxis = #pto<mx_group_axis axis" << group_axis << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register ops with custom codegen logic
   auto reg = [&](const char* op_name, BackendCodegenFunc fn) {
@@ -1164,6 +1265,14 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
   reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAssembleCodegenPTO(op, codegen);
+  });
+
+  reg("tile.tquant_mx_dps", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTQuantMxCodegenPTO(op, codegen);
+  });
+
+  reg("tile.tmov_x2zz_dps", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTMovX2ZzCodegenPTO(op, codegen);
   });
 
   reg("tile.gather_row", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

@@ -1915,9 +1915,10 @@ def view(
             collapse to ``[1, product(shape)]``. Required when either supported
             collapse reinterprets a source with partial validity.
         layout: Target ``TensorLayout`` (ND or DN); DN requires rank at least 2.
-            Layout changes combined with ``shape`` are supported in-core but not by orchestration
-            lowering. Orchestration shape reinterpret is limited to ND-layout
-            tensors.
+            Orchestration supports ND shape reinterprets and shaped
+            ND/MX_A_ZZ/MX_B_NN backing and consumer views for dynamic FP8E8M0
+            MX scales. Other layout-changing shape views are limited to in-core
+            lowering.
 
     Returns:
         Tensor wrapping the view operation.

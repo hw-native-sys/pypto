@@ -348,8 +348,16 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
 
   const DataType target_dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
   const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box, args[0]->span_)
-      << kOpName << " only supports flat tiles with slayout=none_box; boxed/fractal tiles are unsupported";
+  const bool complete_mx_scale_layout =
+      (source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::row_major) ||
+      (source_view.blayout == TileLayout::col_major && source_view.slayout == TileLayout::col_major);
+  const bool mx_scale_byte_alias =
+      source_view.fractal == tile_view_semantics::kMXScaleFractal && complete_mx_scale_layout &&
+      ((tile_type->dtype_ == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
+       (tile_type->dtype_ == DataType::FP8E8M0 && target_dtype == DataType::UINT8));
+  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias, args[0]->span_)
+      << kOpName
+      << " only supports flat tiles with slayout=none_box, except UINT8/FP8E8M0 MX-scale byte aliases";
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
              args[0]->span_)
       << kOpName << " requires row_major or col_major blayout";

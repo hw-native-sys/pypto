@@ -66,6 +66,7 @@ __all__ = [
     "abs",
     "relu",
     "cast",
+    "quant_mx",
     "matmul",
     "batch_matmul",
     "matmul_acc",
@@ -180,6 +181,7 @@ from pypto.pypto_core.ir import (
     PadValue,
     PtrType,
     Span,
+    TensorLayout,
     TileLayout,
 )
 
@@ -1191,6 +1193,64 @@ def cast(
     return Tile(expr=call_expr)
 
 
+# ============================================================================
+# MX Quantization Operations
+# ============================================================================
+
+
+def quant_mx(
+    src: Tile,
+    *,
+    layout: TensorLayout,
+    dtype: DataType = DataType.FP8E4M3FN,
+) -> tuple[Tile, Tile]:
+    """MX block-32 dynamic quantization with required packed scale ``layout``.
+
+    ``layout`` is required (no default) and must be ``MX_A_ZZ`` or ``MX_B_NN``.
+    ``ND`` / ``None`` are rejected.
+
+    LowerCompositeOps maps ``MX_A_ZZ`` to PTOAS group axis 1 and ``MX_B_NN``
+    to group axis 0, then uses PTOAS X-to-ZZ TMOV for the packed scale result.
+
+    Args:
+        src: Source tile (FP16/FP32/BF16 for MXFP8; FP16/BF16 for MXFP4, 2D).
+            ``MX_A_ZZ``: ``[M, K]`` with ``M%16==0``, ``K%64==0``.
+            ``MX_B_NN``: ``[N, K]`` with ``N%32==0``, ``K%64==0``. FP16
+            MXFP4 additionally requires ``N%64==0``.
+        layout: Pack target — ``TensorLayout.MX_A_ZZ`` or ``MX_B_NN``.
+        dtype: Quantized element dtype: ``FP8E4M3FN`` (default) or packed
+            E2M1 ``FP4``.
+
+    Returns:
+        ``MX_A_ZZ``: ``(quant[M,K], scale[M,K/32])`` in ZZ layout.
+        ``MX_B_NN``: ``(quant[K,N], scale[K/32,N])`` — data transposed to
+        Cube RHS layout; scale in NN layout.
+
+    Note:
+        ``quant_mx`` and ``matmul_mx`` cannot currently share one InCore mixed
+        task. Stage the quantized data and scale through GM between separate
+        AIV and AIC kernels.
+    """
+    if layout not in (TensorLayout.MX_A_ZZ, TensorLayout.MX_B_NN):
+        raise ValueError(
+            "pl.quant_mx layout must be TensorLayout.MX_A_ZZ or TensorLayout.MX_B_NN "
+            f"(ND/None are not allowed), got {layout!r}"
+        )
+    if dtype not in (DataType.FP8E4M3FN, DataType.FP4):
+        raise ValueError(f"pl.quant_mx supports FP8E4M3FN or FP4 dtype, but got {dtype}")
+    call_expr = _ir_ops.tquant_mx(src.unwrap(), dtype=dtype, layout=layout)
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+# ============================================================================
+# Matrix Operations
+# ============================================================================
+
+
 def matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Matrix multiplication of two tiles.
 
@@ -1272,9 +1332,10 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
-    Both data tiles passed to this operation must be FP8E4M3FN. For the
-    supported FP4 x FP8 input form, explicitly cast the FP4 lhs to FP8E4M3FN
-    before calling this operation; native FP4 x FP4 is not supported.
+    Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
+    passed to this operation must be FP8E4M3FN. For the supported FP4 x FP8
+    input form, explicitly cast the FP4 lhs to FP8E4M3FN before calling this
+    operation; native FP4 x FP4 is not supported.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)

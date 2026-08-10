@@ -119,6 +119,12 @@ Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布�
 
 当跨核方向使用了不同大小的 tile 时，Pass 会取所有观察到的 tile 字节大小的最大值作为 `initialize_pipe` 的公共 `slot_size`。较小 tile 写入时不会填满整个槽位，但不影响硬件正确性。用户手写程序仍然可以通过给 `initialize_pipe` 以及匹配的 `tpush` / `tpop` / `tfree` 传入不同 `id` 来创建多条独立 pipe。
 
+### 已知限制：MX 量化后接矩阵乘
+
+自动 setup 当前还不支持在同一个 mixed task 内同时把 `quant_mx` 的 data 和
+FP8E8M0 scale 传给 `matmul_mx`。请将两者拆成 AIV 与 AIC kernel，并通过 GM
+暂存这两个值。自动配对的 data/scale pipe 留待后续改动。
+
 ### 覆盖槽位数（`slot_num`）
 
 默认槽位数（8 / 4）可以通过 `pl.cross_core_slot(slot_num=N)` 优化条目按 scope 调整：
