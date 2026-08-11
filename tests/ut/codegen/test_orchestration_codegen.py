@@ -73,7 +73,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -81,7 +81,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
                 const Tensor& ext_a = orch_args.tensor(0).ref();
                 const Tensor& ext_b = orch_args.tensor(1).ref();
@@ -94,14 +94,14 @@ class TestOrchestration:
                     const Tensor& c = alloc_0.get_ref(0);
 
                     // Task 0: kernel_add
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
-                    L0TaskArgs params_t1;
+                    CoreTaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_input(ext_b);
                     params_t1.add_output(ext_d);
@@ -522,7 +522,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
@@ -530,7 +530,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
                 const Tensor& ext_a = orch_args.tensor(0).ref();
                 const Tensor& ext_b = orch_args.tensor(1).ref();
@@ -552,35 +552,35 @@ class TestOrchestration:
                     const Tensor& g = alloc_0.get_ref(3);
 
                     // Task 0: kernel_add
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c);
                     rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
-                    L0TaskArgs params_t1;
+                    CoreTaskArgs params_t1;
                     params_t1.add_input(c);
                     params_t1.add_output(d);
                     params_t1.add_scalar(to_u64(1.000000f));
                     rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
-                    L0TaskArgs params_t2;
+                    CoreTaskArgs params_t2;
                     params_t2.add_input(c);
                     params_t2.add_output(e);
                     params_t2.add_scalar(to_u64(2.000000f));
                     rt_submit_aiv_task(1, params_t2);
 
                     // Task 3: kernel_mul
-                    L0TaskArgs params_t3;
+                    CoreTaskArgs params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
                     params_t3.add_output(g);
                     rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
-                    L0TaskArgs params_t4;
+                    CoreTaskArgs params_t4;
                     params_t4.add_input(g);
                     params_t4.add_input(c);
                     params_t4.add_output(ext_f);
@@ -1560,7 +1560,7 @@ class TestOrchestration:
             extern "C" {
 
             __attribute__((visibility("default")))
-            PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {
+            PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {
                 (void)orch_args;
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 7,
@@ -1568,7 +1568,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {
+            void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {
                 // External tensors
                 const Tensor& ext_mij = orch_args.tensor(0).ref();
                 const Tensor& ext_lij = orch_args.tensor(1).ref();
@@ -1581,7 +1581,7 @@ class TestOrchestration:
                 PTO2_SCOPE() {
 
                     // Task 0: online_update
-                    L0TaskArgs params_t0;
+                    CoreTaskArgs params_t0;
                     params_t0.add_input(ext_mij);
                     params_t0.add_input(ext_lij);
                     params_t0.add_input(ext_oi_new);

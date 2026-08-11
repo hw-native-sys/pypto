@@ -161,7 +161,7 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {\n";
+  oss << "PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {\n";
   oss << "    (void)orch_args;\n";
   oss << "    return PTO2OrchestrationConfig{\n";
   oss << "        .expected_arg_count = " << expected_arg_count << ",\n";
@@ -2307,7 +2307,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Speculative early-dispatch opt-in (pl.submit(..., allow_early_resolve=True)).
   // The flag rides on the Submit and is surfaced as the ``allow_early_resolve``
   // Call attr by SubmitToCallView; a plain submit / call lacks it, so this is a
-  // no-op there. Emitted on the producer task's L0TaskArgs before its rt_submit_* —
+  // no-op there. Emitted on the producer task's CoreTaskArgs before its rt_submit_* —
   // see simpler#1065 ("codegen-side emission of set_allow_early_resolve()").
   void EmitEarlyResolveHint(const std::string& task_var, const CallPtr& call) {
     if (call->GetAttr<bool>("allow_early_resolve", false)) {
@@ -2662,7 +2662,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
   /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
-  void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("L0TaskArgs " + task_var + ";"); }
+  void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("CoreTaskArgs " + task_var + ";"); }
 
   struct TaskDispatchPlan {
     std::string comment;
@@ -4194,7 +4194,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << GenerateConfigFunction(expected_arg_count);
 
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {\n";
+  oss << "void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {\n";
 
   // Selective vs. full tensor dump is no longer requested from the orch body.
   // simpler#953 removed the ``enable_dump_tensor_selective()`` toggle: the

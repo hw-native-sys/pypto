@@ -232,11 +232,11 @@ def guarded_one_trip(
 # Helpers: compile (no device) and read the emitted orchestration back as a string.
 # ---------------------------------------------------------------------------------------------
 
-# "// Group out_proj: ..." introduces a task; "L0TaskArgs params_tN;" declares its arg list and
+# "// Group out_proj: ..." introduces a task; "CoreTaskArgs params_tN;" declares its arg list and
 # the add_input/add_inout/add_output calls fill that list in order.
 _TASK_RE = re.compile(
     r"^\s*//\s*(?:Group|Spmd)\s+(?P<hdr>[^\n]*?)\s*:\s*(?P<tail>[^\n]*)$\n"
-    r"\s*L0TaskArgs\s+(?P<params>\w+);\n"
+    r"\s*CoreTaskArgs\s+(?P<params>\w+);\n"
     r"(?P<ops>(?:\s*(?P=params)\.add_\w+\([^\n]*\n)+)",
     re.MULTILINE,
 )

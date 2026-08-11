@@ -18,10 +18,10 @@
 namespace {
 
 template <typename DType>
-void submit_barrier_kernel(const L2TaskArgs &orch_args) {
+void submit_barrier_kernel(const ChipTaskArgs &orch_args) {
   const Tensor &signal = orch_args.tensor(0).ref();
 
-  L0TaskArgs params;
+  CoreTaskArgs params;
   params.add_inout(signal);
   params.add_scalar(orch_args.scalar(0));  // nranks
   params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
@@ -33,21 +33,21 @@ void submit_barrier_kernel(const L2TaskArgs &orch_args) {
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
-    const L2TaskArgs &orch_args) {
+    const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return PTO2OrchestrationConfig{
       .expected_arg_count = 3,
   };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
   submit_barrier_kernel<{{dtype_cpp}}>(orch_args);
 }
 
 // The sanitized builtin symbol is kept as an alias-like wrapper for easier
 // debugging of materialized sources; kernel_config.py still uses the standard
 // aicpu_orchestration_entry symbol expected by compile_and_assemble.
-__attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void {{entry}}(const ChipTaskArgs &orch_args) {
   aicpu_orchestration_entry(orch_args);
 }
 

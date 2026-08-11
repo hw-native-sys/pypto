@@ -186,7 +186,7 @@ class TestManualScopeCodegen:
         # attached with a single ``set_dependencies(arr, count)`` call. Both
         # entries are unconditionally filled (plain TaskId bindings, not
         # iter-arg carries, so no is_valid() guard).
-        assert "L0TaskArgs params_t2;" in code
+        assert "CoreTaskArgs params_t2;" in code
         assert "PTO2TaskId params_t2_deps[2];" in code
         assert "params_t2_deps[params_t2_deps_count++] = a_tid;" in code
         assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
@@ -1316,7 +1316,7 @@ class TestManualScopeCodegen:
             out, _       = pl.submit(self.stage2, scratch, out, row, col, deps=[tid])
 
         Expected codegen for the dep chain:
-            L0TaskArgs params_t1;
+            CoreTaskArgs params_t1;
             PTO2TaskId params_t1_deps[1];
             uint32_t params_t1_deps_count = 0;
             params_t1_deps[params_t1_deps_count++] = <producer TaskId>;
@@ -1510,7 +1510,7 @@ class TestManualScopeCodegen:
         # this is what the bug used to silently drop. Without these lines the
         # inner ``rt_submit_*_task`` would have no explicit fence on the outer
         # task and the regression would re-emerge.
-        assert "L0TaskArgs params_t1;" in code, code
+        assert "CoreTaskArgs params_t1;" in code, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
         # ``outer_tid`` is a fresh direct-producer TaskId declared in the outer
         # C++ scope (issue #1966): its cross-scope dep insert is unguarded.

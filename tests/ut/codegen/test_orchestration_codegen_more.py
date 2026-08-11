@@ -1385,7 +1385,7 @@ class TestOrchestrationMore:
         assert t2_alloc_line > n_line, "t2 alloc must come after n definition"
 
     def test_scalar_taskarg(self):
-        """Scalar params get L2TaskArgs scalar slots (0-indexed) via from_u64<T>()."""
+        """Scalar params get ChipTaskArgs scalar slots (0-indexed) via from_u64<T>()."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1834,7 +1834,7 @@ class TestOrchestrationMore:
 
         Canonical order::
 
-          L0TaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit
+          CoreTaskArgs → params → dump → MixedKernels → launch_spec → set_dependencies → submit
 
         Guards against unintentional reorder in ``TaskDispatchPlan::Emit``.
         """
@@ -1884,19 +1884,19 @@ class TestOrchestrationMore:
         assert "params_t0.launch_spec." in code, code
         assert "rt_submit_task(mixed_0" in code, code
 
-        # MixedKernels must appear after L0TaskArgs (params/dump block ends with
+        # MixedKernels must appear after CoreTaskArgs (params/dump block ends with
         # add_* calls; MixedKernels comes next in the old canonical order).
-        assert "L0TaskArgs params_t0;" in code, code
-        l0_index = code.index("L0TaskArgs params_t0;")
+        assert "CoreTaskArgs params_t0;" in code, code
+        l0_index = code.index("CoreTaskArgs params_t0;")
         mixed_index = code.index("MixedKernels mixed_0")
         launch_index = code.index("params_t0.launch_spec.")
         submit_index = code.index("rt_submit_task(mixed_0")
-        assert l0_index < mixed_index, "MixedKernels must appear after L0TaskArgs"
+        assert l0_index < mixed_index, "MixedKernels must appear after CoreTaskArgs"
         assert mixed_index < launch_index, "MixedKernels must appear before launch_spec"
         assert launch_index < submit_index, "launch_spec must appear before submit"
 
     def test_direct_call_with_deps_emission_order(self):
-        """Direct-call path with deps: L0TaskArgs → deps array → set_dependencies → submit.
+        """Direct-call path with deps: CoreTaskArgs → deps array → set_dependencies → submit.
 
         The dependent task (params_t1) carries the deps. Guards the canonical
         order for ``pl.submit(..., deps=[...])`` so a future change to
@@ -1922,14 +1922,14 @@ class TestOrchestrationMore:
         code = _generate_orch_code(transformed)
 
         # Task 0 (no deps) and Task 1 (carries deps) must both be present.
-        assert "L0TaskArgs params_t0;" in code, code
+        assert "CoreTaskArgs params_t0;" in code, code
         assert "params_t1.set_dependencies(" in code, code
         assert "rt_submit_aiv_task(" in code, code
 
-        l0_t0 = code.index("L0TaskArgs params_t0;")
+        l0_t0 = code.index("CoreTaskArgs params_t0;")
         deps_t1 = code.index("params_t1.set_dependencies(")
         submit_t1 = code.rindex("rt_submit_aiv_task(")
-        assert l0_t0 < deps_t1, "L0TaskArgs must appear before set_dependencies"
+        assert l0_t0 < deps_t1, "CoreTaskArgs must appear before set_dependencies"
         assert deps_t1 < submit_t1, "set_dependencies must appear before submit"
 
     def test_dyn_dim_symbol_is_defined_from_the_declaring_argument(self):

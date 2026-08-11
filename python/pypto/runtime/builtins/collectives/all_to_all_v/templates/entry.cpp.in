@@ -18,14 +18,14 @@
 namespace {
 
 template <typename DType>
-void submit_all_to_all_v_kernel(const L2TaskArgs &orch_args) {
+void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   const Tensor &input = orch_args.tensor(0).ref();
   const Tensor &target = orch_args.tensor(1).ref();
   const Tensor &signal = orch_args.tensor(2).ref();
   const Tensor &send_counts = orch_args.tensor(3).ref();
   const Tensor &recv_counts = orch_args.tensor(4).ref();
 
-  L0TaskArgs params;
+  CoreTaskArgs params;
   params.add_input(input);
   params.add_inout(target);
   params.add_inout(signal);
@@ -41,18 +41,18 @@ void submit_all_to_all_v_kernel(const L2TaskArgs &orch_args) {
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
-    const L2TaskArgs &orch_args) {
+    const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return PTO2OrchestrationConfig{
       .expected_arg_count = 7,
   };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
   submit_all_to_all_v_kernel<{{dtype_cpp}}>(orch_args);
 }
 
-__attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void {{entry}}(const ChipTaskArgs &orch_args) {
   aicpu_orchestration_entry(orch_args);
 }
 
