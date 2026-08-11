@@ -469,6 +469,7 @@ jobs:
         with:
           checkout-path: examples-checkout
           needs-device: 'false'
+          toolchain: bundle
           pip-cache-name: pip-examples
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 

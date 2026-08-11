@@ -32,12 +32,17 @@ description: >-
   install root in its own pypto-env.conf — both of which the tool resolves, and
   this action follows it there by asking the tool rather than by naming a path.
 
-  Beyond those, the host is expected to provide (by name, not by path): a conda
-  env `py310` under CONDA_ROOT, and task-submit / npu-smi / ccache / git / curl on
-  PATH. The `.env` makes the *locations* portable; these names are the
-  provisioning contract a runner has to satisfy to be usable at all. Note the CPU
-  runner (codegen-tests) now needs the `py310` env too — previously it used the
-  container's Python.
+  Beyond those, the host is expected to provide (by name, not by path):
+  task-submit / npu-smi / ccache / git / curl on PATH, and — on the conda path
+  only — a conda env `py310` under CONDA_ROOT. The `.env` makes the *locations*
+  portable; these names are the provisioning contract a runner has to satisfy to
+  be usable at all.
+
+  A bundle runner needs no conda whatsoever: CONDA_ROOT is read only inside the
+  `toolchain: conda` bootstrap step, and nothing else reaches for a conda prefix.
+  Keep it that way. A step that runs before the bootstrap has no activate.sh and
+  is tempted to find an interpreter on its own; conda is the wrong answer, and
+  the right one is to move the step after the bootstrap instead.
 
   The calling job must define PTOAS_ROOT, PTO_ISA_ROOT, PTOAS_VERSION,
   PTOAS_SHA256, the CMAKE_* and the non-path CCACHE_* (MAXSIZE / UMASK) environment
@@ -248,55 +253,6 @@ runs:
       shell: bash
       run: echo "CCACHE_NAMESPACE=pto-isa-${{ inputs.pto-isa-commit }}" >> "$GITHUB_ENV"
 
-    - name: Install ptoas (local cache)
-      # $PTOAS_CACHE_DIR (ci-cache/ptoas) comes from the derive step above.
-      if: ${{ inputs.install-toolchain == 'true' }}
-      shell: bash
-      run: |
-        # v0.55's standalone archive requires CPython 3.11, while PyPTO CI
-        # intentionally tests Python 3.10. Install the matching cp310 wheel into
-        # an isolated venv so PTOAS_ROOT/bin/ptoas keeps the existing contract.
-        PTOAS_ARCH="$(uname -m)"
-        PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
-        PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
-        CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
-        # $PTOAS_CACHE_DIR is shared across concurrent jobs on the host (unlike the
-        # per-job pip dir), so two cache-miss jobs must not fight over one temp
-        # file: download into a per-job mktemp, verify it, then atomically rename
-        # into place (last writer wins — content is identical). A trap removes
-        # the temp if we die mid-download. CACHE_WHEEL therefore only ever holds
-        # a verified wheel; the final sha256 re-check guards a cache hit against a
-        # partial/corrupt file left by a crashed pre-atomic-rename run.
-        if [ ! -f "$CACHE_WHEEL" ]; then
-          echo "Cache miss — downloading ptoas ${PTOAS_VERSION} for ${PTOAS_ARCH}"
-          mkdir -p "$PTOAS_CACHE_DIR"
-          tmp_wheel="$(mktemp "$PTOAS_CACHE_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
-          trap 'rm -f "$tmp_wheel"' EXIT
-          curl --fail --location --retry 3 --retry-all-errors \
-            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
-            -o "$tmp_wheel"
-          echo "${PTOAS_SHA256}  $tmp_wheel" | sha256sum -c -
-          mv -f "$tmp_wheel" "$CACHE_WHEEL"
-          trap - EXIT
-        else
-          echo "Cache hit — using $CACHE_WHEEL"
-        fi
-        echo "${PTOAS_SHA256}  $CACHE_WHEEL" | sha256sum -c -
-        PTOAS_CONDA_PREFIX="$CONDA_ROOT/envs/py310"
-        PTOAS_PYTHON="$PTOAS_CONDA_PREFIX/bin/python"
-        if [ ! -x "$PTOAS_PYTHON" ]; then
-          echo "::error::ptoas ${PTOAS_VERSION} requires the runner's py310 conda environment"
-          exit 1
-        fi
-        rm -rf "$PTOAS_ROOT"
-        "$PTOAS_PYTHON" -m venv "$PTOAS_ROOT" --system-site-packages
-        "$PTOAS_ROOT/bin/python" -m pip install "$CACHE_WHEEL"
-        # The bootstrap step below writes the same conda lib prefix into
-        # activate.sh. Apply it to this early probe too; otherwise older device
-        # hosts select /usr/lib64/libstdc++.so.6 and miss GLIBCXX_3.4.29.
-        LD_LIBRARY_PATH="$PTOAS_CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-          "$PTOAS_ROOT/bin/ptoas" --version
-
     - name: Clone pto-isa
       if: ${{ inputs.install-toolchain == 'true' }}
       shell: bash
@@ -473,6 +429,101 @@ runs:
             exit 1
           fi )
         echo "toolchain: $(source activate.sh >/dev/null 2>&1; g++-15 -dumpversion) / $(source activate.sh >/dev/null 2>&1; python3.10 -V 2>&1)"
+
+    - name: Install ptoas (local cache)
+      # $PTOAS_CACHE_DIR (ci-cache/ptoas) comes from the derive step above.
+      #
+      # Deliberately after both bootstrap steps. ptoas ships as a wheel now, so
+      # this needs a CPython 3.10 to install it into, and the only correct one is
+      # whichever activate.sh puts on PATH. Run before them, activate.sh does not
+      # exist yet — which is how this step came to reach straight into
+      # $CONDA_ROOT/envs/py310, giving every job a conda dependency, bundle ones
+      # included, that this action's own runner contract says may be absent.
+      if: ${{ inputs.install-toolchain == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.checkout-path }}
+      env:
+        CHECKOUT_PATH: ${{ inputs.checkout-path }}
+      run: |
+        # PTOAS_ROOT belongs to the calling job's env: block, so this action
+        # cannot assume it arrived. Checked before the `rm -rf` below, which
+        # unset would aim at nothing.
+        if [ -z "${PTOAS_ROOT:-}" ]; then
+          echo "::error::PTOAS_ROOT is not set — the calling job must define it"
+          exit 1
+        fi
+        # Non-empty is not enough for a `rm -rf`. Every caller points PTOAS_ROOT
+        # at <checkout>/ptoas-bin, and a value one component short of that —
+        # $GITHUB_WORKSPACE/st-checkout, or a sibling checkout sharing its
+        # prefix — would aim the delete at a checkout instead. Canonicalize both
+        # sides and require a strict descendant, so equality with the checkout
+        # dir, a prefix-sharing sibling, and any `..` escape are all rejected
+        # before anything is removed. realpath -m: neither path need exist yet.
+        checkout_dir="$(realpath -m "$GITHUB_WORKSPACE/$CHECKOUT_PATH")"
+        ptoas_root="$(realpath -m "$PTOAS_ROOT")"
+        case "$ptoas_root" in
+          "$checkout_dir"/?*) ;;
+          *)
+            echo "::error::PTOAS_ROOT must be a directory inside $checkout_dir"
+            echo "Got '$PTOAS_ROOT' (resolves to '$ptoas_root'). This step"
+            echo "recreates that directory from scratch, so it must be one this"
+            echo "action owns rather than the checkout itself."
+            exit 1
+            ;;
+        esac
+        # v0.55's standalone archive requires CPython 3.11, while PyPTO CI
+        # intentionally tests Python 3.10. Install the matching cp310 wheel into
+        # an isolated venv so PTOAS_ROOT/bin/ptoas keeps the existing contract.
+        PTOAS_ARCH="$(uname -m)"
+        PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
+        PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_${PTOAS_ARCH}.whl"
+        CACHE_WHEEL="$PTOAS_CACHE_DIR/$PTOAS_WHEEL_NAME"
+        # $PTOAS_CACHE_DIR is shared across concurrent jobs on the host (unlike the
+        # per-job pip dir), so two cache-miss jobs must not fight over one temp
+        # file: download into a per-job mktemp, verify it, then atomically rename
+        # into place (last writer wins — content is identical). A trap removes
+        # the temp if we die mid-download. CACHE_WHEEL therefore only ever holds
+        # a verified wheel; the final sha256 re-check guards a cache hit against a
+        # partial/corrupt file left by a crashed pre-atomic-rename run.
+        if [ ! -f "$CACHE_WHEEL" ]; then
+          echo "Cache miss — downloading ptoas ${PTOAS_VERSION} for ${PTOAS_ARCH}"
+          mkdir -p "$PTOAS_CACHE_DIR"
+          tmp_wheel="$(mktemp "$PTOAS_CACHE_DIR/.ptoas-${PTOAS_ARCH}.XXXXXX")"
+          trap 'rm -f "$tmp_wheel"' EXIT
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
+            -o "$tmp_wheel"
+          echo "${PTOAS_SHA256}  $tmp_wheel" | sha256sum -c -
+          mv -f "$tmp_wheel" "$CACHE_WHEEL"
+          trap - EXIT
+        else
+          echo "Cache hit — using $CACHE_WHEEL"
+        fi
+        echo "${PTOAS_SHA256}  $CACHE_WHEEL" | sha256sum -c -
+        # activate.sh gives both the interpreter and the LD_LIBRARY_PATH ptoas
+        # needs, for either toolchain. Sourced here rather than at the top of the
+        # step so a download failure stays a download failure.
+        source activate.sh
+        # The wheel is cp310-only: pip would reject it with "not a supported
+        # wheel on this platform", which does not say that the *environment* is
+        # the wrong version. Say it here instead.
+        py_version="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+        if [ "$py_version" != "3.10" ]; then
+          echo "::error::ptoas ${PTOAS_VERSION} ships a cp310 wheel, but this job's python is $py_version"
+          exit 1
+        fi
+        rm -rf "$PTOAS_ROOT"
+        # `python` is the job venv's. venv resolves a new environment's base from
+        # sys.base_prefix, so building one from inside the job venv layers ptoas
+        # on the toolchain underneath it — conda's py310 or the bundle's
+        # python3.10 — and --system-site-packages exposes that same prefix, which
+        # is what the conda-only form did explicitly.
+        python -m venv "$PTOAS_ROOT" --system-site-packages
+        "$PTOAS_ROOT/bin/python" -m pip install "$CACHE_WHEEL"
+        # activate.sh has already put the right libstdc++ first (conda's lib
+        # prefix, or the bundle's), so the probe no longer splices one in by
+        # hand. ptoas needs GLIBCXX_3.4.29; older device hosts stop at 3.4.28.
+        "$PTOAS_ROOT/bin/ptoas" --version
 
     - name: Show ccache stats (before)
       shell: bash
