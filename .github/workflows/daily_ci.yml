@@ -183,7 +183,12 @@ jobs:
       - name: Install pypto-lib runner dependencies
         run: |
           source activate.sh
-          pip install nanobind torch
+          # uv, not pip: this job asks for toolchain: bundle, and that venv is
+          # built by `uv venv` and carries no pip. Both are already installed by
+          # setup-ci-job (torch at its pin); this stays as the job's own explicit
+          # statement of what the pypto-lib samples need, and is a no-op when the
+          # two agree.
+          uv pip install nanobind torch
 
       - name: Run Qwen3-14B decode perf samples (L2 swimlane, 5x)
         id: qwen3_perf_run
