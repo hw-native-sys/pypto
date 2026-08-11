@@ -225,7 +225,7 @@ build each collective by hand before the builtin is revealed:
 | Collective | Tutorial step | Hand-rolled first? |
 | ---------- | ------------- | ------------------ |
 | barrier | [09-barrier](09-barrier.md) | yes (step 04, then reveal) |
-| allreduce | planned — steps 08–11 | yes (mesh, two-phase, ring, then reveal) |
+| allreduce | [13-allreduce_mesh](13-allreduce_mesh.md) · [14-allreduce_two_phase](14-allreduce_two_phase.md) · [15-allreduce_ring](15-allreduce_ring.md) · [16-allreduce_reveal](16-allreduce_reveal.md) | yes (steps 08–11) |
 | broadcast | planned — step 12 | yes |
 | allgather | planned — step 13 | yes |
 | reduce_scatter | planned — step 14 | yes |

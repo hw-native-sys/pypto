@@ -1,12 +1,13 @@
 # 分布式教程（Distributed Tutorials）
 
-`pld` 词汇表按步骤讲解：一个十六步的教程系列，每步一个概念。七个可运行的
-示例现已交付——从 "hello rank" 到点对点移动与动态 rank 数量；步骤 08–16
-（集合通信）为规划中。
+`pld` 词汇表按步骤讲解：一个十六步的教程系列，每步一个概念。十一个可运行的
+示例现已交付——从 "hello rank" 到点对点移动、动态 rank 数量，以及 all-reduce
+三连与其揭示；步骤 12–15（其余集合通信）与步骤 16（组合）为规划中。
 
 > **前置条件：** 先通读[分布式编程](../distributed/index.md)章节——了解词汇，
 > 再回到这里亲手构建同样的概念。硬件：步骤 01–06 需要两个设备，步骤 07
-> 需要三个或更多（任意 rank 数量），步骤 08–16 的集合通信对比需要四个设备。
+> 需要任意 ≥ 2 的数量（三个或更多才能看到环与 P=2 的差异），步骤 08–11
+> 的集合通信对比需要四个设备。
 
 ## 思路（The idea）
 
@@ -37,8 +38,8 @@
 ## 建议阅读顺序（Suggested reading order）
 
 按顺序阅读这些步骤——**01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10 →
-11 → 12 → 13 → 14 → 15 → 16**。每个页面都会重复此顺序块。步骤 08–16 为规划中；
-01–07 在第一个 PR 中交付（见下文）。
+11 → 12 → 13 → 14 → 15 → 16**。每个页面都会重复此顺序块。步骤 01–11 现已交付；
+12–16 仍为规划中。
 
 ## 16 个步骤
 
@@ -51,18 +52,18 @@
 | 05 | `05_remote_load_store.py` | Tile 级 RMA：`remote_load`/`remote_store`；一步环形移位 | ✅ 已交付 |
 | 06 | `06_put_get.py` | Tensor 级 p2p：`put`/`get`；push 与 pull | ✅ 已交付 |
 | 07 | `07_dynamic_rank_count.py` | 动态 rank 数量：`pl.dynamic("NR")`；同一份源码，任意 P | ✅ 已交付 |
-| 08 | `08_allreduce_mesh.py` | All-reduce v1（mesh）：每个 rank 读取所有对端，本地求和 | 规划中 |
-| 09 | `09_allreduce_two_phase.py` | All-reduce v2：reduce-scatter + all-gather | 规划中 |
-| 10 | `10_allreduce_ring.py` | All-reduce v3（ring）：沿环分块 | 规划中 |
-| 11 | `11_allreduce_reveal.py` | **揭示**：`pld.tensor.allreduce`（mesh + ring）；对比 IR | 规划中 |
+| 08 | `08_allreduce_mesh.py` | All-reduce v1（mesh）：每个 rank 读取所有对端，本地求和 | ✅ 已交付 |
+| 09 | `09_allreduce_two_phase.py` | All-reduce v2：reduce-scatter + all-gather | ✅ 已交付 |
+| 10 | `10_allreduce_ring.py` | All-reduce v3（ring）：沿环分块 | ✅ 已交付 |
+| 11 | `11_allreduce_reveal.py` | **揭示**：`pld.tensor.allreduce`（mesh + ring）；对比 IR | ✅ 已交付 |
 | 12 | `12_broadcast.py` | 一对多；揭示 `pld.tensor.broadcast` | 规划中 |
 | 13 | `13_allgather.py` | 全对全切片；揭示 `pld.tensor.allgather` | 规划中 |
 | 14 | `14_reduce_scatter.py` | 全对分块；揭示 `pld.tensor.reduce_scatter` | 规划中 |
 | 15 | `15_all_to_all.py` | 个性化交换；揭示 `pld.tensor.all_to_all` | 规划中 |
 | 16 | `16_putting_it_together.py` | 在一个 kernel 中组合 `broadcast` + `allreduce` + `allgather` | 规划中 |
 
-步骤 08–16 为**规划中**——它们将在后续 PR 中交付。下面的教程页面（06–12）
-覆盖一起交付的步骤 01–07。
+步骤 12–16 为**规划中**——它们将在后续 PR 中交付。下面的教程页面（06–16）
+覆盖步骤 01–11。
 
 ## 抽象总览（The abstractions map）
 

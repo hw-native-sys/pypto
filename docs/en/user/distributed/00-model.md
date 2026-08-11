@@ -13,6 +13,13 @@
 
 The simplest distributed program — two ranks sum their data, both see the same result.
 
+> This is the **mesh all-reduce** pattern — stage in, barrier, read every
+> peer's slice and sum — which the [mesh allreduce walkthrough](13-allreduce_mesh.md)
+> builds step-by-step in the [tutorial ladder](05-tutorials.md). At two ranks
+> every algorithm collapses to this one exchange; the
+> [ring allreduce walkthrough](15-allreduce_ring.md) is the last manual step
+> before the builtin is revealed.
+
 ```python
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -207,6 +214,7 @@ InCore kernel (@pl.jit.incore)
 
 ## See Also
 
+- [05-tutorials](05-tutorials.md) — The step-by-step distributed tutorial ladder
 - [01-collectives](01-collectives.md) — Built-in collectives and their semantics
 - [02-primitives](02-primitives.md) — The substrate beneath the collectives
 - [03-execution](03-execution.md) — DistributedWorker lifecycle and production patterns
