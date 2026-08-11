@@ -961,6 +961,26 @@ class TestWorkerConstruction:
 
         assert worker_cls.call_args.kwargs["startup_timeout_s"] == 1800.0
 
+    @pytest.mark.parametrize(
+        "startup_timeout_s",
+        [0.0, -1.0, float("inf"), float("-inf"), float("nan")],
+    )
+    def test_rejects_invalid_startup_timeout_before_worker_construction(self, monkeypatch, startup_timeout_s):
+        worker_cls = MagicMock(name="simpler.Worker")
+        monkeypatch.setitem(sys.modules, "simpler.worker", SimpleNamespace(Worker=worker_cls))
+        dc = DistributedConfig(device_ids=[0, 1])
+
+        with pytest.raises(ValueError, match="positive finite"):
+            _construct_worker(
+                dc,
+                "a2a3",
+                "tensormap_and_ringbuffer",
+                3,
+                startup_timeout_s=startup_timeout_s,
+            )
+
+        worker_cls.assert_not_called()
+
     def test_distributed_worker_forwards_startup_timeout(self, patched_setup):
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 

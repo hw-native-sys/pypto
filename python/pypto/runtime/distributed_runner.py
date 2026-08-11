@@ -16,6 +16,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import queue
 import sys
 import threading
@@ -322,6 +323,12 @@ def _construct_worker(
     startup_timeout_s: float | None = None,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
+    if startup_timeout_s is not None and (not math.isfinite(startup_timeout_s) or startup_timeout_s <= 0):
+        raise ValueError(
+            "DistributedWorker startup_timeout_s must be a positive finite number of seconds, "
+            f"got {startup_timeout_s!r}"
+        )
+
     from simpler.worker import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
         Worker,
     )
