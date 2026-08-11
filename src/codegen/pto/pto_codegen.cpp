@@ -945,10 +945,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
       INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
           << "FFTS workspace must be a statically sized INT64 tensor";
-      stream_ << "%arg" << j << ": memref<" << extent->value_ << "xi64>";
-    } else {
-      stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
     }
+    stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
   }
   for (size_t j = 0; j < scalar_param_indices.size(); j++) {
     if (!first_param) stream_ << ", ";
@@ -1166,7 +1164,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
     if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a memref
+    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
 
     // ptoas rejects a malformed view (bad strides / layout) on this line, so
     // attribute it to the parameter that declared the tensor.

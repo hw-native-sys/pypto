@@ -518,8 +518,9 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
   return "";
 }
 
-// Helper function for GatherMask: emits pto.tgather with maskPattern attribute
-// PTOAS expects: ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type) outs(dst : dst_type)
+// Helper function for GatherMask: emits row-axis pto.tgather with maskPattern attribute.
+// PTOAS expects:
+//   ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type, "row") outs(dst : dst_type)
 static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CHECK(op->args_.size() == 1) << "tile.gather_mask requires 1 argument (src), but got " << op->args_.size();
@@ -539,7 +540,7 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
-  oss << ") outs(" << dst;
+  oss << ", \"row\") outs(" << dst;
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }

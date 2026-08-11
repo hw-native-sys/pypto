@@ -2524,6 +2524,10 @@ class TestMrgSortCodegen:
         tmrgsort_lines = [line for line in mlir.splitlines() if "pto.tmrgsort" in line]
         assert tmrgsort_lines, "No pto.tmrgsort line found"
         assert "i32" in tmrgsort_lines[0], f"block_len type annotation should be i32: {tmrgsort_lines[0]}"
+        tgather_line = next(line for line in mlir.splitlines() if "pto.tgather" in line)
+        assert '"row"' in tgather_line and tgather_line.index('"row"') < tgather_line.index("outs("), (
+            f"mask-form pto.tgather must emit the PTOAS row axis before outs(...), got:\n{tgather_line}"
+        )
 
     def test_mrgsort_format1_variable_block_len(self):
         """mrgsort with variable block_len (function parameter) should generate pto.tmrgsort."""
@@ -3390,7 +3394,7 @@ class TestCrossCoreSyncCodegen:
         assert "pto.sync.wait <PIPE_MTE2>, 3" in mlir
 
     def test_a3_ffts_workspace_setup(self):
-        """An FFTS tensor stays a memref and lowers to the required PTO setup op."""
+        """An FFTS tensor stays a raw pointer and lowers to the required PTO setup op."""
 
         @pl.program
         class Prog:
@@ -3405,8 +3409,8 @@ class TestCrossCoreSyncCodegen:
                 return x
 
         mlir = self._generate_mlir(Prog)
-        assert "%arg0: memref<256xi64>" in mlir
-        assert "pto.set_ffts %arg0 : memref<256xi64>" in mlir
+        assert "%arg0: !pto.ptr<i64>" in mlir
+        assert "pto.set_ffts %arg0 : !pto.ptr<i64>" in mlir
         assert "ffts_workspace_view" not in mlir
 
     def test_dynamic_event_id(self):

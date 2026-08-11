@@ -472,8 +472,7 @@ static std::string MakeSetFFTSCodegenPTO(const CallPtr& op, codegen::CodegenBase
   auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
   INTERNAL_CHECK_SPAN(extent && extent->value_ >= 256, op->span_)
       << "system.set_ffts workspace must have a static length of at least 256 INT64 elements";
-  codegen.Emit("pto.set_ffts " + codegen.GetVarName(workspace) + " : memref<" +
-               std::to_string(extent->value_) + "xi64>");
+  codegen.Emit("pto.set_ffts " + codegen.GetVarName(workspace) + " : !pto.ptr<i64>");
   return "";
 }
 
