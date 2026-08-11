@@ -127,6 +127,12 @@ def patched_setup():
     Yields a dict of the mocks so individual tests can assert call counts.
     The worker mock records malloc/copy_to/free for alloc_tensor checks.
     """
+    simpler = ModuleType("simpler")
+    simpler.__path__ = []
+    task_interface = ModuleType("simpler.task_interface")
+    setattr(task_interface, "DataType", SimpleNamespace(UINT8=object()))
+    setattr(simpler, "task_interface", task_interface)
+
     worker = MagicMock(name="Worker(level=3)")
     worker.chip_contexts = []
     worker._live_domains = {}
@@ -138,6 +144,13 @@ def patched_setup():
     mod = "pypto.runtime.distributed_runner"
     chip_callables = ({"chip_orch": object()}, "rt_name", False)
     with (
+        patch.dict(
+            sys.modules,
+            {
+                "simpler": simpler,
+                "simpler.task_interface": task_interface,
+            },
+        ),
         patch(f"{mod}._assemble_chip_callables", return_value=chip_callables) as assemble,
         patch(f"{mod}._load_orch_entry", return_value=(MagicMock(name="entry_fn"), None)) as load_entry,
         patch(f"{mod}._load_sub_worker_fns", return_value={}) as load_subs,
@@ -188,6 +201,7 @@ class TestSetupOnce:
         m["construct"].assert_called_once()
         m["register"].assert_called_once()
         m["worker"].init.assert_called_once()
+        assert m["worker"].__dict__["_pypto_tensor_owner_ref"]() is rt
         # Simpler's public init owns eager hierarchy startup.
         m["worker"]._start_hierarchical.assert_not_called()
 
@@ -864,6 +878,27 @@ class TestPerCallValidation:
 
 
 class TestDeviceMemoryApi:
+    def test_pointer_reuse_old_tensor_cannot_free_new_allocation(self, patched_setup):
+        old_buffer = _FakeBuffer(0xDEAD0000, 1024)
+        new_buffer = _FakeBuffer(0xDEAD0000, 1024)
+        worker = patched_setup["worker"]
+        worker.alloc_child_tensor.side_effect = [old_buffer, new_buffer]
+        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+
+        old = rt.alloc_tensor((16, 16), torch.float32)
+        rt.free_tensor(old)
+        new = rt.alloc_tensor((16, 16), torch.float32)
+
+        worker.free.reset_mock()
+        with pytest.raises(ValueError, match="stale DeviceTensor"):
+            rt.free_tensor(old)
+        worker.free.assert_not_called()
+        assert rt._buffer_for_ptr(new.data_ptr) is new_buffer
+
+        rt.free_tensor(new)
+        worker.free.assert_called_once_with(new_buffer)
+        rt.close()
+
     def test_free_tensor_failure_retains_buffer_for_retry(self, patched_setup):
         rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
         dev = rt.alloc_tensor((16, 16), torch.float32)

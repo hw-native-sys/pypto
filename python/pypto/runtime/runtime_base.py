@@ -84,12 +84,19 @@ class Worker(ABC):
     """
 
     def __init__(self) -> None:
-        # Subclasses MUST call ``super().__init__()`` so this set exists before
+        # Subclasses MUST call ``super().__init__()`` so this map exists before
         # any ``alloc_tensor`` call. Tracks DeviceTensors allocated via
         # ``alloc_tensor`` so ``_close_owned_tensors`` can release any the
         # caller forgot. Keyed by ``(worker_id, data_ptr)`` so buffers allocated
-        # on a non-default worker are freed against the correct worker.
-        self._owned_tensors: set[tuple[int, int]] = set()
+        # on a non-default worker are freed against the correct worker. The
+        # DeviceTensor value is the allocation identity: a stale handle must
+        # not free a newer allocation that reused the same device address.
+        self._owned_tensors: dict[tuple[int, int], DeviceTensor] = {}
+        # Raw simpler Workers are bound back to this owner for DeviceTensor
+        # wire conversion.  The concrete runtime sets this whenever it creates
+        # (or recreates) its backend; tensor_arg.py rejects stale backends whose
+        # binding no longer matches this current object.
+        self._tensor_arg_worker: Any | None = None
 
     # ------------------------------------------------------------------
     # Memory primitives — implemented per subclass.
@@ -172,6 +179,48 @@ class Worker(ABC):
         """
         return None
 
+    def _require_owned_resident_tensor(
+        self,
+        tensor: DeviceTensor,
+        label: str,
+        *,
+        worker_id: int | None = None,
+    ) -> None:
+        """Require a live owner ``Buffer`` allocated by this Worker.
+
+        ``DeviceTensor`` keeps its Buffer handle after ``free_tensor()`` so
+        that the immutable public handle remains inspectable.  The retained
+        handle alone is therefore not proof of liveness.  The authoritative
+        check is object identity in ``_device_buffers``: this rejects foreign
+        Workers, freed handles, and pointer-reuse (ABA) cases before a stale
+        wire descriptor can enter simpler ``Worker.run``.
+        """
+        self._require_ready("dispatch DeviceTensor")
+        worker_name = type(self).__name__
+        if tensor.buffer is None:
+            raise TypeError(
+                f"{label}: a raw-pointer DeviceTensor cannot be dispatched by {worker_name}; "
+                f"use this same {worker_name}.alloc_tensor() to create it."
+            )
+
+        buffers = getattr(self, "_device_buffers", None)
+        if not isinstance(buffers, dict):
+            raise TypeError(
+                f"{label}: {worker_name} does not retain owner Buffers required for DeviceTensor dispatch."
+            )
+        if worker_id is None:
+            owned = any(
+                ptr == tensor.data_ptr and buffer is tensor.buffer for (_wid, ptr), buffer in buffers.items()
+            )
+        else:
+            owned = buffers.get((worker_id, tensor.data_ptr)) is tensor.buffer
+        if not owned:
+            placement = "" if worker_id is None else f" on worker_id={worker_id}"
+            raise ValueError(
+                f"{label}: DeviceTensor is not a live allocation owned by this {worker_name}"
+                f"{placement}; allocate it with this same worker and do not dispatch it after free_tensor()."
+            )
+
     # ------------------------------------------------------------------
     # DeviceTensor conveniences — shared.
     # ------------------------------------------------------------------
@@ -194,8 +243,9 @@ class Worker(ABC):
         pointer.
 
         The returned :class:`DeviceTensor` is tracked by this Worker keyed by
-        ``(worker_id, data_ptr)``: if the caller does not :meth:`free_tensor` it
-        before ``close()``, the subclass's ``close()`` (via
+        ``(worker_id, data_ptr)`` and retained as the allocation identity: if
+        the caller does not :meth:`free_tensor` it before ``close()``, the
+        subclass's ``close()`` (via
         :meth:`_close_owned_tensors`) reclaims it against the same worker.
         Because a :class:`DeviceTensor` does not itself carry its worker scope,
         a caller that allocates on a non-default worker MUST pass the same
@@ -215,7 +265,7 @@ class Worker(ABC):
             init=init,
             init_prep=self._prepare_init,
         )
-        self._owned_tensors.add((worker_id, t.data_ptr))
+        self._owned_tensors[(worker_id, t.data_ptr)] = t
         return t
 
     def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
@@ -235,8 +285,8 @@ class Worker(ABC):
         Raises:
             ValueError: if ``t.data_ptr`` is still tracked but under a different
                 ``worker_id`` — silently no-oping there would leak the buffer
-                until ``close()``, so the mismatched-worker contract bug is
-                surfaced instead.
+                until ``close()`` — or if the address is now owned by a newer
+                allocation, so a stale handle cannot free the replacement.
         """
         key = (worker_id, t.data_ptr)
         if key not in self._owned_tensors:
@@ -250,11 +300,16 @@ class Worker(ABC):
                     f"ptr=0x{t.data_ptr:x} (allocated on worker(s) {owners}); pass the same worker_id."
                 )
             return
+        if self._owned_tensors[key] is not t:
+            raise ValueError(
+                f"free_tensor(..., worker_id={worker_id}) received a stale DeviceTensor for "
+                f"ptr=0x{t.data_ptr:x}; that address now belongs to a newer allocation."
+            )
         self.free(t.data_ptr, worker_id=worker_id)
         # Preserve ownership across a backend admission/free failure so callers
         # can retry. A successful first free removes the key and keeps the
         # genuine second-free path idempotent.
-        self._owned_tensors.discard(key)
+        del self._owned_tensors[key]
 
     def _close_owned_tensors(self) -> None:
         """Release any DeviceTensors the caller forgot to :meth:`free_tensor`.
@@ -267,7 +322,7 @@ class Worker(ABC):
         # Snapshot then clear so subsequent free_tensor calls (or a retry on
         # close()) don't double-iterate.
         leaked = self._owned_tensors
-        self._owned_tensors = set()
+        self._owned_tensors = {}
         for worker_id, ptr in leaked:
             try:
                 self.free(ptr, worker_id=worker_id)

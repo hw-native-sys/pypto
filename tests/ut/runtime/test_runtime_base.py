@@ -134,7 +134,7 @@ def test_close_owned_tensors_frees_leaked():
     # Only b is leaked; _close_owned_tensors should free it.
     h._close_owned_tensors()
     assert b.data_ptr in h.freed
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
 
 
 def test_close_owned_tensors_swallows_free_errors():
@@ -147,7 +147,7 @@ def test_close_owned_tensors_swallows_free_errors():
     h.free = failing_free  # type: ignore[method-assign]
     # Must NOT raise; the failure is logged-and-swallowed so close() can complete.
     h._close_owned_tensors()
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
 
 
 def test_default_prepare_init_makes_contiguous_cpu_copy():
@@ -217,6 +217,30 @@ def test_free_tensor_genuine_double_free_is_still_noop():
     assert h.freed == [t.data_ptr]  # freed exactly once
 
 
+def test_pointer_reuse_old_tensor_cannot_free_new_allocation():
+    """Allocation identity, not only the raw address, controls free_tensor."""
+    h = FakeHandle()
+    old = h.alloc_tensor((4,), torch.float32)
+    h.free_tensor(old)
+
+    # Model an allocator reusing the just-freed device address.
+    h._next_ptr = old.data_ptr
+    new = h.alloc_tensor((4,), torch.float32)
+    assert new.data_ptr == old.data_ptr
+    assert new == old
+    assert new is not old
+    assert new.buffer is not old.buffer
+
+    free_calls_before = list(h.free_calls)
+    with pytest.raises(ValueError, match="stale DeviceTensor"):
+        h.free_tensor(old)
+    assert h.free_calls == free_calls_before
+    assert h._owned_tensors[(0, new.data_ptr)] is new
+    assert h.buffers[(0, new.data_ptr)] is new.buffer
+
+    h.free_tensor(new)
+
+
 def test_free_tensor_failure_remains_owned_and_can_retry():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
@@ -237,7 +261,7 @@ def test_close_frees_multi_worker_tensors_against_their_workers():
     a = h.alloc_tensor((4,), torch.float32, worker_id=0)
     b = h.alloc_tensor((4,), torch.float32, worker_id=2)
     h._close_owned_tensors()
-    assert h._owned_tensors == set()
+    assert h._owned_tensors == {}
     assert (a.data_ptr, 0) in h.free_calls
     assert (b.data_ptr, 2) in h.free_calls
 

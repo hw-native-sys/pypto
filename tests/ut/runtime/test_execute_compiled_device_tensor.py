@@ -15,8 +15,11 @@ address-free ``Tensor`` values. It must never receive the direct-chip
 """
 
 import ctypes
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pypto.runtime as runtime_module
 import pytest
 import torch
 from pypto.runtime import DeviceTensor
@@ -37,8 +40,34 @@ class FakeBuffer:
 def task_args_fixture():
     task_args = MagicMock(name="TaskArgs")
     owner = MagicMock(name="simpler_worker")
-    with patch("pypto.runtime.task_interface.TaskArgs", return_value=task_args):
+    task_interface = ModuleType("pypto.runtime.task_interface")
+    setattr(task_interface, "TaskArgs", MagicMock(return_value=task_args))
+    setattr(task_interface, "Tensor", type("Tensor", (), {}))
+    setattr(task_interface, "scalar_to_uint64", lambda scalar: int(scalar.value))
+    setattr(task_interface, "torch_dtype_to_datatype", lambda dtype: dtype)
+
+    simpler_setup = ModuleType("simpler_setup")
+    simpler_setup.__path__ = []
+    torch_interop = ModuleType("simpler_setup.torch_interop")
+    setattr(torch_interop, "make_tensor_arg", MagicMock(name="make_tensor_arg"))
+    setattr(simpler_setup, "torch_interop", torch_interop)
+
+    from pypto.runtime.tensor_arg import _modules  # noqa: PLC0415
+
+    _modules.cache_clear()
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "pypto.runtime.task_interface": task_interface,
+                "simpler_setup": simpler_setup,
+                "simpler_setup.torch_interop": torch_interop,
+            },
+        ),
+        patch.object(runtime_module, "task_interface", task_interface, create=True),
+    ):
         yield task_args, owner
+    _modules.cache_clear()
 
 
 def test_host_tensor_uses_worker_aware_tensor_helper(task_args_fixture):
@@ -57,14 +86,19 @@ def test_host_tensor_uses_worker_aware_tensor_helper(task_args_fixture):
 
 
 def test_device_tensor_uses_retained_buffer_tensor(task_args_fixture):
-    task_args, owner = task_args_fixture
+    task_args, raw_worker = task_args_fixture
     buffer = FakeBuffer(0xABCD)
     device_tensor = DeviceTensor.from_buffer(buffer, (8, 16), torch.float16)
 
     from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+    from pypto.runtime.tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
 
-    _coerced_to_orch_args([device_tensor], owner)
+    pypto_owner = MagicMock(name="pypto_owner")
+    bind_tensor_arg_owner(raw_worker, pypto_owner)
 
+    _coerced_to_orch_args([device_tensor], raw_worker)
+
+    pypto_owner._require_owned_resident_tensor.assert_called_once_with(device_tensor, "Tensor argument")
     assert len(buffer.tensor_calls) == 1
     shapes, _dtype = buffer.tensor_calls[0]
     assert shapes == (8, 16)

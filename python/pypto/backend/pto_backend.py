@@ -257,48 +257,6 @@ _KERNEL_HEADER = """\
 #include "tensor.h"
 {spmd_override}
 
-#if defined(__CPU_SIM)
-// PTOAS v0.50+ emits cache_line_t::ENTIRE_DATA_CACHE / SINGLE_CACHE_LINE as
-// scoped identifiers, but the pto-isa cpu_stub.hpp defines them as bare macros
-// (#define ENTIRE_DATA_CACHE 0) — which breaks cache_line_t::ENTIRE_DATA_CACHE
-// into cache_line_t::0. Undefine the macros and provide proper namespace-scoped
-// constexpr constants. The same headers also #define dcci/dsb as macros that
-// would expand our own inlines, so undefine + redefine all of them here.
-#include <atomic>
-
-// Forward-declare the overloads so the undefs below don't break chained includes.
-namespace pypto_sim_detail {{
-    template <typename... Args>
-    static inline void sim_dcci(Args...);  // defined after the undefs
-    static inline void sim_dsb(int kind);  // ditto
-}}
-
-// Undefine conflicting macros from pto-isa cpu_stub.hpp / inner_kernel.h
-// so our namespace-scoped constants and inline functions are used instead.
-#undef ENTIRE_DATA_CACHE
-#undef SINGLE_CACHE_LINE
-#undef DSB_DDR
-#undef dcci
-#undef dsb
-#undef CACHELINE_OUT
-
-namespace cache_line_t {{
-    constexpr int ENTIRE_DATA_CACHE = 0;
-    constexpr int SINGLE_CACHE_LINE = 0;
-    constexpr int CACHELINE_OUT     = 0;
-}}
-typedef int mem_dsb_t;
-#define DSB_DDR 0
-
-static inline void dcci(...) {{
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-}}
-static inline void dsb(mem_dsb_t) {{
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-}}
-#endif  // __CPU_SIM
-
-
 using namespace pto;
 
 """

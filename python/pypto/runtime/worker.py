@@ -216,13 +216,17 @@ class ChipWorker(Worker):
 
     def _new_impl(self) -> Any:
         """Construct a fresh simpler Worker for this immutable binding."""
-        return _get_simpler_worker_cls()(
+        impl = _get_simpler_worker_cls()(
             level=self._level,
             device_id=self._config.device_id,
             platform=self._config.platform,
             runtime=self._runtime,
             enable_sdma=self._enable_sdma,
         )
+        from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
+
+        bind_tensor_arg_owner(impl, self)
+        return impl
 
     # ------------------------------------------------------------------
     # Lifecycle

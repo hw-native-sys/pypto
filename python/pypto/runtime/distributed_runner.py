@@ -1614,6 +1614,9 @@ class DistributedWorker(Worker):
                 enable_sdma=enable_sdma,
                 startup_timeout_s=startup_timeout_s,
             )
+            from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
+
+            bind_tensor_arg_owner(self._w, self)
             self._validate_persistent_runtime_hooks()
             for prog, chip_callables, sub_worker_fns in loaded:
                 sub_ids, chip_cids = _register_callables(self._w, sub_worker_fns, chip_callables)
@@ -1683,7 +1686,9 @@ class DistributedWorker(Worker):
                 frame = next((candidate for candidate in self._dispatch_frames if not candidate.in_use), None)
                 if frame is not None:
                     if frame.cleanup:
-                        raise RuntimeError("DistributedWorker dispatch frame retained stale cleanup callbacks")
+                        raise RuntimeError(
+                            "DistributedWorker dispatch frame retained stale cleanup callbacks"
+                        )
                     frame.in_use = True
                     dispatch_id = self._next_dispatch_id
                     self._next_dispatch_id += 1
@@ -2140,34 +2145,6 @@ class DistributedWorker(Worker):
 
     def _buffer_for_ptr(self, ptr: int, *, worker_id: int = 0) -> Any:
         return self._device_buffer(ptr, worker_id, "alloc_tensor")
-
-    def _require_owned_resident_tensor(
-        self,
-        tensor: DeviceTensor,
-        label: str,
-        *,
-        worker_id: int | None = None,
-    ) -> None:
-        """Require an address-free Buffer owned by this prepared worker."""
-        if tensor.buffer is None:
-            raise TypeError(
-                f"{label}: a raw-pointer DeviceTensor cannot be dispatched by DistributedWorker; "
-                "use this same DistributedWorker.alloc_tensor() to create it."
-            )
-
-        if worker_id is None:
-            owned = any(
-                ptr == tensor.data_ptr and buffer is tensor.buffer
-                for (_wid, ptr), buffer in self._device_buffers.items()
-            )
-        else:
-            owned = self._device_buffers.get((worker_id, tensor.data_ptr)) is tensor.buffer
-        if not owned:
-            placement = "" if worker_id is None else f" on worker_id={worker_id}"
-            raise ValueError(
-                f"{label}: DeviceTensor is not a live allocation owned by this DistributedWorker"
-                f"{placement}; allocate it with this same worker and do not dispatch it after free_tensor()."
-            )
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         """Release a pointer previously returned by :meth:`malloc`."""

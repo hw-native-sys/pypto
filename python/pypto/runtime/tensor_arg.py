@@ -25,8 +25,44 @@ this path through :mod:`pypto.runtime.task_interface`: its compatibility
 ``make_tensor_arg`` alias is chip-only and produces a ``ChipTensor``.
 """
 
+import weakref
 from functools import cache
 from typing import Any
+
+_PYPTO_OWNER_REF_ATTR = "_pypto_tensor_owner_ref"
+
+
+def bind_tensor_arg_owner(worker: Any, owner: Any) -> None:
+    """Bind a raw simpler Worker to its weak PyPTO owner.
+
+    Generated orchestration receives the raw simpler Worker (``orch._worker``),
+    while DeviceTensor liveness is tracked by the public PyPTO Worker.  This
+    weak backlink lets wire conversion consult the authoritative PyPTO Buffer
+    registry without introducing a reference cycle or changing generated code.
+    """
+    setattr(worker, _PYPTO_OWNER_REF_ATTR, weakref.ref(owner))
+    owner._tensor_arg_worker = worker
+
+
+def _require_device_tensor_owner(worker: Any, arg: Any) -> None:
+    """Require *arg* to be a live DeviceTensor owned by *worker*'s PyPTO wrapper."""
+    worker_dict = getattr(worker, "__dict__", None)
+    owner_ref = worker_dict.get(_PYPTO_OWNER_REF_ATTR) if isinstance(worker_dict, dict) else None
+    if not isinstance(owner_ref, weakref.ReferenceType):
+        raise TypeError(
+            "DeviceTensor dispatch requires the owning PyPTO Worker; a one-shot or raw simpler "
+            "Worker cannot prove that the retained Buffer is live. Dispatch through the same "
+            "PyPTO Worker that allocated the tensor."
+        )
+    owner = owner_ref()
+    if owner is None:
+        raise ValueError("DeviceTensor's owning PyPTO Worker no longer exists.")
+    if getattr(owner, "_tensor_arg_worker", None) is not worker:
+        raise ValueError(
+            "DeviceTensor dispatch received a stale simpler Worker backend; use the owning PyPTO "
+            "Worker's current initialized backend."
+        )
+    owner._require_owned_resident_tensor(arg, "Tensor argument")
 
 
 @cache
@@ -58,12 +94,17 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
     """Convert an orchestration tensor argument into a simpler ``Tensor``.
 
     Args:
+        worker: The raw simpler Worker performing dispatch. DeviceTensor
+            conversion requires it to be bound to the same live PyPTO Worker
+            that allocated the Buffer; host tensors use it directly for
+            simpler's worker-aware conversion.
         arg: One of:
             - ``torch.Tensor``: a CPU-contiguous host tensor (delegated to
               simpler's worker-aware wire helper).
             - :class:`~pypto.runtime.DeviceTensor`: a worker-resident buffer;
-              its retained owner ``Buffer`` constructs an address-free wire
-              ``Tensor`` (memory is caller-managed).
+              after owner/liveness validation, its retained ``Buffer``
+              constructs an address-free wire ``Tensor`` (memory is
+              caller-managed).
             - simpler ``Tensor``: returned as-is (already device-side).
 
     Returns:
@@ -79,6 +120,7 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
                 "A raw-pointer DeviceTensor cannot cross the public Worker.run wire ABI; "
                 "allocate it with Worker.alloc_tensor() so it retains its simpler Buffer."
             )
+        _require_device_tensor_owner(worker, arg)
         try:
             dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:

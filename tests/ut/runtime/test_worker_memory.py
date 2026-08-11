@@ -14,6 +14,7 @@ that PyPTO's stable pointer API is translated to simpler's owner ``Buffer`` API.
 """
 
 import ctypes
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,23 @@ class FakeBuffer:
 
     def tensor(self, shapes, dtype):
         return shapes, dtype
+
+
+@pytest.fixture(autouse=True)
+def fake_tensor_arg_modules():
+    """Keep DeviceTensor wire-conversion checks independent of Simpler."""
+    from pypto.runtime import device_tensor as device_tensor_module  # noqa: PLC0415
+
+    task_interface = SimpleNamespace(
+        Tensor=type("Tensor", (), {}),
+        torch_dtype_to_datatype=lambda dtype: dtype,
+    )
+    torch_interop = SimpleNamespace(make_tensor_arg=MagicMock(name="make_tensor_arg"))
+    with patch(
+        "pypto.runtime.tensor_arg._modules",
+        return_value=(task_interface, device_tensor_module, torch_interop),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -160,6 +178,79 @@ class TestAllocTensor:
         assert t.buffer is buffer
         fake_simpler_worker.malloc.assert_called_once_with(4 * 8 * 4)
         fake_simpler_worker.copy_to.assert_not_called()
+
+    def test_live_tensor_wire_conversion_uses_owning_worker(self, fake_simpler_worker, worker):
+        buffer = FakeBuffer(0x9100)
+        fake_simpler_worker.malloc.return_value = buffer
+        tensor = worker.alloc_tensor((4, 8), torch.float32)
+
+        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+        wire = make_tensor_arg(fake_simpler_worker, tensor)
+        assert wire[0] == (4, 8)
+
+    def test_foreign_tensor_is_rejected_before_wire_conversion(self, fake_simpler_worker, worker):
+        foreign_buffer = FakeBuffer(0x9200)
+        foreign = DeviceTensor.from_buffer(foreign_buffer, (4,), torch.float32)
+
+        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="not a live allocation owned by this ChipWorker"):
+            make_tensor_arg(fake_simpler_worker, foreign)
+
+    def test_freed_tensor_is_rejected_before_wire_conversion(self, fake_simpler_worker, worker):
+        buffer = FakeBuffer(0x9300)
+        fake_simpler_worker.malloc.return_value = buffer
+        tensor = worker.alloc_tensor((4,), torch.float32)
+        worker.free_tensor(tensor)
+
+        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="not a live allocation owned by this ChipWorker"):
+            make_tensor_arg(fake_simpler_worker, tensor)
+
+    def test_pointer_reuse_does_not_revive_old_tensor(self, fake_simpler_worker, worker):
+        old_buffer = FakeBuffer(0x9400)
+        new_buffer = FakeBuffer(0x9400)
+        fake_simpler_worker.malloc.side_effect = [old_buffer, new_buffer]
+        old_tensor = worker.alloc_tensor((4,), torch.float32)
+        worker.free_tensor(old_tensor)
+        new_tensor = worker.alloc_tensor((4,), torch.float32)
+
+        from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="not a live allocation owned by this ChipWorker"):
+            make_tensor_arg(fake_simpler_worker, old_tensor)
+        assert make_tensor_arg(fake_simpler_worker, new_tensor)[0] == (4,)
+
+        fake_simpler_worker.free.reset_mock()
+        with pytest.raises(ValueError, match="stale DeviceTensor"):
+            worker.free_tensor(old_tensor)
+        fake_simpler_worker.free.assert_not_called()
+        assert worker._buffer_for_ptr(new_tensor.data_ptr) is new_buffer
+
+        worker.free_tensor(new_tensor)
+        fake_simpler_worker.free.assert_called_once_with(new_buffer)
+
+    def test_close_reinit_rejects_old_raw_backend(self):
+        old_impl = MagicMock(name="old_impl")
+        new_impl = MagicMock(name="new_impl")
+        old_impl.malloc.return_value = FakeBuffer(0x9500)
+        with (
+            patch("pypto.runtime.worker._SimplerWorker", side_effect=[old_impl, new_impl]),
+            patch("pypto.runtime.worker._SimplerCallConfig", MagicMock()),
+        ):
+            worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+            tensor = worker.alloc_tensor((4,), torch.float32)
+            worker.close()
+            worker.init()
+
+            from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+            with pytest.raises(ValueError, match="stale simpler Worker backend"):
+                make_tensor_arg(old_impl, tensor)
+            assert new_impl.__dict__["_pypto_tensor_owner_ref"]() is worker
+            worker.close()
 
     def test_alloc_with_init_uploads(self, fake_simpler_worker, worker):
         buffer = FakeBuffer(0x9000)
