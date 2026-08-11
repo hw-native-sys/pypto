@@ -509,6 +509,37 @@ jobs:
           python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3
           echo "=== examples/distributed/11_allreduce_reveal.py --mode ring -d 0,1,2,3 ==="
           python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3 --mode ring
+          # Steps 12-15: the collective zoo — every documented invocation must
+          # be CI-validated. P=2 default ran in the loop above; add the P=2
+          # builtin reveal and the P=4 legs (both modes; the per-rank patterns
+          # are most distinct at P=4).
+          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/12_broadcast.py -d 0,1,2,3 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/13_allgather.py -d 0,1,2,3 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/14_reduce_scatter.py -d 0,1,2,3 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1 --mode builtin
+          echo "=== examples/distributed/15_all_to_all.py -d 0,1,2,3 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3
+          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1,2,3 ==="
+          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3 --mode builtin
+          # Step 16: the composition capstone at P=4.
+          echo "=== examples/distributed/16_putting_it_together.py -d 0,1,2,3 ==="
+          python examples/distributed/16_putting_it_together.py -p a2a3sim -d 0,1,2,3
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going

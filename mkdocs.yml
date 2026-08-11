@@ -208,6 +208,11 @@ nav:
           - en/user/distributed/14-allreduce_two_phase.md
           - en/user/distributed/15-allreduce_ring.md
           - en/user/distributed/16-allreduce_reveal.md
+          - en/user/distributed/17-broadcast.md
+          - en/user/distributed/18-allgather.md
+          - en/user/distributed/19-reduce_scatter.md
+          - en/user/distributed/20-all_to_all.md
+          - en/user/distributed/21-putting_it_together.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:
