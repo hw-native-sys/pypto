@@ -75,13 +75,29 @@ def scale_rows(
 | `pl.INDEX` | 64 | Index arithmetic — loop variables, dimensions |
 | `pl.TASK_ID` | — | Producer handle for a launched task |
 
-`dtype.get_byte()` returns the element size in bytes. Use it whenever a byte count is
-computed rather than written as a literal — a raw element count passed where bytes are
-expected is a silent under-allocation.
+`dtype.get_byte()` returns the byte-addressable element size, rounded up to one byte.
+Use it for byte-addressable dtypes whenever a byte count is computed rather than written
+as a literal. Do not use `logical_elements * dtype.get_byte()` for a 4-bit buffer: PyPTO
+packs every semantic 4-bit dtype two logical elements per byte, so the physical size is
+`ceil(logical_elements / 2)`.
 
 ```python
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
+
+FP4 shapes inside PyPTO IR are logical nibble shapes, and `valid_shape` uses the same
+logical units. At the Torch/runtime boundary, `torch.float4_e2m1fn_x2` uses a physical x2
+carrier shape: its last dimension contains one byte per two logical FP4 values. JIT expands
+that last dimension on entry, while compiled-call metadata and orchestration allocations
+contract it by two; no separate `storage_shape` is stored in `TensorType` or `TileType`. Packed
+FP4 requires a positive even logical last dimension, including static allocation and view
+shapes; dynamic widths are checked before conversion. A 4-bit slice origin must land on a byte
+boundary, so an odd linear nibble offset is rejected.
+
+End-to-end 4-bit execution is backend-gated. Ascend950 supports `pl.FP4`; `INT4`, `UINT4`,
+and `HF4` remain storage-accounted but are rejected by in-core codegen. Ascend910B/A2A3
+rejects every 4-bit in-core dtype because its isolated FP16↔INT4 conversion has no matching
+packed load/store carrier ABI.
 
 ### Container types
 
@@ -144,7 +160,11 @@ They are the one case where a layout marker on a `pl.Tensor` annotation is requi
 than discouraged. Current limitations: an MX `pl.load` must pass `target_memory=pl.Mem.Mat`
 explicitly, MX subviews (`slice`, `reshape`, `transpose`, `reinterpret_view`, `view`) and
 MX `remote_load` are rejected. The matmul itself is `pl.matmul_mx` and its `_acc` /
-`_bias` variants, which take a data tile and a scale tile per operand.
+`_bias` variants, which take a data tile and a scale tile per operand. Both data tiles reaching
+the op must be `FP8E4M3FN`. The supported FP4-input form is a left FP4 operand multiplied by a
+right FP8 operand: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
+legalization pass expands that request to FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
+reverse FP8×FP4 form are not supported; MXFP4 quantization is not exposed yet.
 
 ### Dynamic shapes
 

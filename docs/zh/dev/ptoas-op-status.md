@@ -4,7 +4,7 @@
 行 = **最新 PTOAS 提供的公共及兼容 op**。接口基线为 Little-oil/PTOAS `main`
 `d852dd2dba3e5bf7a69ce8324eb88afc336e8a33`：manual 公共接口 189 个，加当前
 `PTOOps.td` 仍保留的 source-only 兼容/tile 接口 15 个，共 204 个。列状态按
-**PyPTO 当前源码**核实（最后更新 2026-07-27）。后续每加或修改一个 op，只更新本表对应行。
+**PyPTO 当前源码**核实（最后更新 2026-08-11）。后续每加或修改一个 op，只更新本表对应行。
 
 本表包含公共/兼容接口中 PyPTO 级别为 `internal` 的 op；另有 `PTOOps.td` 中 32 个仅供
 lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO、VMI、SIMT 等其他 dialect。
@@ -63,8 +63,8 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（最小 MXFP8 host-prequant）；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束)；设备数值 follow-up #1975 |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（`tile.matmul_mx_acc`）；ST 待补 |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST；FP4 输入仅支持左侧 FP4×右侧 FP8，且必须显式做 FP4→FP8 cast；原生 FP4×FP4 暂缓；见 [operators MX 约束](ir/05-operators.md#mx--ascend950pto-isa-约束) |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST（`tile.matmul_mx_acc`） |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen（`tile.matmul_mx_bias`）；ST 待补 |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |

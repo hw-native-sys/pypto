@@ -37,6 +37,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -164,16 +165,15 @@ struct LoopResidencyInfo {
 
 std::optional<uint64_t> StaticTileBytes(const TileTypePtr& tile) {
   if (!tile) return std::nullopt;
-  uint64_t bytes = tile->dtype_.GetByte();
-  if (bytes == 0) return std::nullopt;
+  uint64_t elements = 1;
   for (const auto& dim : tile->shape_) {
     auto extent = As<ConstInt>(dim);
     if (!extent || extent->value_ <= 0) return std::nullopt;
     const auto value = static_cast<uint64_t>(extent->value_);
-    if (value != 0 && bytes > std::numeric_limits<uint64_t>::max() / value) return std::nullopt;
-    bytes *= value;
+    if (value != 0 && elements > std::numeric_limits<uint64_t>::max() / value) return std::nullopt;
+    elements *= value;
   }
-  return bytes;
+  return storage_size::StaticStorageBytes(elements, tile->dtype_);
 }
 
 class LoopResidencyInventory : public IRVisitor {

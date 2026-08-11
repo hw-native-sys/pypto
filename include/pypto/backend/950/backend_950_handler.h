@@ -40,6 +40,9 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_core_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
+  [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
+    return dtype.GetBit() != 4 || dtype == DataType::FP4;
+  }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }

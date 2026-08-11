@@ -42,6 +42,7 @@ from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
+from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -350,10 +351,16 @@ def _invert_var_mul_or_floordiv_const(
 
 
 def _invert_shape_dim_for_var(
-    dim_expr: object, target_var: _ir_core.Var, tensor_name: str, dim_idx: int
+    dim_expr: object,
+    target_var: _ir_core.Var,
+    tensor_name: str,
+    dim_idx: int,
+    logical_scale: int = 1,
 ) -> str | None:
     """Return a C expression recovering target_var from shapes[dim_idx], or None if non-invertible."""
     shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->shapes[{dim_idx}])"
+    if logical_scale != 1:
+        shape_expr = f"({shape_expr} * {logical_scale})"
     if isinstance(dim_expr, _ir_core.Var) and dim_expr.same_as(target_var):
         return shape_expr
     if isinstance(dim_expr, _ir_core.Add):
@@ -413,7 +420,19 @@ def _append_dynamic_dim_unpacking(
 
     for dyn_var in dyn_var_order:
         var_ref, source_tensor, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
-        value_expr = _invert_shape_dim_for_var(source_expr, var_ref, source_tensor, source_dim_idx)
+        source_param = next(param for param in tensor_params if param.name_hint == source_tensor)
+        source_type = source_param.type
+        assert isinstance(source_type, _ir_core.TensorType)
+        logical_scale = (
+            2 if source_type.dtype == DataType.FP4 and source_dim_idx == len(source_type.shape) - 1 else 1
+        )
+        value_expr = _invert_shape_dim_for_var(
+            source_expr,
+            var_ref,
+            source_tensor,
+            source_dim_idx,
+            logical_scale=logical_scale,
+        )
         if value_expr is None:
             raise ValueError(
                 f"Cannot recover dynamic dimension '{dyn_var.name_hint}' for kernel wrapper "

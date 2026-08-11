@@ -14,6 +14,7 @@ from pypto.runtime.golden_writer import (
     _extract_callable_expr,
     _extract_closure_constants,
     _extract_compute_golden,
+    _torch_dtype_str,
     generate_golden_source,
     write_golden,
 )
@@ -24,6 +25,18 @@ torch = pytest.importorskip("torch")
 
 def _dummy_golden(tensors, params=None):
     tensors["out"][:] = tensors["a"] * 3
+
+
+@pytest.mark.parametrize(
+    "dtype_name",
+    ["float8_e4m3fn", "float8_e8m0fnu", "float4_e2m1fn_x2"],
+)
+def test_torch_dtype_str_supports_mx_dtypes(dtype_name):
+    """Optional torch MX dtypes retain their qualified names in golden.py."""
+    dtype = getattr(torch, dtype_name, None)
+    if not isinstance(dtype, torch.dtype):
+        pytest.skip(f"torch.{dtype_name} is unavailable")
+    assert _torch_dtype_str(dtype) == f"torch.{dtype_name}"  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

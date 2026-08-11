@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_CODEGEN_BASE_H_
 #define PYPTO_CODEGEN_CODEGEN_BASE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -152,6 +153,17 @@ class CodegenBase : public ir::IRVisitor {
     }
     return "static_cast<uint32_t>((" + default_dim_expr + ") * (" + scale_expr + "))";
   }
+
+  /**
+   * @brief Convert one logical IR tensor extent to its runtime carrier extent.
+   *
+   * Runtime FP4 tensors use one x2 carrier element per byte, while IR shapes
+   * count logical nibbles. Only the innermost dimension is packed; all other
+   * dtypes and dimensions preserve their logical extent. Dynamic FP4 extents
+   * are asserted positive and even before conversion.
+   */
+  [[nodiscard]] virtual std::string GetRuntimeTensorShapeDim(const DataType& dtype, size_t axis, size_t ndim,
+                                                             const std::string& logical_dim_expr) const;
 
   /**
    * @brief Get the runtime DataType enum string for generated code

@@ -167,6 +167,19 @@ class BackendHandler {
    */
   [[nodiscard]] virtual std::vector<std::string> GetExtraPtoasFlags() const = 0;
 
+  /**
+   * @brief Whether a dtype has an end-to-end in-core storage and PTO ABI on
+   *        this backend.
+   *
+   * Semantic 4-bit dtypes are packed in PyPTO's memory accounting, but that
+   * alone does not make them executable. Backends opt in only after their
+   * load/store and instruction ABI is available. Byte-addressable dtypes keep
+   * their existing support path.
+   */
+  [[nodiscard]] virtual bool SupportsIncoreDataType(const DataType& dtype) const {
+    return dtype.GetBit() != 4;
+  }
+
   // ---------------------------------------------------------------------------
   // Pass behavioural hooks
   // ---------------------------------------------------------------------------

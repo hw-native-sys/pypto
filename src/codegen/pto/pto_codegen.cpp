@@ -1162,9 +1162,17 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // PTOAS *infers* DN for shape ``[M, 1]`` with degenerate strides regardless
   // of an ND declaration, so codegen forces DN + ``[1, M]`` strides. MX
   // layouts are explicit hardware contracts and bypass this legacy override.
+  ir::var_collectors::VarDefUseCollector body_vars;
+  if (func->body_) body_vars.VisitStmt(func->body_);
+
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
+    // Core-group outlining keeps the complete public signature on both the
+    // AIC and AIV functions.  Do not materialize a view for a tensor that the
+    // outlined body does not reference: PTOAS cannot infer a non-ND layout for
+    // such an unused view (notably the MX scale tensors on the AIV cast side).
+    if (body_vars.var_uses.count(param.get()) == 0) continue;
     if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
     if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a memref
 
@@ -1379,12 +1387,30 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     return wide;
   };
 
+  // FP4 Vec tile_bufs use PTOAS's physical x2-carrier coordinates along the
+  // BLayout packed axis. PyPTO keeps logical nibble shapes internally; matrix
+  // spaces are excluded because TMATMUL_MX has its own logical-dimension ABI.
+  const auto memory_space = tile_type->GetMemorySpace();
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+  const bool packed_fp4_vec =
+      tile_type->dtype_ == DataType::FP4 && memory_space.has_value() && *memory_space == ir::MemorySpace::Vec;
+  const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
+
   // Lower a single valid_shape dim expression to an `index` SSA value.
-  auto lower_dim = [&](const ir::ExprPtr& expr) -> std::string {
+  auto lower_dim = [&](const ir::ExprPtr& expr, size_t dim) -> std::string {
     if (!expr) return "";
     if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitConstant(ci->value_, DataType::INDEX);
+      int64_t value = ci->value_;
+      if (packed_fp4_vec && dim == packed_dim) {
+        CHECK(value > 0 && value % 2 == 0)
+            << "FP4 Vec valid_shape packed dimension must be a positive even logical extent for PTOAS, got "
+            << value;
+        value /= 2;
+      }
+      return GetOrEmitConstant(value, DataType::INDEX);
     }
+    CHECK(!(packed_fp4_vec && dim == packed_dim)) << "Dynamic FP4 Vec valid_shape on the packed dimension is "
+                                                     "not supported; provide a static even extent";
     return cast_to_index(GetExprAsCode(expr), expr);
   };
 
@@ -1404,10 +1430,10 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     if (dims->size() == 1) {
       // Match ExtractTileTypeInfo: 1-D tile maps to rows=1, cols=shape[0].
       fields.valid_row_ssa = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      fields.valid_col_ssa = lower_dim((*dims)[0]);
+      fields.valid_col_ssa = lower_dim((*dims)[0], 1);
     } else {
-      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0]);
-      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1]);
+      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0], 0);
+      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1], 1);
     }
   }
 
@@ -2190,7 +2216,23 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   return "";
 }
 
-std::string PTOCodegen::GetTypeString(const DataType& dtype) const { return DataTypeToMLIR(dtype); }
+std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
+  const auto* handler = GetBackendHandler();
+  INTERNAL_CHECK(handler) << "PTOCodegen requires a backend handler";
+  if (!handler->SupportsIncoreDataType(dtype)) {
+    const std::string arch = handler->GetPtoTargetArch();
+    if (arch == "a2a3" && dtype.GetBit() == 4) {
+      CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+                   << " is not supported for end-to-end in-core codegen on backend 'a2a3'. "
+                      "A2/A3 exposes only an isolated FP16<->INT4 conversion, while direct packed "
+                      "4-bit load/store and carrier ABI are unavailable";
+    }
+    CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+                 << " is not supported for end-to-end in-core codegen on backend '" << arch
+                 << "'; A5 currently supports only FP4 among 4-bit dtypes";
+  }
+  return DataTypeToMLIR(dtype);
+}
 
 const ir::Var* PTOCodegen::GetVarKey(const VarPtr& var) const {
   INTERNAL_CHECK(var != nullptr) << "Internal error: variable key requested for null Var";

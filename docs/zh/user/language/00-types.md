@@ -63,11 +63,15 @@ def scale_rows(
 | `pl.INDEX` | 64 | 索引运算 —— 循环变量、维度 |
 | `pl.TASK_ID` | — | 已派发任务的生产者句柄 |
 
-`dtype.get_byte()` 返回元素的字节数。只要字节数是算出来的而不是写死的字面量，就用它 —— 把元素个数传到期望字节数的地方是一次**静默的欠分配**。
+`dtype.get_byte()` 返回向上取整后的可按字节寻址元素大小。对于按字节寻址的 dtype，只要字节数是算出来的而不是写死的字面量，就用它。4-bit buffer 不能使用 `logical_elements * dtype.get_byte()`：PyPTO 会把所有语义 4-bit dtype 按每字节两个逻辑元素打包，物理大小为 `ceil(logical_elements / 2)`。
 
 ```python
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
+
+PyPTO IR 中的 FP4 shape 是以 nibble 计数的逻辑 shape，`valid_shape` 也使用相同单位。Torch/runtime 边界上的 `torch.float4_e2m1fn_x2` 使用物理 x2 carrier shape：末维的每个元素是一字节、承载两个逻辑 FP4。JIT 在入口展开末维，compiled-call metadata 与 orchestration allocation 将末维除以二；`TensorType` 和 `TileType` 不保存单独的 `storage_shape`。Packed FP4 的逻辑末维必须是正偶数，静态 allocation/view shape 同样受此约束，动态宽度会在换算前检查。4-bit slice 起点必须落在字节边界；线性 nibble offset 为奇数时会直接报错。
+
+4-bit 端到端执行按后端做能力检查。Ascend950 支持 `pl.FP4`；`INT4`、`UINT4`、`HF4` 虽使用统一存储计数，但 in-core codegen 会拒绝。Ascend910B/A2A3 会拒绝所有 4-bit in-core dtype，因为它只有孤立的 FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。
 
 ### 容器类型
 
@@ -109,7 +113,7 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
-剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。当前限制：MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`；MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`、`view`）与 MX `remote_load` 会被拒绝。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。
+剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。当前限制：MX 的 `pl.load` 必须显式传 `target_memory=pl.Mem.Mat`；MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`、`view`）与 MX `remote_load` 会被拒绝。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块 data tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。支持的 FP4 输入形式仅为左侧 FP4×右侧 FP8，并且必须在 `matmul_mx` 前显式写 `pl.cast(fp4_tile, pl.FP8E4M3FN)`；A5 的 cast legalization pass 会将其展开为 FP4→BF16→FP32→FP8E4M3FN。原生 FP4×FP4 与反向 FP8×FP4 均不支持，MXFP4 quant 前端本次仍未开放。
 
 ### 动态 shape
 

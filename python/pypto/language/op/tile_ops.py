@@ -1247,6 +1247,10 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
+    Both data tiles passed to this operation must be FP8E4M3FN. For the
+    supported FP4 x FP8 input form, explicitly cast the FP4 lhs to FP8E4M3FN
+    before calling this operation; native FP4 x FP4 is not supported.
+
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
@@ -1262,6 +1266,9 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
+
+    Data operands follow :func:`matmul_mx`: an FP4 lhs must first be cast to
+    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
 
     Args:
         acc: Accumulator tile
@@ -1281,6 +1288,9 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
+
+    Data operands follow :func:`matmul_mx`: an FP4 lhs must first be cast to
+    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)

@@ -36,6 +36,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
@@ -708,12 +709,12 @@ void OpConversionRegistry::RegisterMemoryOps() {
             }
           }
           if (all_const) {
-            uint64_t tile_bytes = static_cast<uint64_t>(total_elements) * dtype.GetBit() / 8;
+            auto tile_bytes = storage_size::StaticStorageBytes(static_cast<uint64_t>(total_elements), dtype);
             const auto* be = backend::GetBackend();
-            if (be) {
+            if (be && tile_bytes.has_value()) {
               uint64_t mem_size = be->GetMemSize(target_mem);
-              INTERNAL_CHECK_SPAN(mem_size == 0 || tile_bytes <= mem_size, span)
-                  << "tensor.create: tile size (" << tile_bytes << " bytes) exceeds buffer capacity ("
+              INTERNAL_CHECK_SPAN(mem_size == 0 || *tile_bytes <= mem_size, span)
+                  << "tensor.create: tile size (" << *tile_bytes << " bytes) exceeds buffer capacity ("
                   << mem_size << " bytes) for memory space " << static_cast<int>(target_mem) << " at "
                   << span.to_string();
             }

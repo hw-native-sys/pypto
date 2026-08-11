@@ -1275,6 +1275,18 @@ class TestGenerateArgUnpacking:
         # dynamic dims appended after tensor params
         assert names == ["a__ssa_v0", "b__ssa_v0", "output__ssa_v0", "TH", "TW"]
 
+    def test_dynamic_fp4_last_dim_expands_runtime_x2_carrier(self):
+        span = ir.Span.unknown()
+        logical_k = ir.Var("LOGICAL_K", ir.ScalarType(DataType.INDEX), span)
+        rows = ir.ConstInt(16, DataType.INDEX, span)
+        ib = IRBuilder()
+        with ib.function("fp4_dynamic", type=ir.FunctionType.InCore) as f:
+            f.param("x", ir.TensorType([rows, logical_k], DataType.FP4))
+
+        code, names = _generate_arg_unpacking(f.get_result())
+        assert "int64_t LOGICAL_K = (static_cast<int64_t>(x_tensor->shapes[1]) * 2);" in code
+        assert names == ["x", "LOGICAL_K"]
+
     def test_dynamic_tensor_deduplicates_vars(self):
         # TH and TW each appear in a__ssa_v0, b__ssa_v0, and output__ssa_v0 but should be extracted only once
         func = _get_dyn_incore_func()

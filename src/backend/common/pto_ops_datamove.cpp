@@ -35,6 +35,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -1107,7 +1108,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     auto col_offset_const = ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
     mat_info.const_offset = row_offset_const != nullptr && col_offset_const != nullptr;
 
-    // A subview's address is base + (row * source_cols + col) * element_bytes.
+    // A subview's address is base + (row * source_cols + col) * storage_bits / 8.
     // Record whether that address is provably 32-byte aligned for every runtime
     // offset. A dynamic row remains safe when the physical row stride is a
     // multiple of 32 bytes; a dynamic column is conservatively unknown.
@@ -1122,20 +1123,30 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         source_base_mod_32 = source_byte_offset->value_ % 32;
       }
     }
-    const int64_t element_bytes = static_cast<int64_t>(source_tile_type->dtype_.GetByte());
+    const int64_t storage_bits =
+        static_cast<int64_t>(ir::storage_size::GetStorageBitWidth(source_tile_type->dtype_));
     int64_t local_offset_mod_32 = -1;
-    if (col_offset_const != nullptr && element_bytes > 0) {
+    if (col_offset_const != nullptr && storage_bits > 0) {
+      auto mod_256 = [](int64_t value) {
+        const int64_t result = value % 256;
+        return result < 0 ? result + 256 : result;
+      };
+      auto logical_to_byte_mod_32 = [&](int64_t logical_mod_256) {
+        const int64_t bit_offset_mod_256 = (mod_256(logical_mod_256) * mod_256(storage_bits)) % 256;
+        return bit_offset_mod_256 % 8 == 0 ? bit_offset_mod_256 / 8 : int64_t{-1};
+      };
       if (row_offset_const != nullptr) {
         if (mat_info.source_cols > 0 || row_offset_const->value_ == 0) {
-          const int64_t row_bytes_mod =
-              ((row_offset_const->value_ % 32) * (mat_info.source_cols % 32) * (element_bytes % 32)) % 32;
-          const int64_t col_bytes_mod = ((col_offset_const->value_ % 32) * (element_bytes % 32)) % 32;
-          local_offset_mod_32 = (row_bytes_mod + col_bytes_mod) % 32;
+          const int64_t linear_mod_256 = (mod_256(row_offset_const->value_) * mod_256(mat_info.source_cols) +
+                                          mod_256(col_offset_const->value_)) %
+                                         256;
+          local_offset_mod_32 = logical_to_byte_mod_32(linear_mod_256);
         }
       } else if (mat_info.source_cols > 0) {
-        const int64_t row_stride_bytes_mod = (mat_info.source_cols % 32) * (element_bytes % 32) % 32;
-        const int64_t col_bytes_mod = ((col_offset_const->value_ % 32) * (element_bytes % 32)) % 32;
-        if (row_stride_bytes_mod == 0) local_offset_mod_32 = col_bytes_mod;
+        const int64_t row_stride_bit_mod_256 = (mod_256(mat_info.source_cols) * mod_256(storage_bits)) % 256;
+        if (row_stride_bit_mod_256 == 0) {
+          local_offset_mod_32 = logical_to_byte_mod_32(mod_256(col_offset_const->value_));
+        }
       }
     }
     if (source_base_mod_32 >= 0 && local_offset_mod_32 >= 0) {

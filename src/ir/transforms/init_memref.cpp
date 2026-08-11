@@ -38,6 +38,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -144,12 +145,8 @@ std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const Shap
     }
   }
 
-  const uint64_t element_bytes = view->dtype_.GetByte();
-  if (element_bytes == 0 || max_linear_offset == std::numeric_limits<uint64_t>::max() ||
-      max_linear_offset + 1 > std::numeric_limits<uint64_t>::max() / element_bytes) {
-    return std::nullopt;
-  }
-  return (max_linear_offset + 1) * element_bytes;
+  if (max_linear_offset == std::numeric_limits<uint64_t>::max()) return std::nullopt;
+  return storage_size::StaticStorageBytes(max_linear_offset + 1, view->dtype_);
 }
 
 // ============================================================================

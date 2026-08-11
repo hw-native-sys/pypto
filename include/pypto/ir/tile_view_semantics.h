@@ -24,6 +24,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::tile_view_semantics {
@@ -62,10 +63,10 @@ inline std::optional<BoxedTileAlignment> GetBoxedTileAlignment(const TileView& v
       }
       return std::nullopt;
     case 512: {
-      constexpr int64_t kAlignedBytes = 32;
-      const int64_t element_bytes = static_cast<int64_t>(dtype.GetByte());
-      if (element_bytes <= 0 || kAlignedBytes % element_bytes != 0) return std::nullopt;
-      const int64_t packed_extent = kAlignedBytes / element_bytes;
+      constexpr int64_t kAlignedBits = int64_t{32} * 8;
+      const int64_t storage_bits = static_cast<int64_t>(storage_size::GetStorageBitWidth(dtype));
+      if (storage_bits <= 0 || kAlignedBits % storage_bits != 0) return std::nullopt;
+      const int64_t packed_extent = kAlignedBits / storage_bits;
       if (view.slayout == TileLayout::row_major) {
         return BoxedTileAlignment{/*rows=*/16, /*cols=*/packed_extent};
       }

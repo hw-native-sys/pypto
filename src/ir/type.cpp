@@ -50,6 +50,25 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
   return memory_space;
 }
 
+void ValidatePackedFp4Shape(const DataType& dtype, const std::vector<ExprPtr>& shape) {
+  if (dtype != DataType::FP4) return;
+  CHECK(!shape.empty()) << "Packed FP4 shaped types must have rank >= 1";
+  auto packed_extent = As<ConstInt>(shape.back());
+  if (!packed_extent) return;
+  CHECK(packed_extent->value_ > 0 && packed_extent->value_ % 2 == 0)
+      << "Packed FP4 shaped types require a positive even logical last dimension, but got "
+      << packed_extent->value_;
+}
+
+std::vector<ExprPtr> MakeShapeExprs(const std::vector<int64_t>& shape) {
+  std::vector<ExprPtr> result;
+  result.reserve(shape.size());
+  for (int64_t dim : shape) {
+    result.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, Span::unknown()));
+  }
+  return result;
+}
+
 void ClearRedundantFullValidShape(std::vector<ExprPtr>& valid_shape, const std::vector<ExprPtr>& shape) {
   if (!valid_shape.empty() && AreExprVectorsEqual(valid_shape, shape)) {
     valid_shape.clear();
@@ -144,7 +163,7 @@ size_t Hash(const TileView& tv) {
 }
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape)
-    : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}
+    : ShapedType(dtype, std::move(shape), std::optional<MemRefPtr>{}) {}
 
 std::string TensorLayoutToString(TensorLayout layout) {
   switch (layout) {
@@ -223,11 +242,7 @@ CompactMode StringToCompactMode(const std::string& str) {
 }
 
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
-    : dtype_(dtype), memref_(std::move(memref)) {
-  for (int64_t dim : shape) {
-    shape_.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, Span::unknown()));
-  }
-}
+    : ShapedType(dtype, MakeShapeExprs(shape), std::move(memref)) {}
 
 TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
                        const std::vector<int64_t>& valid_shape_ints, PadValue pad_)
@@ -258,10 +273,12 @@ TileView::TileView(const std::vector<int64_t>& valid_shape_ints, const std::vect
 }
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr memref)
-    : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+    : ShapedType(dtype, std::move(shape), std::optional<MemRefPtr>{std::move(memref)}) {}
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
-    : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+    : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {
+  ValidatePackedFp4Shape(dtype_, shape_);
+}
 
 TensorType::TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
                        std::optional<TensorView> tensor_view)

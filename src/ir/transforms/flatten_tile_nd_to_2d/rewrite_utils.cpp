@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -29,6 +28,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -225,10 +225,11 @@ std::optional<uint64_t> OperandWholeBytes(const TileTypePtr& original_type) {
   for (const auto& d : original_type->shape_) {
     auto ci = As<ConstInt>(d);
     if (!ci || ci->value_ < 0) return std::nullopt;
-    elems *= static_cast<uint64_t>(ci->value_);
+    const uint64_t extent = static_cast<uint64_t>(ci->value_);
+    if (extent != 0 && elems > std::numeric_limits<uint64_t>::max() / extent) return std::nullopt;
+    elems *= extent;
   }
-  const uint64_t bytes_per = std::max<uint64_t>(1, original_type->dtype_.GetBit() / 8);
-  return elems * bytes_per;
+  return storage_size::StaticStorageBytes(elems, original_type->dtype_);
 }
 
 /// Whether both operands' whole tiles fit Mat together, so each can be brought

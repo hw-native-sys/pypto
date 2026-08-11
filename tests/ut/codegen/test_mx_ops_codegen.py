@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Codegen smoke tests for MXFP8 matmul_mx path (extends MX scale load/move coverage)."""
+"""Codegen smoke tests for MXFP8 matmul and explicit FP4-to-FP8 legalization."""
 
 import pypto.language as pl
 import pytest
@@ -15,6 +15,13 @@ from pypto import ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
+
+
+@pytest.fixture(autouse=True)
+def _reset_backend_after_test():
+    """Do not leak an explicitly selected backend into later test modules."""
+    yield
+    reset_for_testing()
 
 
 def _run_default_pipeline(program, backend_type=BackendType.Ascend950):
@@ -25,9 +32,9 @@ def _run_default_pipeline(program, backend_type=BackendType.Ascend950):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
-def _emit_incore_mlir(program) -> str:
-    """Run Default pipeline on Ascend950 and concatenate AIC/AIV MLIR."""
-    optimized = _run_default_pipeline(program)
+def _emit_incore_mlir(program, backend_type=BackendType.Ascend950) -> str:
+    """Run Default pipeline and concatenate AIC/AIV MLIR."""
+    optimized = _run_default_pipeline(program, backend_type)
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
@@ -102,6 +109,64 @@ class TestMxMatmulCodegen:
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
+
+    def test_mxfp4_times_mxfp8_uses_explicit_lhs_cast(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP4],
+                a_s: pl.Tensor[[128, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[128, 64], pl.FP32],
+            ):
+                ta = pl.cast(pl.load(a, [0, 0], [128, 64]), pl.FP8E4M3FN)
+                tas = pl.load(a_s, [0, 0], [128, 2], target_memory=pl.Mem.Mat)
+                tb = pl.load(b, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                tbs = pl.load(b_s, [0, 0], [2, 64], target_memory=pl.Mem.Mat)
+                la = pl.move(ta, target_memory=pl.Mem.Left)
+                las = pl.move(tas, target_memory=pl.Mem.LeftScale)
+                rb = pl.move(tb, target_memory=pl.Mem.Right)
+                rbs = pl.move(tbs, target_memory=pl.Mem.RightScale)
+                pl.store(pl.matmul_mx(la, las, rb, rbs), [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert mlir.count("pto.tcvt") == 3
+        assert "dtype=!pto.f4E2M1x2, rows=128, cols=32" in mlir
+        assert "pto.tmatmul.mx" in mlir
+        assert mlir.count("pto.tget_scale_addr") == 2
+
+    @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
+    def test_a2a3_rejects_all_four_bit_incore_abis(self, dtype):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 64], dtype],
+                out: pl.Tensor[[16, 64], dtype],
+            ):
+                pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
+
+        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a2a3.*load/store.*ABI"):
+            _emit_incore_mlir(Program, BackendType.Ascend910B)
+
+    @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
+    def test_a5_rejects_non_fp4_four_bit_incore_abis(self, dtype):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                src: pl.Tensor[[16, 64], dtype],
+                out: pl.Tensor[[16, 64], dtype],
+            ):
+                pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
+
+        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*only FP4"):
+            _emit_incore_mlir(Program)
 
     def test_matmul_mx_acc_ins_equals_outs(self):
         @pl.program

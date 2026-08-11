@@ -226,7 +226,21 @@ def _extract_tensor_meta(
     ``layout`` comes from the parameter's annotation, not the tensor: torch has
     no notion of a PyPTO layout, so the annotation is the only source.
     """
-    return _build_tensor_meta(tensor.shape, _torch_dtype_to_pypto(tensor.dtype), dyn_dims, layout)
+    dtype = _torch_dtype_to_pypto(tensor.dtype)
+    extents = list(tensor.shape)
+    if dtype == DataType.FP4:
+        if not extents:
+            raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
+        if extents[-1] <= 0:
+            raise TypeError(
+                "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
+                f"dimension; got shape {tuple(extents)}"
+            )
+        # Torch exposes one x2 carrier per byte. PyPTO IR and PTO-ISA count
+        # logical FP4 nibbles, so expand only at this API boundary and keep the
+        # storage shape out of TensorType/TileType.
+        extents[-1] *= 2
+    return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 
 
 def _resolve_annotation(annotation: Any, ann_ns: dict[str, Any] | None) -> Any:
