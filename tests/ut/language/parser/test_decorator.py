@@ -643,6 +643,110 @@ class TestProgramDecorator:
                 def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
                     return x
 
+    def test_dsl_wrapper_attr_unwraps_and_round_trips(self):
+        """A DSL wrapper attr stores the IR Expr it carries, so printed source reparses.
+
+        The printer emits the value in DSL spelling
+        (``pl.system.available_cluster_count()``), which reparse evaluates back
+        into a ``Scalar`` wrapper — the attr store only accepts the ``Expr``.
+        """
+
+        @pl.program
+        class LaunchQueryProgram:
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": pl.system.available_cluster_count()})
+            def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                return x
+
+        func = LaunchQueryProgram.get_function("kernel")
+        assert func is not None
+        assert isinstance(dict(func.attrs)["core_num"], ir.Call)
+
+        printed = LaunchQueryProgram.as_python()
+        assert 'attrs={"core_num": pl.system.available_cluster_count()}' in printed
+        ir.assert_structural_equal(pl.parse_program(printed), LaunchQueryProgram)
+
+    def test_function_attr_referencing_a_var_is_rejected(self):
+        """A Var in a Function attr has no legal decorator spelling (StaticAttrs)."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(pl.INT32), span)
+        with pytest.raises(ParserSyntaxError, match="references a variable"):
+
+            @pl.program
+            class VarAttrProgram:
+                @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": n})
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+    def test_function_attr_expression_over_a_var_is_rejected(self):
+        """The whole attr Expr tree is walked, not just its root node."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(pl.INT32), span)
+        core_num = ir.add(n, ir.ConstInt(1, pl.INT32, span))
+        with pytest.raises(ParserSyntaxError, match="references a variable"):
+
+            @pl.program
+            class VarExprAttrProgram:
+                @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": core_num})
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+    def test_malformed_attrs_container_is_rejected(self):
+        """A non-dict attrs= and a non-string key both raise a parser error."""
+        with pytest.raises(ParserSyntaxError, match="must be a dict"):
+
+            @pl.program
+            class NonDictAttrs:
+                @pl.function(attrs=5)  # type: ignore[arg-type]  # deliberate: validates runtime rejection
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+        with pytest.raises(ParserSyntaxError, match="keys must be strings"):
+
+            @pl.program
+            class NonStrKeyAttrs:
+                @pl.function(attrs={1: 2})  # type: ignore[arg-type]  # deliberate: validates runtime rejection
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+    def test_falsey_non_dict_attrs_is_rejected(self):
+        """A falsey non-dict must reach the validator, not be read as absent.
+
+        The callers gate on ``attrs is not None`` rather than truthiness, so
+        ``attrs=[]`` cannot slip past ``_normalize_attrs`` as though no attrs
+        were supplied.
+        """
+        with pytest.raises(ParserSyntaxError, match="must be a dict"):
+
+            @pl.program
+            class EmptyListAttrs:
+                @pl.function(attrs=[])  # type: ignore[arg-type]  # deliberate: validates runtime rejection
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+        with pytest.raises(ParserSyntaxError, match="must be a dict"):
+
+            @pl.program
+            class EmptyStrAttrs:
+                @pl.function(attrs="")  # type: ignore[arg-type]  # deliberate: validates runtime rejection
+                def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                    return x
+
+    def test_annotation_only_wrapper_attr_is_rejected(self):
+        """Annotation-only wrappers raise ValueError or RuntimeError on unwrap.
+
+        ``Scalar``/``Ptr`` raise ``RuntimeError`` while ``Tensor``/``Tile``/
+        ``Array`` raise ``ValueError``; both must surface as the actionable
+        parser diagnostic rather than escaping raw.
+        """
+        for annotation in (pl.Scalar[pl.INT32], pl.Tensor[[4], pl.FP16]):
+            with pytest.raises(ParserSyntaxError, match="annotation-only"):
+
+                @pl.program
+                class AnnotationAttrs:
+                    @pl.function(attrs={"bad": annotation})
+                    def kernel(self, x: pl.Tensor[[4], pl.FP16]) -> pl.Tensor[[4], pl.FP16]:
+                        return x
+
     def test_empty_class_error(self):
         """Test that empty class raises error."""
         with pytest.raises(ParserSyntaxError):  # Should raise ParserSyntaxError

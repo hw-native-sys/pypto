@@ -404,22 +404,110 @@ def _extract_function_auto_scope_from_decorator(node: ast.FunctionDef) -> bool |
     return None
 
 
-def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize function attrs: convert SplitMode enums to int values for C++ storage.
+def _normalize_attrs(attrs: Any) -> dict[str, Any] | None:
+    """Normalize function attrs for C++ storage.
 
-    SplitMode.NONE entries are dropped (equivalent to no split).
+    ``SplitMode`` enums become their int value; ``SplitMode.NONE`` is dropped
+    (equivalent to no split, and the printer filters it for the same reason).
+
+    DSL wrapper values are unwrapped to the IR ``Expr`` they carry. The printer
+    emits that ``Expr`` in DSL spelling (e.g. ``pl.system.available_cluster_count()``),
+    so reparsing printed source evaluates the wrapper again — without this the
+    attr store rejects it as an unsupported kwarg type.
+
     Returns None if the result is empty.
+
+    Raises:
+        ParserSyntaxError: If ``attrs`` is not a dict, a key is not a string, or
+            a value references an SSA binding (see the ``StaticAttrs`` IR
+            property — a Function attr has no legal spelling for one).
     """
-    if not attrs:
-        return None
+    if not isinstance(attrs, dict):
+        raise ParserSyntaxError(
+            f"`@pl.function(attrs=...)` must be a dict, got {type(attrs).__name__}",
+            hint='Use a dict, e.g. attrs={"split": pl.SplitMode.UP_DOWN}.',
+        )
     result: dict[str, Any] = {}
     for key, value in attrs.items():
+        if not isinstance(key, str):
+            raise ParserSyntaxError(
+                f"`@pl.function(attrs=...)` keys must be strings, got {key!r}",
+                hint='Use string keys, e.g. attrs={"core_num": 8}.',
+            )
         if isinstance(value, ir.SplitMode):
             if value != ir.SplitMode.NONE:
                 result[key] = value.value
-        else:
-            result[key] = value
+            continue
+        if hasattr(value, "unwrap"):
+            # Annotation-only wrappers raise on unwrap, but not uniformly:
+            # Scalar/Ptr raise RuntimeError while Tensor/Tile/Array raise
+            # ValueError. Catch both so the actionable diagnostic is not
+            # bypassed by whichever wrapper the caller passed.
+            try:
+                value = value.unwrap()
+            except (RuntimeError, ValueError) as e:
+                raise ParserSyntaxError(
+                    f"@pl.function attr '{key}' is an annotation-only {type(value).__name__}",
+                    hint="Pass a value expression, not a type annotation.",
+                ) from e
+        _reject_ssa_referencing_attr(key, value)
+        result[key] = value
     return result or None
+
+
+def _reject_ssa_referencing_attr(key: str, value: Any) -> None:
+    """Reject a Function attr value that references an SSA binding.
+
+    The DSL-side half of the ``StaticAttrs`` IR property. A ``Var`` in a
+    function attr names something the function does not bind: a decorator is
+    evaluated before the body binds anything, and a launch-site value belongs
+    to the *calling* function. Such an attr is unprintable as a decorator and
+    invisible to every pass that walks the use-def chain, so it is rejected at
+    the source rather than surfacing later as a structural mismatch.
+    """
+    if isinstance(value, (list, tuple)):
+        offenders = [v for v in value if isinstance(v, ir.Expr)]
+    else:
+        offenders = [value] if isinstance(value, ir.Expr) else []
+    for expr in offenders:
+        if not _expr_references_ssa(expr):
+            continue
+        raise ParserSyntaxError(
+            f"@pl.function attr '{key}' references a variable, which a function attr cannot carry",
+            hint=(
+                "A decorator is evaluated before the body binds any name, so the reference has no "
+                "legal spelling. Pass the value at the launch site instead — e.g. "
+                "`with pl.spmd(n):` rather than `attrs={'core_num': n}`."
+            ),
+        )
+
+
+class _SsaRefFinder(ir.IRVisitor):
+    """Detects any Var-like reference inside an attr expression subtree.
+
+    ``Var`` and ``IterArg`` are overridden separately rather than through
+    ``visit_var_like`` because each carries its own ``ObjectKind`` and so
+    dispatches independently (see ``.claude/rules/ir-kind-traits.md``).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found = False
+
+    def visit_var(self, op: ir.Var) -> None:
+        self.found = True
+
+    def visit_iter_arg(self, op: Any) -> None:
+        self.found = True
+
+    def visit_mem_ref(self, op: Any) -> None:
+        self.found = True
+
+
+def _expr_references_ssa(expr: ir.Expr) -> bool:
+    finder = _SsaRefFinder()
+    finder.visit_expr(expr)
+    return finder.found
 
 
 # Function-attr key carrying the path to a hand-written external C++ kernel
@@ -855,7 +943,12 @@ def function(
             # object: reconstructing the dict from AST loses closure values,
             # DataType values, and every other non-literal expression. The
             # @pl.program walker reads this snapshot before building the IR.
-            f._pl_function_attrs = _normalize_attrs(attrs or {}) or {}  # type: ignore[attr-defined]
+            # Gate on `is not None`, not truthiness: a falsey non-dict such as
+            # `attrs=[]` or `attrs=""` must reach the validator rather than be
+            # silently treated as absent.
+            f._pl_function_attrs = (  # type: ignore[attr-defined]
+                _normalize_attrs(attrs) or {} if attrs is not None else {}
+            )
             # Stash the resolved external_source for the same reason: the value
             # is a runtime Path expression that cannot be re-read from the AST.
             if resolved_external_source is not None:
@@ -894,7 +987,7 @@ def function(
             )
 
             # Normalize attrs: convert enum values to ints for storage
-            func_attrs = _normalize_attrs(attrs) if attrs else None
+            func_attrs = _normalize_attrs(attrs) if attrs is not None else None
             # Fold auto_scope=False into attrs (absent ⇒ default True).
             if auto_scope is False:
                 func_attrs = {**(func_attrs or {}), "auto_scope": False}
