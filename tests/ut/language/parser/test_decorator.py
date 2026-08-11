@@ -649,6 +649,11 @@ class TestProgramDecorator:
         The printer emits the value in DSL spelling
         (``pl.system.available_cluster_count()``), which reparse evaluates back
         into a ``Scalar`` wrapper — the attr store only accepts the ``Expr``.
+
+        Function attrs print as a ``pl.func_attr({...})`` body prologue rather
+        than into the decorator, so the deprecated ``attrs=`` keyword never
+        appears in compiler output (RFC #2338). The value spelling is unchanged;
+        only its position is.
         """
 
         @pl.program
@@ -662,7 +667,8 @@ class TestProgramDecorator:
         assert isinstance(dict(func.attrs)["core_num"], ir.Call)
 
         printed = LaunchQueryProgram.as_python()
-        assert 'attrs={"core_num": pl.system.available_cluster_count()}' in printed
+        assert 'pl.func_attr({"core_num": pl.system.available_cluster_count()})' in printed
+        assert "attrs=" not in printed
         ir.assert_structural_equal(pl.parse_program(printed), LaunchQueryProgram)
 
     def test_function_attr_referencing_a_var_is_rejected(self):

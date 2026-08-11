@@ -367,6 +367,22 @@ class IRBuilder:
         actual_span = span if span is not None else self._capture_call_span()
         return self._builder.var(name, type, actual_span)
 
+    def add_function_attrs(self, attrs: dict[str, Any]) -> None:
+        """Merge attributes into the function currently being built.
+
+        Attributes normally arrive at :meth:`function`. A ``pl.func_attr({...})``
+        body prologue is evaluated only after the parameters bind — which is what
+        lets an attribute reference one — so it merges here instead.
+
+        Args:
+            attrs: Attribute dict to merge
+
+        Raises:
+            RuntimeError: If not inside a function context
+            ValueError: If a key is already present (attrs are unique-keyed)
+        """
+        self._builder.add_function_attrs(attrs)
+
     def assign(
         self,
         var: ir.Var,

@@ -372,11 +372,15 @@ def test_split_none_func_attr_is_not_printed():
     text = ir.python_print(ir.Program([func], "P", span))
 
     assert "SplitMode.NONE" not in text, text
-    # ``split`` was the only entry, so no empty ``attrs={}`` may be emitted either.
+    # ``split`` was the only entry, so no empty attrs dict may be emitted either —
+    # in neither the decorator spelling nor the ``pl.func_attr`` prologue.
     assert "attrs=" not in text, text
-    # A real mode is unaffected.
+    assert "func_attr" not in text, text
+    # A real mode is unaffected. Function attrs print as a body prologue: a
+    # decorator is evaluated before the signature binds, so it cannot carry an
+    # attr that references a parameter.
     real = ir.Function("g", [], [], ir.SeqStmts([], span), span, attrs={"split": ir.SplitMode.UP_DOWN.value})
-    assert 'attrs={"split": pl.SplitMode.UP_DOWN}' in ir.python_print(ir.Program([real], "P", span))
+    assert 'pl.func_attr({"split": pl.SplitMode.UP_DOWN})' in ir.python_print(ir.Program([real], "P", span))
 
 
 if __name__ == "__main__":

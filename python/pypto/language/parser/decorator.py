@@ -15,6 +15,7 @@ import inspect
 import linecache
 import sys
 import textwrap
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar, cast, overload
@@ -29,13 +30,31 @@ from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, 
 from .source_lookup import get_class_source_lines
 
 
+def _is_pl_func_attr_stmt(stmt: ast.stmt) -> bool:
+    """True when ``stmt`` is a ``pl.func_attr({...})`` prologue directive."""
+    if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+        return False
+    func = stmt.value.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "func_attr"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pl"
+    )
+
+
 def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
     """True if the SubWorker body is an abstract ``...`` declaration.
 
     An abstract SubWorker declares only ``...`` (optionally preceded by a
-    docstring) and carries no implementation — it is a runtime-bound callback
-    point that must be supplied via ``prepare(callbacks={...})``. A bare ``pass``
-    is *not* abstract: it is a valid no-op SubWorker with a concrete body.
+    docstring and a ``pl.func_attr({...})`` prologue) and carries no
+    implementation — it is a runtime-bound callback point that must be supplied
+    via ``prepare(callbacks={...})``. A bare ``pass`` is *not* abstract: it is a
+    valid no-op SubWorker with a concrete body.
+
+    The prologue is skipped for the same reason the docstring is: it is
+    parse-time metadata, not an implementation, so a SubWorker carrying function
+    attrs stays abstract and keeps a printable spelling for them.
     """
     non_doc = [
         stmt
@@ -45,6 +64,7 @@ def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
             and isinstance(stmt.value, ast.Constant)
             and isinstance(stmt.value.value, str)
         )
+        and not _is_pl_func_attr_stmt(stmt)
     ]
     return (
         len(non_doc) == 1
@@ -475,9 +495,11 @@ def _reject_ssa_referencing_attr(key: str, value: Any) -> None:
         raise ParserSyntaxError(
             f"@pl.function attr '{key}' references a variable, which a function attr cannot carry",
             hint=(
-                "A decorator is evaluated before the body binds any name, so the reference has no "
-                "legal spelling. Pass the value at the launch site instead — e.g. "
-                "`with pl.spmd(n):` rather than `attrs={'core_num': n}`."
+                "A decorator is evaluated before the signature binds any name, so it cannot spell a "
+                "reference. To reference a parameter, declare the attr in the body prologue instead: "
+                "`pl.func_attr({'stationary': w})` as the first statement, where the parameters are "
+                "bound. To pass a launch width, use the launch site — `with pl.spmd(n):` rather than "
+                "`attrs={'core_num': n}`."
             ),
         )
 
@@ -929,6 +951,15 @@ def function(
     # Capture the caller's scope for variable resolution in type annotations
     caller_frame = sys._getframe(1)
     closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+
+    if attrs:
+        warnings.warn(
+            "@pl.function(attrs={...}) is deprecated: a decorator is evaluated before the "
+            "signature binds, so it cannot reference parameters. Use pl.func_attr({...}) as "
+            "the first statement of the function body instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     resolved_external_source = (
         _resolve_external_source(external_source, caller_frame) if external_source is not None else None

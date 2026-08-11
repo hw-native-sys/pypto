@@ -118,6 +118,20 @@ class IRBuilder {
   void ReturnType(const TypePtr& type);
 
   /**
+   * @brief Merge attributes into the current function
+   *
+   * Attributes normally arrive at ``BeginFunction``, but a ``pl.func_attr({...})``
+   * body prologue is evaluated only *after* the parameters bind — that is the
+   * whole point of body position, since it is what lets an attribute reference a
+   * parameter. This merges such a batch into the open function context.
+   *
+   * @param attrs Attributes to merge
+   * @throws RuntimeError if not inside a function context
+   * @throws ValueError if a key is already present (attrs are unique-keyed)
+   */
+  void AddFunctionAttrs(const std::vector<std::pair<std::string, std::any>>& attrs);
+
+  /**
    * @brief End building a function
    *
    * Finalizes the function and pops the function context from the stack.
@@ -612,6 +626,10 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
+
+  /// Append one attribute. Callers must ensure the key is not already present —
+  /// ``IRBuilder::AddFunctionAttrs`` is the checked entry point.
+  void AddAttr(std::string key, std::any value) { attrs_.emplace_back(std::move(key), std::move(value)); }
   [[nodiscard]] bool GetRequiresRuntimeBinding() const { return requires_runtime_binding_; }
 
  private:

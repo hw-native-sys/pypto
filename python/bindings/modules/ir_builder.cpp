@@ -93,6 +93,22 @@ void BindIRBuilder(nb::module_& m) {
            "Raises:\n"
            "    RuntimeError: If not inside a function context")
 
+      .def(
+          "add_function_attrs",
+          [](IRBuilder& self, const nb::object& attrs_or_none) {
+            self.AddFunctionAttrs(ConvertAttrsFromPython(attrs_or_none));
+          },
+          nb::arg("attrs"),
+          "Merge attributes into the current function.\n\n"
+          "Attributes normally arrive at begin_function(). A pl.func_attr({...}) body\n"
+          "prologue is evaluated only after the parameters bind — which is what lets an\n"
+          "attribute reference a parameter — so it merges here instead.\n\n"
+          "Args:\n"
+          "    attrs: Attribute dict to merge\n\n"
+          "Raises:\n"
+          "    RuntimeError: If not inside a function context\n"
+          "    ValueError: If a key is already present (attrs are unique-keyed)")
+
       .def("end_function", &IRBuilder::EndFunction, nb::arg("end_span"),
            "End building a function.\n\n"
            "Finalizes the function and returns it.\n\n"

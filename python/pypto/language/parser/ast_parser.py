@@ -68,6 +68,29 @@ if TYPE_CHECKING:
 # / tile_ops); also surfaced as the hint in _parse_pld_category_op.
 _PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
 
+# ``pl.func_attr({...})`` — the body-prologue directive carrying function-level
+# attributes. Body position is what lets an attribute reference a parameter: a
+# decorator is evaluated before the signature binds any name.
+_FUNC_ATTR_DIRECTIVE = "func_attr"
+
+# The ``split`` attr stores an int but is spelled (and printed) as the
+# ``pl.SplitMode.X`` enum, so it needs enum handling on both attr paths.
+_SPLIT_ATTR = "split"
+
+# Sentinel: a parsed attr value that must not be stored at all. ``None`` cannot
+# serve here — it is a legitimate attr value — so identity against this object
+# is the signal.
+_OMIT_ATTR: Any = object()
+
+# Function attrs the parser consumes BEFORE it walks the body, so a body-position
+# declaration would arrive too late to have any effect. These keep their
+# dedicated ``@pl.function(...)`` keyword and are rejected in ``pl.func_attr``:
+#   - ``auto_scope``      gates implicit scope insertion during the body walk
+#   - ``external_source`` selects the no-DSL-body path entirely (the body must
+#                         be a bare ``...``, so there is nowhere to put a
+#                         prologue in the first place)
+_DECORATOR_ONLY_FUNC_ATTRS: frozenset[str] = frozenset({"auto_scope", "external_source"})
+
 # Enum values that op wrappers and printed ``attrs={...}`` dicts take verbatim.
 # ``parse_expression`` cannot represent these: it either rejects the standalone
 # attribute form outright or (for MemorySpace) lowers it to a ConstInt that the
@@ -135,6 +158,15 @@ def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
         and parent.attr in _PLD_CATEGORIES
         and isinstance(parent.value, ast.Name)
         and parent.value.id == "pld"
+    )
+
+
+def _is_docstring_stmt(node: ast.stmt) -> bool:
+    """True when ``node`` is a bare string expression, i.e. a docstring."""
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
     )
 
 
@@ -1032,6 +1064,14 @@ class ASTParser:
                 else:
                     f.return_type(return_type)
 
+            # ``pl.func_attr({...})`` prologue. Merged here — after the params
+            # are bound above, which is what lets an attr reference one — and
+            # stripped from the body so no later stage sees the directives.
+            # Consumed before the body-shape dispatch below so that a
+            # signature-only external kernel carrying other attrs still counts
+            # as having an empty body.
+            body_stmts = self._consume_func_attr_prologue(func_def.body, func_name)
+
             # Parse function body. HOST SubWorkers carry pure-Python source
             # via ``inline_body`` and are not parsed as DSL.
             external_source = (func_attrs or {}).get("external_source")
@@ -1047,7 +1087,7 @@ class ASTParser:
                         span=func_span,
                         hint="Declare the external kernel as pl.FunctionType.AIC or pl.FunctionType.AIV.",
                     )
-                if not _is_empty_body(func_def.body):
+                if not _is_empty_body(body_stmts):
                     raise ParserSyntaxError(
                         f"External kernel '{func_name}' must have an empty '...' body "
                         "(signature only) — its implementation is the C++ source "
@@ -1058,13 +1098,145 @@ class ASTParser:
             elif inline_body is not None:
                 self.builder.inline_stmt(inline_body, ir.InlineLanguage.Python, func_span)
             else:
-                self._parse_body_siblings(func_def.body)
+                self._parse_body_siblings(body_stmts)
                 self._discard_tail_block_comments(func_def.body, upper_line=None)
 
         # Exit function scope
         self.scope_manager.exit_scope()
 
         return f.get_result()
+
+    def _consume_func_attr_prologue(self, body: list[ast.stmt], func_name: str) -> list[ast.stmt]:
+        """Merge leading ``pl.func_attr({...})`` directives, return the rest of the body.
+
+        ``pl.func_attr`` is a parse-time directive, not a statement: the dict is
+        merged into the function's attrs and no IR node is emitted. It must
+        appear in the **prologue** — before every other statement — because an
+        attribute describes the whole function and must not appear to start
+        applying partway down a body. That restriction is also what bounds the
+        referenceable names to the parameters, which are the only bindings in
+        scope at this point.
+
+        A leading docstring is not "another statement": it precedes the prologue
+        in ordinary Python style and carries no semantics here. It is skipped and
+        kept in the returned body, so comment rerouting still sees it.
+
+        Args:
+            body: The function's AST body statements
+            func_name: Enclosing function name, for diagnostics
+
+        Returns:
+            The body statements after the prologue, to be parsed as DSL. Any
+            leading docstring is retained at the front.
+        """
+        index = 0
+        docstring: list[ast.stmt] = []
+        if body and _is_docstring_stmt(body[0]):
+            docstring = [body[0]]
+            index = 1
+
+        while index < len(body) and _is_pl_call(getattr(body[index], "value", None), _FUNC_ATTR_DIRECTIVE):
+            self._merge_func_attr_directive(cast(ast.Expr, body[index]), func_name)
+            index += 1
+
+        # Anything further down the body is a misplacement, not a second prologue.
+        for stmt in body[index:]:
+            if _is_pl_call(getattr(stmt, "value", None), _FUNC_ATTR_DIRECTIVE):
+                raise ParserSyntaxError(
+                    f"pl.{_FUNC_ATTR_DIRECTIVE}() must appear before every other statement in '{func_name}'",
+                    span=self.span_tracker.get_span(stmt),
+                    hint=(
+                        f"Move the pl.{_FUNC_ATTR_DIRECTIVE}(...) call to the top of the function "
+                        "body. A function attribute describes the whole function, so it is "
+                        "declared in the prologue; only parameters are referenceable there."
+                    ),
+                )
+        return docstring + body[index:]
+
+    def _merge_func_attr_directive(self, stmt: ast.Expr, func_name: str) -> None:
+        """Evaluate one ``pl.func_attr({...})`` call and merge it into the function."""
+        call = cast(ast.Call, stmt.value)
+        span = self.span_tracker.get_span(stmt)
+
+        if len(call.args) != 1 or call.keywords:
+            raise ParserSyntaxError(
+                f"pl.{_FUNC_ATTR_DIRECTIVE}() takes exactly one positional dict argument (no keywords)",
+                span=span,
+                hint=f'Use: pl.{_FUNC_ATTR_DIRECTIVE}({{"split": pl.SplitMode.UP_DOWN}})',
+            )
+        if not isinstance(call.args[0], ast.Dict):
+            raise ParserSyntaxError(
+                f"pl.{_FUNC_ATTR_DIRECTIVE}() argument must be a dict literal",
+                span=self.span_tracker.get_span(call.args[0]),
+                hint=f'Use: pl.{_FUNC_ATTR_DIRECTIVE}({{"split": pl.SplitMode.UP_DOWN}})',
+            )
+
+        attrs: dict[str, Any] = {}
+        for key_node, value_node in zip(call.args[0].keys, call.args[0].values):
+            if key_node is None:
+                raise ParserSyntaxError(
+                    f"Unsupported `**` unpacking in pl.{_FUNC_ATTR_DIRECTIVE}({{...}})",
+                    span=span,
+                    hint="Use only string literal keys in the attrs dict.",
+                )
+            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                raise ParserSyntaxError(
+                    f"pl.{_FUNC_ATTR_DIRECTIVE}() key must be a string literal, got {ast.unparse(key_node)}",
+                    span=self.span_tracker.get_span(key_node),
+                    hint=f'Use string literal keys, e.g. pl.{_FUNC_ATTR_DIRECTIVE}({{"split": ...}}).',
+                )
+            key = key_node.value
+            if key in attrs:
+                raise ParserSyntaxError(
+                    f"Duplicate function attribute '{key}' in pl.{_FUNC_ATTR_DIRECTIVE}({{...}})",
+                    span=span,
+                    hint="Each attribute may be declared only once.",
+                )
+            if key in _DECORATOR_ONLY_FUNC_ATTRS:
+                raise ParserSyntaxError(
+                    f"'{key}' cannot be set with pl.{_FUNC_ATTR_DIRECTIVE}()",
+                    span=span,
+                    hint=(
+                        f"Pass it as the '{key}=' keyword of @pl.function(...) instead. The parser "
+                        "reads it before the body is parsed, so a body-position declaration comes "
+                        "too late to take effect."
+                    ),
+                )
+            value = self._parse_func_attr_value(key, value_node)
+            if value is _OMIT_ATTR:
+                continue
+            attrs[key] = value
+
+        # The builder rejects a key already present, which covers a duplicate
+        # across two pl.func_attr calls as well as one between the body and a
+        # decorator attrs= (those were merged in at begin_function).
+        try:
+            self.builder.add_function_attrs(attrs)
+        except ValueError as exc:
+            raise ParserSyntaxError(str(exc), span=span, hint=None) from exc
+
+    def _parse_func_attr_value(self, key: str, value_node: ast.expr) -> Any:
+        """Reconstruct one ``pl.func_attr`` value from its Python AST node.
+
+        Shares ``_parse_attr_value``'s syntax-inference contract with the
+        printer, so a printed prologue reparses to the same attrs. The one rule
+        worth stating outright: a **bare name is always a parameter reference**,
+        never the value of a same-named Python variable in the enclosing scope.
+        The decorator form evaluated its dict as Python and could capture such a
+        value; body position resolves names against the signature instead.
+        """
+        if key == _SPLIT_ATTR:
+            # ``split`` is an enum whose printed spelling (pl.SplitMode.X) the
+            # generic path would resolve to its int value, changing the stored
+            # attr type. Mirrors the decorator's dedicated handling, including
+            # dropping ``SplitMode.NONE``: storing the 0 would be a non-canonical
+            # spelling of "no split" that the printer filters, so print -> parse
+            # would lose the key and structural round-trip would fail.
+            split_mode = extract_enum_value(value_node, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+            if split_mode == ir.SplitMode.NONE:
+                return _OMIT_ATTR
+            return split_mode.value
+        return self._parse_attr_value(f"pl.{_FUNC_ATTR_DIRECTIVE}", key, value_node)
 
     def parse_statement(self, stmt: ast.stmt) -> None:
         """Parse a statement node.
