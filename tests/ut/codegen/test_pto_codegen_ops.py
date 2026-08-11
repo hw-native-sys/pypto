@@ -3355,7 +3355,7 @@ class TestScatterCodegen:
             f"maskPattern must appear inside ins(...) before outs(...), got:\n{line}"
         )
         assert '"row"' in line and line.index('"row"') < line.index("outs("), (
-            f'mask-form pto.tscatter must emit the PTOAS row axis before outs(...), got:\n{line}'
+            f"mask-form pto.tscatter must emit the PTOAS row axis before outs(...), got:\n{line}"
         )
 
 
