@@ -266,6 +266,11 @@ class SSAConverter {
     result->params_ = std::move(new_params);
     result->param_directions_ = std::move(new_dirs);
     result->body_ = std::move(new_body);
+    // A function attr may legally reference a parameter, and the parameters
+    // above were just re-versioned. Without this the attr keeps pointing at the
+    // pre-SSA Var and the UseAfterDef function-attr walk reports it undefined.
+    auto new_attrs = SubstCallAttrs(result->attrs_);
+    if (new_attrs.has_value()) result->attrs_ = std::move(*new_attrs);
     return result;
   }
 
@@ -351,42 +356,15 @@ class SSAConverter {
     bool changed = false;
     std::vector<std::pair<std::string, std::any>> out;
     out.reserve(attrs.size());
+    // Substitute by stored type, matching ``ForEachAttrExpr`` on the visitor
+    // side and ``MapAttrExprs`` in IRMutator. A key-gated version left any attr
+    // key nobody enumerated pointing at its pre-SSA Var.
     for (const auto& [k, v] : attrs) {
-      if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges || k == kAttrDumpVars) {
-        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-        if (edges) {
-          std::vector<VarPtr> new_edges;
-          new_edges.reserve(edges->size());
-          bool any = false;
-          for (const auto& e : *edges) {
-            if (!e) {
-              new_edges.push_back(e);
-              continue;
-            }
-            auto it = cur_.find(e.get());
-            if (it != cur_.end() && it->second.get() != e.get()) {
-              new_edges.push_back(it->second);
-              any = true;
-            } else {
-              new_edges.push_back(e);
-            }
-          }
-          if (any) {
-            changed = true;
-            out.emplace_back(k, std::any(std::move(new_edges)));
-            continue;
-          }
-        }
-      } else if (IsExprValuedCallAttr(k)) {
-        const auto* attr_expr = std::any_cast<ExprPtr>(&v);
-        if (attr_expr && *attr_expr) {
-          auto new_expr = SubstExpr(*attr_expr);
-          if (new_expr.get() != attr_expr->get()) {
-            changed = true;
-            out.emplace_back(k, std::any(std::move(new_expr)));
-            continue;
-          }
-        }
+      auto remapped = MapAttrExprs(v, [this](const ExprPtr& e) { return SubstExpr(e); });
+      if (remapped.has_value()) {
+        changed = true;
+        out.emplace_back(k, std::move(*remapped));
+        continue;
       }
       out.emplace_back(k, v);
     }
@@ -1001,59 +979,16 @@ class SSAConverter {
     bool changed = false;
     std::vector<std::pair<std::string, std::any>> out;
     out.reserve(attrs.size());
+    // Substitute by stored type. ``SubstScopeAttrs`` runs before the body is
+    // converted (see ConvertScope), so attr references resolve to the SSA
+    // versions visible at scope entry — the type dispatch changes which attrs
+    // are covered, not when.
     for (const auto& [k, v] : attrs) {
-      if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges || k == kAttrArgDirOverrideVars ||
-          k == kAttrDumpVars) {
-        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-        if (edges) {
-          std::vector<VarPtr> new_edges;
-          new_edges.reserve(edges->size());
-          bool any = false;
-          for (const auto& e : *edges) {
-            if (!e) {
-              new_edges.push_back(e);
-              continue;
-            }
-            auto it = cur_.find(e.get());
-            if (it != cur_.end() && it->second.get() != e.get()) {
-              new_edges.push_back(it->second);
-              any = true;
-            } else {
-              new_edges.push_back(e);
-            }
-          }
-          if (any) {
-            changed = true;
-            out.emplace_back(k, std::any(std::move(new_edges)));
-            continue;
-          }
-        }
-      } else if (k == kAttrTaskIdVar) {
-        const auto* var = std::any_cast<VarPtr>(&v);
-        if (var && *var) {
-          auto it = cur_.find(var->get());
-          if (it != cur_.end() && it->second.get() != var->get()) {
-            changed = true;
-            out.emplace_back(k, std::any(it->second));
-            continue;
-          }
-        }
-      } else if (k == kAttrPredicate) {
-        // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — an ExprPtr, so
-        // substitute the whole subtree via SubstExpr rather than remapping a
-        // single Var (mirrors the kAttrDevice handling in SubstCallAttrs).
-        // Substituting here — before the body is converted, see ConvertScope —
-        // resolves the operand tensor to the SSA version visible at scope
-        // entry, which is the value the scheduler reads at the dispatch point.
-        const auto* pred = std::any_cast<ExprPtr>(&v);
-        if (pred && *pred) {
-          auto new_pred = SubstExpr(*pred);
-          if (new_pred.get() != pred->get()) {
-            changed = true;
-            out.emplace_back(k, std::any(std::move(new_pred)));
-            continue;
-          }
-        }
+      auto remapped = MapAttrExprs(v, [this](const ExprPtr& e) { return SubstExpr(e); });
+      if (remapped.has_value()) {
+        changed = true;
+        out.emplace_back(k, std::move(*remapped));
+        continue;
       }
       out.emplace_back(k, v);
     }

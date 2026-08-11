@@ -2463,5 +2463,80 @@ class TestSplitAivRegionTransparentToSSA:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestArbitraryAttrKeyRemap:
+    """Attr substitution is keyed on the value's type, not on the attr name.
+
+    The walkers report every reference-valued attr as a live use, so every
+    substitution path must rewrite the same set. A key-gated substitution left
+    an attr under an unenumerated key pointing at its pre-SSA ``Var``, which
+    then fails ``UseAfterDef``.
+    """
+
+    @staticmethod
+    def _use_after_def(program):
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.UseAfterDef)
+        return [
+            d
+            for d in passes.PropertyVerifierRegistry.verify(props, program)
+            if d.severity == passes.DiagnosticSeverity.Error
+        ]
+
+    def test_call_attr_under_arbitrary_key_is_remapped(self):
+        """A Var under a key no walker list enumerates survives ConvertToSSA.
+
+        The reassignment below forces a new SSA version of ``acc``. A key-gated
+        substitution would leave the attr on the pre-SSA ``acc``, which
+        ``UseAfterDef`` then reports as undefined.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.load(x, [0], [64])
+                out = pl.store(t, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], out: pl.Out[pl.Tensor[[64], pl.FP32]]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.kernel(x, out)
+                out = self.kernel(out, out)
+                return out
+
+        after = passes.convert_to_ssa()(Before)
+        assert self._use_after_def(after) == []
+
+        # Every Var referenced from a Call attr must be one the converted
+        # function actually binds — i.e. remapped alongside the args.
+        main = after.get_function("main")
+        assert main is not None
+        bound: set[int] = {id(p) for p in main.params}
+
+        class _Collect(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.attr_vars = []
+
+            def visit_assign_stmt(self, op):
+                bound.add(id(op.var))
+                super().visit_assign_stmt(op)
+
+            def visit_call(self, op):
+                for value in dict(op.attrs).values():
+                    if isinstance(value, ir.Var):
+                        self.attr_vars.append(value)
+                super().visit_call(op)
+
+        collector = _Collect()
+        collector.visit_function(main)
+        for var in collector.attr_vars:
+            assert id(var) in bound, f"Call attr references unbound Var {var.name_hint}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

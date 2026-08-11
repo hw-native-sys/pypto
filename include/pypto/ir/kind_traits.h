@@ -12,9 +12,13 @@
 #ifndef PYPTO_IR_KIND_TRAITS_H_
 #define PYPTO_IR_KIND_TRAITS_H_
 
+#include <any>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -312,6 +316,61 @@ inline VarPtr AsVarLike(const ExprPtr& expr) {
     return std::static_pointer_cast<const Var>(expr);
   }
   return nullptr;
+}
+
+/**
+ * @brief Rewrite every ``ExprPtr`` an attr value references, by stored type.
+ *
+ * The rewriting counterpart of ``ForEachAttrExpr`` (``expr.h``): whatever that
+ * walk reports as a live reference, this one must rewrite, or substitution
+ * leaves the attr pointing at a pre-mutation ``Var``. Sharing one
+ * type-dispatched implementation is what keeps the two in step — the key lists
+ * they replaced had already drifted apart across ``IRMutator`` and the SSA
+ * pass's own ``SubstCallAttrs`` / ``SubstScopeAttrs``.
+ *
+ * The value's stored type is preserved: a ``VarPtr`` attr stays a ``VarPtr``
+ * and never widens to ``ExprPtr``. ``AsVarLike`` (not ``As<Var>``) keeps a
+ * remapped ``IterArg`` matching. Returns ``std::nullopt`` when nothing changed,
+ * so callers keep their copy-on-write short-circuit.
+ *
+ * @param value Attr value to rewrite.
+ * @param remap Callable mapping one ``ExprPtr`` to its replacement.
+ */
+template <typename F>
+std::optional<std::any> MapAttrExprs(const std::any& value, F&& remap) {
+  if (const auto* var = std::any_cast<VarPtr>(&value)) {
+    if (!*var) return std::nullopt;
+    auto next = AsVarLike(remap(ExprPtr(*var)));
+    if (!next || next.get() == var->get()) return std::nullopt;
+    return std::any(std::move(next));
+  }
+  if (const auto* vars = std::any_cast<std::vector<VarPtr>>(&value)) {
+    std::vector<VarPtr> next;
+    next.reserve(vars->size());
+    bool changed = false;
+    for (const auto& v : *vars) {
+      if (!v) {
+        next.push_back(v);
+        continue;
+      }
+      auto remapped = AsVarLike(remap(ExprPtr(v)));
+      if (!remapped) {
+        next.push_back(v);  // Should not happen; keep the original over corrupting the attr.
+        continue;
+      }
+      if (remapped.get() != v.get()) changed = true;
+      next.push_back(std::move(remapped));
+    }
+    if (!changed) return std::nullopt;
+    return std::any(std::move(next));
+  }
+  if (const auto* expr = std::any_cast<ExprPtr>(&value)) {
+    if (!*expr) return std::nullopt;
+    auto next = remap(*expr);
+    if (!next || next.get() == expr->get()) return std::nullopt;
+    return std::any(std::move(next));
+  }
+  return std::nullopt;
 }
 
 /**
