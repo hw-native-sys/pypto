@@ -107,7 +107,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
-        assert "const Tensor& y = task_0_outs.get_ref(0);" in code, code
+        assert "const ChipTensor& y = task_0_outs.get_ref(0);" in code, code
         assert "params_t1.add_input(y);" in code, code
         assert "signal_ctx.get_ref" not in code, code
 

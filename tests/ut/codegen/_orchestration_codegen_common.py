@@ -138,7 +138,7 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
     Numeric literals (``= 0;``), casts, and scalar locals carry neither marker,
     so they never yield false positives.
     """
-    decl_re = re.compile(r"\b(?:const\s+Tensor\s*&|Tensor|TaskOutputTensors|Arg)\s+(\w+)")
+    decl_re = re.compile(r"\b(?:const\s+ChipTensor\s*&|ChipTensor|TaskOutputTensors|Arg)\s+(\w+)")
     declared_anywhere = set(decl_re.findall(code))
     # An SSA-versioned tensor temp is unambiguously a tensor regardless of whether
     # its declaration still exists, so an out-of-scope reference to one is always
@@ -153,7 +153,7 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
         line = raw.strip()
         # Declarations and uses are each emitted on their own line (never sharing
         # a line with a scope brace), so resolve them against the current scope
-        # set first. Declarations are recorded before uses so a ``const Tensor& Y
+        # set first. Declarations are recorded before uses so a ``const ChipTensor& Y
         # = X`` line registers Y while still checking the RHS read of X.
         for m in decl_re.finditer(line):
             scopes[-1].add(m.group(1))

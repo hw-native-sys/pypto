@@ -19,7 +19,7 @@ namespace {
 
 template <typename DType>
 void submit_barrier_kernel(const ChipTaskArgs &orch_args) {
-  const Tensor &signal = orch_args.tensor(0).ref();
+  const ChipTensor &signal = orch_args.tensor(0).ref();
 
   CoreTaskArgs params;
   params.add_inout(signal);

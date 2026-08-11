@@ -19,11 +19,11 @@ namespace {
 
 template <typename DType>
 void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
-  const Tensor &input = orch_args.tensor(0).ref();
-  const Tensor &target = orch_args.tensor(1).ref();
-  const Tensor &signal = orch_args.tensor(2).ref();
-  const Tensor &send_counts = orch_args.tensor(3).ref();
-  const Tensor &recv_counts = orch_args.tensor(4).ref();
+  const ChipTensor &input = orch_args.tensor(0).ref();
+  const ChipTensor &target = orch_args.tensor(1).ref();
+  const ChipTensor &signal = orch_args.tensor(2).ref();
+  const ChipTensor &send_counts = orch_args.tensor(3).ref();
+  const ChipTensor &recv_counts = orch_args.tensor(4).ref();
 
   CoreTaskArgs params;
   params.add_input(input);

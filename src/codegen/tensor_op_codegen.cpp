@@ -371,7 +371,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   }
 
   // Runtime tensor views use shape+offset; valid_shape only affects IR metadata.
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
+  oss << "ChipTensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
       << result_var << "_offsets);";
   return oss.str();
 }
@@ -414,7 +414,7 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
   }
 
   // Runtime Tensor::reshape requires the source to be contiguous; valid_shape only affects IR metadata.
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
+  oss << "ChipTensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
       << ndim << ");";
   return oss.str();
 }
@@ -478,7 +478,7 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
   std::string result_var = codegen.GetCurrentResultTarget();
 
   std::ostringstream oss;
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << axis1 << ", " << axis2
+  oss << "ChipTensor " << result_var << " = " << ext_input_name << ".transpose(" << axis1 << ", " << axis2
       << ");";
   return oss.str();
 }
@@ -535,13 +535,13 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
       oss << EmitRuntimeTensorShapeDim(shape_dim, input_type->dtype_, i, ndim, codegen);
     }
     oss << "};\n";
-    oss << "Tensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
+    oss << "ChipTensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
         << ndim << ");";
     return oss.str();
   }
 
   if (target_layout == src_layout) {
-    oss << "Tensor " << result_var << " = " << ext_input_name << ";";
+    oss << "ChipTensor " << result_var << " = " << ext_input_name << ";";
   } else {
     int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
     INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
@@ -550,7 +550,7 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
     CHECK_SPAN(input_type->dtype_ != DataType::FP4, op->span_)
         << "tensor.view cannot move the packed FP4 last axis during an Orchestration layout change because "
            "the runtime Tensor carries physical x2 elements; lower the view through PTO in-core codegen";
-    oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
+    oss << "ChipTensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
         << (ndim - 1) << ");";
   }
 

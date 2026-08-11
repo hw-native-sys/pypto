@@ -190,7 +190,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
                                        [[maybe_unused]] const TensorTypePtr& tensor_type,
                                        [[maybe_unused]] const CodegenBase& codegen) {
   std::ostringstream oss;
-  oss << "    const Tensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
+  oss << "    const ChipTensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
   return oss.str();
 }
 
@@ -843,7 +843,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // the enclosing scope so a task / method-receiver placed AFTER the block
         // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-Tensor
         // (e.g. Sequential TaskId scalar) carries keep their in-block decl.
-        if (cpp_type == "Tensor") {
+        if (cpp_type == "ChipTensor") {
           EmitMutableTensorCarryDecl(carry_name, init_var_name);
         } else {
           EmitIndentedLine(cpp_type + " " + carry_name + " = " + init_var_name + ";");
@@ -1132,7 +1132,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& rv : if_stmt->return_vars_) {
       const std::string emit_name = ReserveVarEmitName(rv.get());
       const std::string cpp_type = GetCppType(rv->GetType());
-      if (cpp_type == "Tensor") {
+      if (cpp_type == "ChipTensor") {
         INTERNAL_CHECK_SPAN(!tensor_phi_init.empty(), if_stmt->span_)
             << "Internal error: IfStmt return_var '" << rv->name_hint_
             << "' is a Tensor but no in-scope Tensor was found to use as the "
@@ -1383,7 +1383,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // alias the carry's later value.
         const bool carry_collapse_ok =
             hoisted_carry_names_.count(value_expr) == 0 || IsAtManualScopeBodyIndent();
-        if (cpp_type == "Tensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
+        if (cpp_type == "ChipTensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
             !IsMutableTensorNameInCurrentScope(value_expr) && !IsMutableTensorNameInCurrentScope(var_name) &&
             carry_collapse_ok) {
           emit_name_map_[assign->var_.get()] = value_expr;
@@ -1602,10 +1602,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (scalar_type->dtype_ == DataType::TASK_ID) return "PTO2TaskId";
       return scalar_type->dtype_.ToCTypeString();
     }
-    // TensorType: use ``Tensor`` so default-constructible declarations are
+    // TensorType: use ``ChipTensor`` so default-constructible declarations are
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
-    if (AsTensorTypeLike(type)) return "Tensor";
+    if (AsTensorTypeLike(type)) return "ChipTensor";
     if (As<CommCtxType>(type)) return "uint64_t";
     // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
     // single "type expression" that names a C array. Callers that need to
@@ -3020,7 +3020,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine(alloc.str());
 
     for (size_t i = 0; i < emit_names.size(); i++) {
-      EmitIndentedLine("const Tensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
+      EmitIndentedLine("const ChipTensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
                        std::to_string(i) + ");");
     }
   }
@@ -3374,7 +3374,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (mutable_alias) {
       EmitIndentedLine(alias_name + " = " + out_name + ";");
     } else {
-      EmitIndentedLine("const Tensor& " + alias_name + " = " + out_name + ";");
+      EmitIndentedLine("const ChipTensor& " + alias_name + " = " + out_name + ";");
     }
   }
 
@@ -3399,7 +3399,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
-    if (cpp_type == "Tensor") {
+    if (cpp_type == "ChipTensor") {
       mutable_tensor_name_scopes_.back().insert(emit_name);
     }
   }
@@ -3434,16 +3434,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Caller guarantees the decl type is ``Tensor``.
   void EmitMutableTensorCarryDecl(const std::string& name, const std::string& init_expr) {
     if (scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_expr)) {
-      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "Tensor " + name + " = " +
+      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "ChipTensor " + name + " = " +
                                    init_expr + ";\n");
       RegisterMutableTensorNameInEnclosingScope(name);
       hoisted_carry_names_.insert(name);
       if (manual_local_names_ != nullptr) manual_local_names_->erase(name);
       if (enclosing_manual_local_names_ != nullptr) enclosing_manual_local_names_->insert(name);
     } else {
-      EmitIndentedLine("Tensor " + name + " = " + init_expr + ";");
+      EmitIndentedLine("ChipTensor " + name + " = " + init_expr + ";");
 
-      RegisterMutableTensorName("Tensor", name);
+      RegisterMutableTensorName("ChipTensor", name);
     }
   }
 
@@ -3804,7 +3804,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (IsMutableTensorNameInCurrentScope(elem_name)) {
           EmitIndentedLine(elem_name + " = " + source + ";");
         } else {
-          EmitIndentedLine("const Tensor& " + elem_name + " = " + source + ";");
+          EmitIndentedLine("const ChipTensor& " + elem_name + " = " + source + ";");
         }
       }
     }

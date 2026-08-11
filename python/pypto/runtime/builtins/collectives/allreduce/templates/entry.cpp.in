@@ -26,8 +26,8 @@ enum class ReduceOp : int32_t {
 
 template <ReduceOp Op>
 void submit_allreduce_kernel(const ChipTaskArgs &orch_args) {
-  const Tensor &data = orch_args.tensor(0).ref();
-  const Tensor &signal = orch_args.tensor(1).ref();
+  const ChipTensor &data = orch_args.tensor(0).ref();
+  const ChipTensor &signal = orch_args.tensor(1).ref();
 
   CoreTaskArgs params;
   params.add_inout(data);

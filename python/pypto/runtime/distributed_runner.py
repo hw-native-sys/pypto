@@ -1769,7 +1769,7 @@ class DistributedWorker(Worker):
                 nbytes,
                 owner,
                 buffer_id,
-                access=AccessMode.READ_WRITE if is_shared else AccessMode.READ,
+                access=AccessMode.READWRITE if is_shared else AccessMode.READ,
                 backend_kind=BackendKind.FORK_SHM if is_shared else BackendKind.FORK_COW,
             )
         raise ValueError(
