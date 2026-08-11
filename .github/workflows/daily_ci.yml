@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 18 * * *'  # UTC 18:00 = Beijing 02:00 (next day)
   workflow_dispatch:
-  # TEMPORARY: revert before merging. Nothing re-runs this workflow when the
-  # setup it depends on changes, so qwen3-perf's move onto the toolchain bundle
-  # has no coverage among the green PR checks. Trigger it from the pull request
-  # until that path has run at least once.
-  pull_request:
 
 jobs:
   toolchain:
@@ -40,10 +35,6 @@ jobs:
 
   a5-system-tests:
     needs: toolchain
-    # TEMPORARY, with the pull_request trigger above. This job is untouched by
-    # the bundle migration and holds a5-device6 for up to 30m, so keep it out of
-    # the pull-request runs rather than queueing every PR behind that card.
-    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, a5-device6]
     defaults:
       run:
