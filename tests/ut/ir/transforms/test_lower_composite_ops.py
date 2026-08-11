@@ -1943,7 +1943,7 @@ _RING_ALLREDUCE_REQUIRED_OPS = {
         "pld.system.rank",
         "pld.system.notify",  # per-round barrier (2(P−1) rounds)
         "pld.system.wait",  # per-round barrier
-        "pld.tile.remote_load",  # per-ring-step chunk receive
+        "pld.tile.put",  # TPUT push of each ring step's chunk to the right neighbour
         "tile.add",  # reduce-scatter accumulation
         "tile.load",  # reduce-scatter local accumulation
         "tile.fillpad_inplace",  # promote ragged subchunks for fixed-shape arithmetic
@@ -1995,8 +1995,8 @@ def test_ring_allreduce_is_decomposed_to_primitives():
     assert ir.get_op("pld.tensor.allreduce").name not in op_names, (
         "lower_composite_ops must remove the composite allreduce call entirely"
     )
-    assert ir.get_op("tile.create").name not in op_names, (
-        "inactive ring segments must not leave allocation-only placeholders"
+    assert ir.get_op("tile.create").name in op_names, (
+        "the TPUT push path must emit the tile.create staging tile"
     )
     missing = _RING_ALLREDUCE_REQUIRED_OPS - op_names
     assert not missing, f"ring-lowered IR missing expected ops: {missing}"
@@ -2014,7 +2014,7 @@ def test_ring_allreduce_emits_ring_control_flow():
     collector.visit_program(After)
 
     assert collector.for_count == 14, f"expected 14 ForStmts for P=2 ring, got {collector.for_count}"
-    assert collector.if_count == 13, f"expected 13 IfStmts for P=2 ring, got {collector.if_count}"
+    assert collector.if_count == 14, f"expected 14 IfStmts for P=2 ring, got {collector.if_count}"
 
 
 @pytest.mark.parametrize("size", [1, 3, 17, 8193, 65537])
@@ -2039,18 +2039,19 @@ def test_ring_allreduce_accepts_arbitrary_lengths(size, n_ranks):
 
     collector = CallCollector()
     collector.visit_program(After)
-    remote_loads = [
-        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.remote_load").name
-    ]
+    puts = [call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name]
+    stage_creates = [call for call in collector.calls if call.op.name == ir.get_op("tile.create").name]
     loads = [call for call in collector.calls if call.op.name == ir.get_op("tile.load").name]
     set_valid_shapes = [
         call for call in collector.calls if call.op.name == ir.get_op("tile.set_validshape").name
     ]
 
-    assert remote_loads
+    assert puts, "ring-lowered IR must emit pld.tile.put pushes"
+    assert stage_creates, "ring-lowered IR must emit the TPUT staging tile"
     assert loads
     assert set_valid_shapes
-    assert all(len(call.args) == 5 for call in remote_loads)
+    # pld.tile.put(dst, peer, src, stage, dst_offsets, src_offsets, shape)
+    assert all(len(call.args) == 7 for call in puts)
 
     loops: list[ir.ForStmt] = []
 
@@ -2084,7 +2085,9 @@ def test_ring_allreduce_accepts_arbitrary_lengths(size, n_ranks):
         assert isinstance(loop.start, ir.ConstInt) and loop.start.value == 0
         assert isinstance(loop.stop, ir.ConstInt) and loop.stop.value == max_segment
 
-    chunk_shapes = [call.args[3] for call in remote_loads]
+    # The static TPUT staging tile carries the UB-bounded, 32-byte-aligned
+    # chunk width (tile.create shape [1, chunk_cols]).
+    chunk_shapes = [call.args[0] for call in stage_creates]
     for shape in chunk_shapes:
         assert isinstance(shape, ir.MakeTuple)
         chunk_rows = shape.elements[0]
@@ -2099,7 +2102,7 @@ def test_ring_allreduce_accepts_arbitrary_lengths(size, n_ranks):
 @pytest.mark.parametrize("size", [1, 17, 33, 8193, 65537])
 @pytest.mark.parametrize("n_ranks", [2, 4])
 def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
-    """FP16 stays on the ring path and marks every remote tail as padded."""
+    """FP16 stays on the ring path with a 16-element-aligned TPUT staging tile."""
     Before = _build_ring_allreduce_before(
         size=size,
         n_ranks=n_ranks,
@@ -2118,12 +2121,11 @@ def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
 
     collector = CallCollector()
     collector.visit_program(After)
-    remote_loads = [
-        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.remote_load").name
-    ]
-    assert remote_loads
-    assert all(call.kwargs.get("allow_physical_tail_padding") is True for call in remote_loads)
-    assert all(len(call.args) == 5 for call in remote_loads)
+    puts = [call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name]
+    stage_creates = [call for call in collector.calls if call.op.name == ir.get_op("tile.create").name]
+    assert puts
+    assert stage_creates
+    assert all(len(call.args) == 7 for call in puts)
 
     stmt_collector = _StmtKindCollector()
     stmt_collector.visit_program(After)
@@ -2133,7 +2135,7 @@ def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
 
     max_segment = min(size, (size + n_ranks - 1) // n_ranks + 15)
     expected_chunk = min(8192, ((max_segment + 15) // 16) * 16)
-    chunk_shapes = [call.args[3] for call in remote_loads]
+    chunk_shapes = [call.args[0] for call in stage_creates]
     for shape in chunk_shapes:
         assert isinstance(shape, ir.MakeTuple)
         chunk_cols = shape.elements[1]
@@ -2144,13 +2146,12 @@ def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
 
 
 def test_ring_allreduce_fp16_lowered_ir_round_trips():
-    """The compiler-only aligned remote tail survives print and reparse."""
+    """The push-based ring schedule (pld.tile.put) survives print and reparse."""
     Before = _build_ring_allreduce_before(size=17, n_ranks=2, dtype=pl.FP16)
     After = passes.lower_composite_ops()(Before)
 
     text = ir.python_print(After)
-    assert "pld.tile._remote_load_with_physical_tail_padding(" in text
-    assert "allow_physical_tail_padding=" not in text
+    assert "pld.tile.put(" in text
     reparsed = pl.parse_program(text)
     ir.assert_structural_equal(After, reparsed)
 
