@@ -10,16 +10,20 @@
 """Tests for IR pass snapshot discovery."""
 
 import errno
+import importlib.metadata
 import json
 import shutil
 import subprocess
+import sys
 import sysconfig
 import tempfile
 import textwrap
 import tokenize
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
+import pypto
 import pytest
 from pypto.tools.ir_trace.cli import main
 from pypto.tools.ir_trace.diff import build_trace, highlight_python
@@ -294,9 +298,52 @@ def test_cli_cleanup_failure_does_not_mask_primary_write_error(
         temporary.unlink()
 
 
-def test_installed_console_script_preserves_main_exit_codes(tmp_path: Path):
-    script = Path(sysconfig.get_path("scripts")) / "pypto-ir-trace"
-    assert script.is_file(), "install PyPTO before running the console-script smoke test"
+def _console_script() -> Path:
+    return Path(sysconfig.get_path("scripts")) / "pypto-ir-trace"
+
+
+def _import_comes_from_installed_distribution() -> bool:
+    """Report whether the imported ``pypto`` is the installed distribution.
+
+    A source checkout on ``PYTHONPATH`` shadows any installed copy, so the mere
+    presence of distribution metadata does not mean the console script on the
+    ``sysconfig`` scripts path belongs to the package under test. Comparing the
+    imported package directory against the distribution's own location tells
+    the two apart.
+    """
+    try:
+        distribution = importlib.metadata.distribution("pypto")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    installed_root = Path(str(distribution.locate_file("pypto"))).resolve()
+    return Path(pypto.__file__).resolve().parent == installed_root
+
+
+def _entry_point_commands() -> list[Any]:
+    """Build the argv prefix of every entry point this environment can launch.
+
+    The module entry point works everywhere, including a source checkout that
+    only sets ``PYTHONPATH``. The console script exists only once pip has
+    installed the project, so it is added when present; a missing script in an
+    installed run is a packaging regression caught by the dedicated test below.
+    """
+    commands = [pytest.param([sys.executable, "-m", "pypto.tools.ir_trace"], id="module")]
+    if _console_script().is_file():
+        commands.append(pytest.param([str(_console_script())], id="console-script"))
+    return commands
+
+
+def test_installed_distribution_provides_the_console_script():
+    if not _import_comes_from_installed_distribution():
+        pytest.skip("source-only run: the imported pypto is not the installed distribution")
+    assert _console_script().is_file(), (
+        "the installed pypto distribution must ship the pypto-ir-trace console script; "
+        "check [project.scripts] in pyproject.toml and wheel generation"
+    )
+
+
+@pytest.mark.parametrize("command", _entry_point_commands())
+def test_entry_points_preserve_main_exit_codes(command: list[str], tmp_path: Path):
     dump = _write_dump(
         tmp_path,
         {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
@@ -304,19 +351,19 @@ def test_installed_console_script_preserves_main_exit_codes(tmp_path: Path):
     output = tmp_path / "trace.html"
 
     success = subprocess.run(
-        [str(script), str(dump), "--output", str(output)],
+        [*command, str(dump), "--output", str(output)],
         check=False,
         capture_output=True,
         text=True,
     )
     domain_error = subprocess.run(
-        [str(script), str(tmp_path / "missing")],
+        [*command, str(tmp_path / "missing")],
         check=False,
         capture_output=True,
         text=True,
     )
     argument_error = subprocess.run(
-        [str(script), str(dump), "--context", "-1"],
+        [*command, str(dump), "--context", "-1"],
         check=False,
         capture_output=True,
         text=True,
