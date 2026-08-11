@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_BUFFER_ROOT_COLLECTOR_H_
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -49,7 +50,7 @@ enum class AmbiguousRootPolicy {
  *
  * For a call's single (non-tuple) return value the owning root is selected by
  * matching the return type's shape+dtype against the callee's Out/InOut args
- * (see SelectReturnRoot), so a differently-typed InOut scratch is never
+ * (see SelectReturnRootInfo), so a differently-typed InOut scratch is never
  * mistaken for the real output buffer (issue #1564 / #1580). When that match is
  * ambiguous, the fallback is governed by @p ambiguous_policy (see
  * AmbiguousRootPolicy).
@@ -64,22 +65,40 @@ class BufferRootCollector : public IRVisitor {
   /// Var* -> owning buffer-root Var*. Populated by Initialize + VisitStmt.
   std::unordered_map<const Var*, const Var*> buffer_roots;
 
+  /// Vars whose value may refer to more than one owning buffer root because of
+  /// control flow. Consumers that derive dependencies must treat writes through
+  /// these vars conservatively; aliasing optimizations leave them unmapped.
+  std::unordered_set<const Var*> ambiguous_buffer_vars;
+
  protected:
+  void VisitStmt_(const IfStmtPtr& if_stmt) override;
   void VisitStmt_(const ForStmtPtr& for_stmt) override;
   void VisitStmt_(const WhileStmtPtr& while_stmt) override;
   void VisitStmt_(const AssignStmtPtr& assign) override;
 
  private:
+  using RootCandidates = std::vector<const Var*>;
+
+  struct RootInfo {
+    RootCandidates roots;
+    bool ambiguous;
+  };
+
   // A candidate output buffer: the resolved root of an Out/InOut arg, paired
   // with that arg's type so a single return value can be matched to the param
   // it actually aliases (see SelectReturnRoot).
   struct OutputRoot {
-    const Var* root;
+    RootInfo info;
     TypePtr type;
   };
 
-  [[nodiscard]] const Var* ResolveVar(const Var* var) const;
-  [[nodiscard]] const Var* ResolveExpr(const ExprPtr& expr) const;
+  [[nodiscard]] RootCandidates ResolveRootCandidates(const ExprPtr& expr) const;
+  [[nodiscard]] bool IsAmbiguous(const ExprPtr& expr) const;
+  void RecordRootCandidates(const VarPtr& var, const RootCandidates& roots, bool unresolved = false);
+  [[nodiscard]] std::vector<RootCandidates> InitializeLoopCarryRoots(
+      const std::vector<IterArgPtr>& iter_args);
+  void RecordLoopReturnRoots(const StmtPtr& body, const std::vector<VarPtr>& return_vars,
+                             const std::vector<RootCandidates>& init_roots, bool guaranteed_to_run);
   [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const;
 
   // Pick the buffer root for a call's single (non-tuple) return value. A
@@ -89,8 +108,8 @@ class BufferRootCollector : public IRVisitor {
   // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
   // making tensor.create -> tensor.slice(output) alias and corrupt the result.
   // When no unambiguous match exists, the fallback follows ambiguous_policy_.
-  [[nodiscard]] const Var* SelectReturnRoot(const std::vector<OutputRoot>& out_roots,
-                                            const TypePtr& return_type) const;
+  [[nodiscard]] RootInfo SelectReturnRootInfo(const std::vector<OutputRoot>& out_roots,
+                                              const TypePtr& return_type) const;
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
   // value aliases its source buffer with the same logical shape and dtype.
@@ -98,7 +117,8 @@ class BufferRootCollector : public IRVisitor {
 
   ProgramPtr program_;
   AmbiguousRootPolicy ambiguous_policy_;
-  std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
+  std::unordered_map<const Var*, RootCandidates> root_candidates_;
+  std::unordered_map<const Var*, std::vector<RootInfo>> tuple_output_roots_;
 };
 
 }  // namespace buffer_root

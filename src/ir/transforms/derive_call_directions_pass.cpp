@@ -332,10 +332,12 @@ class CallDirectionMutator : public IRMutator {
  public:
   CallDirectionMutator(
       ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
+      const std::unordered_set<const Var*>& ambiguous_buffer_vars,
       const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots,
       const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root)
       : program_(std::move(program)),
         buffer_roots_(buffer_roots),
+        ambiguous_buffer_vars_(ambiguous_buffer_vars),
         first_writer_roots_(first_writer_roots),
         enclosing_param_dir_by_root_(enclosing_param_dir_by_root) {}
 
@@ -490,6 +492,14 @@ class CallDirectionMutator : public IRMutator {
           dirs.push_back(ArgDirection::InOut);
           continue;
         }
+        // A control-flow result may refer to different buffers on different
+        // paths (zero-trip loop, while, or differing if branches). A single
+        // canonical root cannot prove first-writer status, so retain the
+        // dependency conservatively.
+        if (auto var = AsVarLike(arg); var && ambiguous_buffer_vars_.count(var.get()) != 0) {
+          dirs.push_back(ArgDirection::InOut);
+          continue;
+        }
         // R-prior: a prior writer-unit in this scope already wrote to this root → InOut.
         if (root) {
           bool is_first_writer = first_writer_set != nullptr && first_writer_set->count(root) > 0;
@@ -543,6 +553,7 @@ class CallDirectionMutator : public IRMutator {
  private:
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
+  const std::unordered_set<const Var*>& ambiguous_buffer_vars_;
   const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots_;
   const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
   int sequential_depth_ = 0;
@@ -586,8 +597,8 @@ Pass DeriveCallDirections() {
       PriorWriterCollector pw_collector(program, br_collector.buffer_roots);
       pw_collector.Run(func->body_);
 
-      CallDirectionMutator mutator(program, br_collector.buffer_roots, pw_collector.first_writer_roots,
-                                   enclosing_param_dir_by_root);
+      CallDirectionMutator mutator(program, br_collector.buffer_roots, br_collector.ambiguous_buffer_vars,
+                                   pw_collector.first_writer_roots, enclosing_param_dir_by_root);
       auto new_body = mutator.VisitStmt(func->body_);
 
       if (new_body.get() == func->body_.get()) continue;
