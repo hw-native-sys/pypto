@@ -1286,6 +1286,27 @@ class DistributedWorker(Worker):
                 )
         self._inherited_host_tensors = inherited
         self._inherited_host_storage_ptrs = {tensor.untyped_storage().data_ptr() for tensor in inherited}
+        # Simpler now names both ends of a device copy by Buffer identity rather than by
+        # raw address, and it will not infer how the host side is mapped: MAP_SHARED
+        # (``FORK_SHM``) may serve as an output, MAP_PRIVATE (``FORK_COW``) is read-only
+        # because a child's write would split the page into a copy the parent never sees.
+        # That classification is the caller's to make, so record it here, where the
+        # tensors are still in hand, as (start, end, is_shared) spans to resolve a bare
+        # address against later.
+        self._inherited_host_spans: tuple[tuple[int, int, bool], ...] = tuple(
+            (
+                tensor.data_ptr(),
+                tensor.data_ptr() + tensor.numel() * tensor.element_size(),
+                bool(tensor.is_shared()),
+            )
+            for tensor in inherited
+        )
+        # (worker_id, device address) -> the Buffer handle Simpler minted for it. The
+        # public surface here still speaks addresses, so this is what lets ``free`` and
+        # ``copy_to`` hand back the identity Simpler expects.
+        self._device_buffers: dict[tuple[int, int], Any] = {}
+        self._buffer_owner_id: bytes | None = None
+        self._buffer_id_seq = 0
         self._persistent = bool(persistent)
         self._reset_persistent_windows = reset_persistent_windows
         # ``orch.copy_to`` runs in each forked chip child and dereferences the
@@ -1711,15 +1732,67 @@ class DistributedWorker(Worker):
     # the private Orchestrator facade.
     # ------------------------------------------------------------------
 
+    def _next_buffer_identity(self) -> tuple[bytes, int]:
+        """Mint the (owner, id) pair Simpler uses to name a Buffer we wrap ourselves."""
+        from simpler.buffer import mint_owner_instance_id  # noqa: PLC0415 -- native ext
+
+        if self._buffer_owner_id is None:
+            self._buffer_owner_id = mint_owner_instance_id()
+        self._buffer_id_seq += 1
+        return self._buffer_owner_id, self._buffer_id_seq
+
+    def _host_buffer_for(self, host_ptr: int, nbytes: int, *, api: str, writing: bool) -> Any:
+        """Name an inherited host range the way Simpler's L3 copy path requires.
+
+        The range must fall inside one tensor registered through
+        ``inherited_host_tensors``: the copy runs in a forked chip child, which can only
+        reach memory that existed at fork. Each range is wrapped on its own rather than
+        offset into a whole-tensor Buffer, because a Buffer carries no offset — a shard's
+        address is interior to its stacked tensor, so per-range wrapping is what keeps a
+        shard copy from moving the whole stack.
+        """
+        from simpler.buffer import AccessMode, BackendKind, wrap_fork_inherited  # noqa: PLC0415
+
+        end = host_ptr + nbytes
+        for start, stop, is_shared in self._inherited_host_spans:
+            if host_ptr < start or end > stop:
+                continue
+            if writing and not is_shared:
+                raise ValueError(
+                    f"{api}: cannot write into a copy-on-write host mapping — a child's write would "
+                    "split the page into a private copy the parent never sees. Register the tensor "
+                    "with shared memory if it has to receive data."
+                )
+            owner, buffer_id = self._next_buffer_identity()
+            return wrap_fork_inherited(
+                host_ptr,
+                nbytes,
+                owner,
+                buffer_id,
+                access=AccessMode.READ_WRITE if is_shared else AccessMode.READ,
+                backend_kind=BackendKind.FORK_SHM if is_shared else BackendKind.FORK_COW,
+            )
+        raise ValueError(
+            f"{api}: host range 0x{host_ptr:x}+{nbytes} is not inside any tensor registered through "
+            "inherited_host_tensors, so the forked chip child cannot read it."
+        )
+
     def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
         """Allocate ``nbytes`` on chip *worker_id*; returns a device pointer."""
+        from simpler.task_interface import DataType  # noqa: PLC0415
+
         self._require_open("malloc")
-        return int(self._w.malloc(nbytes, worker_id))
+        handle = self._w.alloc_child_tensor(int(worker_id), (int(nbytes),), DataType.UINT8)
+        self._device_buffers[(int(worker_id), int(handle.base))] = handle
+        return int(handle.base)
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         """Release a pointer previously returned by :meth:`malloc`."""
         self._require_open("free")
-        self._w.free(ptr, worker_id)
+        handle = self._device_buffers.pop((int(worker_id), int(ptr)), None)
+        if handle is None:
+            raise ValueError(f"free: 0x{int(ptr):x} was not allocated on worker {int(worker_id)} by this Worker")
+        self._w.free(handle)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
         """Total device HBM (bytes) committed by chip *worker_id*'s ``MemoryAllocator``
@@ -1732,15 +1805,25 @@ class DistributedWorker(Worker):
             return 0
         return int(self._w.committed_device_memory(worker_id))
 
+    def _device_buffer_for(self, ptr: int, worker_id: int, api: str) -> Any:
+        handle = self._device_buffers.get((int(worker_id), int(ptr)))
+        if handle is None:
+            raise ValueError(f"{api}: 0x{int(ptr):x} was not allocated on worker {int(worker_id)} by this Worker")
+        return handle
+
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """H2D copy: ``nbytes`` from host *src_host_ptr* to device *dst_dev_ptr*."""
         self._require_open("copy_to")
-        self._w.copy_to(dst_dev_ptr, src_host_ptr, nbytes, worker_id)
+        dst = self._device_buffer_for(dst_dev_ptr, worker_id, "copy_to")
+        src = self._host_buffer_for(int(src_host_ptr), int(nbytes), api="copy_to", writing=False)
+        self._w.copy_to(dst, src)
 
     def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """D2H copy: ``nbytes`` from device *src_dev_ptr* back to host *dst_host_ptr*."""
         self._require_open("copy_from")
-        self._w.copy_from(dst_host_ptr, src_dev_ptr, nbytes, worker_id)
+        src = self._device_buffer_for(src_dev_ptr, worker_id, "copy_from")
+        dst = self._host_buffer_for(int(dst_host_ptr), int(nbytes), api="copy_from", writing=True)
+        self._w.copy_from(dst, src)
 
     # ``alloc_tensor`` / ``free_tensor`` are inherited from Worker ABC.
     # Only the two behaviours that genuinely differ from L2 are overridden below:
