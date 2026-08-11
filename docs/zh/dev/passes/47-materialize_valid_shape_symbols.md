@@ -20,7 +20,7 @@ def softmax_prepare(
 ```
 
 `VALID` 既不是物理张量维度（那类符号由 kernel wrapper 从运行时 tensor 的
-`shapes[]` 还原），也不是标量参数。运行时 `Tensor` 并不携带有效范围信息（参见
+`shapes[]` 还原），也不是标量参数。运行时 `ChipTensor` 并不携带有效范围信息（参见
 `runtime/src/common/task_interface/tensor.h`），因此该值必须以参数形式传入。在本
 pass 出现之前，PTO codegen 会打印 `Variable VALID not found in MLIR mapping` 并继续
 执行，生成缺少操作数的 `%0 = arith.minsi , %c128_index : index`，最终在很靠后的阶段

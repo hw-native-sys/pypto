@@ -49,9 +49,16 @@ with decode.prepare(
 手动清零相关通信 buffer，或者使用 epoch 等协议安全管理所有 retained signal 和
 data 状态；如果两者都没有，复用陈旧状态可能导致错误结果或死锁。
 
-默认开启 reset 时，PyPTO 会在复用前同步清零所有参与 worker 上的本地 window。
-芯片 worker fork 前会准备一个只读的 1 MiB host zero chunk；更大的 window 会分块
-重复拷贝。reset copy 会计入每次重复请求的 host 开销。
+默认开启 reset 时，PyPTO 会在复用前同步清零所有参与 worker 上的具名本地 buffer。
+每次 reset 请求会按不同的具名 buffer 大小各创建一个全零的 POSIX 共享内存 host
+`Buffer`，并在所有相同大小的 domain 和 worker 之间复用。staging buffer 会保留到
+`Worker.run()` fence 返回后再释放，因此 staging 内存峰值是这些不同大小之和。
+reset copy 会计入每次重复请求的 host 开销。
+
+这种整 buffer staging 是 Simpler 7a Buffer ABI 的限制：`copy_to` 根据源 `Buffer`
+决定拷贝长度，同时不提供目标 offset 或公开的 Buffer subview。PyPTO 生成的 domain
+会由具名 buffer 完整覆盖 window；如果 artifact 含有未命名的 window 空隙，reset
+会直接拒绝，因为当前 Buffer API 无法将该空隙恢复为 fresh-window 状态。
 
 ## 多 compiled program
 

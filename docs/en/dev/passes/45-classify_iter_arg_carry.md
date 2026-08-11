@@ -11,7 +11,7 @@ An orchestration loop carry lowers one of two ways in the generated C++:
 
 | Classification | Emitted C++ | Why |
 | -------------- | ----------- | --- |
-| **trivial** | iter_arg and return_var both alias the init value's emit name | The runtime dependency tracker keys off `Tensor*` identity, and `OUTPUT_EXISTING` / `INOUT` params record the address of the `Tensor` lvalue passed in. Materialising a fresh `Tensor` for the carry would break dep chains — kernel reads/writes would see a different `&tensor` than the producer. |
+| **trivial** | iter_arg and return_var both alias the init value's emit name | The runtime dependency tracker keys off `ChipTensor*` identity, and `OUTPUT_EXISTING` / `INOUT` params record the address of the `ChipTensor` lvalue passed in. Materialising a fresh `ChipTensor` for the carry would break dep chains — kernel reads/writes would see a different `&tensor` than the producer. |
 | **rebind** | a mutable carry variable is declared, and the `YieldStmt` assigns back to it | The yield value is a *different* buffer (e.g. a tensor freshly created inside the body). Without the carry, a Python rebind like `current = next` would never propagate to the next iteration or to code after the loop (issue #1286). |
 
 An iter_arg is **trivial** exactly when its yield value lies in the iter_arg's
@@ -85,7 +85,7 @@ aliases `acc` through the InOut writeback rule, so codegen routes both `acc` and
 
 Swapping the body for a `pl.create_tensor` result yields
 `attrs={"iter_arg_rebind_0": True}` instead, and codegen declares
-`Tensor <carry> = <init>;` plus a yield-time assignment.
+`ChipTensor <carry> = <init>;` plus a yield-time assignment.
 
 Inside a manual scope, a TaskId carry on `pl.parallel(4)` yields
 `attrs={"iter_arg_rebind_0": True, "iter_arg_array_size_0": 4}`, lowering to

@@ -689,7 +689,7 @@ output_dir/
 
 | 参数类型 | 解包模式 |
 | -------- | -------- |
-| `TensorType` | `Tensor*` -> `buffer.addr` -> 带类型指针 |
+| `TensorType` | `ChipTensor*` -> `buffer.addr` -> 带类型指针 |
 | `ScalarType` | `uint64_t` -> 联合体解码 -> 带类型值 |
 
 ### SPMD 身份参数

@@ -245,7 +245,7 @@ class AliasForest {
 
     // Calls with output_existing/inout args (e.g. InCore kernels): the result
     // aliases the Out/InOut arg the callee actually returns, mirroring the
-    // codegen alias ``const Tensor& result = args[out_idx];``. For kernels with
+    // codegen alias ``const ChipTensor& result = args[out_idx];``. For kernels with
     // multiple Out params (e.g. real result + GM scratch passed through pl.spmd
     // mixed dispatch), tracing the ReturnStmt back to its Param avoids aliasing
     // the result to an arbitrary scratch tensor.

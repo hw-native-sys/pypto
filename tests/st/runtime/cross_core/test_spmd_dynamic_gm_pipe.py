@@ -14,7 +14,7 @@ dynamic block count, makes ``InjectGMPipeBuffer`` (Ascend910B) inject a GM pipe
 buffer whose size is ``slot_size * (m // ROW_TILE)`` — a function of the dynamic
 token dim ``m``. Orchestration codegen used to hoist that buffer's
 ``alloc_tensors`` to the top of ``PTO2_SCOPE()``, *above* the body-local
-``int64_t m = orch_args.tensor(0).shapes[0];`` that sizes it, so the generated
+``int64_t m = orch_args.tensor(0).ref().shapes[0];`` that sizes it, so the generated
 host C++ failed to compile with ``'m...' was not declared in this scope``.
 
 Only this exact combination triggers it:

@@ -1468,7 +1468,7 @@ bool FunctionCallsFunction(const FunctionPtr& func, const std::string& callee_na
 // Hand-written Group ABI normalization
 // ============================================================================
 
-/// Runtime MixedKernels subslots share one L0TaskArgs payload. Auto-expanded
+/// Runtime MixedKernels subslots share one CoreTaskArgs payload. Auto-expanded
 /// Groups already satisfy that contract because both member calls forward the
 /// complete Group signature. A hand-written Group may call AIC/AIV functions
 /// with different subsets, however, so normalize both members to the Group ABI

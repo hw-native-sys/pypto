@@ -68,7 +68,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func,
 ///
 /// Scalar return positions are never canonicalized, so they resolve here only
 /// when the value literally *is* a scalar param. That is deliberate: propagating
-/// param lineage onto a scalar return once made codegen emit `const Tensor&` for
+/// param lineage onto a scalar return once made codegen emit `const ChipTensor&` for
 /// an `int64_t` (issue #1580).
 ///
 /// @return one entry per return position (nullopt = not a param writeback);

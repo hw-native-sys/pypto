@@ -18,11 +18,11 @@
 namespace {
 
 template <typename DType>
-void submit_broadcast_kernel(const L2TaskArgs &orch_args) {
-  const Tensor &target = orch_args.tensor(0).ref();
-  const Tensor &signal = orch_args.tensor(1).ref();
+void submit_broadcast_kernel(const ChipTaskArgs &orch_args) {
+  const ChipTensor &target = orch_args.tensor(0).ref();
+  const ChipTensor &signal = orch_args.tensor(1).ref();
 
-  L0TaskArgs params;
+  CoreTaskArgs params;
   params.add_inout(target);
   params.add_inout(signal);
   params.add_scalar(orch_args.scalar(0));  // nranks
@@ -35,21 +35,21 @@ void submit_broadcast_kernel(const L2TaskArgs &orch_args) {
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(
-    const L2TaskArgs &orch_args) {
+    const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return PTO2OrchestrationConfig{
       .expected_arg_count = 4,
   };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
   submit_broadcast_kernel<{{dtype_cpp}}>(orch_args);
 }
 
 // The sanitized builtin symbol is kept as an alias-like wrapper for easier
 // debugging of materialized sources; kernel_config.py still uses the standard
 // aicpu_orchestration_entry symbol expected by compile_and_assemble.
-__attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void {{entry}}(const ChipTaskArgs &orch_args) {
   aicpu_orchestration_entry(orch_args);
 }
 

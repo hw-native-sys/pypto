@@ -7,144 +7,93 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Verify ``execute_compiled`` translates :class:`DeviceTensor` arguments to
-``Tensor.make(..., child_memory=True)`` while ``torch.Tensor``
-arguments still take the ordinary ``make_tensor_arg`` path.
+"""Verify direct L2 dispatch builds worker-owned wire ``TaskArgs``.
+
+The high-level simpler ``Worker.run`` contract accepts ``TaskArgs`` containing
+address-free ``Tensor`` values. It must never receive the direct-chip
+``ChipStorageTaskArgs`` / ``ChipTensor`` pair.
 """
 
+import ctypes
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from pypto.runtime import DeviceTensor
 
-# ``device_runner`` and ``task_interface`` eagerly import the optional
-# ``simpler`` runtime package; skip the module when simpler is unavailable
-# (the same pattern test_worker_reuse.py uses for execute_on_device tests).
-try:
-    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
-except ImportError:
-    _has_simpler = False
-else:
-    _has_simpler = True
 
-pytestmark = pytest.mark.skipif(not _has_simpler, reason="execute_compiled requires the simpler package")
+class FakeBuffer:
+    def __init__(self, base: int) -> None:
+        self.base = base
+        self.tensor_calls: list[tuple[tuple[int, ...], object]] = []
+        self.wire_tensor = MagicMock(name=f"Tensor(0x{base:x})")
+
+    def tensor(self, *, shapes, dtype):
+        self.tensor_calls.append((tuple(shapes), dtype))
+        return self.wire_tensor
 
 
 @pytest.fixture
-def patched_runtime(tmp_path):
-    """Patch every import inside ``execute_compiled`` so it runs without a device.
-
-    Captures the per-arg list passed to ``orch_args.add_tensor`` so individual
-    tests can assert on the resulting Tensor descriptors.
-    """
-    captured: dict = {
-        "tensors": [],
-        "scalars": [],
-        "make_calls": [],  # Tensor.make kwargs
-        "make_tensor_arg_calls": [],
-    }
-
-    chip_args = MagicMock(name="ChipStorageTaskArgs_instance")
-
-    def _record_tensor(t):
-        captured["tensors"].append(t)
-
-    def _record_scalar(s):
-        captured["scalars"].append(s)
-
-    chip_args.add_tensor.side_effect = _record_tensor
-    chip_args.add_scalar.side_effect = _record_scalar
-
-    def _make(*, data, shapes, dtype, child_memory=False):
-        captured["make_calls"].append(
-            {
-                "data": data,
-                "shapes": tuple(shapes),
-                "dtype": dtype,
-                "child_memory": child_memory,
-            }
-        )
-        return MagicMock(name=f"Tensor(0x{data:x})")
-
-    def _make_tensor_arg(t):
-        captured["make_tensor_arg_calls"].append(t)
-        return MagicMock(name="Tensor(host)")
-
-    def _torch_dtype_to_datatype(dt):
-        # Sentinel — not asserted on directly; child_memory and shape carry the signal.
-        return f"<dtype:{dt}>"
-
-    with (
-        patch("pypto.runtime.runner._patch_orchestration_headers"),
-        patch(
-            "pypto.runtime.device_runner.compile_and_assemble",
-            return_value=(MagicMock(name="chip_callable"), "host_build_graph", {}),
-        ),
-        patch("pypto.runtime.device_runner.execute_on_device"),
-        patch("pypto.runtime.device_runner.ChipStorageTaskArgs", return_value=chip_args),
-        patch("pypto.runtime.device_runner.make_tensor_arg", side_effect=_make_tensor_arg),
-        patch("pypto.runtime.device_runner.scalar_to_uint64", side_effect=lambda s: int(s.value)),
-        patch("pypto.runtime.task_interface.Tensor.make", side_effect=_make),
-        patch("pypto.runtime.task_interface.torch_dtype_to_datatype", side_effect=_torch_dtype_to_datatype),
-    ):
-        yield captured, tmp_path
+def task_args_fixture():
+    task_args = MagicMock(name="TaskArgs")
+    owner = MagicMock(name="simpler_worker")
+    with patch("pypto.runtime.task_interface.TaskArgs", return_value=task_args):
+        yield task_args, owner
 
 
-class TestExecuteCompiledDeviceTensor:
-    def test_device_tensor_produces_child_memory_true(self, patched_runtime):
-        captured, tmp = patched_runtime
-        dt = DeviceTensor(0xABCD, (8, 16), torch.float16)
+def test_host_tensor_uses_worker_aware_tensor_helper(task_args_fixture):
+    task_args, owner = task_args_fixture
+    host = torch.zeros(4, 4, dtype=torch.float32)
+    wire_tensor = MagicMock(name="wire_tensor")
 
-        from pypto.runtime.runner import execute_compiled  # noqa: PLC0415
+    with patch("simpler_setup.torch_interop.make_tensor_arg", return_value=wire_tensor) as make:
+        from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
 
-        execute_compiled(tmp, [dt], platform="a2a3sim", device_id=0)
+        result = _coerced_to_orch_args([host], owner)
 
-        assert len(captured["make_calls"]) == 1
-        call = captured["make_calls"][0]
-        assert call["data"] == 0xABCD
-        assert call["shapes"] == (8, 16)
-        assert call["child_memory"] is True
-        assert call["dtype"] == "<dtype:torch.float16>"
-        # Host path was not used.
-        assert captured["make_tensor_arg_calls"] == []
-
-    def test_torch_tensor_uses_make_tensor_arg_path(self, patched_runtime):
-        captured, tmp = patched_runtime
-        host = torch.zeros(4, 4, dtype=torch.float32)
-
-        from pypto.runtime.runner import execute_compiled  # noqa: PLC0415
-
-        execute_compiled(tmp, [host], platform="a2a3sim", device_id=0)
-
-        # Host tensor goes through make_tensor_arg, NOT through Tensor.make
-        # (so child_memory cannot be True for it).
-        assert captured["make_tensor_arg_calls"] == [host]
-        assert captured["make_calls"] == []
-
-    def test_mixed_args_preserve_order(self, patched_runtime):
-        captured, tmp = patched_runtime
-        host = torch.zeros(4, 4, dtype=torch.float32)
-        dt = DeviceTensor(0x9000, (4, 4), torch.float32)
-
-        from pypto.runtime.runner import execute_compiled  # noqa: PLC0415
-
-        execute_compiled(tmp, [host, dt, host], platform="a2a3sim", device_id=0)
-
-        # add_tensor was called three times in order: host, device, host.
-        assert len(captured["tensors"]) == 3
-        # Only the device-tensor slot uses Tensor.make with child_memory=True.
-        assert len(captured["make_calls"]) == 1
-        assert captured["make_calls"][0]["child_memory"] is True
-        assert len(captured["make_tensor_arg_calls"]) == 2
-
-    def test_unsupported_arg_raises(self, patched_runtime):
-        _, tmp = patched_runtime
-        from pypto.runtime.runner import execute_compiled  # noqa: PLC0415
-
-        with pytest.raises(TypeError, match="DeviceTensor"):
-            execute_compiled(tmp, ["not a tensor"], platform="a2a3sim", device_id=0)  # type: ignore[list-item]
+    assert result is task_args
+    make.assert_called_once_with(owner, host)
+    task_args.add_tensor.assert_called_once_with(wire_tensor)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_device_tensor_uses_retained_buffer_tensor(task_args_fixture):
+    task_args, owner = task_args_fixture
+    buffer = FakeBuffer(0xABCD)
+    device_tensor = DeviceTensor.from_buffer(buffer, (8, 16), torch.float16)
+
+    from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+    _coerced_to_orch_args([device_tensor], owner)
+
+    assert len(buffer.tensor_calls) == 1
+    shapes, _dtype = buffer.tensor_calls[0]
+    assert shapes == (8, 16)
+    task_args.add_tensor.assert_called_once_with(buffer.wire_tensor)
+
+
+def test_raw_pointer_device_tensor_is_rejected(task_args_fixture):
+    _task_args, owner = task_args_fixture
+    raw = DeviceTensor(0xABCD, (8,), torch.float16)
+
+    from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="raw-pointer DeviceTensor"):
+        _coerced_to_orch_args([raw], owner)
+
+
+def test_tensors_keep_order_and_scalars_use_separate_pool(task_args_fixture):
+    task_args, owner = task_args_fixture
+    first = torch.zeros(2, dtype=torch.float32)
+    second = torch.ones(2, dtype=torch.float32)
+    scalar = ctypes.c_int32(7)
+    wire_first = MagicMock(name="wire_first")
+    wire_second = MagicMock(name="wire_second")
+
+    with patch("simpler_setup.torch_interop.make_tensor_arg", side_effect=[wire_first, wire_second]):
+        from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+        _coerced_to_orch_args([first, scalar, second], owner)
+
+    assert task_args.add_tensor.call_args_list[0].args == (wire_first,)
+    assert task_args.add_tensor.call_args_list[1].args == (wire_second,)
+    assert task_args.add_scalar.call_count == 1

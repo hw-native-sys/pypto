@@ -285,7 +285,7 @@ enum class WindowReadKind {
   ///
   /// ``tensor.slice``: PTO codegen emits the view shape already clamped to
   /// ``min(shape, parent - offset)``, because the strided-Tensor runtime enforces
-  /// ``offset + shape <= parent`` in ``Tensor::view``. A padded fixed-width window
+  /// ``offset + shape <= parent`` in ``ChipTensor::view``. A padded fixed-width window
   /// with an explicit ``valid_shape`` naming the real extent is the standard idiom.
   ///
   /// ``tile.load``: the DMA fetches only the valid extent, so the destination tile

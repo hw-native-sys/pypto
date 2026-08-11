@@ -156,7 +156,7 @@ The mirrored order is accepted — `0 < rc[e]` means the same as `rc[e] > 0`. Th
 IR keeps the comparison as written; orchestration codegen flips the operator so
 the tensor is always the runtime's operand.
 
-Lowers to the runtime `L0TaskPredicate` + `Arg::set_predicate(...)` in
+Lowers to the runtime `CoreTaskPredicate` + `Arg::set_predicate(...)` in
 orchestration codegen (operand → its `ext_<name>` reference, `op` →
 `PredicateOp::*`, `target` verbatim; `elem_size` is derived by the runtime from
 the tensor dtype).

@@ -924,8 +924,8 @@ Pass MaterializeRuntimeScopes();
  * An Orchestration ``ForStmt`` iter_arg lowers one of two ways:
  *  - **trivial**: the yield value aliases the iter_arg (same backing buffer), so
  *    iter_arg and return_var share the init value's emit name. Materialising a
- *    fresh ``Tensor`` would break the runtime dependency tracker, which keys off
- *    ``Tensor*`` identity.
+ *    fresh ``ChipTensor`` would break the runtime dependency tracker, which keys off
+ *    ``ChipTensor*`` identity.
  *  - **rebind**: the yield value is a different buffer, so a mutable carry
  *    variable is declared and the yield assigns back to it (issue #1286).
  *

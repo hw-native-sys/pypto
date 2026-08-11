@@ -307,7 +307,7 @@ class _SpyCallConfig:
 
     def __init__(self) -> None:
         self.runtime_env = _SpyRuntimeEnv()
-        self.enable_l2_swimlane = False
+        self.enable_chip_swimlane = False
         self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_dep_gen = False
@@ -447,10 +447,11 @@ class TestMakeCallConfigDfx:
     """Verify L3 ``_make_call_config`` wires the runtime DFX diagnostics.
 
     The runtime-diagnostic flags (``enable_dump_args`` / ``enable_pmu`` /
-    ``enable_dep_gen`` / ``enable_scope_stats`` / ``enable_l2_swimlane``) are
-    transcribed onto the shared ``CallConfig`` and their artifacts rooted at
-    ``dfx_base``. ``enable_l2_swimlane`` additionally co-enables ``dep_gen`` so
-    the converter has a task graph (see :class:`test_swimlane_sets_flag...`).
+    ``enable_dep_gen`` / ``enable_scope_stats`` / public
+    ``enable_l2_swimlane``) are transcribed onto the shared ``CallConfig`` and
+    their artifacts rooted at ``dfx_base``. The public swimlane option maps to
+    Simpler's ``enable_chip_swimlane`` and additionally co-enables ``dep_gen``
+    so the converter has a task graph.
     """
 
     def test_dfx_flags_transcribed_and_prefix_set(self, monkeypatch, tmp_path):
@@ -485,7 +486,7 @@ class TestMakeCallConfigDfx:
         cfg = _make_dist_call_config_with_fake(
             DistributedConfig(), run_config, monkeypatch, dfx_base=dfx_base
         )
-        assert cfg.enable_l2_swimlane is True
+        assert cfg.enable_chip_swimlane is True
         assert cfg.enable_dep_gen is True  # co-enabled
         assert cfg.output_prefix == str(dfx_base)
 
@@ -569,23 +570,11 @@ class TestRunConfigCompileForwarding:
         def fake_execute_on_device(*args, **kwargs):
             captured["execute"] = {"args": args, "kwargs": kwargs}
 
-        class FakeChipStorageTaskArgs:
-            def add_tensor(self, _arg):
-                return None
-
-            def add_scalar(self, _arg):
-                return None
-
         fake_device_runner = types.SimpleNamespace(
-            ChipStorageTaskArgs=FakeChipStorageTaskArgs,
             compile_and_assemble=fake_compile_and_assemble,
             execute_on_device=fake_execute_on_device,
-            make_tensor_arg=lambda _arg: object(),
-            scalar_to_uint64=lambda _arg: 0,
         )
-        fake_task_interface = types.SimpleNamespace(device_tensor_to_tensor=lambda _arg: object())
         monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
-        monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", fake_task_interface)
 
         execute_compiled(
             tmp_path,
@@ -621,23 +610,11 @@ class TestRunConfigCompileForwarding:
         def fake_execute_on_device(*_args, **kwargs):
             captured.update(kwargs)
 
-        class FakeChipStorageTaskArgs:
-            def add_tensor(self, _arg):
-                return None
-
-            def add_scalar(self, _arg):
-                return None
-
         fake_device_runner = types.SimpleNamespace(
-            ChipStorageTaskArgs=FakeChipStorageTaskArgs,
             compile_and_assemble=fake_compile_and_assemble,
             execute_on_device=fake_execute_on_device,
-            make_tensor_arg=lambda _arg: object(),
-            scalar_to_uint64=lambda _arg: 0,
         )
-        fake_task_interface = types.SimpleNamespace(device_tensor_to_tensor=lambda _arg: object())
         monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", fake_device_runner)
-        monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", fake_task_interface)
 
         execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
 
@@ -740,6 +717,27 @@ class TestExecuteOnDeviceDfxValidation:
             assert worker.init.called
             assert worker.run.called
             assert worker.close.called
+
+    def test_public_l2_option_maps_to_simpler_chip_field(self, tmp_path):
+        """The compatibility option must populate Simpler's renamed member."""
+        from pypto.runtime import device_runner  # noqa: PLC0415
+
+        with patch.object(device_runner, "Worker") as worker_cls:
+            worker = worker_cls.return_value
+            with patch("pypto.runtime.worker.ChipWorker.current", return_value=None):
+                device_runner.execute_on_device(
+                    chip_callable=MagicMock(),
+                    orch_args=MagicMock(),
+                    platform="a5sim",
+                    runtime_name="tensormap_and_ringbuffer",
+                    device_id=0,
+                    output_prefix=str(tmp_path),
+                    enable_l2_swimlane=True,
+                )
+
+        call_config = worker.init.call_args.kwargs["prewarm_config"]
+        # Simpler maps bool True to its full chip-swimlane collection level.
+        assert call_config.enable_chip_swimlane == 4
 
 
 if __name__ == "__main__":

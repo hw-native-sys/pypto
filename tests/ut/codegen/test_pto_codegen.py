@@ -1234,6 +1234,13 @@ class TestPreprocessPtoasOutput:
         result = _preprocess_ptoas_output(SAMPLE_PTOAS_OUTPUT)
         assert "ptoas_bitcast" in result
 
+    def test_renames_only_standalone_ptoas_tensor_type(self):
+        source = "Tensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+
+        assert _preprocess_ptoas_output(source) == (
+            "ChipTensor value; GlobalTensor<float> global; TensorView view; ChipTensor ready;\n"
+        )
+
     def test_mgather_preprocess_fast_path_preserves_unrelated_content(self):
         source = "AICORE void kernel() {\n  TSTORE(v3);\n}\n"
 
@@ -1331,17 +1338,17 @@ class TestGenerateArgUnpacking:
     def test_tensor_only(self):
         func = _make_func("test_fn", [("a", "tensor"), ("b", "tensor"), ("out", "tensor")])
         code, names = _generate_arg_unpacking(func)
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[2])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[2])" in code
         assert names == ["a", "b", "out"]
 
     def test_mixed_tensor_scalar(self):
         func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
         code, names = _generate_arg_unpacking(func)
         # Tensors-first: input=args[0], output=args[1], scale=args[2]
-        assert "reinterpret_cast<__gm__ Tensor*>(args[0])" in code
-        assert "reinterpret_cast<__gm__ Tensor*>(args[1])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[0])" in code
+        assert "reinterpret_cast<__gm__ ChipTensor*>(args[1])" in code
         assert "scale_conv.u64 = args[2];" in code
         assert "float scale = scale_conv.val;" in code
         assert names == ["input", "output", "scale"]

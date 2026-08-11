@@ -1260,9 +1260,10 @@ def benchmark(
             programs must pass ``compiled[<name>]``.
         args: Positional dispatch args, same as ``compiled(*args)``. **L3
             requires shared-memory host** ``torch.Tensor`` **args** (allocated
-            with ``.share_memory_()`` and reused in place) or worker-resident
-            :class:`~pypto.runtime.DeviceTensor` buffers — a buffer allocated
-            after ``prepare()`` is invisible to the forked chip workers.
+            with ``.share_memory_()`` and reused in place). This helper creates
+            its own prepared Worker, so it cannot accept a DeviceTensor owned by
+            another Worker; benchmark resident tensors with an explicit
+            ``compiled.prepare()`` dispatch loop.
         rounds: Number of measured launches. Must be positive.
         warmup: Number of leading launches discarded before measurement
             (page-in / cache warm). Total launches = ``warmup + rounds``.

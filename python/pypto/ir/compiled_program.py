@@ -1195,13 +1195,15 @@ class CompiledProgram(_RuntimeFacade):
     def build_orch_args(
         self,
         *args: "CallArg",
+        worker: Any | None = None,
     ) -> tuple[Any, list[torch.Tensor | DeviceTensor | ctypes._SimpleCData], bool]:
-        """Coerce user args and pack into a simpler ``ChipStorageTaskArgs``.
+        """Coerce user args and pack into simpler address-free ``TaskArgs``.
 
         Returns ``(orch_args, coerced, return_style)``:
 
         - ``orch_args``: simpler dispatch arg pack. Hand to
-          ``Worker.run(cid, orch_args, cfg)``.
+          ``Worker.run(cid, orch_args, cfg)``. ``worker`` owns the wire tensor
+          identities and must be the same simpler Worker used for dispatch.
         - ``coerced``: full positional list of length ``len(param_infos)``.
           Scalar values are wrapped in their target ``ctypes`` type. For
           return-style callers, output ``torch.Tensor``s are auto-allocated
@@ -1222,9 +1224,13 @@ class CompiledProgram(_RuntimeFacade):
         coerced, return_style = _coerce_args(
             args, param_infos, output_indices, return_types, caller_name="CompiledProgram"
         )
+        if worker is None:
+            raise TypeError(
+                "build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
+            )
         from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
 
-        orch_args = _coerced_to_orch_args(coerced)
+        orch_args = _coerced_to_orch_args(coerced, worker)
         return orch_args, coerced, return_style
 
     def build_call_config(
@@ -1452,6 +1458,7 @@ class _SubChipCallable(_RuntimeFacade):
     def build_orch_args(
         self,
         *args: "CallArg",
+        worker: Any | None = None,
     ) -> tuple[Any, list[torch.Tensor | DeviceTensor | ctypes._SimpleCData], bool]:
         coerced, return_style = _coerce_args(
             args,
@@ -1460,9 +1467,13 @@ class _SubChipCallable(_RuntimeFacade):
             self._return_types,
             caller_name=f"orchestration {self._name!r}",
         )
+        if worker is None:
+            raise TypeError(
+                "build_orch_args requires the simpler Worker that will own and dispatch these TaskArgs"
+            )
         from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
 
-        orch_args = _coerced_to_orch_args(coerced)
+        orch_args = _coerced_to_orch_args(coerced, worker)
         return orch_args, coerced, return_style
 
     def build_call_config(

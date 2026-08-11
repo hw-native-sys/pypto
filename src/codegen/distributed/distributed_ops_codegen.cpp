@@ -165,16 +165,16 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
       const std::string dtype_enum =
           "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
-      codegen.Emit(ta_var + ".add_tensor(Tensor.make(data=" + arg_handle + "[" + rank_expr +
-                   "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
-                   ", child_memory=True), " + tag + ")");
+      codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
+                   "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {
       const std::string arg_name = codegen.GetExprAsCode(call->args_[i]);
       INTERNAL_CHECK_SPAN(!arg_name.empty(), call->span_)
           << "Internal error: builtin tensor collective tile arg must resolve to a Python name";
-      codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + arg_name + "\"]), " + tag + ")");
+      codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_name + "\"]), " +
+                   tag + ")");
       continue;
     }
     INTERNAL_CHECK_SPAN(false, call->span_)
@@ -203,7 +203,7 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
 // as part of the ``orch.allocate_domain(buffers=[CommBufferSpec(...), ...])``
 // spec list wrapping the host_orch body. The host_orch.py module never needs
 // to reach for the IR-level alloc op again — chip dispatch reads the device
-// pointer from ``__comm_d0[r].buffer_ptrs["<name>"]`` instead. Returning
+// wire view from ``__comm_d0[r].buffers["<name>"].tensor(...)`` instead. Returning
 // empty signals the surrounding ``AssignStmt`` visitor to drop the line.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window_buffer") {
@@ -217,7 +217,7 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window
 //
 // ``pld.tensor.window`` materialises a window-bound view at IR construction
 // time; ``MaterializeCommDomainScopes`` rewires every dispatch site so the per-rank
-// device pointer is read from ``__comm_d0[r].buffer_ptrs["<name>"]`` at
+// wire view is derived from ``__comm_d0[r].buffers["<name>"]`` at
 // chip-arg emission time. The host_orch.py module never calls back into
 // the IR window op.
 // ============================================================================
@@ -402,7 +402,7 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
 //   * otherwise        → slice ``offset[axis] : offset[axis] + shape[axis]``
 //
 // The result is registered into the ``tensors`` dict so downstream
-// dispatch sites can ``chip_args.add_tensor(make_tensor_arg(tensors["t"]), ...)``
+// dispatch sites can ``chip_args.add_tensor(make_tensor_arg(orch._worker, tensors["t"]), ...)``
 // without an extra binding step.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {

@@ -10,7 +10,7 @@
 
 Drives ``pl.spmd_submit(..., predicate=(rc[0, 0] > 0))`` through the full
 Default pass pipeline and asserts the orchestration C++ emits the runtime
-``L0TaskPredicate`` + ``Arg::set_predicate(...)`` sequence. Also proves the
+``CoreTaskPredicate`` + ``Arg::set_predicate(...)`` sequence. Also proves the
 predicate operand tensor survives inlining / SSA / outlining and resolves to its
 ``ext_<name>`` orchestration reference (exercising the Submit pass-walk safety).
 """
@@ -77,7 +77,7 @@ class _NoPredicate:
 
 def test_predicate_emits_set_predicate_block():
     code = _generate_orch_full_pipeline(_WithPredicate)
-    assert "L0TaskPredicate" in code, code
+    assert "CoreTaskPredicate" in code, code
     # Operand resolves to the orchestration ext_ reference; op/target/indices emitted.
     assert ".operand.tensor = &ext_rc;" in code, code
     assert ".operand.ndims = 2;" in code, code
@@ -93,7 +93,7 @@ def test_predicate_emits_set_predicate_block():
 def test_no_predicate_emits_no_set_predicate():
     code = _generate_orch_full_pipeline(_NoPredicate)
     assert "set_predicate" not in code
-    assert "L0TaskPredicate" not in code
+    assert "CoreTaskPredicate" not in code
 
 
 if __name__ == "__main__":
@@ -262,7 +262,7 @@ def _emit_scope_predicate(predicate_src: str) -> str:
 def test_scope_form_emits_set_predicate_block():
     """The scope form lowers to the same runtime sequence as pl.spmd_submit."""
     code = _emit_scope_predicate("rc[0, 0] > 0")
-    assert "L0TaskPredicate" in code, code
+    assert "CoreTaskPredicate" in code, code
     # The operand survived SSA versioning inside the scope attr and resolved to
     # the orchestration ext_ reference — the whole point of the attr walk.
     assert ".operand.tensor = &ext_rc;" in code, code

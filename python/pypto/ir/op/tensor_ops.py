@@ -1873,7 +1873,7 @@ def view(
        both require an explicit target ``valid_shape``.
     Combining ``shape`` with a layout change is valid for type deduction and
     PTO in-core lowering. Orchestration lowering only supports shape
-    reinterpret for ND-layout tensors because the runtime ``Tensor::reshape``
+    reinterpret for ND-layout tensors because the runtime ``ChipTensor::reshape``
     cannot express an arbitrary-layout view.
 
     Args:

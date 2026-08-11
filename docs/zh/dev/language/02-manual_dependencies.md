@@ -141,7 +141,7 @@ runtime 的 `Arg::set_dependencies(ptr, count)` 直接接收调用者持有的�
 镜像写法也被接受 —— `0 < rc[e]` 与 `rc[e] > 0` 含义相同。IR 按书写原样保留该比较；
 orchestration codegen 会翻转算子，使 tensor 始终是运行时的操作数。
 
-在 orchestration codegen 中 lower 为运行时 `L0TaskPredicate` + `Arg::set_predicate(...)`
+在 orchestration codegen 中 lower 为运行时 `CoreTaskPredicate` + `Arg::set_predicate(...)`
 （operand → 其 `ext_<name>` 引用，`op` → `PredicateOp::*`，`target` 原样；`elem_size`
 由运行时从张量 dtype 推导）。
 

@@ -220,14 +220,15 @@ def pytest_addoption(parser):
         ),
     )
     # ── DFX (Design For X) toggles ────────────────────────────────────────
-    # Each maps 1:1 to the same-named field on ``RunConfig`` and to the
-    # corresponding ``CallConfig`` member on the runtime side. Names match
-    # ``runtime/conftest.py`` so the two surfaces stay aligned.
+    # Each maps to the same-named field on ``RunConfig`` and to the corresponding
+    # runtime ``CallConfig`` member. The public PyPTO swimlane spelling remains
+    # ``enable_l2_swimlane`` for compatibility and maps to Simpler's renamed
+    # ``enable_chip_swimlane`` member.
     parser.addoption(
         "--enable-l2-swimlane",
         action="store_true",
         default=False,
-        help="Capture per-task L2 perf records into <work_dir>/dfx_outputs/l2_swimlane_records.json. "
+        help="Capture per-task chip perf records into <work_dir>/dfx_outputs/chip_swimlane_records.json. "
         "On onboard platforms, also render merged_swimlane_*.json and run the kernel twice: a dep_gen "
         "pass to capture deps.json (the converter's task graph) then a clean swimlane pass, since "
         "dep_gen collection perturbs the timing. Simulator platforms emit only the records (the merged "

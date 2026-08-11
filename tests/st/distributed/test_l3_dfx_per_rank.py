@@ -28,7 +28,7 @@ base ``output_prefix``) and the codegen wiring (``_submit_chip`` appending the
 ``/rank{worker}/d{k}`` suffix per dispatch).
 
 ``enable_l2_swimlane`` is also covered: on L3 it co-enables dep_gen and emits
-``rank{r}/d{k}/l2_swimlane_records.json`` + ``rank{r}/d{k}/deps.json`` per
+``rank{r}/d{k}/chip_swimlane_records.json`` + ``rank{r}/d{k}/deps.json`` per
 dispatch; onboard it is additionally converted to
 ``rank{r}/d{k}/merged_swimlane_*.json`` (conversion is skipped on the simulator,
 which does not ship the converter's task metadata).
@@ -171,9 +171,9 @@ class TestL3DfxPerRank:
         dfx_base = compiled.output_dir / "dfx_outputs"
         for r in range(n_ranks):
             disp_dir = dfx_base / f"rank{r}" / "d0"
-            records = disp_dir / "l2_swimlane_records.json"
+            records = disp_dir / "chip_swimlane_records.json"
             assert records.is_file() and records.stat().st_size > 0, (
-                f"empty/missing l2_swimlane_records.json for rank {r}: {records}"
+                f"empty/missing chip_swimlane_records.json for rank {r}: {records}"
             )
             # dep_gen is co-enabled so the converter has a task graph.
             deps = disp_dir / "deps.json"

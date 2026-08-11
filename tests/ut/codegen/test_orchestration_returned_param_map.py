@@ -251,18 +251,18 @@ def guarded_one_trip(
 # Helpers: compile (no device) and read the emitted orchestration back as a string.
 # ---------------------------------------------------------------------------------------------
 
-# "// Group out_proj: ..." introduces a task; "L0TaskArgs params_tN;" declares its arg list and
+# "// Group out_proj: ..." introduces a task; "CoreTaskArgs params_tN;" declares its arg list and
 # the add_input/add_inout/add_output calls fill that list in order.
 _TASK_RE = re.compile(
     r"^\s*//\s*(?:Group|Spmd)\s+(?P<hdr>[^\n]*?)\s*:\s*(?P<tail>[^\n]*)$\n"
-    r"\s*L0TaskArgs\s+(?P<params>\w+);\n"
+    r"\s*CoreTaskArgs\s+(?P<params>\w+);\n"
     r"(?P<ops>(?:\s*(?P=params)\.add_\w+\([^\n]*\n)+)",
     re.MULTILINE,
 )
 _OP_RE = re.compile(r"\.add_(input|inout|output)\((\w+)\)")
 
 # A loop-tail carry rebind, e.g. "cur__rv_v3 = cur__ssa_v4;". Matches the bare assignment
-# only -- the "Tensor cur__rv_v3 = cur;" declaration above the loop is not a rebind.
+# only -- the "ChipTensor cur__rv_v3 = cur;" declaration above the loop is not a rebind.
 _CARRY_RE = re.compile(r"^\s*(\w+)__rv_v\d+\s*=\s*(\w+);\s*$", re.MULTILINE)
 
 

@@ -741,14 +741,15 @@ class TestCompiledProgramExtraction:
         c = torch.zeros(128, 128)
 
         # Patch the runner-side helper so we don't hit simpler types.
+        worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = cp.build_orch_args(a, b, c)
+            orch_args, coerced, return_style = cp.build_orch_args(a, b, c, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
         assert return_style is False
-        oa_helper.assert_called_once_with([a, b, c])
+        oa_helper.assert_called_once_with([a, b, c], worker)
 
     def test_build_orch_args_return_style_allocates_output(self, tmp_path):
         """Return-style: only inputs passed; output auto-allocated at output_indices."""
@@ -757,9 +758,10 @@ class TestCompiledProgramExtraction:
         a = torch.zeros(128, 128)
         b = torch.zeros(128, 128)
 
+        worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = cp.build_orch_args(a, b)
+            orch_args, coerced, return_style = cp.build_orch_args(a, b, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert return_style is True
@@ -848,7 +850,7 @@ class TestCompiledProgramExtraction:
                 dfx_dir=tmp_path / "dfx",
             )
 
-        assert fake_call_config.enable_l2_swimlane is True
+        assert fake_call_config.enable_chip_swimlane is True
         assert fake_call_config.enable_dump_args is True
         assert fake_call_config.enable_pmu == 2
         assert fake_call_config.enable_dep_gen is True
@@ -863,7 +865,7 @@ class TestCompiledProgramExtraction:
         fake_call_config = MagicMock(
             spec=[
                 "aicpu_thread_num",
-                "enable_l2_swimlane",
+                "enable_chip_swimlane",
                 "enable_dump_args",
                 "enable_pmu",
                 "enable_dep_gen",
@@ -946,13 +948,15 @@ class TestSubChipCallableExtraction:
         a = torch.zeros(128, 128)
         b = torch.zeros(128, 128)
         c = torch.zeros(128, 128)
+        worker = MagicMock(name="worker")
         with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
             oa_helper.return_value = "fake_orch_args"
-            orch_args, coerced, return_style = sub.build_orch_args(a, b, c)
+            orch_args, coerced, return_style = sub.build_orch_args(a, b, c, worker=worker)
 
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
         assert return_style is False
+        oa_helper.assert_called_once_with([a, b, c], worker)
 
     def test_load_after_first_access_is_noop(self, tmp_path):
         sub = self._make_subchip(tmp_path)

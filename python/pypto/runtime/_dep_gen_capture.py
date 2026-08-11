@@ -49,18 +49,15 @@ def _torch_dtype(name: str) -> torch.dtype:
 
 
 def _build_argspec_orch_args(args_spec: list[dict]):
-    """Rebuild orch args from a recorded spec (see ``runner._build_args_spec``).
+    """Rebuild ordered args from a recorded spec (see ``runner._build_args_spec``).
 
     Host tensors are reloaded from disk with real data (so data-as-control
     inputs route the same graph); device-resident tensors are rebuilt as zeros;
     scalars are reconstructed exactly.
 
-    Returns ``(orch_args, keepalive)``. ``orch_args`` holds only raw host
-    pointers, so *keepalive* (the backing tensors/scalars) MUST outlive the
-    ``execute_on_device`` call or the H2D copy reads freed memory.
+    Returns ``(orch_args, keepalive)``. The tensors/scalars stay unmaterialized
+    until ``execute_on_device`` has selected their owning Worker.
     """
-    from .runner import _coerced_to_orch_args  # noqa: PLC0415
-
     coerced: list = []
     for entry in args_spec:
         kind = entry["kind"]
@@ -74,14 +71,13 @@ def _build_argspec_orch_args(args_spec: list[dict]):
             coerced.append(ctype(entry["value"]))
         else:
             raise ValueError(f"Unknown arg spec kind: {kind!r}")
-    return _coerced_to_orch_args(coerced), coerced
+    return coerced, coerced
 
 
 def _build_golden_orch_args(golden_path: Path):
     """Regenerate orch args from ``golden.py``'s ``generate_inputs`` (faithful).
 
-    Returns ``(orch_args, keepalive)`` — see :func:`_build_argspec_orch_args`
-    for why the backing tensors must be kept alive past the device run.
+    Returns ``(orch_args, keepalive)`` — see :func:`_build_argspec_orch_args`.
     """
     from .device_runner import build_orch_args_from_inputs  # noqa: PLC0415
     from .runner import _load_golden_module  # noqa: PLC0415
@@ -123,8 +119,8 @@ def main(argv: list[str]) -> int:
         orch_args, _keepalive = _build_argspec_orch_args(spec["args"])
     else:
         raise ValueError(f"Unknown spec mode: {spec['mode']!r}")
-    # ``orch_args`` stores raw host pointers; ``_keepalive`` (the backing
-    # tensors) must stay referenced until execute_on_device's H2D copy completes.
+    # Keep backing tensors referenced through Worker-owned TaskArgs creation
+    # and the device run.
 
     # A caller-supplied aicpu_thread_num takes precedence; fall back to the
     # value baked into kernel_config.py so the captured graph matches the

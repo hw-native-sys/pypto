@@ -19,6 +19,15 @@ import torch
 from pypto.runtime import ChipWorker, DeviceTensor, Worker
 
 
+class FakeBuffer:
+    def __init__(self, base: int, nbytes: int) -> None:
+        self.base = base
+        self.nbytes = nbytes
+
+    def tensor(self, shapes, dtype):
+        return shapes, dtype
+
+
 class FakeHandle(Worker):
     """Dict-backed Worker that records every primitive call.
 
@@ -31,6 +40,7 @@ class FakeHandle(Worker):
         self.ready = True
         self._next_ptr = 0x1000
         self.live: dict[int, int] = {}  # ptr -> nbytes
+        self.buffers: dict[tuple[int, int], FakeBuffer] = {}
         self.uploads: list[tuple[int, int, int]] = []
         self.freed: list[int] = []
         self.free_calls: list[tuple[int, int]] = []  # (ptr, worker_id)
@@ -40,12 +50,14 @@ class FakeHandle(Worker):
         ptr = self._next_ptr
         self._next_ptr += 0x1000
         self.live[ptr] = nbytes
+        self.buffers[(worker_id, ptr)] = FakeBuffer(ptr, nbytes)
         return ptr
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         self.freed.append(ptr)
         self.free_calls.append((ptr, worker_id))
         self.live.pop(ptr, None)
+        self.buffers.pop((worker_id, ptr), None)
 
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         if self.fail_copy:
@@ -66,12 +78,16 @@ class FakeHandle(Worker):
         if not self.ready:
             raise RuntimeError(f"FakeHandle.{op}() not ready")
 
+    def _buffer_for_ptr(self, ptr: int, *, worker_id: int = 0):
+        return self.buffers[(worker_id, ptr)]
+
 
 def test_alloc_tensor_without_init_allocates_only():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
     assert isinstance(t, DeviceTensor)
     assert t.shape == (4,) and t.dtype == torch.float32
+    assert t.buffer is h.buffers[(0, t.data_ptr)]
     assert h.live == {t.data_ptr: 16}  # 4 * float32(4 bytes)
     assert h.uploads == []  # no init -> no H2D copy
 
@@ -199,6 +215,20 @@ def test_free_tensor_genuine_double_free_is_still_noop():
     h.free_tensor(t, worker_id=2)
     h.free_tensor(t, worker_id=2)  # ptr no longer owned under any worker -> no-op
     assert h.freed == [t.data_ptr]  # freed exactly once
+
+
+def test_free_tensor_failure_remains_owned_and_can_retry():
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32)
+    original_free = h.free
+    h.free = lambda _ptr, *, worker_id=0: (_ for _ in ()).throw(RuntimeError("admission failed"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="admission failed"):
+        h.free_tensor(t)
+    assert (0, t.data_ptr) in h._owned_tensors
+
+    h.free = original_free  # type: ignore[method-assign]
+    h.free_tensor(t)
+    assert (0, t.data_ptr) not in h._owned_tensors
 
 
 def test_close_frees_multi_worker_tensors_against_their_workers():

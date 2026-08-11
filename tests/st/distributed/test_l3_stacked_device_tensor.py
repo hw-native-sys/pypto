@@ -41,7 +41,7 @@ import pytest
 import torch
 from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
-from pypto.runtime import DistributedWorker, StackedDeviceTensor, task_interface
+from pypto.runtime import DistributedWorker, StackedDeviceTensor
 
 N_RANKS = 2
 DIM = 128
@@ -169,13 +169,15 @@ def _run_stacked(test_config, device_ids, program, worker_ids, *, inherited_sour
         host_tensor_args = []
         if inherited_source:
             assert monkeypatch is not None
-            make_tensor_arg = task_interface.make_tensor_arg
+            from simpler_setup import torch_interop  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
 
-            def record_host_tensor_arg(arg):
+            make_tensor_arg = torch_interop.make_tensor_arg
+
+            def record_host_tensor_arg(worker, arg):
                 host_tensor_args.append(arg)
-                return make_tensor_arg(arg)
+                return make_tensor_arg(worker, arg)
 
-            monkeypatch.setattr(task_interface, "make_tensor_arg", record_host_tensor_arg)
+            monkeypatch.setattr(torch_interop, "make_tensor_arg", record_host_tensor_arg)
         try:
             for host_a_val in (2.0, 7.0):
                 host_a.fill_(host_a_val)

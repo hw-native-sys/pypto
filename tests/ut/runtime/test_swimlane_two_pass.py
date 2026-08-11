@@ -139,7 +139,7 @@ def _converter_argv(monkeypatch, work_dir: Path, swimlane_dir: Path) -> list[str
     monkeypatch.setattr(_runner.importlib.util, "find_spec", lambda name: object())
     argv: list[list[str]] = []
     monkeypatch.setattr(_runner.subprocess, "run", lambda cmd, check: argv.append(cmd))
-    records = swimlane_dir / "l2_swimlane_records.json"
+    records = swimlane_dir / "chip_swimlane_records.json"
     records.write_text("{}", encoding="utf-8")
     _generate_swimlane(work_dir, swimlane_dir, records)
     assert len(argv) == 1

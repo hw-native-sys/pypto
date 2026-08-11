@@ -59,11 +59,8 @@ from .kernel_compiler import KernelCompiler
 from .task_interface import (
     CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
-    make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
-    scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 logger = logging.getLogger(__name__)
@@ -890,7 +887,7 @@ def _compile_and_assemble_locked(
 
 def execute_on_device(  # noqa: PLR0913
     chip_callable: ChipCallable,
-    orch_args: ChipStorageTaskArgs,
+    orch_args: list[Any],
     platform: str,
     runtime_name: str,
     device_id: int,
@@ -917,7 +914,9 @@ def execute_on_device(  # noqa: PLR0913
 
     Args:
         chip_callable: Assembled callable (orchestration + kernels).
-        orch_args: Tensor/scalar arguments.
+        orch_args: Ordered host tensors, worker-owned tensors, and scalar
+            arguments. They are converted to the runtime's address-free
+            ``TaskArgs`` only after the owning Worker is known.
         platform: Target execution platform (e.g. ``"a2a3sim"``).
         runtime_name: Runtime implementation name (e.g. ``"tensormap_and_ringbuffer"``).
         device_id: NPU device index.
@@ -931,14 +930,14 @@ def execute_on_device(  # noqa: PLR0913
             required by prefetch artifacts. Defaults to ``False`` for legacy,
             hand-built, and non-prefetch callables.
         output_prefix: Directory under which the runtime writes diagnostic
-            artifacts (``l2_swimlane_records.json`` / ``args_dump/`` /
+            artifacts (``chip_swimlane_records.json`` / ``args_dump/`` /
             ``pmu.csv`` / ``deps.json`` / ``scope_stats/``). Required
             whenever any ``enable_*`` DFX flag is set — Simpler's
             ``CallConfig::validate()`` would otherwise reject the call.
             Passing it with all flags off creates no artefacts.
-        enable_l2_swimlane: Capture per-task L2 perf records
-            (``l2_swimlane_records.json``). Mirrors runtime's
-            ``--enable-l2-swimlane`` pytest flag.
+        enable_l2_swimlane: Capture per-task chip perf records
+            (``chip_swimlane_records.json``). This public PyPTO compatibility
+            spelling maps to Simpler's ``enable_chip_swimlane`` field.
         enable_dump_args: Per-task argument dump level into
             ``<output_prefix>/args_dump/``. ``0`` off; ``1`` partial
             (only ``pl.dump_tag`` / ``dumps=`` marked tensors); ``2`` full
@@ -962,7 +961,7 @@ def execute_on_device(  # noqa: PLR0913
         ``None``. The dispatch writes device results back into the host
         tensors in *orch_args* in place; per-run timing is no longer
         returned — read it from the runtime's ``[STRACE]`` log markers
-        (simpler PR #1177) or the L2 swimlane records instead.
+        (simpler PR #1177) or the chip swimlane records instead.
 
     Raises:
         ValueError: If ``level != 2`` (L3 not yet exposed), or any DFX flag
@@ -990,11 +989,13 @@ def execute_on_device(  # noqa: PLR0913
     cfg = CallConfig()
     if aicpu_thread_num is not None:
         cfg.aicpu_thread_num = aicpu_thread_num
-    # CallConfig nanobind setters: ``enable_l2_swimlane`` / ``enable_dep_gen``
-    # take `bool`; ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event
-    # type); ``enable_dump_args`` is a dump level (0 off, 1 partial, 2 full)
-    # — the setter also accepts a bool (True→1 partial, False→0).
-    cfg.enable_l2_swimlane = enable_l2_swimlane
+    # CallConfig nanobind setters: ``enable_chip_swimlane`` accepts a bool or
+    # level, while ``enable_dep_gen`` takes `bool`; ``enable_pmu`` is a raw
+    # ``int32_t`` (0 disabled, >0 event type); ``enable_dump_args`` is a dump
+    # level (0 off, 1 partial, 2 full) whose setter also accepts a bool
+    # (True→1 partial, False→0). Keep the public PyPTO argument's legacy name,
+    # but map it to Simpler's current member.
+    cfg.enable_chip_swimlane = enable_l2_swimlane
     cfg.enable_dump_args = enable_dump_args
     cfg.enable_pmu = enable_pmu
     cfg.enable_dep_gen = enable_dep_gen
@@ -1012,7 +1013,10 @@ def execute_on_device(  # noqa: PLR0913
     )
     with _temporary_env(env):
         if active is not None:
-            active._run_chip(chip_callable, orch_args, cfg)
+            from .runner import _coerced_to_orch_args  # noqa: PLC0415
+
+            wire_args = _coerced_to_orch_args(orch_args, active._impl)
+            active._run_chip(chip_callable, wire_args, cfg)
             return
         worker = Worker(
             level=level,
@@ -1026,11 +1030,14 @@ def execute_on_device(  # noqa: PLR0913
         # inside the timed dispatch. No-op without a prebuilt arena.
         worker.init(prewarm_config=cfg)
         try:
+            from .runner import _coerced_to_orch_args  # noqa: PLC0415
+
+            wire_args = _coerced_to_orch_args(orch_args, worker)
             # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
             # register the callable, run it, then close — close() runs finalize()
             # so explicit unregister is unnecessary here.
             cid = worker.register(chip_callable)
-            worker.run(cid, orch_args, cfg)
+            worker.run(cid, wire_args, cfg)
         finally:
             worker.close()
 
@@ -1096,15 +1103,16 @@ def validate_golden(
 # Tensor argument construction
 # ---------------------------------------------------------------------------
 
-# Return type for build_orch_args_from_inputs.
-_OrchArgsTuple = tuple[ChipStorageTaskArgs, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
+# Return type for build_orch_args_from_inputs. The first element deliberately
+# remains unmaterialized until execute_on_device has selected its owning Worker.
+_OrchArgsTuple = tuple[list[Any], dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
 def _collect_orch_args(
     items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
     is_output: Callable[[str], bool],
 ) -> _OrchArgsTuple:
-    """Shared logic for building ``ChipStorageTaskArgs`` from ``(name, value)`` pairs.
+    """Normalize ordered ``(name, value)`` pairs for worker-owned packing.
 
     Args:
         items: Ordered ``(name, value)`` pairs.  Each value is either a
@@ -1113,9 +1121,11 @@ def _collect_orch_args(
             output to be validated.
 
     Returns:
-        ``(orch_args, all_tensors, inputs, outputs)``.
+        ``(orch_args, all_tensors, inputs, outputs)``. ``orch_args`` is an
+        ordered Python list; :func:`execute_on_device` turns it into
+        address-free ``TaskArgs`` after selecting the Worker.
     """
-    orch_args = ChipStorageTaskArgs()
+    orch_args: list[Any] = []
     all_tensors: dict[str, Any] = {}
     inputs: dict[str, torch.Tensor] = {}
     outputs: dict[str, torch.Tensor] = {}
@@ -1123,14 +1133,14 @@ def _collect_orch_args(
     for name, val in items:
         if isinstance(val, torch.Tensor):
             val = val.cpu().contiguous()
-            orch_args.add_tensor(make_tensor_arg(val))
+            orch_args.append(val)
             all_tensors[name] = val
             if is_output(name):
                 outputs[name] = val
             else:
                 inputs[name] = val
         elif isinstance(val, ctypes._SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(val))
+            orch_args.append(val)
             all_tensors[name] = val.value
 
     return orch_args, all_tensors, inputs, outputs
@@ -1140,7 +1150,7 @@ def build_orch_args_from_inputs(
     inputs_result: list[tuple[str, Any]],
     output_names: set[str],
 ) -> _OrchArgsTuple:
-    """Build ``ChipStorageTaskArgs`` from pre-generated ``(name, value)`` tuples.
+    """Normalize pre-generated ``(name, value)`` tuples for device dispatch.
 
     This variant is used by the test harness path where inputs come from
     ``golden.py``'s ``generate_inputs()`` function rather than ``TensorSpec``.

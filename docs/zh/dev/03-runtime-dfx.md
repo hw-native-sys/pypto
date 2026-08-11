@@ -1,15 +1,16 @@
 # 运行时 DFX（Design For X）开关
 
 PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴露在
-[`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都
-1:1 映射到 Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中
-对应的 pytest flag，保持两侧命名一致。
+[`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都映射到
+Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中对应的 pytest
+flag。为保持调用方兼容，PyPTO 保留公开名称 `enable_l2_swimlane`，但内部
+映射到 Simpler 已更名的 `enable_chip_swimlane` 成员。
 
 ## 开关映射表
 
 | `RunConfig` 字段 | pytest flag | `CallConfig` 成员 | `dfx_outputs/` 下产物 | 后处理工具 |
 | ---------------- | ----------- | ----------------- | --------------------- | ---------- |
-| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_l2_swimlane` | `l2_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_chip_swimlane` | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]`（裸 flag = `1`） | `enable_dump_args`（`0` 关，`1` 部分，`2` 全量） | `args_dump/{args_dump.json,bin}` | `dump_viewer`（手动） |
 | `enable_pmu: int` | `--enable-pmu [N]`（裸 flag = `2`） | `enable_pmu`（`0` 关，`>0` 事件类型） | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer`（手动） |
@@ -75,7 +76,7 @@ join——device 热路径不再记录 per-task fanout，因此没有 dep_gen �
    退出时操作系统会彻底回收这些状态。抓图是 best-effort——子进程失败时只打印告警、
    计时趟照常运行（泳道退化成匿名 `task(rXtY)`）。
 2. **计时趟** —— 开泳道（以及 PMU / args-dump / scope-stats 等其它对时序敏感的
-   DFX），强制关闭 dep_gen，产出耗时干净的 `l2_swimlane_records.json`，这一趟的耗时
+   DFX），强制关闭 dep_gen，产出耗时干净的 `chip_swimlane_records.json`，这一趟的耗时
    才会被上报，在本进程内运行。
 
 两趟写入同一个 `dfx_outputs/`，因此 `swimlane_converter` 会自动把同目录的
@@ -109,7 +110,7 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,     # 生成 l2_swimlane_records.json
+        enable_l2_swimlane=True,     # 生成 chip_swimlane_records.json
         enable_dep_gen=True,         # 生成 deps.json（按需用 deps_viewer 渲染 HTML）
         enable_pmu=4,                # PMU 事件 = MEMORY
     ),

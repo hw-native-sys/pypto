@@ -22,7 +22,7 @@ After this pass, no `FunctionType::InCore` functions remain in the program.
 ### Shared argument ABI for hand-written Groups
 
 One runtime `MixedKernels` submission creates a co-scheduled AIC/AIV task whose
-active lanes share one `L0TaskArgs` payload. Consequently, the two compiled
+active lanes share one `CoreTaskArgs` payload. Consequently, the two compiled
 kernel wrappers must unpack the same tensors-first argument layout. This is
 automatic for Groups created by the mixed-kernel splitter, because both member
 calls forward the complete Group signature.

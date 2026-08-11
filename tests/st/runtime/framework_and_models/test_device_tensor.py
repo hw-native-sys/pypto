@@ -9,9 +9,10 @@
 
 """End-to-end tests for the worker-resident DeviceTensor flow.
 
-Validates that ``Worker.alloc_tensor`` produces a buffer the runtime can
-consume via ``CompiledProgram(...)`` with ``Tensor.child_memory=True``
--- i.e. no H2D upload of the DeviceTensor on entry, no D2H copy-back on exit.
+Validates that ``Worker.alloc_tensor`` produces a DeviceTensor retaining its
+owning simpler ``Buffer``, which ``CompiledProgram(...)`` packs into an
+address-free wire ``Tensor`` -- i.e. no H2D upload of the DeviceTensor on
+entry and no D2H copy-back on exit.
 
 Both tests run on hardware/simulator and depend on the ``simpler`` runtime
 package; the ``check_hardware_availability`` fixture in this directory's
@@ -66,8 +67,8 @@ class TestDeviceTensorEndToEnd:
 
         1. ``Worker.alloc_tensor(..., init=host_b)`` actually populates the
            device buffer (otherwise the kernel would compute ``a + 0``).
-        2. The runtime treats DeviceTensor as ``child_memory=True`` and does
-           not overwrite the device buffer with stale host bytes on entry.
+        2. The runtime derives the wire Tensor from DeviceTensor's retained
+           Buffer and does not upload stale host bytes on entry.
         3. The handle survives across multiple kernel invocations bound to
            the same Worker.
         """

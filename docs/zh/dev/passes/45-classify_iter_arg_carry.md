@@ -11,7 +11,7 @@ orchestration codegen 直接读取，不再自行推导。
 
 | 分类 | 生成的 C++ | 原因 |
 | ---- | ---------- | ---- |
-| **trivial（平凡）** | iter_arg 与 return_var 都别名到 init 值的 emit 名 | 运行时依赖追踪器以 `Tensor*` 身份为键，`OUTPUT_EXISTING` / `INOUT` 参数记录的是传入 `Tensor` 左值的地址。为 carry 物化一个新的 `Tensor` 会打断依赖链——kernel 的读写看到的 `&tensor` 与生产者不同。 |
+| **trivial（平凡）** | iter_arg 与 return_var 都别名到 init 值的 emit 名 | 运行时依赖追踪器以 `ChipTensor*` 身份为键，`OUTPUT_EXISTING` / `INOUT` 参数记录的是传入 `ChipTensor` 左值的地址。为 carry 物化一个新的 `ChipTensor` 会打断依赖链——kernel 的读写看到的 `&tensor` 与生产者不同。 |
 | **rebind（重绑定）** | 声明一个可变 carry 变量，`YieldStmt` 赋值回该变量 | yield 值是*另一个*缓冲区（例如循环体内新建的 tensor）。没有这个 carry，Python 侧的 `current = next` 这类重绑定既不会传递到下一次迭代，也不会传递到循环之后的代码（issue #1286）。 |
 
 当且仅当 iter_arg 的 yield 值落在该 iter_arg 的**别名等价类**（alias class，即指
@@ -77,7 +77,7 @@ pass 之后该循环带上 `attrs={"iter_arg_rebind_0": False}`：`acc2` 经 InO
 自赋值。
 
 把循环体换成 `pl.create_tensor` 的结果，则得到
-`attrs={"iter_arg_rebind_0": True}`，codegen 声明 `Tensor <carry> = <init>;` 并在
+`attrs={"iter_arg_rebind_0": True}`，codegen 声明 `ChipTensor <carry> = <init>;` 并在
 yield 处赋值。
 
 在 manual scope 内，`pl.parallel(4)` 上的 TaskId carry 得到

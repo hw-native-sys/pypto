@@ -16,6 +16,7 @@ persistent contract: bounded asynchronous submission, retained per-program
 domains, handle-owned input lifetimes, and complete cleanup before publication.
 """
 
+import ctypes
 import gc
 import importlib.util
 import json
@@ -34,7 +35,7 @@ from pypto.ir.compiled_program import _ParamInfo
 from pypto.ir.distributed_compiled_program import DistributedConfig
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor
+from pypto.runtime import DeviceTensor, StackedDeviceTensor
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
     _L3_SWIMLANE_GRAPH_END,
@@ -108,6 +109,17 @@ class _ControlledNativeHandle:
             raise self.error
 
 
+class _FakeBuffer:
+    def __init__(self, base: int, nbytes: int, *, host: bool = False, owner_worker_id: int = 0) -> None:
+        self.nbytes = nbytes
+        self.owner_worker_id = owner_worker_id
+        self._backing = (ctypes.c_ubyte * nbytes)() if host else None
+        self.base = ctypes.addressof(self._backing) if self._backing is not None else base
+
+    def tensor(self, shapes, dtype):
+        return shapes, dtype
+
+
 @pytest.fixture
 def patched_setup():
     """Patch every setup helper so DistributedWorker() does no real work.
@@ -119,7 +131,8 @@ def patched_setup():
     worker.chip_contexts = []
     worker._live_domains = {}
     worker._building_run_resources = None
-    worker.malloc.return_value = 0xDEAD0000
+    worker.alloc_child_tensor.return_value = _FakeBuffer(0xDEAD0000, 1 << 20)
+    worker.create_buffer.side_effect = lambda nbytes: _FakeBuffer(0, nbytes, host=True)
     worker.submit.side_effect = lambda fn: (fn(worker._orch, None, None), _ImmediateNativeHandle())[1]
 
     mod = "pypto.runtime.distributed_runner"
@@ -149,6 +162,21 @@ def patched_setup():
         }
 
 
+def _resident(
+    rt: DistributedWorker,
+    shape: tuple[int, ...],
+    *,
+    worker_id: int = 0,
+) -> DeviceTensor:
+    """Allocate a uniquely addressed resident tensor through the public API."""
+    nbytes = torch.empty((), dtype=torch.float32).element_size()
+    for dim in shape:
+        nbytes *= dim
+    base = 0x10000000 + (len(rt._device_buffers) + 1) * 0x100000
+    rt._w.alloc_child_tensor.return_value = _FakeBuffer(base, nbytes)
+    return rt.alloc_tensor(shape, torch.float32, worker_id=worker_id)
+
+
 class TestSetupOnce:
     def test_setup_runs_once_dispatch_many(self, patched_setup):
         m = patched_setup
@@ -163,8 +191,8 @@ class TestSetupOnce:
         # Simpler's public init owns eager hierarchy startup.
         m["worker"]._start_hierarchical.assert_not_called()
 
-        a = DeviceTensor(0x1000, (128, 128), torch.float32)
-        b = DeviceTensor(0x2000, (128, 128), torch.float32)
+        a = _resident(rt, (128, 128))
+        b = _resident(rt, (128, 128))
         rt(a, b)
         rt(a, b)
         rt(a, b)
@@ -185,7 +213,7 @@ class TestAsyncDispatchHandle:
         m["submit_dispatch"].return_value = native
         rt = DistributedWorker(compiled)
 
-        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+        handle = rt.submit(compiled, _resident(rt, (16, 16)))
 
         assert isinstance(handle, DistributedRunHandle)
         assert handle.done is False
@@ -203,7 +231,7 @@ class TestAsyncDispatchHandle:
         native = _ControlledNativeHandle()
         m["submit_dispatch"].return_value = native
         rt = DistributedWorker(compiled)
-        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+        handle = rt.submit(compiled, _resident(rt, (16, 16)))
 
         with pytest.raises(TimeoutError):
             handle.result(timeout=0.0)
@@ -244,7 +272,7 @@ class TestAsyncDispatchHandle:
         natives = [_ControlledNativeHandle() for _ in range(3)]
         m["submit_dispatch"].side_effect = natives
         rt = DistributedWorker(compiled)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
         first = rt.submit(compiled, arg)
         second = rt.submit(compiled, arg)
         assert m["make_call_config"].call_count == 3  # prepare + two accepted dispatches
@@ -286,7 +314,7 @@ class TestAsyncDispatchHandle:
         natives = [_ControlledNativeHandle() for _ in range(3)]
         m["submit_dispatch"].side_effect = natives
         rt = DistributedWorker(compiled)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
         first = rt.submit(compiled, arg)
         second = rt.submit(compiled, arg)
 
@@ -315,7 +343,7 @@ class TestAsyncDispatchHandle:
         natives = [_ControlledNativeHandle(), _ControlledNativeHandle()]
         m["submit_dispatch"].side_effect = natives
         rt = DistributedWorker(compiled)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
 
         first = rt.submit(compiled, arg)
         second = rt.submit(compiled, arg)
@@ -338,7 +366,7 @@ class TestAsyncDispatchHandle:
         natives = [_ControlledNativeHandle(), _ImmediateNativeHandle()]
         m["submit_dispatch"].side_effect = natives
         rt = DistributedWorker(compiled)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
         first = rt.submit(compiled, arg)
         submitted: list[DistributedRunHandle] = []
 
@@ -368,7 +396,7 @@ class TestAsyncDispatchHandle:
         failed = _ControlledNativeHandle()
         m["submit_dispatch"].return_value = failed
         rt = DistributedWorker(compiled)
-        handle = rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+        handle = rt.submit(compiled, _resident(rt, (16, 16)))
         failed.complete(RuntimeError("dispatch failed"))
 
         with pytest.raises(RuntimeError, match="dispatch failed"):
@@ -384,7 +412,8 @@ class TestAsyncDispatchHandle:
         native = _ControlledNativeHandle()
         m["submit_dispatch"].return_value = native
         rt = DistributedWorker(compiled)
-        rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+        arg = _resident(rt, (16, 16))
+        rt.submit(compiled, arg)
 
         closed = threading.Event()
         closer = threading.Thread(target=lambda: (rt.close(), closed.set()))
@@ -414,9 +443,10 @@ class TestAsyncDispatchHandle:
 
         m["submit_dispatch"].side_effect = interrupt_after_acceptance
         rt = DistributedWorker(compiled)
+        arg = _resident(rt, (16, 16))
 
         with pytest.raises(KeyboardInterrupt, match="after native acceptance"):
-            rt.submit(compiled, DeviceTensor(0x1000, (16, 16), torch.float32))
+            rt.submit(compiled, arg)
 
         assert len(rt._active_dispatch_handles) == 1
         assert sum(frame.in_use for frame in rt._dispatch_frames) == 1
@@ -454,7 +484,7 @@ class TestPerTaskRingSizing:
         fresh = MagicMock(name="FreshCallConfig")
         m["make_call_config"].return_value = fresh
 
-        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        rt(_resident(rt, (16, 16)))
 
         assert m["make_call_config"].call_count == 2
         assert fresh is not baseline
@@ -470,7 +500,7 @@ class TestPerTaskRingSizing:
         assert m["make_call_config"].call_count == 1  # baseline at construction
 
         rc = RunConfig(platform="a2a3sim", ring_task_window=64, ring_heap=4 * 1024 * 1024)
-        rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=rc)
+        rt(_resident(rt, (16, 16)), config=rc)
 
         # A per-dispatch config rebuilds from (program DistributedConfig, rc).
         assert m["make_call_config"].call_count == 2
@@ -491,7 +521,7 @@ class TestPerTaskRingSizing:
         rt = DistributedWorker(compiled)
 
         rc = RunConfig(platform="a2a3sim", ring_dep_pool=256)
-        rt.run(compiled, DeviceTensor(0x1000, (16, 16), torch.float32), config=rc)
+        rt.run(compiled, _resident(rt, (16, 16)), config=rc)
 
         # rt.run(...) honors the same per-dispatch ring sizing as rt(...).
         assert m["make_call_config"].call_count == 2
@@ -540,7 +570,7 @@ class TestPreparedSwimlaneTwoPass:
                 side_effect=lambda _output, _platform: events.append("collect"),
             ) as collect,
         ):
-            rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
+            rt(_resident(rt, (16, 16)), config=run_config)
 
         assert events == ["clear", "deps", "timing", "collect"]
         assert m["submit_dispatch"].call_count == 2
@@ -589,7 +619,7 @@ class TestPreparedSwimlaneTwoPass:
             enable_l2_swimlane=1,  # pyright: ignore[reportArgumentType]
         )
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
-            rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
+            rt(_resident(rt, (16, 16)), config=run_config)
 
         m["submit_dispatch"].assert_called_once()
         assert m["submit_dispatch"].call_args.args[self._CALL_CONFIG_ARG] is call_config
@@ -611,7 +641,7 @@ class TestPreparedSwimlaneTwoPass:
         m["make_call_config"].reset_mock()
         run_config = RunConfig(platform="a2a3", enable_dep_gen=True)
         with patch("pypto.runtime.distributed_runner._collect_l3_swimlane") as collect:
-            rt(DeviceTensor(0x1000, (16, 16), torch.float32), config=run_config)
+            rt(_resident(rt, (16, 16)), config=run_config)
 
         m["submit_dispatch"].assert_called_once()
         m["make_call_config"].assert_called_once_with(
@@ -645,7 +675,7 @@ class TestPreparedSwimlaneTwoPass:
             patch("pypto.runtime.distributed_runner._collect_l3_swimlane"),
         ):
             rt(
-                DeviceTensor(0x1000, (16, 16), torch.float32),
+                _resident(rt, (16, 16)),
                 config=RunConfig(platform="a2a3", enable_l2_swimlane=True),
             )
 
@@ -694,7 +724,7 @@ class TestArenaPrewarm:
 
 
 class TestPerCallValidation:
-    def test_accepts_device_tensor(self, patched_setup):
+    def test_accepts_device_tensor_allocated_by_same_worker(self, patched_setup):
         submitted_tensors: dict[str, Any] = {}
 
         def submit_dispatch(*args):
@@ -704,16 +734,53 @@ class TestPerCallValidation:
         patched_setup["submit_dispatch"].side_effect = submit_dispatch
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
-        rt(DeviceTensor(0x1000, (128, 128), torch.float32), DeviceTensor(0x2000, (128, 128), torch.float32))
+        rt(_resident(rt, (128, 128)), _resident(rt, (128, 128)))
         patched_setup["submit_dispatch"].assert_called_once()
         assert set(submitted_tensors) == {"a", "b"}
+        rt.close()
+
+    def test_rejects_raw_device_tensor_before_dispatch(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [128, 128])], [])
+        rt = DistributedWorker(compiled)
+
+        with pytest.raises(
+            TypeError, match=r"raw-pointer DeviceTensor.*same DistributedWorker\.alloc_tensor"
+        ):
+            rt(DeviceTensor(0x1000, (128, 128), torch.float32))
+
+        patched_setup["submit_dispatch"].assert_not_called()
+        rt.close()
+
+    def test_rejects_device_tensor_owned_by_another_worker(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [128, 128])], [])
+        owner = DistributedWorker(compiled)
+        foreign = _resident(owner, (128, 128))
+        consumer = DistributedWorker(compiled)
+
+        with pytest.raises(ValueError, match="not a live allocation owned by this DistributedWorker"):
+            consumer(foreign)
+
+        patched_setup["submit_dispatch"].assert_not_called()
+        consumer.close()
+        owner.close()
+
+    def test_rejects_stacked_tensor_with_raw_shard(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [1, 128, 128])], [])
+        rt = DistributedWorker(compiled)
+        raw = DeviceTensor(0x1000, (128, 128), torch.float32)
+        stacked = StackedDeviceTensor((raw,), (1, 128, 128), (0,))
+
+        with pytest.raises(TypeError, match=r"shard 0.*raw-pointer DeviceTensor"):
+            rt(stacked)
+
+        patched_setup["submit_dispatch"].assert_not_called()
         rt.close()
 
     def test_accepts_shared_host_torch_tensor(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
         host_a = torch.zeros(128, 128, dtype=torch.float32).share_memory_()
-        rt(host_a, DeviceTensor(0x2000, (128, 128), torch.float32))
+        rt(host_a, _resident(rt, (128, 128)))
         patched_setup["submit_dispatch"].assert_called_once()
         rt.close()
 
@@ -721,10 +788,10 @@ class TestPerCallValidation:
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
         with pytest.raises(TypeError, match="shared memory"):
-            rt(torch.zeros(128, 128), DeviceTensor(0x2000, (128, 128), torch.float32))
+            rt(torch.zeros(128, 128), _resident(rt, (128, 128)))
         rt.close()
 
-    def test_releasing_registered_tensors_disables_later_uploads(self, patched_setup):
+    def test_releasing_compatibility_refs_does_not_disable_staged_uploads(self, patched_setup):
         compiled = _fake_compiled([_param("weight", [4, 4])], [])
         weight = torch.zeros(4, 4, dtype=torch.float32)
         rt = DistributedWorker(compiled, inherited_host_tensors=[weight])
@@ -734,8 +801,8 @@ class TestPerCallValidation:
 
         assert rt._inherited_host_tensors == ()
         assert not rt._inherited_host_storage_ptrs
-        with pytest.raises(ValueError, match="inherited_host_tensors"):
-            rt.alloc_tensor(weight.shape, weight.dtype, init=weight)
+        rt.alloc_tensor(weight.shape, weight.dtype, init=weight)
+        patched_setup["worker"].copy_to.assert_called_once()
         rt.close()
 
     def test_registered_tensor_still_requires_shared_memory_for_dispatch(self, patched_setup):
@@ -775,7 +842,7 @@ class TestPerCallValidation:
         scalar = _ParamInfo(name="seq_len", direction=ParamDirection.In, shape=None, dtype=DataType.FP32)
         compiled = _fake_compiled([scalar, _param("kv", [16, 16])], [])
         rt = DistributedWorker(compiled)
-        rt(7, DeviceTensor(0x1000, (16, 16), torch.float32))
+        rt(7, _resident(rt, (16, 16)))
         assert submitted_tensors["seq_len"] == 7
         rt.close()
 
@@ -789,15 +856,40 @@ class TestPerCallValidation:
     def test_validates_device_tensor_shape(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
         rt = DistributedWorker(compiled)
+        wrong = _resident(rt, (64, 64))
+        valid = _resident(rt, (128, 128))
         with pytest.raises(TypeError, match="shape"):
-            rt(
-                DeviceTensor(0x1000, (64, 64), torch.float32),  # wrong shape
-                DeviceTensor(0x2000, (128, 128), torch.float32),
-            )
+            rt(wrong, valid)
         rt.close()
 
 
 class TestDeviceMemoryApi:
+    def test_free_tensor_failure_retains_buffer_for_retry(self, patched_setup):
+        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        dev = rt.alloc_tensor((16, 16), torch.float32)
+        worker = patched_setup["worker"]
+        worker.free.side_effect = RuntimeError("admission failed")
+
+        with pytest.raises(RuntimeError, match="admission failed"):
+            rt.free_tensor(dev)
+        assert (0, dev.data_ptr) in rt._owned_tensors
+        assert rt._buffer_for_ptr(dev.data_ptr) is dev.buffer
+
+        worker.free.side_effect = None
+        rt.free_tensor(dev)
+        assert (0, dev.data_ptr) not in rt._owned_tensors
+        assert worker.free.call_count == 2
+        rt.close()
+
+    def test_copy_rejects_interior_pointer_with_precise_guidance(self, patched_setup):
+        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        ptr = rt.malloc(64)
+        host = (ctypes.c_ubyte * 32)()
+        with pytest.raises(ValueError, match="interior pointer"):
+            rt.copy_to(ptr + 32, ctypes.addressof(host), 32)
+        rt.free(ptr)
+        rt.close()
+
     def test_alloc_tensor_forwards_malloc_and_copy(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled)
@@ -810,19 +902,25 @@ class TestDeviceMemoryApi:
         assert isinstance(dev, DeviceTensor)
         assert dev.data_ptr == 0xDEAD0000
         assert dev.shape == (16, 16)
-        # Simpler's public Worker takes payload arguments first and worker_id last.
-        patched_setup["worker"].malloc.assert_called_once_with(16 * 16 * 4, 0)
-        # No defensive host copy is made before the public Worker call.
-        patched_setup["worker"].copy_to.assert_called_once_with(0xDEAD0000, host.data_ptr(), 16 * 16 * 4, 0)
+        child = patched_setup["worker"].alloc_child_tensor.return_value
+        assert dev.buffer is child
+        alloc_args = patched_setup["worker"].alloc_child_tensor.call_args.args
+        assert alloc_args[:2] == (0, (16 * 16 * 4,))
+        # PyPTO stages the raw host-pointer API through a self-describing host
+        # Buffer because forked L3 children cannot dereference parent pointers.
+        copy_args = patched_setup["worker"].copy_to.call_args.args
+        assert copy_args[0] is child
+        staging = copy_args[1]
+        assert ctypes.string_at(staging.base, 16 * 16 * 4) == ctypes.string_at(host.data_ptr(), 16 * 16 * 4)
+        patched_setup["worker"].release_buffer.assert_called_once_with(staging)
         rt.close()
 
-    def test_alloc_tensor_rejects_non_shared_init(self, patched_setup):
+    def test_alloc_tensor_accepts_ordinary_post_prepare_init(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled)
-        with pytest.raises(ValueError, match="shared-memory"):
-            rt.alloc_tensor((16, 16), torch.float32, init=torch.zeros(16, 16, dtype=torch.float32))
-        # rolled back the malloc'd pointer.
-        patched_setup["worker"].free.assert_called_once_with(0xDEAD0000, 0)
+        dev = rt.alloc_tensor((16, 16), torch.float32, init=torch.zeros(16, 16, dtype=torch.float32))
+        assert dev.buffer is patched_setup["worker"].alloc_child_tensor.return_value
+        patched_setup["worker"].copy_to.assert_called_once()
         rt.close()
 
     def test_alloc_tensor_rolls_back_on_copy_failure(self, patched_setup):
@@ -835,20 +933,23 @@ class TestDeviceMemoryApi:
             rt.alloc_tensor((16, 16), torch.float32, init=host)
 
         # malloc'd pointer is freed on the failure path.
-        patched_setup["worker"].free.assert_called_once_with(0xDEAD0000, 0)
+        child = patched_setup["worker"].alloc_child_tensor.return_value
+        patched_setup["worker"].free.assert_called_once_with(child)
+        staging = patched_setup["worker"].copy_to.call_args.args[1]
+        patched_setup["worker"].release_buffer.assert_called_once_with(staging)
         rt.close()
 
     def test_alloc_tensor_forwards_nonzero_worker_id(self, patched_setup):
-        # A non-default worker_id is supported: malloc is forwarded to that
-        # worker (public order is ``malloc(nbytes, worker_id)``) and the buffer
-        # is tracked under (worker_id, ptr) for per-worker auto-free.
+        # A non-default worker_id is supported through alloc_child_tensor and
+        # tracked under (worker_id, ptr) for per-worker auto-free.
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled)
         dev = rt.alloc_tensor((16, 16), torch.float32, worker_id=1)
-        patched_setup["worker"].malloc.assert_called_once_with(16 * 16 * 4, 1)
+        alloc_args = patched_setup["worker"].alloc_child_tensor.call_args.args
+        assert alloc_args[:2] == (1, (16 * 16 * 4,))
         assert (1, dev.data_ptr) in rt._owned_tensors
         rt.free_tensor(dev, worker_id=1)
-        patched_setup["worker"].free.assert_called_once_with(0xDEAD0000, 1)
+        patched_setup["worker"].free.assert_called_once_with(dev.buffer)
         rt.close()
 
 
@@ -862,7 +963,8 @@ class TestAllocStackedTensor:
     """``alloc_stacked_tensor`` uploads each leading-dim shard to its worker once."""
 
     def test_identity_uploads_shard_per_worker(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
+        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
         rt = DistributedWorker(_compiled_2cards())
         host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4).share_memory_()
 
@@ -874,17 +976,17 @@ class TestAllocStackedTensor:
         worker = patched_setup["worker"]
         # shard 0 -> worker 0, shard 1 -> worker 1.
         nbytes = 4 * 4 * 4
-        worker.malloc.assert_any_call(nbytes, 0)
-        worker.malloc.assert_any_call(nbytes, 1)
-        worker.copy_to.assert_any_call(0xA000, host[0].contiguous().data_ptr(), nbytes, 0)
-        worker.copy_to.assert_any_call(0xB000, host[1].contiguous().data_ptr(), nbytes, 1)
+        allocs = worker.alloc_child_tensor.call_args_list
+        assert [call.args[:2] for call in allocs] == [(0, (nbytes,)), (1, (nbytes,))]
+        assert [call.args[0] for call in worker.copy_to.call_args_list] == buffers
         # Tracked per (worker_id, ptr) for auto-free.
         assert (0, 0xA000) in rt._owned_tensors
         assert (1, 0xB000) in rt._owned_tensors
         rt.close()
 
     def test_registered_inherited_storage_uploads_without_shared_memory(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
+        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
         host = torch.arange(2 * 4 * 4, dtype=torch.float32).view(2, 4, 4)
         rt = DistributedWorker(_compiled_2cards(), inherited_host_tensors=[host])
 
@@ -892,13 +994,14 @@ class TestAllocStackedTensor:
 
         assert stacked.worker_ids == (0, 1)
         worker = patched_setup["worker"]
-        nbytes = 4 * 4 * 4
-        worker.copy_to.assert_any_call(0xA000, host[0].data_ptr(), nbytes, 0)
-        worker.copy_to.assert_any_call(0xB000, host[1].data_ptr(), nbytes, 1)
+        assert [call.args[0] for call in worker.copy_to.call_args_list] == buffers
         rt.close()
 
     def test_permuted_worker_ids_place_shards(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        patched_setup["worker"].alloc_child_tensor.side_effect = [
+            _FakeBuffer(0xA000, 64),
+            _FakeBuffer(0xB000, 64),
+        ]
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
 
@@ -908,14 +1011,15 @@ class TestAllocStackedTensor:
         worker = patched_setup["worker"]
         nbytes = 4 * 4 * 4
         # shard 0 -> worker 1, shard 1 -> worker 0.
-        worker.malloc.assert_any_call(nbytes, 1)
-        worker.malloc.assert_any_call(nbytes, 0)
+        allocs = worker.alloc_child_tensor.call_args_list
+        assert [call.args[:2] for call in allocs] == [(1, (nbytes,)), (0, (nbytes,))]
         assert (1, 0xA000) in rt._owned_tensors
         assert (0, 0xB000) in rt._owned_tensors
         rt.close()
 
     def test_free_stacked_tensor_releases_each_shard(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
+        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         stacked = rt.alloc_stacked_tensor(host, worker_ids=[1, 0])
@@ -924,14 +1028,15 @@ class TestAllocStackedTensor:
         rt.free_stacked_tensor(stacked)
 
         worker = patched_setup["worker"]
-        worker.free.assert_any_call(0xA000, 1)
-        worker.free.assert_any_call(0xB000, 0)
+        worker.free.assert_any_call(buffers[0])
+        worker.free.assert_any_call(buffers[1])
         assert (1, 0xA000) not in rt._owned_tensors
         assert (0, 0xB000) not in rt._owned_tensors
         rt.close()
 
     def test_close_auto_frees_stacked_shards(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        buffers = [_FakeBuffer(0xA000, 64), _FakeBuffer(0xB000, 64)]
+        patched_setup["worker"].alloc_child_tensor.side_effect = buffers
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         rt.alloc_stacked_tensor(host)  # leak — close() must release both shards
@@ -939,8 +1044,8 @@ class TestAllocStackedTensor:
         patched_setup["worker"].free.reset_mock()
         rt.close()
         worker = patched_setup["worker"]
-        worker.free.assert_any_call(0xA000, 0)
-        worker.free.assert_any_call(0xB000, 1)
+        worker.free.assert_any_call(buffers[0])
+        worker.free.assert_any_call(buffers[1])
 
     def test_worker_ids_out_of_range_rejected(self, patched_setup):
         rt = DistributedWorker(_compiled_2cards())
@@ -956,7 +1061,7 @@ class TestAllocStackedTensor:
         host = torch.zeros(0, 4, 4, dtype=torch.float32).share_memory_()
         with pytest.raises(ValueError, match="at least one shard"):
             rt.alloc_stacked_tensor(host)
-        patched_setup["worker"].malloc.assert_not_called()
+        patched_setup["worker"].alloc_child_tensor.assert_not_called()
         rt.close()
 
     def test_worker_ids_length_mismatch_rejected(self, patched_setup):
@@ -966,15 +1071,17 @@ class TestAllocStackedTensor:
             rt.alloc_stacked_tensor(host, worker_ids=[0])
         rt.close()
 
-    def test_non_shared_host_rejected_and_rolled_back(self, patched_setup):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+    def test_non_shared_host_is_staged_and_uploaded(self, patched_setup):
+        patched_setup["worker"].alloc_child_tensor.side_effect = [
+            _FakeBuffer(0xA000, 64),
+            _FakeBuffer(0xB000, 64),
+        ]
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32)  # NOT shared
 
-        with pytest.raises(ValueError, match="shared-memory"):
-            rt.alloc_stacked_tensor(host)
-        # No shard should remain tracked after the rollback.
-        assert not any(ptr in (0xA000, 0xB000) for _w, ptr in rt._owned_tensors)
+        stacked = rt.alloc_stacked_tensor(host)
+        assert stacked.worker_ids == (0, 1)
+        assert patched_setup["worker"].copy_to.call_count == 2
         rt.close()
 
 
@@ -982,11 +1089,15 @@ class TestCopyStackedFrom:
     """``copy_stacked_from`` reads each resident shard back into host[i] (D2H)."""
 
     def _make_stacked(self, patched_setup, worker_ids=None):
-        patched_setup["worker"].malloc.side_effect = [0xA000, 0xB000]
+        patched_setup["worker"].alloc_child_tensor.side_effect = [
+            _FakeBuffer(0xA000, 64),
+            _FakeBuffer(0xB000, 64),
+        ]
         rt = DistributedWorker(_compiled_2cards())
         host = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_()
         stacked = rt.alloc_stacked_tensor(host, worker_ids=worker_ids)
         patched_setup["worker"].copy_from.reset_mock()
+        patched_setup["worker"].release_buffer.reset_mock()
         return rt, stacked
 
     def test_reads_each_shard_back(self, patched_setup):
@@ -996,9 +1107,10 @@ class TestCopyStackedFrom:
         rt.copy_stacked_from(stacked, out)
 
         worker = patched_setup["worker"]
-        nbytes = 4 * 4 * 4
-        worker.copy_from.assert_any_call(out[0].data_ptr(), 0xA000, nbytes, 0)
-        worker.copy_from.assert_any_call(out[1].data_ptr(), 0xB000, nbytes, 1)
+        calls = worker.copy_from.call_args_list
+        assert [call.args[1] for call in calls] == [stacked.shards[0].buffer, stacked.shards[1].buffer]
+        assert all(isinstance(call.args[0], _FakeBuffer) for call in calls)
+        assert worker.release_buffer.call_count == 2
         assert worker.copy_from.call_count == 2
         rt.close()
 
@@ -1009,10 +1121,9 @@ class TestCopyStackedFrom:
         rt.copy_stacked_from(stacked, out)
 
         worker = patched_setup["worker"]
-        nbytes = 4 * 4 * 4
         # shard 0 resides on worker 1, shard 1 on worker 0.
-        worker.copy_from.assert_any_call(out[0].data_ptr(), 0xA000, nbytes, 1)
-        worker.copy_from.assert_any_call(out[1].data_ptr(), 0xB000, nbytes, 0)
+        calls = worker.copy_from.call_args_list
+        assert [call.args[1] for call in calls] == [stacked.shards[0].buffer, stacked.shards[1].buffer]
         rt.close()
 
     def test_shape_mismatch_rejected(self, patched_setup):
@@ -1029,13 +1140,11 @@ class TestCopyStackedFrom:
             rt.copy_stacked_from(stacked, out)
         rt.close()
 
-    def test_non_shared_host_rejected(self, patched_setup):
-        # A plain (non-shared) host buffer is invisible to the forked worker's
-        # D2H write — reject it up front rather than silently returning zeros.
+    def test_non_shared_post_prepare_host_is_accepted(self, patched_setup):
         rt, stacked = self._make_stacked(patched_setup)
         out = torch.zeros(2, 4, 4, dtype=torch.float32)  # NOT shared
-        with pytest.raises(ValueError, match="shared-memory"):
-            rt.copy_stacked_from(stacked, out)
+        rt.copy_stacked_from(stacked, out)
+        assert patched_setup["worker"].copy_from.call_count == 2
         rt.close()
 
     def test_non_contiguous_host_rejected(self, patched_setup):
@@ -1043,7 +1152,7 @@ class TestCopyStackedFrom:
         # Shared but transposed -> non-contiguous; still rejected.
         out = torch.zeros(2, 4, 4, dtype=torch.float32).share_memory_().transpose(1, 2)
         assert not out.is_contiguous()
-        with pytest.raises(ValueError, match="shared-memory"):
+        with pytest.raises(ValueError, match="CPU, contiguous"):
             rt.copy_stacked_from(stacked, out)
         rt.close()
 
@@ -1250,6 +1359,14 @@ class TestOneShotRegression:
         patched_setup["worker"].init.assert_called_once()
         patched_setup["dispatch"].assert_called_once()
         patched_setup["worker"].close.assert_called_once()
+
+    def test_one_shot_rejects_resident_tensor_before_setup(self, patched_setup):
+        from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
+
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+        with pytest.raises(TypeError, match=r"same prepared DistributedWorker"):
+            execute_distributed(compiled, [DeviceTensor(0x1000, (8, 8), torch.float32)])
+        patched_setup["assemble"].assert_not_called()
 
     def test_one_shot_enables_sdma_when_a_chip_requires_it(self, patched_setup):
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
@@ -1633,7 +1750,7 @@ class TestMultiProgram:
         prog_b = _fake_compiled([_param("kv", [16, 16])], [])
         rt = DistributedWorker([prog_a, prog_b])
 
-        kv = DeviceTensor(0x5000, (16, 16), torch.float32)
+        kv = _resident(rt, (16, 16))
         rt.run(prog_a, kv)
         rt.run(prog_b, kv)
 
@@ -1999,14 +2116,14 @@ class TestSubmitChip:
 
 
 def _write_dfx_dispatch_dirs(dfx: Path, *rels: str) -> None:
-    """Lay down ``<dfx>/<rel>/l2_swimlane_records.json`` for each dispatch dir.
+    """Lay down ``<dfx>/<rel>/chip_swimlane_records.json`` for each dispatch dir.
 
     Shared by the cleaner and collector tests below so the on-disk DFX layout
     they both assume is spelled out once.
     """
     for rel in rels:
         (dfx / rel).mkdir(parents=True)
-        (dfx / rel / "l2_swimlane_records.json").write_text("{}", encoding="utf-8")
+        (dfx / rel / "chip_swimlane_records.json").write_text("{}", encoding="utf-8")
 
 
 def _write_chip_program(output_dir: Path, program: str, *kernel_names: str) -> None:
@@ -2281,7 +2398,7 @@ class _BoolStrictCallConfig:
         self.enable_dump_args = 0
         self.enable_pmu = 0
         self.enable_scope_stats = False
-        self.enable_l2_swimlane: Any = 0
+        self.enable_chip_swimlane: Any = 0
         self.output_prefix = ""
         self.runtime_env = SimpleNamespace(ring_task_window=0, ring_heap=0, ring_dep_pool=0)
         self._enable_dep_gen = False
@@ -2335,7 +2452,7 @@ class TestMakeCallConfigDepGenType:
         run_config = RunConfig(enable_l2_swimlane=1)  # pyright: ignore[reportArgumentType]
         cfg = _make_call_config(DistributedConfig(), run_config, dfx_base=tmp_path / "dfx")
         assert cfg.enable_dep_gen is True
-        assert cfg.enable_l2_swimlane == 1
+        assert cfg.enable_chip_swimlane == 1
 
     def test_int_zero_swimlane_yields_bool_false_dep_gen(self, tmp_path, fake_simpler_task_interface):
         # Another DFX flag opens the block while swimlane is the int ``0``; the
@@ -2388,16 +2505,27 @@ class _PersistentDomainHandle:
         allocation_index: int,
         worker: Any,
         owner: _PersistentRunResources,
+        buffers: list[Any],
     ) -> None:
         self.name = name
         self.workers = tuple(workers)
-        self.contexts = {
-            worker_id: SimpleNamespace(
-                local_window_base=0x10000000 + allocation_index * 0x100000 + worker_id * 0x10000,
+        self.contexts = {}
+        for worker_id in workers:
+            local_window_base = 0x10000000 + allocation_index * 0x100000 + worker_id * 0x10000
+            offset = 0
+            named_buffers = {}
+            for spec in buffers:
+                named_buffers[spec.name] = _FakeBuffer(
+                    local_window_base + offset,
+                    int(spec.nbytes),
+                    owner_worker_id=worker_id,
+                )
+                offset += int(spec.nbytes)
+            self.contexts[worker_id] = SimpleNamespace(
+                local_window_base=local_window_base,
                 actual_window_size=window_size,
+                buffers=named_buffers,
             )
-            for worker_id in workers
-        }
         self.worker = worker
         self.owner = owner
         self.release_count = 0
@@ -2449,7 +2577,7 @@ class _PersistentOrch:
     def __init__(self, worker: Any) -> None:
         self.worker = worker
         self.allocate_calls: list[dict[str, Any]] = []
-        self.copy_calls: list[tuple[int, int, int, int]] = []
+        self.copy_calls: list[tuple[_FakeBuffer, _FakeBuffer, bytes]] = []
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
         self.worker.close.side_effect = self._close_live_domains
@@ -2502,6 +2630,7 @@ class _PersistentOrch:
             len(self.handles),
             self.worker,
             resources,
+            list(kwargs["buffers"]),
         )
         self.handles.append(handle)
         self.worker._live_domains[handle.name] = handle
@@ -2509,8 +2638,9 @@ class _PersistentOrch:
         resources.requires_ordered_cleanup = True
         return handle
 
-    def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
-        self.copy_calls.append((worker_id, dst, src, size))
+    def copy_to(self, dst: _FakeBuffer, src: _FakeBuffer) -> None:
+        payload = ctypes.string_at(int(src.base), int(src.nbytes))
+        self.copy_calls.append((dst, src, payload))
 
     def _close_live_domains(self) -> None:
         first_error: BaseException | None = None
@@ -2524,7 +2654,14 @@ class _PersistentOrch:
             raise first_error
 
 
-def _persistent_entry(window_size: int, seen_handles: list[Any]):
+def _persistent_entry(
+    window_size: int,
+    seen_handles: list[Any],
+    *,
+    buffer_nbytes: tuple[int, ...] | None = None,
+):
+    sizes = (window_size,) if buffer_nbytes is None else buffer_nbytes
+
     def entry(
         orch,
         _args,
@@ -2543,7 +2680,10 @@ def _persistent_entry(window_size: int, seen_handles: list[Any]):
             name="comm_d0",
             workers=[*range(world_size)],
             window_size=window_size,
-            buffers=[SimpleNamespace(name="signal", dtype="opaque", count=4, nbytes=4)],
+            buffers=[
+                SimpleNamespace(name=f"buffer_{index}", dtype="opaque", count=size, nbytes=size)
+                for index, size in enumerate(sizes)
+            ],
         ) as domain:
             seen_handles.append(domain)
 
@@ -2580,6 +2720,23 @@ class TestPersistentDistributedWorker:
     def test_request_run_fences_reuse_and_zero_domain_by_default(self, patched_setup):
         m = patched_setup
         m["worker"]._live_domains = {}
+        created_zero_buffers: list[_FakeBuffer] = []
+        released_zero_buffers: list[_FakeBuffer] = []
+
+        def create_dirty_host_buffer(nbytes: int) -> _FakeBuffer:
+            buffer = _FakeBuffer(0, nbytes, host=True)
+            ctypes.memset(int(buffer.base), 0xA5, nbytes)
+            created_zero_buffers.append(buffer)
+            return buffer
+
+        def release_host_buffer(buffer: _FakeBuffer) -> None:
+            # Simpler holds a non-reentrant submit lock during the callback, so
+            # release is only safe after its run journal has been retired.
+            assert m["worker"]._building_run_resources is None
+            released_zero_buffers.append(buffer)
+
+        m["worker"].create_buffer.side_effect = create_dirty_host_buffer
+        m["worker"].release_buffer.side_effect = release_host_buffer
         orch = _PersistentOrch(m["worker"])
         submit_threads: list[int] = []
 
@@ -2591,12 +2748,15 @@ class TestPersistentDistributedWorker:
         m["worker"].submit.side_effect = worker_submit
         seen_handles: list[Any] = []
         window_size = (1 << 20) + 17
-        m["load_entry"].return_value = (_persistent_entry(window_size, seen_handles), None)
+        m["load_entry"].return_value = (
+            _persistent_entry(window_size, seen_handles, buffer_nbytes=(1 << 20, 17)),
+            None,
+        )
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
 
         rt = DistributedWorker(compiled, persistent=True)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
         rt(arg)
         handle = orch.handles[0]
         owner = orch.resources[0]
@@ -2615,13 +2775,23 @@ class TestPersistentDistributedWorker:
         assert len(seen_handles) == 2
         assert seen_handles[0] is seen_handles[1]
         # The first request receives the freshly-zeroed allocation. The second
-        # restores 1 MiB + 17 bytes on each of two workers before dispatch.
-        assert [(worker, size) for worker, _dst, _src, size in orch.copy_calls] == [
+        # resets each of its two named buffers on both workers through Buffer
+        # handles, reusing one runtime-owned host buffer per distinct size.
+        assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == [
             (0, 1 << 20),
-            (0, 17),
             (1, 1 << 20),
+            (0, 17),
             (1, 17),
         ]
+        assert all(payload == bytes(dst.nbytes) for dst, _src, payload in orch.copy_calls)
+        assert [src for _dst, src, _payload in orch.copy_calls] == [
+            created_zero_buffers[0],
+            created_zero_buffers[0],
+            created_zero_buffers[1],
+            created_zero_buffers[1],
+        ]
+        assert released_zero_buffers == created_zero_buffers
+        assert [call.args[0] for call in m["worker"].release_buffer.call_args_list] == created_zero_buffers
         # A retained domain survives both request run-fences and is released
         # once when the persistent worker closes.
         assert handle.release_count == 1
@@ -2646,8 +2816,8 @@ class TestPersistentDistributedWorker:
         seen_handles: list[Any] = []
         m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
         rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
 
         rt(arg)
         rt.submit(compiled, arg)
@@ -2681,7 +2851,7 @@ class TestPersistentDistributedWorker:
         compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
 
         rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=False)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
         rt(arg)
         rt(arg)
         rt.close()
@@ -2690,6 +2860,69 @@ class TestPersistentDistributedWorker:
         assert seen_handles[0] is seen_handles[1]
         assert orch.copy_calls == []
         assert m["worker"].submit.call_count == 2
+
+    def test_reset_rejects_unnamed_window_slack(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["load_entry"].return_value = (
+            _persistent_entry(64, [], buffer_nbytes=(4,)),
+            None,
+        )
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
+        rt(arg)
+        m["worker"].create_buffer.reset_mock()
+
+        with pytest.raises(RuntimeError, match="named buffers to cover its window"):
+            rt(arg)
+
+        m["worker"].create_buffer.assert_not_called()
+        assert m["worker"].submit.call_count == 1
+        rt.close()
+
+    def test_reset_buffer_is_released_after_failed_run(self, patched_setup):
+        m = patched_setup
+        m["worker"]._live_domains = {}
+        orch = _PersistentOrch(m["worker"])
+        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["load_entry"].return_value = (_persistent_entry(64, []), None)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
+        rt(arg)
+
+        created: list[_FakeBuffer] = []
+        released: list[_FakeBuffer] = []
+
+        def create_dirty_host_buffer(nbytes: int) -> _FakeBuffer:
+            buffer = _FakeBuffer(0, nbytes, host=True)
+            ctypes.memset(int(buffer.base), 0xA5, nbytes)
+            created.append(buffer)
+            return buffer
+
+        def release_after_run(buffer: _FakeBuffer) -> None:
+            assert m["worker"]._building_run_resources is None
+            released.append(buffer)
+
+        m["worker"].create_buffer.side_effect = create_dirty_host_buffer
+        m["worker"].release_buffer.side_effect = release_after_run
+        original_copy_to = orch.copy_to
+
+        def fail_copy(dst: _FakeBuffer, src: _FakeBuffer) -> None:
+            original_copy_to(dst, src)
+            raise RuntimeError("persistent reset copy failed")
+
+        orch.copy_to = fail_copy
+        with pytest.raises(RuntimeError, match="persistent reset copy failed"):
+            rt(arg)
+
+        assert len(created) == 1
+        assert released == created
+        assert orch.copy_calls[-1][2] == bytes(64)
+        rt.close()
 
     def test_task_args_stay_alive_through_request_drain(self, patched_setup):
         m = patched_setup
@@ -2734,7 +2967,7 @@ class TestPersistentDistributedWorker:
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
         rt = DistributedWorker(compiled, persistent=True)
-        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        rt(_resident(rt, (16, 16)))
 
         assert task_args_ref is not None
         # Once the caller waits the handle, its bounded frame releases the
@@ -2757,13 +2990,12 @@ class TestPersistentDistributedWorker:
         compiled_b = _fake_compiled([_param("b", [16, 16])], [])
         compiled_a._distributed_config = DistributedConfig(device_ids=[0, 1])
         compiled_b._distributed_config = DistributedConfig(device_ids=[0, 1])
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
-
         rt = DistributedWorker(
             [compiled_a, compiled_b],
             persistent=True,
             reset_persistent_windows=True,
         )
+        arg = _resident(rt, (16, 16))
         rt.run(compiled_a, arg)
         rt.run(compiled_b, arg)
         rt.run(compiled_a, arg)
@@ -2774,7 +3006,7 @@ class TestPersistentDistributedWorker:
         assert seen_a[0] is seen_a[1]
         assert seen_a[0] is not seen_b[0]
         # Only program A is reused; program B's first use needs no reset.
-        assert [(worker, size) for worker, _dst, _src, size in orch.copy_calls] == [
+        assert [(dst.owner_worker_id, dst.nbytes) for dst, _src, _payload in orch.copy_calls] == [
             (0, 64),
             (1, 64),
         ]
@@ -2792,7 +3024,7 @@ class TestPersistentDistributedWorker:
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
-        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        rt(_resident(rt, (16, 16)))
         handle = orch.handles[0]
         handle.release_error = RuntimeError("persistent domain release failed")
 
@@ -2815,7 +3047,7 @@ class TestPersistentDistributedWorker:
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
-        rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+        rt(_resident(rt, (16, 16)))
         handle = orch.handles[0]
         handle.free_on_release = False
 
@@ -2860,7 +3092,7 @@ class TestPersistentDistributedWorker:
         m["load_entry"].return_value = (failing_entry, None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
-        arg = DeviceTensor(0x1000, (16, 16), torch.float32)
+        arg = _resident(rt, (16, 16))
 
         with pytest.raises(RuntimeError, match="persistent dispatch failed"):
             rt(arg)
@@ -2890,9 +3122,10 @@ class TestPersistentDistributedWorker:
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
 
         with pytest.raises(RuntimeError, match="run finalization abandoned"):
-            rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+            rt(arg)
 
         handle = orch.handles[0]
         owner = orch.resources[0]
@@ -2938,12 +3171,13 @@ class TestPersistentDistributedWorker:
         m["load_entry"].return_value = (persistent_entry, None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
+        arg = _resident(rt, (16, 16))
         caller_done = threading.Event()
         errors: list[BaseException] = []
 
         def call_worker() -> None:
             try:
-                rt(DeviceTensor(0x1000, (16, 16), torch.float32))
+                rt(arg)
             except BaseException as exc:  # noqa: BLE001 - asserted below
                 errors.append(exc)
             finally:

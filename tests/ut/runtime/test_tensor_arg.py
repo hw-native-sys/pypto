@@ -11,10 +11,10 @@
 orchestration code.
 
 It must:
-- wrap a worker-resident :class:`DeviceTensor` as
-  ``Tensor.make(..., child_memory=True)``;
+- derive an address-free wire ``Tensor`` from a worker-resident
+  :class:`DeviceTensor`'s retained ``Buffer``;
 - pass an already-built ``Tensor`` through unchanged;
-- delegate a host ``torch.Tensor`` to simpler's ``make_tensor_arg``.
+- delegate a host ``torch.Tensor`` to simpler's worker-aware wire helper.
 """
 
 from unittest.mock import MagicMock, patch
@@ -36,57 +36,63 @@ else:
 pytestmark = pytest.mark.skipif(not _has_simpler, reason="make_tensor_arg requires the simpler package")
 
 
-def test_device_tensor_produces_child_memory_true():
-    captured: dict = {"make_calls": []}
+def test_device_tensor_derives_wire_tensor_from_retained_buffer():
+    captured: dict = {"tensor_calls": []}
 
-    def _make(*, data, shapes, dtype, child_memory=False):
-        captured["make_calls"].append(
-            {"data": data, "shapes": tuple(shapes), "dtype": dtype, "child_memory": child_memory}
-        )
-        return MagicMock(name=f"Tensor(0x{data:x})")
+    class FakeBuffer:
+        base = 0xABCD
 
-    dt = DeviceTensor(0xABCD, (8, 16), torch.float16)
+        def tensor(self, *, shapes, dtype):
+            captured["tensor_calls"].append({"shapes": tuple(shapes), "dtype": dtype})
+            return MagicMock(name="wire_tensor")
 
-    with (
-        patch("pypto.runtime.task_interface.Tensor.make", side_effect=_make),
-        patch(
-            "pypto.runtime.task_interface.torch_dtype_to_datatype",
-            side_effect=lambda d: f"<dtype:{d}>",
-        ),
+    buffer = FakeBuffer()
+    dt = DeviceTensor.from_buffer(buffer, (8, 16), torch.float16)
+    worker = MagicMock(name="worker")
+
+    with patch(
+        "pypto.runtime.task_interface.torch_dtype_to_datatype",
+        side_effect=lambda d: f"<dtype:{d}>",
     ):
         from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-        make_tensor_arg(dt)
+        make_tensor_arg(worker, dt)
 
-    assert len(captured["make_calls"]) == 1
-    call = captured["make_calls"][0]
-    assert call["data"] == 0xABCD
+    assert len(captured["tensor_calls"]) == 1
+    call = captured["tensor_calls"][0]
     assert call["shapes"] == (8, 16)
-    assert call["child_memory"] is True
     assert call["dtype"] == "<dtype:torch.float16>"
 
 
-def test_continuous_tensor_passes_through():
-    from pypto.runtime.task_interface import (  # noqa: PLC0415
-        Tensor,  # pyright: ignore[reportAttributeAccessIssue]
-        torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+def test_raw_pointer_device_tensor_is_rejected_for_wire_dispatch():
     from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-    ct = Tensor.make(0x1000, (4,), torch_dtype_to_datatype(torch.float32), child_memory=True)
-    assert make_tensor_arg(ct) is ct
+    with pytest.raises(TypeError, match="raw-pointer DeviceTensor"):
+        make_tensor_arg(MagicMock(name="worker"), DeviceTensor(0x1000, (4,), torch.float32))
+
+
+def test_wire_tensor_passes_through():
+    from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+    class FakeWireTensor:
+        pass
+
+    wire = FakeWireTensor()
+    with patch("pypto.runtime.task_interface.Tensor", FakeWireTensor):
+        assert make_tensor_arg(MagicMock(name="worker"), wire) is wire
 
 
 def test_host_tensor_delegates_to_simpler():
     host = torch.zeros(4, 4, dtype=torch.float32)
     sentinel = MagicMock(name="Tensor(host)")
+    worker = MagicMock(name="worker")
 
-    with patch("pypto.runtime.task_interface.make_tensor_arg", return_value=sentinel) as impl:
+    with patch("simpler_setup.torch_interop.make_tensor_arg", return_value=sentinel) as impl:
         from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
-        result = make_tensor_arg(host)
+        result = make_tensor_arg(worker, host)
 
-    impl.assert_called_once_with(host)
+    impl.assert_called_once_with(worker, host)
     assert result is sentinel
 
 

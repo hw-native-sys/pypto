@@ -497,7 +497,9 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
         assert isinstance(param.type, _ir_core.TensorType)
         c_type = param.type.dtype.to_c_type_string()
         lines.append(f"    // Unpack tensor: {param_name}")
-        lines.append(f"    __gm__ Tensor* {param_name}_tensor = reinterpret_cast<__gm__ Tensor*>(args[{i}]);")
+        lines.append(
+            f"    __gm__ ChipTensor* {param_name}_tensor = reinterpret_cast<__gm__ ChipTensor*>(args[{i}]);"
+        )
         if param_name == "__gm_pipe_buffer" and uses_spmd:
             lines.append("    // SPMD: shard GM pipe workspace by logical block_idx to avoid overlap.")
             lines.append("    int64_t __pypto_gm_block_num = static_cast<int64_t>(__pypto_spmd_block_num);")
@@ -1503,12 +1505,12 @@ def _materialize_builtin_next_levels(specs: list[Any]) -> dict[str, str]:
 
 
 def _emit_sub_worker_module(func: _ir_core.Function) -> str:
-    """Emit a self-contained SubWorker module callable as ``fn(args: TaskArgs)``.
+    """Emit a self-contained SubWorker module callable as ``fn(args: MappedArgs)``.
 
     The user's function body lives on ``func.body`` as an :class:`InlineStmt`
     captured by the decorator. The emitted module wraps the body in
     ``def _user_{name}(<params>)`` plus a dispatcher ``{name}(args)`` that
-    unpacks tensors from ``TaskArgs``.
+    unpacks tensors from Simpler's mapped receive-side arguments.
     """
     import textwrap  # noqa: PLC0415
 
@@ -1537,14 +1539,12 @@ def _emit_sub_worker_module(func: _ir_core.Function) -> str:
 
     indented_body = textwrap.indent(body.body, "    ") if body.body else "    pass"
     unpack_block = (
-        "\n".join(
-            f"    {name} = _tensor_from_continuous(args.tensor({i}))" for i, name in enumerate(param_names)
-        )
+        "\n".join(f"    {name} = _tensor_from_continuous(args[{i}])" for i, name in enumerate(param_names))
         or "    pass"
     )
 
     return (
-        f'"""SubWorker: {func.name} — auto-generated, callable as fn(args: TaskArgs)."""\n'
+        f'"""SubWorker: {func.name} — auto-generated, callable as fn(args: MappedArgs)."""\n'
         f"\n"
         f"import torch\n"
         f"\n"

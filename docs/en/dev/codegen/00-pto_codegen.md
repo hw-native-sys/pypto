@@ -717,7 +717,7 @@ The wrapper unpacks `int64_t* args` following the standard convention:
 
 | Parameter Type | Unpacking Pattern |
 | -------------- | ----------------- |
-| `TensorType` | `Tensor*` → `buffer.addr` → typed pointer |
+| `TensorType` | `ChipTensor*` → `buffer.addr` → typed pointer |
 | `ScalarType` | `uint64_t` → union decode → typed value |
 
 ### SPMD Identity Parameters

@@ -160,6 +160,18 @@ class Worker(ABC):
         """
         return default_init_prep(init)
 
+    def _buffer_for_ptr(self, ptr: int, *, worker_id: int = 0) -> Any | None:
+        """Return the owning simpler ``Buffer`` for a public device pointer.
+
+        PyPTO preserves its raw-pointer memory API, while current simpler uses
+        owner ``Buffer`` objects internally and address-free ``Tensor`` values
+        on the dispatch wire. Concrete runtime Workers override this hook for
+        pointers returned by :meth:`malloc`. A custom Worker that returns only
+        raw pointers can keep the default, but its ``DeviceTensor`` values
+        cannot be dispatched through public ``Worker.run`` paths.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # DeviceTensor conveniences — shared.
     # ------------------------------------------------------------------
@@ -197,6 +209,7 @@ class Worker(ABC):
             malloc=lambda nbytes: self.malloc(nbytes, worker_id=worker_id),
             copy_to=lambda dst, src, nbytes: self.copy_to(dst, src, nbytes, worker_id=worker_id),
             free=lambda ptr: self.free(ptr, worker_id=worker_id),
+            buffer_for_ptr=lambda ptr: self._buffer_for_ptr(ptr, worker_id=worker_id),
             shape=shape,
             dtype=dtype,
             init=init,
@@ -208,9 +221,10 @@ class Worker(ABC):
     def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
         """Release a buffer previously returned by :meth:`alloc_tensor`.
 
-        Untracks *t* from this Worker's owned-set, then frees the underlying
-        pointer against *worker_id* (which MUST match the ``worker_id`` used to
-        allocate *t* — a :class:`DeviceTensor` does not carry its worker scope).
+        Frees the underlying pointer against *worker_id* (which MUST match the
+        ``worker_id`` used to allocate *t*), then untracks *t* only after the
+        backend reports success. A failed backend admission/free keeps the
+        ownership key so the caller can retry.
         Idempotent for a genuine double-free: if ``t.data_ptr`` is no longer
         tracked under *any* worker (e.g. ``_close_owned_tensors`` ran first, or
         the caller already freed it), this is a no-op — the underlying ``free``
@@ -236,8 +250,11 @@ class Worker(ABC):
                     f"ptr=0x{t.data_ptr:x} (allocated on worker(s) {owners}); pass the same worker_id."
                 )
             return
-        self._owned_tensors.discard(key)
         self.free(t.data_ptr, worker_id=worker_id)
+        # Preserve ownership across a backend admission/free failure so callers
+        # can retry. A successful first free removes the key and keeps the
+        # genuine second-free path idempotent.
+        self._owned_tensors.discard(key)
 
     def _close_owned_tensors(self) -> None:
         """Release any DeviceTensors the caller forgot to :meth:`free_tensor`.

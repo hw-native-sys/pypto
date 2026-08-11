@@ -161,7 +161,7 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs& orch_args) {\n";
+  oss << "PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs& orch_args) {\n";
   oss << "    (void)orch_args;\n";
   oss << "    return PTO2OrchestrationConfig{\n";
   oss << "        .expected_arg_count = " << expected_arg_count << ",\n";
@@ -190,7 +190,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
                                        [[maybe_unused]] const TensorTypePtr& tensor_type,
                                        [[maybe_unused]] const CodegenBase& codegen) {
   std::ostringstream oss;
-  oss << "    const Tensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
+  oss << "    const ChipTensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
   return oss.str();
 }
 
@@ -690,7 +690,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           carry_plans[i].dynamic_compiler_dep_collection = true;
         }
         // Override is_rebind: ClassifyIterArgCarry only sets it for TASK_ID
-        // iter_args, but Tensor-typed iter_args with compiler-dep edges also
+        // iter_args, but ChipTensor-typed iter_args with compiler-dep edges also
         // need true so the yield handler emits dynamic-collection writes.
         carry_plans[i].is_rebind = true;
       }
@@ -706,7 +706,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Emit carry declarations for each iter_arg. Three lowering paths:
     //   - array_size > 0  -> TaskId array-carry (PTO2TaskId arr[N])
     //   - ArrayType carry  -> C-stack array with in-place-update semantics
-    //   - is_rebind        -> scalar/Tensor mutable carry variable
+    //   - is_rebind        -> scalar/ChipTensor mutable carry variable
     //   - else             -> trivial alias to init's emit name
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       const auto& iter_arg = for_stmt->iter_args_[i];
@@ -837,7 +837,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         RegisterArrayCarry(return_var.get(), carry_name, N);
       } else if (is_rebind) {
         // Scalar (single-name) carry path — only fires for non-TaskId
-        // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
+        // iter_args (e.g. ChipTensor) or Sequential TaskId iter_args whose
         // yield value isn't an inner array. Parallel TaskId iter_args are
         // guaranteed to use the array-carry path above (the const-trip-count
         // CHECK above would have fired otherwise).
@@ -851,11 +851,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // declared names.
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
         const std::string cpp_type = GetCppType(return_var->GetType());
-        // A Tensor loop carry directly in a ``pl.manual_scope`` body is hoisted to
+        // A ChipTensor loop carry directly in a ``pl.manual_scope`` body is hoisted to
         // the enclosing scope so a task / method-receiver placed AFTER the block
-        // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-Tensor
+        // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-ChipTensor
         // (e.g. Sequential TaskId scalar) carries keep their in-block decl.
-        if (cpp_type == "Tensor") {
+        if (cpp_type == "ChipTensor") {
           EmitMutableTensorCarryDecl(carry_name, init_var_name);
         } else {
           EmitIndentedLine(cpp_type + " " + carry_name + " = " + init_var_name + ";");
@@ -1092,12 +1092,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
     std::string cond_expr = GenerateExprString(if_stmt->condition_);
 
-    // ``Tensor`` has no public default ctor, so ``Tensor x;`` won't compile.
-    // The phi declaration for a Tensor return_var must be initialised with a
-    // valid Tensor that's already in scope. Try sources in order:
+    // A default-constructed ``ChipTensor`` is deliberately uninitialised. Seed
+    // the phi declaration for a ChipTensor return_var from a valid ChipTensor
+    // that's already in scope instead. Try sources in order:
     //   1. The first tensor function parameter (selected by orch arg index,
     //      not lexical name — picking from ``param_name_set_`` could yield a
-    //      scalar param and emit ``Tensor x = <scalar>;`` which won't compile).
+    //      scalar param and emit ``ChipTensor x = <scalar>;`` which won't compile).
     //   2. A Var yielded by either branch that's already declared at
     //      if-entry (an outer iter_arg, or a prior in-body assignment). This
     //      handles parameterless functions whose branches yield a name
@@ -1144,11 +1144,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& rv : if_stmt->return_vars_) {
       const std::string emit_name = ReserveVarEmitName(rv.get());
       const std::string cpp_type = GetCppType(rv->GetType());
-      if (cpp_type == "Tensor") {
+      if (cpp_type == "ChipTensor") {
         INTERNAL_CHECK_SPAN(!tensor_phi_init.empty(), if_stmt->span_)
             << "Internal error: IfStmt return_var '" << rv->name_hint_
-            << "' is a Tensor but no in-scope Tensor was found to use as the "
-            << "phi placeholder (``Tensor`` has a private default ctor). "
+            << "' is a ChipTensor but no in-scope ChipTensor was found to use as the "
+            << "valid phi placeholder (a default-constructed ``ChipTensor`` is uninitialised). "
             << "Expected either a function parameter or a branch yield value "
             << "to resolve to a Var already declared at if-entry.";
         // Phi placeholder init — overwritten by branch yields. When the IfStmt is
@@ -1371,7 +1371,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         // Inside a ``pl.manual_scope``, collapse a pure SSA tensor copy ``X = Y``
         // by remapping ``X``'s emit name to ``Y`` instead of emitting a
-        // scope-local ``Tensor X = Y;`` decl (issue #1713). ``X`` is a fresh SSA
+        // scope-local ``ChipTensor X = Y;`` decl (issue #1713). ``X`` is a fresh SSA
         // version of the *same physical tensor* as ``Y`` (e.g. a post-loop
         // rebind ``score = score_rv`` lowering to ``score__ssa_v1 = score``, or a
         // windowed-assemble result rebind). The decl would die at the block's
@@ -1391,11 +1391,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // ``X = <hoisted carry>`` at the manual-scope body indent — where the
         // carry is post-loop and stable (the canonical ``score = score_rv``
         // rebind). Inside the loop body (a deeper indent) a copy of the carry
-        // keeps its ``Tensor X = carry;`` decl, so a pre-yield snapshot can never
+        // keeps its ``ChipTensor X = carry;`` decl, so a pre-yield snapshot can never
         // alias the carry's later value.
         const bool carry_collapse_ok =
             hoisted_carry_names_.count(value_expr) == 0 || IsAtManualScopeBodyIndent();
-        if (cpp_type == "Tensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
+        if (cpp_type == "ChipTensor" && manual_local_names_ != nullptr && IsEnclosingScopeValid(value_expr) &&
             !IsMutableTensorNameInCurrentScope(value_expr) && !IsMutableTensorNameInCurrentScope(var_name) &&
             carry_collapse_ok) {
           emit_name_map_[assign->var_.get()] = value_expr;
@@ -1614,10 +1614,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (scalar_type->dtype_ == DataType::TASK_ID) return "PTO2TaskId";
       return scalar_type->dtype_.ToCTypeString();
     }
-    // TensorType: use ``Tensor`` so default-constructible declarations are
+    // TensorType: use ``ChipTensor`` so default-constructible declarations are
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
-    if (AsTensorTypeLike(type)) return "Tensor";
+    if (AsTensorTypeLike(type)) return "ChipTensor";
     if (As<CommCtxType>(type)) return "uint64_t";
     // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
     // single "type expression" that names a C array. Callers that need to
@@ -1660,9 +1660,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       case ArgDirection::OutputExisting:
         // The runtime overloads add_output on the argument type:
         //   add_output(TensorCreateInfo&)  -> OUTPUT       (runtime allocates)
-        //   add_output(Tensor&)            -> OUTPUT_EXISTING (write-only existing tensor)
+        //   add_output(ChipTensor&)            -> OUTPUT_EXISTING (write-only existing tensor)
         // The codegen pre-allocates via tensor.create + alloc_tensors, so the emitted
-        // call site always passes a Tensor& and the OUTPUT_EXISTING overload is selected.
+        // call site always passes a ChipTensor& and the OUTPUT_EXISTING overload is selected.
         // We still distinguish the two ArgDirections in the IR to let downstream phases
         // switch to the runtime-allocated form without an IR change.
         return "add_output";
@@ -2319,7 +2319,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Speculative early-dispatch opt-in (pl.submit(..., allow_early_resolve=True)).
   // The flag rides on the Submit and is surfaced as the ``allow_early_resolve``
   // Call attr by SubmitToCallView; a plain submit / call lacks it, so this is a
-  // no-op there. Emitted on the producer task's L0TaskArgs before its rt_submit_* —
+  // no-op there. Emitted on the producer task's CoreTaskArgs before its rt_submit_* —
   // see simpler#1065 ("codegen-side emission of set_allow_early_resolve()").
   void EmitEarlyResolveHint(const std::string& task_var, const CallPtr& call) {
     if (call->GetAttr<bool>("allow_early_resolve", false)) {
@@ -2328,7 +2328,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   // Mirrors the runtime's ``MAX_TENSOR_DIMS`` — the capacity of the fixed
-  // ``uint32_t indices[]`` array in ``L0PredicateOperand``.
+  // ``uint32_t indices[]`` array in ``CorePredicateOperand``.
   static constexpr size_t kRuntimeMaxTensorDims = 5;
 
   // Map an IR comparison node kind onto the runtime PredicateOp enumerator, and
@@ -2433,13 +2433,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     } else {
       indices.push_back(read->args_[1]);
     }
-    // ``L0PredicateOperand::indices`` is a fixed ``uint32_t[MAX_TENSOR_DIMS]``;
+    // ``CorePredicateOperand::indices`` is a fixed ``uint32_t[MAX_TENSOR_DIMS]``;
     // emitting more would write past it (the next field is ``op``, so an
     // overflow corrupts the comparison itself).
     CHECK_SPAN(indices.size() <= kRuntimeMaxTensorDims, read->span_)
         << "Submit dispatch-predicate operand has rank " << indices.size()
         << ", exceeding the runtime's maximum of " << kRuntimeMaxTensorDims
-        << " indices (L0PredicateOperand::indices is a fixed-size array)";
+        << " indices (CorePredicateOperand::indices is a fixed-size array)";
     const std::string var_name = TryGetVarName(operand);
     CHECK_SPAN(!var_name.empty(), operand->span_)
         << "Submit dispatch-predicate operand must be a named tensor (a function parameter or a variable "
@@ -2448,7 +2448,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << ". Bind the tensor to a variable first and pass that variable.";
     const std::string tname = GetExternalTensorName(var_name);
     const std::string pv = task_var + "_pred";
-    EmitIndentedLine("L0TaskPredicate " + pv + ";");
+    EmitIndentedLine("CoreTaskPredicate " + pv + ";");
     EmitIndentedLine(pv + ".operand.tensor = &" + tname + ";");
     EmitIndentedLine(pv + ".operand.ndims = " + std::to_string(indices.size()) + ";");
     for (size_t i = 0; i < indices.size(); ++i) {
@@ -2674,7 +2674,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
   /// attached separately by ``EmitManualDeps`` via ``set_dependencies``.
-  void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("L0TaskArgs " + task_var + ";"); }
+  void EmitTaskParamsDecl(const std::string& task_var) { EmitIndentedLine("CoreTaskArgs " + task_var + ";"); }
 
   struct TaskDispatchPlan {
     std::string comment;
@@ -3070,7 +3070,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitIndentedLine(alloc.str());
 
     for (size_t i = 0; i < emit_names.size(); i++) {
-      EmitIndentedLine("const Tensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
+      EmitIndentedLine("const ChipTensor& " + emit_names[i] + " = " + alloc_var + ".get_ref(" +
                        std::to_string(i) + ");");
     }
   }
@@ -3394,7 +3394,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // A caller-allocated kernel/submit output aliases an arg it writes in place
     // — it is the *same physical tensor* as that arg. Rather than mint a
-    // ``const Tensor& <result> = <source>;`` rename, we remap the result Var's
+    // ``const ChipTensor& <result> = <source>;`` rename, we remap the result Var's
     // emit name to the source, so every reference resolves directly to the
     // source name. This is the strategy ``tensor.assemble`` already uses
     // (HandleTensorAssembleAssign); applying it uniformly drops the redundant
@@ -3424,7 +3424,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (mutable_alias) {
       EmitIndentedLine(alias_name + " = " + out_name + ";");
     } else {
-      EmitIndentedLine("const Tensor& " + alias_name + " = " + out_name + ";");
+      EmitIndentedLine("const ChipTensor& " + alias_name + " = " + out_name + ";");
     }
   }
 
@@ -3449,14 +3449,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
-    if (cpp_type == "Tensor") {
+    if (cpp_type == "ChipTensor") {
       mutable_tensor_name_scopes_.back().insert(emit_name);
     }
   }
 
   /// Register a hoisted loop carry's emit name as mutable in the scope that
   /// ENCLOSES the current (manual-scope body) C++ frame — the frame the hoisted
-  /// ``Tensor <carry> = <init>;`` decl lands in (issue #1713). The carry's
+  /// ``ChipTensor <carry> = <init>;`` decl lands in (issue #1713). The carry's
   /// in-loop ``<carry> = ...;`` reassignments still resolve through that
   /// enclosing frame, and a post-loop ``X = <carry>`` rebind reads the carry as
   /// *not* mutable-in-current-scope (it is mutable one level out), so the rebind
@@ -3467,7 +3467,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     mutable_tensor_name_scopes_[mutable_tensor_name_scopes_.size() - 2].insert(emit_name);
   }
 
-  /// Emit a mutable ``Tensor <name> = <init>;`` decl for a loop carry or an
+  /// Emit a mutable ``ChipTensor <name> = <init>;`` decl for a loop carry or an
   /// IfStmt phi placeholder, hoisting it out of a ``pl.manual_scope`` body into
   /// the enclosing scope when the construct sits directly in that body
   /// (``IsAtManualScopeBodyIndent``) and ``init`` is enclosing-scope-valid
@@ -3476,24 +3476,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``<name> = ...;`` reassignments (loop yields / branch merges) stay put and
   /// resolve through the enclosing frame. ``init`` is an enclosing-scope value
   /// that does not change between the hoist point and the block, so moving the
-  /// decl one level out is ordering-inert; ``Tensor`` has no public default ctor,
-  /// so the whole decl (init included) is hoisted, not a bare forward
+  /// decl one level out is ordering-inert; a default-constructed ``ChipTensor``
+  /// is uninitialised, so the whole decl (init included) is hoisted, not a bare forward
   /// declaration. Registering ``<name>`` mutable in the *enclosing* frame and
   /// tracking it in ``hoisted_carry_names_`` also lets a post-block ``X = <name>``
   /// rebind collapse onto it (see the Var-RHS catch-all in VisitStmt_(AssignStmt)).
-  /// Caller guarantees the decl type is ``Tensor``.
+  /// Caller guarantees the decl type is ``ChipTensor``.
   void EmitMutableTensorCarryDecl(const std::string& name, const std::string& init_expr) {
     if (scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_expr)) {
-      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "Tensor " + name + " = " +
+      scope_hoist_sink_->push_back(IndentAtLevel(scope_hoist_indent_level_) + "ChipTensor " + name + " = " +
                                    init_expr + ";\n");
       RegisterMutableTensorNameInEnclosingScope(name);
       hoisted_carry_names_.insert(name);
       if (manual_local_names_ != nullptr) manual_local_names_->erase(name);
       if (enclosing_manual_local_names_ != nullptr) enclosing_manual_local_names_->insert(name);
     } else {
-      EmitIndentedLine("Tensor " + name + " = " + init_expr + ";");
+      EmitIndentedLine("ChipTensor " + name + " = " + init_expr + ";");
 
-      RegisterMutableTensorName("Tensor", name);
+      RegisterMutableTensorName("ChipTensor", name);
     }
   }
 
@@ -3747,7 +3747,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///     passed in. The runtime's ``TaskOutputTensors`` stores only
   ///     ``add_output`` entries (see runtime/.../pto_types.h:72 — "Only
   ///     runtime-created outputs are stored here"), so ``add_inout`` /
-  ///     in-args ``add_output(Tensor&)`` slots do **not** appear in
+  ///     in-args ``add_output(ChipTensor&)`` slots do **not** appear in
   ///     ``task_<idx>_outs`` and ``get_ref`` would skip past them or assert.
   ///   - Runtime-allocated (param_idx >= original arg count): alias to
   ///     ``task_<idx>_outs.get_ref(runtime_out_pos)`` where
@@ -3854,7 +3854,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (IsMutableTensorNameInCurrentScope(elem_name)) {
           EmitIndentedLine(elem_name + " = " + source + ";");
         } else {
-          EmitIndentedLine("const Tensor& " + elem_name + " = " + source + ";");
+          EmitIndentedLine("const ChipTensor& " + elem_name + " = " + source + ";");
         }
       }
     }
@@ -4068,11 +4068,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
   std::unordered_map<const Var*, DynamicTaskIdCollection> dynamic_task_id_collections_;
   bool needs_vector_include_ = false;
-  /// Names of mutable Tensor values declared in each generated C++ block.
+  /// Names of mutable ChipTensor values declared in each generated C++ block.
   /// Tuple-output alias emission must avoid redeclaring names already declared
   /// in the same block, but must not treat outer-block declarations as aliases:
   /// C++ shadowing is valid and sometimes required to avoid rebinding an outer
-  /// loop-carried Tensor too early.
+  /// loop-carried ChipTensor too early.
   std::vector<std::unordered_set<std::string>> mutable_tensor_name_scopes_{{}};
   /// Manual-scope cross-scope tensor handling (issue #1697). While a
   /// ``pl.manual_scope`` block body is being buffered, EmitBatchedAllocTensors
@@ -4092,7 +4092,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int scope_hoist_indent_level_ = 0;
   std::set<std::string>* manual_local_names_ = nullptr;
   std::set<std::string>* enclosing_manual_local_names_ = nullptr;
-  /// Emit names of loop carries whose ``Tensor carry = init;`` decl was hoisted
+  /// Emit names of loop carries whose ``ChipTensor carry = init;`` decl was hoisted
   /// out of a manual-scope body (issue #1713). Such a carry is mutable in an
   /// *enclosing* C++ frame, so ``IsMutableTensorNameInCurrentScope`` (which only
   /// scans the back frame) does not see it. The Var-RHS collapse uses this set to
@@ -4244,7 +4244,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << GenerateConfigFunction(expected_arg_count);
 
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(const L2TaskArgs& orch_args) {\n";
+  oss << "void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {\n";
 
   // Selective vs. full tensor dump is no longer requested from the orch body.
   // simpler#953 removed the ``enable_dump_tensor_selective()`` toggle: the

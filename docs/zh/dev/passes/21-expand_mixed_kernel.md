@@ -22,7 +22,7 @@
 ### 手写 Group 的共享参数 ABI
 
 一次运行时 `MixedKernels` 提交会创建一个协同调度的 AIC/AIV task，其中所有
-active lane 共用同一份 `L0TaskArgs` payload。因此，两个已编译 kernel wrapper
+active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 kernel wrapper
 必须按完全相同的 tensors-first 参数布局解包。由 mixed-kernel 拆分器生成的 Group
 天然满足这一约束，因为两个成员调用都会转发完整的 Group 签名。
 

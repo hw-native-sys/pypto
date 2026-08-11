@@ -497,9 +497,9 @@ class TestDistributedCodegen:
         # Two torch.zeros().share_memory_() calls
         assert code.count("torch.zeros(") == 2
         assert code.count(".share_memory_()") == 2
-        # Parameter tensors still use make_tensor_arg(tensors[...])
-        assert 'make_tensor_arg(tensors["a' in code
-        assert 'make_tensor_arg(tensors["b' in code
+        # Plain host tensors use the worker-aware address-free wire helper.
+        assert 'make_tensor_arg(orch._worker, tensors["a' in code
+        assert 'make_tensor_arg(orch._worker, tensors["b' in code
 
     def test_host_orch_create_tensor_hoisted_to_alloc_intermediates(self):
         """HOST-orch tensor.create lifts to _alloc_intermediates(tensors).
@@ -693,7 +693,7 @@ class TestSubWorkerSourceGeneration:
         source = _emit_sub_worker_module(verify_fn)
         param_name = verify_fn.params[0].name_hint
         assert f"def _user_verify({param_name}):" in source
-        assert f"{param_name} = _tensor_from_continuous(args.tensor(0))" in source
+        assert f"{param_name} = _tensor_from_continuous(args[0])" in source
         assert f"_user_verify({param_name})" in source
 
     def test_sub_worker_source_imports_torch(self):

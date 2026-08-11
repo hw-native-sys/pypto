@@ -2,14 +2,16 @@
 
 PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
-toggle maps 1:1 to a field on Simpler's `CallConfig` and to the matching
-pytest flag in `tests/st/conftest.py`, so the two surfaces stay aligned.
+toggle maps to a field on Simpler's `CallConfig` and to the matching pytest
+flag in `tests/st/conftest.py`. PyPTO retains the public
+`enable_l2_swimlane` spelling for compatibility while mapping it to Simpler's
+renamed `enable_chip_swimlane` member.
 
 ## Flag matrix
 
 | `RunConfig` field | pytest flag | `CallConfig` member | Artefact under `dfx_outputs/` | Post-run converter |
 | ----------------- | ----------- | ------------------- | ----------------------------- | ------------------ |
-| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_l2_swimlane` | `l2_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
+| `enable_l2_swimlane: bool` | `--enable-l2-swimlane` | `enable_chip_swimlane` | `chip_swimlane_records.json` | `swimlane_converter` → `merged_swimlane_*.json` |
 | `enable_dump_args: int` | `--dump-args [LEVEL]` (bare = `1`) | `enable_dump_args` (`0` off, `1` partial, `2` full) | `args_dump/{args_dump.json,bin}` | `dump_viewer` (manual) |
 | `enable_pmu: int` | `--enable-pmu [N]` (bare = `2`) | `enable_pmu` (`0` off, `>0` event type) | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_viewer` (manual) |
@@ -87,7 +89,7 @@ transparently:
    (lanes degrade to anonymous `task(rXtY)`).
 2. **Timing pass** — swimlane (plus any other timing-sensitive DFX such as PMU /
    args-dump / scope-stats), dep_gen forced off, producing the clean
-   `l2_swimlane_records.json` whose timing is reported. Runs in-process.
+   `chip_swimlane_records.json` whose timing is reported. Runs in-process.
 
 Both passes write into the same `dfx_outputs/`, so `swimlane_converter`
 auto-joins the sibling `deps.json` with the records. Adding `--enable-dep-gen`
@@ -127,7 +129,7 @@ run(
     MyProgram, a, b, c,
     config=RunConfig(
         platform="a2a3sim",
-        enable_l2_swimlane=True,     # produces l2_swimlane_records.json
+        enable_l2_swimlane=True,     # produces chip_swimlane_records.json
         enable_dep_gen=True,         # produces deps.json (render with deps_viewer on demand)
         enable_pmu=4,                # PMU event = MEMORY
     ),
