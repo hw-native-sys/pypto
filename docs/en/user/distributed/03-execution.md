@@ -24,7 +24,7 @@ directly via `DistributedWorker(compiled)`, importable from
 
 | Method | Description |
 | ------ | ----------- |
-| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
 | `rt(x, y, z)` | Single dispatch — coerces args, calls host_orch. |
 | `rt.run(compiled, x, y, z)` | Multi-program dispatch — selects the target program. |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | Allocate a worker-resident `DeviceTensor`. `init` copies from host (one-time H2D). |
@@ -49,6 +49,10 @@ directly via `DistributedWorker(compiled)`, importable from
   retained windows are zeroed between requests (a correctness-vs-overhead
   trade-off). See `docs/en/dev/06-persistent-l3.md`.
 - **`extra_compiled`** — see "Several Programs on One Worker" below.
+- **`startup_timeout_s`** — optionally overrides Simpler's positive finite
+  startup-readiness deadline for the forked worker hierarchy. Leave it as
+  `None` to keep Simpler's default; increase it for legitimately slow cold
+  starts rather than disabling the bound.
 
 ## DeviceTensor
 

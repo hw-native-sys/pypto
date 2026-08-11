@@ -401,6 +401,7 @@ class DistributedCompiledProgram:
         reset_persistent_windows: bool | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+        startup_timeout_s: float | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
@@ -455,6 +456,9 @@ class DistributedCompiledProgram:
                 raises ``ValueError``. In multi-program mode the callbacks apply
                 to every prepared program.
             sub_worker_overrides: Deprecated alias for ``callbacks``.
+            startup_timeout_s: Optional positive finite bound, in seconds, for
+                the forked worker hierarchy to report startup readiness. ``None``
+                keeps Simpler's default timeout.
 
         Returns:
             A :class:`DistributedWorker`; use it as a context manager or call
@@ -469,6 +473,7 @@ class DistributedCompiledProgram:
             reset_persistent_windows=reset_persistent_windows,
             callbacks=callbacks,
             sub_worker_overrides=sub_worker_overrides,
+            startup_timeout_s=startup_timeout_s,
         )
 
     @staticmethod

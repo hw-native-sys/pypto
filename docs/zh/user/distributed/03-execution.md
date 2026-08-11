@@ -24,7 +24,7 @@ with compiled.prepare() as rt:
 
 | 方法 | 描述 |
 | ---- | ---- |
-| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None, startup_timeout_s=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
 | `rt(x, y, z)` | 单次分发——转换参数，调用 host_orch。 |
 | `rt.run(compiled, x, y, z)` | 多程序分发——选择目标程序。 |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | 分配 worker 常驻的 `DeviceTensor`。`init` 从 host 拷贝（一次性 H2D）。 |
@@ -47,6 +47,9 @@ with compiled.prepare() as rt:
   搭配使用，后者决定保留的 window 是否在两次请求之间清零（正确性与
   开销的权衡）。见 `docs/en/dev/06-persistent-l3.md`。
 - **`extra_compiled`**——见下方"在同一个 worker 上运行多个程序"。
+- **`startup_timeout_s`**——可选地覆盖 Simpler 对 fork worker 层级报告
+  启动就绪状态所设置的正有限秒数期限。保持为 `None` 时使用 Simpler
+  默认值；对于确实较慢的冷启动，应增大该期限，而不是取消期限约束。
 
 ## DeviceTensor
 

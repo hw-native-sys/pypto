@@ -946,6 +946,29 @@ class TestWorkerConstruction:
             enable_sdma=True,
         )
 
+    def test_forwards_startup_timeout_to_simpler_worker(self, monkeypatch):
+        worker_cls = MagicMock(name="simpler.Worker")
+        monkeypatch.setitem(sys.modules, "simpler.worker", SimpleNamespace(Worker=worker_cls))
+        dc = DistributedConfig(device_ids=[0, 1])
+
+        _construct_worker(
+            dc,
+            "a2a3",
+            "tensormap_and_ringbuffer",
+            3,
+            startup_timeout_s=1800.0,
+        )
+
+        assert worker_cls.call_args.kwargs["startup_timeout_s"] == 1800.0
+
+    def test_distributed_worker_forwards_startup_timeout(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        rt = DistributedWorker(compiled, startup_timeout_s=1800.0)
+
+        assert patched_setup["construct"].call_args.kwargs["startup_timeout_s"] == 1800.0
+        rt.close()
+
     def test_failure_preserves_primary_error_when_cleanup_retry_fails(self, patched_setup, caplog):
         worker = patched_setup["worker"]
         worker.init.side_effect = RuntimeError("init failed")
@@ -1325,6 +1348,14 @@ class TestMultiProgram:
             DistributedCompiledProgram.prepare(primary, persistent=True)
         assert fake_worker.call_args.kwargs["persistent"] is True
         assert fake_worker.call_args.kwargs["reset_persistent_windows"] is None
+
+    def test_prepare_forwards_startup_timeout(self):
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        primary = _fake_compiled([_param("a", [4])], [])
+        with patch("pypto.runtime.distributed_runner.DistributedWorker") as fake_worker:
+            DistributedCompiledProgram.prepare(primary, startup_timeout_s=1800.0)
+        assert fake_worker.call_args.kwargs["startup_timeout_s"] == 1800.0
 
     def test_empty_sequence_raises(self, patched_setup):
         with pytest.raises(ValueError, match="at least one compiled program"):

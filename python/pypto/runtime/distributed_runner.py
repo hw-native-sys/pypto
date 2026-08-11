@@ -319,20 +319,24 @@ def _construct_worker(
     runtime_name: str,
     num_sub: int,
     enable_sdma: bool = False,
+    startup_timeout_s: float | None = None,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
     from simpler.worker import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
         Worker,
     )
 
-    return Worker(
-        level=3,
-        device_ids=dc.device_ids,
-        num_sub_workers=num_sub,
-        platform=platform,
-        runtime=runtime_name,
-        enable_sdma=enable_sdma,
-    )
+    worker_config: dict[str, Any] = {
+        "level": 3,
+        "device_ids": dc.device_ids,
+        "num_sub_workers": num_sub,
+        "platform": platform,
+        "runtime": runtime_name,
+        "enable_sdma": enable_sdma,
+    }
+    if startup_timeout_s is not None:
+        worker_config["startup_timeout_s"] = startup_timeout_s
+    return Worker(**worker_config)
 
 
 def _close_local_worker(w: Any) -> None:
@@ -1268,6 +1272,7 @@ class DistributedWorker(Worker):
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor] | None = None,
+        startup_timeout_s: float | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
@@ -1390,6 +1395,7 @@ class DistributedWorker(Worker):
                 runtime_name,
                 num_sub,
                 enable_sdma=enable_sdma,
+                startup_timeout_s=startup_timeout_s,
             )
             self._validate_persistent_runtime_hooks()
             for prog, chip_callables, sub_worker_fns in loaded:
