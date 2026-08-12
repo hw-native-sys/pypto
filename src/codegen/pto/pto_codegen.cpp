@@ -2048,15 +2048,6 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {
         BindVarToMlir(op->var_, fs_.current_result_buf);
       }
-      // Register per-variable tile_buf type from the variable's own TileType.
-      // This ensures that even when multiple variables share a MemRef, each
-      // variable's SSA value carries its correct typed annotation.
-      if (result_tile_type && !fs_.current_result_buf.empty() && fs_.current_result_buf == result_buf) {
-        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
-        if (!var_type_str.empty()) {
-          fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;
-        }
-      }
       fs_.current_result_var.reset();
       fs_.current_result_buf.clear();
       fs_.current_result_tile_type = nullptr;
