@@ -444,7 +444,15 @@ runs:
         # composition (wrong venv, lost PATH order), and it is worth catching at
         # second ten rather than as a compile error at minute ten.
         ( source activate.sh
-          command -v python3.10 g++-15 ccache uv >/dev/null
+          # One name per iteration. `command -v a b c` returns 0 when ANY name
+          # resolves and non-zero only when they all fail, so the multi-name
+          # form this replaces asserted almost nothing — it passed on a bundle
+          # with no uv in it at all, since python3.10 alone satisfied it.
+          for tool in python3.10 g++-15 ccache uv; do
+            command -v "$tool" >/dev/null && continue
+            echo "::error::$tool is not on PATH after sourcing activate.sh"
+            exit 1
+          done
           python3.10 -c 'import sys; assert sys.version_info[:2]==(3,10)'
           gxx_version=$(g++-15 -dumpversion)
           gxx_major=${gxx_version%%.*}
