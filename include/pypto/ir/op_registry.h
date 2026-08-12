@@ -506,6 +506,42 @@ class OpRegistryEntry {
   /// should be classified from its memory spec.
   [[nodiscard]] std::optional<core_affinity::CoreAffinity> GetCoreAffinity() const { return core_affinity_; }
 
+  /// Mark an operation that MUST NOT RUN ON A SECOND CORE: replicating the call
+  /// onto another lane changes what the program means. The canonical case is
+  /// `pld.system.notify`, which publishes a cross-rank signal — a copy on the
+  /// cube lane can release the peer before the vector lane's TPUT has landed
+  /// the data that signal covers, so the peer reads stale bytes. (The
+  /// atomic-add form additionally double-counts, but non-idempotence is not
+  /// what the flag encodes: a `NotifyOp::kSet` fires the same race.)
+  ///
+  /// This axis says nothing about WHICH core the op runs on — placement stays
+  /// entirely with set_core_affinity(). The two are orthogonal: an op may be
+  /// core-agnostic (no declared affinity, hence SHARED) and still be
+  /// no-duplicate, which is exactly the combination that makes the flag
+  /// necessary — ExpandMixedKernel replicates SHARED statements onto both the
+  /// AIC and the AIV lane, and an affinity declaration cannot express "runs on
+  /// either core, but only one of them" without making a false claim about the
+  /// ISA. Ops that are pinned to one lane by set_core_affinity() need no flag:
+  /// they are never duplicated in the first place.
+  ///
+  /// The consumer is LowerAutoVectorSplit's `pl.split_aiv` region placement
+  /// stamp: it pins exactly the no-duplicate calls inside a region to the AIV
+  /// lane, so they are not copied onto the cube lane by ExpandMixedKernel. No
+  /// verifier rejects anything on this axis — see the "NOT CHECKED,
+  /// DELIBERATELY" note in verify_aiv_split.cpp.
+  ///
+  /// Do NOT use it for an op whose presence on the cube lane is load-bearing:
+  /// pinning `pld.system.wait` to AIV would let the matmul race past the peer
+  /// data it blocks on.
+  inline OpRegistryEntry& set_no_duplicate() {
+    no_duplicate_ = true;
+    return *this;
+  }
+
+  /// True when duplicating this op onto a second core would change program
+  /// meaning (see set_no_duplicate()). False for the vast majority of ops.
+  [[nodiscard]] bool IsNoDuplicate() const { return no_duplicate_; }
+
   /// Declare the cross-core role of this op. Used for registry-driven predicates
   /// (IsTPop, IsInitializePipe, ...) so passes do not have to string-compare
   /// on specific op names.
@@ -571,8 +607,9 @@ class OpRegistryEntry {
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
-  bool internal_only_{false};                                    ///< True for compiler-created ops only.
-  std::optional<std::string> template_dir_;                      ///< Package resource for builtin templates.
+  bool no_duplicate_{false};   ///< True when the op must not run on a second core (set_no_duplicate)
+  bool internal_only_{false};  ///< True for compiler-created ops only.
+  std::optional<std::string> template_dir_;  ///< Package resource for builtin templates.
 };
 
 /**

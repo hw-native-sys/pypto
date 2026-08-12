@@ -21,25 +21,17 @@ reaches `ExpandMixedKernel` (pass 21) or codegen.
 
 ## Why this pass exists
 
-A mixed `InCore` function written with `pl.split` describes cube and vector
-work in one body, with the split intent expressed only by the function-level
-`split` mode. Two ways to realize that split were possible:
-
-1. **Late, per-op halving in `SplitVectorKernel`** — after `ExpandMixedKernel`
-   has already separated the body into AIC + AIV functions with cross-core
-   `tpush`/`tpop`, halve the AIV body op-by-op. This duplicated the boundary
-   semantics already encoded by `tile.aiv_shard` / `tile.aic_gather`.
-2. **Early, explicit lowering (this pass)** — rewrite the AUTO `pl.split`
-   body into the same explicit `split_aiv` shape a hand-authored kernel uses,
-   *before* `ExpandMixedKernel`. Then the single op-driven boundary arm in
-   `ExpandMixedKernel` folds `tile.aiv_shard` / `tile.aic_gather` into
-   split-stamped `tpush`/`tpop` uniformly — auto and hand-written kernels take
-   the identical downstream path.
-
-Approach 2 is the live path. It is byte-identical to the old per-op halving
-(proved during the staged convergence) because both call the same
-`split_axis::ProcessStmts` machinery; only the entry point and the boundary
-handling differ.
+A mixed `InCore` function written with `pl.split` describes cube and vector work
+in one body, with the split intent expressed only by the function-level `split`
+mode. Rather than halve the AIV body op-by-op *after* `ExpandMixedKernel` has
+already split it (the old `SplitVectorKernel` path, which duplicated the boundary
+semantics `tile.aiv_shard` / `tile.aic_gather` already encode), this pass
+rewrites the AUTO body into the same explicit `split_aiv` shape a hand-authored
+kernel uses, *before* that split. `ExpandMixedKernel`'s single op-driven boundary
+arm then folds shard/gather into split-stamped `tpush`/`tpop` for auto and
+hand-written kernels alike — one downstream path. The result is byte-identical to
+the old halving (proved during the staged convergence): both call the same
+`split_axis::ProcessStmts` machinery, and only the entry point differs.
 
 ## API
 
@@ -77,40 +69,109 @@ A function is rewritten iff **all** of:
   uses for `is_mixed`.
 
 Everything else is passed through unchanged. The last condition matters: a
-**pure-vector** `pl.split` function (e.g. an elementwise op split across the two
-AIV lanes, with no cube and no C↔V boundary) has nothing to converge. It is left
-untouched, so `ExpandMixedKernel` converts it to a plain AIV function and strips
-its `split` attr exactly as before — preserving its prior (un-split) behavior.
-Were it lowered here, it would carry `split_aiv` without a `split` mode after
-that strip, and `SplitVectorKernel` would reject it.
+**pure-vector** `pl.split` function (an elementwise op split across the two AIV
+lanes, with no cube and no C↔V boundary) has nothing to converge, so it is left
+untouched and `ExpandMixedKernel` converts it to a plain AIV function and strips
+its `split` attr exactly as before. Were it lowered here, it would carry
+`split_aiv` without a `split` mode after that strip, and `SplitVectorKernel` would
+reject it.
 
 ## Explicit `SplitAivScopeStmt` region path
 
-In addition to the AUTO whole-function path above, an `InCore` function whose
-body still carries one or more `SplitAivScopeStmt` regions takes a separate
-**region path** (`LowerExplicitRegionFunction`), checked **before** the AUTO
-path. Each region carries its own `split_` mode, so this handles the multi-mode
-case the single function-level mode cannot. Region-local `tile_vars` /
-`var_replacements` maps keep a halved var from leaking into a sibling region or
-an out-of-region full-width op. Statements **outside** any region are emitted
-full-width. After all regions are lowered, the scope wrappers are dropped and the
-function is stamped `split_aiv` + `split_aiv_region_validated` (the latter signals
+In addition to the AUTO whole-function path above, an `InCore` function whose body
+still carries one or more `SplitAivScopeStmt` regions takes a separate **region
+path** (`LowerExplicitRegionFunction`), checked **before** the AUTO path. Each
+region carries its own `split_` mode, so this handles the multi-mode case the
+single function-level mode cannot. Region-local `tile_vars` / `var_replacements`
+maps keep a halved var from leaking into a sibling region or an out-of-region op;
+statements **outside** any region are emitted full-width. After all regions are
+lowered, the wrappers are dropped and the function is stamped `split_aiv` +
+`split_aiv_region_validated` (the latter signals
 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) to skip its single-func-mode
 transpose check — this pass validates each region's transpose hazard with the
 correct per-region split axis instead).
 
+### The out-of-region contract (manual mode)
+
+"Emitted full-width" describes what this pass *does* with an out-of-region
+statement, not what an author may *write* there. A function that opens **at
+least one** region opts into **manual mode**, where the regions are
+authoritative for vector placement, and the [`AivSplitValid`](99-verifier.md)
+verifier enforces that division long before this pass runs:
+
+| op / value | inside a region | outside every region |
+| ---------- | --------------- | -------------------- |
+| vector compute | AIV | **rejected** — check (e) |
+| `tile.load` / `tile.store` | AIV | allowed (compiler-materialised) |
+| cube compute | **rejected** — check (a) | AIC |
+| `aiv_shard` / `aic_gather` | the boundary | **rejected** — check (c) |
+| no-duplicate op (`pld.system.notify`) | pinned to the AIV lane | duplicated onto both lanes (**not** diagnosed) |
+
+So outside a region this pass sees only cube work, the `tile.load` /
+`tile.store` pairs `ConvertTensorToTileOps` hoists out of the region holding the
+compute they feed, and core-agnostic scalar / control-flow statements. Full-width
+vector compute is **not** among them: to keep a phase at full width, wrap it in
+`for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):`. The multi-mode goal is
+therefore *regions only, one per vector phase*; a function with **no** region is
+untouched by manual mode. Verifier checks (f)/(g) add that a tile crossing a region
+edge must name the crossing with a boundary op, so an implicit cube↔vector crossing
+never reaches this pass either.
+
+The last row is **documented, not enforced**: an out-of-region comm op is
+duplicated with no diagnostic (see the "NOT CHECKED, DELIBERATELY" note in
+`verify_aiv_split.cpp`), and the stamp below does not make a region mean "exactly
+once" — the AIV function carries `dual_aiv_dispatch`, so sharding a once-only side
+effect across the two AIV sub-lanes is the author's job, as is the lane rule for a
+`None`-region V→C crossing ([Scopes and Placement](../../user/language/04-scopes.md)).
+
+### Carrying region placement past the erasure (`core_placement`)
+
+Erasing the wrappers loses the only record of *where the author put a statement*,
+and [`ExpandMixedKernel`](21-expand_mixed_kernel.md) — which runs next — duplicates
+every `SHARED` statement onto **both** lanes. A core-agnostic op in a region
+(`pld.system.notify`: TNOTIFY declares no core affinity) would therefore also land
+on the cube lane, where it can publish the signal before the vector lane's TPUT has
+landed the data that signal releases.
+
+So before splicing a region body out, this pass stamps
+`attrs["core_placement"] = "aiv"` on the calls it is about to orphan;
+`ClassifyCallAffinity` reads it as the **placement authority** and resolves them
+to `VECTOR`. The attr asserts a placement, so it is written exactly where the
+region is what *decides* one:
+
+| intrinsic affinity of the call | stamped? | why |
+| ------------------------------ | -------- | --- |
+| `SHARED` **and** marked `set_no_duplicate()` (`pld.system.notify`) | **yes** | only the region places it, `SHARED` is what pass 21 duplicates, and duplication is wrong for it |
+| `SHARED` but *not* marked (`pld.system.wait`, other core-agnostic ops) | no | pinning REMOVES it from the cube lane. For a blocking op that is a miscompile — the matmul would race past the peer data the wait exists to block on |
+| `VECTOR` (ordinary vector compute) | no | already the AIV lane, by its own memory spec |
+| a **stated** lane (`tile.create`, `system.syncall(core_type=…)`) | no | placed by its own declaration, which a region does not outrank |
+| `MIXED` (`aiv_shard` / `aic_gather`, C/V-crossing `tile.move`) | no | these *are* the transfer — tpush on one lane, tpop on the other |
+| `CUBE` | no | rejected in a region by check (a); the override declines it |
+
+A mixed comm kernel therefore gains exactly one attr, on the notify. The stamp
+buys precisely one thing — the op is not copied onto the **cube** lane; it says
+nothing about how many AIV sub-lanes run it. The walk descends into `for` / `if`
+/ `while` / `seq`, is idempotent (nested regions do not double-stamp), and runs
+on each region arm's **final** statements, after the halving machinery has
+finished rewriting calls.
+
+**Lifetime: this pass → pass 21, no further.** `ExpandMixedKernel` strips the
+attr once consumed — `Call::attrs_` is a reflection `UsualField` and the printer
+serialises attrs open-world, so an un-stripped stamp would surface in every later
+pass dump, round-trip and `assert_structural_equal`, describing a region that no
+longer exists. Same lifecycle as `pipeline_stages`
+([`LowerPipelineLoops`](28-lower_pipeline_loops.md) →
+[`CanonicalizeIOOrder`](29-canonicalize_io_order.md)).
+
 A function-level AUTO split (`optimizations=[pl.split(mode)]`, `SplitMode.NONE`
-included) and explicit `pl.split_aiv` regions are **mutually exclusive** — a
-scope carrying both is rejected. To pin a custom cross-core slot count on a
-region-carrying scope, use `optimizations=[pl.cross_core_slot(slot_num=N)]`,
-which sizes the pipe without annotating a split. This is enforced earlier, at
+included) and explicit `pl.split_aiv` regions are **mutually exclusive**; use
+`optimizations=[pl.cross_core_slot(slot_num=N)]` to size the pipe on a
+region-carrying scope without annotating a split. Enforced earlier, at
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md), where the scope's own
-`split_` (the user's `pl.split`) and its regions are both still visible; the
-combination is rejected there because this region path would otherwise lower per
-region and silently drop the function-level split. (Post-outline the two merge
-indistinguishably: a *single* `pl.split_aiv` region legitimately derives a
-function-level representative `split` mode, so the conflict cannot be detected
-here.)
+`split_` and its regions are both still visible — otherwise this path would
+lower per region and silently drop the function-level split. (Post-outline the
+two merge indistinguishably: a *single* region legitimately derives a
+function-level representative `split` mode.)
 
 Three region body shapes are handled, selected by the region's `split_` mode:
 
@@ -136,14 +197,18 @@ Three region body shapes are handled, selected by the region's `split_` mode:
   `aiv_id` lane index (e.g. an `aiv_id`-strided loop). The region path **splices
   the body through unchanged** (no halving, no offset localization, no injected
   `subblock_idx`; the author's `aiv_id = get_subblock_idx()` binding already
-  carries the lane). A `tile.aiv_shard` / `tile.aic_gather` inside a `None` region
-  is rejected (nothing to shard without a split axis) — both by the `AivSplitValid`
-  verifier and by an always-on guard here. The function is still stamped
+  carries the lane). A `tile.aiv_shard` / `tile.aic_gather` here is **accepted** and
+  spliced through with the rest: without a split axis it crosses the AIC/AIV
+  boundary without splitting, and its `split=0` deduction preserves the shape, so
+  there is nothing to halve or re-join. `ValidateMixedExplicitRegion` is skipped for
+  this mode — it rejects a body mixing half-width boundary ops with full-width
+  vector ops, and here everything is full width. The function is still stamped
   `split_aiv`, so downstream [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
   `SplitVectorKernel` dispatch it to **both** AIV lanes (via `dual_aiv_dispatch`)
   and **not** the lane-0-only no-split replay (which is only for non-`split_aiv`
-  kernels) — so both lanes run the full body. Use this when the region's tiles
-  cannot be halved (unit dims) or a reduction must stay full-width.
+  kernels) — so both lanes run the full body, and a V→C crossing out of such a
+  region resolves lane-0-wins by hardware rather than by a synthesized replay. Use
+  this when the region's tiles cannot be halved or a reduction must stay full-width.
 
 ### What may appear inside an explicit-boundary region
 
@@ -159,15 +224,13 @@ any of the following holds:
 | A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
 | An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row` — whose **read address** references the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the read-offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2, `tile.gather_row` arg 3 = `src_offset`) — a lane reference in a `shape`, a `valid_shape`, or a *destination* slot does not move the window, so it does not admit. |
 
-`tile.gather_row` is the DMA case: it is DPS, so it carries **two** offsets, and
-only `src_offset` decides whether the two lanes do different work. A lane-derived
-`src_offset` means each lane pulls its own scattered GM rows (admitted); a
-lane-derived `dst_offset` over a lane-invariant `src_offset` means both lanes
-fetch the *same* rows into different slots of a full-width accumulator (still
-reported). See "Per-lane scattered gather" below.
+`tile.gather_row` is the DMA case: being DPS it carries **two** offsets, and only
+`src_offset` decides whether the lanes do different work — a lane-derived
+`src_offset` means each lane pulls its own scattered GM rows (admitted), while a
+lane-derived `dst_offset` over a lane-invariant `src_offset` means both lanes fetch
+the *same* rows into different slots of a full-width accumulator (still reported).
 
-Anything else that classifies `VECTOR` is reported. Two consequences worth
-knowing:
+Anything else that classifies `VECTOR` is reported. Two consequences:
 
 - A generator is accepted for **itself only** — it does not join the half-width
   dataflow. `z = pl.full([FULL, N]); y = pl.add(z, z)` still rejects on `y`,
@@ -178,21 +241,21 @@ knowing:
   tile into the region.
 
 The guard proves *intent*, not *extent*: a load at a lane-strided offset but a
-full-width extent is accepted, and the two lanes then read overlapping windows.
-That is the same trust already extended to `tile.store`, whose lane-dependent
-offset the pass never checks.
+full-width extent is accepted, and the two lanes then read overlapping windows —
+the same trust already extended to `tile.store`, whose lane-dependent offset the
+pass never checks.
 
 Because the region is built via the generic `BeginScope`/`EndScope` and is
 non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an
-`if`; the region path recurses into compound statements to find and lower every
-region while preserving the surrounding control flow.
+`if`; the region path recurses into compound statements to lower every region while
+preserving the surrounding control flow.
 
 ### Per-lane scattered gather
 
-`pl.gather_row` is the only op that reads GM at an arbitrary **runtime** offset,
-so it is how a paged/top-k row set is sharded across the two AIV lanes — each
-lane assembles half of the tile in UB and `pl.aic_gather` hands the reassembled
-tile to the cube:
+`pl.gather_row` is the only op that reads GM at an arbitrary **runtime** offset, so
+it is how a paged/top-k row set is sharded across the two AIV lanes: each lane
+assembles half the tile in UB and `pl.aic_gather` hands the reassembled tile to the
+cube.
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
@@ -208,22 +271,22 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve
 
 Two authoring rules make this work:
 
-- **Write the accumulator at the half extent.** `pl.full` is a generator, so it is
-  accepted at whatever extent you give it and never joins the half-width dataflow
-  on its own. The gather is admitted on its lane-derived `src_offset`; the guard
-  proves *intent*, not *extent*, so a full-extent accumulator here would be
-  gathered back to `2 x FULL` and mismatch downstream.
+- **Write the accumulator at the half extent.** `pl.full` is a generator, accepted
+  at whatever extent you give it and never joining the half-width dataflow on its
+  own. The gather is admitted on its lane-derived `src_offset`, and the guard proves
+  *intent*, not *extent* — so a full-extent accumulator would be gathered back to
+  `2 x FULL` and mismatch downstream.
 - **Size the cross-core ring.** The V2C ring reserves `slot_size x slot_num` bytes
-  of the consuming core's memory (L1 for V2C, UB for C2V), where `slot_size` is
-  the **full** tile the consumer pops — `128 x 512 x 2 = 131072` here — and
-  `slot_num` defaults to **8** for a one-way pipe. That is 1 MB of a 512 KB L1, so
-  the default depth cannot express this shape; `pl.cross_core_slot(slot_num=N)`
-  lowers it. A kernel that pushes once per invocation needs no more than 2. If you
-  omit it, `AllocateMemoryAddr` reports the overflow and names the reserved bytes.
+  of the consuming core's memory (L1 for V2C, UB for C2V), where `slot_size` is the
+  **full** tile the consumer pops (`128 x 512 x 2 = 131072` here) and `slot_num`
+  defaults to **8** — 1 MB of a 512 KB L1, so the default depth cannot express this
+  shape. `pl.cross_core_slot(slot_num=N)` lowers it; a kernel that pushes once per
+  invocation needs no more than 2. Omit it and `AllocateMemoryAddr` reports the
+  overflow, naming the reserved bytes.
 
-Note that `pl.aiv_shard` is **not** an alternative to the half-extent `pl.full`
-here: it is the C→V transfer and requires an `Acc` (cube-produced) operand, so it
-cannot shard a value the vector lane produced itself.
+`pl.aiv_shard` is **not** an alternative to the half-extent `pl.full` here: it is
+the C→V transfer and requires an `Acc` (cube-produced) operand, so it cannot shard
+a value the vector lane produced itself.
 
 ### Regions must be scope-free
 
@@ -234,11 +297,11 @@ region must therefore already be scope-free when this pass runs — normally
 guaranteed by [`OutlineIncoreScopes`](08-outline_incore_scopes.md) (pass 8), which
 lifts the enclosing `InCore` scope into its own function.
 
-That guarantee has a hole, so the pass enforces it rather than assuming it. Pass 7
+That guarantee has a hole, so the pass enforces it rather than assuming it: pass 7
 only outlines scopes out of `Opaque` / `Orchestration` functions, while the parser
-wraps a top-level `for aiv_id in pl.split_aiv(...)` in an `InCore` scope
-regardless of the enclosing function's type. Declaring the function
-`pl.FunctionType.InCore` directly therefore delivers a scope-wrapped region here:
+wraps a top-level `for aiv_id in pl.split_aiv(...)` in an `InCore` scope whatever
+the enclosing function's type. Declaring the function `pl.FunctionType.InCore`
+directly therefore delivers a scope-wrapped region here:
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)   # pass 8 skips this function
@@ -292,8 +355,7 @@ as an internal assertion in PTO codegen (`SplitAivScopeStmt reached PTO codegen`
        The deduced HALF type already carries the consuming-lane memory
        (Vec): the split deducer leaves memory_space null and
        OpRegistry::Create fills it from tile.aiv_shard's set_output_memory
-       declaration, so this path and the explicit pl.aiv_shard form read
-       one declaration. Seed the result var into tile_vars (its half
+       declaration, shared with the explicit form. Seed it into tile_vars (its half
        extent) and record the old->new var rebind. The cube source (the
        matmul / Acc result) stays FULL.
      VECTOR_TO_CUBE — insert
@@ -342,10 +404,10 @@ remain unchanged.
 
 Only **vector** work is halved; cube work stays full. Affinity is decided by
 `core_affinity::ClassifyCallAffinity` (memory-space driven): an op producing or
-consuming a `Vec` tile is `VECTOR`; matmul operands and the Acc/Mat cube result
-are `CUBE`. The C→V boundary `tile.aiv_shard` is the seam: the FULL cube tile is
-its input, the HALF vector tile is its output. `CheckNoCubeTileHalved` is the
-backstop — if a cube operand were ever shrunk, it fires.
+consuming a `Vec` tile is `VECTOR`; matmul operands and the Acc/Mat cube result are
+`CUBE`. The C→V boundary `tile.aiv_shard` is the seam — FULL cube tile in, HALF
+vector tile out. `CheckNoCubeTileHalved` is the backstop if a cube operand is ever
+shrunk.
 
 ## Example — cube→vector boundary, vector region halved (UpDown)
 
@@ -446,10 +508,9 @@ Pass LowerAutoVectorSplit();
 - `WithSplitAivAttrs` — stamps `split` + `split_aiv`.
 
 **Shared machinery**: `src/ir/transforms/utils/split_axis_utils.cpp`
-(`ProcessStmts`, `InjectSubblockIdx`, `SplitDimension`, `IsReduceOnSplitAxis`)
-— the per-op vector halving, shared with `SplitVectorKernel`'s standalone-split
-arm (`ProcessStandaloneSplitFunction`) and the `AivSplitValid` verifier
-(`SplitDimension` / `IsReduceOnSplitAxis`).
+(`ProcessStmts`, `InjectSubblockIdx`, `SplitDimension`, `IsReduceOnSplitAxis`) —
+the per-op vector halving, shared with `SplitVectorKernel`'s
+`ProcessStandaloneSplitFunction` and the `AivSplitValid` verifier.
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -457,10 +518,9 @@ arm (`ProcessStandaloneSplitFunction`) and the `AivSplitValid` verifier
 passes.def("lower_auto_vector_split", &pass::LowerAutoVectorSplit, ...);
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_lower_auto_vector_split.py` and the
+**Tests**: `tests/ut/ir/transforms/test_lower_auto_vector_split.py`, plus the
 end-to-end `pl.split` golden scenarios in
-`tests/st/codegen/torch/test_torch_codegen_cross_core.py`
-(`test_lower_auto_vector_split_golden`).
+`tests/st/codegen/torch/test_torch_codegen_cross_core.py`.
 
 ## Related
 

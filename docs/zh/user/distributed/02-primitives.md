@@ -68,6 +68,20 @@ def handshake_step(
 > `wait` 使用 `Ge` 且 `expected=1`，对端的 `tag` **必须 >= 1**。传入 `tag=0`
 > 会导致永久挂起。
 
+### 混合 cube+vector kernel 中的 `notify`
+
+上面的内容都默认一条 notify 只执行一次。在把 `pl.matmul` 与通信算子混写的 kernel
+中，这一点并不会自动成立，而且**不会有任何诊断**：
+
+- **写在 `pl.split_aiv` 区域之外**时，notify 没有声明所属的核，编译器会把它同时发射到
+  cube 通路*和* vector 通路上。把通信阶段放进区域，编译器就会让它们远离 cube 通路。
+- **写在 `mode=NONE` 区域之内**时，区域体会在**两条 AIV sub-lane 上都运行**，因此除非
+  你按 `aiv_id` 对它分片、或把它限定到某一条 lane，notify 仍然会触发两次。
+
+这两条规则、它们所避免的错误，以及「限定到 lane 0」这种写法所附带的定序义务，都写在
+[作用域 → pl.split_aiv](../language/04-scopes.md)。在把 notify 写到 cube 计算旁边之前，
+请先阅读该文档。
+
 ### 选择 NotifyOp 和 WaitCmp
 
 | 场景 | NotifyOp | WaitCmp | 原因 |

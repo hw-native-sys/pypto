@@ -81,6 +81,23 @@ def handshake_step(
 > The `wait` uses `Ge` with `expected=1`, which means the peer's `tag`
 > **must be >= 1**. Passing `tag=0` will cause a permanent hang.
 
+### `notify` in a mixed cube+vector kernel
+
+Everything above assumes one notify runs once. In a kernel that mixes
+`pl.matmul` with comm ops, that is not automatic, and **nothing diagnoses it**:
+
+- **Outside a `pl.split_aiv` region**, the notify has no declared core, so the
+  compiler emits it on the cube lane *and* the vector lane. Put comm phases
+  inside a region and the compiler keeps them off the cube lane.
+- **Inside a `mode=NONE` region**, the body runs on **both AIV sub-lanes**, so a
+  notify still fires twice unless you shard it by `aiv_id` or guard it to one
+  lane.
+
+Both rules, the failure they prevent, and the ordering obligation the guarded
+form carries are in
+[Scopes → pl.split_aiv](../language/04-scopes.md). Read that before writing a
+notify next to cube work.
+
 ### Choosing NotifyOp and WaitCmp
 
 | Scenario | NotifyOp | WaitCmp | Why |

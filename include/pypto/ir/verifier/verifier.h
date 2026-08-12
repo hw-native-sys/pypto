@@ -157,9 +157,11 @@ PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
  *
  * Structural verifier for the first-class ``SplitAivScopeStmt`` region (live
  * between OutlineIncoreScopes and LowerAutoVectorSplit). Keyed on the node, it
- * checks, per region: (a) no cube compute inside a region (each AIV lane holds
- * only half the tile, so cube ops cannot be vector-split); (b) no AIV reduce
- * over the split axis inside a region (partial per-lane reduction); (c) the
+ * checks, per region: (a) no cube compute inside ANY region — a data-parallel
+ * region cannot vector-split it (each AIV lane holds only half the tile) and
+ * every region, task-parallel included, *is* the AIV lane's body; (b) no AIV
+ * reduce over the split axis inside a *data-parallel* region (partial per-lane
+ * reduction; a ``mode=NONE`` region has no split axis to collapse); (c) the
  * ``tile.aiv_shard`` / ``tile.aic_gather`` boundary ops appear only inside a
  * region, and never inside a task-parallel ``mode=NONE`` one; (d) the boundary
  * memory contract — ``tile.aiv_shard`` is ``Acc -> Vec`` and
@@ -168,9 +170,20 @@ PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
  * consuming one. Each memory side of (d) is skipped until its space is
  * resolved, which is why ConvertTensorToTileOps and InferTileMemorySpace
  * re-produce this property (see pass_properties.h) — at OutlineIncoreScopes the
- * boundary is still the space-less ``tensor.*`` form. Full-width vector compute
- * outside a region is legal (multi-mode), so "bare vector compute outside a
- * region" is intentionally not checked.
+ * boundary is still the space-less ``tensor.*`` form.
+ *
+ * One further check is gated on a whole-function fact rather than on the node
+ * (MANUAL MODE): (e) in a function that opens at least one region, the regions
+ * are authoritative for vector placement, so a VECTOR-affine op *outside* every
+ * region is rejected — ``tile.load`` / ``tile.store`` are carved out because
+ * ConvertTensorToTileOps materializes them out of region by construction, as is
+ * an op whose lane is *stated* rather than inferred.
+ *
+ * Lane-sharding of once-only side effects (``pld.system.notify``) is
+ * deliberately NOT checked here — see the "NOT CHECKED, DELIBERATELY" note in
+ * verify_aiv_split.cpp: a region cannot mean "exactly once" while the AIV body
+ * runs on both sub-lanes, and the correct and incorrect authoring forms are
+ * structurally identical IR. The rule is documented for authors instead.
  * @return Shared pointer to AivSplitValid PropertyVerifier
  */
 PropertyVerifierPtr CreateAivSplitValidPropertyVerifier();

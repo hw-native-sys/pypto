@@ -115,6 +115,165 @@ physical cluster, producing a `Group` function.
 belongs to mixed-kernel programming — AIC and AIV cooperating inside one function — which
 the tutorials chapter covers end to end.
 
+`mode=` picks how the two lanes divide the work:
+
+| `mode=` | Each lane gets |
+| ------- | -------------- |
+| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | Half of every tile (rows / cols) — data-parallel |
+| `pl.SplitMode.NONE` | The **full** body; you dispatch disjoint work via `aiv_id` — task-parallel |
+
+**Opening one region changes the rules for the whole function.** The regions then own
+every placement decision for vector work, so vector compute has to live inside a region:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+        ...                                    # phase 1 — per-lane work via aiv_id
+    pl.system.syncall(core_type="mix")         # barrier: outside, runs on both
+    mm = pl.matmul(q, k)                       # cube work: outside, runs on AIC
+    for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+        out = pl.add(pl.aiv_shard(mm), bias)   # phase 2 — full-width vector work
+```
+
+One region per vector phase. `mode=NONE` is the wrapper for a phase you do **not** want
+halved: both lanes run the full body, which is what un-regioned vector code did anyway, so
+wrapping it changes the text and not the execution. Cube ops and barriers stay outside.
+
+`mm` is cube-produced and read on the vector lane, so it crosses the AIC/AIV boundary —
+`pl.aiv_shard` is what says so. The next section explains why that is required.
+
+A function with **no** `pl.split_aiv` at all is unaffected — write it exactly as before.
+
+### Name every tile that crosses a region edge
+
+**Once a function opens a region, a tile crossing a region edge must say so.** The
+boundary between the two cores is yours to place in manual mode, so the compiler stops
+choosing it for you:
+
+| Direction | Where it is written | Op |
+| --------- | ------------------- | -- |
+| Cube value read on the vector lane (C->V) | at the top of the region | `pl.aiv_shard(x)` |
+| Vector value read on the cube lane (V->C) | inside the region, before the read | `pl.aic_gather(x)` |
+
+```python
+mm = pl.matmul(q, k)                        # cube, outside every region
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    v = pl.exp(pl.aiv_shard(mm))            # C->V: named
+    kv = pl.aic_gather(v)                   # V->C: named
+out = pl.matmul(kv, w)                      # cube again, outside
+```
+
+Drop either call and the crossing still *works* — the compiler emits the same transfer
+either way — but it is then a boundary nobody chose, in a program whose whole point is
+that you chose it. So it is rejected instead; the diagnostic names the value and the op
+that reads it.
+
+**In a `mode=NONE` region both ops cross without splitting.** There is no split axis to
+halve or re-join, so the shape passes through unchanged — `pl.aiv_shard` of a `[128, 128]`
+tile is a `[128, 128]` tile. Only in `UP_DOWN` / `LEFT_RIGHT` do they also halve (shard)
+and re-join (gather).
+
+**Only gather a value both AIV lanes agree on.** The hardware requires both sub-lanes to
+take part in a no-split handshake, and they share one destination slot with no per-lane
+offset. Nothing arbitrates between them: both lanes push, so if they hold *different*
+values the cube receives an **unspecified** one of the two. Not lane 0's — unspecified.
+
+There is no way to select a lane here. Guarding the *production* of the value does not
+help: lane 1 still reaches the push and still sends whatever its tile holds. So a
+`pl.aic_gather` out of a `mode=NONE` region is well-defined only when the value is
+lane-uniform — computed identically on both lanes, or made identical before the gather. If
+the lanes must contribute different data to the cube, this construct cannot express it;
+route it through GM and order it yourself, or use a data-parallel (`UP_DOWN` /
+`LEFT_RIGHT`) region, where each lane owns a declared half and the gather re-joins them.
+
+The compiler does not check any of this.
+
+**GM traffic is not covered by any of this.** These rules are about *tile* values crossing
+a region edge. A GM tensor belongs to no lane, so no boundary op can express a crossing
+through one — `pld.tensor.put` takes a GM tensor by signature. AIC and AIV run
+asynchronously, so ordering a cube-lane write against a vector-lane read of the same GM
+buffer stays yours: put a `pl.system.syncall(core_type="mix")` between the phases.
+
+### Put cross-rank comm ops in a region
+
+A region also decides placement for ops that have no lane of their own.
+`pld.system.notify` is core-agnostic — the hardware runs TNOTIFY on either core —
+so in a kernel that mixes cube and vector work the compiler emits it on **both**
+the AIC and the AIV lane. Wrap the comm phase in a region and it is pinned to the
+vector lane instead:
+
+```python
+for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    pld.tensor.put(dst=win, peer=peer, src=out,
+                   dst_offsets=[0, 0], src_offsets=[0, 0], shape=[16, 256])
+    pld.system.notify(target=sig, peer=peer, offsets=[0, 0], value=1,
+                      op=pld.NotifyOp.AtomicAdd)
+```
+
+The cube copy is the dangerous one: the AIC lane can reach the notify before the
+AIV lane's put has landed the data, publishing a signal for bytes that are not
+there yet. A region removes it.
+
+### Shard once-only side effects across the two AIV lanes
+
+**A `mode=NONE` region body runs on BOTH AIV sub-lanes.** That is the whole point
+of the mode — the region is not "one lane", it is two lanes running the same
+code, and you dispatch the disjoint work with the loop's `aiv_id`. The snippet
+above is therefore still incomplete: it fires *one* notify per lane, i.e. **two**
+notifies for the same peer.
+
+An op whose side effect must happen once per logical occurrence — a
+`pld.system.notify` above all — must be either **sharded by `aiv_id`** or
+**guarded to one lane**:
+
+```python
+# sharded: each lane takes a different set of peers
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    for owner in pl.range(aiv_id, NUM_PEERS, 2):
+        pld.system.notify(target=sig, peer=owner, offsets=[0, 0], value=1,
+                          op=pld.NotifyOp.AtomicAdd)
+
+# guarded: lane 0 does it, lane 1 skips
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    if aiv_id == 0:
+        pld.system.notify(target=sig, peer=peer, offsets=[0, 0], value=1,
+                          op=pld.NotifyOp.AtomicAdd)
+```
+
+**The guarded form carries an ordering obligation the sharded one does not.**
+The two AIV lanes run asynchronously — nothing orders lane 0 against lane 1. So
+a lane-0-guarded notify may publish *before* lane 1's writes have landed, and
+the peer then reads data that is still in flight. It is safe only when the data
+the signal releases was written by lane 0 itself. If lane 1 contributes any of
+it, order the two lanes explicitly before the notify, or prefer the sharded form
+— there each lane releases only what it wrote, so the question does not arise.
+
+**What goes wrong without it.** `NotifyOp.AtomicAdd` accumulates into the peer's
+slot. Two lanes notifying the *same* peer make that rank's counter read `2` when
+one rank has arrived. A `pld.system.wait` waiting for two arrivals is released by
+one — so that rank runs ahead and reads a buffer whose data has not landed. The
+symptom is wrong numbers on one rank, intermittently, at multi-rank runtime; it
+does not reproduce on one rank and it does not look like a synchronisation bug.
+
+### What the compiler does and does not do here
+
+| Behaviour | What it means |
+| --------- | ------------- |
+| **Does** | Keeps a region's comm ops off the **cube** lane. Outside a region they are duplicated onto the AIC lane as well. |
+| **Does not** | Check the lane-sharding. A notify that both AIV lanes run against the same peer compiles cleanly and **is not diagnosed**. |
+
+The compiler cannot diagnose it: the correct form and the wrong form produce the
+same single statement in the AIV function, differing only in whether `aiv_id`
+reached the call's arguments. Getting this right is the author's job.
+
+### Cross-lane ordering is yours too
+
+AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
+is what the transfer is — but nothing orders a cube-lane write against a vector-lane read
+of the same **GM buffer**. Put a `pl.system.syncall(core_type="mix")` between those two
+phases. A region places work on a lane; it does not sequence the two lanes against each
+other.
+
 ## Edge Cases
 
 > **Fatal pitfall:** `pl.spmd` is an assertion, not a request. You are telling the compiler
@@ -126,6 +285,13 @@ the tutorials chapter covers end to end.
 | **`with pl.spmd(n):` body rejected** | It neither reads the block index nor dispatches a kernel | Read `pl.tile.get_block_idx()`, or call a kernel |
 | **`optimizations=` rejected** | Built up in a variable — the parser reads the AST | Write the list inline at the call site |
 | **Printed IR cannot be reparsed** | A device-size query was bound to a name before use | Write the call inline where it is used |
+| **`vector op '...' sits outside every pl.split_aiv region`** | The function opens a region, so the regions own vector placement | Wrap that phase in `for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):` |
+| **`cube op '...' inside a pl.split_aiv region`** | A region body is AIV work | Move the `pl.matmul` out of the region |
+| **`'x' is produced on the CUBE lane ... reads it on the VECTOR lane inside one`** | An unnamed C->V crossing into a region | Read it as `pl.aiv_shard(x)` at the top of the region |
+| **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | An unnamed V->C crossing out of a region | Gather it inside the region: `x = pl.aic_gather(x)` |
+| **The cube reads one lane's value at random** | A V->C crossing out of a `mode=NONE` region — both lanes push, one shared slot, no arbitration, **not diagnosed** | Gather only a lane-uniform value; use a data-parallel region if the lanes hold different halves |
+| **A peer's signal counter reads twice what it should** | Both AIV lanes ran the same `pld.system.notify` — **not diagnosed** | Shard the notify by `aiv_id`, or guard it with `if aiv_id == 0:` |
+| **A rank reads stale data after its `pld.system.wait` returns** | Either the double-notify above, or a missing `pl.system.syncall(core_type="mix")` between the cube and vector phases | Shard the notify; add the barrier |
 
 ## See Also
 

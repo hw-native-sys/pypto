@@ -78,6 +78,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -201,6 +202,17 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // pld.tensor.put - synchronous cross-rank bulk write into a peer rank's slice
 // ============================================================================
+//
+// Core placement: VECTOR. pto-isa TPUT streams GM -> UB -> remote GM through a
+// VEC staging tile, and ptoas hard-enforces it (verifyCommStagingTileLike
+// requires AddressSpace::VEC), so the op can only execute on the vector core.
+// The tile-level form would also land on VECTOR incidentally, via
+// ClassifyCallAffinity's first-tile-argument rule finding that Vec staging
+// tile; declaring the affinity makes the ISA constraint explicit rather than a
+// side effect of operand inspection. The tensor-level form has no tile operand
+// at all and would otherwise classify SHARED — and it is still live when
+// ClassifyCallAffinity runs before ConvertTensorToTileOps materializes the
+// staging tile.
 
 REGISTER_OP("pld.tensor.put")
     .set_description(
@@ -229,6 +241,7 @@ REGISTER_OP("pld.tensor.put")
     .set_attr<int>("chunk_rows")
     .set_attr<int>("chunk_cols")
     .set_attr<bool>("pipeline")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     .f_deduce_type(DeducePutType);
 
@@ -257,6 +270,7 @@ REGISTER_OP("pld.tile.put")
         "Optional per-dim offsets (MakeTuple) into the local src; present only in the subregion form")
     .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
     .set_attr<int>("atomic")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     .f_deduce_type(DeducePutTileType);
 

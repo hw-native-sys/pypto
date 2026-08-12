@@ -67,8 +67,10 @@ becomes ``pl.tile.aiv_shard(cube_seed, split=<mode>)``.
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+from pypto import backend as _backend
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile_ops as T
+from pypto.runtime import RunConfig
 
 MS = ir.MemorySpace
 FP32 = DataType.FP32
@@ -1227,15 +1229,44 @@ def _get_subblock(var, span):
     return ir.AssignStmt(var, T.get_subblock_idx(span=span), span)
 
 
-def _shard_vec(tile, split, half_shape, span):
-    """A C->V boundary ``tile.aiv_shard`` returning a HALF *Vec* tile.
+def _notify(span, sig, peer, notify_op=0):
+    """A ``pld.system.notify`` Call — a core-agnostic (SHARED) comm op.
 
-    ``tile.aiv_shard`` declares Vec as its result memory (the consuming vector
-    lane), and ``OpRegistry::Create`` fills that onto the space-less deduced half
-    type — so the pass itself attaches nothing. This helper still has to state Vec
-    explicitly only because it builds the ``ir.Call`` directly, bypassing Create.
+    SHARED is what ExpandMixedKernel duplicates onto both lanes, so this is the
+    op whose placement the region stamp exists to decide.
     """
-    return ir.Call(ir.get_op("tile.aiv_shard"), [tile], {"split": split}, _tile(half_shape, MS.Vec), span)
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    value = ir.ConstInt(1, DataType.INT32, span)
+    return ir.create_op_call("pld.system.notify", [sig, peer, offsets, value], {"op": notify_op}, span)
+
+
+def _placements(program, op_name):
+    """The ``core_placement`` attr of every call to ``op_name``, in body order.
+
+    ``None`` for an unstamped call, so a list like ``["aiv", None]`` states both
+    which calls the region placed and which it left alone.
+    """
+    found = []
+
+    def walk(node):
+        if node is None:
+            return
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == op_name:
+            found.append(node.attrs.get("core_placement"))
+        if isinstance(node, ir.SeqStmts):
+            for stmt in node.stmts:
+                walk(stmt)
+            return
+        if isinstance(node, ir.AssignStmt):
+            walk(node.value)
+        if isinstance(node, ir.EvalStmt):
+            walk(node.expr)
+        walk(getattr(node, "body", None))
+
+    for func in program.functions.values():
+        walk(func.body)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -1414,35 +1445,61 @@ def test_none_region_keeps_tiles_full_and_binds_aiv_id():
     ir.assert_structural_equal(_lower(program), expected)
 
 
-def test_none_region_rejects_aiv_shard():
-    """A boundary op (tile.aiv_shard) inside a NONE region is rejected: a
-    task-parallel region has no split axis to shard. NEGATIVE — no After IR.
-    (The always-on lowering CHECK fires even with verification disabled.)"""
+def _none_region_gather_stmts(span, data):
+    """``aiv_id`` + a Vec load + an explicit ``tile.aic_gather(split=0)``.
+
+    The V->C crossing spelled out in a task-parallel region: split=0 says "cross
+    the boundary, do not split", so the gathered type keeps the FULL [128, 128]
+    shape instead of doubling it. Returns ``(stmts, gather_var)``.
+    """
+    aiv_id_call = T.get_subblock_idx(span=span)
+    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
+    load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    t = ir.Var("t", load.type, span)
+    gather = T.aic_gather(t, split=int(ir.SplitMode.NONE.value), span=span)
+    g = ir.Var("g", gather.type, span)
+    stmts: list[ir.Stmt] = [
+        ir.AssignStmt(aiv_id, aiv_id_call, span),
+        ir.AssignStmt(t, load, span),
+        ir.AssignStmt(g, gather, span),
+    ]
+    return stmts, g
+
+
+def test_none_region_admits_explicit_boundary_unchanged():
+    """A boundary op inside a NONE region is ACCEPTED and passed through verbatim.
+
+    Without a split axis the op keeps the one meaning that still applies — this
+    value crosses the AIC/AIV boundary — and its split=0 deduction preserves the
+    shape, so there is nothing for this pass to halve, re-join or re-localize.
+    The scope wrapper is dropped and the body is spliced in unchanged, exactly as
+    for a boundary-free NONE region; ExpandMixedKernel then folds the op into the
+    split=0 tpush/tpop pair (see the end-to-end test at the bottom of this file).
+    """
     span = ir.Span.unknown()
     data = ir.Var("data", _tensor([128, 128]), span)
     out_0 = ir.Var("out_0", _tensor([128, 128]), span)
-    aiv_id_call = T.get_subblock_idx(span=span)
-    aiv_id = ir.Var("aiv_id", aiv_id_call.type, span)
-    cube = ir.Var("cube", _tile([128, 128], mem=MS.Mat), span)
-    cube_load = T.load(data, [0, 0], [128, 128], target_memory=MS.Mat, span=span)
-    shard = _shard_vec(cube, 1, [64, 128], span)
-    sh = ir.Var("sh", shard.type, span)
-    body = ir.SeqStmts(
-        [
-            ir.AssignStmt(aiv_id, aiv_id_call, span),
-            ir.AssignStmt(cube, cube_load, span),
-            ir.AssignStmt(sh, shard, span),
-        ],
-        span,
-    )
-    region = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
+    stmts, g = _none_region_gather_stmts(span, data)
+    region = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=ir.SeqStmts(stmts, span), span=span)
     program = _explicit_region_program(
-        [region, ir.ReturnStmt([sh], span)],
+        [region, ir.ReturnStmt([g], span)],
         [(data, _IN), (out_0, _OUT)],
-        [sh.type],
+        [g.type],
     )
-    with pytest.raises(ValueError, match="must not contain tile.aiv_shard"):
-        _lower(program)
+
+    e_data = ir.Var("data", _tensor([128, 128]), span)
+    e_out = ir.Var("out_0", _tensor([128, 128]), span)
+    e_stmts, e_g = _none_region_gather_stmts(span, e_data)
+    expected = _expected_region_program(
+        [*e_stmts, ir.ReturnStmt([e_g], span)],
+        [(e_data, _IN), (e_out, _OUT)],
+        [e_g.type],
+    )
+    ir.assert_structural_equal(_lower(program), expected)
+    # The gathered tile is FULL, not doubled: the crossing is not a split.
+    g_type = g.type
+    assert isinstance(g_type, ir.TileType)
+    assert g_type.shape == [128, 128]
 
 
 def test_region_injects_subblock_idx():
@@ -2428,6 +2485,314 @@ def test_outlined_region_still_lowers_and_stamps():
     assert dict(incore[0].attrs) == _REGION_ATTRS, (
         f"expected exactly {_REGION_ATTRS}, got {dict(incore[0].attrs)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Region placement stamp (``attrs["core_placement"] = "aiv"``)
+#
+# The pass ERASES the SplitAivScopeStmt wrapper, so ExpandMixedKernel — which
+# runs next and duplicates every SHARED statement onto both lanes — would
+# otherwise have no way to tell that the author placed a statement on the vector
+# lane. The stamp is that carrier.
+#
+# It is written only on calls whose lane the region DECIDES: a call that states
+# its own lane (``tile.get_subblock_idx`` declares SHARED by policy) or whose
+# memory spec already fixes one (any vector op is VECTOR; the aiv_shard /
+# aic_gather boundary is MIXED because it genuinely runs on both lanes) is
+# placed without it. So a comm op is stamped and the compute around it is not —
+# which is what the ``[..., None]`` expectations below pin.
+#
+# All three region arms are covered (task-parallel splice, explicit-boundary
+# splice, data-parallel halving), plus nesting inside a loop, plus the
+# out-of-region negative.
+# ---------------------------------------------------------------------------
+
+
+def _notify_region_program(span, mode, *, in_region, nest_in_loop=False):
+    """matmul (cube, always out-of-region) + a region holding a vector load,
+    with the notify placed either inside the region or after it."""
+    a_left = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
+    b_right = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
+    data = ir.Var("data", _tensor([128, 128]), span)
+    sig = ir.Var("sig", ir.DistributedTensorType([4, 4], DataType.INT32), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+
+    matmul = T.matmul(a_left, b_right, span=span)
+    qk = ir.Var("qk", matmul.type, span)
+
+    aiv_id = _sub_var("aiv_id")
+    load = T.load(data, [0, 0], [128, 128], target_memory=MS.Vec, span=span)
+    t = ir.Var("t", load.type, span)
+    store = T.store(t, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+
+    notify_stmt = ir.EvalStmt(_notify(span, sig, peer), span)
+    if nest_in_loop:
+        notify_stmt = ir.ForStmt(
+            ir.Var("i", _IDX, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(2, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [],
+            ir.SeqStmts([notify_stmt], span),
+            [],
+            span,
+        )
+
+    region_stmts: list[ir.Stmt] = [
+        _get_subblock(aiv_id, span),
+        ir.AssignStmt(t, load, span),
+        ir.AssignStmt(out_store, store, span),
+    ]
+    if in_region:
+        region_stmts.append(notify_stmt)
+    region = ir.SplitAivScopeStmt(split=mode, body=ir.SeqStmts(region_stmts, span), span=span)
+
+    top: list[ir.Stmt] = [ir.AssignStmt(qk, matmul, span), region]
+    if not in_region:
+        top.append(notify_stmt)
+    top.append(ir.ReturnStmt([out_store], span))
+    return _explicit_region_program(
+        top,
+        [(a_left, _IN), (b_right, _IN), (data, _IN), (sig, _IN), (peer, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+
+
+_NOTIFY = ir.get_op("pld.system.notify").name
+
+
+def test_none_region_stamps_comm_op_with_aiv_placement():
+    """Task-parallel (NONE) splice arm: the in-region notify is stamped.
+
+    This is the arm the mixed comm kernels use — ``pl.split_aiv(2,
+    mode=pl.SplitMode.NONE)`` runs the full body on both AIV lanes — and the one
+    the user docs tell authors to reach for.
+    """
+    span = ir.Span.unknown()
+    program = _notify_region_program(span, ir.SplitMode.NONE, in_region=True)
+
+    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+
+
+def test_data_parallel_region_stamps_comm_op_with_aiv_placement():
+    """Data-parallel (UP_DOWN) halving arm: the stamp survives the rewriting.
+
+    The halving machinery replaces calls as it localizes offsets and halves
+    shapes, so the stamp is applied to the FINAL statements — a stamp written
+    before the rewrite would mark calls that no longer exist.
+    """
+    span = ir.Span.unknown()
+    program = _notify_region_program(span, ir.SplitMode.UP_DOWN, in_region=True)
+
+    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+
+
+def test_explicit_boundary_region_stamps_comm_op_with_aiv_placement():
+    """Explicit-boundary splice arm: a body the author already half-widthed.
+
+    A user-written ``tile.aiv_shard`` routes the region through the pass-through
+    arm instead of the halving one, and that arm must stamp too — the body is no
+    less region-placed for being pre-halved. The whole body derives from the
+    shard result (the mixed-explicit validator rejects a full-width op here), so
+    this cannot reuse the shared builder above.
+    """
+    span = ir.Span.unknown()
+    a_left = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
+    b_right = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
+    sig = ir.Var("sig", ir.DistributedTensorType([4, 4], DataType.INT32), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
+
+    matmul = T.matmul(a_left, b_right, span=span)
+    qk = ir.Var("qk", matmul.type, span)
+    aiv_id = _sub_var("aiv_id")
+    shard = T.aiv_shard(qk, split=1, span=span)
+    qk_h = ir.Var("qk_h", shard.type, span)
+    sc = T.muls(qk_h, 2.0, span=span)
+    sc_var = ir.Var("sc", sc.type, span)
+    store = T.store(sc_var, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+    region = ir.SplitAivScopeStmt(
+        split=ir.SplitMode.UP_DOWN,
+        body=ir.SeqStmts(
+            [
+                _get_subblock(aiv_id, span),
+                ir.AssignStmt(qk_h, shard, span),
+                ir.AssignStmt(sc_var, sc, span),
+                ir.AssignStmt(out_store, store, span),
+                ir.EvalStmt(_notify(span, sig, peer), span),
+            ],
+            span,
+        ),
+        span=span,
+    )
+    program = _explicit_region_program(
+        [ir.AssignStmt(qk, matmul, span), region, ir.ReturnStmt([out_store], span)],
+        [(a_left, _IN), (b_right, _IN), (sig, _IN), (peer, _IN), (out_0, _OUT)],
+        [out_0.type],
+    )
+
+    after = _lower(program)
+    assert _placements(after, _NOTIFY) == ["aiv"]
+    # The boundary op itself is NOT stamped: it runs on BOTH lanes (tpush on the
+    # cube side, tpop on the vector side), so "aiv" would be false of it.
+    assert _placements(after, ir.get_op("tile.aiv_shard").name) == [None]
+
+
+def test_comm_op_nested_in_loop_inside_region_is_stamped():
+    """The stamp walk descends into compound statements.
+
+    A notify buried in a ForStmt inside the region is as region-placed as one at
+    the region's top level; missing it would silently reintroduce the
+    duplication bug for any loop-carried signal.
+    """
+    span = ir.Span.unknown()
+    program = _notify_region_program(span, ir.SplitMode.NONE, in_region=True, nest_in_loop=True)
+
+    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+
+
+def test_comm_op_outside_region_is_not_stamped():
+    """The negative: an out-of-region notify keeps no placement.
+
+    The region is authoritative only for what it contains. Stamping outside it
+    would claim a placement the author never made.
+    """
+    span = ir.Span.unknown()
+    program = _notify_region_program(span, ir.SplitMode.NONE, in_region=False)
+
+    assert _placements(_lower(program), _NOTIFY) == [None]
+
+
+def test_region_compute_is_not_stamped():
+    """Only calls whose lane the region decides are stamped.
+
+    ``tile.load`` is VECTOR from its own memory spec and
+    ``tile.get_subblock_idx`` declares SHARED by policy (both lanes need the
+    lane index), so neither needs — or gets — a placement. Pins that the stamp
+    is a placement decision rather than a region-membership marker sprayed over
+    the whole body.
+    """
+    span = ir.Span.unknown()
+    after = _lower(_notify_region_program(span, ir.SplitMode.NONE, in_region=True))
+
+    assert _placements(after, ir.get_op("tile.load").name) == [None]
+    assert _placements(after, ir.get_op("tile.store").name) == [None]
+    assert _placements(after, ir.get_op("tile.get_subblock_idx").name) == [None]
+
+
+# ---------------------------------------------------------------------------
+# End to end: an explicit crossing out of a task-parallel (NONE) region.
+#
+# These run the WHOLE pipeline (``pl.jit(...).lower()``), not just this pass,
+# because the fact under test spans three of them: this pass splices the region
+# body through with the boundary op intact, ExpandMixedKernel folds that op into
+# a tpush/tpop pair, and the split=0 stamp has to survive both. Property
+# verification is on for the ride, so these double as the acceptance side of the
+# AivSplitValid crossing checks (whose rejection side lives in
+# ``test_verify_aiv_split.py``).
+# ---------------------------------------------------------------------------
+
+_E2E_M, _E2E_N, _E2E_K = 64, 64, 64
+
+
+def _e2e_kernel_text(fn):
+    """Lower ``fn`` for a2a3 (Ascend910B) and return (aic_body_text, aiv_body_text).
+
+    a2a3 rather than this file's ambient Ascend950 because 910B is the backend
+    where a no-split crossing is dual-AIV dispatched, i.e. where the lane rule in
+    the tests below actually applies. The conftest fixture pins the backend at
+    setup and resets at teardown, so re-selecting it here is local to the test.
+
+    Property verification stays ON — it is half of what these tests assert — but
+    the ambient print->parse roundtrip instrument is dropped. A ``pl.jit`` kernel
+    whose ``pl.at`` body opens a top-level ``pl.split_aiv`` does not survive
+    print->parse today (the parser re-wraps a bare top-level region in an InCore
+    ScopeStmt, so OutlineIncoreScopes' output reparses as InCoreScopeStmt !=
+    SplitAivScopeStmt). That is a pre-existing parser/printer asymmetry, not
+    something the crossing introduces: a region with no crossing at all fails the
+    same way.
+    """
+    _backend.reset_for_testing()
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        program = fn.lower(config=RunConfig(platform="a2a3"))
+
+    def body_of(func_type):
+        matches = [f for f in program.functions.values() if f.func_type == func_type]
+        assert len(matches) == 1, f"expected exactly one {func_type} function, got {len(matches)}"
+        return ir.python_print(matches[0])
+
+    return body_of(ir.FunctionType.AIC), body_of(ir.FunctionType.AIV)
+
+
+def test_e2e_none_region_v2c_crossing_lowers_to_split_zero_transport():
+    """``pl.aic_gather`` in a NONE region becomes a split=0 tpush/tpop pair.
+
+    The vector lane pushes the FULL tile (no halving — there is no split axis)
+    and the cube lane pops the same full tile. ``split=0`` on both ends is what
+    tells the transport this is a no-split crossing.
+
+    LANE RULE (documented, not enforced — docs/en/user/language/04-scopes.md):
+    the ISA requires BOTH AIV sub-lanes to take part in a no-split handshake, and
+    they share one slot with no per-lane offset, so lane 0's push is the one the
+    cube reads. Making lane 1 contribute nothing when the two lanes hold
+    different data is the author's job (guard the divergent work, or gather a
+    value both lanes agree on); the compiler does not synthesize it here.
+    """
+
+    @pl.jit
+    def none_v2c(
+        a: pl.Tensor[[_E2E_M, _E2E_K], pl.FP16],
+        q: pl.Tensor[[_E2E_M, _E2E_K], pl.FP16],
+        out: pl.Out[pl.Tensor[[_E2E_M, _E2E_N], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="none_v2c", allow_early_resolve=True):
+            for aiv in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007 - task-parallel
+                v = pl.aic_gather(pl.exp(a))
+            out[0:_E2E_M, 0:_E2E_N] = pl.matmul(q, v, out_dtype=pl.FP32)
+        return out
+
+    aic, aiv = _e2e_kernel_text(none_v2c)
+    assert "pl.tile.tpush_to_aic(" in aiv and "split=0" in aiv
+    assert "pl.tile.tpop_from_aiv(split=0)" in aic
+    # Full width on both ends: the crossing preserved the shape.
+    assert "pl.Tile[[64, 64], pl.FP16" in aiv
+    assert "pl.Tile[[64, 64], pl.FP16" in aic
+    assert "pl.tile.aic_gather" not in aic and "pl.tile.aic_gather" not in aiv
+
+
+def test_e2e_none_region_c2v_crossing_lowers_to_split_zero_transport():
+    """Mirror of the V->C case: ``pl.aiv_shard`` in a NONE region, cube -> vector.
+
+    ``pl.cross_core_slot`` sizes the c2v ring down; the default 8-slot depth of a
+    full-width FP32 tile does not fit UB, which is a property of the shape rather
+    than of the crossing.
+    """
+
+    @pl.jit
+    def none_c2v(
+        a: pl.Tensor[[_E2E_M, _E2E_K], pl.FP16],
+        b: pl.Tensor[[_E2E_K, _E2E_N], pl.FP16],
+        out: pl.Out[pl.Tensor[[_E2E_M, _E2E_N], pl.FP32]],
+    ):
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            name_hint="none_c2v",
+            allow_early_resolve=True,
+            optimizations=[pl.cross_core_slot(slot_num=2)],
+        ):
+            mm = pl.matmul(a, b, out_dtype=pl.FP32)
+            for aiv in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007 - task-parallel
+                out[0:_E2E_M, 0:_E2E_N] = pl.exp(pl.aiv_shard(mm))
+        return out
+
+    aic, aiv = _e2e_kernel_text(none_c2v)
+    assert "pl.tile.tpush_to_aiv(" in aic and "split=0" in aic
+    assert "pl.tile.tpop_from_aic(split=0)" in aiv
+    assert "pl.Tile[[64, 64], pl.FP32" in aiv
+    assert "pl.tile.aiv_shard" not in aic and "pl.tile.aiv_shard" not in aiv
 
 
 if __name__ == "__main__":

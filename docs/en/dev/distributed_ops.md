@@ -68,6 +68,43 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
   pure control-plane synchronisation with no data operand — so they live in
   `pld.system`.
 
+## Core placement in a mixed kernel
+
+`ExpandMixedKernel` splits a mixed InCore function into an AIC and an AIV
+function using `core_affinity::ClassifyCallAffinity`. Statements that classify
+`SHARED` are **duplicated onto both lanes**, so every distributed op has to be
+explicit about two independent questions: *which* core may run it, and *how many
+times* it may run.
+
+| Op | Affinity | Why |
+| -- | -------- | --- |
+| `pld.tile.put` / `pld.tensor.put`, `pld.tile.get` / `pld.tensor.get` | `VECTOR` (declared) | TPUT/TGET stream GM → UB → remote GM through a VEC staging tile; ptoas enforces it (`verifyCommStagingTileLike` requires `AddressSpace::VEC`). The tile forms would classify VECTOR incidentally via their staging-tile operand; the tensor forms have no tile operand and would otherwise be duplicated onto the cube lane |
+| `pld.tile.remote_store` | derived: VECTOR | Inherits VECTOR from its source tile operand via the first-tile-argument rule |
+| `pld.tile.remote_load` | `SHARED` (**known gap**) | Its tile is the *result*, not an argument, and it declares no memory spec — so both memory rules miss it and it reaches the `SHARED` fallback, which `ExpandMixedKernel` replicates onto both lanes. Benign today: the cube copy produces a `Vec` tile no cube statement consumes, so DCE removes it. Not fixed by declaring VECTOR (a false ISA claim — the destination could be a cube-side buffer) nor by classifying from the result tile: `LowerAutoVectorSplit` treats a VECTOR-affine leaf as "halve this", and the halving path has no rewrite for the op's `offsets` / `shape` tuples. A real fix teaches the halving path about the op |
+| `pld.system.notify` / `pld.system.wait` | `SHARED` (deliberately undeclared) | Their pto-isa implementations are pure scalar/GM (`st_atomic`, `dcci`, `dsb`) and ptoas imposes no core or section constraint — pto-isa's own cube-built `allgather_gemm_compute_kernel.cpp` calls TWAIT. Declaring VECTOR here would be a false claim about the ISA |
+
+`pld.system.notify` additionally carries the registry's `set_no_duplicate()`
+flag — for **both** `NotifyOp` forms. The hazard on the cube lane is not
+double-counting but **premature release from the wrong lane**: the AIC copy can
+publish the signal before the AIV lane's TPUT has landed the data that signal
+releases, so the peer reads stale bytes. A `NotifyOp::kSet` fires that race
+exactly as readily as an atomic-add.
+
+`pld.system.wait` is deliberately left unmarked, and not because TWAIT is
+idempotent: it *blocks*, and its presence on the cube lane is load-bearing —
+pinning it to the vector lane would let the matmul race past the peer data it
+waits on.
+
+The flag is orthogonal to affinity (it constrains replication, not placement).
+Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
+stamp, which pins a region's no-duplicate calls to the AIV lane; see
+`docs/en/dev/ir/05-operators.md` and
+`docs/en/dev/passes/20-lower_auto_vector_split.md`.
+
+**Comm ops written outside every region are still duplicated onto both lanes,
+and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is
+the author's job; see `docs/en/user/language/04-scopes.md`.
+
 ## ABI enums (`include/pypto/ir/comm.h`)
 
 The four enums are an **append-only ABI**. Their underlying `int` values are
@@ -164,8 +201,8 @@ pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])
 Reads a region of the `peer` rank's slice of a window-bound `DistributedTensor`
 into a local tile. Mirrors `tile.load` at the IR level (positional `offsets` /
 `shape` tuples, `TileType` result) but the source is a *remote* slice — the
-address translation is realised at codegen by
-`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view`.
+address translation is realised at codegen by inline peer-offset arithmetic
+over the `CommContext` + `addptr` + `make_tensor_view`.
 
 `valid_shape` is optional. With or without it, type inference intersects the
 requested window with the source tensor's effective valid region and checks
@@ -196,8 +233,8 @@ pld.tensor.remote_store(src, target, peer, offsets, *, atomic: int = 0) -> Unkno
 Writes a local value into a region of the `peer` rank's slice of a window-bound
 `DistributedTensor`. Mirrors `tile.store` at the IR level (positional `offsets`
 tuple, optional `atomic` attr, side-effect-only return) but the destination is a
-*remote* slice — address translation happens at codegen via
-`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view`.
+*remote* slice — address translation happens at codegen via inline peer-offset
+arithmetic over the `CommContext` + `addptr` + `make_tensor_view`.
 
 The two forms differ **only** in the IR level of `src`; `pld.remote_store`
 dispatches on the operand, so user code reads the same at either level.
@@ -566,8 +603,8 @@ arithmetic — are:
 
 | Helper | Role |
 | ------ | ---- |
-| `CommRemoteOffset_<dtype>` | per-dtype MLIR helper (emitted once by `PTOCodegen::EmitCommRemoteOffsetHelpers`) that turns `(ctx, peer)` into the byte offset of the peer's window slice |
-| `EmitCommRemoteView` | emits `CommRemoteOffset + addptr + make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
+| `PTOCodegen::EmitCommRemoteOffsetInline` | emits the `CommContext` reads + byte-to-element division **inline** in the caller's own `func.func`, turning `(ctx, peer)` into the element offset of the peer's window slice. No module-level helper is emitted: a mixed cube+vector group is one MLIR module holding both the AIC and the AIV function, and a helper carrying no `pto.kernel_kind` strands its value-returning `return` outside PTOAS's `__DAV_VEC__` section guard |
+| `EmitCommRemoteView` | emits the inline peer offset + `addptr` + `make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
 | `EmitPartitionViewPTO` | wraps a tensor view in a full-slice `partition_view` with given offsets/sizes (used by every op for both local and peer operands) |
 | `ResolveDistTensorBinding` | resolves a `DistributedTensor` arg to its codegen binding (type + window var) |
 | `AsTensorTypeLike` | kind-trait downcast accepting both `TensorType` and `DistributedTensorType` where a view's element/shape info is read uniformly |

@@ -39,6 +39,37 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `no_argument()` | 无参数（同步操作） | `.no_argument()` |
 | `set_attr<T>(name)` | Kwarg 模式（T: bool, int, DataType 等） | `.set_attr<bool>("a_trans")` |
 | `f_deduce_type(fn)` | 类型推导函数 | `.f_deduce_type(DeduceAddType)` |
+| `set_core_affinity(a)` | 算子在哪个核上执行（**放置**） | `.set_core_affinity(core_affinity::CoreAffinity::VECTOR)` |
+| `set_no_duplicate()` | 算子不得在第二个核上运行（**复制**） | `.set_no_duplicate()` |
+
+**`set_core_affinity` 与 `set_no_duplicate`** —— 两个正交的维度，选错会对 ISA
+做出错误的断言：
+
+- `set_core_affinity(...)` 回答算子在*哪个*核上运行。只有当硬件确实把算子限制在
+  某一侧时才声明。未声明时，`ClassifyCallAffinity` 从调用本身推导放置位置
+  （先看 memory spec，再看第一个 tile 参数的内存空间），最终回退到 `SHARED`。
+- `set_no_duplicate()` 回答算子是否允许在*第二个*核上运行。`ExpandMixedKernel` 会把
+  `SHARED` 语句复制到 AIC 和 AIV 两条通路上；当这份副本会改变程序语义时，标记该算子。
+
+`pld.system.notify` 是典型例子，而其风险在于**从错误的通路上提前释放**，而非不幂等：
+AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放的数据落盘之前就发布信号，
+于是对端 rank 读到过期数据。正因如此该标记是无条件的 —— 尽管只有原子加会重复计数，
+`NotifyOp::kSet` 触发的竞态与原子加完全相同。
+
+兄弟算子 `pld.system.wait` **不标记**，且是有意为之：TWAIT 会*阻塞*，它出现在 cube
+通路上是有实际作用的。把它钉在向量通路上，会让 matmul 越过它本应等待的对端数据。
+请把该标记读作「不得在第二个核上运行」，而不是「不幂等」。
+
+读取该维度的查询是 `IsNoDuplicate()`。它唯一的消费者是 `LowerAutoVectorSplit`
+（pass 20）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
+钉在 AIV 通路上。没有任何 verifier 在这个维度上做拒绝。
+
+被 `set_core_affinity(...)` 固定在单条通路上的算子本来就不会被复制，因此无需该标记。
+这个标记正是为核无关（core-agnostic）的算子准备的 —— 对它们而言，没有任何 affinity
+取值能表达「两个核都能跑，但不能两个核都跑」。请注意这是关于**核**的断言，而不是关于
+总执行次数的断言：在 `dual_aiv_dispatch` 下，AIV 函数体仍然会在两条 AIV sub-lane 上都
+运行，因此把算子挡在 cube 通路之外并不意味着它只执行一次。那一部分属于作者的职责，
+文档见[作用域 → pl.split_aiv](../../user/language/04-scopes.md)。
 
 **类型推导签名：**
 

@@ -607,7 +607,6 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.str("");
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
-  remote_offset_dtypes_.clear();
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
@@ -619,13 +618,6 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
   }
-
-  // Emit `@CommRemoteOffset_<dtype>` helpers at module end. Dtypes were
-  // registered lazily during op lowering via RegisterCommRemoteOffsetHelper
-  // (see EmitCommRemoteView in src/backend/common/pto_ops_common.cpp). MLIR
-  // resolves func.call symbols whole-module, so call sites in user functions
-  // above can forward-reference these helpers without issue.
-  EmitCommRemoteOffsetHelpers();
 
   stream_ << "}\n";
   return stream_.str();
@@ -697,27 +689,19 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
 }
 
 // ========================================================================
-// Distributed N6: CommRemoteOffset helper emission
+// Distributed N6: inline peer-offset (CommContext) arithmetic
 // ========================================================================
 
-std::string PTOCodegen::GetCommRemoteOffsetFuncName(const DataType& dtype) {
-  return "CommRemoteOffset_" + DataTypeToMLIR(dtype);
-}
-
-std::string PTOCodegen::RegisterCommRemoteOffsetHelper(const DataType& dtype) {
+std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, const std::string& peer_ssa,
+                                                   const DataType& dtype) {
   // Sub-byte dtypes (bool / 4-bit) have no whole-byte element stride, so the
-  // byte→element division at the bottom of the helper body is ill-defined.
-  // Fail at the op call site, where the CHECK message still has caller context.
+  // byte→element division at the bottom is ill-defined. Fail here, at the op
+  // call site, where the CHECK message still has caller context.
   const size_t elem_bits = dtype.GetBit();
   CHECK(elem_bits >= 8 && elem_bits % 8 == 0)
       << "Distributed remote ops only support byte-sized element types, got " << dtype.ToString() << " ("
       << elem_bits << " bits)";
-  remote_offset_dtypes_.insert(dtype);
-  return GetCommRemoteOffsetFuncName(dtype);
-}
-
-void PTOCodegen::EmitCommRemoteOffsetHelpers() {
-  if (remote_offset_dtypes_.empty()) return;
+  const int64_t elem_size_bytes = static_cast<int64_t>(elem_bits / 8);
 
   namespace cl = codegen::distributed::comm_layout;
   // CommContext field indices, expressed in u64 slots (one ``pto.load_scalar``
@@ -727,39 +711,43 @@ void PTOCodegen::EmitCommRemoteOffsetHelpers() {
   const int64_t k_rank_idx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
   const int64_t k_win_idx = static_cast<int64_t>(cl::kWindowsInOffset / cl::kWindowSlotStride);
 
-  const std::string body_indent = std::string(4, ' ');
-  for (const DataType& dtype : remote_offset_dtypes_) {
-    // Bit-width validated at registration time (RegisterCommRemoteOffsetHelper),
-    // so the division below is always well-defined.
-    const int64_t elem_size_bytes = static_cast<int64_t>(dtype.GetBit() / 8);
-    const std::string func_name = GetCommRemoteOffsetFuncName(dtype);
+  // Every value below gets a fresh SSA name (constants are deduplicated into
+  // the function's constants section), so a function may hold any number of
+  // remote ops without name collisions.
+  const std::string c_r = GetOrEmitConstant(k_rank_idx, DataType::INDEX);
+  const std::string c_w = GetOrEmitConstant(k_win_idx, DataType::INDEX);
 
-    // ``private`` visibility tells PTOAS to emit the helper with C++
-    // ``static`` linkage — without it AIV mis-lowers the call and the
-    // remote pointer arithmetic silently returns garbage.
-    stream_ << "  func.func private @" << func_name << "(%ctx: !pto.ptr<i64>, %peer: index) -> index {\n";
-    stream_ << body_indent << "%c_r = arith.constant " << k_rank_idx << " : index\n";
-    stream_ << body_indent << "%c_w = arith.constant " << k_win_idx << " : index\n";
-    // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
-    // u64 index k_rank_idx).
-    stream_ << body_indent << "%rk_pair = pto.load_scalar %ctx[%c_r] : !pto.ptr<i64> -> i64\n";
-    stream_ << body_indent << "%rk_i32 = arith.trunci %rk_pair : i64 to i32\n";
-    stream_ << body_indent << "%rk_idx = arith.index_cast %rk_i32 : i32 to index\n";
-    // local_base = windowsIn[rankId]
-    stream_ << body_indent << "%lb_off = arith.addi %c_w, %rk_idx : index\n";
-    stream_ << body_indent << "%lbase = pto.load_scalar %ctx[%lb_off] : !pto.ptr<i64> -> i64\n";
-    // peer_base = windowsIn[peer]
-    stream_ << body_indent << "%pb_off = arith.addi %c_w, %peer : index\n";
-    stream_ << body_indent << "%pbase = pto.load_scalar %ctx[%pb_off] : !pto.ptr<i64> -> i64\n";
-    // delta_bytes = peer_base - local_base; converted to an element offset
-    // because pto.addptr takes element counts, not bytes.
-    stream_ << body_indent << "%dbytes = arith.subi %pbase, %lbase : i64\n";
-    stream_ << body_indent << "%esize = arith.constant " << elem_size_bytes << " : i64\n";
-    stream_ << body_indent << "%delems_i = arith.divsi %dbytes, %esize : i64\n";
-    stream_ << body_indent << "%delems = arith.index_cast %delems_i : i64 to index\n";
-    stream_ << body_indent << "return %delems : index\n";
-    stream_ << "  }\n";
-  }
+  // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
+  // u64 index k_rank_idx).
+  const std::string rk_pair = NewTemp();
+  Emit(rk_pair + " = pto.load_scalar " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
+  const std::string rk_i32 = NewTemp();
+  Emit(rk_i32 + " = arith.trunci " + rk_pair + " : i64 to i32");
+  const std::string rk_idx = NewTemp();
+  Emit(rk_idx + " = arith.index_cast " + rk_i32 + " : i32 to index");
+
+  // local_base = windowsIn[rankId]
+  const std::string lb_off = NewTemp();
+  Emit(lb_off + " = arith.addi " + c_w + ", " + rk_idx + " : index");
+  const std::string lbase = NewTemp();
+  Emit(lbase + " = pto.load_scalar " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
+
+  // peer_base = windowsIn[peer]
+  const std::string pb_off = NewTemp();
+  Emit(pb_off + " = arith.addi " + c_w + ", " + peer_ssa + " : index");
+  const std::string pbase = NewTemp();
+  Emit(pbase + " = pto.load_scalar " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
+
+  // delta_bytes = peer_base - local_base; converted to an element offset
+  // because pto.addptr takes element counts, not bytes.
+  const std::string dbytes = NewTemp();
+  Emit(dbytes + " = arith.subi " + pbase + ", " + lbase + " : i64");
+  const std::string esize = GetOrEmitConstant(elem_size_bytes, DataType::INT64);
+  const std::string delems_i = NewTemp();
+  Emit(delems_i + " = arith.divsi " + dbytes + ", " + esize + " : i64");
+  const std::string delems = NewTemp();
+  Emit(delems + " = arith.index_cast " + delems_i + " : i64 to index");
+  return delems;
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {

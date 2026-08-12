@@ -132,7 +132,7 @@ def notify(
     """Cross-rank notify: deposit ``value`` at the peer rank's slot of ``target``.
 
     Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
-    ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + TNOTIFY`` at
+    inline peer-offset arithmetic + ``addptr`` + ``make_tensor_view`` + ``TNOTIFY`` at
     codegen.
 
     ``target`` / ``peer`` / ``offsets`` / ``value`` are positional-or-keyword

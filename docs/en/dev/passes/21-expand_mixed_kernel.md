@@ -308,8 +308,42 @@ Phase 4 — Normalize hand-written mixed Group ABIs:
 | MIXED | `tile.move` crossing cube↔vector memory | Leaf cross-side move — also recorded in the `boundary_moves` map (see below) |
 | CUBE or VECTOR | `tile.move` (same-side) | By source tile's `memory_space` |
 | VECTOR | All other `tile.*` ops (`tile.add`, `tile.exp`, `tile.sub`, etc.) | Always VECTOR (op name) |
+| VECTOR | `pld.tile.put`, `pld.tile.get`, `pld.tensor.put`, `pld.tensor.get` | Declared `set_core_affinity(VECTOR)` — TPUT/TGET stream through a VEC staging tile, which ptoas enforces |
 | SHARED | Non-tile ops, function calls, control flow, scalar ops | — |
+| SHARED | `pld.system.notify`, `pld.system.wait` | Core-agnostic by ISA (pure scalar/GM), so no affinity is declared. `notify` additionally declares `set_no_duplicate()` (both `NotifyOp` forms) — a cube-lane copy can release the peer before the vector lane's TPUT has landed the data. `wait` does not: it *blocks*, and its cube-lane copy is load-bearing |
 | MIXED | Compound statements containing both CUBE and VECTOR children | — |
+| VECTOR | **any call stamped `attrs["core_placement"] = "aiv"`** | Region placement — outranks every rule above. See below |
+
+**Region placement outranks inference.** `SHARED` is no longer duplicated onto
+both lanes unconditionally. A statement the author wrote inside a `pl.split_aiv`
+region carries `attrs["core_placement"] = "aiv"` — stamped by
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) just before it erases the
+region wrapper, which documents what is stamped and why — and
+`ClassifyCallAffinity` resolves such a call to `VECTOR`, so it lands on the AIV
+lane only. This is what stops a `pld.system.notify` (core-agnostic, hence
+`SHARED`) from also landing on the cube lane, where it could publish the signal
+before the vector lane's TPUT has landed the data that signal releases.
+
+Nothing rejects an *unplaced* one: a comm op outside every region is duplicated
+onto both lanes with no diagnostic. Nor does the stamp make it run once — the
+AIV function this pass emits carries `dual_aiv_dispatch`, so its body runs on
+both AIV sub-lanes, and sharding a once-only side effect across them is the
+author's job ([Scopes and Placement](../../user/language/04-scopes.md)).
+
+The override is total, and refuses in three cases — each because the region is
+not what decides that call's lane:
+
+| intrinsic affinity | result | why |
+| ------------------ | ------ | --- |
+| a **stated** lane (`set_core_affinity`, or a `core_type` kwarg) | unchanged | `tile.create` is `SHARED` by policy so both lanes can declare the buffer; `system.syncall(core_type="mix")` rendezvouses both cores. A declaration outranks placement |
+| `MIXED` | unchanged | `aiv_shard` / `aic_gather` and a C/V-crossing `tile.move` *are* the transfer — forcing them to `VECTOR` would leave the tpush without its tpop |
+| `CUBE` | unchanged | cube work in a region is an authoring error that check (a) reports; declining leaves it on the cube lane as before, rather than newly miscompiling it onto the vector lane when verification is off |
+
+Pass 20 only stamps calls outside all three, so in compiler-produced IR the
+carve-outs never fire; they are total because the attr is ordinary IR that
+survives a print → parse round-trip. Once the affinity roll-up has read it, this
+pass **strips** the attr from every function it emits — including ones it merely
+retyped or passed through — so it never reaches a later pass or a printed dump.
 
 **CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual. Boundary leaf moves are tagged `MIXED` for affinity purposes and are also recorded in a separate `boundary_moves` map; the cross-core direction (Cube→Vector vs Vector→Cube) is recovered via `ClassifyMoveDirection` at the call sites that need it (`CollectCVBoundaryMoves`, `BuildCoreBody`).
 

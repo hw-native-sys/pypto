@@ -329,5 +329,182 @@ def test_aic_gather_folds_into_vector_to_cube_boundary():
     _assert_no_free_var(after)
 
 
+# ---------------------------------------------------------------------------
+# Region placement: core_placement="aiv" keeps a comm op off the cube lane
+#
+# A mixed kernel is split into an AIC and an AIV function, and a statement whose
+# affinity is SHARED is copied onto BOTH. ``pld.system.notify`` is SHARED — its
+# TNOTIFY is core-agnostic by ISA, so declaring a core affinity for it would be
+# a false claim — and its atomic-add form is NOT idempotent, so the copy makes
+# the waiting rank observe the signal twice.
+#
+# ``pl.split_aiv`` is how the author says "this runs on the vector lane".
+# LowerAutoVectorSplit erases the region node, so it leaves the placement behind
+# as ``attrs["core_placement"] = "aiv"`` on the calls whose lane the region
+# decides, and ClassifyCallAffinity resolves that to VECTOR. These tests pin the
+# consuming end: the stamp, and only the stamp, is what keeps the notify off the
+# cube lane. The pass ALSO strips the stamp once it has consumed it, so it never
+# reaches a downstream pass or a printed dump.
+# ---------------------------------------------------------------------------
+
+_PLACEMENT_ATTRS = {"core_placement": "aiv"}
+
+
+def _notify_call(span, sig, peer, *, placed: bool) -> ir.Call:
+    """A ``pld.system.notify`` (AtomicAdd), optionally region-placed on AIV.
+
+    ``placed=False`` is the identical call without the stamp, so a pair of these
+    isolates the stamp as the only difference between the two programs.
+    """
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    value = ir.ConstInt(1, DataType.INT32, span)
+    call = ir.create_op_call("pld.system.notify", [sig, peer, offsets, value], {"op": 0}, span)
+    if not placed:
+        return call
+    return ir.Call(call.op, call.args, call.kwargs, _PLACEMENT_ATTRS, call.type, call.span)
+
+
+def _build_notify_program(*, placed: bool):
+    """The aiv_shard kernel above (mixed: cube push + vector half) plus a notify.
+
+    The shard is what makes the function mixed, so ExpandMixedKernel really does
+    split it into a pair — the precondition for anything being duplicated.
+    """
+    span = ir.Span.unknown()
+    qk = ir.Var("qk", _tile([128, 128], mem=MS.Vec), span)
+    sig = ir.Var("sig", ir.DistributedTensorType([4, 4], DataType.INT32), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    out_0 = ir.Var("out_0", ir.TensorType([64, 128], FP32), span)
+
+    shard = T.aiv_shard(qk, split=1, span=span)
+    assert isinstance(shard.type, ir.TileType)
+    half = ir.Var("half", _tile(shard.type.shape, shard.type.tile_view, MS.Vec), span)
+    add = T.add(half, half, span)
+    assert isinstance(add.type, ir.TileType)
+    y = ir.Var("y", _tile(add.type.shape, add.type.tile_view, MS.Vec), span)
+    store = T.store(y, [0, 0], out_0, span=span)
+    out_store = ir.Var("out_store", store.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(half, shard, span),
+            ir.AssignStmt(y, add, span),
+            ir.EvalStmt(_notify_call(span, sig, peer, placed=placed), span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "split_aiv",
+        [(qk, _IN), (sig, _IN), (peer, _IN), (out_0, _OUT)],
+        [out_0.type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": ir.SplitMode.UP_DOWN, "split_aiv": True},
+    )
+    return ir.Program([func], "test_notify_placement", span)
+
+
+def _count_op_calls(func, op_name: str) -> int:
+    """How many ``Call``s to ``op_name`` appear anywhere in ``func``'s body."""
+    seen = 0
+
+    def walk(node):
+        nonlocal seen
+        if node is None:
+            return
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == op_name:
+            seen += 1
+        if isinstance(node, ir.SeqStmts):
+            for stmt in node.stmts:
+                walk(stmt)
+            return
+        if isinstance(node, ir.AssignStmt):
+            walk(node.value)
+        if isinstance(node, ir.EvalStmt):
+            walk(node.expr)
+        walk(getattr(node, "body", None))
+
+    walk(func.body)
+    return seen
+
+
+def _notify_counts_by_lane(after) -> dict[str, int]:
+    """notify count per expanded function, keyed by function name."""
+    op_name = ir.get_op("pld.system.notify").name
+    return {func.name: _count_op_calls(func, op_name) for func in after.functions.values()}
+
+
+def test_region_placed_notify_lands_on_aiv_lane_only():
+    """A region-placed notify is emitted on the AIV lane and NOT on the AIC one.
+
+    This is the fix for the double-signal bug: one notify survives the split, on
+    the vector lane the author chose with ``pl.split_aiv``.
+    """
+    after = _expand(_build_notify_program(placed=True))
+    counts = _notify_counts_by_lane(after)
+
+    assert counts["split_aiv_aiv"] == 1
+    assert counts["split_aiv_aic"] == 0
+    # Exactly one across the whole program — the property that actually matters,
+    # stated independently of which lane won.
+    assert sum(counts.values()) == 1
+    _assert_no_free_var(after)
+
+
+def test_unplaced_notify_is_duplicated_onto_both_lanes():
+    """The negative: WITHOUT the stamp the same notify is copied onto both lanes.
+
+    This is the reported bug, pinned here so the fix above cannot be mistaken
+    for something the pass already did. Nothing rejects the unplaced form —
+    putting the comm phase in a region is the author's job, documented rather
+    than enforced.
+    """
+    after = _expand(_build_notify_program(placed=False))
+    counts = _notify_counts_by_lane(after)
+
+    assert counts["split_aiv_aiv"] == 1
+    assert counts["split_aiv_aic"] == 1
+    assert sum(counts.values()) == 2
+
+
+def test_placement_stamp_is_stripped_after_expansion():
+    """The stamp's lifetime ends here: no expanded function still carries it.
+
+    ``core_placement`` exists only to bridge the region erasure in pass 20 to
+    the affinity roll-up in pass 21. Leaving it behind would put a defunct
+    region marker into every later pass dump, the print -> parse round-trip and
+    every downstream structural comparison.
+    """
+    after = _expand(_build_notify_program(placed=True))
+
+    assert "core_placement" not in ir.python_print(after)
+
+
+def test_placement_stamp_does_not_move_vector_compute():
+    """The stamp changes the notify's lane and nothing else.
+
+    Guards against the override being applied too broadly: the stamped and
+    unstamped programs must expand identically apart from where the notify
+    lands, so the vector add stays on AIV and the cross-core boundary keeps its
+    tpush on AIC and tpop on AIV in both.
+    """
+    placed = _expand(_build_notify_program(placed=True))
+    unplaced = _expand(_build_notify_program(placed=False))
+
+    add_name = ir.get_op("tile.add").name
+    push_name = ir.get_op("tile.tpush_to_aiv").name
+    pop_name = ir.get_op("tile.tpop_from_aic").name
+    for after in (placed, unplaced):
+        funcs = {func.name: func for func in after.functions.values()}
+        assert _count_op_calls(funcs["split_aiv_aiv"], add_name) == 1
+        assert _count_op_calls(funcs["split_aiv_aic"], add_name) == 0
+        assert _count_op_calls(funcs["split_aiv_aic"], push_name) == 1
+        assert _count_op_calls(funcs["split_aiv_aiv"], pop_name) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

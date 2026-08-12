@@ -30,11 +30,13 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/reuse_penalty_recognizer.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 
 namespace nb = nanobind;
 
@@ -154,6 +156,62 @@ std::string GetExecutionMemoryAccessEvidenceForTesting(const std::string& op_nam
   INTERNAL_UNREACHABLE << "Unknown execution-memory-access evidence";
 }
 
+/**
+ * @brief Spell a CoreAffinity as the lowercase string the Python tests assert on.
+ */
+const char* CoreAffinityToString(ir::core_affinity::CoreAffinity affinity) {
+  switch (affinity) {
+    case ir::core_affinity::CoreAffinity::CUBE:
+      return "cube";
+    case ir::core_affinity::CoreAffinity::VECTOR:
+      return "vector";
+    case ir::core_affinity::CoreAffinity::SHARED:
+      return "shared";
+    case ir::core_affinity::CoreAffinity::MIXED:
+      return "mixed";
+  }
+  INTERNAL_UNREACHABLE << "Unknown core affinity";
+}
+
+/**
+ * @brief Return an operation's explicitly declared core affinity, or None.
+ *
+ * None means the op declares no affinity and ClassifyCallAffinity derives it
+ * from the call (memory spec, operand tiles, result tile).
+ */
+nb::object GetDeclaredCoreAffinityForTesting(const std::string& op_name) {
+  const auto& registry = ir::OpRegistry::GetInstance();
+  CHECK(registry.IsRegistered(op_name)) << "Unknown operation '" << op_name << "'";
+  const auto affinity = registry.GetEntry(op_name).GetCoreAffinity();
+  if (!affinity) return nb::none();
+  return nb::str(CoreAffinityToString(*affinity));
+}
+
+/**
+ * @brief Return the core affinity ClassifyCallAffinity derives for a Call.
+ *
+ * Unlike get_declared_core_affinity this is the *effective* placement: it runs
+ * the full classification chain (declared affinity, then the dynamic special
+ * cases, then output memory spec, first tile argument, and result tile memory),
+ * so it depends on how far the call has been lowered.
+ */
+std::string ClassifyCallAffinityForTesting(const ir::CallPtr& call) {
+  return CoreAffinityToString(ir::core_affinity::ClassifyCallAffinity(call));
+}
+
+/**
+ * @brief Return whether an operation must not run on a second core.
+ *
+ * The set_no_duplicate() axis: replicating such an op onto the other lane of a
+ * mixed kernel changes what the program means. Read by LowerAutoVectorSplit's
+ * pl.split_aiv region placement stamp.
+ */
+bool IsNoDuplicateOpForTesting(const std::string& op_name) {
+  const auto& registry = ir::OpRegistry::GetInstance();
+  CHECK(registry.IsRegistered(op_name)) << "Unknown operation '" << op_name << "'";
+  return registry.GetEntry(op_name).IsNoDuplicate();
+}
+
 // ============================================================================
 // Module binding
 // ============================================================================
@@ -200,6 +258,15 @@ void BindTesting(nb::module_& m) {
 
   testing.def("get_execution_memory_access_evidence", &GetExecutionMemoryAccessEvidenceForTesting,
               nb::arg("op_name"), "Return an operation's execution-memory-access evidence");
+
+  testing.def("get_declared_core_affinity", &GetDeclaredCoreAffinityForTesting, nb::arg("op_name"),
+              "Return an operation's explicitly declared core affinity, or None");
+
+  testing.def("is_no_duplicate_op", &IsNoDuplicateOpForTesting, nb::arg("op_name"),
+              "Return whether an operation must not run on a second core");
+
+  testing.def("classify_call_affinity", &ClassifyCallAffinityForTesting, nb::arg("call"),
+              "Return the core affinity ClassifyCallAffinity derives for a Call");
 }
 
 }  // namespace python

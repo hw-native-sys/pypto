@@ -2135,7 +2135,7 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
 
         // Publish the *clamped* transfer count into peer dest's
         // recv_counts[my_rank, 0] via TNOTIFY Set — same scalar-cell path as
-        // the barrier signal, including self (CommRemoteOffset identity).
+        // the barrier signal, including self (peer offset is 0 for self).
         // The TPUT transfers the full MAX_RECV capacity; the published
         // clamped value tells the receiver how many rows are valid.
         auto count_i32 = body.Bind("aav_count_i32", MakeCast(rows, DataType::INT32, span), span);

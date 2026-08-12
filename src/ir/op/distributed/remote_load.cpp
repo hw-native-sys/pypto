@@ -17,7 +17,7 @@
  * :class:`DistributedTensorType` into a local tile. Mirrors ``tile.load``
  * at the IR level (positional ``offsets`` / ``shape`` tuples + TileType
  * result), but the source is a *remote* slice — the address translation
- * is realised at codegen time by ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view``.
+ * is realised at codegen time by inline peer-offset arithmetic + ``addptr`` + ``make_tensor_view``.
  *
  * IR signature::
  *
@@ -111,7 +111,7 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
 
   // peer must be a scalar (integer rank index). Allow any ScalarType — dtype
   // narrowing to integer is handled at codegen time when emitting the
-  // CommRemoteOffset scalar arithmetic.
+  // peer-offset scalar arithmetic.
   CHECK(IsA<ScalarType>(args[1]->GetType()))
       << "pld.tile.remote_load peer must be a scalar (rank index), got " << args[1]->GetType()->TypeName();
 
@@ -213,13 +213,37 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // pld.tile.remote_load — cross-rank slice of a DistributedTensor into a tile
 // ============================================================================
+//
+// Core placement: deliberately undeclared, and therefore SHARED today.
+//
+// Unlike TPUT/TGET, a remote load is not pinned to the vector core by the ISA —
+// it lands wherever its destination tile lives, and codegen emits the transfer
+// into that buffer. Declaring VECTOR here would be right only by accident of
+// InferTileMemorySpace currently pinning non-`tile.` producers to Vec, so it is
+// not declared.
+//
+// The consequence is a KNOWN GAP: this op has no memory spec and no TileType
+// *argument* (its tile is the result), so ClassifyCallAffinity's memory rules
+// both miss it and it reaches the SHARED fallback — which ExpandMixedKernel
+// replicates onto both lanes of a mixed kernel. The replication is benign
+// today: the cube copy produces a Vec tile that no cube-lane statement consumes
+// (a cube consumer reaches it through a C/V boundary tpush/tpop instead), so it
+// is dead and FinalizeSplitCoreBody's DCE removes it.
+//
+// Deriving the affinity from the resolved result-tile memory space looks like
+// the clean fix, but it is NOT safe as a general ClassifyCallAffinity rule:
+// LowerAutoVectorSplit (pass 20) treats a VECTOR-affine leaf as "route into the
+// halving machinery", and that machinery has no rewrite for this op's `offsets`
+// / `shape` tuples — it would shrink the result type while leaving the request
+// at full width. Fixing this properly means teaching the halving path about the
+// op, not reclassifying it.
 
 REGISTER_OP("pld.tile.remote_load")
     .set_description(
         "Load a region of the peer rank's slice of a window-bound DistributedTensor "
         "into a local tile. Mirrors tile.load at the IR level but the source is a "
         "remote slice — address translation is realised at codegen via "
-        "CommRemoteOffset(ctx, peer) + addptr + make_tensor_view.")
+        "inline peer-offset arithmetic + addptr + make_tensor_view.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (DistributedTensorType)")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")

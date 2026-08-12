@@ -19,6 +19,7 @@ Tests cover:
 
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core import testing
 
 
 def test_dynamic_dimension_constant():
@@ -823,6 +824,88 @@ class TestRegistryInfrastructure:
         # a memory spec or explicitly opted out via no_memory_spec().
         # Verify at least one tile op exists as a sanity check.
         assert ir.is_op_registered("tile.matmul")
+
+
+class TestDeclaredCoreAffinity:
+    """`set_core_affinity(...)` declarations, read back through the registry."""
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "pld.tile.put",
+            "pld.tile.get",
+            "pld.tensor.put",
+            "pld.tensor.get",
+        ],
+    )
+    def test_put_get_family_is_vector(self, op_name):
+        """The TPUT/TGET family is vector-only: it bounces through a VEC tile.
+
+        pto-isa streams GM -> UB -> remote GM, and ptoas enforces the staging
+        tile's address space (``verifyCommStagingTileLike`` requires VEC). The
+        tile-level forms would classify VECTOR incidentally via their staging
+        tile argument; the tensor-level forms have no tile operand at all, so
+        without the declaration they would classify SHARED and be duplicated
+        onto the cube lane of a mixed kernel.
+        """
+        assert testing.get_declared_core_affinity(op_name) == "vector"
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "pld.system.notify",
+            "pld.system.wait",
+        ],
+    )
+    def test_notify_wait_are_core_agnostic(self, op_name):
+        """TNOTIFY / TWAIT run on either core, so they declare no affinity.
+
+        Their pto-isa implementations are pure scalar/GM (st_atomic, dcci, dsb)
+        and ptoas imposes no core or section constraint, so declaring VECTOR
+        here would be a false claim about the ISA.
+        """
+        assert testing.get_declared_core_affinity(op_name) is None
+
+    def test_declared_affinity_rejects_unknown_op(self):
+        with pytest.raises(ValueError):
+            testing.get_declared_core_affinity("pld.tile.not_an_op")
+
+
+class TestNoDuplicateOps:
+    """`set_no_duplicate()` declarations, read back through the registry."""
+
+    def test_notify_must_not_run_on_a_second_core(self):
+        """A notify copied onto the cube lane can release the peer too early.
+
+        The hazard is premature release from the wrong lane, not
+        non-idempotence: a copy on the AIC lane can publish the signal before
+        the AIV lane's TPUT has landed the data that signal covers, so the peer
+        reads stale bytes. That applies to BOTH ``NotifyOp`` forms, which is why
+        the flag is unconditional rather than keyed on the ``op`` kwarg.
+        """
+        assert testing.is_no_duplicate_op("pld.system.notify") is True
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            # TWAIT's presence on the cube lane is load-bearing: pinning it to
+            # AIV would let the matmul race past the peer data it blocks on.
+            "pld.system.wait",
+            # Placement, not duplication, keeps the put/get family off the cube
+            # lane: they declare VECTOR affinity.
+            "pld.tile.put",
+            "pld.tile.get",
+            # Ordinary compute is safe to run on either lane.
+            "tile.matmul",
+            "tile.add",
+        ],
+    )
+    def test_ops_safe_to_run_on_a_second_core(self, op_name):
+        assert testing.is_no_duplicate_op(op_name) is False
+
+    def test_no_duplicate_rejects_unknown_op(self):
+        with pytest.raises(ValueError):
+            testing.is_no_duplicate_op("pld.system.not_an_op")
 
 
 if __name__ == "__main__":

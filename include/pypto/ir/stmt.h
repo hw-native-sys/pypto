@@ -825,6 +825,12 @@ using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
  * an if. The region body begins with `aiv_id = tile.get_subblock_idx()`. The
  * node is consumed and erased by LowerAutoVectorSplit (pass 20); never reaches
  * codegen.
+ *
+ * A function holding at least one region is in MANUAL MODE: the regions are
+ * authoritative for vector placement, so the AivSplitValid verifier rejects
+ * vector compute outside every region (and cube compute inside one). Write one
+ * region per vector phase — a phase that must stay full width goes in its own
+ * `None` region.
  */
 class SplitAivScopeStmt : public ScopeStmt {
  public:

@@ -60,6 +60,38 @@ SSA 值而存在。
 - **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
   同步,无数据操作数 —— 因此归入 `pld.system`。
 
+## 混合 kernel 中的核放置
+
+`ExpandMixedKernel` 使用 `core_affinity::ClassifyCallAffinity` 把混合 InCore 函数
+拆分为 AIC 与 AIV 两个函数。被分类为 `SHARED` 的语句会**同时复制到两条通路上**，
+因此每个分布式算子都必须明确回答两个彼此独立的问题：*哪个*核可以运行它，以及它
+可以运行*多少次*。
+
+| 算子 | 亲和性 | 原因 |
+| ---- | ------ | ---- |
+| `pld.tile.put` / `pld.tensor.put`、`pld.tile.get` / `pld.tensor.get` | `VECTOR`（显式声明） | TPUT/TGET 经由 VEC 暂存 tile 完成 GM → UB → 远端 GM 的搬运；ptoas 强制校验（`verifyCommStagingTileLike` 要求 `AddressSpace::VEC`）。tile 形式本来就会通过暂存 tile 操作数被间接判为 VECTOR；tensor 形式没有 tile 操作数，若不声明就会被复制到 cube 通路上 |
+| `pld.tile.remote_store` | 推导得出：VECTOR | 通过「首个 tile 参数」规则，从其源 tile 操作数继承 VECTOR |
+| `pld.tile.remote_load` | `SHARED`（**已知缺口**） | 它的 tile 是*结果*而非参数，且未声明 memory spec —— 两条内存规则都匹配不到，最终落到 `SHARED` 兜底，于是 `ExpandMixedKernel` 会把它复制到两条通路上。目前无害：cube 侧副本产出的 `Vec` tile 没有任何 cube 语句消费，会被 DCE 删除。声明 VECTOR 并不能修复（那是对 ISA 的错误断言 —— 目标可能是 cube 侧缓冲区），按结果 tile 分类同样不行：`LowerAutoVectorSplit` 会把 VECTOR 亲和的叶子节点视为「需要折半」，而折半路径并不会改写该算子的 `offsets` / `shape` 元组。真正的修复是让折半路径认识这个算子 |
+| `pld.system.notify` / `pld.system.wait` | `SHARED`（刻意不声明） | 它们的 pto-isa 实现是纯标量/GM 的（`st_atomic`、`dcci`、`dsb`），ptoas 也未施加任何核或 section 约束 —— pto-isa 自己以 cube 编译的 `allgather_gemm_compute_kernel.cpp` 就调用了 TWAIT。在此声明 VECTOR 会对 ISA 做出错误断言 |
+
+`pld.system.notify` 还额外带有注册表的 `set_no_duplicate()` 标记 —— 对**两种**
+`NotifyOp` 形式都生效。cube 通路上的风险并不是重复计数，而是**从错误的通路上提前
+释放**：AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放的数据落盘之前
+就发布信号，于是对端 rank 读到过期数据。`NotifyOp::kSet` 触发该竞态与原子加完全
+一样容易。
+
+`pld.system.wait` 刻意不加标记，原因并非 TWAIT 幂等：它会*阻塞*，出现在 cube 通路
+上是有实际作用的 —— 把它钉在向量通路上，会让 matmul 越过它本应等待的对端数据。
+
+该标记与亲和性正交（它约束的是复制而非放置位置）。它唯一的消费者是
+`LowerAutoVectorSplit` 的 `pl.split_aiv` 区域放置标记：该 pass 把区域内的
+no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md` 与
+`docs/zh/dev/passes/20-lower_auto_vector_split.md`。
+
+**写在所有区域之外的通信算子仍然会被复制到两条通路上，且没有任何诊断会提示这一点。**
+把通信阶段放进 `pl.split_aiv` 区域是作者的职责；参见
+`docs/zh/user/language/04-scopes.md`。
+
 ## ABI 枚举（`include/pypto/ir/comm.h`）
 
 四个枚举是**仅追加（append-only）的 ABI**。它们的底层 `int` 值被序列化为算子的
@@ -147,8 +179,8 @@ pld.tile.remote_load(target, peer, offsets, shape[, valid_shape])
 
 把 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域读入本地 tile。
 在 IR 层面镜像 `tile.load`（位置参数 `offsets` / `shape` 元组、`TileType` 结果）,
-但源是*远程*切片 —— 地址转换在 codegen 时由
-`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view` 实现。
+但源是*远程*切片 —— 地址转换在 codegen 时由内联的 `CommContext` peer 偏移算术
+（inline peer-offset arithmetic）+ `addptr` + `make_tensor_view` 实现。
 
 `valid_shape` 可选。无论是否传入，类型推导都会将请求窗口与源 tensor 的实际有效
 区域取交集，并检查可证明的物理边界。传入时，`shape` 仍决定 UB tile 的物理分配
@@ -175,8 +207,8 @@ pld.tensor.remote_store(src, target, peer, offsets, *, atomic: int = 0) -> Unkno
 
 把本地值写入 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域。
 在 IR 层面镜像 `tile.store`（位置参数 `offsets` 元组、可选 `atomic` attr、仅副作用
-返回值），但目的是*远程*切片 —— 地址转换在 codegen 时由
-`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view` 实现。
+返回值），但目的是*远程*切片 —— 地址转换在 codegen 时由内联的 `CommContext` peer
+偏移算术（inline peer-offset arithmetic）+ `addptr` + `make_tensor_view` 实现。
 
 两种形式**只**在 `src` 的 IR 层级上不同；短形式 `pld.remote_store` 按操作数分派，
 因此用户代码在两个层级上写法相同。
@@ -495,8 +527,8 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 
 | 辅助函数 | 作用 |
 | -------- | ---- |
-| `CommRemoteOffset_<dtype>` | 按 dtype 的 MLIR 辅助函数（由 `PTOCodegen::EmitCommRemoteOffsetHelpers` 一次性发出）,把 `(ctx, peer)` 转为 peer 窗口切片的字节偏移 |
-| `EmitCommRemoteView` | 在调用点发出 `CommRemoteOffset + addptr + make_tensor_view`,得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
+| `PTOCodegen::EmitCommRemoteOffsetInline` | 在调用者自身的 `func.func` 内**内联**发出 `CommContext` 读取与字节到元素的除法,把 `(ctx, peer)` 转为 peer 窗口切片的元素偏移。不再发出模块级辅助函数：cube+vector 混合 kernel 组是同一个 MLIR module（同时含 AIC 与 AIV 函数）,而不带 `pto.kernel_kind` 的辅助函数会让 PTOAS 的分段包装把其带返回值的 `return` 留在 `__DAV_VEC__` 保护之外 |
+| `EmitCommRemoteView` | 在调用点发出内联 peer 偏移 + `addptr` + `make_tensor_view`,得到 peer 寻址的视图（被 `remote_load`、`get` 的 `src` 和 `put` 的 `dst` 使用） |
 | `EmitPartitionViewPTO` | 用给定 offsets/sizes 把 tensor view 包成全切片 `partition_view`（被每个算子的本地与 peer 操作数使用） |
 | `ResolveDistTensorBinding` | 把 `DistributedTensor` 实参解析为其 codegen 绑定（类型 + 窗口变量） |
 | `AsTensorTypeLike` | kind-trait 向下转换,在统一读取视图 element/shape 信息处同时接受 `TensorType` 与 `DistributedTensorType` |

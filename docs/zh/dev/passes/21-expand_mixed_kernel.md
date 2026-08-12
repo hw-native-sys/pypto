@@ -268,8 +268,36 @@ program_expanded = expand_pass(program)
 | MIXED | 跨越 cube↔vector 内存的 `tile.move` | 跨核心侧的叶子移动 —— 同时记录在 `boundary_moves` 映射中（见下文） |
 | CUBE 或 VECTOR | `tile.move`（同侧） | 按源 tile 的 `memory_space` |
 | VECTOR | 所有其他 `tile.*` 操作（`tile.add`、`tile.exp`、`tile.sub` 等） | 始终为 VECTOR（按操作名） |
+| VECTOR | `pld.tile.put`、`pld.tile.get`、`pld.tensor.put`、`pld.tensor.get` | 显式声明 `set_core_affinity(VECTOR)` —— TPUT/TGET 经由 VEC 暂存 tile 中转，ptoas 强制校验该约束 |
 | SHARED | 非 tile 操作、函数调用、控制流、标量操作 | — |
+| SHARED | `pld.system.notify`、`pld.system.wait` | 按 ISA 属于核无关操作（纯标量/GM），因此不声明亲和性。`notify` 额外声明了 `set_no_duplicate()`（对两种 `NotifyOp` 形式都生效）—— cube 侧的副本可能在向量 lane 的 TPUT 落盘数据之前就释放对端。`wait` 则不声明：它会*阻塞*，其 cube 侧副本是有实际作用的 |
 | MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句 | — |
+| VECTOR | **任何打上 `attrs["core_placement"] = "aiv"` 的调用** | 区域放置——凌驾于上述所有规则之上。见下文 |
+
+**区域放置凌驾于推断之上。** `SHARED` 不再无条件复制到两条 lane 上。作者写在 `pl.split_aiv`
+区域内的语句会携带 `attrs["core_placement"] = "aiv"`——由
+[`LowerAutoVectorSplit`](20-lower_auto_vector_split.md) 在擦除区域包装前打上（该文档说明了
+打标范围与理由）——`ClassifyCallAffinity` 将这类调用解析为 `VECTOR`，因此它只落在 AIV lane
+上。正是这一点阻止了 `pld.system.notify`（核无关，因而 `SHARED`）同样落到 cube lane 上——
+在那里它可能在向量 lane 的 TPUT 把该信号所释放的数据落盘之前就发布信号。
+
+对*未被放置*的那一类，没有任何检查会拒绝：写在所有区域之外的通信算子会被复制到两条 lane 上，
+且不会有任何诊断。该标记也不能让它只运行一次——本 pass 发出的 AIV 函数带有
+`dual_aiv_dispatch`，其函数体会在两条 AIV 子 lane 上都运行，把只应发生一次的副作用在两条子
+lane 之间分片是作者的职责（见[作用域与放置](../../user/language/04-scopes.md)）。
+
+该覆盖是完备的，并在三种情况下拒绝覆盖——每种都是因为“该调用的 lane 并非由区域决定”：
+
+| 本征亲和性 | 结果 | 原因 |
+| ---------- | ---- | ---- |
+| **自述** lane（`set_core_affinity` 或 `core_type` kwarg） | 保持不变 | `tile.create` 按策略为 `SHARED`，以便两条 lane 都能声明该缓冲；`system.syncall(core_type="mix")` 需要两核会合。声明优先于放置 |
+| `MIXED` | 保持不变 | `aiv_shard` / `aic_gather` 与跨 C/V 的 `tile.move` **就是**那次传输——强制为 `VECTOR` 会让 tpush 失去配对的 tpop |
+| `CUBE` | 保持不变 | 区域内的 cube 计算是作者错误，由检查 (a) 报告；不覆盖即让它照旧留在 cube lane 上，而不是在关闭验证时把它错误地搬到向量 lane |
+
+pass 20 只给不属于上述三类的调用打标，因此编译器产出的 IR 中这些分支永不触发；写成完备形式
+是因为该属性就是能经受 print → parse 往返的普通 IR。亲和性汇总读取完毕后，本 pass 会把该
+属性从它发出的每个函数上**剥除**（包括仅被改型或原样透传的函数），因此它不会到达任何后续
+pass 或打印输出。
 
 **CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。边界叶子移动在亲和性上被标记为 `MIXED`，并额外记录在独立的 `boundary_moves` 映射中；跨核方向（Cube→Vector vs Vector→Cube）由 `CollectCVBoundaryMoves`、`BuildCoreBody` 等调用点通过 `ClassifyMoveDirection` 即时恢复。
 

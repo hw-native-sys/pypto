@@ -15,23 +15,24 @@ Covers the InCore PTO codegen for ``pld.tile.remote_load``,
 - MaterializeDistTensorCtx adds one explicit CommContext IR parameter per
   ``DistributedTensor`` IR param; PTO codegen lowers each one to
   ``!pto.ptr<i64>``.
-- One module-level ``func.func @CommRemoteOffset_<dtype>`` helper is
-  emitted per distinct element dtype consumed by remote ops. The helper
-  reads the CommContext field, computes the byte→element delta between
-  the local rank's window slice and the peer's slice, and returns it as
-  an ``index``. Each remote-op call site is a single
-  ``func.call @CommRemoteOffset_<dtype>(ctx, peer) -> index`` followed by
-  ``pto.addptr`` + ``pto.make_tensor_view`` in the user kernel.
-- ``pto.addptr`` and ``pto.make_tensor_view`` MUST live at the call site,
-  not in the helper: PTOAS verifies per-function that ``addptr`` directly
-  feeds ``make_tensor_view`` / ``initialize_l2g2l_pipe(gm_addr)`` /
+- Peer addressing is emitted **inline** in the caller's own ``func.func``:
+  the CommContext reads plus the byte→element division that yield the
+  delta between the local rank's window slice and the peer's slice, then
+  ``pto.addptr`` + ``pto.make_tensor_view``. There is no module-level
+  ``@CommRemoteOffset_<dtype>`` helper and no ``func.call`` — a mixed
+  cube+vector kernel group is one MLIR module holding both the AIC and
+  the AIV function, and a helper carrying no ``pto.kernel_kind`` strands
+  its value-returning ``return`` outside PTOAS's ``__DAV_VEC__`` section
+  guard, breaking the cube compile.
+- ``pto.addptr`` and ``pto.make_tensor_view`` MUST live at the call site
+  regardless: PTOAS verifies per-function that ``addptr`` directly feeds
+  ``make_tensor_view`` / ``initialize_l2g2l_pipe(gm_addr)`` /
   ``load|store_scalar``, AND ``make_tensor_view`` lowers to a strided
   memref whose layout cannot be encoded in a ``!pto.tensor_view<…>``
-  return type — so the view cannot be returned across a func boundary
-  either. Returning the offset is the only shape that satisfies both
-  constraints while still sharing the CommContext reads.
-- The helper's byte-offset literals are pinned to the constants in
-  ``include/pypto/codegen/distributed/comm_layout.h``.
+  return type — so the view could not be returned across a func boundary
+  either.
+- The inline arithmetic's byte-offset literals are pinned to the constants
+  in ``include/pypto/codegen/distributed/comm_layout.h``.
 - ``pto.tload`` (remote_load), ``pto.comm.tnotify`` (notify) and
   ``pto.comm.twait`` (wait) consume the partition views with the PTOAS
   attribute spellings (``notifyOp = #pto<notify_op …>`` and
@@ -44,7 +45,7 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
-from pypto import DataType, backend, codegen, ir
+from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op.distributed import system_ops as dist_system
@@ -471,8 +472,8 @@ def _split_module(mlir: str) -> dict[str, str]:
     return funcs
 
 
-def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site():
-    """remote_load lowers to func.call @CommRemoteOffset_<dtype> + addptr + make_tensor_view at call site."""
+def test_remote_load_emits_inline_offset_arithmetic_with_addptr_at_call_site():
+    """remote_load lowers to inline peer-offset arithmetic + addptr + make_tensor_view at call site."""
 
     @pl.program
     class P:
@@ -489,28 +490,21 @@ def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site()
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
 
-    # Helper signature: (ctx, peer) → index. No local_ptr arg, no addptr,
-    # no make_tensor_view inside — those live at the call site.
-    helper_name = "CommRemoteOffset_f16"
-    assert helper_name in funcs, f"Expected @{helper_name} in module, got {list(funcs)}"
-    helper = funcs[helper_name]
-    assert f"func.func private @{helper_name}(%ctx: !pto.ptr<i64>, %peer: index) -> index" in helper, helper
-    # Helper body: load_scalar reads + arith + divsi + return %delems : index.
-    assert helper.count("pto.load_scalar") >= 3, helper  # rankId + 2 window slots
-    assert "arith.divsi" in helper
-    assert "return %delems : index" in helper, helper
-    # Critically, none of the addptr / make_tensor_view forbidden ops appear
-    # inside the helper — both must stay at the call site to satisfy
-    # PTOAS's same-func constraints (see module docstring).
-    assert "pto.addptr" not in helper, "addptr must NOT live in the helper"
-    assert "pto.make_tensor_view" not in helper, "make_tensor_view must NOT live in the helper"
+    # No module-level offset helper, and no call to one: the arithmetic is
+    # emitted inline so every line sits inside a kernel_kind-guarded section.
+    assert not any(name.startswith("CommRemoteOffset") for name in funcs), (
+        f"no module-level offset helper may be emitted, got {list(funcs)}"
+    )
+    assert "CommRemoteOffset" not in mlir, mlir
+    assert "func.call" not in funcs["kernel"], funcs["kernel"]
 
-    # The kernel calls the helper to get the offset, then emits addptr +
+    # The kernel does the CommContext reads itself, then emits addptr +
     # make_tensor_view locally so PTOAS sees the addptr→make_tensor_view
     # chain within a single func.func.
     kernel = funcs["kernel"]
-    assert f"func.call @{helper_name}(" in kernel
-    assert "(!pto.ptr<i64>, index) -> index" in kernel, kernel
+    # Inline body: load_scalar reads (rankId + 2 window slots) + divsi.
+    assert kernel.count("pto.load_scalar") >= 3, kernel
+    assert "arith.divsi" in kernel, kernel
     assert "pto.addptr" in kernel, "addptr must live at the call site"
     # The addptr's direct downstream is a make_tensor_view in the same func —
     # that's what makes PTOAS happy.
@@ -519,12 +513,10 @@ def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site()
     assert "pto.make_tensor_view" in following, (
         f"addptr must be followed shortly by make_tensor_view, but next lines were:\n{following}"
     )
-    # The local CommContext scalar arithmetic must stay inside the helper.
-    assert "pto.load_scalar" not in kernel, "CommContext scalar reads belong in the helper"
 
 
 def test_remote_store_emits_tstore_with_partition_view_pattern():
-    """remote_store lowers to func.call @CommRemoteOffset_<dtype> + addptr +
+    """remote_store lowers to inline peer-offset arithmetic + addptr +
     make_tensor_view + partition_view + pto.tstore at the call site."""
 
     @pl.program
@@ -550,7 +542,8 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "pto.tstore" in kernel, kernel
     assert "_peer_pview" in kernel, kernel
     # Address translation lives at the call site (same constraints as remote_load).
-    assert "func.call @CommRemoteOffset_f16" in kernel, kernel
+    assert "CommRemoteOffset" not in mlir, mlir
+    assert kernel.count("pto.load_scalar") >= 3, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
 
@@ -648,7 +641,12 @@ def test_tensor_remote_store_of_computed_value_emits_tstore_without_tput():
     kernel = _split_module(_generate_mlir(P))["kernel"]
     assert "pto.tstore" in kernel, kernel
     assert "_peer_pview" in kernel, kernel
-    assert "func.call @CommRemoteOffset_f16" in kernel, kernel
+    # Peer address translation still happens, but inline at the call site: the
+    # module-level @CommRemoteOffset_<dtype> helper carried no pto.kernel_kind and
+    # broke the AIC half of a mixed module, so it was replaced by inline arithmetic.
+    assert "CommRemoteOffset" not in kernel, kernel
+    assert "pto.addptr" in kernel, kernel
+    assert "pto.make_tensor_view" in kernel, kernel
     # The push is a direct tstore of the computed tile: no TPUT bounce buffer.
     assert "pto.comm.tput" not in kernel, kernel
     # ...and the vector add's result feeds it directly rather than being spilled
@@ -690,8 +688,8 @@ def test_remote_store_pads_partition_view_with_ones_for_3d_target():
     assert "pto.tstore" in kernel, kernel
 
 
-def test_one_comm_remote_offset_helper_per_dtype():
-    """The module emits a distinct @CommRemoteOffset_<dtype> helper per element dtype."""
+def test_inline_offset_arithmetic_emits_one_element_size_per_dtype():
+    """The inline peer-offset arithmetic divides by each op's own element size."""
 
     @pl.program
     class P:
@@ -709,17 +707,20 @@ def test_one_comm_remote_offset_helper_per_dtype():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    # f16 (data) + i32 (signal) — one helper per dtype consumed by a
-    # cross-rank op (notify counts; wait stays local-only).
-    assert "CommRemoteOffset_f16" in funcs
-    assert "CommRemoteOffset_i32" in funcs
-    # The element-size constant inside each helper matches the dtype.
-    assert "arith.constant 2 : i64" in funcs["CommRemoteOffset_f16"]
-    assert "arith.constant 4 : i64" in funcs["CommRemoteOffset_i32"]
+    # No module-level helper of any dtype survives — the arithmetic is inline.
+    assert "CommRemoteOffset" not in mlir, mlir
+    kernel = funcs["kernel"]
+    # f16 (data) + i32 (signal) — both dtypes are consumed by a cross-rank op
+    # (notify counts; wait stays local-only), so both element-size divisors
+    # appear in the same function.
+    assert "arith.constant 2 : i64" in kernel, kernel
+    assert "arith.constant 4 : i64" in kernel, kernel
+    # Two remote ops → two independent inline offset computations.
+    assert kernel.count("arith.divsi") == 2, kernel
 
 
 def test_remote_load_uses_comm_layout_constants():
-    """CommRemoteOffset helper literal offsets equal the comm_layout::k* values."""
+    """Inline peer-offset literal offsets equal the comm_layout::k* values."""
 
     @pl.program
     class P:
@@ -735,20 +736,31 @@ def test_remote_load_uses_comm_layout_constants():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    helper = funcs["CommRemoteOffset_f16"]
+    kernel = funcs["kernel"]
 
     layout = ir.comm_layout
     rank_idx_unit = layout.RANK_ID_OFFSET // layout.WINDOW_SLOT_STRIDE  # 16 / 8 = 2
     win_idx_unit = layout.WINDOWS_IN_OFFSET // layout.WINDOW_SLOT_STRIDE  # 32 / 8 = 4
 
-    # The helper scaffolding references the rank-slot offset and the
+    # The inline scaffolding references the rank-slot offset and the
     # windowsIn-array base in *u64-units*, derived from comm_layout constants.
-    assert f"arith.constant {rank_idx_unit} : index" in helper
-    assert f"arith.constant {win_idx_unit} : index" in helper
+    #
+    # Pin each constant to its ROLE, not merely its presence in the function:
+    # the inline arithmetic emits constants through GetOrEmitConstant, which
+    # hoists and dedups them into the function's shared constants section, so a
+    # bare `arith.constant 2 : index` may equally be an unrelated shape or
+    # stride. Matching the *uses* keeps the comm_layout pin load-bearing.
+    rank_slot_reads = [
+        line
+        for line in kernel.splitlines()
+        if "pto.load_scalar" in line and f"[%c{rank_idx_unit}_index]" in line
+    ]
+    assert rank_slot_reads, kernel
+    assert f"arith.addi %c{win_idx_unit}_index," in kernel, kernel
     # Element-size for FP16 is 2 bytes; the byte-delta is divided by 2 to
     # reach a pto.addptr-compatible element offset.
-    assert "arith.constant 2 : i64" in helper, helper
-    assert "arith.divsi" in helper
+    divsi_lines = [line for line in kernel.splitlines() if "arith.divsi" in line]
+    assert any("%c2_i64" in line for line in divsi_lines), kernel
 
 
 def test_remote_load_peer_view_preserves_explicit_tensor_view_layout_and_strides():
@@ -1323,9 +1335,15 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "addr = " in stage_alloc_line, (
         f"staging tile must have an explicit addr at level3, got: {stage_alloc_line}"
     )
-    # dst is peer-addressed (CommRemoteOffset + addptr); src is local (no addptr
-    # needed for its own view).
-    assert "func.call @CommRemoteOffset_f16" in mlir
+    # dst is peer-addressed (inline peer-offset + addptr); src is local (no
+    # addptr needed for its own view).
+    assert "CommRemoteOffset" not in mlir, mlir
+    # Pin the element-size divisor, not just "some scalar read happened":
+    # pto.load_scalar alone is emitted by unrelated lowerings (pld.system.rank,
+    # tensor.read), so it would not catch a wrong dtype reaching the inline
+    # peer-offset arithmetic. FP16 => 2 bytes.
+    assert "arith.constant 2 : i64" in mlir, mlir
+    assert "arith.divsi" in mlir, mlir
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
@@ -1551,8 +1569,12 @@ def test_get_emits_comm_tget_with_staging_tile():
     assert "addr = " in stage_alloc_line, (
         f"staging tile must have an explicit addr at level3, got: {stage_alloc_line}"
     )
-    # src is peer-addressed (CommRemoteOffset + addptr); dst is local.
-    assert "func.call @CommRemoteOffset_f16" in mlir
+    # src is peer-addressed (inline peer-offset + addptr); dst is local.
+    assert "CommRemoteOffset" not in mlir, mlir
+    # Element-size divisor pinned per dtype (FP16 => 2 bytes); see the note in
+    # test_put_emits_comm_tput_with_attr_and_staging_tile.
+    assert "arith.constant 2 : i64" in mlir, mlir
+    assert "arith.divsi" in mlir, mlir
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
@@ -1606,7 +1628,179 @@ def test_get_rank1_transfer_uses_full_slice_partition_view():
     mlir = _generate_mlir(P)
     assert "pto.comm.tget(" in mlir
     assert "!pto.partition_tensor_view<128xf32>" in mlir
-    assert "func.call @CommRemoteOffset_f32" in mlir
+    assert "CommRemoteOffset" not in mlir, mlir
+    # The suite's only FP32 remote op: pins the 4-byte element-size divisor of
+    # the inline peer-offset arithmetic. A wrong dtype reaching
+    # EmitCommRemoteOffsetInline would emit 2 here and silently address one full
+    # window past the peer's slice.
+    assert "arith.constant 4 : i64" in mlir, mlir
+    assert "arith.divsi" in mlir, mlir
+    assert "pto.addptr" in mlir, mlir
+
+
+def test_mixed_cube_vector_kernel_emits_no_module_level_offset_helper():
+    """A comm op in a *mixed* cube+vector kernel emits no module-level helper.
+
+    This is the configuration the inline lowering exists for, and the only one
+    where the old module-level ``@CommRemoteOffset_<dtype>`` helper was fatal:
+    ExpandMixedKernel splits the kernel into an AIC and an AIV function that
+    ptoas compiles from ONE module into ONE ``.cpp``, compiled once per core.
+    The helper carried no ``pto.kernel_kind``, so ptoas emitted its body under
+    ``#if defined(__DAV_VEC__)`` while leaving the value-returning ``return``
+    outside the guard — and the cube compile failed on undeclared identifiers.
+
+    Every other test in this file uses a single InCore function, which never
+    produces a second kernel_kind and so cannot catch a regression here.
+
+    What this test does NOT model is comm placement. With no ``pl.split_aiv``
+    region, ``pld.system.notify`` classifies SHARED and ExpandMixedKernel copies
+    it onto BOTH lanes — the very duplication a region exists to prevent. That
+    is deliberate here: pinning the comm phase needs a region, which cannot be
+    written inside a function declared ``pl.FunctionType.InCore``, and which,
+    written in a plain ``@pl.function``, outlines the comm phase into its own
+    AIV function and so dissolves the single mixed module this test is about.
+    The kernel is a codegen fixture for the offset lowering, not an authoring
+    example; ``test_split_aiv_region_keeps_notify_off_the_cube_lane`` below is
+    where placement is under test.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 256], pl.BF16],
+            w: pl.Tensor[[256, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            win: pld.DistributedTensor[[16, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            acc = pl.matmul(a, w, b_trans=True, out_dtype=pl.FP32)
+            out[0:16, 0:256] = acc
+            pld.tensor.put(
+                dst=win,
+                peer=peer,
+                src=out,
+                dst_offsets=[0, 0],
+                src_offsets=[0, 0],
+                shape=[16, 256],
+            )
+            pld.system.notify(target=sig, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
+
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
+    members = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+    kinds = {str(f.func_type) for f in members}
+    assert any("AIC" in k for k in kinds) and any("AIV" in k for k in kinds), (
+        f"expected the kernel to split into AIC + AIV, got {sorted(kinds)}"
+    )
+
+    # One module carrying both kernel_kinds — exactly what ptoas turns into a
+    # single per-core translation unit.
+    grouped = ir.Program(members, "kernel", optimized.span)
+    mlir = codegen.PTOCodegen().generate(grouped)
+
+    funcs = _split_module(mlir)
+    assert not any(name.startswith("CommRemoteOffset") for name in funcs), sorted(funcs)
+    assert "CommRemoteOffset" not in mlir, mlir
+    assert "func.call" not in mlir, mlir
+    # The comm ops are still lowered — a vacuous pass would satisfy the above.
+    assert "pto.comm.tput(" in mlir, mlir
+    assert "pto.comm.tnotify(" in mlir, mlir
+    assert "arith.divsi" in mlir, mlir
+
+
+def test_split_aiv_region_keeps_notify_off_the_cube_lane():
+    """A region pins ``pld.system.notify`` to the AIV function of a MIXED kernel.
+
+    ``pld.system.notify`` is core-agnostic by ISA, so it classifies SHARED, and
+    ExpandMixedKernel copies SHARED statements onto BOTH functions of a kernel
+    it splits. On the cube lane that is a real hazard: the AIC copy can publish
+    the signal before the AIV lane's TPUT has landed the data the signal
+    releases, so the peer reads stale bytes. Writing the comm phase inside a
+    ``pl.split_aiv`` region is what prevents it — LowerAutoVectorSplit stamps
+    the region's no-duplicate calls with ``core_placement="aiv"`` and
+    ClassifyCallAffinity resolves that to VECTOR.
+
+    The kernel must be GENUINELY mixed at the InCore level for this to be under
+    test at all: the ``pl.at(level=pl.Level.CORE_GROUP)`` block holds both the
+    cube matmul and the region, so it outlines into ONE InCore function that
+    ExpandMixedKernel really does split into an ``_aic`` / ``_aiv`` pair. (An
+    earlier version of this test put the matmul at ``@pl.function`` level, where
+    it stays a tensor-level op and only the region is outlined — leaving a
+    single AIV function, no cube lane, and nothing for the stamp to do. It
+    passed identically with the stamp removed.)
+
+    The discriminating assertion is the pair: notify present in the AIV
+    function, ABSENT from the AIC one. With the stamp neutered the notify
+    appears in both, and the second assertion fails.
+
+    Property verification stays ON; only the ambient print->parse roundtrip
+    instrument is dropped, for a pre-existing asymmetry that has nothing to do
+    with placement: the printer re-synthesises scope wrappers around a lowered
+    region, so print->parse is not structurally equal here. Suppressing the
+    whole context would also drop verification, which is the part that must keep
+    running.
+    """
+
+    @pl.program
+    class P:
+        @pl.function
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 64], pl.BF16],
+            w: pl.Tensor[[64, 256], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            win: pld.DistributedTensor[[16, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                ta = pl.load(a, [0, 0], [16, 64])
+                tw = pl.load(w, [0, 0], [64, 256])
+                acc = pl.matmul(ta, tw, out_dtype=pl.FP32)
+                out = pl.store(acc, [0, 0], out)
+                for _aiv in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007
+                    pld.tensor.put(
+                        dst=win,
+                        peer=peer,
+                        src=out,
+                        dst_offsets=[0, 0],
+                        src_offsets=[0, 0],
+                        shape=[16, 256],
+                    )
+                    pld.system.notify(
+                        target=sig, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd
+                    )
+            return out
+
+    verify_only: list[passes.PassInstrument] = [
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+    ]
+    with passes.PassContext(verify_only):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(P)
+
+    lanes = {
+        str(f.func_type): ir.python_print(f)
+        for f in optimized.functions.values()
+        if ir.is_incore_type(f.func_type)
+    }
+    aic = [txt for kind, txt in lanes.items() if "AIC" in kind]
+    aiv = [txt for kind, txt in lanes.items() if "AIV" in kind]
+    # The kernel really was split — otherwise the assertions below are vacuous.
+    assert len(aic) == 1 and len(aiv) == 1, sorted(lanes)
+    assert "tile.matmul" in aic[0], aic[0]
+
+    assert "pld.system.notify" in aiv[0], aiv[0]
+    assert "pld.system.notify" not in aic[0], aic[0]
+
+    # The transient placement carrier is consumed by ExpandMixedKernel, so it
+    # must not survive into the final IR.
+    assert "core_placement" not in ir.python_print(optimized)
+
+    incore = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+    mlir = codegen.PTOCodegen().generate(ir.Program(incore, "kernel", optimized.span))
+    assert mlir.count("pto.comm.tnotify(") == 1, mlir
 
 
 if __name__ == "__main__":

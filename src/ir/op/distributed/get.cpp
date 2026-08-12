@@ -67,6 +67,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -182,6 +183,17 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // pld.tensor.get - synchronous cross-rank bulk read from a peer rank's slice
 // ============================================================================
+//
+// Core placement: VECTOR. pto-isa TGET streams remote GM -> UB -> GM through a
+// VEC staging tile, and ptoas hard-enforces it (verifyCommStagingTileLike
+// requires AddressSpace::VEC), so the op can only execute on the vector core.
+// The tile-level form would also land on VECTOR incidentally, via
+// ClassifyCallAffinity's first-tile-argument rule finding that Vec staging
+// tile; declaring the affinity makes the ISA constraint explicit rather than a
+// side effect of operand inspection. The tensor-level form has no tile operand
+// at all and would otherwise classify SHARED — and it is still live when
+// ClassifyCallAffinity runs before ConvertTensorToTileOps materializes the
+// staging tile.
 
 REGISTER_OP("pld.tensor.get")
     .set_description(
@@ -190,7 +202,7 @@ REGISTER_OP("pld.tensor.get")
         "(window-bound DistributedTensor or plain Tensor). "
         "Semantically equivalent to remote_load + store. Supports full-slice and explicit "
         "subregion forms. ConvertTensorToTileOps lowers this to tile.create + pld.tile.get; "
-        "PTO emission then produces CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + "
+        "PTO emission then produces inline peer-offset arithmetic + addptr + make_tensor_view + "
         "partition_view (src) + partition_view (dst) + explicit VEC staging tile + TGET. "
         "Optional `chunk_rows` / `chunk_cols` (0 = full) size that staging tile to a sub-tile "
         "of the flattened transfer [rows, cols] extent; pto-isa TGET then auto-chunks the full "
@@ -209,6 +221,7 @@ REGISTER_OP("pld.tensor.get")
     .set_attr<int>("chunk_rows")
     .set_attr<int>("chunk_cols")
     .set_attr<bool>("pipeline")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     .f_deduce_type(DeduceGetType);
 
@@ -235,6 +248,7 @@ REGISTER_OP("pld.tile.get")
                   "Optional per-dim offsets (MakeTuple) into the peer's src slice; present only in the "
                   "subregion form")
     .add_argument("shape", "Optional per-dim transfer shape (MakeTuple); present only in the subregion form")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_memory_spec()
     .f_deduce_type(DeduceGetTileType);
 

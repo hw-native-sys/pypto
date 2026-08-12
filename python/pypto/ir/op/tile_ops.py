@@ -2972,13 +2972,15 @@ def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | 
 
 
 def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
-    """Shard a 2D tile into half along the split axis (full -> half).
+    """Cross the AIC -> AIV boundary, halving on the split axis (full -> half).
 
-    The result is a TileType with the split axis halved.
+    ``split=1`` / ``2`` halve the named axis. ``split=0`` (a task-parallel
+    ``mode=NONE`` region) has no split axis: the op still marks the crossing and
+    the result type preserves the operand's shape.
 
     Args:
-        tile: Input tile (TileType, 2D)
-        split: Split mode (1=up-down/axis0, 2=left-right/axis1)
+        tile: Input tile (TileType; 2D unless split=0)
+        split: Split mode (0=no split axis, 1=up-down/axis0, 2=left-right/axis1)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -2986,13 +2988,15 @@ def aiv_shard(tile: Expr, *, split: int, span: Span | None = None) -> Call:
 
 
 def aic_gather(tile: Expr, *, split: int, span: Span | None = None) -> Call:
-    """Gather a 2D tile into full along the split axis (half -> full).
+    """Cross the AIV -> AIC boundary, rejoining on the split axis (half -> full).
 
-    Inverse of :func:`aiv_shard`: the result is a TileType with the split axis doubled.
+    Inverse of :func:`aiv_shard`: ``split=1`` / ``2`` double the named axis, while
+    ``split=0`` (a task-parallel ``mode=NONE`` region) marks the crossing and
+    preserves the operand's shape.
 
     Args:
-        tile: Input tile (TileType, 2D)
-        split: Split mode (1=up-down/axis0, 2=left-right/axis1)
+        tile: Input tile (TileType; 2D unless split=0)
+        split: Split mode (0=no split axis, 1=up-down/axis0, 2=left-right/axis1)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

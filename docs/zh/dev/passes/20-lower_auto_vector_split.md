@@ -75,19 +75,77 @@ result = passes.lower_auto_vector_split()(program)
 `InCore` 函数走一条独立的**区域路径**（`LowerExplicitRegionFunction`），它在 AUTO
 路径**之前**判定。每个区域携带各自的 `split_` 模式，因此可处理单一函数级模式无法表达
 的多模式情形。区域局部的 `tile_vars` / `var_replacements` 映射保证折半后的变量不会泄漏
-到同级区域或区域外的全宽算子。任何区域**之外**的语句以全宽发出。所有区域下降后，作用域
-包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
+到同级区域或区域外的算子。任何区域**之外**的语句以全宽发出，且永不折半。所有区域下降后，
+作用域包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
 改由本 pass 用每个区域正确的拆分轴校验各自的转置风险）。
 
+### 区域外契约（手动模式）
+
+“以全宽发出”描述的是本 pass 对区域外语句所**做**的处理，而不是作者在那里**可以写**什么。
+持有**至少一个**区域的函数即进入**手动模式**：区域对向量计算的放置具有决定权，而
+[`AivSplitValid`](99-verifier.md) 验证器早在本 pass 之前就会强制这一分工：
+
+| 算子 / 值 | 区域内 | 所有区域之外 |
+| --------- | ------ | ------------ |
+| 向量计算 | AIV | **拒绝** —— 检查 (e) |
+| `tile.load` / `tile.store` | AIV | 允许（编译器物化） |
+| cube 计算 | **拒绝** —— 检查 (a) | AIC |
+| `aiv_shard` / `aic_gather` | 边界本身 | **拒绝** —— 检查 (c) |
+| no-duplicate 算子（`pld.system.notify`） | 钉在 AIV lane 上 | 复制到两条 lane 上（**不会**诊断） |
+
+因此本 pass 在区域外真正会遇到的语句是：cube 计算、`ConvertTensorToTileOps` 从承载其
+计算的区域中提升出来的 `tile.load` / `tile.store` 对，以及与核无关的标量 / 控制流语句。
+全宽向量计算**不在**其列：若要让某个阶段保持全宽，请把它包进
+`for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):`，其含义恰是“两条 AIV lane 都运行
+完整函数体”。因此多模式的目标是*只有区域、每个向量阶段一个区域*。**没有**任何区域的函数
+不受手动模式影响。校验器的检查 (f)/(g) 还要求跨越区域边界的 tile 必须用边界算子写明，
+因此隐式的 cube↔vector 跨越也不会到达本 pass。
+
+写在所有区域之外的通信算子**不会**被拒绝，只是同样被复制到 cube lane 上（参见
+`verify_aiv_split.cpp` 中的 “NOT CHECKED, DELIBERATELY” 注释）。下文的放置标记也并不能让
+区域意味着“恰好一次”：AIV 函数带有 `dual_aiv_dispatch`，其函数体会在**两条** AIV 子 lane 上
+都运行，把只应发生一次的副作用在两条子 lane 之间分片是作者的职责，`None` 区域 V→C 跨越的
+lane 规则同理（见[作用域与放置](../../user/language/04-scopes.md)）。
+
+### 把区域放置信息带过擦除点（`core_placement`）
+
+擦除包装的同时也丢失了唯一记录“作者把语句写在哪里”的信息，而紧随其后的
+[`ExpandMixedKernel`](21-expand_mixed_kernel.md) 会把每条 `SHARED` 语句复制到**两条**
+lane 上。于是被作者放在区域内、与核无关的算子（`pld.system.notify`：TNOTIFY 未声明任何
+core affinity）同样会落到 cube lane 上，而它可能在向量 lane 的 TPUT 把该信号所释放的数据
+落盘之前就发布信号。
+
+因此在把区域体拼接出去之前，本 pass 会给即将失去归属的调用打上
+`attrs["core_placement"] = "aiv"`；`ClassifyCallAffinity` 把它视为**放置权威**并将这些调用
+解析为 `VECTOR`。该属性断言的是一个放置结论，因此只写在“区域确实**决定**其 lane”的调用上：
+
+| 调用的本征亲和性 | 是否打标 | 原因 |
+| ---------------- | -------- | ---- |
+| `SHARED` **且**带有 `set_no_duplicate()` 标记（`pld.system.notify`） | **是** | 只有区域能决定其放置，`SHARED` 正是 pass 21 会复制的那一类，而复制对它来说是错的 |
+| `SHARED` 但*未*标记（`pld.system.wait` 等与核无关的算子） | 否 | 钉住会把它从 cube 通路上**移除**。对阻塞类算子而言这是误编译——matmul 会越过该 wait 本应等待的对端数据 |
+| `VECTOR`（普通向量计算） | 否 | 其内存规格已把它放在 AIV lane 上 |
+| **自述** lane（`tile.create`、`system.syncall(core_type=…)`） | 否 | 由其自身声明决定，区域不凌驾于声明之上 |
+| `MIXED`（`aiv_shard` / `aic_gather`、跨 C/V 的 `tile.move`） | 否 | 它们**就是**那次传输——一侧 tpush、另一侧 tpop |
+| `CUBE` | 否 | 区域内的 cube 计算已被检查 (a) 拒绝；覆盖逻辑也拒绝改写它 |
+
+因此一个混合通信 kernel 只会多出一个属性，就打在 notify 上。该标记买到的恰恰只有一件事：
+该算子不会被复制到 **cube** lane 上；它对“有多少条 AIV 子 lane 会执行它”只字未言。该遍历会下降进
+`for` / `if` / `while` / `seq`，且是幂等的（嵌套区域不会重复打标），并作用在每个区域分支的
+**最终**语句上，即在折半机制改写完调用之后。
+
+**生命周期：本 pass → pass 21，到此为止。** `ExpandMixedKernel` 一旦消费完即剥除该属性——
+`Call::attrs_` 是反射的 `UsualField`，printer 又以开放世界方式序列化 attrs，未剥除的标记会
+出现在后续每一次 pass dump、往返与 `assert_structural_equal` 中，描述一个已不存在的区域。
+其生命周期与 `pipeline_stages` 相同（[`LowerPipelineLoops`](28-lower_pipeline_loops.md) →
+[`CanonicalizeIOOrder`](29-canonicalize_io_order.md)）。
+
 函数级 AUTO split（`optimizations=[pl.split(mode)]`，包括 `SplitMode.NONE`）与显式
-`pl.split_aiv` 区域是**互斥**的——同时携带二者的作用域会被拒绝。若需在携带区域的作用域上
-指定自定义跨核槽位数，请使用 `optimizations=[pl.cross_core_slot(slot_num=N)]`：它只决定
-pipe 大小，不标注任何拆分。该检查在更早的
-[`OutlineIncoreScopes`](08-outline_incore_scopes.md) 中执行，那里作用域自身的 `split_`
-（用户的 `pl.split`）与其区域都仍可见；否则本区域路径会按区域下降并静默丢弃函数级 split。
-（提取后二者会无法区分地合并：**单个** `pl.split_aiv` 区域会合法地派生出一个函数级代表
-`split` 模式，故此处无法再检测该冲突。）
+`pl.split_aiv` 区域是**互斥**的；若需在携带区域的作用域上指定自定义跨核槽位数，请使用
+`optimizations=[pl.cross_core_slot(slot_num=N)]`：它只决定 pipe 大小，不标注任何拆分。
+该检查在更早的 [`OutlineIncoreScopes`](08-outline_incore_scopes.md) 中执行，那里作用域自身
+的 `split_` 与其区域都仍可见；否则本区域路径会按区域下降并静默丢弃函数级 split。（提取后
+二者会无法区分地合并：**单个**区域会合法地派生出一个函数级代表 `split` 模式。）
 
 按区域的 `split_` 模式处理三种区域体形态：
 
@@ -104,12 +162,15 @@ pipe 大小，不标注任何拆分。该检查在更早的
 - **任务并行体**（`None`）：**没有拆分轴**——两个 AIV lane 都运行**完整**区域体，由作者通过
   区域的 `aiv_id` lane 索引（例如按 `aiv_id` 跨步的循环）分派各自不相交的工作。区域路径
   **原样透传区域体**（不折半、不本地化偏移、不注入 `subblock_idx`；作者的
-  `aiv_id = get_subblock_idx()` 绑定已携带 lane 信息）。`None` 区域内的 `tile.aiv_shard` /
-  `tile.aic_gather` 会被拒绝（无拆分轴可切分）——由 `AivSplitValid` 校验器与此处的常开保护
-  共同拦截。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
+  `aiv_id = get_subblock_idx()` 绑定已携带 lane 信息）。此处的 `tile.aiv_shard` /
+  `tile.aic_gather` 是**被接受**的，并与其余语句一同透传：没有拆分轴时它只跨越 AIC/AIV 边界
+  而不切分，其 `split=0` 类型推导原样保留形状，因此没有可折半或可拼合的东西。本模式下会跳过
+  `ValidateMixedExplicitRegion`——它拒绝的是「半宽边界算子与全宽向量算子混写」，而这里一切
+  都是全宽。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
   `SplitVectorKernel` 会把它派发到**两个** AIV lane（经由 `dual_aiv_dispatch`），而**非**
-  lane-0-only 的非拆分 replay（后者只针对非 `split_aiv` 核）——故两个 lane 都运行完整函数体。
-  当区域的 tile 无法折半（单位维）或归约必须保持全宽时使用本模式。
+  lane-0-only 的非拆分 replay（后者只针对非 `split_aiv` 核）——故两个 lane 都运行完整函数体，
+  从这类区域向外的 V→C 跨越由硬件决定 lane-0-wins，而不是由合成的 replay 决定。当区域的 tile
+  无法折半（单位维）或归约必须保持全宽时使用本模式。
 
 ### 显式边界区域内允许出现哪些算子
 
@@ -124,10 +185,9 @@ pipe 大小，不标注任何拆分。该检查在更早的
 | 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row`——且其**读地址**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅读偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个、`tile.gather_row` 第 3 个即 `src_offset`）——出现在 `shape`、`valid_shape` 或**目的**槽位中的 lane 引用并不会移动窗口，因此不予接受。 |
 
 `tile.gather_row` 是其中的 DMA 情形：它是 DPS，因此带有**两个**偏移，而只有 `src_offset`
-决定两个 lane 是否在做不同的工作。`src_offset` 由 lane 派生意味着每个 lane 各自拉取属于自己
-的散列 GM 行（接受）；若 `src_offset` 与 lane 无关而只有 `dst_offset` 由 lane 派生，则两个
-lane 会把**相同**的行取到同一个全宽累加器的不同槽位（仍会被报告）。参见下文"per-lane 散列
-gather"。
+决定两个 lane 是否在做不同的工作——`src_offset` 由 lane 派生意味着每个 lane 各自拉取属于
+自己的散列 GM 行（接受）；若只有 `dst_offset` 由 lane 派生，则两个 lane 会把**相同**的行取到
+同一个全宽累加器的不同槽位（仍会被报告）。
 
 其余归类为 `VECTOR` 的算子都会被报告。有两点需要注意：
 
@@ -139,18 +199,17 @@ gather"。
   无法把一个全宽 tile 洗白进区域。
 
 该校验证明的是**意图**而非**范围**：偏移按 lane 跨步、但 extent 仍为全宽的 load 会被接受，
-此时两个 lane 会读到重叠的窗口。这与本 pass 从不检查 `tile.store` 的 lane 相关偏移是同一种
+此时两个 lane 会读到重叠的窗口——这与本 pass 从不检查 `tile.store` 的 lane 相关偏移是同一种
 信任。
 
 由于区域经由通用的 `BeginScope`/`EndScope` 构建且不被提取，它可**嵌套**在 `pl.range` /
-`pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句，找到并下降每个区域，同时保留
-外围控制流。
+`pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句以下降每个区域，同时保留外围控制流。
 
 ### Per-lane 散列 gather
 
 `pl.gather_row` 是唯一能按任意**运行时**偏移读取 GM 的算子，因此它正是把 paged / top-k 行
-集合切分到两个 AIV lane 上的手段——每个 lane 在 UB 中组装 tile 的一半，再由
-`pl.aic_gather` 把重组后的 tile 交给 cube：
+集合切分到两个 AIV lane 上的手段：每个 lane 在 UB 中组装 tile 的一半，再由 `pl.aic_gather`
+把重组后的 tile 交给 cube。
 
 ```python
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve=True,
@@ -172,12 +231,12 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv", allow_early_resolve
   `2 x FULL` 并在下游产生形状不匹配。
 - **设置跨核 ring 的大小。** V2C ring 会在消费侧核的内存中预留 `slot_size x slot_num` 字节
   （V2C 为 L1，C2V 为 UB），其中 `slot_size` 是消费方弹出的**完整** tile——此处为
-  `128 x 512 x 2 = 131072`——而 `slot_num` 对单向流水默认取 **8**。这相当于在 512 KB 的 L1
-  中占用 1 MB，因此默认深度无法表达这种形状；用 `pl.cross_core_slot(slot_num=N)` 调低即可。
-  每次调用只 push 一次的 kernel 至多需要 2。若省略该项，`AllocateMemoryAddr` 会报告溢出并
-  指出被预留的字节数。
+  `128 x 512 x 2 = 131072`——而 `slot_num` 对单向流水默认取 **8**，相当于在 512 KB 的 L1 中
+  占用 1 MB，故默认深度无法表达这种形状；用 `pl.cross_core_slot(slot_num=N)` 调低即可，每次
+  调用只 push 一次的 kernel 至多需要 2。若省略，`AllocateMemoryAddr` 会报告溢出并指出被预留
+  的字节数。
 
-注意 `pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
+`pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
 `Acc`（cube 产出），因此无法对 vector lane 自己产生的值做切分。
 
 ### 区域必须不被 scope 包裹
@@ -188,9 +247,9 @@ pass 运行时每个区域都必须已不被 scope 包裹——通常由
 [`OutlineIncoreScopes`](08-outline_incore_scopes.md)（pass 8）保证，它会把外围的 `InCore`
 scope 提取为独立函数。
 
-该保证存在一个缺口，故本 pass 选择强制校验而非假定成立。pass 8 只对 `Opaque` /
+该保证存在一个缺口，故本 pass 选择强制校验而非假定成立：pass 8 只对 `Opaque` /
 `Orchestration` 函数提取 scope，而解析器无论外围函数类型如何，都会把顶层的
-`for aiv_id in pl.split_aiv(...)` 包进一个 `InCore` scope。因此直接把函数声明为
+`for aiv_id in pl.split_aiv(...)` 包进一个 `InCore` scope。因此直接声明为
 `pl.FunctionType.InCore` 时，到达此处的区域仍被 scope 包裹：
 
 ```python
@@ -240,9 +299,8 @@ attrs，因此 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) 凭该标记跳�
          tile.aiv_shard(full_cube_tile, split=int(mode))   -> 半
        推导出的半类型已经带有消费侧 lane 内存（Vec）：切分推导器让 memory_space
        保持为空，由 OpRegistry::Create 用 tile.aiv_shard 的 set_output_memory
-       声明填充，因此本路径与显式 pl.aiv_shard 形式读取的是同一处声明。将结果
-       var 连同其半尺寸种入 tile_vars，并记录 旧->新 var 重绑。cube 源（matmul /
-       Acc 结果）保持全尺寸。
+       声明填充，与显式形式同源。将结果 var 连同其半尺寸种入 tile_vars，并记录
+       旧->新 var 重绑。cube 源（matmul / Acc 结果）保持全尺寸。
      VECTOR_TO_CUBE —— 插入
          tile.aic_gather(half_vector_tile, split=int(mode))  -> 全
        将源解析到其折半后的 var 使 gather 把 半 -> 全 翻倍，随后保留对折叠后全尺寸

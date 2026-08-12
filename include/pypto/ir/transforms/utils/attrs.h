@@ -230,6 +230,55 @@ inline std::string IterArgArraySizeAttrKey(size_t idx) {
   return std::string(kIterArgArraySizeAttrPrefix) + std::to_string(idx);
 }
 
+// ---------------------------------------------------------------------------
+// Region placement carrier (``LowerAutoVectorSplit`` -> ``ExpandMixedKernel``)
+// ---------------------------------------------------------------------------
+//
+// ``pl.split_aiv`` opens an explicit AIV region as a first-class
+// ``SplitAivScopeStmt``. ``LowerAutoVectorSplit`` (pass 20) lowers each region
+// and ERASES the wrapper, so by the time ``ExpandMixedKernel`` (pass 21)
+// partitions the function into an AIC and an AIV lane the region node is gone
+// and nothing records that the author pinned those statements to the vector
+// lane. Without that record pass 21 duplicates every SHARED statement onto BOTH
+// lanes — which for a side effect that must not run on a second core, such as
+// ``pld.system.notify``, is wrong. The hazard is not double-counting but
+// PREMATURE RELEASE FROM THE WRONG LANE: the cube copy can publish the signal
+// before the vector lane's TPUT has landed the data that signal releases, so
+// the peer reads stale bytes. A ``NotifyOp::kSet`` fires that race as readily
+// as an atomic-add.
+//
+// Pass 20 therefore stamps ``attrs["core_placement"] = "aiv"`` on the region
+// calls whose lane the region DECIDES, and ``ClassifyCallAffinity`` reads it as
+// the placement authority. This is a plain string attr, exactly like the
+// per-op ``split`` ints and the function-level ``split_aiv_region_validated``
+// flag the same pass already stamps, so it needs no new IR concept and keeps
+// pass 21's "no live SplitAivScopeStmt survives" invariant intact.
+//
+// The attr asserts a placement, so it is written only where the region is what
+// settles one: a call that STATES its own lane (`tile.create`, a
+// `core_type=`-dispatched barrier) or whose lane its memory spec already fixes
+// (any ordinary vector op is VECTOR; the `aiv_shard` / `aic_gather` boundary is
+// MIXED because it really does run on both lanes) is placed without it. See
+// ``RegionPlacementStamper`` in lower_auto_vector_split_pass.cpp for the full
+// rule; in practice a mixed comm kernel gains exactly one of these, on the
+// notify.
+//
+// LIFECYCLE: strictly the pass 20 -> pass 21 window. ``ExpandMixedKernel``
+// strips the attr from every function it emits once it has consumed it, so no
+// downstream pass, printed dump, ``.pto`` round-trip or structural comparison
+// ever sees it. (``Call::attrs_`` is a reflection ``UsualField`` and the python
+// printer serialises attrs open-world, so an un-stripped stamp WOULD leak into
+// both.) Same shape as ``kPipelineStagesAttr``, which lives from
+// ``LowerPipelineLoops`` until ``CanonicalizeIOOrder`` strips it.
+inline constexpr const char* kCorePlacementAttr = "core_placement";
+
+/// The only value ``kCorePlacementAttr`` currently takes: "this call was
+/// written inside a ``pl.split_aiv`` region, so the author placed it on the
+/// vector lane". A string (rather than a bool) leaves room for a cube-side
+/// placement authority without a second key, and round-trips through the
+/// existing string attr codec.
+inline constexpr const char* kCorePlacementAiv = "aiv";
+
 }  // namespace ir
 }  // namespace pypto
 

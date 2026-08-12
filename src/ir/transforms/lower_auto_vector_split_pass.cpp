@@ -63,10 +63,12 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -152,6 +154,102 @@ bool RegionBodyHasExplicitBoundary(const StmtPtr& body) {
   return finder.found_;
 }
 
+// Stamp ``attrs["core_placement"] = "aiv"`` on every leaf Call of a region body.
+//
+// This pass ERASES the SplitAivScopeStmt wrapper, so without a carrier the next
+// pass (ExpandMixedKernel) cannot tell a statement the author placed inside a
+// region from one written at top level — and it duplicates every SHARED
+// statement onto BOTH lanes, double-firing a non-idempotent side effect such as
+// pld.system.notify. The stamp is that carrier; ``ClassifyCallAffinity`` reads
+// it as the placement authority. See kCorePlacementAttr (attrs.h) for the
+// pass 20 -> pass 21 lifetime, and ExpandMixedKernel for where it is stripped.
+//
+// WHAT GETS STAMPED. The attr asserts a placement — "this call runs on the AIV
+// lane" — so it is written exactly where the region is what DECIDES that, and
+// nowhere else. The walk visits every call in the region; a call is stamped
+// when both hold:
+//
+//   * it does not STATE its own lane (core_affinity::HasStatedLane): a
+//     `tile.create` shared by policy so both lanes can declare the buffer, or a
+//     `system.syncall(core_type="mix")` that rendezvouses both cores, is placed
+//     by its own declaration. Region membership does not outrank that, so
+//     recording a contrary placement on it would be a false claim.
+//   * its intrinsic affinity is SHARED, i.e. nothing about the op, its kwargs
+//     or its operand memory spaces already fixes a lane. This is the case the
+//     carrier exists for: SHARED is what ExpandMixedKernel duplicates onto both
+//     lanes, and `pld.system.notify` — core-agnostic by ISA, hence SHARED — is
+//     the op whose double-fire started all this.
+//   * duplication would actually be WRONG for it (IsNoDuplicateCall).
+//
+// SHARED ALONE IS NOT ENOUGH, and getting this wrong is a miscompile rather
+// than a missed optimisation. Pinning a call to AIV does not merely *place* it
+// — it REMOVES it from the cube lane. For a duplicate-safe SHARED op that is a
+// silent semantic change: `pld.system.wait` inside a region would stop blocking
+// the cube core, so the matmul races ahead of the peer's data it was waiting
+// for. The same reasoning covers any SHARED op that defines a value a cube
+// statement outside the region consumes — pinning it would leave the AIC body
+// referencing a variable it no longer defines. So the stamp is written only for
+// the ops whose registration says duplication changes program meaning.
+//
+// The three intrinsic answers left out are left out because the region does not
+// decide them, not to save space:
+//
+//   * VECTOR is already the AIV lane; the stamp would restate what the op's own
+//     memory spec says.
+//   * CUBE inside a region is an authoring error that check (a) reports; a
+//     stamp cannot fix it and ClassifyCallAffinity declines to override it.
+//   * MIXED IS the cross-core transfer — `tile.aiv_shard` / `tile.aic_gather`
+//     and a C/V-crossing `tile.move` lower to a tpush on one lane plus a tpop
+//     on the other, so they genuinely run on both and "aiv" would be false of
+//     them. (The printed low-level boundary form also accepts no kwarg beyond
+//     `split=`, so stamping one would break the print -> parse round-trip.)
+//
+// Consequently a region's ordinary vector compute is untouched, and a mixed
+// comm kernel gains exactly one attr — on the notify.
+//
+// Being an IRMutator, this descends into for / if / while / seq bodies, so a
+// comm op nested in a loop inside the region is stamped like any other. The
+// re-stamp guard keeps it idempotent, which is what makes NESTED regions work:
+// an inner region is lowered (and stamped) by the recursive LowerStmts call
+// before the outer arm stamps its whole lowered body, and a duplicate key would
+// violate the attrs unique-key invariant.
+//
+// Only ``Call`` is stamped, never ``Submit``: submits are task launches inside
+// a pl.manual_scope, which is Orchestration-level, whereas SplitAivScopeStmt
+// lives in InCore function bodies — the two cannot co-occur. (ExpandMixedKernel
+// likewise classifies affinity from Calls only.)
+class RegionPlacementStamper : public IRMutator {
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto mutated = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(mutated);
+    if (!call || call->HasAttr(kCorePlacementAttr)) return mutated;
+    if (core_affinity::HasStatedLane(call)) return mutated;
+    if (core_affinity::ClassifyIntrinsicCallAffinity(call) != CoreAffinity::SHARED) return mutated;
+    // ...and only when duplication would actually be WRONG for this call site.
+    // See the "SHARED alone is not enough" note above: pinning a duplicate-safe
+    // SHARED op removes it from the cube lane, which is a miscompile for any op
+    // whose presence there is load-bearing (pld.system.wait being the case that
+    // caught this).
+    if (!core_affinity::IsNoDuplicateCall(call)) return mutated;
+    auto attrs = call->attrs_;
+    attrs.emplace_back(kCorePlacementAttr, std::any(std::string(kCorePlacementAiv)));
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs), call->GetType(),
+                                  call->span_);
+  }
+};
+
+std::vector<StmtPtr> StampRegionPlacement(const std::vector<StmtPtr>& stmts) {
+  RegionPlacementStamper stamper;
+  std::vector<StmtPtr> stamped;
+  stamped.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    INTERNAL_CHECK(stmt) << "Internal error: null statement in a pl.split_aiv region body";
+    stamped.push_back(stamper.VisitStmt(stmt));
+  }
+  return stamped;
+}
+
 // Collect every variable name (DEF and referenced) in a function body so the
 // per-region subblock-index injection reserves against them. Threaded through
 // the explicit-region walk and grown after each region mints its index, so
@@ -201,26 +299,32 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
 
       // TASK-PARALLEL form (SplitMode::None): both AIV lanes run the FULL body for
       // disjoint work the author dispatches via aiv_id. No split axis, so no
-      // halving, no offset localization, no aiv_shard/aic_gather. Bind aiv_id and
-      // splice the body through unchanged, then drop the scope wrapper. (This must
-      // branch BEFORE SplitDimension(rmode) below, which rejects None. A
-      // shard/gather op inside a None region is caught by the AivSplitValid
-      // verifier — there is no split axis for it to mark.)
+      // halving and no offset localization. (This must branch BEFORE
+      // SplitDimension(rmode) below, which rejects None.)
+      //
+      // tile.aiv_shard / tile.aic_gather ARE allowed here, and mean the one thing
+      // that still applies without a split axis: this value crosses the AIC/AIV
+      // boundary. Their split=0 deduction is shape-preserving (cross_core.cpp), so
+      // nothing is halved or re-joined and no re-halving guard is needed — the
+      // body is spliced through exactly as a boundary-free one is, and
+      // ExpandMixedKernel folds the op into a split=0 tpush/tpop pair, the same
+      // pair an implicit crossing produces. The AivSplitValid verifier is what
+      // makes writing them mandatory (checks (f)/(g)) rather than optional.
+      //
+      // ValidateMixedExplicitRegion is deliberately NOT run for this mode: it
+      // rejects a body that mixes half-width boundary ops with full-width vector
+      // ops, and in a task-parallel region EVERYTHING is full width, so the mix it
+      // describes does not exist.
       if (rmode == SplitMode::None) {
-        // A boundary op needs a split axis to mark; a task-parallel region has
-        // none. The AivSplitValid verifier rejects this with a user diagnostic,
-        // but guard here too so a verification-off build fails loudly rather than
-        // miscompiling (full tile silently passed where a half is expected).
-        CHECK_SPAN(!RegionBodyHasExplicitBoundary(reg->body_), reg->span_)
-            << "pl.split_aiv(mode=pl.SplitMode.NONE) region must not contain tile.aiv_shard / "
-               "tile.aic_gather: a task-parallel region has no split axis to shard / gather. Use "
-               "mode=pl.SplitMode.UP_DOWN / LEFT_RIGHT for data-parallel halving.";
-        // Pass the body through UNCHANGED, dropping only the scope wrapper. The
-        // body already opens with aiv_id = get_subblock_idx() (the author's lane
-        // index, used for disjoint dispatch). No halving and no per-lane offset
-        // localization happen here, so there is no second internal subblock_idx
-        // to inject — both AIV lanes run the full body verbatim.
-        for (auto& s : region_stmts) result.push_back(s);
+        // Pass the body through UNCHANGED except for the placement stamp,
+        // dropping the scope wrapper. The body already opens with
+        // aiv_id = get_subblock_idx() (the author's lane index, used for
+        // disjoint dispatch). No halving and no per-lane offset localization
+        // happen here, so there is no second internal subblock_idx to inject —
+        // both AIV lanes run the full body verbatim. This is the arm the comm
+        // kernels use: 'for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE)'
+        // is how an author pins a notify to the vector lane.
+        for (auto& s : StampRegionPlacement(region_stmts)) result.push_back(s);
         continue;
       }
 
@@ -236,7 +340,9 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (RegionBodyHasExplicitBoundary(reg->body_)) {
         ValidateMixedExplicitRegion(region_stmts, reg->span_);
         ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
-        for (auto& s : region_stmts) result.push_back(s);
+        // Unchanged apart from the placement stamp: the body is already
+        // half-width, but it is still region-placed, so pass 21 must be told.
+        for (auto& s : StampRegionPlacement(region_stmts)) result.push_back(s);
         continue;
       }
 
@@ -265,7 +371,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       if (!r_var_repl.empty()) {
         region_body = transform_utils::Substitute(region_body, r_var_repl);
       }
-      for (auto& s : transform_utils::FlattenToStmts(region_body)) result.push_back(s);
+      // Stamp LAST, on the final statements: the halving machinery rewrote and
+      // replaced calls above (boundary moves became aiv_shard / aic_gather,
+      // shapes and offsets were localized), so stamping earlier would mark
+      // calls that no longer exist and miss the ones that replaced them.
+      for (auto& s : StampRegionPlacement(transform_utils::FlattenToStmts(region_body))) {
+        result.push_back(s);
+      }
       continue;
     }
 

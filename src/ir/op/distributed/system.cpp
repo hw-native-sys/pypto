@@ -134,19 +134,39 @@ TypePtr DeduceWaitType(const std::vector<ExprPtr>& args,
 // ============================================================================
 // pld.system.notify — atomically signal a peer rank's slot in a DistributedTensor
 // ============================================================================
+//
+// Core placement: deliberately undeclared, i.e. SHARED. TNOTIFY's pto-isa
+// implementation is pure scalar/GM (st_atomic + dcci + dsb) and ptoas imposes
+// no core or section constraint on it, so pinning it to VECTOR would be a false
+// claim about the ISA.
+//
+// It is, however, marked `set_no_duplicate()` unconditionally — for BOTH
+// `NotifyOp` forms, not just the non-idempotent atomic-add. The hazard on the
+// cube lane is not double-counting but PREMATURE RELEASE FROM THE WRONG LANE: a
+// notify copied onto the AIC lane can publish the signal before the AIV lane's
+// TPUT has landed the data that signal releases, so the peer reads stale bytes.
+// A `NotifyOp::kSet` fires that race exactly as readily as an atomic-add, so it
+// needs pinning to the vector lane just as much. The flag's only consumer is
+// LowerAutoVectorSplit's region placement stamp, which uses it to keep a
+// region's comm ops off the cube lane.
+//
+// `pld.system.wait` carries no such rule: TWAIT is a poll that BLOCKS, and its
+// presence on the cube lane is load-bearing — pinning it to AIV would let the
+// matmul race ahead of the peer data it was waiting for.
 
 REGISTER_OP("pld.system.notify")
     .set_description(
         "Cross-rank notify: write `value` to the peer rank's slot of a window-bound "
         "DistributedTensor signal matrix. `op` selects between atomic-add and set semantics. "
-        "Lowers to CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view + TNOTIFY at "
-        "codegen.")
+        "Lowers to inline peer-offset arithmetic + addptr + make_tensor_view + partition_view + TNOTIFY "
+        "at codegen.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor signal matrix")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
     .add_argument("offsets", "Offsets in target tensor coordinates (MakeTuple of scalars)")
     .add_argument("value", "Scalar value to deposit at the peer slot")
     .set_attr<int>("op")
+    .set_no_duplicate()
     .no_memory_spec()
     .f_deduce_type(DeduceNotifyType);
 

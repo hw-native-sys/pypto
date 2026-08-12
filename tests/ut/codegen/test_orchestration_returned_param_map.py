@@ -101,10 +101,29 @@ def _layer_guarded(
         pl.system.syncall(core_type="mix")
 
         mm = pl.matmul(pl.slice(q_pad, [ROWS_PER_CORE, HIDDEN], [pr0, 0]), wid, out_dtype=pl.FP32)
-        k_p = pl.cast(pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
-        v_p = pl.cast(pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32)
-        oi = pl.sub(pl.add(mm, k_p), pl.mul(v_p, 0.5))
-        attn_out = pl.assemble(attn_out, pl.cast(oi, target_type=pl.BF16), [r0, 0])
+        # The second vector phase. Once a function opens ANY pl.split_aiv region
+        # the regions become authoritative for vector placement, so full-width
+        # vector compute has to live in a region of its own -- mode=NONE, whose
+        # meaning is exactly "both AIV lanes run the full body". That is what
+        # this phase already did: the region above makes the whole AIV function
+        # dual_aiv_dispatch, so wrapping changes the text and not the execution.
+        # The cube pl.matmul and the SHARED mix barrier stay outside.
+        for aiv_lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):  # noqa: B007 - full-width phase
+            # ``mm`` is cube-produced outside the region, so bringing it onto the
+            # vector lane crosses the AIC -> AIV boundary. In manual mode that
+            # crossing is written, not inferred: pl.aiv_shard names it. In a
+            # mode=NONE region it preserves the shape (there is no split axis) and
+            # lowers to the same split=0 tpush/tpop pair the implicit form used to
+            # emit silently.
+            mm_v = pl.aiv_shard(mm)
+            k_p = pl.cast(
+                pl.slice(k_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
+            )
+            v_p = pl.cast(
+                pl.slice(v_cache, [ROWS_PER_CORE, HIDDEN], [cache_base + pr0, 0]), target_type=pl.FP32
+            )
+            oi = pl.sub(pl.add(mm_v, k_p), pl.mul(v_p, 0.5))
+            attn_out = pl.assemble(attn_out, pl.cast(oi, target_type=pl.BF16), [r0, 0])
 
     # The downstream consumer. Its one producer-written input is attn_out.
     for c in pl.spmd(NUM_CORES, name_hint="out_proj"):

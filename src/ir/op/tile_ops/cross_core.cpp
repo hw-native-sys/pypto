@@ -40,7 +40,12 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 }
 
 // Read the required "split" int attr shared by the split-axis reshape ops
-// (reuses the tpush/tpop encoding: 1 = UP_DOWN/axis0, 2 = LEFT_RIGHT/axis1).
+// (reuses the tpush/tpop encoding: 0 = NONE/no split axis, 1 = UP_DOWN/axis0,
+// 2 = LEFT_RIGHT/axis1).
+//
+// 0 is the task-parallel (``mode=pl.SplitMode.NONE``) region: both AIV lanes run
+// the full body, so there is no axis to halve — the op still marks the AIC/AIV
+// boundary crossing, but shape-preservingly. See the deducers below.
 int ReadSplitAttr(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& op_name,
                   const Span& span) {
   std::optional<int> split_opt;
@@ -51,10 +56,12 @@ int ReadSplitAttr(const std::vector<std::pair<std::string, std::any>>& kwargs, c
     }
   }
   CHECK_SPAN(split_opt.has_value(), span)
-      << op_name << " requires a 'split' attr (1 = UP_DOWN/axis0, 2 = LEFT_RIGHT/axis1)";
+      << op_name << " requires a 'split' attr (0 = NONE/no split axis, 1 = UP_DOWN/axis0, "
+      << "2 = LEFT_RIGHT/axis1)";
   const int split = *split_opt;
-  CHECK_SPAN(split == 1 || split == 2, span)
-      << op_name << " split must be 1 (UP_DOWN/axis0) or 2 (LEFT_RIGHT/axis1), but got " << split;
+  CHECK_SPAN(split == 0 || split == 1 || split == 2, span)
+      << op_name << " split must be 0 (NONE/no split axis), 1 (UP_DOWN/axis0) or 2 (LEFT_RIGHT/axis1), "
+      << "but got " << split;
   return split;
 }
 
@@ -123,7 +130,13 @@ SplitReshaped ReshapeSplitAxis(std::vector<ExprPtr> shape, std::vector<ExprPtr> 
 // half) and tile.aic_gather (half -> full). The single positional tile argument
 // is reshaped along the split axis selected by the "split" int attr.
 //
-// 2D-vocab constraint: the input must be rank-2 and the split attr must be 1 or 2.
+// SHAPE-PRESERVING AT split=0. A task-parallel (``mode=pl.SplitMode.NONE``)
+// region has no split axis: both AIV lanes run the full body, so nothing is
+// halved and nothing is re-joined. There the op still means "this value crosses
+// the AIC/AIV boundary" — that is the whole of its meaning in manual mode — and
+// the crossing does not change the value's shape. So split=0 reshapes nothing
+// and the rank-2 requirement is dropped with it: rank 2 exists only to make
+// UP_DOWN / LEFT_RIGHT unambiguous, and neither applies.
 TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name, bool halve) {
@@ -135,6 +148,18 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
                    << args[0]->GetType()->TypeName();
 
   const int split = ReadSplitAttr(kwargs, op_name, args[0]->span_);
+  if (split == 0) {
+    // No split axis: preserve shape and valid_shape exactly. The type is still
+    // rebuilt (rather than returned as-is) so the boundary result keeps the same
+    // "fresh tile, no inherited layout / memref" shape the halving path produces
+    // — the memory space comes from set_output_memory, and the layout is
+    // re-attached downstream.
+    TileView no_split_view;
+    no_split_view.valid_shape = GetValidShape(tile_type);
+    return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt,
+                                      std::move(no_split_view));
+  }
+
   CHECK_SPAN(tile_type->shape_.size() == 2, args[0]->span_)
       << op_name << " requires a 2D tile, but got rank " << tile_type->shape_.size();
 
@@ -178,6 +203,14 @@ TypePtr DeduceSplitReshapeTensor(const std::vector<ExprPtr>& args,
                      << args[0]->GetType()->TypeName();
 
   const int split = ReadSplitAttr(kwargs, op_name, args[0]->span_);
+  if (split == 0) {
+    // Task-parallel (NONE) region: the op marks the crossing and preserves the
+    // shape (see DeduceSplitReshape). Return the operand's type unchanged — its
+    // view is already canonical, so re-wrapping it could only break the
+    // print -> parse round-trip the halving path has to work around below.
+    return args[0]->GetType();
+  }
+
   CHECK_SPAN(tensor_type->shape_.size() == 2, args[0]->span_)
       << op_name << " requires a 2D tensor, but got rank " << tensor_type->shape_.size()
       << ". Reshape the operand to 2D (pl.reshape) before the shard / gather so the "
@@ -294,11 +327,18 @@ REGISTER_OP("tile.tpop_from_aiv")
 // Mat/L1 tile is rejected by ptoas ("'pto.tpush' op tile type must map to a
 // supported producer pipe"). aic_gather is the mirror image but its cube side is
 // the tpop DESTINATION, which is Mat (GetBoundaryTpopMemory(CoreSide::AIC)).
+//
+// The memory contract is MODE-INDEPENDENT: it describes which lane produces the
+// value and which consumes it, and a task-parallel (split=0) region crosses the
+// same two lanes as a data-parallel one. Only the SHAPE differs — at split=0 the
+// crossing preserves it (see DeduceSplitReshape).
 
 // Shard a full tile into half along the split axis (cube -> vector vocabulary).
 REGISTER_OP("tile.aiv_shard")
     .set_op_category("CrossCoreOp")
-    .set_description("Shard a 2D tile into half along the split axis (full -> half)")
+    .set_description(
+        "Cross the AIC->AIV boundary; halve the 2D tile along the split axis (split=1/2), or preserve its "
+        "shape (split=0)")
     .add_argument("tile", "Tile data to shard (TileType, 2D)")
     .set_attr<int>("split")
     .set_output_memory(MemorySpace::Vec)
@@ -310,7 +350,9 @@ REGISTER_OP("tile.aiv_shard")
 // Gather two half tiles back into a full tile along the split axis (inverse of aiv_shard).
 REGISTER_OP("tile.aic_gather")
     .set_op_category("CrossCoreOp")
-    .set_description("Gather a 2D tile into full along the split axis (half -> full)")
+    .set_description(
+        "Cross the AIV->AIC boundary; rejoin the 2D tile along the split axis (split=1/2), or preserve its "
+        "shape (split=0)")
     .add_argument("tile", "Tile data to gather (TileType, 2D)")
     .set_attr<int>("split")
     .set_output_memory(MemorySpace::Mat)
@@ -331,7 +373,9 @@ REGISTER_OP("tile.aic_gather")
 // Shard a full 2D tensor into half along the split axis (cube -> vector vocabulary).
 REGISTER_OP("tensor.aiv_shard")
     .set_op_category("CrossCoreOp")
-    .set_description("Shard a 2D tensor into half along the split axis (full -> half)")
+    .set_description(
+        "Cross the AIC->AIV boundary; halve the 2D tensor along the split axis (split=1/2), or preserve its "
+        "shape (split=0)")
     .add_argument("tensor", "Tensor data to shard (TensorType, 2D)")
     .set_attr<int>("split")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -342,7 +386,9 @@ REGISTER_OP("tensor.aiv_shard")
 // Gather a half 2D tensor back into full along the split axis (inverse of aiv_shard).
 REGISTER_OP("tensor.aic_gather")
     .set_op_category("CrossCoreOp")
-    .set_description("Gather a 2D tensor into full along the split axis (half -> full)")
+    .set_description(
+        "Cross the AIV->AIC boundary; rejoin the 2D tensor along the split axis (split=1/2), or preserve its "
+        "shape (split=0)")
     .add_argument("tensor", "Tensor data to gather (TensorType, 2D)")
     .set_attr<int>("split")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

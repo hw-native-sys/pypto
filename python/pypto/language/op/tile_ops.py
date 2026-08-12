@@ -625,7 +625,13 @@ def move(
 
 
 def aiv_shard(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
-    """Shard a 2D operand into half along the split axis (full -> half).
+    """Bring a cube-produced operand onto the AIV lane (AIC -> AIV crossing).
+
+    In a data-parallel region (``UP_DOWN`` / ``LEFT_RIGHT``) the crossing also
+    **halves** the operand along the split axis, so each lane gets one half; in a
+    task-parallel ``mode=NONE`` region there is no split axis, so it crosses and
+    **preserves the shape**. Either way, writing it is how a C->V crossing into a
+    region is named — the ``AivSplitValid`` verifier rejects an unnamed one.
 
     The split mode is **inherited** from the enclosing
     ``for aiv_id in pl.split_aiv(mode=...)`` scope — it is not passed here.
@@ -644,7 +650,8 @@ def aiv_shard(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
         span: Optional source span
 
     Returns:
-        Operand of the same kind with the split axis halved.
+        Operand of the same kind: the split axis halved in a data-parallel region,
+        the shape unchanged in a ``mode=NONE`` one.
     """
     raise RuntimeError(
         "pl.aiv_shard must be used inside a 'for aiv_id in pl.split_aiv(...)' "
@@ -653,9 +660,18 @@ def aiv_shard(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
 
 
 def aic_gather(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
-    """Gather a 2D operand into full along the split axis (half -> full).
+    """Hand a vector-produced operand to the cube (AIV -> AIC crossing).
 
-    Inverse of :func:`aiv_shard`. Like :func:`aiv_shard`, the split mode is
+    Inverse of :func:`aiv_shard`: in a data-parallel region it **rejoins** the two
+    lanes' halves along the split axis, and in a task-parallel ``mode=NONE`` region
+    it crosses and **preserves the shape**. It is how a V->C crossing out of a
+    region is named; an unnamed one is rejected by the ``AivSplitValid`` verifier.
+
+    Out of a ``mode=NONE`` region the two lanes share one destination slot with no
+    per-lane offset, so when they hold different values the cube reads **lane 0's**.
+    Gather a value both lanes agree on, or guard the divergent work to lane 0.
+
+    Like :func:`aiv_shard`, the split mode is
     **inherited** from the enclosing ``for aiv_id in pl.split_aiv(mode=...)``
     scope and must not be passed here. Calling it eagerly (outside a parsed
     program) raises, since there is no scope to read the mode from.
@@ -670,7 +686,8 @@ def aic_gather(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
         span: Optional source span
 
     Returns:
-        Operand of the same kind with the split axis doubled.
+        Operand of the same kind: the split axis doubled in a data-parallel region,
+        the shape unchanged in a ``mode=NONE`` one.
     """
     raise RuntimeError(
         "pl.aic_gather must be used inside a 'for aiv_id in pl.split_aiv(...)' "

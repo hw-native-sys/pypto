@@ -39,6 +39,45 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `no_argument()` | No arguments (sync ops) | `.no_argument()` |
 | `set_attr<T>(name)` | Kwarg schema (T: bool, int, DataType, etc.) | `.set_attr<bool>("a_trans")` |
 | `f_deduce_type(fn)` | Type deduction function | `.f_deduce_type(DeduceAddType)` |
+| `set_core_affinity(a)` | Which core executes the op (**placement**) | `.set_core_affinity(core_affinity::CoreAffinity::VECTOR)` |
+| `set_no_duplicate()` | Op must not run on a second core (**replication**) | `.set_no_duplicate()` |
+
+**`set_core_affinity` vs `set_no_duplicate`** — two orthogonal axes, and picking
+the wrong one makes a false claim about the ISA:
+
+- `set_core_affinity(...)` answers *which* core runs the op. Declare it only
+  when the hardware really constrains the op to one side. When left unset,
+  `ClassifyCallAffinity` derives placement from the call (memory spec, then the
+  first tile argument's memory space), falling back to `SHARED`.
+- `set_no_duplicate()` answers whether the op may run on a *second* core.
+  `ExpandMixedKernel` replicates `SHARED` statements onto both the AIC and the
+  AIV lane; mark an op for which that copy changes what the program means.
+
+`pld.system.notify` is the canonical case, and the hazard is **premature release
+from the wrong lane**, not non-idempotence: the AIC copy can publish the signal
+before the AIV lane's TPUT has landed the data that signal releases, so the peer
+reads stale bytes. That is why the flag is unconditional — a `NotifyOp::kSet`
+fires the same race as an atomic-add, even though only the atomic-add
+double-counts.
+
+Its sibling `pld.system.wait` stays **unmarked**, and deliberately so: TWAIT
+*blocks*, and its presence on the cube lane is load-bearing. Pinning it to the
+vector lane would let the matmul race past the peer data it waits on. Read the
+flag as "must not run on a second core", not as "not idempotent".
+
+`IsNoDuplicate()` reads the axis. Its only consumer is `LowerAutoVectorSplit`'s
+`pl.split_aiv` region placement stamp (pass 20), which pins exactly the
+no-duplicate calls inside a region to the AIV lane. No verifier rejects anything
+on this axis.
+
+An op pinned to one lane by `set_core_affinity(...)` is never duplicated in the
+first place and needs no flag. The flag exists precisely for the core-agnostic
+ops, where no affinity value can express "may run on either core, but must not
+run on both". Note that is a claim about *cores*, not about total executions: an
+AIV function body still runs on both AIV sub-lanes under `dual_aiv_dispatch`, so
+keeping an op off the cube lane does not make it happen once. That part is the
+author's, and is documented in
+[Scopes → pl.split_aiv](../../user/language/04-scopes.md).
 
 **Type Deduction Signature:**
 

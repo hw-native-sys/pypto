@@ -95,6 +95,147 @@ for i in pl.spmd(4):
 
 `for aiv_id in pl.split_aiv(2, mode=...):` 把一个区域切开分给两条 AIV lane。它属于混合 kernel 编程（AIC 与 AIV 在同一个函数里协作），教程章会端到端地讲。
 
+`mode=` 决定两条 lane 如何分担工作：
+
+| `mode=` | 每条 lane 拿到 |
+| ------- | -------------- |
+| `pl.SplitMode.UP_DOWN` / `LEFT_RIGHT` | 每块 tile 的一半（按行 / 按列）—— 数据并行 |
+| `pl.SplitMode.NONE` | **完整**函数体；由你通过 `aiv_id` 分派互不相交的工作 —— 任务并行 |
+
+**只要开了一个区域，整个函数的规则就变了。** 此后区域拥有向量计算的全部放置决定权，因此向量计算必须写在区域里：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+        ...                                    # 阶段 1 —— 通过 aiv_id 分派每 lane 的工作
+    pl.system.syncall(core_type="mix")         # 屏障：写在外面，两核都执行
+    mm = pl.matmul(q, k)                       # cube 计算：写在外面，跑在 AIC 上
+    for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+        out = pl.add(pl.aiv_shard(mm), bias)   # 阶段 2 —— 全宽向量计算
+```
+
+每个向量阶段一个区域。`mode=NONE` 正是给**不希望被折半**的阶段用的包装：两条 lane 都运行完整函数体，而这本来就是没写区域时向量代码的行为，所以包起来只改变写法、不改变执行。cube 算子与屏障留在区域外。
+
+`mm` 由 cube 产出、却在向量 lane 上被读取，因此它跨越了 AIC/AIV 边界 —— `pl.aiv_shard`
+就是把这件事写出来。下一节解释为什么这是必须的。
+
+完全**没有** `pl.split_aiv` 的函数不受影响 —— 按原来的写法写即可。
+
+### 每一个跨区域边界的 tile 都要写明
+
+**只要函数开了区域，跨越区域边界的 tile 就必须写明。** 手动模式下两核之间的边界由你放置，
+编译器不再替你选：
+
+| 方向 | 写在哪里 | 算子 |
+| ---- | -------- | ---- |
+| cube 产出的值在向量 lane 上被读（C->V） | 区域开头 | `pl.aiv_shard(x)` |
+| 向量产出的值在 cube lane 上被读（V->C） | 区域内、被读之前 | `pl.aic_gather(x)` |
+
+```python
+mm = pl.matmul(q, k)                        # cube，写在所有区域之外
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    v = pl.exp(pl.aiv_shard(mm))            # C->V：已写明
+    kv = pl.aic_gather(v)                   # V->C：已写明
+out = pl.matmul(kv, w)                      # 又回到 cube，写在区域之外
+```
+
+去掉其中任何一个调用，这次跨越**依然能工作** —— 编译器两种写法都会发出同样的传输 ——
+但那样一来边界就成了没人选择的边界，而这恰恰与手动模式的意义相反。因此它会被拒绝；
+诊断会指出是哪个值、被哪个算子读走。
+
+**在 `mode=NONE` 区域里，两个算子都只跨越、不切分。** 没有可切分的轴，形状原样透传 ——
+`[128, 128]` 的 tile 经 `pl.aiv_shard` 之后仍是 `[128, 128]`。只有在 `UP_DOWN` /
+`LEFT_RIGHT` 下它们才同时折半（shard）与重新拼合（gather）。
+
+**只能 gather 两条 AIV lane 取值一致的值。** 硬件要求两条子 lane 都参与 no-split 握手，
+而它们共用同一个目标槽位、没有每 lane 偏移。两者之间没有任何仲裁：两条 lane 都会push，
+因此当它们持有**不同**的值时，cube 收到的是二者之一，且**不确定是哪一个** —— 不是
+lane 0 的，而是不确定的。
+
+这里没有任何办法指定 lane。把该值的*产出*限定到某条 lane 也没有用：lane 1 依然会执行到
+push，依然会把它自己 tile 中的内容发出去。因此从 `mode=NONE` 区域向外做 `pl.aic_gather`，
+只有在该值是 lane-uniform（两条 lane 计算结果相同，或在 gather 之前已被统一）时才是良定义
+的。若两条 lane 必须向 cube 提供不同的数据，这个构造无法表达：请改为经由 GM 传递并自行
+定序，或使用数据并行（`UP_DOWN` / `LEFT_RIGHT`）区域 —— 那里每条 lane 拥有一个被声明的
+半块，gather 会把它们重新拼合。
+
+编译器不会检查上述任何一点。
+
+**GM 上的数据流不在此规则覆盖范围内。** 上述规则针对的是跨区域边界的 *tile* 值。GM
+tensor 不属于任何一条 lane，因此没有任何边界算子能表达经由它的跨越 —— `pld.tensor.put`
+的签名本身就收 GM tensor。AIC 与 AIV 异步运行，所以为 cube lane 的写与 vector lane 对同一
+块 GM 缓冲区的读定序，仍然由你负责：在两个阶段之间加 `pl.system.syncall(core_type="mix")`。
+
+### 把跨 rank 通信算子写进区域
+
+区域也会为「自身没有 lane 归属」的算子决定放置。`pld.system.notify` 与核无关 ——
+硬件上 TNOTIFY 两种核都能跑 —— 因此在 cube 与 vector 混合的 kernel 中，编译器会把它
+同时发到 **AIC 与 AIV 两条** lane 上。把通信阶段包进区域，它就会被钉在向量 lane 上：
+
+```python
+for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    pld.tensor.put(dst=win, peer=peer, src=out,
+                   dst_offsets=[0, 0], src_offsets=[0, 0], shape=[16, 256])
+    pld.system.notify(target=sig, peer=peer, offsets=[0, 0], value=1,
+                      op=pld.NotifyOp.AtomicAdd)
+```
+
+危险的是 cube 侧那份副本：AIC lane 可能在 AIV lane 的 put 尚未把数据落盘之前就执行到
+notify，为尚不存在的数据发布信号。区域会把这份副本去掉。
+
+### 把只应发生一次的副作用在两条 AIV lane 之间分片
+
+**`mode=NONE` 区域的函数体会在两条 AIV 子 lane 上都运行。** 这正是该模式的用意 ——
+区域不是「一条 lane」，而是两条 lane 跑同一段代码，由你用循环变量 `aiv_id` 分派互不
+相交的工作。因此上面那段代码仍不完整：它每条 lane 各发一次 notify，即对同一个 peer
+发了**两次**。
+
+只应发生一次的副作用算子 —— 尤其是 `pld.system.notify` —— 必须**按 `aiv_id` 分片**，
+或**限定到一条 lane**：
+
+```python
+# 分片：每条 lane 负责不同的 peer 集合
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    for owner in pl.range(aiv_id, NUM_PEERS, 2):
+        pld.system.notify(target=sig, peer=owner, offsets=[0, 0], value=1,
+                          op=pld.NotifyOp.AtomicAdd)
+
+# 限定：lane 0 执行，lane 1 跳过
+for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+    if aiv_id == 0:
+        pld.system.notify(target=sig, peer=peer, offsets=[0, 0], value=1,
+                          op=pld.NotifyOp.AtomicAdd)
+```
+
+**「限定到 lane 0」这种写法带有分片写法所没有的定序义务。** 两条 AIV lane 异步运行，
+没有任何机制为 lane 0 与 lane 1 定序。因此被限定在 lane 0 的 notify 可能在 lane 1 的
+写入落盘*之前*就发布信号，对端于是读到仍在传输途中的数据。只有当该信号所释放的数据
+全部由 lane 0 自己写入时，这种写法才是安全的。若其中有任何一部分来自 lane 1，就必须
+在 notify 之前显式地为两条 lane 定序，或者改用分片写法 —— 分片写法中每条 lane 只释放
+自己写入的数据，因此不存在这个问题。
+
+**不这样做会发生什么。** `NotifyOp.AtomicAdd` 会累加到对端的槽位上。两条 lane 通知
+*同一个* peer，会让该 rank 的计数器在只有一个 rank 到达时就读到 `2`。原本要等两次
+到达的 `pld.system.wait` 被一次就放行 —— 于是该 rank 抢跑，读到数据尚未落盘的缓冲区。
+症状是多 rank 运行时某个 rank 间歇性算错；单 rank 复现不了，看上去也不像同步问题。
+
+### 编译器在这里做什么、不做什么
+
+| 行为 | 含义 |
+| ---- | ---- |
+| **会做** | 让区域内的通信算子远离 **cube** lane。写在区域外时，它们同样会被复制到 AIC lane 上。 |
+| **不做** | 检查 lane 分片。两条 AIV lane 对同一个 peer 发 notify 能正常编译，且**不会有任何诊断**。 |
+
+编译器无法诊断这一点：正确写法与错误写法在 AIV 函数中生成的是同一条语句，唯一的差别
+是 `aiv_id` 有没有进入该调用的实参。写对这件事是作者的职责。
+
+### 跨 lane 的定序同样由你负责
+
+AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
+但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序：请在这
+两个阶段之间加 `pl.system.syncall(core_type="mix")`。区域只决定工作放在哪条 lane 上，
+并不为两条 lane 之间定序。
+
 ## Edge Cases
 
 > **致命陷阱：** `pl.spmd` 是一个断言，不是请求。你是在告诉编译器这些 block 彼此独立。如果它们其实不独立，结果是竞态，而不是一条诊断。
@@ -105,6 +246,13 @@ for i in pl.spmd(4):
 | **`with pl.spmd(n):` 体被拒绝** | 它既不读 block 索引也不派发 kernel | 读 `pl.tile.get_block_idx()`，或调用一个 kernel |
 | **`optimizations=` 被拒绝** | 用变量拼出来的 —— 解析器读的是 AST | 在调用点内联书写该列表 |
 | **printed IR 无法被重新解析** | 设备规模查询在使用前被绑定到了名字上 | 在使用处内联书写该调用 |
+| **`vector op '...' sits outside every pl.split_aiv region`** | 函数开了区域，区域即拥有向量放置决定权 | 把该阶段包进 `for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):` |
+| **`cube op '...' inside a pl.split_aiv region`** | 区域体是 AIV 的工作 | 把 `pl.matmul` 移出区域 |
+| **`'x' is produced on the CUBE lane ... reads it on the VECTOR lane inside one`** | 未写明的 C->V 跨越（进入区域） | 在区域开头以 `pl.aiv_shard(x)` 读取 |
+| **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | 未写明的 V->C 跨越（离开区域） | 在区域内 gather：`x = pl.aic_gather(x)` |
+| **cube 读到的是 lane 0 的值，而不是 lane 1 的** | 从 `mode=NONE` 区域向外的 V->C 跨越 —— 共用一个槽位、无每 lane 偏移，**不会有诊断** | gather 一个两条 lane 一致的值，或把有分歧的计算限定到 lane 0 |
+| **对端的信号计数器读到的值是应有值的两倍** | 两条 AIV lane 都执行了同一条 `pld.system.notify` —— **不会有诊断** | 按 `aiv_id` 分片该 notify，或用 `if aiv_id == 0:` 限定 |
+| **某个 rank 的 `pld.system.wait` 返回后读到过期数据** | 要么是上面的重复 notify，要么是 cube 与 vector 阶段之间缺少 `pl.system.syncall(core_type="mix")` | 分片该 notify；补上屏障 |
 
 ## See Also
 

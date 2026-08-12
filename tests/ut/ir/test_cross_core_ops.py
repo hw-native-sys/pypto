@@ -238,13 +238,63 @@ def test_split_reshape_rejects_non_2d_tile():
 
 
 def test_split_reshape_rejects_bad_split_attr():
-    """split must be 1 or 2 (0 and out-of-range rejected)."""
+    """split must be 0, 1 or 2 — anything else is rejected."""
     span = ir.Span.unknown()
     tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32), span)
 
-    for bad in (0, 3):
+    for bad in (-1, 3):
         with pytest.raises(ValueError, match="split must be"):
             ir.create_op_call("tile.aiv_shard", [tile_var], {"split": bad}, span)
+
+
+def test_split_reshape_preserves_shape_at_split_zero():
+    """split=0 (a ``mode=NONE`` region) is a crossing, not a split: shape preserved.
+
+    Both ops mean "this value crosses the AIC/AIV boundary". A task-parallel
+    region has no split axis, so there is nothing to halve (shard) or re-join
+    (gather) — the type comes out identical to the operand's.
+    """
+    span = ir.Span.unknown()
+    tile_view = ir.TileView(
+        valid_shape=[ir.ConstInt(13, DataType.INDEX, span), ir.ConstInt(100, DataType.INDEX, span)]
+    )
+    tile_var = ir.Var("t", ir.TileType([16, 128], DataType.FP32, None, tile_view), span)
+
+    for op_name in ("tile.aiv_shard", "tile.aic_gather"):
+        call = ir.create_op_call(op_name, [tile_var], {"split": 0}, span)
+        result = call.type
+        assert isinstance(result, ir.TileType), op_name
+        assert result.shape == [16, 128], op_name
+        assert result.tile_view is not None, op_name
+        valid_0, valid_1 = result.tile_view.valid_shape
+        assert isinstance(valid_0, ir.ConstInt) and isinstance(valid_1, ir.ConstInt), op_name
+        assert [valid_0.value, valid_1.value] == [13, 100], op_name
+
+
+def test_split_reshape_at_split_zero_allows_non_2d():
+    """The rank-2 requirement exists only to disambiguate UP_DOWN / LEFT_RIGHT.
+
+    Neither applies at split=0, so a crossing of a rank-3 tile is accepted and
+    passes the shape through untouched.
+    """
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([2, 16, 128], DataType.FP32), span)
+
+    call = ir.create_op_call("tile.aic_gather", [tile_var], {"split": 0}, span)
+    result = call.type
+    assert isinstance(result, ir.TileType)
+    assert result.shape == [2, 16, 128]
+
+
+def test_split_reshape_at_split_zero_skips_even_extent_guard():
+    """An odd split-axis extent is only a problem when the axis is halved."""
+    span = ir.Span.unknown()
+    tile_var = ir.Var("t", ir.TileType([15, 128], DataType.FP32), span)
+
+    call = ir.create_op_call("tile.aiv_shard", [tile_var], {"split": 0}, span)
+    result = call.type
+    assert isinstance(result, ir.TileType)
+    assert result.shape == [15, 128]
 
 
 def test_aiv_shard_rejects_odd_split_axis():
@@ -402,13 +452,45 @@ def test_tensor_split_reshape_rejects_distributed_tensor():
 
 
 def test_tensor_split_reshape_rejects_bad_split_attr():
-    """split must be 1 or 2 (0 and out-of-range rejected)."""
+    """split must be 0, 1 or 2 — anything else is rejected."""
     span = ir.Span.unknown()
     tensor_var = ir.Var("t", ir.TensorType([16, 128], DataType.FP32), span)
 
-    for bad in (0, 3):
+    for bad in (-1, 3):
         with pytest.raises(ValueError, match="split must be"):
             ir.create_op_call("tensor.aiv_shard", [tensor_var], {"split": bad}, span)
+
+
+def test_tensor_split_reshape_preserves_shape_at_split_zero():
+    """Tensor mirror of the tile deducer: split=0 crosses without splitting."""
+    span = ir.Span.unknown()
+    tensor_view = ir.TensorView(
+        [],
+        ir.TensorLayout.ND,
+        [ir.ConstInt(13, DataType.INDEX, span), ir.ConstInt(100, DataType.INDEX, span)],
+    )
+    tensor_var = ir.Var("t", ir.TensorType([16, 128], DataType.FP32, None, tensor_view), span)
+
+    for op_name in ("tensor.aiv_shard", "tensor.aic_gather"):
+        call = ir.create_op_call(op_name, [tensor_var], {"split": 0}, span)
+        result = call.type
+        assert isinstance(result, ir.TensorType), op_name
+        assert result.shape == [16, 128], op_name
+        assert result.tensor_view is not None, op_name
+        valid_0, valid_1 = result.tensor_view.valid_shape
+        assert isinstance(valid_0, ir.ConstInt) and isinstance(valid_1, ir.ConstInt), op_name
+        assert [valid_0.value, valid_1.value] == [13, 100], op_name
+
+
+def test_tensor_split_reshape_at_split_zero_allows_non_2d():
+    """No split axis at split=0, so the 2D-reshape requirement does not apply."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([2, 16, 128], DataType.FP32), span)
+
+    call = ir.create_op_call("tensor.aic_gather", [tensor_var], {"split": 0}, span)
+    result = call.type
+    assert isinstance(result, ir.TensorType)
+    assert result.shape == [2, 16, 128]
 
 
 def test_tensor_aiv_shard_rejects_odd_split_axis():

@@ -377,7 +377,11 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     `BeginScope`/`EndScope`, it emits into any parent context (a `pl.range` /
     `pl.pipeline` loop or an `if`). Sibling regions may carry **different**
     `split_` modes (multi-mode); pass-21 halving is region-scoped, so each region
-    halves independently and out-of-region vector compute stays full-width. A
+    halves independently. A function holding at least one region is in **manual
+    mode**: the regions are authoritative for vector placement, and the
+    `AivSplitValid` verifier rejects vector compute outside every region (write
+    a `mode=None` region per full-width phase — see
+    [LowerAutoVectorSplit](../passes/20-lower_auto_vector_split.md)). A
     top-level `for aiv_id in pl.split_aiv(...)` is wrapped by the parser in an
     enclosing `InCoreScopeStmt` (so `OutlineIncoreScopes` can outline it), i.e.
     `InCoreScopeStmt{ body: SplitAivScopeStmt{...} }`.

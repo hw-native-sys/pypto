@@ -38,9 +38,11 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
@@ -1813,6 +1815,32 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
   return {std::move(result)};
 }
 
+// Removes the pl.split_aiv region placement stamp LowerAutoVectorSplit left on
+// each region call once this pass has consumed it (see the Phase 5 comment in
+// ExpandMixedKernel, and kCorePlacementAttr in attrs.h for the full lifecycle).
+//
+// Returns the input Call unchanged when the attr is absent, so a program with
+// no regions in it walks through at the cost of the traversal alone.
+class CorePlacementStripper : public IRMutator {
+ protected:
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto mutated = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(mutated);
+    if (!call || !call->HasAttr(kCorePlacementAttr)) return mutated;
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
+                                  StripAttr(call->attrs_, kCorePlacementAttr), call->GetType(), call->span_);
+  }
+};
+
+FunctionPtr StripCorePlacement(const FunctionPtr& func) {
+  if (!func || !func->body_) return func;
+  auto new_body = CorePlacementStripper().VisitStmt(func->body_);
+  if (new_body.get() == func->body_.get()) return func;
+  auto stripped = MutableCopy(func);
+  stripped->body_ = new_body;
+  return stripped;
+}
+
 }  // namespace
 
 namespace pass {
@@ -1920,6 +1948,25 @@ Pass ExpandMixedKernel() {
     // callee scan sees the final AIC/AIV functions.
     auto rewritten_program = std::make_shared<Program>(new_functions, program->name_, program->span_);
     new_functions = NormalizeHandWrittenGroupAbis(rewritten_program, new_functions).functions;
+
+    // Phase 5: the region placement stamp is consumed — drop it.
+    //
+    // ``core_placement`` exists solely to carry pl.split_aiv region membership
+    // across the wrapper erasure in LowerAutoVectorSplit, and every reader of
+    // it (ClassifyCallAffinity, via the affinity roll-up above) has now run. It
+    // is stripped rather than left in place because Call::attrs_ is a
+    // reflection UsualField and the python printer serialises attrs open-world:
+    // an un-stripped stamp would show up in every downstream pass dump, in the
+    // print -> parse round-trip, and in every ir.assert_structural_equal a
+    // later pass's tests make — noise that describes a region that no longer
+    // exists. Same lifecycle as ``pipeline_stages`` (set by LowerPipelineLoops,
+    // stripped by CanonicalizeIOOrder).
+    //
+    // The sweep covers EVERY emitted function, not just the split pair: a
+    // region in a function that turned out not to be mixed (converted straight
+    // to AIV, or left alone because it was not InCore) carries the same stamp
+    // and must not keep it either.
+    for (auto& func : new_functions) func = StripCorePlacement(func);
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);
   };

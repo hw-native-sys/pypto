@@ -51,7 +51,8 @@ def remote_load(
 
     Mirrors :func:`pl.tile.load` at the user-visible surface, but the source
     is a *remote* slice of a window-bound :class:`pld.DistributedTensor`.
-    Address translation happens at codegen via ``CommRemoteOffset`` + addptr + make_tensor_view.
+    Address translation happens at codegen via inline peer-offset arithmetic + addptr
+    + make_tensor_view.
 
     .. code-block:: python
 
@@ -143,7 +144,7 @@ def remote_store(
     Mirrors :func:`pl.tile.store` at the user-visible surface, but the
     destination is a *remote* slice of a window-bound
     :class:`pld.DistributedTensor`. Address translation happens at codegen
-    via ``CommRemoteOffset`` + addptr + make_tensor_view.
+    via inline peer-offset arithmetic + addptr + make_tensor_view.
 
     .. code-block:: python
 

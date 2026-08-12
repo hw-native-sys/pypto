@@ -61,3 +61,29 @@ def try_infer_pipe(call: Call) -> int | None:
 
 def get_execution_memory_access_evidence(op_name: str) -> Literal["unknown", "functional", "no_access"]:
     """Return an operation's execution-memory-access evidence."""
+
+def get_declared_core_affinity(op_name: str) -> Literal["cube", "vector", "shared", "mixed"] | None:
+    """Return an operation's explicitly declared core affinity, or None.
+
+    ``None`` means the op declares no affinity, so ``ClassifyCallAffinity``
+    derives it from the call itself (memory spec, operand tiles, result tile).
+    """
+
+def is_no_duplicate_op(op_name: str) -> bool:
+    """Return whether an operation must not run on a second core.
+
+    A no-duplicate op changes what the program means when it is replicated onto
+    the other lane of a mixed kernel — ``pld.system.notify`` can release a peer
+    from the cube lane before the vector lane's TPUT has landed the data.
+    Orthogonal to core affinity, which decides placement. Read by
+    ``LowerAutoVectorSplit``'s ``pl.split_aiv`` region placement stamp.
+    """
+
+def classify_call_affinity(call: Call) -> Literal["cube", "vector", "shared", "mixed"]:
+    """Return the core affinity ``ClassifyCallAffinity`` derives for a Call.
+
+    Unlike :func:`get_declared_core_affinity` this is the *effective* placement:
+    it runs the full classification chain (declared affinity, the dynamic
+    special cases, output memory spec, first tile argument, result tile
+    memory), so the answer depends on how far the call has been lowered.
+    """
