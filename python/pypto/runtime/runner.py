@@ -733,12 +733,14 @@ def _coerced_to_orch_args(
     """
     from .device_runner import (  # noqa: PLC0415
         ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
         scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
-    from .task_interface import (  # noqa: PLC0415
-        device_tensor_to_tensor,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+
+    # Both tensor branches go through pypto's own converter, which resolves the bound
+    # worker: Simpler's ``make_tensor_arg`` needs it (it memoizes the host tensor as a
+    # FORK_SHM handle on a worker) and a DeviceTensor needs its allocating Buffer. That
+    # is the same path L3's generated orchestration uses, so the two levels cannot drift.
+    from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
     orch_args = ChipStorageTaskArgs()
     for i, arg in enumerate(coerced):
@@ -756,7 +758,7 @@ def _coerced_to_orch_args(
             orch_args.add_tensor(make_tensor_arg(arg))
         elif isinstance(arg, DeviceTensor):
             try:
-                orch_args.add_tensor(device_tensor_to_tensor(arg))
+                orch_args.add_tensor(make_tensor_arg(arg))
             except ValueError as e:
                 raise ValueError(f"At position {i}: {e}") from e
         elif isinstance(arg, _SimpleCData):

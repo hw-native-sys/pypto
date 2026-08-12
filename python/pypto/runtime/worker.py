@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from .runner import RunConfig
 from .runtime_base import Worker
+from ._buffer_bridge import BufferBridge
 
 if TYPE_CHECKING:
     from pypto.ir.compiled_program import CallArg, CompiledProgram
@@ -99,7 +100,7 @@ _ACTIVE_WORKERS: contextvars.ContextVar[tuple[ChipWorker, ...]] = contextvars.Co
 _DEFAULT_RUNTIME = "tensormap_and_ringbuffer"
 
 
-class ChipWorker(Worker):
+class ChipWorker(BufferBridge, Worker):
     """L2 single-chip execution handle, bound to one ``(platform, device_id, runtime)``.
 
     A ``ChipWorker`` auto-initializes device state in ``__init__`` so that an
@@ -160,6 +161,7 @@ class ChipWorker(Worker):
         self._runtime = runtime
         self._enable_sdma = bool(enable_sdma)
         self._token: contextvars.Token | None = None
+        self._arg_token: Any = None
 
         self._impl = _get_simpler_worker_cls()(
             level=level,
@@ -168,6 +170,7 @@ class ChipWorker(Worker):
             runtime=runtime,
             enable_sdma=self._enable_sdma,
         )
+        self._init_buffer_bridge()
         self._initialized = False
         # Maps id(chip_callable) -> handle returned by simpler Worker.register()
         # (an opaque ``CallableHandle`` since runtime #891; typed ``Any`` to
@@ -215,6 +218,9 @@ class ChipWorker(Worker):
         # cid registrations / tear down the impl so the underlying free path
         # is still live.
         self._close_owned_tensors()
+        # Same ordering argument for the shm staging Buffers: closing them needs a live
+        # worker, so it happens before ``_impl.close()``.
+        self._release_staging_buffers()
         # Drop per-handle host-side state before tearing down the device so
         # the underlying ChipWorker.finalize() doesn't observe stale
         # registrations on a re-init(). ``unregister`` accepts the opaque
@@ -261,12 +267,32 @@ class ChipWorker(Worker):
         self._require_initialized("malloc")
         if not isinstance(nbytes, int) or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
-        return self._impl.malloc(nbytes, worker_id)
+        self._require_leaf_worker(worker_id, "malloc")
+        # Simpler's leaf ``malloc`` returns a Buffer and no longer takes a worker id.
+        # Keep handing the caller an int so pypto's public surface is unchanged, and
+        # remember the Buffer: the pointer alone cannot be re-wrapped later.
+        handle = self._impl.malloc(int(nbytes))
+        self._register_device_buffer(int(worker_id), int(handle.base), handle)
+        return int(handle.base)
+
+    def _simpler_worker(self) -> Any:
+        return self._impl
+
+    @staticmethod
+    def _require_leaf_worker(worker_id: int, api: str) -> None:
+        """A ChipWorker drives one chip, so ``worker_id`` can only be 0.
+
+        It stays in the signature because the Worker ABC declares it; a non-zero value
+        used to be silently forwarded to Simpler, which no longer takes one at all.
+        """
+        if int(worker_id) != 0:
+            raise ValueError(f"{api}: ChipWorker drives a single chip; worker_id must be 0, got {worker_id}")
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         """Release a pointer previously returned by :meth:`malloc`."""
         self._require_initialized("free")
-        self._impl.free(ptr, worker_id)
+        self._require_leaf_worker(worker_id, "free")
+        self._impl.free(self._pop_device_buffer(int(ptr), int(worker_id), "free"))
 
     def copy_to(
         self,
@@ -283,7 +309,13 @@ class ChipWorker(Worker):
         this call returns.
         """
         self._require_initialized("copy_to")
-        self._impl.copy_to(dst_dev_ptr, src_host_ptr, nbytes, worker_id)
+        self._require_leaf_worker(worker_id, "copy_to")
+        # Both sides must be Buffers now. A leaf worker has no forked children, but the
+        # host side still has to be nameable, so it goes through shm staging — one
+        # memcpy, and the same code path L3 uses for post-fork host memory.
+        dst = self._device_buffer_for(int(dst_dev_ptr), int(worker_id), "copy_to")
+        src = self._stage_host_to_buffer(int(worker_id), int(src_host_ptr), int(nbytes))
+        self._impl.copy_to(dst, src)
 
     def copy_from(
         self,
@@ -295,7 +327,11 @@ class ChipWorker(Worker):
     ) -> None:
         """D2H copy: ``nbytes`` bytes from device *src_dev_ptr* back to host *dst_host_ptr*."""
         self._require_initialized("copy_from")
-        self._impl.copy_from(dst_host_ptr, src_dev_ptr, nbytes, worker_id)
+        self._require_leaf_worker(worker_id, "copy_from")
+        src = self._device_buffer_for(int(src_dev_ptr), int(worker_id), "copy_from")
+        staging = self._staging_buffer(int(worker_id), int(nbytes))
+        self._impl.copy_from(staging, src)
+        self._stage_buffer_to_host(staging, int(dst_host_ptr), int(nbytes))
 
     # ``alloc_tensor`` / ``free_tensor`` are inherited from Worker (ABC).
     # L2 uses the default ``_prepare_init`` (a defensive contiguous CPU copy);
@@ -538,10 +574,22 @@ class ChipWorker(Worker):
         if not self._initialized:
             self.init()
         self._token = _ACTIVE_WORKERS.set(stack + (self,))
+        # Simpler's task-arg conversion is worker-scoped now: a host tensor is memoized
+        # as a FORK_SHM handle on a specific worker, and a DeviceTensor resolves through
+        # the Buffer that allocated it. Bind this worker for the block so the shared
+        # converter works at L2 exactly as it does for L3's generated orchestration.
+        from .tensor_arg import bind_worker  # noqa: PLC0415
+
+        self._arg_token = bind_worker(self)
         return self
 
     def __exit__(self, *_exc: Any) -> None:
         assert self._token is not None
+        from .tensor_arg import unbind_worker  # noqa: PLC0415
+
+        if getattr(self, "_arg_token", None) is not None:
+            unbind_worker(self._arg_token)
+            self._arg_token = None
         _ACTIVE_WORKERS.reset(self._token)
         self._token = None
         self.close()
