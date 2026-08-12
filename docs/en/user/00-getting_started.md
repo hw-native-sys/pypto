@@ -173,6 +173,12 @@ Pass `platform=` / `device_id=` for the common case, or a full `RunConfig` via
 exposed under both `device_wall_us_*` and shorter `device_us_*` names, with
 `samples` aliasing the raw `device_wall_us` list.
 
+`compiled` does not have to come from a fresh compile: `CompiledProgram.from_dir(work_dir)`
+rebuilds a benchmarkable program from an existing build directory, so you can
+hand-edit the generated orchestration cpp / `.pto` and re-measure without
+recompiling. See
+[Benchmarking a replayed single-chip build](../dev/03-runtime-replay.md#benchmarking-a-replayed-single-chip-build).
+
 `benchmark` reads timing from the `[STRACE]` markers (simpler PR #1177): it
 sets the runtime log level to `timing` for the worker's lifetime and captures
 `stderr` at the fd level around the measured loop, so stderr emitted during the

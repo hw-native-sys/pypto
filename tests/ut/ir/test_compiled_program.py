@@ -11,6 +11,7 @@
 
 import contextlib
 import ctypes
+import json
 import os
 import sys
 import types
@@ -20,7 +21,13 @@ import pytest
 import torch
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
-from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
+from pypto.ir.compiled_program import (
+    _COMPILED_META_FILENAME,
+    _COMPILED_META_SCHEMA,
+    CompiledProgram,
+    _build_full_args,
+    _extract_param_infos,
+)
 from pypto.runtime import DeviceTensor, RunConfig
 
 
@@ -954,6 +961,173 @@ class TestValidateIr:
             cp.validate_ir(tensors, expected, rtol=1e-3, atol=1e-4)
 
         validator.assert_called_once_with(str(passes_dump), tensors, expected, rtol=1e-3, atol=1e-4)
+
+
+class TestCompiledMetaAndFromDir:
+    """``compiled_meta.json`` + ``CompiledProgram.from_dir`` — replay an
+    already-compiled single-chip build without re-running the pypto compile,
+    so ``benchmark()`` works against a ``runtime_dir`` replay (#2344).
+    """
+
+    def test_compile_persists_compiled_meta(self, tmp_path):
+        """Constructing from live IR writes a compiled_meta.json sidecar."""
+        prog = _make_program_with_orchestration(has_return=True)
+        CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
+
+        meta = json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())
+        assert meta["schema"] == _COMPILED_META_SCHEMA
+        assert [p["name"] for p in meta["params"]] == ["a", "b", "c"]
+        assert [p["direction"] for p in meta["params"]] == ["In", "In", "Out"]
+        assert [p["shape"] for p in meta["params"]] == [[128, 128]] * 3
+        assert {p["dtype"] for p in meta["params"]} == {"fp32"}
+        assert meta["num_return_types"] == 1
+        assert meta["platform"] == "a2a3sim"
+        assert meta["backend_type"] == "Ascend910B"
+
+    def test_from_dir_round_trips_param_metadata(self, tmp_path):
+        """from_dir reconstructs the same param metadata as the live compile."""
+        prog = _make_program_with_orchestration(has_return=True)
+        live = CompiledProgram(prog, str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        def _key(cp):
+            infos, _, _ = cp._get_metadata()
+            return [(p.name, p.direction, p.shape, str(p.dtype)) for p in infos]
+
+        assert _key(reloaded) == _key(live)
+        assert reloaded.program is None  # reconstructed from disk, no live IR
+        assert reloaded.platform == "a2a3sim"
+        assert reloaded.backend_type == BackendType.Ascend910B
+        assert reloaded.has_return is live.has_return
+
+    def test_from_dir_output_indices_match_out_params(self, tmp_path):
+        """output_indices are rederived from the persisted directions (c is the lone Out)."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        param_infos, output_indices, _ = reloaded._get_metadata()
+        assert output_indices == [2]
+        assert param_infos[2].direction == ir.ParamDirection.Out
+
+    def test_from_dir_dispatches_via_runner(self, tmp_path):
+        """A reconstructed program is callable and reaches execute_compiled."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path)
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+        c = torch.zeros(128, 128)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            reloaded(a, b, c)
+
+        mock_exec.assert_called_once()
+        assert mock_exec.call_args.args[0] == tmp_path.resolve()
+        assert list(mock_exec.call_args.args[1]) == [a, b, c]
+        assert mock_exec.call_args.kwargs["platform"] == "a2a3sim"
+
+    def test_from_dir_exposes_benchmark_surface(self, tmp_path):
+        """Every member ``benchmark()``'s L2 branch touches works after from_dir.
+
+        Regression test for #2344: ``benchmark`` needs ``platform`` /
+        ``runtime_name`` / ``runtime_config`` / ``chip_callable`` plus the
+        metadata-derived ``build_orch_args`` / ``build_call_config`` /
+        ``output_indices``, which previously required a live ``Program``.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path, platform="a2a3")
+
+        cc = MagicMock(name="fake_chip")
+        runtime_config = {"aicpu_thread_num": 2, "enable_sdma": True}
+        call_config = MagicMock(name="call_config")
+        args = [torch.zeros(128, 128) for _ in range(3)]
+
+        with _fake_compile_and_assemble((cc, "host_build_graph", runtime_config)):
+            assert reloaded.platform == "a2a3"
+            assert reloaded.runtime_name == "host_build_graph"
+            assert reloaded.runtime_config == runtime_config
+            assert reloaded.chip_callable is cc
+            assert reloaded.output_indices == [2]
+            with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
+                oa_helper.return_value = "fake_orch_args"
+                orch_args, coerced, return_style = reloaded.build_orch_args(*args)
+            with _fake_call_config(call_config):
+                assert reloaded.build_call_config(RunConfig()) is call_config
+
+        assert orch_args == "fake_orch_args"
+        assert coerced == args
+        assert return_style is False
+
+    def test_from_dir_does_not_clobber_debug_runner(self, tmp_path):
+        """Reloading must preserve a hand-edited debug/run.py (the replay workflow)."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        run_py = tmp_path / "debug" / "run.py"
+        # Asserted rather than skipped: a self-skip would silently disable this
+        # regression check if debug-runner emission ever changed.
+        assert run_py.exists(), "single-orch compile must emit debug/run.py"
+        sentinel = "# hand-edited by the user — must survive from_dir\n"
+        run_py.write_text(sentinel)
+
+        CompiledProgram.from_dir(tmp_path)
+        assert run_py.read_text() == sentinel
+
+    def test_from_dir_does_not_rewrite_meta(self, tmp_path):
+        """The reload path must not rewrite the sidecar it just read."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        before = meta_path.stat().st_mtime_ns
+
+        CompiledProgram.from_dir(tmp_path)
+        assert meta_path.stat().st_mtime_ns == before
+
+    def test_from_dir_overrides_platform_and_backend(self, tmp_path):
+        """Explicit platform / backend_type override the persisted defaults."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        reloaded = CompiledProgram.from_dir(tmp_path, platform="a2a3", backend_type=BackendType.Ascend910B)
+        assert reloaded.platform == "a2a3"
+        assert reloaded.backend_type == BackendType.Ascend910B
+
+    def test_from_dir_missing_meta_raises(self, tmp_path):
+        """A directory without compiled_meta.json raises with a recompile hint."""
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_from_dir_incompatible_schema_raises(self, tmp_path):
+        """A compiled_meta.json written under a different schema version is rejected."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        meta = json.loads(meta_path.read_text())
+        meta["schema"] = meta["schema"] + 1  # simulate an incompatible future format
+        meta_path.write_text(json.dumps(meta))
+
+        with pytest.raises(ValueError, match="schema"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_multi_orch_build_writes_no_meta(self, tmp_path):
+        """Multi-orch builds have no single canonical entry, so no sidecar is written."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        cp = CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+
+        assert cp.orchestration_names  # sanity: multi-orch detected
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        with pytest.raises(FileNotFoundError, match="multi-orch"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_subscript_on_reconstructed_multi_orch_raises(self, tmp_path):
+        """A hand-placed sidecar in a multi-orch dir must not deref the absent IR."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        with pytest.raises(RuntimeError, match="live IR"):
+            _ = reloaded["orch_a"]
+
+    def test_metadata_without_ir_or_sidecar_raises(self, tmp_path):
+        """Constructing with neither live IR nor metadata fails loudly, not with None deref."""
+        cp = CompiledProgram(None, str(tmp_path))
+        with pytest.raises(RuntimeError, match="from_dir"):
+            _ = cp.param_names
 
 
 if __name__ == "__main__":

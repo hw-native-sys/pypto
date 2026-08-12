@@ -226,6 +226,7 @@ nav:
       - en/dev/02-error-handling.md
       - en/dev/03-logging.md
       - en/dev/03-runtime-dfx.md
+      - en/dev/03-runtime-replay.md
       - en/dev/04-simulator-trace-cleaning.md
       - en/dev/05-runtime-ring-sizing.md
       - en/dev/06-persistent-l3.md

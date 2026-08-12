@@ -154,6 +154,11 @@ print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 以 `device_wall_us_*` 和更短的 `device_us_*` 两套命名暴露，`samples` 是原始
 `device_wall_us` 列表的别名。
 
+`compiled` 不必来自一次新编译：`CompiledProgram.from_dir(work_dir)` 能从已有的
+构建目录重建出可 benchmark 的程序，于是可以手改生成的 orchestration cpp /
+`.pto` 后直接重测，无需重新编译。参见
+[对重放的单芯片构建做 benchmark](../dev/03-runtime-replay.md#对重放的单芯片构建做-benchmark)。
+
 `benchmark` 从 `[STRACE]` 标记读取计时（simpler PR #1177）：它在 worker 生命周期内
 将 runtime 日志级别设为 `timing`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环
 期间产生的 stderr 会被转存到临时文件，而非实时打印。`device_wall_us` 在 L2 单芯片

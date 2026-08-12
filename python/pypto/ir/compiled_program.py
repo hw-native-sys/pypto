@@ -19,6 +19,7 @@ torch tensors::
 """
 
 import ctypes
+import json
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -48,6 +49,17 @@ from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 # Scalar params accept Python primitives or ctypes scalars (which are
 # coerced to the correct ctypes type internally).
 CallArg = torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool | ctypes._SimpleCData
+
+# Filename of the small JSON sidecar persisted alongside the build artifacts so
+# a single-orchestration program can be reconstructed (``from_dir``) without the
+# live IR -- the L2 counterpart of ``distributed_meta.json``. Bump
+# ``_COMPILED_META_SCHEMA`` on any incompatible format change.
+#
+# Both sidecars embed the same ``_param_info_to_dict`` payload but version it
+# independently, so a change to *that* shared format must bump this schema AND
+# ``distributed_compiled_program._META_SCHEMA``.
+_COMPILED_META_FILENAME = "compiled_meta.json"
+_COMPILED_META_SCHEMA = 1
 
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
@@ -615,20 +627,28 @@ class CompiledProgram(_RuntimeFacade):
 
     def __init__(
         self,
-        program: Program,
+        program: Program | None,
         output_dir: str,
         *,
         backend_type: BackendType = BackendType.Ascend910B,
         platform: str | None = None,
+        _param_infos: list[_ParamInfo] | None = None,
+        _output_indices: list[int] | None = None,
+        _return_types: list[Any] | None = None,
     ) -> None:
+        # ``program`` is ``None`` on the :meth:`from_dir` reload path: param
+        # metadata is supplied pre-derived via the ``_param_infos`` /
+        # ``_output_indices`` / ``_return_types`` kwargs (read back from
+        # ``compiled_meta.json``), and the runtime artefacts are assembled from
+        # the on-disk ``kernel_config.py`` -- so no live IR is needed.
         self._program = program
         self._output_dir = Path(output_dir).resolve()
         self._backend_type = backend_type
         self._platform = platform or _default_platform(backend_type)
-        # Lazy metadata -- extracted on first call
-        self._param_infos: list[_ParamInfo] | None = None
-        self._output_indices: list[int] | None = None
-        self._return_types: list[Any] | None = None
+        # Lazy metadata -- extracted on first call, or supplied by from_dir()
+        self._param_infos = _param_infos
+        self._output_indices = _output_indices
+        self._return_types = _return_types
 
         # Lazy runtime artefacts -- compiled-and-assembled on first access
         # of chip_callable / runtime_name / runtime_config (or via load()).
@@ -660,11 +680,122 @@ class CompiledProgram(_RuntimeFacade):
                 if child.is_dir() and (child / "orchestration").is_dir():
                     self._sub_chip_dirs[child.name] = child
 
-        # Debug runner only makes sense when there's a single canonical entry
-        # point; multi-orch programs have one sub-build (and one debug script)
-        # per orch, emitted by each sub-build's own pipeline.
-        if not self._sub_chip_dirs:
+        # Only the fresh-compile path (live IR) writes artifacts: the reload
+        # path must not clobber a user's hand-edited debug/run.py, nor rewrite
+        # the sidecar it just read. Both artifacts assume a single canonical
+        # entry point, so multi-orch programs emit neither -- they have one
+        # sub-build (and one debug script) per orch, emitted by each
+        # sub-build's own pipeline.
+        if program is not None and not self._sub_chip_dirs:
+            self._persist_metadata()
             _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+
+    def _persist_metadata(self) -> None:
+        """Write ``<output_dir>/compiled_meta.json`` for :meth:`from_dir`.
+
+        Captures exactly what the dispatch path reads from the IR -- the
+        orchestration param metadata (names, directions, shapes, dtypes) plus
+        the return-type count -- alongside the platform / backend. Runtime
+        artefacts (``chip_callable`` / ``runtime_name`` / ``runtime_config``)
+        need no persistence: ``compile_and_assemble`` already rederives them
+        from the generated ``kernel_config.py``.
+
+        Best-effort: a program without a resolvable orchestration signature
+        skips emission (mirrors :func:`_write_debug_runner`); :meth:`from_dir`
+        then reports the missing file with a recompile hint.
+        """
+        try:
+            param_infos, _, return_types = self._get_metadata()
+        except (ValueError, TypeError):
+            return
+        meta = {
+            "schema": _COMPILED_META_SCHEMA,
+            "params": [_param_info_to_dict(p) for p in param_infos],
+            "num_return_types": len(return_types),
+            "platform": self._platform,
+            "backend_type": self._backend_type.name,
+        }
+        (self._output_dir / _COMPILED_META_FILENAME).write_text(json.dumps(meta, indent=2))
+
+    @classmethod
+    def from_dir(
+        cls,
+        output_dir: str | os.PathLike[str],
+        *,
+        platform: str | None = None,
+        backend_type: BackendType | None = None,
+    ) -> "CompiledProgram":
+        """Reconstruct a single-chip program from an existing ``build_output/`` dir.
+
+        Rebuilds param metadata from ``compiled_meta.json`` (written at compile
+        time) so the program is callable **and benchmarkable** without re-running
+        the pypto compile -- the L2 counterpart of
+        :meth:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram.from_dir`
+        and the basis of the ``runtime_dir`` replay workflow (edit the generated
+        orchestration cpp / ``.pto``, then re-measure)::
+
+            from pypto.ir import CompiledProgram
+            from pypto.runtime import benchmark
+
+            compiled = CompiledProgram.from_dir(work_dir, platform="a2a3")
+            stats = benchmark(compiled, args, rounds=100)
+
+        Args:
+            output_dir: A build directory produced by a prior ``ir.compile`` of a
+                single-orchestration (L2) program. Must contain
+                ``compiled_meta.json``.
+            platform: Override the persisted platform (e.g. swap ``a2a3sim`` ->
+                ``a2a3`` to replay on hardware). ``None`` keeps the persisted
+                value.
+            backend_type: Override the persisted codegen backend. ``None`` keeps
+                the persisted value.
+
+        Returns:
+            A :class:`CompiledProgram` whose ``__call__`` and runtime-artefact
+            accessors behave exactly like the freshly-compiled object.
+            :attr:`program` is ``None`` -- the IR itself is not persisted, so
+            :meth:`validate_ir` still reads the directory's ``passes_dump/``
+            rather than the live program.
+
+        Raises:
+            FileNotFoundError: ``compiled_meta.json`` is absent -- the directory
+                predates this feature, is a distributed (L3+) build, or is a
+                multi-orch build whose sub-builds live under ``next_levels/``.
+            ValueError: ``compiled_meta.json`` records a ``schema`` version
+                incompatible with this pypto build (the metadata format changed).
+        """
+        meta_path = Path(output_dir).resolve() / _COMPILED_META_FILENAME
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"{meta_path} not found — cannot reconstruct a compiled program from this "
+                f"directory. It predates the single-chip replay feature, is a distributed "
+                f"(L3+) build (use DistributedCompiledProgram.from_dir), or is a multi-orch "
+                f"build (reload one next_levels/<name>/ sub-build instead). Recompile via "
+                f"ir.compile() to refresh."
+            )
+        meta = json.loads(meta_path.read_text())
+        schema = meta.get("schema")
+        if schema != _COMPILED_META_SCHEMA:
+            raise ValueError(
+                f"Incompatible {_COMPILED_META_FILENAME} schema {schema!r} (expected "
+                f"{_COMPILED_META_SCHEMA}) in {meta_path}. The metadata was written by a "
+                f"different pypto version — recompile via ir.compile() to refresh."
+            )
+        param_infos = [_param_info_from_dict(p) for p in meta["params"]]
+        output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
+        # ``return_types`` contents are never inspected at runtime — only the
+        # count matters (has_return = len(...) > 0), so placeholders suffice.
+        return_types: list[Any] = [None] * int(meta.get("num_return_types", 0))
+        bt = backend_type or getattr(BackendType, meta.get("backend_type", "Ascend910B"))
+        return cls(
+            None,
+            str(output_dir),
+            backend_type=bt,
+            platform=platform or meta.get("platform"),
+            _param_infos=param_infos,
+            _output_indices=output_indices,
+            _return_types=return_types,
+        )
 
     # --- Properties -----------------------------------------------------------
 
@@ -674,8 +805,12 @@ class CompiledProgram(_RuntimeFacade):
         return self._output_dir
 
     @property
-    def program(self) -> Program:
-        """The original IR Program (pre-optimization passes)."""
+    def program(self) -> Program | None:
+        """The original IR Program (pre-optimization passes).
+
+        ``None`` for a program reconstructed via :meth:`from_dir` -- the IR is
+        not persisted alongside the build artifacts.
+        """
         return self._program
 
     @property
@@ -849,6 +984,13 @@ class CompiledProgram(_RuntimeFacade):
     def _get_metadata(self) -> tuple[list[_ParamInfo], list[int], list[Any]]:
         """Return (param_infos, output_indices, return_types), extracting on first call."""
         if self._param_infos is None:
+            if self._program is None:
+                # Reload path with no pre-filled metadata — should not happen
+                # (``from_dir`` always supplies it); guard rather than deref None.
+                raise RuntimeError(
+                    "CompiledProgram has neither live IR nor persisted param metadata; "
+                    "reconstruct via CompiledProgram.from_dir()."
+                )
             self._param_infos, self._output_indices, self._return_types = _extract_param_infos(self._program)
         return self._param_infos, self._output_indices, self._return_types  # type: ignore[return-value]
 
@@ -885,6 +1027,12 @@ class CompiledProgram(_RuntimeFacade):
             raise KeyError(
                 f"No orchestration {name!r} under {self._output_dir / 'next_levels'}. "
                 f"Available: {sorted(self._sub_chip_dirs)}"
+            )
+        if self._program is None:
+            raise RuntimeError(
+                f"Multi-orch dispatch needs live IR; this CompiledProgram was reconstructed "
+                f"from {self._output_dir} and compiled_meta.json records one orchestration "
+                f"signature only. Reload next_levels/{name}/ directly, or recompile via ir.compile()."
             )
         func = self._program.get_function(name)
         if func is None:
