@@ -116,12 +116,22 @@ live `CompiledProgram` for the orchestration param metadata — derived from the
 `kernel_config.py`, and `CompiledProgram.from_dir()` rebuilds a fully callable
 program from it — **no pypto recompile, no pass re-run**:
 
+**`from_dir()` reloads metadata only — it does not rebuild sources.** Unlike
+`replay`, it runs neither the `.pto` → cpp splice nor the binary-cache
+invalidation, so an edit left to it alone can be silently ignored: a `.pto` edit
+never reaches the cpp, and an edited cpp can still be served from a cached
+`.o` / `.so`. Do both explicitly, exactly as `replay` does internally:
+
 ```python
 from pypto.ir import CompiledProgram
 from pypto.runtime import benchmark
+from pypto.runtime.debug import invalidate_binary_cache, rebuild_kernel_cpp_from_pto
 
-# after hand-editing orchestration/*.cpp or ptoas/*.pto in the build dir
-compiled = CompiledProgram.from_dir("build_output/<jit_dir>/", platform="a2a3")
+work_dir = "build_output/<jit_dir>/"
+rebuild_kernel_cpp_from_pto(work_dir)  # only if you edited ptoas/*.pto
+invalidate_binary_cache(work_dir)      # drop cached .o/.so so the edit is compiled
+
+compiled = CompiledProgram.from_dir(work_dir, platform="a2a3")
 compiled(a, b, c)                                    # correctness re-check
 stats = benchmark(compiled, [a, b, c], rounds=100)   # and timing
 ```
@@ -130,9 +140,10 @@ stats = benchmark(compiled, [a, b, c], rounds=100)   # and timing
 can be overridden to replay elsewhere (e.g. `a2a3sim` → `a2a3`). Runtime artifacts
 are rederived from `kernel_config.py`, and the reload rewrites neither the sidecar
 nor a hand-edited `debug/run.py`. `program` is `None` on the result (the IR is not
-persisted); `validate_ir()` still works from `passes_dump/`. A multi-orch build
-writes no sidecar — reload one `next_levels/<name>/` sub-build instead.
-Distributed builds use `DistributedCompiledProgram.from_dir` (below).
+persisted); `validate_ir()` still works from `passes_dump/`. A multi-orch parent
+has no sidecar of its own — each `next_levels/<name>/` sub-build carries one, so
+reload the sub-build you want. Distributed builds use
+`DistributedCompiledProgram.from_dir` (below).
 
 ## Replaying an L3 / distributed build
 

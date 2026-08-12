@@ -84,6 +84,43 @@ def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
     return ir.Program([orch], "TestProgram", span)
 
 
+def _make_multi_orch_program() -> ir.Program:
+    """Build a Program with two Orchestrations of deliberately different signatures.
+
+    ``orch_a(a, b, c)`` mirrors :func:`_make_program_with_orchestration`;
+    ``orch_b(x, y)`` is shorter, so a per-sub-build sidecar cannot accidentally
+    pass by carrying the other orchestration's metadata.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([128, 128], DataType.FP32)
+    body = ir.SeqStmts([], span)
+
+    orch_a = ir.Function(
+        "orch_a",
+        [
+            (ir.Var("a", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("b", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("c", tensor_type, span), ir.ParamDirection.Out),
+        ],
+        [],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    orch_b = ir.Function(
+        "orch_b",
+        [
+            (ir.Var("x", tensor_type, span), ir.ParamDirection.In),
+            (ir.Var("y", tensor_type, span), ir.ParamDirection.Out),
+        ],
+        [],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    return ir.Program([orch_a, orch_b], "MultiOrchProgram", span)
+
+
 def _make_program_without_orchestration() -> ir.Program:
     """Build a Program with multiple InCore functions and no orchestration."""
     span = ir.Span.unknown()
@@ -1102,16 +1139,60 @@ class TestCompiledMetaAndFromDir:
         with pytest.raises(ValueError, match="schema"):
             CompiledProgram.from_dir(tmp_path)
 
-    def test_multi_orch_build_writes_no_meta(self, tmp_path):
-        """Multi-orch builds have no single canonical entry, so no sidecar is written."""
+    def test_multi_orch_parent_writes_no_meta(self, tmp_path):
+        """The multi-orch parent has no single canonical entry, so it gets no sidecar."""
         for name in ("orch_a", "orch_b"):
             (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
-        cp = CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        cp = CompiledProgram(_make_multi_orch_program(), str(tmp_path))
 
         assert cp.orchestration_names  # sanity: multi-orch detected
         assert not (tmp_path / _COMPILED_META_FILENAME).exists()
         with pytest.raises(FileNotFoundError, match="multi-orch"):
             CompiledProgram.from_dir(tmp_path)
+
+    def test_multi_orch_sub_builds_get_their_own_meta(self, tmp_path):
+        """Each next_levels/<name>/ sub-build is independently reloadable.
+
+        The parent's error message points users at the sub-builds, so each one
+        must carry the signature of *its own* orchestration.
+        """
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), platform="a2a3sim")
+
+        # orch_a takes (a, b, c); orch_b takes only (x, y) — distinct signatures.
+        reloaded_a = CompiledProgram.from_dir(tmp_path / "next_levels" / "orch_a")
+        reloaded_b = CompiledProgram.from_dir(tmp_path / "next_levels" / "orch_b")
+        assert reloaded_a.param_names == ["a", "b", "c"]
+        assert reloaded_a.output_indices == [2]
+        assert reloaded_b.param_names == ["x", "y"]
+        assert reloaded_b.output_indices == [1]
+        assert reloaded_a.platform == "a2a3sim"
+
+    def test_malformed_meta_raises_value_error(self, tmp_path):
+        """Every malformed payload surfaces as ValueError naming the file, not a raw KeyError."""
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        good = json.loads(meta_path.read_text())
+
+        broken = {
+            "not JSON": "{ this is not json",
+            "top-level list": json.dumps([good]),
+            "params not a list": json.dumps({**good, "params": "abc"}),
+            "param entry not an object": json.dumps({**good, "params": ["abc"]}),
+            "param missing a key": json.dumps({**good, "params": [{"name": "a"}]}),
+            "bad direction": json.dumps({**good, "params": [{**good["params"][0], "direction": "Sideways"}]}),
+            "bad dtype": json.dumps({**good, "params": [{**good["params"][0], "dtype": "fp99"}]}),
+            "negative return count": json.dumps({**good, "num_return_types": -1}),
+            "non-int return count": json.dumps({**good, "num_return_types": "two"}),
+            "unknown backend": json.dumps({**good, "backend_type": "AscendNope"}),
+            "non-string platform": json.dumps({**good, "platform": 7}),
+        }
+        for label, payload in broken.items():
+            meta_path.write_text(payload)
+            with pytest.raises(ValueError, match=_COMPILED_META_FILENAME) as excinfo:
+                CompiledProgram.from_dir(tmp_path)
+            assert "ir.compile()" in str(excinfo.value), f"{label}: message lacks a recompile hint"
 
     def test_subscript_on_reconstructed_multi_orch_raises(self, tmp_path):
         """A hand-placed sidecar in a multi-orch dir must not deref the absent IR."""

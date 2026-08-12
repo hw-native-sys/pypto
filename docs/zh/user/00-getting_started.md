@@ -156,8 +156,9 @@ print(stats.device_wall_us_median, stats.device_wall_us_min, len(stats.samples))
 
 `compiled` 不必来自一次新编译：`CompiledProgram.from_dir(work_dir)` 能从已有的
 构建目录重建出可 benchmark 的程序，于是可以手改生成的 orchestration cpp /
-`.pto` 后直接重测，无需重新编译。参见
-[对重放的单芯片构建做 benchmark](../dev/03-runtime-replay.md#对重放的单芯片构建做-benchmark)。
+`.pto` 后直接重测，无需重新编译——但要配合
+[对重放的单芯片构建做 benchmark](../dev/03-runtime-replay.md#对重放的单芯片构建做-benchmark)
+里的 `.pto` 重建与二进制缓存失效两步，否则改动可能没被编译进去。
 
 `benchmark` 从 `[STRACE]` 标记读取计时（simpler PR #1177）：它在 worker 生命周期内
 将 runtime 日志级别设为 `timing`，并在测量循环期间以 fd 级别捕获 `stderr`，因此循环

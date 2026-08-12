@@ -206,6 +206,79 @@ def _param_info_from_dict(d: dict[str, Any]) -> _ParamInfo:
     )
 
 
+def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
+    """Read and fully validate a ``compiled_meta.json`` sidecar.
+
+    Every malformed-payload failure surfaces as a single :class:`ValueError`
+    naming *meta_path* and the recompile fix, rather than leaking whichever
+    ``JSONDecodeError`` / ``KeyError`` / ``AttributeError`` / ``TypeError`` the
+    offending field happened to raise. A build directory is user-supplied
+    input, so a hand-edited or truncated sidecar must fail like bad input, not
+    like an internal error.
+
+    Returns:
+        ``{"param_infos", "num_return_types", "platform", "backend_type"}``,
+        already converted to their runtime types.
+
+    Raises:
+        ValueError: the file is not readable as the expected schema.
+    """
+
+    def _bad(detail: str) -> ValueError:
+        return ValueError(
+            f"Invalid {_COMPILED_META_FILENAME} in {meta_path}: {detail}. The metadata was "
+            f"written by a different pypto version or hand-edited — recompile via "
+            f"ir.compile() to refresh."
+        )
+
+    try:
+        meta = json.loads(meta_path.read_text())
+    except ValueError as exc:  # JSONDecodeError is a ValueError subclass
+        raise _bad(f"not valid JSON ({exc})") from exc
+    if not isinstance(meta, dict):
+        raise _bad(f"expected a JSON object, got {type(meta).__name__}")
+
+    schema = meta.get("schema")
+    if schema != _COMPILED_META_SCHEMA:
+        raise ValueError(
+            f"Incompatible {_COMPILED_META_FILENAME} schema {schema!r} (expected "
+            f"{_COMPILED_META_SCHEMA}) in {meta_path}. The metadata was written by a "
+            f"different pypto version — recompile via ir.compile() to refresh."
+        )
+
+    raw_params = meta.get("params")
+    if not isinstance(raw_params, list):
+        raise _bad(f"'params' must be a list, got {type(raw_params).__name__}")
+    param_infos: list[_ParamInfo] = []
+    for i, entry in enumerate(raw_params):
+        if not isinstance(entry, dict):
+            raise _bad(f"params[{i}] must be an object, got {type(entry).__name__}")
+        try:
+            param_infos.append(_param_info_from_dict(entry))
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            raise _bad(f"params[{i}] is malformed ({exc})") from exc
+
+    num_return_types = meta.get("num_return_types", 0)
+    if not isinstance(num_return_types, int) or isinstance(num_return_types, bool) or num_return_types < 0:
+        raise _bad(f"'num_return_types' must be a non-negative integer, got {num_return_types!r}")
+
+    backend_name = meta.get("backend_type", "Ascend910B")
+    backend_type = getattr(BackendType, backend_name, None) if isinstance(backend_name, str) else None
+    if backend_type is None:
+        raise _bad(f"unknown 'backend_type' {backend_name!r}")
+
+    platform = meta.get("platform")
+    if platform is not None and not isinstance(platform, str):
+        raise _bad(f"'platform' must be a string or absent, got {type(platform).__name__}")
+
+    return {
+        "param_infos": param_infos,
+        "num_return_types": num_return_types,
+        "platform": platform,
+        "backend_type": backend_type,
+    }
+
+
 def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from a specific IR function.
 
@@ -682,13 +755,35 @@ class CompiledProgram(_RuntimeFacade):
 
         # Only the fresh-compile path (live IR) writes artifacts: the reload
         # path must not clobber a user's hand-edited debug/run.py, nor rewrite
-        # the sidecar it just read. Both artifacts assume a single canonical
-        # entry point, so multi-orch programs emit neither -- they have one
-        # sub-build (and one debug script) per orch, emitted by each
-        # sub-build's own pipeline.
-        if program is not None and not self._sub_chip_dirs:
-            self._persist_metadata()
-            _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+        # the sidecar it just read.
+        if program is not None:
+            if self._sub_chip_dirs:
+                # Multi-orch: the parent has no single canonical signature, but
+                # each next_levels/<name>/ IS a complete single-orch build dir,
+                # so give each one its own sidecar. That makes the per-sub-build
+                # reload the parent's error message points at actually work.
+                # The debug runner stays parent-less for the same reason as
+                # before: one script per sub-build, from its own pipeline.
+                self._persist_sub_chip_metadata()
+            else:
+                self._persist_metadata()
+                _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+
+    def _write_meta(
+        self,
+        output_dir: Path,
+        param_infos: list[_ParamInfo],
+        return_types: list[Any],
+    ) -> None:
+        """Write one ``compiled_meta.json`` describing a single orchestration."""
+        meta = {
+            "schema": _COMPILED_META_SCHEMA,
+            "params": [_param_info_to_dict(p) for p in param_infos],
+            "num_return_types": len(return_types),
+            "platform": self._platform,
+            "backend_type": self._backend_type.name,
+        }
+        (output_dir / _COMPILED_META_FILENAME).write_text(json.dumps(meta, indent=2))
 
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/compiled_meta.json`` for :meth:`from_dir`.
@@ -708,14 +803,27 @@ class CompiledProgram(_RuntimeFacade):
             param_infos, _, return_types = self._get_metadata()
         except (ValueError, TypeError):
             return
-        meta = {
-            "schema": _COMPILED_META_SCHEMA,
-            "params": [_param_info_to_dict(p) for p in param_infos],
-            "num_return_types": len(return_types),
-            "platform": self._platform,
-            "backend_type": self._backend_type.name,
-        }
-        (self._output_dir / _COMPILED_META_FILENAME).write_text(json.dumps(meta, indent=2))
+        self._write_meta(self._output_dir, param_infos, return_types)
+
+    def _persist_sub_chip_metadata(self) -> None:
+        """Write one sidecar per ``next_levels/<name>/`` sub-build.
+
+        Each sub-build is dispatched on its own (``compiled[<name>]``, or a
+        direct ``CompiledProgram.from_dir(next_levels/<name>)``), so each needs
+        the signature of *its* orchestration rather than the parent's. Same
+        best-effort contract as :meth:`_persist_metadata`: an orchestration
+        whose signature cannot be extracted is skipped, not fatal.
+        """
+        assert self._program is not None
+        for name, sub_dir in self._sub_chip_dirs.items():
+            func = self._program.get_function(name)
+            if func is None:
+                continue
+            try:
+                param_infos, _, return_types = _extract_func_param_infos(func)
+            except (ValueError, TypeError):
+                continue
+            self._write_meta(sub_dir, param_infos, return_types)
 
     @classmethod
     def from_dir(
@@ -759,34 +867,28 @@ class CompiledProgram(_RuntimeFacade):
 
         Raises:
             FileNotFoundError: ``compiled_meta.json`` is absent -- the directory
-                predates this feature, is a distributed (L3+) build, or is a
-                multi-orch build whose sub-builds live under ``next_levels/``.
-            ValueError: ``compiled_meta.json`` records a ``schema`` version
-                incompatible with this pypto build (the metadata format changed).
+                predates this feature, is a distributed (L3+) build, or is the
+                *parent* of a multi-orch build (each ``next_levels/<name>/``
+                sub-build carries its own sidecar; reload one of those).
+            ValueError: ``compiled_meta.json`` is unreadable, malformed, or
+                records a ``schema`` version incompatible with this pypto build.
         """
         meta_path = Path(output_dir).resolve() / _COMPILED_META_FILENAME
         if not meta_path.exists():
             raise FileNotFoundError(
                 f"{meta_path} not found — cannot reconstruct a compiled program from this "
                 f"directory. It predates the single-chip replay feature, is a distributed "
-                f"(L3+) build (use DistributedCompiledProgram.from_dir), or is a multi-orch "
-                f"build (reload one next_levels/<name>/ sub-build instead). Recompile via "
-                f"ir.compile() to refresh."
+                f"(L3+) build (use DistributedCompiledProgram.from_dir), or is the parent of "
+                f"a multi-orch build (each next_levels/<name>/ sub-build has its own sidecar "
+                f"— reload one of those). Recompile via ir.compile() to refresh."
             )
-        meta = json.loads(meta_path.read_text())
-        schema = meta.get("schema")
-        if schema != _COMPILED_META_SCHEMA:
-            raise ValueError(
-                f"Incompatible {_COMPILED_META_FILENAME} schema {schema!r} (expected "
-                f"{_COMPILED_META_SCHEMA}) in {meta_path}. The metadata was written by a "
-                f"different pypto version — recompile via ir.compile() to refresh."
-            )
-        param_infos = [_param_info_from_dict(p) for p in meta["params"]]
+        meta = _load_compiled_meta(meta_path)
+        param_infos = meta["param_infos"]
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the
         # count matters (has_return = len(...) > 0), so placeholders suffice.
-        return_types: list[Any] = [None] * int(meta.get("num_return_types", 0))
-        bt = backend_type or getattr(BackendType, meta.get("backend_type", "Ascend910B"))
+        return_types: list[Any] = [None] * meta["num_return_types"]
+        bt = backend_type or meta["backend_type"]
         return cls(
             None,
             str(output_dir),

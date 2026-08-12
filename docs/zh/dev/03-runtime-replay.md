@@ -108,12 +108,21 @@ python build_output/<jit_dir>/debug/run.py
 `CompiledProgram.from_dir()` 只凭它就能重建出完全可调用的程序——
 **不重新编译 pypto、不重跑 pass**：
 
+**`from_dir()` 只重载元数据，不重建源码。** 与 `replay` 不同，它既不做
+`.pto` → cpp 拼接，也不失效二进制缓存，所以只调它可能让改动被静默忽略：
+改了 `.pto` 不会传到 cpp，改了 cpp 也可能仍被缓存的 `.o` / `.so` 顶替。
+按 `replay` 内部的做法显式补上这两步：
+
 ```python
 from pypto.ir import CompiledProgram
 from pypto.runtime import benchmark
+from pypto.runtime.debug import invalidate_binary_cache, rebuild_kernel_cpp_from_pto
 
-# 在 build 目录里手改 orchestration/*.cpp 或 ptoas/*.pto 之后
-compiled = CompiledProgram.from_dir("build_output/<jit_dir>/", platform="a2a3")
+work_dir = "build_output/<jit_dir>/"
+rebuild_kernel_cpp_from_pto(work_dir)  # 仅在改了 ptoas/*.pto 时需要
+invalidate_binary_cache(work_dir)      # 丢弃缓存的 .o/.so，让改动真正被编译
+
+compiled = CompiledProgram.from_dir(work_dir, platform="a2a3")
 compiled(a, b, c)                                    # 正确性复检
 stats = benchmark(compiled, [a, b, c], rounds=100)   # 以及计时
 ```
@@ -122,8 +131,9 @@ stats = benchmark(compiled, [a, b, c], rounds=100)   # 以及计时
 （例如 `a2a3sim` → `a2a3`）。运行时产物照常从 `kernel_config.py` 重新派生；
 重载既不重写 sidecar，也不覆盖手改过的 `debug/run.py`。重建出的对象
 `program` 为 `None`（IR 未持久化），`validate_ir()` 仍可从 `passes_dump/` 工作。
-multi-orch 构建不写 sidecar——改为重载某个 `next_levels/<name>/` 子构建。
-分布式构建用 `DistributedCompiledProgram.from_dir`（见下一节）。
+multi-orch 的父目录自身没有 sidecar——每个 `next_levels/<name>/` 子构建各有一份，
+重载你要的那个子构建即可。分布式构建用
+`DistributedCompiledProgram.from_dir`（见下一节）。
 
 ## 重放 L3 / 分布式构建
 
