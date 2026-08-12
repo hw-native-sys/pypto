@@ -95,6 +95,41 @@ rank just wrote. The same barrier that orders loads also orders stores.
 structural: anything you want to share must flow through a
 `pld.DistributedTensor` view of a window buffer.
 
+## Pushing a computed value from a tensor-level kernel
+
+The example above is a `@pl.jit.incore` (tile-level) kernel, so `pl.load`
+produces a `Tile` and `pld.tile.remote_store` takes it directly. In a
+tensor-level `@pl.jit` kernel there are no tiles to name — every value is a
+`pl.Tensor` — so the push is spelled `pld.tensor.remote_store`:
+
+```python
+@pl.jit
+def push_scaled(x, win, peer):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        scaled = pl.mul(x[0:ROWS, 0:COLS], 2.0)
+        pld.tensor.remote_store(scaled, win, peer, [0, 0])
+        # ...then pld.system.notify() to release it, as always.
+```
+
+Both spellings compile to the same single remote write. The value goes
+**straight from on-core memory to the peer** — you do not have to store it back
+to global memory and push from there, which would cost a round trip and leave
+the store and the transfer on different pipes with nothing ordering them.
+
+If you don't want to think about which one you're in, the short form
+`pld.remote_store(src, target, peer, offsets)` picks the right one from the
+operand you hand it.
+
+Pass `atomic=pld.AtomicType.Add` (either form) to make the push a **combine** —
+`peer_region += src` — instead of an overwrite. That is what an all-to-all
+combine wants: every rank's contribution accumulates in place. It needs an
+fp32/bf16/fp16/int32/int16/int8 dtype, the same set `pl.store` accepts.
+
+Use [`pld.tensor.put`](11-put_get.md) instead when you are moving a **bulk**
+global-memory region: `put` streams through a staging tile and has the
+`chunk_rows` / `chunk_cols` / `pipeline` knobs, so it is not limited to what
+fits on-core. `remote_store` moves what you already have on-core, in one write.
+
 ## Edge cases
 
 > **Fatal pitfall — RMA before the ordering barrier.** `remote_load` reads

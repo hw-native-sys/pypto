@@ -8524,7 +8524,8 @@ class ASTParser:
                 f"Unknown distributed operation 'pld.{op_name}'",
                 span=span,
                 hint="Available short forms: pld.world_size, pld.get_comm_ctx, pld.rank, "
-                "pld.nranks, pld.alloc_window_buffer, pld.window, pld.remote_load",
+                "pld.nranks, pld.alloc_window_buffer, pld.window, pld.remote_load, "
+                "pld.remote_store",
             )
 
         return self._dispatch_op(_dsl_pld, "pld", op_name, call)

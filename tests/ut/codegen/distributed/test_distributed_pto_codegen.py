@@ -555,6 +555,107 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "pto.make_tensor_view" in kernel, kernel
 
 
+def test_remote_store_accepts_nd_tile_with_unit_leading_dims():
+    """A `[1, H, W]` tile pushed into a `[1, H, W]` window lowers end-to-end.
+
+    The deducer's push contract runs at authoring time, before FlattenTileNdTo2D
+    collapses N-D tiles, so it has to admit leading unit dims — rejecting rank > 2
+    outright would refuse a program that compiles to a correct 3-D partition view.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            inp: pl.Tensor[[1, 16, 32], pl.FP16],
+            data: pld.DistributedTensor[[1, 16, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pl.load(inp, [0, 0, 0], [1, 16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "!pto.partition_tensor_view<1x16x32xf16>" in kernel, kernel
+    assert "_peer_pview" in kernel, kernel
+
+
+def test_remote_store_emits_atomic_add_attr():
+    """``atomic=AtomicType.Add`` makes the cross-rank push a combine.
+
+    Same ``atomicType`` attr ``tile.store`` already emits for split-K
+    accumulation — this is what an all-to-all combine needs to sum every peer's
+    contribution in place instead of overwriting it.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0], atomic=pld.AtomicType.Add)
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "{atomicType = #pto<atomic_type atomic_add>}" in kernel, kernel
+
+
+def test_remote_store_omits_atomic_attr_for_plain_store():
+    """A plain push emits no atomicType attr — non-atomic codegen is unchanged."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "atomicType" not in kernel, kernel
+
+
+def test_tensor_remote_store_of_computed_value_emits_tstore_without_tput():
+    """A computed value pushed with ``pld.tensor.remote_store`` reaches the peer
+    as a single ``pto.tstore`` — no TPUT, no staging tile, no GM round-trip.
+
+    This is the end-to-end shape issue #2349 asked for: before it, the value was
+    rejected from both directions and the only way to push it was to store it
+    back to global memory and TPUT from there.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP16],
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            scaled = pl.tensor.add(x, x)
+            pld.tensor.remote_store(scaled, data, peer, [0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "_peer_pview" in kernel, kernel
+    assert "func.call @CommRemoteOffset_f16" in kernel, kernel
+    # The push is a direct tstore of the computed tile: no TPUT bounce buffer.
+    assert "pto.comm.tput" not in kernel, kernel
+    # ...and the vector add's result feeds it directly rather than being spilled
+    # to global memory first.
+    assert "pto.vadd" in kernel or "pto.add" in kernel, kernel
+
+
 def test_remote_store_pads_partition_view_with_ones_for_3d_target():
     """For an N-D (N > 2) target, the partition_view rank matches the target
     rank — leading dims are size-1 (matching notify's one_dims(rank, "1")

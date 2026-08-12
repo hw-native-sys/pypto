@@ -7,21 +7,18 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 分配的对称、按 rank 划分的通信窗口的一个切片。族内 verifier 通常会拒绝普通
 `TensorType`（严格的 kind-trait 匹配 —— `As<DistributedTensorType>` 不匹配普通
 `TensorType`），以保证非窗口绑定的 tensor 永远不会被误传入跨 rank 槽位。
-**两个明确的例外：** `pld.tensor.put`（以及它下降出的 `pld.tile.put`）的
-`src` 参数通过 `AsTensorTypeLike` 接受普通 `Tensor` —— TPUT 在源端只需要一段
-可读的本地 GM 区域,因此 kernel 可以直接从 host 输入推送,不必先经过窗口缓冲
-中转；`dst` 仍然必须是窗口绑定的 `DistributedTensor`。
-`pld.tensor.get`（以及它下降出的 `pld.tile.get`）的 `dst` 参数通过
-`AsTensorTypeLike` 接受普通 `Tensor` —— TGET 在目标端只需要一段可写的本地 GM
-区域来接收数据,因此 kernel 可以将 TGET 结果直接写入 host 输出 tensor；
-`src` 仍然必须是窗口绑定的 `DistributedTensor`。
+**两个明确的例外**（均经 `AsTensorTypeLike` 匹配,详见下方命名空间一节）：
+`put`/`tile.put` 的 `src` 与 `get`/`tile.get` 的 `dst` 接受普通 `Tensor` ——
+TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑定的一侧
+（`put.dst`、`get.src`）仍然必须是 `DistributedTensor`。
 
-共有**十三个算子**和**四个 ABI 枚举**：
+共有**十四个算子**和**四个 ABI 枚举**：
 
 | 算子 | 方向 | 结果 | 硬件 |
 | ---- | ---- | ---- | ---- |
 | `pld.tile.remote_load` | pull（读 peer → 本地 tile） | `TileType` | TLOAD |
 | `pld.tile.remote_store` | push（写本地 tile → peer） | `Unknown`（副作用） | TSTORE |
+| `pld.tensor.remote_store` | push（写本地 tensor 级值 → peer）；1:1 下降为 `pld.tile.remote_store` | `Unknown`（副作用） | TSTORE |
 | `pld.tensor.get` | pull（读 peer → 本地 GM） | `Unknown`（副作用） | TGET |
 | `pld.tensor.put` | push（写本地 → peer） | `Unknown`（副作用） | TPUT |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType`（同 src） | builtin collective |
@@ -34,7 +31,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 
-五个仅有副作用（side-effect-only）的算子产生
+六个仅有副作用（side-effect-only）的算子产生
 [`UnknownType`](ir/02-types.md)：它们因跨 rank 副作用而存在，而非为消费者读取的
 SSA 值而存在。
 
@@ -46,20 +43,20 @@ SSA 值而存在。
   的兄弟,归入 `pld.tile`。
 - **`pld.tile.remote_store`** 消费一个 *tile*（`remote_load` 的对称写伴生算子），
   因此是 `tile.store` 的兄弟,同样归入 `pld.tile`。
-- **`pld.tensor.get`** 读写 *tensor*（GM）操作数 —— `dst` 可以是窗口绑定的
-  `DistributedTensor` 视图,**也可以**是普通 `Tensor`（TGET 在目标端只需要一段
-  可写的本地 GM 区域来接收数据）；`src` 必须是窗口绑定的 `DistributedTensor`
-  视图（peer 需要窗口槽位用于读取）。TGET 中转用的 VEC staging tile 由
-  `ConvertTensorToTileOps` 物化为内部 `pld.tile.get`,不出现在 DSL 表面。
-  因此它是 `pld.tensor.alloc_window_buffer` / `pld.tensor.window` 的兄弟,
-  而**不是**产出 tile 的 `remote_load` 的兄弟。
-- **`pld.tensor.put`** 读写 *tensor*（GM）操作数 —— `dst` 必须是窗口绑定的
-  `DistributedTensor` 视图（peer 需要窗口槽位用于接收）；`src` 可以是窗口绑定的
-  `DistributedTensor` 视图,**也可以**是普通 `Tensor`（TPUT 在源端只需要一段可
-  读的本地 GM 区域）。TPUT 中转用的 VEC staging tile 由
-  `ConvertTensorToTileOps` 物化为内部 `pld.tile.put`,不出现在 DSL 表面。
-  因此它是 `pld.tensor.alloc_window_buffer` / `pld.tensor.window` 的兄弟,
-  而**不是**产出 tile 的 `remote_load` 的兄弟。
+- **`pld.tensor.remote_store`** 是同一算子上移一个 IR 层级 —— 它消费 *tensor 级*
+  的值，因此归入 `pld.tensor`，并由 `ConvertTensorToTileOps` 1:1 下降为
+  `pld.tile.remote_store`。这正是 `tensor.aiv_shard` / `tile.aiv_shard` 的形态
+  （**一个算子、两个层级、完全相同的参数面**），也是把 tensor 级 push 做成独立
+  入口、而不是重载 `pld.tensor.put` 的原因：按 `src` 的种类分派 `put` 会让它的五
+  个参数（`src_offsets`、`shape`、`atomic`、`chunk_*`、`pipeline`）随上游如何产生
+  该值而变得时而无意义，而这个属性在调用点是看不见的。
+- **`pld.tensor.get` / `pld.tensor.put`** 两侧读写的都是 *tensor*（GM）操作数。
+  窗口绑定的是 peer 需要槽位的那一侧（`get.src`、`put.dst`）；本地的一侧
+  （`get.dst`、`put.src`）也接受普通 `Tensor`,因此 kernel 可以直接 TGET 进 /
+  TPUT 出 host 提供的 tensor,不必先经窗口缓冲中转。二者中转用的 VEC staging
+  tile 由 `ConvertTensorToTileOps` 物化为内部 `pld.tile.get` / `pld.tile.put`,
+  不出现在 DSL 表面。因此二者都是 `pld.tensor.alloc_window_buffer` /
+  `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
   同步,无数据操作数 —— 因此归入 `pld.system`。
 
@@ -72,7 +69,7 @@ kwarg 负载（notify 的 `op`、wait 的 `cmp`、put 的 `atomic`）,并在 cod
 ```cpp
 enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
 enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait
-enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put
+enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put、remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
 ```
 
@@ -169,20 +166,36 @@ rank 索引；`offsets` / `shape` / 可选 `valid_shape` 必须各为 `MakeTuple
 DSL（`python/pypto/language/distributed/op/tile_ops.py`）接受位置或关键字参数；
 IR 算子保持位置参数，与 `tile.load` 一致。
 
-### `pld.tile.remote_store`（TSTORE）
+### `pld.tile.remote_store` / `pld.tensor.remote_store`（TSTORE）
 
 ```text
-pld.tile.remote_store(src_tile, target, peer, offsets) -> Unknown
+pld.tile.remote_store(src_tile, target, peer, offsets, *, atomic: int = 0) -> Unknown
+pld.tensor.remote_store(src, target, peer, offsets, *, atomic: int = 0) -> Unknown
 ```
 
-把本地 tile 写入 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域。
-在 IR 层面镜像 `tile.store`（位置参数 `offsets` 元组、仅副作用返回值），但目的是
-*远程*切片 —— 地址转换在 codegen 时由
+把本地值写入 `peer` rank 的窗口绑定 `DistributedTensor` 切片中的一个区域。
+在 IR 层面镜像 `tile.store`（位置参数 `offsets` 元组、可选 `atomic` attr、仅副作用
+返回值），但目的是*远程*切片 —— 地址转换在 codegen 时由
 `CommRemoteOffset(ctx, peer) + addptr + make_tensor_view` 实现。
 
-Verifier：`src_tile` 必须是 `TileType`；`target` 必须是 `DistributedTensorType`；
-`peer` 必须是 `ScalarType` rank 索引；`offsets` 必须是 `MakeTuple`,其 rank 等于
-`target.shape.size()`；`src_tile.dtype` 必须等于 `target.dtype`。
+两种形式**只**在 `src` 的 IR 层级上不同；短形式 `pld.remote_store` 按操作数分派，
+因此用户代码在两个层级上写法相同。
+
+Verifier（两种形式共用）：
+
+| 规则 | 说明 |
+| ---- | ---- |
+| `target` 是 `DistributedTensorType`，`peer` 是 `ScalarType` rank 索引 | |
+| `offsets` 是 rank 等于 `target.shape.size()` 的 `MakeTuple` | |
+| `src.dtype == target.dtype`，`target` rank ≥ 2 | |
+| `src` 是 2-D，或前导维全为 1 的 N-D | deducer 运行在 `FlattenTileNdTo2D` 折叠 N-D tile **之前**；前导维 > 1 会被折进行数并越过 target |
+| 被写入的区域在 `offsets` 处落在 `target` 内部（仅静态维度） | `remote_store` 自身不携带 transfer `shape` 可供裁剪：范围来自 `src`，所以在此之前一次越界 push 会静默覆写 peer 的相邻区域 |
+| `src` 是 `TileType`（tile 形式）/ `TensorType`（tensor 形式） | 两者的诊断都会点名兄弟入口，把作者引向其所处层级对应的那一个 |
+
+下降（tensor 形式）：`ConvertTensorToTileOps` 通过 `RegisterSimple` 将其 1:1 改写为
+tile 形式。其 `InputSpaceReq{Vec}` 使该算子在参数面上**完备**——`BridgeInputSpaces`
+只改写 `TensorType` 操作数，因此计算值（已是 tile）保持其内存空间直接透传，而仍驻留
+在 GM 的 `src` 会被自动桥接一次自然的 `tile.load` 到 Vec。
 
 Codegen：经过标准 tile pipeline 之后 tile 是 2-D（height × width）；发出的
 `pto.partition_view` 与 `target` 同 rank，前 `(target.rank - 2)` 维都填 1（与
@@ -191,9 +204,21 @@ Codegen：经过标准 tile pipeline 之后 tile 是 2-D（height × width）；
 是用来抓住之前 codegen 对任意 rank 都按 2-D 发 `partition_view` 的隐藏 bug
 的回归保护。
 
-DSL（`python/pypto/language/distributed/op/tile_ops.py`）把 `target` / `peer` /
-`offsets` 暴露为仅关键字（keyword-only）参数以提升可读性；IR 算子保持位置参数,
-与 `tile.store` 一致。
+`atomic = AtomicType.kAdd` 会在 `pto.tstore` 上追加
+`{atomicType = #pto<atomic_type atomic_add>}`，把 push 变成**归约**
+（`peer_region += src`）而非覆写 —— 即 `tile.store` split-K 累加的跨 rank 孪生形式，
+也是 all-to-all combine 就地累加各 rank 贡献所需要的。该 attr 仅在 `kAdd` 时发出，
+因此普通 push 的产物与之前逐字节一致。`kAdd` 要求 dtype 为
+fp32/bf16/fp16/int32/int16/int8 —— 与 `tile.store` 强制的硬件允许列表相同 ——
+bf16 在此之上还有 Ascend910B-only 限制。
+
+`pld.tensor.put`（TPUT）**没有** tile 源形式 —— 它的 staging tile 是中转缓冲而非
+数据源。推送计算值是 `remote_store` 的职责；推送无需装入片上的大块 GM 区域则是
+`put` 的职责。
+
+DSL（`python/pypto/language/distributed/op/tile_ops.py`、`.../tensor_ops.py`）把
+`target` / `peer` / `offsets` 暴露为位置或关键字参数以提升可读性并支持往返；IR 算子
+保持位置参数,与 `tile.store` 一致。
 
 ### `pld.tensor.put`（TPUT）
 
@@ -511,5 +536,5 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`
-  （tile 级子视图 push ✅）。所有测试均采用由 notify/wait 和集体 ST 建立的
+  （tile 级子视图 push ✅，以及 tensor 级*计算值* push ✅）。所有测试均采用由 notify/wait 和集体 ST 建立的
   `pld.system.notify` / `pld.system.wait` 握手模式。

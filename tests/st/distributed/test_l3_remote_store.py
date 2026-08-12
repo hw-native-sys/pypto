@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: ``pld.tile.remote_store`` cross-rank subview write.
+"""L3 distributed st: ``remote_store`` cross-rank writes, tile and tensor level.
 
 Subview-aware push dual of :func:`pld.tile.remote_load`. Where ``remote_load``
 reads a region of a peer's tensor into a local tile, ``remote_store`` writes a
@@ -209,8 +209,90 @@ def _build_subview_remote_store_program():
     return SubviewRemoteStore
 
 
+def _build_tensor_remote_store_program():
+    """Push a *computed* tensor-level value straight to the peer (issue #2349).
+
+    The body is tensor-level: ``scaled`` is produced by ``pl.tensor.add`` and
+    lives on-core, so ``ConvertTensorToTileOps`` lowers the push 1:1 to
+    ``pld.tile.remote_store``. There is no global-memory round-trip between the
+    compute and the push — which is the point: staging through GM and pushing
+    from there leaves the store and the transfer on different pipes with nothing
+    ordering them.
+
+    Same ring protocol as :func:`_build_ring_remote_store_program`, so the golden
+    is the partner's input doubled.
+    """
+
+    @pl.program
+    class TensorRemoteStore:
+        @pl.function(type=pl.FunctionType.InCore)
+        def scale_push_step(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            dst: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            # Phase 1: compute, then push the computed value directly.
+            scaled = pl.tensor.add(inp, inp)
+            pld.tensor.remote_store(scaled, dst, peer, [0, 0])
+
+            # Phase 2: same notify/wait handshake as the tile-level ring.
+            pld.system.notify(
+                target=signal,
+                peer=peer,
+                offsets=[0, 0],
+                value=1,
+                op=pld.NotifyOp.AtomicAdd,
+            )
+            pld.system.wait(
+                signal=signal,
+                offsets=[0, 0],
+                expected=1,
+                cmp=pld.WaitCmp.Ge,
+            )
+
+            # Phase 3: read back what our own peer pushed into us.
+            recv = pl.load(dst, [0, 0], [1, SIZE])
+            return pl.store(recv, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            dst: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            return self.scale_push_step(inp, out, dst, signal, peer)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+            dst_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pl.INT32.get_byte())
+
+            for r in pl.range(pld.world_size()):
+                dst = pld.window(dst_buf, [1, SIZE], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                self.chip_orch(inputs[r], outputs[r], dst, signal, (r + 1) % pld.world_size(), device=r)
+            return outputs
+
+    return TensorRemoteStore
+
+
 class TestL3RemoteStore:
-    """L3 distributed runtime: cross-rank subview write via pld.tile.remote_store."""
+    """L3 distributed runtime: cross-rank writes via both remote_store forms.
+
+    ``pld.tile.remote_store`` for the tile-level whole-tile and subview pushes,
+    and ``pld.tensor.remote_store`` for the tensor-level push of a computed
+    value.
+    """
 
     def test_ring_shuffle(self, test_config, device_ids):
         """Non-atomic overwrite: rank r pushes its input to peer (r + 1) % nranks."""
@@ -284,6 +366,43 @@ class TestL3RemoteStore:
         expected = torch.stack([expected_0, expected_1])
         assert torch.allclose(outputs, expected), (
             f"subview remote_store mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+    def test_tensor_level_push_of_computed_value(self, test_config, device_ids):
+        """Tensor-level push: rank r computes ``inp * 2`` and pushes it to its peer.
+
+        Regression cover for issue #2349 — before ``pld.tensor.remote_store``
+        existed, a computed value could not be pushed at all: ``pld.tensor.put``
+        refused the tile it lowers to and ``pld.tile.remote_store`` refused the
+        tensor-level value it starts as.
+        """
+        if len(device_ids) < 2:
+            pytest.skip(f"tensor-level remote_store needs 2 devices, got {device_ids}")
+
+        program = _build_tensor_remote_store_program()
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:2],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = torch.stack(
+            [
+                torch.arange(SIZE, dtype=torch.float32).reshape(1, SIZE),
+                torch.arange(100.0, 100.0 + SIZE, dtype=torch.float32).reshape(1, SIZE),
+            ]
+        )
+        outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+
+        compiled(inputs, outputs)
+
+        # outputs[r] = 2 * inputs[(r - 1) % nranks]
+        expected = torch.stack([inputs[1], inputs[0]]) * 2
+        assert torch.allclose(outputs, expected), (
+            f"tensor-level remote_store mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
 

@@ -90,6 +90,37 @@ barrier 也为 store 排序。
 输入/输出。规则是结构性的：任何你想共享的内容都必须流经 window buffer 的
 `pld.DistributedTensor` 视图。
 
+## 从 tensor 级 kernel 推送计算值
+
+上面的示例是 `@pl.jit.incore`（tile 级）kernel，因此 `pl.load` 产生 `Tile`，
+`pld.tile.remote_store` 直接接受它。而在 tensor 级 `@pl.jit` kernel 中没有 tile
+可命名——每个值都是 `pl.Tensor`——所以 push 写作 `pld.tensor.remote_store`：
+
+```python
+@pl.jit
+def push_scaled(x, win, peer):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        scaled = pl.mul(x[0:ROWS, 0:COLS], 2.0)
+        pld.tensor.remote_store(scaled, win, peer, [0, 0])
+        # ...随后照例用 pld.system.notify() 释放数据。
+```
+
+两种写法编译出的是同一次远程写。值**直接从片上内存到达对端**——你不需要先把它
+存回全局内存再从那里推送，那样会多一次往返，并且会让 store 与 transfer 落在不同
+pipe 上而没有任何东西为它们排序。
+
+如果你不想区分自己身处哪一层，短形式
+`pld.remote_store(src, target, peer, offsets)` 会根据你传入的操作数选择正确的那个。
+
+传入 `atomic=pld.AtomicType.Add`（两种形式均可）可把 push 变成**归约**——
+`peer_region += src`——而非覆写。这正是 all-to-all combine 需要的：每个 rank 的
+贡献就地累加。它要求 dtype 为 fp32/bf16/fp16/int32/int16/int8，与 `pl.store`
+接受的集合相同。
+
+当你搬运的是**大块**全局内存区域时，改用 [`pld.tensor.put`](11-put_get.md)：`put`
+经由 staging tile 流式传输，并带有 `chunk_rows` / `chunk_cols` / `pipeline` 开关，
+因此不受片上容量限制。`remote_store` 则以单次写搬运你已经放在片上的数据。
+
 ## 边界情况（Edge cases）
 
 > **致命陷阱——排序 barrier 之前的 RMA。** `remote_load` 读取 *window* 内存，

@@ -9,23 +9,19 @@ storage is a slice of a symmetric, per-rank communication window allocated by
 `pld.alloc_window_buffer`. Verifiers in this family generally reject plain
 `TensorType` (strict kind-trait matching — `As<DistributedTensorType>` does
 not match a plain `TensorType`), so a non-window-bound tensor can never be fed
-into a cross-rank slot by accident. **Two documented exceptions:**
-`pld.tensor.put` (and its lowered `pld.tile.put`) accepts a plain `Tensor` on
-the `src` side via `AsTensorTypeLike` — TPUT only needs a readable local GM
-region for the source, so kernels can push directly from host-backed inputs
-without first staging through a window buffer; `dst` still requires a
-window-bound `DistributedTensor`.
-`pld.tensor.get` (and its lowered `pld.tile.get`) accepts a plain `Tensor` on
-the `dst` side via `AsTensorTypeLike` — TGET only needs a writable local GM
-region to receive into, so kernels can TGET directly into host-backed output
-tensors; `src` still requires a window-bound `DistributedTensor`.
+into a cross-rank slot by accident. **Two documented exceptions**, both matched
+via `AsTensorTypeLike` and detailed under Namespacing below: `put`/`tile.put`
+accept a plain `Tensor` as `src`, and `get`/`tile.get` accept one as `dst` —
+TPUT/TGET only need a readable/writable *local* GM region on that side. The
+window-bound side (`put.dst`, `get.src`) still requires a `DistributedTensor`.
 
-There are **thirteen ops** and **four ABI enums**:
+There are **fourteen ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
 | `pld.tile.remote_load` | pull (read peer → local tile) | `TileType` | TLOAD |
 | `pld.tile.remote_store` | push (write local tile → peer) | `Unknown` (side effect) | TSTORE |
+| `pld.tensor.remote_store` | push (write local tensor-level value → peer); lowered 1:1 to `pld.tile.remote_store` | `Unknown` (side effect) | TSTORE |
 | `pld.tensor.get` | pull (read peer → local GM) | `Unknown` (side effect) | TGET |
 | `pld.tensor.put` | push (write local → peer) | `Unknown` (side effect) | TPUT |
 | `pld.tensor.allreduce` | collective reduce over window slices | `DistributedTensorType` (same as src) | builtin collective |
@@ -38,7 +34,7 @@ There are **thirteen ops** and **four ABI enums**:
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
-The five side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
+The six side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
@@ -50,22 +46,24 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
 - **`pld.tile.remote_store`** consumes a *tile* (the symmetric write companion
   of `remote_load`), so it is a sibling of `tile.store` and lives in
   `pld.tile`.
-- **`pld.tensor.get`** reads and writes *tensor* (GM) operands — `dst` may be a
-  window-bound `DistributedTensor` or a plain `Tensor` (TGET only needs a
-  writable local GM region to receive into) while `src` must be a window-bound
-  `DistributedTensor` (the peer needs a window slot to read from). The VEC
-  staging tile that TGET bounces through is materialised by
-  `ConvertTensorToTileOps` as an internal `pld.tile.get`, never on the DSL
-  surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window`, **not** of the tile-producing `remote_load`.
-- **`pld.tensor.put`** reads and writes *tensor* (GM) operands — `dst` is a
-  window-bound `DistributedTensor` (the peer needs a window slot to receive
-  into) while `src` accepts either a window-bound `DistributedTensor` or a
-  plain `Tensor` (TPUT only needs a readable local GM region on the source
-  side). The VEC staging tile that TPUT bounces through is materialised by
-  `ConvertTensorToTileOps` as an internal `pld.tile.put`, never on the DSL
-  surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window`, **not** of the tile-producing `remote_load`.
+- **`pld.tensor.remote_store`** is the same op one IR level up — it consumes a
+  *tensor-level* value, so it lives in `pld.tensor` and `ConvertTensorToTileOps`
+  lowers it 1:1 to `pld.tile.remote_store`. This is the `tensor.aiv_shard` /
+  `tile.aiv_shard` shape (**one op, two levels, one identical argument
+  surface**), and it is why the tensor-level push is a separate entry point
+  rather than an overload of `pld.tensor.put`: dispatching `put` on the kind of
+  its `src` would make five of its arguments (`src_offsets`, `shape`, `atomic`,
+  `chunk_*`, `pipeline`) conditionally meaningless depending on how the value
+  was produced upstream — a property invisible at the call site.
+- **`pld.tensor.get` / `pld.tensor.put`** read and write *tensor* (GM) operands
+  on both sides. The window-bound side is the one the peer needs a slot for
+  (`get.src`, `put.dst`); the local side (`get.dst`, `put.src`) also accepts a
+  plain `Tensor`, so kernels can TGET into / TPUT from host-backed tensors
+  without staging through a window buffer. The VEC staging tile they bounce
+  through is materialised by `ConvertTensorToTileOps` as an internal
+  `pld.tile.get` / `pld.tile.put`, never on the DSL surface. Both are therefore
+  siblings of `pld.tensor.alloc_window_buffer` / `pld.tensor.window`, **not** of
+  the tile-producing `remote_load`.
 - **`pld.system.notify` / `pld.system.wait`** drive the per-rank signal slot —
   pure control-plane synchronisation with no data operand — so they live in
   `pld.system`.
@@ -80,7 +78,7 @@ added **at the end** so existing IR and cached programs keep their meaning.
 ```cpp
 enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
 enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait
-enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put
+enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put, remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
 ```
 
@@ -188,33 +186,61 @@ be a `MakeTuple` whose rank equals `target.shape.size()`.
 DSL (`python/pypto/language/distributed/op/tile_ops.py`) accepts positional or
 keyword arguments; the IR op keeps them positional, matching `tile.load`.
 
-### `pld.tile.remote_store` (TSTORE)
+### `pld.tile.remote_store` / `pld.tensor.remote_store` (TSTORE)
 
 ```text
-pld.tile.remote_store(src_tile, target, peer, offsets) -> Unknown
+pld.tile.remote_store(src_tile, target, peer, offsets, *, atomic: int = 0) -> Unknown
+pld.tensor.remote_store(src, target, peer, offsets, *, atomic: int = 0) -> Unknown
 ```
 
-Writes a local tile into a region of the `peer` rank's slice of a window-bound
+Writes a local value into a region of the `peer` rank's slice of a window-bound
 `DistributedTensor`. Mirrors `tile.store` at the IR level (positional `offsets`
-tuple + side-effect-only return) but the destination is a *remote* slice —
-address translation happens at codegen via `CommRemoteOffset(ctx, peer) +
-addptr + make_tensor_view`.
+tuple, optional `atomic` attr, side-effect-only return) but the destination is a
+*remote* slice — address translation happens at codegen via
+`CommRemoteOffset(ctx, peer) + addptr + make_tensor_view`.
 
-Verifier: `src_tile` must be `TileType`; `target` must be
-`DistributedTensorType`; `peer` must be a `ScalarType` rank index; `offsets`
-must be a `MakeTuple` whose rank equals `target.shape.size()`; `src_tile.dtype`
-must match `target.dtype`.
+The two forms differ **only** in the IR level of `src`; `pld.remote_store`
+dispatches on the operand, so user code reads the same at either level.
 
-Codegen: the tile is 2-D (height × width) after the standard tile pipeline; the
-emitted `pto.partition_view` has the same rank as `target`, with the leading
-`(target.rank - 2)` dims set to size 1 (matching `notify`'s `one_dims(rank,
-"1")` pattern). This lets a 2-D tile push land on the inner two dims of any
-N-D peer slice (N ≥ 2) without forcing the caller to reshape — and it is the
-regression guard against the older codegen that emitted a fixed-2D
+Verifier (both forms):
+
+| Rule | Note |
+| ---- | ---- |
+| `target` is `DistributedTensorType`, `peer` a `ScalarType` rank index | |
+| `offsets` is a `MakeTuple` of rank `target.shape.size()` | |
+| `src.dtype == target.dtype`, `target` rank ≥ 2 | |
+| `src` is 2-D, or N-D with every leading dim 1 | the deducer runs *before* `FlattenTileNdTo2D` collapses N-D tiles; a leading extent > 1 would fold into the row count and overrun the target |
+| the pushed region fits inside `target` at `offsets` (static dims only) | `remote_store` has no transfer `shape` to clamp against — the extent comes from `src`, so without this an oversized push silently overwrote the peer's neighbouring region |
+| `src` is `TileType` (tile form) / `TensorType` (tensor form) | each diagnostic names the sibling entry point, so the author lands on the one for their level |
+
+Lowering (tensor form): `ConvertTensorToTileOps` rewrites it 1:1 to the tile
+form via `RegisterSimple`. Its `InputSpaceReq{Vec}` makes the op *total* on its
+argument surface — `BridgeInputSpaces` only rewrites `TensorType` operands, so a
+computed value (already a tile) passes straight through keeping its space, while
+a GM-resident `src` is auto-bridged with a natural `tile.load` into Vec.
+
+Codegen: the tile is 2-D (height × width) after the tile pipeline; the emitted
+`pto.partition_view` has `target`'s rank with the leading `(target.rank - 2)`
+dims set to size 1 (matching `notify`'s `one_dims(rank, "1")`). A 2-D push
+therefore lands on the inner two dims of any N-D peer slice (N ≥ 2) without the
+caller reshaping — and guards the older codegen that emitted a fixed-2D
 `partition_view` regardless of target rank.
 
-DSL (`python/pypto/language/distributed/op/tile_ops.py`) exposes `target` /
-`peer` / `offsets` as keyword-only for readability; the IR op keeps them
+`atomic = AtomicType.kAdd` appends `{atomicType = #pto<atomic_type atomic_add>}`
+to the `pto.tstore`, making the push a **combine** (`peer_region += src`) — the
+cross-rank twin of `tile.store`'s split-K accumulation, and what an all-to-all
+combine needs. Emitted only for `kAdd`, so plain pushes stay byte-identical.
+`kAdd` requires an fp32/bf16/fp16/int32/int16/int8 dtype -- the same hardware
+allow-list `tile.store` enforces -- and bf16 carries the same Ascend910B-only
+restriction on top.
+
+`pld.tensor.put` (TPUT) has **no** tile-source form — its staging tile is a
+bounce buffer, not a data source. Pushing a computed value is `remote_store`'s
+job; pushing a bulk GM region that need not fit on-core is `put`'s.
+
+DSL (`python/pypto/language/distributed/op/tile_ops.py`,
+`.../tensor_ops.py`) exposes `target` / `peer` / `offsets` as
+positional-or-keyword for readability and round-tripping; the IR ops keep them
 positional, matching `tile.store`.
 
 ### `pld.tensor.put` (TPUT)
@@ -583,6 +609,7 @@ dispatches before the final `Simplify`.
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),
-  and `test_l3_remote_store.py` (tile-level subview push ✅). All tests use the
+  and `test_l3_remote_store.py` (tile-level subview push ✅, plus a
+  tensor-level push of a *computed* value ✅). All tests use the
   `pld.system.notify` / `pld.system.wait` handshake pattern established by
   notify/wait and collective STs.

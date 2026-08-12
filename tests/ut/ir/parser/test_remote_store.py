@@ -8,17 +8,22 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for ``pld.tile.remote_store``.
+"""Parser tests for ``pld.tile.remote_store`` / ``pld.tensor.remote_store``.
 
-``pld.tile.remote_store(src_tile, target=..., peer=..., offsets=[...])`` is the
-cross-rank tile store: it writes a local tile into a sub-region of the peer
-rank's window-bound distributed tensor. The op is side-effect-only (no SSA
-result for downstream consumers).
+``remote_store(src, target=..., peer=..., offsets=[...])`` is the cross-rank
+store: it writes a local value into a sub-region of the peer rank's window-bound
+distributed tensor. The op is side-effect-only (no SSA result for downstream
+consumers).
+
+It exists at both IR levels — ``pld.tile.remote_store`` for a tile-level kernel
+and ``pld.tensor.remote_store`` for a tensor-level one (lowered 1:1 by
+ConvertTensorToTileOps) — with the short form ``pld.remote_store`` dispatching
+between them on the kind of ``src``.
 
 The parser dispatches via the generic 3-segment ``pld.<category>.<op>`` path
-(``ast_parser.py:_parse_pld_category_op``); these tests cover both the
-positive DSL→IR lifting and the parser-level rejection of malformed call
-sites.
+(``ast_parser.py:_parse_pld_category_op``) and the 2-segment short form; these
+tests cover both the positive DSL→IR lifting and the parser-level rejection of
+malformed call sites.
 """
 
 import pypto.language as pl
@@ -141,9 +146,173 @@ def test_remote_store_round_trips_through_printer():
     assert after_call.op.name == ir.get_op("pld.tile.remote_store").name
 
 
+def test_remote_store_atomic_round_trips_through_printer():
+    """The ``atomic`` attr survives print → parse → print.
+
+    A plain store prints without the attr at all (so existing IR is unchanged);
+    an atomic-add store carries it explicitly.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[32, 16])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0], atomic=pld.AtomicType.Add)
+
+    text1 = ir.python_print(Before)
+    After = pl.parse_program(text1)
+    text2 = ir.python_print(After)
+    assert text1 == text2, f"round-trip mismatch:\n--- before:\n{text1}\n--- after:\n{text2}"
+    after_call = _find_call(_get_func(After, "kernel"), "pld.tile.remote_store")
+    assert after_call.kwargs["atomic"] == int(pld.AtomicType.Add)
+
+
+# ---------------------------------------------------------------------------
+# Positive: the tensor-level twin, pld.tensor.remote_store (issue #2349)
+# ---------------------------------------------------------------------------
+
+
+def test_tensor_remote_store_lifts_to_op_call():
+    """``pld.tensor.remote_store`` lifts to its own op with the same four args."""
+
+    @pl.program
+    class P:
+        @pl.function
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 8], pl.FP16],
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.remote_store(x, data, peer, [0, 0])
+
+    call = _find_call(_get_func(P, "kernel"), "pld.tensor.remote_store")
+    assert isinstance(call.type, ir.UnknownType)
+    assert call.kwargs == {}
+    assert len(call.args) == 4
+    src_arg, target_arg, peer_arg, offsets_arg = call.args
+    assert isinstance(src_arg.type, ir.TensorType)
+    assert isinstance(target_arg, ir.Var)
+    assert isinstance(target_arg.type, ir.DistributedTensorType)
+    assert isinstance(peer_arg, ir.Var)
+    assert isinstance(peer_arg.type, ir.ScalarType)
+    assert isinstance(offsets_arg, ir.MakeTuple)
+
+
+def test_tensor_remote_store_round_trips_through_printer():
+    """print → parse → print is stable for the tensor-level form."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 8], pl.FP16],
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.remote_store(x, data, peer, [0, 0])
+
+    text1 = ir.python_print(Before)
+    After = pl.parse_program(text1)
+    text2 = ir.python_print(After)
+    assert text1 == text2, f"round-trip mismatch:\n--- before:\n{text1}\n--- after:\n{text2}"
+    after_call = _find_call(_get_func(After, "kernel"), "pld.tensor.remote_store")
+    assert after_call.op.name == ir.get_op("pld.tensor.remote_store").name
+
+
+def test_tensor_remote_store_atomic_round_trips_through_printer():
+    """The tensor form's ``atomic`` attr survives print → parse → print too."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 8], pl.FP16],
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.remote_store(x, data, peer, [0, 0], atomic=pld.AtomicType.Add)
+
+    text1 = ir.python_print(Before)
+    After = pl.parse_program(text1)
+    text2 = ir.python_print(After)
+    assert text1 == text2, f"round-trip mismatch:\n--- before:\n{text1}\n--- after:\n{text2}"
+    after_call = _find_call(_get_func(After, "kernel"), "pld.tensor.remote_store")
+    assert after_call.kwargs["atomic"] == int(pld.AtomicType.Add)
+
+
+def test_short_form_remote_store_dispatches_on_operand_level():
+    """``pld.remote_store`` picks the tile or tensor op from its src operand.
+
+    Both spellings are written the same way; only the level of ``src`` differs.
+    """
+
+    @pl.program
+    class P:
+        @pl.function
+        def tile_level(
+            self,
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[32, 16])
+            pld.remote_store(tile, data, peer, [0, 0])
+
+        @pl.function
+        def tensor_level(
+            self,
+            x: pl.Tensor[[16, 8], pl.FP16],
+            data: pld.DistributedTensor[[64, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.remote_store(x, data, peer, [0, 0])
+
+    assert _find_call(_get_func(P, "tile_level"), "pld.tile.remote_store") is not None
+    assert _find_call(_get_func(P, "tensor_level"), "pld.tensor.remote_store") is not None
+
+
 # ---------------------------------------------------------------------------
 # Negative: shape / target / offsets mistakes surface at parse or verify time
 # ---------------------------------------------------------------------------
+
+
+def test_tensor_remote_store_rejects_tile_src():
+    """A tile operand in a tensor-level call names the tile-level entry point."""
+    with pytest.raises(InvalidOperationError, match=r"pld\.tile\.remote_store"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function
+            def kernel(
+                self,
+                data: pld.DistributedTensor[[64, 32], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[32, 16])
+                pld.tensor.remote_store(tile, data, peer, [0, 0])  # type: ignore[arg-type]
+
+
+def test_tensor_remote_store_rejects_out_of_bounds_push():
+    """The pushed region must fit inside the peer's slice at ``offsets``."""
+    with pytest.raises(InvalidOperationError, match="push exceeds the peer's target region"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP16],
+                data: pld.DistributedTensor[[64, 32], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.remote_store(x, data, peer, [56, 0])
 
 
 def test_remote_store_rejects_plain_tensor_target():

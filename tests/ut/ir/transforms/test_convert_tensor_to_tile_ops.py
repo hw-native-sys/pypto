@@ -857,6 +857,130 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_tensor_remote_store_of_computed_value_lowers_1to1(self):
+        """pld.tensor.remote_store(computed) lowers 1:1 to pld.tile.remote_store.
+
+        The computed value's producer already lowered to a tile earlier in this
+        pass, so the tile flows straight into the push — no staging tile, no GM
+        round-trip (issue #2349).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                scaled = pl.tensor.add(x, x)
+                pld.tensor.remote_store(scaled, dst, peer, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                x_vec: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 64], [16, 64])
+                scaled = pl.tile.add(x_vec, x_vec)
+                pld.tile.remote_store(scaled, dst, peer, [0, 0])
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None
+        # No TPUT staging buffer is materialised on this path.
+        assert _find_first_call_to(kernel, "tile.create") is None, (
+            "a tile-source push needs no VEC staging tile — that is pld.tensor.put's TPUT bounce buffer"
+        )
+        assert _find_first_call_to(kernel, "pld.tensor.remote_store") is None
+        assert _find_first_call_to(kernel, "pld.tile.remote_store") is not None
+        _assert_convert_output_equal(After, Expected)
+
+    def test_tensor_remote_store_bridges_a_gm_src_with_a_tile_load(self):
+        """A src still resident in GM is auto-bridged with a natural Vec tile.load.
+
+        This is what makes the op total on its argument surface: the author does
+        not have to know whether the value they are pushing happens to live in GM
+        or on-core.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.remote_store(x, dst, peer, [0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pl.Out[pld.DistributedTensor[[16, 64], pl.FP16]],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                x_vec: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.load(x, [0, 0], [16, 64], [16, 64])
+                pld.tile.remote_store(x_vec, dst, peer, [0, 0])
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
+        _assert_convert_equal(Before, Expected)
+
+    def test_tensor_remote_store_forwards_atomic_attr(self):
+        """The atomic-add combine mode survives the 1:1 lowering."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                pld.tensor.remote_store(x, dst, peer, [0, 0], atomic=pld.AtomicType.Add)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None
+        store = _find_first_call_to(kernel, "pld.tile.remote_store")
+        assert store is not None
+        assert store.kwargs["atomic"] == int(pld.AtomicType.Add)
+
+    def test_put_with_tile_source_names_put_and_points_at_remote_store(self):
+        """A computed src on pld.tensor.put is rejected at the op the author wrote.
+
+        Before issue #2349 this surfaced as "pld.tile.put src must be a Tensor or
+        DistributedTensor, got TileType" — naming an internal op the author never
+        wrote. TPUT genuinely cannot take a tile source, so the diagnostic must
+        route them to the op that can.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP16],
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                scaled = pl.tensor.add(x, x)
+                pld.tensor.put(dst, peer=peer, src=scaled, atomic=pld.AtomicType.None_)
+
+        with pytest.raises(ValueError, match=r"pld\.tensor\.put src must be a GM tensor"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
     def test_get_subregion_emits_transfer_shape_stage_and_forwards_offsets(self):
         """pld.tensor.get subregion lowers like put: stage sized to shape and offsets forwarded."""
 

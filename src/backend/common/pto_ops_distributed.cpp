@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -338,14 +339,19 @@ static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";
 }
 
-// pld.tile.remote_store(src_tile, target, peer, offsets) — write a local tile
-// into a peer's slice of a window-bound DistributedTensor. Lowers to:
+// pld.tile.remote_store(src_tile, target, peer, offsets, *, atomic) — write a
+// local tile into a peer's slice of a window-bound DistributedTensor. Lowers to:
 //   delems    = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
 //   peer_ptr  = pto.addptr local_ptr, delems
 //   peer_view = pto.make_tensor_view peer_ptr, shape=..., strides=...
 //   pto.partition_view peer_view, offsets=..., sizes=<tile.valid_shape padded
 //                                                     with leading 1s>
 //   pto.tstore ins(<tile>) outs(<pview>)
+//       [{atomicType = #pto<atomic_type atomic_add>}]
+//
+// The optional atomicType attr is the cross-rank twin of tile.store's split-K
+// accumulation: it makes the push a combine (peer_region += tile) instead of an
+// overwrite, and is emitted only for AtomicType::kAdd.
 //
 // The tile's valid_shape is 2-D (height, width); when target_rank > 2 the
 // leading (target_rank - 2) partition dims are size-1 — matching the
@@ -406,6 +412,32 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
     tstore_line << " : " << tile_buf_type;
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
+
+  // Optional atomic-add combine mode — the cross-rank twin of tile.store's
+  // split-K accumulation, and what an all-to-all combine needs to sum peers'
+  // contributions in place. The attr is emitted only for atomic_add so a plain
+  // remote_store's codegen stays byte-identical (pto.tstore's atomicType
+  // defaults to none).
+  const int atomic_int = op->GetKwarg<int>("atomic", 0);
+  INTERNAL_CHECK_SPAN(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
+                          atomic_int == static_cast<int>(ir::AtomicType::kAdd),
+                      op->span_)
+      << "pld.tile.remote_store atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
+  if (atomic_int == static_cast<int>(ir::AtomicType::kAdd)) {
+    // Same backend restriction as tile.store: bf16 atomic-add into GM is only
+    // honoured on the A2/A3 store path (pto-isa set_atomic_bf16). The hardware
+    // atomic dispatch keys on the GM *destination* dtype, which here is the
+    // peer window's dtype.
+    if (binding.type->dtype_ == DataType::BF16) {
+      const auto* handler = codegen.GetBackendHandler();
+      CHECK_SPAN(handler->SupportsBf16AtomicAdd(), op->span_)
+          << "pld.tile.remote_store with atomic=AtomicType.Add into a bf16 window is not supported on the '"
+          << handler->GetPtoTargetArch()
+          << "' backend; bf16 atomic-add requires the Ascend910B (A2/A3) profile. Accumulate into an fp32 "
+             "window and cast to bf16 after the reduction instead.";
+    }
+    tstore_line << " {atomicType = #pto<atomic_type atomic_add>}";
+  }
   codegen.Emit(tstore_line.str());
 
   // Data-before-signal (ptoas memory-consistency): clean+invalidate the

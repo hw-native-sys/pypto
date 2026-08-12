@@ -304,6 +304,78 @@ def window(
     return DistributedTensor(expr=call)
 
 
+def remote_store(
+    src: Tensor | Expr,
+    target: DistributedTensor,
+    peer: IntLike,
+    offsets: Sequence[IntLike],
+    *,
+    atomic: AtomicType = AtomicType.None_,
+) -> Call:
+    """Push a tensor-level value into a region of ``peer`` rank's slice of ``target``.
+
+    Tensor-level twin of :func:`pld.tile.remote_store` — same four arguments,
+    same single ``pto.tstore``, one IR level up. This is the entry point a
+    tensor-level ``@pl.jit`` kernel uses to push a **computed** value cross-rank:
+    ``ConvertTensorToTileOps`` lowers it 1:1 to ``pld.tile.remote_store``, so the
+    value goes straight from on-core memory to the peer's window with no global-
+    memory round-trip in between.
+
+    .. code-block:: python
+
+       @pl.jit
+       def push(x: pl.Tensor[[16, 256], pl.FP32], win: pld.DistributedTensor[[16, 256], pl.FP32], peer):
+           with pl.at(level=pl.Level.CORE_GROUP):
+               scaled = pl.mul(x[0:16, 0:256], 2.0)
+               pld.tensor.remote_store(scaled, win, peer, [0, 0])
+               # ...then pld.system.notify() to release it to the peer.
+
+    A ``src`` that is still resident in global memory at lowering time (e.g. a
+    kernel parameter pushed unchanged) is auto-bridged with a ``tile.load``, so
+    the op is total on its argument surface. Prefer :func:`pld.tensor.put` for a
+    **bulk** global-memory transfer: TPUT streams through a staging tile and owns
+    the ``chunk_rows`` / ``chunk_cols`` / ``pipeline`` knobs, so it is not bounded
+    by what fits on-core.
+
+    Args:
+        src: Local 2-D :class:`pl.Tensor` value (dtype must match
+            ``target.dtype``). A :class:`pld.DistributedTensor` is refused — a
+            window-to-window transfer is :func:`put`'s job.
+        target: Window-bound :class:`pld.DistributedTensor` destination
+            (rank >= 2). The C++ verifier refuses a plain :class:`pl.Tensor`.
+        peer: Peer rank index.
+        offsets: Offsets into the remote slice, one per ``target`` dimension.
+            The pushed region must fit inside ``target`` at these offsets.
+        atomic: :class:`pld.AtomicType` selecting plain-store
+            (``AtomicType.None_``, the default) vs atomic-add combine semantics
+            on the peer's region (keyword-only).
+
+    Returns:
+        A side-effect-only :class:`ir.Call` (no SSA result for downstream use).
+    """
+    src_expr = _unwrap(src)
+    target_expr = _unwrap(target)
+    if not isinstance(target_expr, Expr) or not isinstance(target_expr.type, _ir.DistributedTensorType):
+        got = (
+            _ir.python_print_type(target_expr.type)
+            if isinstance(target_expr, Expr)
+            else type(target_expr).__name__
+        )
+        raise TypeError(
+            f"pld.tensor.remote_store expects a DistributedTensor target (window-bound); got {got}"
+        )
+    if not isinstance(src_expr, Expr) or not isinstance(src_expr.type, _ir.TensorType):
+        got = _ir.python_print_type(src_expr.type) if isinstance(src_expr, Expr) else type(src_expr).__name__
+        raise TypeError(
+            f"pld.tensor.remote_store expects a Tensor src (a tensor-level value); got {got}. "
+            "In a tile-level kernel use pld.tile.remote_store; to push one window buffer into "
+            "another use pld.tensor.put."
+        )
+    return _ir_tensor.remote_store(
+        src_expr, target_expr, _unwrap(peer), _normalize_intlike(offsets), atomic=int(atomic)
+    )
+
+
 def put(
     dst: DistributedTensor,
     peer: IntLike,
@@ -995,6 +1067,7 @@ __all__ = [
     "broadcast",
     "get",
     "put",
+    "remote_store",
     "reduce_scatter",
     "window",
 ]

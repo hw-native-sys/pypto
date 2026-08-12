@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """IR builders for ``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` /
-``pld.tensor.get`` / ``pld.tensor.put``.
+``pld.tensor.get`` / ``pld.tensor.put`` / ``pld.tensor.remote_store``.
 
 These are the raw IR-layer equivalents of :func:`pypto.ir.op.tile_ops.load`
 and friends: they take ``ir.Expr`` arguments, normalize them to the shapes
@@ -71,6 +71,53 @@ def window(
     actual_span = _get_span_or_capture(span, frame_offset=1)
     shape_tuple = _to_make_tuple(shape, actual_span)
     return _ir_core.create_op_call("pld.tensor.window", [buf, shape_tuple], {"dtype": dtype}, actual_span)
+
+
+def remote_store(
+    src: Expr,
+    target: Expr,
+    peer: int | Expr,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    *,
+    atomic: int = 0,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.remote_store(src, target, peer, offsets)`` Call.
+
+    Tensor-level twin of :func:`pypto.ir.op.distributed.tile_ops.remote_store`:
+    same four arguments, same semantics, one IR level up.
+    ``ConvertTensorToTileOps`` lowers it 1:1 to ``pld.tile.remote_store`` (and
+    auto-bridges a still-GM ``src`` with a ``tile.load``), so a tensor-level
+    ``@pl.jit`` kernel can push a computed value cross-rank without first
+    round-tripping it through global memory.
+
+    Args:
+        src: Local :class:`ir.Expr` with 2-D :class:`ir.TensorType` (dtype must
+            match ``target.dtype``). The verifier rejects a
+            :class:`ir.DistributedTensorType` — a window-to-window transfer is
+            :func:`put`'s GM-to-GM job.
+        target: A :class:`ir.Expr` with type :class:`ir.DistributedTensorType`
+            (the verifier rejects plain :class:`ir.TensorType`).
+        peer: Scalar peer rank index (:class:`ir.Expr` of :class:`ir.ScalarType`).
+        offsets: Per-dimension offsets into ``target``'s coordinate space —
+            sequence of ints/:class:`ir.Expr`, or an existing :class:`ir.MakeTuple`.
+        atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite)
+            or 1 (``kAdd``, atomic-add into the peer's region). Omitted from the
+            kwargs entirely when 0.
+        span: Optional source span (auto-captured if absent).
+
+    Returns:
+        :class:`ir.Call` with :class:`ir.UnknownType` (side-effect only).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    return _ir_core.create_op_call(
+        "pld.tensor.remote_store",
+        [src, target, peer_expr, offsets_tuple],
+        {"atomic": int(atomic)} if atomic else {},
+        actual_span,
+    )
 
 
 def put(  # noqa: PLR0913
@@ -445,6 +492,7 @@ __all__ = [
     "broadcast",
     "get",
     "put",
+    "remote_store",
     "reduce_scatter",
     "window",
 ]

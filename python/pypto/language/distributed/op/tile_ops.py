@@ -131,10 +131,12 @@ def _remote_load_with_physical_tail_padding(
 
 
 def remote_store(
-    src_tile: Tile,
+    src_tile: Tile | Expr,
     target: DistributedTensor,
     peer: IntLike,
     offsets: Sequence[IntLike],
+    *,
+    atomic: AtomicType = AtomicType.None_,
 ) -> Call:
     """Write a local tile into a region of ``peer`` rank's slice of a DistributedTensor.
 
@@ -150,18 +152,32 @@ def remote_store(
        # remote_store is a raw write with no synchronization of its own —
        # pair it with pld.system.notify()/wait() to signal completion.
 
-    All arguments are positional-or-keyword (mirroring :func:`pl.tile.store`),
-    so the printed IR — which emits them positionally — round-trips through
-    the parser. Callers may still pass them by keyword for readability.
+       # Combine instead of overwrite: sum every rank's contribution in place.
+       pld.tile.remote_store(tile, data, peer=1, offsets=[0, 0], atomic=pld.AtomicType.Add)
+
+    In a tensor-level ``@pl.jit`` kernel the operand is a :class:`pl.Tensor`
+    rather than a :class:`pl.Tile`; call :func:`pld.tensor.remote_store` there,
+    or use the ``pld.remote_store`` short form, which dispatches on the operand.
+
+    All positional arguments are positional-or-keyword (mirroring
+    :func:`pl.tile.store`), so the printed IR — which emits them positionally —
+    round-trips through the parser. Callers may still pass them by keyword for
+    readability.
 
     Args:
-        src_tile: Local :class:`pl.Tile` (dtype must match ``target.dtype``).
-        target: A window-bound :class:`pld.DistributedTensor` (any rank, any
+        src_tile: Local 2-D :class:`pl.Tile` (dtype must match ``target.dtype``).
+        target: A window-bound :class:`pld.DistributedTensor` (rank >= 2, any
             dtype). The C++ verifier refuses plain :class:`pl.Tensor` here
             (precise ObjectKind match on :class:`ir.DistributedTensorType`).
         peer: Peer rank index. Accepts an ``int`` literal, a DSL ``Scalar``,
             or a raw ``ir.Expr`` (e.g. ``pld.rank(ctx) + 1``).
         offsets: Offsets into the remote slice, one per ``target`` dimension.
+            The pushed region must fit inside ``target`` at these offsets.
+        atomic: :class:`pld.AtomicType` selecting plain-store
+            (``AtomicType.None_``, the default) vs atomic-add combine semantics
+            on the peer's region (keyword-only). ``AtomicType.Add`` into a bf16
+            window requires the Ascend910B (A2/A3) profile, the same restriction
+            :func:`pl.tile.store` carries.
 
     Returns:
         A side-effect-only :class:`ir.Call` (no SSA result for downstream use).
@@ -176,7 +192,9 @@ def remote_store(
         )
         raise TypeError(f"pld.tile.remote_store expects a DistributedTensor target (window-bound); got {got}")
 
-    return _ir_tile.remote_store(tile_expr, target_expr, _unwrap(peer), _normalize_intlike(offsets))
+    return _ir_tile.remote_store(
+        tile_expr, target_expr, _unwrap(peer), _normalize_intlike(offsets), atomic=int(atomic)
+    )
 
 
 def put(

@@ -16,7 +16,9 @@
  * @file comm_op_utils.h
  * @brief Shared deducer helpers for the mirror-image cross-rank transfer ops
  *        ``pld.tensor.put`` / ``pld.tile.put`` (put.cpp) and ``pld.tensor.get``
- *        / ``pld.tile.get`` (get.cpp).
+ *        / ``pld.tile.get`` (get.cpp), plus the whole-tile push bounds check
+ *        shared by ``pld.tensor.remote_store`` / ``pld.tile.remote_store``
+ *        (remote_store.cpp).
  *
  * put and get are structural mirrors: the only semantic differences are which
  * operand must be window-bound (put: dst; get: src) and put's extra ``atomic``
@@ -35,6 +37,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -258,6 +261,78 @@ inline std::vector<ExprPtr> ValidateRegionArgs(const std::vector<ExprPtr>& args,
     }
   }
   return transfer_shape->elements_;
+}
+
+// Bounds-check a whole-region cross-rank push (``pld.tensor.remote_store`` /
+// ``pld.tile.remote_store``): the 2-D ``push_extent`` lands at ``offsets`` in
+// the target's coordinate space, with the leading ``rank - 2`` dims occupying a
+// single element each (codegen pads them with size-1 partition dims — see
+// MakeRemoteStoreCodegenPTO).
+//
+// Unlike put/get, a remote_store carries no transfer ``shape`` of its own to
+// clamp against: the extent comes from the source, so an oversized or
+// badly-offset push silently overwrites the peer's neighbouring region. This is
+// the check that turns that into a compile error. Its ``remote_load`` mirror
+// already bounds-checks the same way. Dynamic offsets / dims are bounded at
+// runtime and are skipped here.
+inline void ValidatePushFitsTarget(const std::vector<ExprPtr>& push_extent,
+                                   const std::vector<ExprPtr>& offsets,
+                                   const std::vector<ExprPtr>& target_shape, const std::string& op_name) {
+  INTERNAL_CHECK(push_extent.size() == 2)
+      << "Internal error: " << op_name << " push extent must be 2-D at this point, got rank "
+      << push_extent.size();
+  INTERNAL_CHECK(target_shape.size() >= 2)
+      << "Internal error: " << op_name << " target rank must be >= 2 at this point, got "
+      << target_shape.size();
+  INTERNAL_CHECK(offsets.size() == target_shape.size())
+      << "Internal error: " << op_name << " offsets rank must match target rank at this point";
+  const size_t rank = target_shape.size();
+  for (size_t i = 0; i < rank; ++i) {
+    auto offset = As<ConstInt>(offsets[i]);
+    if (!offset) continue;  // dynamic offset — bounded at runtime
+    CHECK_SPAN(offset->value_ >= 0, offsets[i]->span_)
+        << op_name << " offsets dimension " << i << " must be non-negative, got " << offset->value_;
+    auto target_dim = As<ConstInt>(target_shape[i]);
+    if (!target_dim) continue;  // dynamic window dim
+    // Leading dims carry one element each; the trailing two carry the push extent.
+    int64_t extent = 1;
+    if (i + 2 >= rank) {
+      auto e = As<ConstInt>(push_extent[i + 2 - rank]);
+      if (!e) continue;  // dynamic push extent
+      extent = e->value_;
+    }
+    CHECK_SPAN(offset->value_ + extent <= target_dim->value_, offsets[i]->span_)
+        << op_name << " push exceeds the peer's target region in dimension " << i
+        << " (offset=" << offset->value_ << ", extent=" << extent << ", target_dim=" << target_dim->value_
+        << ")";
+  }
+}
+
+// Reject an ``atomic`` attr that is not a legal :enum:`AtomicType` value.
+// Shared by the put family (which requires the attr) and remote_store (where it
+// is optional and defaults to kNone), so the accepted set cannot drift apart.
+inline void ValidateAtomicValue(int atomic_value, const std::string& op_name) {
+  CHECK(atomic_value == static_cast<int>(AtomicType::kNone) ||
+        atomic_value == static_cast<int>(AtomicType::kAdd))
+      << op_name << " atomic must be AtomicType.None_ or AtomicType.Add (got int " << atomic_value << ")";
+}
+
+// The dtypes hardware atomic-add can actually combine. Mirrors the identical
+// allow-list `tile.store` enforces (DeduceTileStoreType in
+// src/ir/op/tile_ops/memory.cpp): both lower to `pto.tstore`'s `atomicType`, so
+// a dtype the local store path rejects is equally unsupported cross-rank.
+// Without this, `atomic=AtomicType.Add` into e.g. a UINT8 window passes the enum
+// check and reaches codegen, which then emits atomic_add for a dtype the
+// hardware cannot combine. bf16 is additionally profile-gated at codegen
+// (BackendHandler::SupportsBf16AtomicAdd); this is the dtype half of the guard.
+inline void ValidateAtomicAddDtype(int atomic_value, const DataType& dtype, const std::string& op_name) {
+  if (atomic_value != static_cast<int>(AtomicType::kAdd)) return;
+  CHECK(dtype == DataType::FP32 || dtype == DataType::BF16 || dtype == DataType::FP16 ||
+        dtype == DataType::INT32 || dtype == DataType::INT16 || dtype == DataType::INT8)
+      << op_name
+      << " with atomic=AtomicType.Add requires an fp32/bf16/fp16/int32/int16/int8 dtype (hardware "
+         "atomic-add dtypes), but got "
+      << dtype.ToString();
 }
 
 }  // namespace comm_op
