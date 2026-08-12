@@ -230,23 +230,25 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   if (HasStatedLane(call)) return intrinsic;
 
   switch (intrinsic) {
+    // Carve-out 2 — MIXED means "this call IS the cross-core transfer":
+    // `tile.aiv_shard` / `tile.aic_gather` and a C/V-crossing `tile.move`
+    // lower to a tpush on one lane plus a tpop on the other, so they
+    // legitimately need BOTH. Forcing them to VECTOR would leave the tpush
+    // without its tpop and strand the data.
     case CoreAffinity::MIXED:
-      // Carve-out 2 — MIXED means "this call IS the cross-core transfer":
-      // `tile.aiv_shard` / `tile.aic_gather` and a C/V-crossing `tile.move`
-      // lower to a tpush on one lane plus a tpop on the other, so they
-      // legitimately need BOTH. Forcing them to VECTOR would leave the tpush
-      // without its tpop and strand the data.
-      return intrinsic;
+    // Carve-out 3 — cube work inside a region is an authoring error, and
+    // check (a) rejects it with a user diagnostic naming the fix. Do NOT
+    // re-report it here: this is a shared classification utility called from
+    // many passes (and from a testing binding), so throwing would misattribute
+    // a user error as a compiler bug and fire from callers that only asked a
+    // question. Declining the override is also the conservative answer — the
+    // op stays on the cube lane exactly as it does today, so a build with
+    // verification disabled is no worse off than before this rule existed,
+    // rather than newly miscompiled onto the vector lane.
     case CoreAffinity::CUBE:
-      // Carve-out 3 — cube work inside a region is an authoring error, and
-      // check (a) rejects it with a user diagnostic naming the fix. Do NOT
-      // re-report it here: this is a shared classification utility called from
-      // many passes (and from a testing binding), so throwing would misattribute
-      // a user error as a compiler bug and fire from callers that only asked a
-      // question. Declining the override is also the conservative answer — the
-      // op stays on the cube lane exactly as it does today, so a build with
-      // verification disabled is no worse off than before this rule existed,
-      // rather than newly miscompiled onto the vector lane.
+      // Both carve-outs decline the override: the intrinsic answer stands.
+      // They share one body deliberately — keeping them as two branches with
+      // identical `return intrinsic;` trips bugprone-branch-clone.
       return intrinsic;
     case CoreAffinity::VECTOR:
     case CoreAffinity::SHARED:
