@@ -213,7 +213,7 @@ def test_disabled_perf_hint_silent():
 
 
 # ---------------------------------------------------------------------------
-# Memory-space awareness (issue #1305 ask 1)
+# Memory-space coverage (issue #1305 ask 1, corrected by issue #2309)
 # ---------------------------------------------------------------------------
 
 
@@ -222,9 +222,14 @@ def _make_cube_matmul_program(k: int, dtype) -> ir.Program:
 
     A is loaded into Mat (L1) with a small inner ``k`` (below threshold), B into
     Mat, both moved to Left/Right (L0A/L0B), multiplied into Acc (L0C), then
-    stored. The A-Mat load's innermost dim is below threshold but it never
-    traverses L2, so PH001 must not fire on it. ``n`` is chosen so the final
-    store's innermost dim meets the threshold and stays silent on its own.
+    stored. ``n`` is chosen so the B load and the final store meet the threshold
+    and stay silent on their own, leaving the A load as the single hit.
+
+    The A load lands in Mat, but it *reads GM*: ``tile.load``'s source is a
+    ``TensorType``, which is always off-chip. So it crosses L2 at its 32B
+    innermost granularity like any other GM read, and PH001 must flag it. Only
+    the two ``pl.move`` calls below are genuinely cube-private, and PH001 does
+    not inspect ``tile.move`` at all.
     """
     m, n = 16, 32
 
@@ -248,19 +253,41 @@ def _make_cube_matmul_program(k: int, dtype) -> ir.Program:
     return Prog
 
 
-def test_cube_memory_space_not_flagged_a5():
-    """A5: cube-private (Mat/Left/Right/Acc) transfers are never flagged.
+def test_gm_to_mat_load_is_flagged_a5():
+    """A5: a GM->Mat load is a GM transfer, so the L2 threshold applies.
 
-    Mat/Left/Right/Acc are cube-private L0/L1 buffers that never traverse L2, so
-    the L2-cache-line threshold does not apply and PH001 must stay silent even
-    though the A-side tiles have an 8-element (32B) innermost dim, well below the
-    128B A5 recommendation.
+    Regression guard for issue #2309. An earlier revision skipped every tile in a
+    cube-private space, which silenced exactly this shape: the GM->Mat weight
+    load of a ``b_trans`` matmul, whose window is the caller's [N, K] slice
+    transposed. Since ``tile.load`` / ``tile.store`` are the only ops inspected
+    and their non-tile side is always an off-chip ``TensorType``, that skip could
+    only ever suppress true positives.
     """
     _activate_a5()
     program = _make_cube_matmul_program(8, pl.FP32)  # A-Mat innermost = 32B (< 128B)
     diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
-    assert perf_hints == []
+    assert len(perf_hints) == 1
+    msg = perf_hints[0].message
+    assert "tile.load" in msg
+    assert "target_memory=Mat" in msg
+    # Volume clause: 16 rows of 8 fp32 elements = 512B in 32B rows.
+    assert "moves 512B as 16 x 32B rows" in msg
+
+
+def test_chip_internal_move_not_flagged_a5():
+    """Mat->L0 ``tile.move`` is genuinely cube-private and is never inspected.
+
+    This is the half of the old memory-space rule that survives: PH001 visits
+    only ``tile.load`` / ``tile.store``, so the two ``pl.move`` calls staging
+    Mat->Left/Right in the fixture produce no diagnostic regardless of their
+    innermost dim.
+    """
+    _activate_a5()
+    program = _make_cube_matmul_program(8, pl.FP32)
+    diags = _run_perf_hint_check(program)
+    messages = [d.message for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
+    assert not any("tile.move" in m for m in messages)
 
 
 # ---------------------------------------------------------------------------
