@@ -167,8 +167,8 @@ The mixed-kernel surface — AIC and AIV cooperating inside one InCore function.
 | `aiv_shard` `aic_gather` | `pl.` | Shard across AIV lanes / gather back on AIC |
 | `AUTO` | `pl.` | Sentinel for compiler-chosen pipe parameters |
 
-Push and pop must be **paired**, and each pop must be matched by a `tfree`. The tutorial
-covering this is not written yet; the mechanics are in
+Push and pop must be **paired**, and each pop must be matched by a `tfree`. The tutorial covering this is
+[Mixed kernels](../tutorials/03-mixed-kernel.md); the machine-level mechanics are in
 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md) and
 [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md).
 

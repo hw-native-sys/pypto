@@ -176,6 +176,14 @@ nav:
           - en/user/language/04-scopes.md
           - en/user/language/05-directives.md
           - en/user/language/06-syntax.md
+      - Tutorials:
+          - en/user/tutorials/index.md
+          - en/user/tutorials/00-elementwise.md
+          - en/user/tutorials/01-reduction-softmax.md
+          - en/user/tutorials/02-matmul.md
+          - en/user/tutorials/03-mixed-kernel.md
+          - en/user/tutorials/04-task-graph.md
+          - en/user/tutorials/05-scheduling-tuning.md
       - Tasks and Ordering:
           - en/user/tasks/index.md
           - en/user/tasks/00-model.md

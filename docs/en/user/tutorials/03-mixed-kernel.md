@@ -1,0 +1,148 @@
+# Mixed Kernels
+
+Cube and vector working at the same time, inside one scope.
+
+> **Prerequisites:** [Tiled matmul](02-matmul.md).
+> **Companion file:** `examples/advanced/03_mixed_kernel.py`.
+
+## What you are building
+
+`a @ b + bias` — a cube operation followed by a vector one — written so the two units
+overlap instead of taking turns.
+
+## Why bother
+
+A core group pairs one cube unit with vector units. Written the obvious way, the chain
+occupies them one after the other:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="cube_only"):
+    acc = pl.matmul(a, b, out_dtype=pl.FP32)
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="vector_only"):
+    out = pl.assemble(out, pl.add(acc, bias), [0, 0])
+```
+
+Two scopes, two dispatches. The vector units have nothing to do until the matmul scope has
+finished, and the cube unit has nothing to do afterwards. This is the form a mixed kernel
+replaces — and it is what `examples/intermediate/01_fused_linear.py`-style "fused" kernels
+often still are underneath: fused in name, sequential in execution.
+
+## Step 1: one scope, split
+
+Put both operations in one scope and mark it split:
+
+```python
+import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
+
+@pl.jit
+def mixed(
+    a: pl.Tensor[[128, 256], pl.FP16],
+    b: pl.Tensor[[256, 128], pl.FP16],
+    bias: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    with pl.at(
+        level=pl.Level.CORE_GROUP,
+        optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
+        name_hint="mixed",
+    ):
+        acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
+        out = pl.assemble(out, pl.add(acc, bias), [0, 0])        # vector (AIV)
+    return out
+
+torch.manual_seed(0)
+a = torch.randn(128, 256, dtype=torch.float16)
+b = torch.randn(256, 128, dtype=torch.float16)
+bias = torch.randn(128, 128, dtype=torch.float32)
+out = torch.zeros(128, 128, dtype=torch.float32)
+mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
+assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
+```
+
+`pl.split(mode)` marks the scope as mixed. The compiler halves the work along the chosen
+axis, gives the cube one half and the vector units the other, and inserts the cross-core
+transfers that move results between them.
+
+| Mode | Halves along |
+| ---- | ------------ |
+| `pl.SplitMode.UP_DOWN` | Rows (height) |
+| `pl.SplitMode.LEFT_RIGHT` | Columns (width) |
+| `pl.SplitMode.NONE` | No split |
+
+Which one to pick follows from the shape: split the axis that is large enough to halve
+without leaving a unit idle. Run the companion file with `--mode left_right` to compare.
+
+## Step 2: the ring will not fit by default
+
+That `pl.cross_core_slot(slot_num=2)` above is not optional decoration. Leave it out and
+compilation fails:
+
+```text
+Vec buffer usage (557056 bytes) exceeds platform limit (188416 bytes). The first 524288
+bytes of that space are reserved by system.reserve_buffer, so tiles are allocated above
+them — this is the cross-core pipe ring. Lower its depth with
+optimizations=[pl.cross_core_slot(slot_num=N)] on the enclosing pl.at(...), or shrink the
+tile that crosses the cube/vector boundary
+```
+
+The arithmetic behind it:
+
+| Quantity | Value |
+| -------- | ----- |
+| Tile crossing the boundary | `[128, 128]` FP32 = 64 KB |
+| Default ring depth | 8 slots |
+| Ring size | 8 × 64 KB = **512 KB** |
+| Vector budget | **184 KB** |
+
+The ring is a queue of whole tiles, so its size scales with the tile that crosses, not with
+the work. Two levers: shrink the tile, or shorten the ring. `slot_num=2` gives 128 KB and
+fits.
+
+Deeper rings buy more overlap — the producer can run further ahead before it blocks. So
+this is a real trade, not a formality: pick the largest depth that fits.
+
+## Step 3: what the compiler inserted
+
+`pl.split` is the automatic path. Underneath, the cross-core dataflow is explicit
+operators, and you can write them yourself:
+
+| Operator | Role |
+| -------- | ---- |
+| `pl.aic_initialize_pipe` / `pl.aiv_initialize_pipe` | Set up the pipe |
+| `pl.tpush_to_aiv` / `pl.tpush_to_aic` | Push a tile to the peer core |
+| `pl.tpop_from_aic` / `pl.tpop_from_aiv` | Pop a tile the peer pushed |
+| `pl.tfree_to_aic` / `pl.tfree_to_aiv` | Release the popped slot back to the producer |
+| `pl.aiv_shard` / `pl.aic_gather` | Shard across AIV lanes, gather back on AIC |
+| `pl.split_aiv(n, mode=...)` | The explicit region form of the split |
+
+**Every push must be paired with a pop, and every pop with a `tfree`.** A missing `tfree`
+does not error — it leaks a ring slot, and the producer stalls once the ring fills.
+
+Reach for the explicit form when `pl.split` cannot express the shape: per-lane addressing,
+a gather that only one lane can compute, or a region that mixes split and unsplit work.
+`tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` is a worked example.
+Otherwise stay on `pl.split` — it inserts the same operators and gets the pairing right.
+
+For the machine-level contract see [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md);
+for what the pass does, [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md).
+
+## Edge Cases
+
+> **Fatal pitfall:** the ring is sized in whole tiles at the cube/vector boundary. A tile
+> that grows turns a working kernel into one that cannot be allocated, and the error names
+> a byte count rather than the tile — read it as "the crossing tile is too big, or the ring
+> too deep".
+
+| Symptom | Likely cause | Fix |
+| ------- | ------------ | --- |
+| **`Vec buffer usage ... exceeds platform limit`** | The 8-slot default ring does not fit | `pl.cross_core_slot(slot_num=N)`, or shrink the crossing tile |
+| **No speedup from `pl.split`** | One side dominates, so halving cannot overlap anything | Check the work is genuinely cube-then-vector |
+| **The producer stalls after a while** | A popped slot was never `tfree`d | Match every pop with a `tfree` |
+| **Split rejected on a scope** | The body mixes split and plain full-width vector ops | Use the explicit `pl.split_aiv` region form |
+
+## Next
+
+[Shaping the task graph](04-task-graph.md) — from inside one kernel to the order between
+kernels.
