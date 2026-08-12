@@ -104,11 +104,18 @@ inputs:
       bundle that `pypto-toolchain` has selected on the host, which is
       byte-identical on every host and carries its own ccache and uv.
 
-      Default stays 'conda' so a runner that has not been provisioned yet keeps
-      working: the two can coexist while the fleet is migrated one label at a
-      time, and any job can be reverted on its own.
+      The default was 'conda' while the fleet was migrated a label at a time.
+      That is finished — every caller in this repo passes 'bundle' explicitly —
+      so the default follows, and a job added without this input lands on the
+      path CI actually exercises. Left as 'conda' it would have inherited a path
+      with no coverage that also demands CONDA_ROOT and a py310 env on the
+      runner, and the first symptom would have been a provisioning error on a
+      host that is otherwise fine.
+
+      'conda' still works and is still the way to revert a single job, but it is
+      now untested. Removing it altogether waits on conda leaving the runners.
     required: false
-    default: 'conda'
+    default: 'bundle'
   unset-ring:
     description: >-
       When 'true', activate.sh unsets PTO2_RING_* — the dist HCCL tests break with
@@ -145,7 +152,12 @@ runs:
         # an unknown value silently skips both and the first symptom is an
         # unrelated "activate.sh: No such file" ten minutes into the build.
         # Reject it here, where the message can still name the real cause.
-        case "${TOOLCHAIN_IN:-conda}" in
+        #
+        # Matched bare, with no shell-side default: the input carries one, so an
+        # empty value here means a caller passed `toolchain: ''`. Substituting a
+        # default for it would accept a spelling the `if:` gates below reject,
+        # which is the exact silent-skip this check exists to prevent.
+        case "$TOOLCHAIN_IN" in
           conda|bundle) ;;
           *)
             echo "::error::toolchain must be 'conda' or 'bundle', got '$TOOLCHAIN_IN'"
@@ -155,7 +167,7 @@ runs:
         # Prerequisites CI does not create, so they must already be there. The
         # codegen job needs no Ascend env, so CANN_ROOT is device-jobs-only.
         required=""
-        if [ "${TOOLCHAIN_IN:-conda}" = "conda" ]; then
+        if [ "$TOOLCHAIN_IN" = "conda" ]; then
           required="CONDA_ROOT"
         fi
         if [ "$NEEDS_DEVICE" = "true" ]; then
