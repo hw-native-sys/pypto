@@ -1064,9 +1064,12 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
       const std::string handle_var = HandleVarForScope(ScopeForWindowBuffer(window_buffer));
-      emitter_.EmitLine(ta_var + ".add_tensor(Tensor.make(data=" + handle_var + "[" + rank_expr +
-                        "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
-                        ", child_memory=True), " + tag + ")");
+      // The domain hands each named window slice over as a VMM_WINDOW Buffer owned by
+      // that chip, so the task arg is a view of it. This replaces the retired
+      // ``Tensor.make(data=<ptr>, child_memory=True)`` raw-address form: chip ownership
+      // now rides in the Buffer instead of being implied by the dispatch.
+      emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
+                        "\"].tensor(" + shape + ", " + dtype_enum + "), " + tag + ")");
       continue;
     }
 

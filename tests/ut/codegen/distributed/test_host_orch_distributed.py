@@ -14,8 +14,9 @@ Covers four orthogonal pieces of the host_orch emit:
 1. Programs with at least one comm domain wrap the body in
    ``with orch.allocate_domain(name=..., workers=..., window_size=...,
    buffers=[CommBufferSpec(...)]) as __comm_d0:``.
-2. DistributedTensor formal → ``add_tensor(Tensor.make(data=__comm_d0[<r>]
-   .buffer_ptrs["<name>"], shapes=..., dtype=..., child_memory=True), ...)``.
+2. DistributedTensor formal → ``add_tensor(__comm_d0[<r>].buffers["<name>"]
+   .tensor(<shapes>, <dtype>), ...)`` — the window VA is
+   domain-owned and chip-local, so the owning rank travels with it.
 3. Explicit CommCtx scalar:
    ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
    in IR-arg order (matching the materialized incore function signature).
@@ -90,7 +91,7 @@ def _lower_host_collectives(program):
 
 # ---------------------------------------------------------------------------
 # Positive: DistributedTensor formals + device= → with orch.allocate_domain
-# + Tensor.make + add_scalar(ctx) + worker= + world_size lowering
+# + window Buffer .tensor() + add_scalar(ctx) + worker= + world_size lowering
 # ---------------------------------------------------------------------------
 
 
@@ -127,15 +128,14 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
 
     # for r in range(..., world_size, ...):  ← world_size lowering in loop bound.
     assert re.search(r"for \w+ in range\(.*\bworld_size\b.*\):", code), code
-    # Tensor.make for the DistributedTensor formal — keyed on
+    # window Buffer view for the DistributedTensor formal — keyed on
     # the alloc op's LHS name_hint (``data_buf``).
     assert re.search(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["data_buf"\],'
-        r" shapes=\(64,\), dtype=DataType\.FLOAT32, child_memory=True\)",
+        r'__comm_d0\[\w+\]\.buffers\["data_buf"\]\.tensor\(\(64,\), DataType\.FLOAT32\)',
         code,
     ), code
     # Trailing per-DistributedTensor ctx scalar — same rank index as
-    # the Tensor.make above.
+    # the window Buffer view above.
     assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
     assert "pld.system.get_comm_ctx" not in code, code
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
@@ -168,10 +168,9 @@ def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
 
     code = _lower(Prog)
 
-    # Two Tensor.make lines — one per DistributedTensor formal.
+    # Two window Buffer view lines — one per DistributedTensor formal.
     cont_makes = re.findall(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["([^"]+)"\],'
-        r" shapes=(\([^)]*\)), dtype=DataType\.([A-Z0-9]+),",
+        r'__comm_d0\[\w+\]\.buffers\["([^"]+)"\]\.tensor\((\([^)]*\)), DataType\.([A-Z0-9]+)\)',
         code,
     )
     assert len(cont_makes) == 2, code
@@ -240,7 +239,7 @@ def test_const_device_kwarg_renders_literal_worker():
 
     code = _lower(Prog)
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, 0\)", code), code
-    assert "__comm_d0[0].buffer_ptrs" in code, code
+    assert "__comm_d0[0].buffers[" in code, code
     assert "__comm_d0[0].device_ctx" in code, code
 
 
@@ -289,7 +288,7 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # All buffer / device_ctx lookups go through the handle; the legacy
     # ``contexts`` parameter must not appear anywhere.
     assert "contexts[" not in code, code
-    assert re.search(r"__comm_d0\[\w+\]\.buffer_ptrs", code), code
+    assert re.search(r"__comm_d0\[\w+\]\.buffers\[", code), code
 
 
 def test_comm_buffer_specs_align_each_physical_allocation():
@@ -364,10 +363,10 @@ def test_comm_less_dispatch_routes_through_submit_chip_unplaced():
     code = _lower(Prog)
     # The dispatch shape stays intact; the comm-less path routes through
     # ``_submit_chip(..., None)`` and emits no wrapper, no ctx-scalar /
-    # Tensor.make / handle subscript, and no ``worker=`` kwarg.
+    # window Buffer view / handle subscript, and no ``worker=`` kwarg.
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, None\)", code), code
     assert "worker=" not in code, code
-    assert "Tensor.make" not in code, code
+    assert ".buffers[" not in code, code
     assert "__comm_d0[" not in code, code
     assert "allocate_domain" not in code, code
     assert "with orch" not in code, code
@@ -514,14 +513,14 @@ def test_two_groups_emit_nested_allocate_domain():
     assert d1_indent > d0_indent, (d0_line, d1_line)
 
     # Each dispatch's DistributedTensor arg routes through the right handle.
-    # group A dispatches: Tensor.make(... __comm_d0[...].buffer_ptrs["buf_a"] ...)
+    # group A dispatches: __comm_d0[...].buffers["buf_a"].tensor(...)
     # and add_scalar(__comm_d0[...].device_ctx).
     assert re.search(
-        r'Tensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["buf_a"\],',
+        r'__comm_d0\[\w+\]\.buffers\["buf_a"\]\.tensor\(',
         code,
     ), code
     assert re.search(
-        r'Tensor\.make\(data=__comm_d1\[\w+\]\.buffer_ptrs\["buf_b"\],',
+        r'__comm_d1\[\w+\]\.buffers\["buf_b"\]\.tensor\(',
         code,
     ), code
     # The trailing per-tensor ctx scalar uses the matching handle too.
@@ -561,10 +560,10 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
 
     code = _lower(Prog)
 
-    # Each dispatch site emits one Tensor.make line; the handle
+    # Each dispatch site emits one window Buffer view; the handle
     # prefix uniquely identifies the group.
     cont_makes = re.findall(
-        r'Tensor\.make\(data=(__comm_d\d+)\[\w+\]\.buffer_ptrs\["([^"]+)"\],',
+        r'(__comm_d\d+)\[\w+\]\.buffers\["([^"]+)"\]\.tensor\(',
         code,
     )
     assert cont_makes == [
@@ -787,9 +786,9 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
     generated, cg = _lower_host_collectives(Prog)
 
     assert 'callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
-    assert 'buffer_ptrs["__allreduce_signal_buf_0"]' in generated, generated
-    assert 'buffer_ptrs["data_buf"]' in generated, generated
-    assert 'buffer_ptrs["signal_buf"]' not in generated, generated
+    assert 'buffers["__allreduce_signal_buf_0"]' in generated, generated
+    assert 'buffers["data_buf"]' in generated, generated
+    assert 'buffers["signal_buf"]' not in generated, generated
     assert "orch.submit_next_level" in generated, generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert "data = data" not in generated, generated
