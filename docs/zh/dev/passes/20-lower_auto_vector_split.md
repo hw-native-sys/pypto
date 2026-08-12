@@ -168,9 +168,9 @@ core affinity）同样会落到 cube lane 上，而它可能在向量 lane 的 T
   `ValidateMixedExplicitRegion`——它拒绝的是「半宽边界算子与全宽向量算子混写」，而这里一切
   都是全宽。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](21-expand_mixed_kernel.md) /
   `SplitVectorKernel` 会把它派发到**两个** AIV lane（经由 `dual_aiv_dispatch`），而**非**
-  lane-0-only 的非拆分 replay（后者只针对非 `split_aiv` 核）——故两个 lane 都运行完整函数体，
-  从这类区域向外的 V→C 跨越由硬件决定 lane-0-wins，而不是由合成的 replay 决定。当区域的 tile
-  无法折半（单位维）或归约必须保持全宽时使用本模式。
+  lane-0-only 的非拆分 replay——故从这类区域向外的 V→C 跨越上两个 lane 都会 push，写入同一个
+  共享槽位且没有任何仲裁，因此除非作者保证该值 lane-uniform，cube 收到的是二者之一且不确定
+  是哪一个。当区域的 tile 无法折半（单位维）或归约必须保持全宽时使用本模式。
 
 ### 显式边界区域内允许出现哪些算子
 
