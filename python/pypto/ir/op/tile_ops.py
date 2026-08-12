@@ -949,7 +949,9 @@ def div(
     rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     if isinstance(rhs_expr.type, ScalarType):
         if high_precision:
-            raise ValueError("tile.div(high_precision=True) requires a Tile rhs")
+            # TypeError, matching the unified pl.* guards: a kwarg this operand
+            # combination cannot honour is a wrong-arguments error, not a bad value.
+            raise TypeError("tile.div(high_precision=True) requires a Tile rhs")
         return _ir_core.create_op_call("tile.divs", [lhs, rhs_expr], {}, actual_span)
     kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
     return _ir_core.create_op_call("tile.div", [lhs, rhs_expr], kwargs, actual_span)

@@ -1493,7 +1493,7 @@ def test_tensor_div_precision_kwarg_and_scalar_dispatch():
     assert dict(high_precision_call.kwargs) == {"high_precision": True}
     assert scalar_call.op.name == ir.get_op("tensor.divs").name
     assert dict(scalar_call.kwargs) == {}
-    with pytest.raises(ValueError, match=r"requires a Tensor rhs"):
+    with pytest.raises(TypeError, match=r"requires a Tensor rhs"):
         ir.op.tensor.div(lhs, 2.0, high_precision=True)
 
 

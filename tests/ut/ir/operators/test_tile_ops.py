@@ -163,7 +163,7 @@ class TestTileElementwiseOps:
         assert dict(high_precision_call.kwargs) == {"high_precision": True}
         assert scalar_call.op.name == ir.get_op("tile.divs").name
         assert dict(scalar_call.kwargs) == {}
-        with pytest.raises(ValueError, match=r"requires a Tile rhs"):
+        with pytest.raises(TypeError, match=r"requires a Tile rhs"):
             tile.div(lhs, 2.0, high_precision=True)
 
     def test_tile_div_rejects_integer_high_precision_template_gap(self):
@@ -5903,7 +5903,7 @@ class TestWindowReadValidRegion:
 
         # And the DSL rejects the flag itself rather than silently dropping it.
         tile_arg = pl.Tile(expr=src)
-        with pytest.raises(ValueError, match="clamp=True is not supported for a Tile"):
+        with pytest.raises(TypeError, match="clamp=True is not supported for a Tile"):
             pl.slice(tile_arg, [64, 64], [64, 0], clamp=True)
 
     def test_slice_drop_dims_rejected_when_axis_is_not_provably_valid(self):

@@ -1377,7 +1377,7 @@ class TestUnifiedOpsTypeErrors:
         rhs = Tensor(expr=ir.Var("rhs", ir.TensorType([8, 1], DataType.FP32), span))
         tmp = Tile(expr=ir.Var("tmp", ir.TileType([8, 8], DataType.FP32), span))
 
-        with pytest.raises(ValueError, match="tmp is only supported for Tile"):
+        with pytest.raises(TypeError, match="Tensor inputs must not pass tmp"):
             unified_ops.row_expand_add(lhs, rhs, tmp)  # type: ignore[call-overload]
 
     def test_div_rejects_high_precision_for_scalar_paths(self):
@@ -1398,8 +1398,57 @@ class TestUnifiedOpsTypeErrors:
         ]
 
         for lhs, rhs in cases:
-            with pytest.raises(ValueError, match="high_precision"):
+            with pytest.raises(TypeError, match="high_precision"):
                 unified_ops.div(lhs, rhs, high_precision=True)  # type: ignore[call-overload]
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "row_max",
+            "row_sum",
+            "row_min",
+            "row_prod",
+            "row_argmax",
+            "row_argmin",
+            "col_argmax",
+            "col_argmin",
+        ],
+    )
+    def test_reduction_requires_tmp_tile_for_tile_inputs(self, op_name):
+        """The scratch operand the Tensor path must omit is the one the Tile path must get.
+
+        Both directions raise ``TypeError``: a Tile cannot synthesize caller-owned
+        scratch, so omitting it is a wrong-arguments error, not a bad value.
+        """
+        span = ir.Span.unknown()
+        tile = Tile(expr=ir.Var("input", ir.TileType([8, 64], DataType.FP32), span))
+
+        with pytest.raises(TypeError, match="Tile inputs require tmp_tile"):
+            getattr(unified_ops, op_name)(tile)
+
+    @pytest.mark.parametrize("op_name", ["xor", "xors"])
+    def test_bitwise_requires_scratch_tile_for_tile_inputs(self, op_name):
+        """Same guard as the reductions, for the ops whose scratch operand is positional."""
+        span = ir.Span.unknown()
+        lhs = Tile(expr=ir.Var("lhs", ir.TileType([8, 64], DataType.INT32), span))
+
+        with pytest.raises(TypeError, match="Tile inputs require an explicit scratch tile"):
+            getattr(unified_ops, op_name)(lhs, 1)
+
+    def test_cast_rejects_non_default_mode_for_scalar(self):
+        """A *valid* mode the Scalar path cannot honour is a TypeError...
+
+        ...while a mode that is not a mode at all stays a ValueError from
+        ``resolve_cast_mode``, which runs first.
+        """
+        span = ir.Span.unknown()
+        scalar = Scalar(expr=ir.Var("s", ir.ScalarType(DataType.FP32), span))
+
+        with pytest.raises(TypeError, match="Scalar inputs do not support non-default mode"):
+            unified_ops.cast(scalar, DataType.INT32, mode="floor")
+
+        with pytest.raises(ValueError, match="Invalid rounding mode"):
+            unified_ops.cast(scalar, DataType.INT32, mode="not_a_mode")
 
     def test_matmul_invalid_lhs(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile operands"):

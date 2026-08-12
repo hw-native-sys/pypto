@@ -633,7 +633,9 @@ def div(
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
         if high_precision:
-            raise ValueError("tensor.div(high_precision=True) requires a Tensor rhs")
+            # TypeError, matching the unified pl.* guards: a kwarg this operand
+            # combination cannot honour is a wrong-arguments error, not a bad value.
+            raise TypeError("tensor.div(high_precision=True) requires a Tensor rhs")
         return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
     kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
     return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], kwargs, actual_span)
