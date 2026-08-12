@@ -197,10 +197,9 @@ class TileInnermostDimVisitor : public IRVisitor {
   // would print differently can collapse onto one another's text. Element
   // counts matter independently of byte counts under sub-byte packing, where
   // int4[1] and int4[2] both round to one byte.
-  using SiteKey =
-      std::tuple<std::string, int, int, std::string, std::string, uint64_t, int64_t,
-                 std::optional<MemorySpace>, std::optional<uint64_t>, std::optional<uint64_t>,
-                 std::optional<uint64_t>>;
+  using SiteKey = std::tuple<std::string, int, int, std::string, std::string, uint64_t, int64_t,
+                             std::optional<MemorySpace>, std::optional<uint64_t>, std::optional<uint64_t>,
+                             std::optional<uint64_t>>;
 
   void RecordIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
     auto info_opt = InspectTile(tile_type);
@@ -233,10 +232,9 @@ class TileInnermostDimVisitor : public IRVisitor {
       return;
     }
 
-    SiteKey key{span.filename_,       span.begin_line_,     span.begin_column_,
-                op_name,              info.dtype_name,      info.innermost_bytes,
-                info.innermost_elems, info.memory,          info.rows,
-                info.row_bytes,       info.transfer_bytes};
+    SiteKey key{span.filename_,  span.begin_line_,     span.begin_column_,   op_name,
+                info.dtype_name, info.innermost_bytes, info.innermost_elems, info.memory,
+                info.rows,       info.row_bytes,       info.transfer_bytes};
     auto [it, inserted] = sites_.try_emplace(key, info, span, op_name);
     (void)inserted;
     ++it->second.count;

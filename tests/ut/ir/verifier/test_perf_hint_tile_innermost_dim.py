@@ -317,9 +317,7 @@ def test_volume_follows_valid_shape_not_physical_shape_a5():
             )
             return pl.store(t, [0, 0], out)
 
-    perf_hints = [
-        d for d in _run_perf_hint_check(Prog) if d.severity == passes.DiagnosticSeverity.PerfHint
-    ]
+    perf_hints = [d for d in _run_perf_hint_check(Prog) if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     for diag in perf_hints:
         # 4 valid rows of 16 fp32, not the physical 16 rows / 1024B.
