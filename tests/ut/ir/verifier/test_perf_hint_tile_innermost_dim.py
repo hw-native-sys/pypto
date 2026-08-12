@@ -275,6 +275,57 @@ def test_gm_to_mat_load_is_flagged_a5():
     assert "moves 512B as 16 x 32B rows" in msg
 
 
+def test_volume_is_self_consistent_for_subbyte_dtype_a5():
+    """Sub-byte volume is rows x row bytes, not the packed whole-tile size.
+
+    Rounding the whole tile to bytes in one step under-reports a bit-packed
+    transfer by the packing factor and contradicts the row figures printed
+    beside it: a [16, 1] bool tile moves 16 separately-addressed 1B rows, so
+    16B, not the 2B a single packed rounding would claim.
+    """
+    _activate_a5()
+    program = _make_load_program(1, pl.BOOL)  # 16 rows x 1 bool = 1B rows
+    perf_hints = [
+        d for d in _run_perf_hint_check(program) if d.severity == passes.DiagnosticSeverity.PerfHint
+    ]
+    assert len(perf_hints) >= 1
+    for diag in perf_hints:
+        assert "moves 16B as 16 x 1B rows" in diag.message
+
+
+def test_volume_follows_valid_shape_not_physical_shape_a5():
+    """A padded tile transfers only its valid region, and the hint says so.
+
+    ``tile.load`` / ``tile.store`` size their GM partition from ``valid_shape``,
+    so reporting the physical allocation would overstate traffic on every tail
+    tile -- here by 4x -- and would split the dedup key away from an otherwise
+    identical transfer.
+    """
+    _activate_a5()
+    rows, inner, valid_rows = 16, 16, 4
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[rows, inner], pl.FP32],
+            out: pl.Out[pl.Tensor[[rows, inner], pl.FP32]],
+        ) -> pl.Tensor[[rows, inner], pl.FP32]:
+            t: pl.Tile[[rows, inner], pl.FP32] = pl.load(
+                x, [0, 0], [rows, inner], valid_shape=[valid_rows, inner]
+            )
+            return pl.store(t, [0, 0], out)
+
+    perf_hints = [
+        d for d in _run_perf_hint_check(Prog) if d.severity == passes.DiagnosticSeverity.PerfHint
+    ]
+    assert len(perf_hints) >= 1
+    for diag in perf_hints:
+        # 4 valid rows of 16 fp32, not the physical 16 rows / 1024B.
+        assert "moves 256B as 4 x 64B rows" in diag.message
+
+
 def test_chip_internal_move_not_flagged_a5():
     """Mat->L0 ``tile.move`` is genuinely cube-private and is never inspected.
 
