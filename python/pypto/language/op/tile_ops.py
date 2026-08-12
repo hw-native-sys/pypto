@@ -668,8 +668,11 @@ def aic_gather(x: _SplitOperandT, span: Span | None = None) -> _SplitOperandT:
     region is named; an unnamed one is rejected by the ``AivSplitValid`` verifier.
 
     Out of a ``mode=NONE`` region the two lanes share one destination slot with no
-    per-lane offset, so when they hold different values the cube reads **lane 0's**.
-    Gather a value both lanes agree on, or guard the divergent work to lane 0.
+    per-lane offset and nothing arbitrates between them: both push, so when they
+    hold different values the cube receives an **unspecified** one of the two.
+    Guarding the *production* of the value does not help — lane 1 still reaches
+    the push and still sends its own tile. Gather only a value both lanes agree
+    on; if they must contribute different data, use a data-parallel region.
 
     Like :func:`aiv_shard`, the split mode is
     **inherited** from the enclosing ``for aiv_id in pl.split_aiv(mode=...)``

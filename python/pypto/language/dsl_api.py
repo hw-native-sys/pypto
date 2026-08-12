@@ -1013,7 +1013,7 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
             kv = pl.aic_gather(v)                # V->C: named
         out = pl.matmul(kv, w)                   # cube again, outside
 
-    **Lane 0 wins on a V->C crossing out of a ``NONE`` region.** The ISA requires
+    **Gather only a lane-uniform value out of a ``NONE`` region.** The ISA requires
     both AIV sub-lanes to take part in a no-split handshake and they share one
     destination slot with no per-lane offset, and nothing arbitrates between
     them: both lanes push, so if they hold different values the cube receives an
@@ -1060,9 +1060,12 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
     **GM traffic is outside all of this.** The crossing rules above govern *tile*
     values. A GM tensor belongs to no lane — ``pld.tensor.put`` takes one by
     signature — so no boundary op can express a crossing through it, and AIC and
-    AIV run asynchronously. Ordering a cube-lane write against a vector-lane read
-    of the same GM buffer needs an explicit ``pl.system.syncall(core_type="mix")``
-    and remains the author's responsibility.
+    AIV run asynchronously. ``ExpandMixedKernel`` fences one narrow shape by
+    itself: a cube ``tile.store`` whose GM tensor a vector ``tile.load`` reads
+    back, when the two share an origin and the load is in or under the store's
+    body. Everything else — a comm op reading the buffer, a consumer in a
+    sibling body — needs an explicit ``pl.system.syncall(core_type="mix")`` and
+    remains the author's responsibility.
 
     The region survives parse -> SSA -> ResolveBackendOpLayouts as a structural
     node (printer emits ``for aiv_id in pl.split_aiv(...):`` so parse->print->parse

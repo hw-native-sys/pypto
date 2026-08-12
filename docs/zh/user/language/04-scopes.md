@@ -250,7 +250,7 @@ AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定�
 | **`cube op '...' inside a pl.split_aiv region`** | 区域体是 AIV 的工作 | 把 `pl.matmul` 移出区域 |
 | **`'x' is produced on the CUBE lane ... reads it on the VECTOR lane inside one`** | 未写明的 C->V 跨越（进入区域） | 在区域开头以 `pl.aiv_shard(x)` 读取 |
 | **`'x' is defined inside a pl.split_aiv region but ... reads it on the CUBE lane outside`** | 未写明的 V->C 跨越（离开区域） | 在区域内 gather：`x = pl.aic_gather(x)` |
-| **cube 读到的是 lane 0 的值，而不是 lane 1 的** | 从 `mode=NONE` 区域向外的 V->C 跨越 —— 共用一个槽位、无每 lane 偏移，**不会有诊断** | gather 一个两条 lane 一致的值，或把有分歧的计算限定到 lane 0 |
+| **cube 随机读到其中一条 lane 的值** | 从 `mode=NONE` 区域向外的 V->C 跨越 —— 两条 lane 都 push、共用一个槽位、无仲裁，**不会有诊断** | 只 gather lane-uniform 的值；若两条 lane 持有不同的半块，请改用数据并行区域 |
 | **对端的信号计数器读到的值是应有值的两倍** | 两条 AIV lane 都执行了同一条 `pld.system.notify` —— **不会有诊断** | 按 `aiv_id` 分片该 notify，或用 `if aiv_id == 0:` 限定 |
 | **某个 rank 的 `pld.system.wait` 返回后读到过期数据** | 要么是上面的重复 notify，要么是 cube 与 vector 阶段之间缺少 `pl.system.syncall(core_type="mix")` | 分片该 notify；补上屏障 |
 

@@ -283,7 +283,8 @@ program_expanded = expand_pass(program)
 
 对*未被放置*的那一类，没有任何检查会拒绝：写在所有区域之外的通信算子会被复制到两条 lane 上，
 且不会有任何诊断。该标记也不能让它只运行一次——本 pass 发出的 AIV 函数带有
-`dual_aiv_dispatch`，其函数体会在两条 AIV 子 lane 上都运行，把只应发生一次的副作用在两条子
+`dual_aiv_dispatch`（当后端确实需要两条子 lane 时，即 Ascend910B 的 no-split 混合 kernel），
+此时其函数体会在两条 AIV 子 lane 上都运行，把只应发生一次的副作用在两条子
 lane 之间分片是作者的职责（见[作用域与放置](../../user/language/04-scopes.md)）。
 
 该覆盖是完备的，并在三种情况下拒绝覆盖——每种都是因为“该调用的 lane 并非由区域决定”：
