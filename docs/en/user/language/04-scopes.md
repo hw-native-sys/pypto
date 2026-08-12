@@ -40,7 +40,7 @@ def scale(
     out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.mul(x, 2.0)
+        out = pl.assemble(out, pl.mul(x, 2.0), [0, 0])
     return out
 ```
 

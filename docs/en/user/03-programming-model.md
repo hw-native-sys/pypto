@@ -40,7 +40,7 @@ def square_tensor(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     # Tensor level: name the whole array. Placement and movement are the compiler's.
-    out = pl.mul(x, x)
+    out = pl.assemble(out, pl.mul(x, x), [0, 0])
     return out
 
 @pl.jit.incore
