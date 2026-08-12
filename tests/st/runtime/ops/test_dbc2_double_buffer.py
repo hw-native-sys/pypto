@@ -23,6 +23,7 @@ Under the default PyPTO planner (flag off) these shapes get one accumulator and
 would not exercise the feature.
 
 Coverage:
+  - minimal one-dimensional 1x2 / 2x1 grids under both PyPTO-owned planners;
   - direct-store (Acc->GM) sweep over chooser-pinned 4 / 6 / 8 / 16-tile grids,
     under all three planners —
     the WAR reuse boundary (tile i+2's matmul into a buffer must wait for tile i's
@@ -287,32 +288,63 @@ class TestDbc2DoubleBuffer:
         ],
     )
     @pytest.mark.parametrize(
-        "m,n,tile_m,tile_n,tile_count",
+        "m,n,tile_m,tile_n,tile_count,stationarity",
         [
-            (160, 160, 80, 128, 4),
-            (144, 144, 48, 128, 6),
-            (256, 256, 64, 128, 8),
-            (448, 448, 112, 128, 16),
+            (160, 160, 80, 128, 4, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
+            (144, 144, 48, 128, 6, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
+            (256, 256, 32, 256, 8, _core_passes.l0_tile_chooser.Stationarity.BStationary),
+            (448, 448, 112, 128, 16, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
         ],
     )
-    def test_direct_store_dbc(self, test_runner, platform, planner, m, n, tile_m, tile_n, tile_count):
+    def test_direct_store_dbc(
+        self, test_runner, platform, planner, m, n, tile_m, tile_n, tile_count, stationarity
+    ):
         """Direct-store (Acc->GM) dbC=2 across a tile-count sweep; a wrong reuse-WAR
         sync would corrupt the result."""
         choice = _choose_a2a3_fp32_dbc(m, n)
         count = ((m + choice.m - 1) // choice.m) * ((n + choice.n - 1) // choice.n)
         assert (choice.m, choice.n, choice.k, count) == (tile_m, tile_n, 64, tile_count)
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert choice.stationarity == stationarity
         assert choice.double_buffer_c
         result = test_runner.run(_DbcDirectStore(m, n, planner=planner, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
+    @pytest.mark.parametrize(
+        "planner",
+        [
+            pytest.param(MemoryPlanner.PYPTO, id="pypto"),
+            pytest.param(MemoryPlanner.DSA_RP, id="dsa_rp"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "m,n,tile_m,tile_n,holds_a",
+        [
+            (16, 256, 16, 128, True),
+            (256, 16, 128, 16, False),
+        ],
+    )
+    def test_one_dimensional_dbc(self, test_runner, platform, planner, m, n, tile_m, tile_n, holds_a):
+        """A singleton outer axis still permits two moving-inner dbC stages."""
+        choice = _choose_a2a3_fp32_dbc(m, n)
+        assert (choice.m, choice.n, choice.k) == (tile_m, tile_n, 64)
+        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert choice.os_holds_a is holds_a
+        assert choice.double_buffer_c
+
+        case = _DbcDirectStore(m, n, planner=planner, platform=platform)
+        printed = _printed_after_auto_tile(case, planner)
+        assert printed.count('"pipeline_double_buffer_c": True') == 1
+        result = test_runner.run(case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS_DBC)
     def test_ptoas_384x256_operand_allocation(self, test_runner, platform):
-        """Formerly disabled PTOAS operand-buffer overflow, now a 6x2 (12-tile) grid."""
+        """Formerly disabled PTOAS operand-buffer overflow, now a 12x1 grid."""
         choice = _choose_a2a3_fp32_dbc(384, 256)
         count = ((384 + choice.m - 1) // choice.m) * ((256 + choice.n - 1) // choice.n)
-        assert (choice.m, choice.n, choice.k, count) == (64, 128, 64, 12)
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert (choice.m, choice.n, choice.k, count) == (32, 256, 64, 12)
+        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.BStationary
         assert choice.double_buffer_c
         result = test_runner.run(_DbcDirectStore(384, 256, planner=MemoryPlanner.PTOAS, platform=platform))
         assert result.passed, f"Test failed: {result.error}"

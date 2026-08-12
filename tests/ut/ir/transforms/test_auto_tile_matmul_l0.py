@@ -1939,8 +1939,8 @@ class TestAutoTileMatmulL0MNTiling:
     def test_system_k_split_shapes_emit_k_only_loop(self, planner, M, K, N, tile_k):
         """Structural contract for the FP32 system-test matrix.
 
-        Every shape must remain a K-only split under both planners: one K
-        pipeline, at least one matmul_acc, and no M/N grid loop.
+        Shapes remain K-only unless PTOAS's expanded design space finds a
+        strictly cheaper full-K one-dimensional dbC schedule.
         """
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -1967,6 +1967,17 @@ class TestAutoTileMatmulL0MNTiling:
         with passes.PassContext([], memory_planner=planner):
             After = passes.auto_tile_matmul_l0()(Before)
         printed = ir.python_print(After)
+        if planner == passes.MemoryPlanner.PTOAS and (M, K, N) == (64, 256, 256):
+            assert printed.count("pl.range(") == 1
+            assert printed.count("pl.pipeline(") == 1
+            assert "pl.range(0, 64, 64," in printed
+            assert "pl.pipeline(0, 256, 32," in printed
+            assert "[64, 256], target_memory=pl.Mem.Left" in printed
+            assert "[256, 32], target_memory=pl.Mem.Right" in printed
+            assert "pipeline_double_buffer_c" in printed
+            assert "pl.tile.matmul_acc(" not in printed
+            _assert_ssa_valid(After, "test_system_full_k_one_dimensional_ptoas")
+            return
         assert printed.count("pl.pipeline(") == 1
         assert "pl.range(" not in printed
         assert f"pl.pipeline(0, {K}, {tile_k}," in printed
@@ -1988,12 +1999,12 @@ class TestAutoTileMatmulL0MNTiling:
             ),
             (
                 passes.MemoryPlanner.PTOAS,
+                64,
                 384,
-                256,
-                128,
-                128,
-                "pl.range(0, 384, 128,",
-                "pl.pipeline(0, 128, 64,",
+                288,
+                64,
+                "pl.range(0, 64, 64,",
+                "pl.pipeline(0, 288, 32,",
                 True,
             ),
         ],
@@ -2059,7 +2070,7 @@ class TestAutoTileMatmulL0MNTiling:
                 passes.MemoryPlanner.PTOAS,
                 64,
                 80,
-                288,
+                256,
                 256,
                 "pl.range(0, 256, 256,",
                 "pl.pipeline(0, 64, 32,",
@@ -2123,9 +2134,9 @@ class TestAutoTileMatmulL0MNTiling:
         [
             (160, 160, 80, 128),
             (144, 144, 48, 128),
-            (256, 256, 64, 128),
+            (256, 256, 32, 256),
             (448, 448, 112, 128),
-            (384, 256, 64, 128),
+            (384, 256, 32, 256),
         ],
     )
     def test_system_dbc_shapes_emit_expected_fp32_tile(self, planner, pypto_dbc, M, N, tile_m, tile_n):
@@ -2363,6 +2374,66 @@ class TestAutoTileMatmulL0MNTiling:
             assert acc_buffer_count() == 2, (
                 "PyPTO + opt-in flag must allocate the dbC=2 ping-pong (two co-live L0C accumulators)"
             )
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize(
+        ("M", "N", "held_memory"),
+        [
+            (16, 256, "pl.Mem.Left"),
+            (256, 16, "pl.Mem.Right"),
+        ],
+    )
+    def test_dbc_one_dimensional_grid_allocates_two_accumulators(self, planner, M, N, held_memory):
+        """PyPTO-owned planners realize 1x2 and 2x1 dbC with two L0C buffers.
+
+        The singleton axis is outer and holds its operand; the two-tile axis is
+        the inner loop carrying ``pipeline_double_buffer_c``. Both PYPTO and
+        DSA_RP must preserve exactly two co-live accumulator allocations.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        K = 128
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
+        tiled_lines = ir.python_print(tiled).splitlines()
+        outer_i = next(i for i, line in enumerate(tiled_lines) if "pl.pipeline(0, 16, 16," in line)
+        inner_i = next(i for i, line in enumerate(tiled_lines) if "pl.pipeline(0, 256, 128," in line)
+        assert outer_i < inner_i
+        held_region = "\n".join(tiled_lines[outer_i + 1 : inner_i])
+        assert "pl.tile.extract(" in held_region
+        assert f"target_memory={held_memory}" in held_region
+        assert "pipeline_double_buffer_c" not in tiled_lines[outer_i]
+        assert "pipeline_double_buffer_c" in tiled_lines[inner_i]
+
+        acc_buffers = {
+            line.strip().split(":")[0]
+            for line in ir.python_print(optimized).splitlines()
+            if "tile.alloc(pl.Mem.Acc" in line
+        }
+        assert len(acc_buffers) == 2, (
+            f"{planner} must preserve exactly two co-live L0C accumulators for {M}x{N}, "
+            f"got {sorted(acc_buffers)}"
+        )
 
     @pytest.mark.parametrize(
         ("M", "N"),
