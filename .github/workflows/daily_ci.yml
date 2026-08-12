@@ -184,11 +184,15 @@ jobs:
         run: |
           source activate.sh
           # uv, not pip: this job asks for toolchain: bundle, and that venv is
-          # built by `uv venv` and carries no pip. Both are already installed by
-          # setup-ci-job (torch at its pin); this stays as the job's own explicit
-          # statement of what the pypto-lib samples need, and is a no-op when the
-          # two agree.
-          uv pip install nanobind torch
+          # built by `uv venv` and carries no pip.
+          #
+          # torch is deliberately NOT named here, though the samples need it.
+          # setup-ci-job installs it at a pin and from the CPU index, and naming
+          # it again would either duplicate that pin — two places to keep in step
+          # on the next bump — or, bare as it was, let a future divergence
+          # resolve `torch` from PyPI, whose aarch64 wheel drags in the entire
+          # CUDA stack on an Ascend host. One owner for that decision.
+          uv pip install nanobind
 
       - name: Run Qwen3-14B decode perf samples (L2 swimlane, 5x)
         id: qwen3_perf_run
