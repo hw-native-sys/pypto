@@ -5245,5 +5245,99 @@ class TestConvertCrossCoreSplitOps:
         ir.assert_structural_equal(explicit_call.type, auto_call.type)
 
 
+class TestSynthesizedOpSpans:
+    """Every Call the pass synthesizes carries a precise span, not the ``def`` line.
+
+    Downstream ``CHECK_SPAN`` diagnostics, IR-trace reports and (eventually) MLIR
+    ``loc()`` all read the span off the ``Call``. Stamping the enclosing
+    function's span on synthesized ops silently reports the ``def`` line for
+    every one of them, so the attribution is pinned here.
+    """
+
+    # A single-op InCore kernel: the pass synthesizes an entry tile.load for `x`
+    # and an exit tile.store for the returned tile, and converts tensor.exp.
+    _SOURCE = (
+        "@pl.program\n"
+        "class Before:\n"
+        "    @pl.function(type=pl.FunctionType.InCore)\n"
+        "    def kernel(self, x: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        t = pl.tensor.exp(x)\n"
+        "        return t\n"
+    )
+
+    @staticmethod
+    def _parse_before() -> ir.Program:
+        parsed = parse(TestSynthesizedOpSpans._SOURCE)
+        assert isinstance(parsed, ir.Program)
+        return parsed
+
+    @staticmethod
+    def _pos(span: ir.Span) -> tuple[int, int, int, int]:
+        """Full span position — the signature is one line, so the column matters."""
+        return (span.begin_line, span.begin_column, span.end_line, span.end_column)
+
+    @staticmethod
+    def _calls_by_op(func: ir.Function) -> dict[str, list[tuple[ir.Call, ir.Stmt]]]:
+        """Map op name -> [(call, enclosing stmt)] over a function body."""
+        found: dict[str, list[tuple[ir.Call, ir.Stmt]]] = {}
+
+        def walk(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.SeqStmts):
+                for inner in stmt.stmts:
+                    walk(inner)
+                return
+            value = None
+            if isinstance(stmt, ir.AssignStmt):
+                value = stmt.value
+            elif isinstance(stmt, ir.EvalStmt):
+                value = stmt.expr
+            if isinstance(value, ir.Call):
+                found.setdefault(value.op.name, []).append((value, stmt))
+            for attr in ("body", "then_body", "else_body"):
+                sub = getattr(stmt, attr, None)
+                if sub is not None:
+                    walk(sub)
+
+        walk(func.body)
+        return found
+
+    def test_entry_load_and_exit_store_do_not_carry_the_function_span(self):
+        """The synthesized entry ``tile.load`` / exit ``tile.store`` are attributed
+        to the parameter and the ``return`` that motivated them."""
+        after = passes.convert_tensor_to_tile_ops()(self._parse_before())
+        func = _require_function(after, "kernel")
+        calls = self._calls_by_op(func)
+
+        # The entry load is attributed to the parameter declaration it loads.
+        (load_call, load_stmt) = calls[ir.get_op("tile.load").name][0]
+        assert self._pos(load_call.span) == self._pos(func.params[0].span)
+        assert self._pos(load_call.span) != self._pos(func.span)
+        assert self._pos(load_call.span) == self._pos(load_stmt.span)
+
+        # The exit store is attributed to the `return` that motivated it.
+        (store_call, store_stmt) = calls[ir.get_op("tile.store").name][0]
+        assert self._pos(store_call.span) == self._pos(store_stmt.span)
+        assert self._pos(store_call.span) != self._pos(func.span)
+        assert store_call.span.begin_line > func.span.begin_line
+
+    def test_converted_body_op_keeps_its_own_statement_span(self):
+        """A converted ``tensor.*`` -> ``tile.*`` op keeps the source span of the
+        statement it came from."""
+        before = self._parse_before()
+        exp_before = _find_first_call_to(_require_function(before, "kernel"), ir.get_op("tensor.exp").name)
+        assert exp_before is not None
+
+        after = passes.convert_tensor_to_tile_ops()(before)
+        func = _require_function(after, "kernel")
+        (exp_after, exp_stmt) = self._calls_by_op(func)[ir.get_op("tile.exp").name][0]
+
+        # Unchanged from the tensor-level original, and still nested inside its
+        # own statement (the Call spans the RHS, the AssignStmt spans `t = ...`).
+        assert self._pos(exp_after.span) == self._pos(exp_before.span)
+        assert exp_stmt.span.begin_line <= exp_after.span.begin_line
+        assert exp_after.span.end_line <= exp_stmt.span.end_line
+        assert exp_after.span.begin_line > func.span.begin_line
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -87,9 +87,14 @@ TypePtr WithCarriedMemRef(const TypePtr& deduced, const AssignStmtPtr& assign) {
 
 /**
  * @brief Recursively transform statements, flattening >2D tile ops to 2D.
+ *
+ * Every node this synthesizes is attributed to the statement it was synthesized
+ * for (see `span` in the rewrite loop) — never to the enclosing function — so
+ * post-pass diagnostics, IR traces and `loc()` point at the offending source
+ * line rather than the `def` line.
  */
 std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenContext& ctx,
-                                   const OpRegistry& op_registry, const Span& span) {
+                                   const OpRegistry& op_registry) {
   std::vector<StmtPtr> result;
 
   // Pre-scan: identify operand chains (tile.load -> tile.transpose_view/reshape)
@@ -343,6 +348,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
   for (size_t stmt_index = 0; stmt_index < stmts.size(); ++stmt_index) {
     const auto& stmt = stmts[stmt_index];
+    // Statement-level nodes below each carry their own source node's span
+    // (`ret->span_`, `assign->span_`, `for_stmt->body_->span_`, ...). Ops rebuilt
+    // from an RHS `Call` use that Call's tighter span — see `span`, bound once the
+    // Call is in hand.
+
     // ReturnStmt: substitute return values
     if (auto ret = As<ReturnStmt>(stmt)) {
       std::vector<ExprPtr> new_values;
@@ -367,7 +377,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // SeqStmts: recurse
     if (auto seq = As<SeqStmts>(stmt)) {
-      auto inner = TransformBody(seq->stmts_, ctx, op_registry, span);
+      auto inner = TransformBody(seq->stmts_, ctx, op_registry);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }
@@ -376,7 +386,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // since ScopeStmt is abstract and MutableCopy needs a concrete type.
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
-      auto inner = TransformBody(body_stmts, ctx, op_registry, span);
+      auto inner = TransformBody(body_stmts, ctx, op_registry);
       auto new_body = SeqStmts::Flatten(std::move(inner), scope->body_->span_);
       auto rewrite = [&](auto&& concrete) -> StmtPtr {
         auto new_scope = MutableCopy(concrete);
@@ -407,7 +417,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       auto then_ctx = ctx;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
-      auto new_then = TransformBody(then_stmts, then_ctx, op_registry, span);
+      auto new_then = TransformBody(then_stmts, then_ctx, op_registry);
       // Extract yield types before moving the vector
       auto yield_types = FindYieldTypes(new_then);
       auto new_then_body = SeqStmts::Flatten(std::move(new_then), if_stmt->then_body_->span_);
@@ -416,7 +426,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
-        auto new_else = TransformBody(else_stmts, else_ctx, op_registry, span);
+        auto new_else = TransformBody(else_stmts, else_ctx, op_registry);
         new_else_body = SeqStmts::Flatten(std::move(new_else), (*if_stmt->else_body_)->span_);
       }
 
@@ -468,7 +478,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
 
       auto body_stmts = FlattenToStmts(for_stmt->body_);
-      auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
+      auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry);
       auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
@@ -515,7 +525,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       auto new_cond = Substitute(while_stmt->condition_, body_ctx.var_map);
       auto body_stmts = FlattenToStmts(while_stmt->body_);
-      auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
+      auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry);
       auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
@@ -548,7 +558,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // Re-create tile ops via OpRegistry for proper type deduction
         if (auto call = As<Call>(new_expr)) {
           if (call->op_ && call->op_->name_.substr(0, 5) == "tile.") {
-            auto new_call = op_registry.Create(call->op_->name_, call->args_, call->kwargs_, span);
+            auto new_call = op_registry.Create(call->op_->name_, call->args_, call->kwargs_, call->span_);
             result.push_back(std::make_shared<EvalStmt>(new_call, eval->span_));
             continue;
           }
@@ -591,6 +601,19 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
       continue;
     }
+
+    // Everything below rebuilds ops derived from this RHS `Call`, so they take the
+    // Call's own span rather than the statement's. The two differ whenever the RHS
+    // does not start at the assignment — always by column (`t = pl.tile.exp(x)`),
+    // and by line for a parenthesized or wrapped RHS.
+    //
+    // Invariant: `span` is for expressions and ops ONLY. Every `AssignStmt` built
+    // below — including the auxiliary ones the lowering paths insert (the rank-N
+    // Mat load's `tensor.view`, the rank-N store's `tile.reshape`, the transpose
+    // scratch `tile.create`) — must pass `assign->span_`, so statement-level
+    // verifiers and `INTERNAL_CHECK_SPAN(..., assign->span_)` consumers keep
+    // reporting the statement rather than the operator inside it.
+    const Span& span = call->span_;
 
     const auto& op_name = call->op_->name_;
 
@@ -715,7 +738,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           auto view_call = CreateCollapsedTensorView(tensor, tensor_type, span);
           auto view_var =
               std::make_shared<Var>(assign->var_->name_hint_ + "_view2d", view_call->GetType(), span);
-          result.push_back(std::make_shared<AssignStmt>(view_var, view_call, span));
+          result.push_back(std::make_shared<AssignStmt>(view_var, view_call, assign->span_));
 
           auto row_offset = CollapseLeadingOffsetsToRow(offsets_tuple->elements_, tensor_type->shape_, span);
           sub_args[0] = view_var;
@@ -782,7 +805,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto reshape_shape = MakeShapeTupleFromInts({merged, last}, span);
         auto reshape_call = op_registry.Create("tile.reshape", {new_args[0], reshape_shape}, span);
         auto flat_var = std::make_shared<Var>("flat_tile", reshape_call->GetType(), span);
-        result.push_back(std::make_shared<AssignStmt>(flat_var, reshape_call, span));
+        result.push_back(std::make_shared<AssignStmt>(flat_var, reshape_call, assign->span_));
         new_args[0] = flat_var;
       }
 
@@ -901,7 +924,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         };
         auto scratch_create = op_registry.Create("tile.create", {scratch_shape}, scratch_kw, span);
         auto scratch_var = std::make_shared<Var>("transpose_tmp", scratch_create->GetType(), span);
-        result.push_back(std::make_shared<AssignStmt>(scratch_var, scratch_create, span));
+        result.push_back(std::make_shared<AssignStmt>(scratch_var, scratch_create, assign->span_));
 
         auto t_call =
             op_registry.Create("tile.transpose", {in, call->args_[1], call->args_[2], scratch_var}, span);
@@ -962,14 +985,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 }  // namespace rewrite_internal
 
 FunctionPtr Rewrite(const FunctionPtr& func) {
-  const auto& span = func->span_;
   auto& op_registry = OpRegistry::GetInstance();
 
   rewrite_internal::FlattenContext ctx;
 
   auto body_stmts = FlattenToStmts(func->body_);
-  auto new_stmts = rewrite_internal::TransformBody(body_stmts, ctx, op_registry, span);
-  auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
+  auto new_stmts = rewrite_internal::TransformBody(body_stmts, ctx, op_registry);
+  // The body SeqStmts wrapper spans the whole function; the ops inside it carry
+  // their own statements' spans (see TransformBody).
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), func->span_);
 
   // return_types_ are unchanged: InCore functions return tensors (not tiles),
   // and this pass only flattens tile ops. Tensor types are never modified.

@@ -1539,6 +1539,11 @@ struct IncoreTransformResult {
 IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto& conv_registry = OpConversionRegistry::GetInstance();
   auto& op_registry = OpRegistry::GetInstance();
+  // Structural nodes (body SeqStmts, the rebuilt Function) belong to the whole
+  // function, so they carry its span.  Synthesized *ops* must not: an entry load
+  // is attributed to the parameter that motivated it and an exit store to the
+  // `return` that motivated it, so post-pass diagnostics point at real source
+  // lines instead of the `def` line.
   const auto& span = func->span_;
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
@@ -1570,15 +1575,17 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
     if (params_used_by_converted_ops.find(var.get()) == params_used_by_converted_ops.end()) continue;
 
-    auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
-    auto shapes = MakeShapeTuple(tensor_type->shape_, span);
+    // Attribute the entry load to the parameter declaration it loads, not to `def`.
+    const auto& load_span = var->span_;
+    auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), load_span);
+    auto shapes = MakeShapeTuple(tensor_type->shape_, load_span);
     std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec}};
-    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, span);
+    auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, load_span);
 
     std::string tile_name = MakeTileValueName(var->name_hint_);
-    auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);
+    auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), load_span);
 
-    new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, span));
+    new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, load_span));
     mutator.AddMapping(var.get(), tile_var);
   }
 
@@ -1609,6 +1616,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
+    // The exit stores and the Out params they write exist because of this
+    // `return`, so they are attributed to it rather than to the `def` line.
+    const auto& ret_span = return_stmt->span_;
 
     // Process each return value
     for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
@@ -1627,7 +1637,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         std::string out_name = MakeOutParamName(num_added_outputs);
 
         auto out_type = orig_tensor_type;
-        auto out_param = std::make_shared<Var>(out_name, out_type, span);
+        auto out_param = std::make_shared<Var>(out_name, out_type, ret_span);
         new_params.push_back(out_param);
         new_param_directions.push_back(ParamDirection::Out);
 
@@ -1645,12 +1655,12 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         }
 
         // Insert tile.store(tile, zeros, out_param)
-        auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
-        auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
+        auto offsets = MakeZeroOffsets(tile_type->shape_.size(), ret_span);
+        auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, ret_span);
 
         auto store_var =
-            std::make_shared<Var>(MakeStoreResultName(num_added_outputs), store_call->GetType(), span);
-        new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+            std::make_shared<Var>(MakeStoreResultName(num_added_outputs), store_call->GetType(), ret_span);
+        new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, ret_span));
 
         new_return_types.push_back(store_call->GetType());
         new_return_exprs.push_back(store_var);

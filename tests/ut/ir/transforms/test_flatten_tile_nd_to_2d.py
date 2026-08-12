@@ -3361,5 +3361,394 @@ class TestFlattenTileNdTo2DSharedBatchMatmulOperand:
         passes.verify_properties(props, after, "test_shared_operand_with_nested_use_not_dropped")
 
 
+class TestFlattenTileNdTo2DSpans:
+    """Re-created tile ops keep the span of the statement they came from.
+
+    The pass rebuilds every tile op it touches through ``OpRegistry::Create``.
+    Handing those rebuilds the enclosing function's span would report the ``def``
+    line for the whole InCore body — degrading every later ``CHECK_SPAN``
+    diagnostic, IR-trace report and MLIR ``loc()``, and merging distinct source
+    sites in span-keyed consumers such as the PH001 perf hint.
+    """
+
+    @staticmethod
+    def _assigned_calls(func: ir.Function) -> list[tuple[ir.Call, ir.Stmt]]:
+        """Every ``AssignStmt``-bound ``Call`` in ``func``, paired with its statement."""
+        found: list[tuple[ir.Call, ir.Stmt]] = []
+
+        def walk(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.SeqStmts):
+                for inner in stmt.stmts:
+                    walk(inner)
+                return
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                found.append((stmt.value, stmt))
+            for attr in ("body", "then_body", "else_body"):
+                sub = getattr(stmt, attr, None)
+                if sub is not None:
+                    walk(sub)
+
+        walk(func.body)
+        return found
+
+    def test_rebuilt_ops_keep_their_statement_span(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4])
+                a_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.exp(x_tile)
+                b_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(a_tile, x_tile)
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.tile.store(b_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        seen = [(call.op.name, call.span, stmt.span) for call, stmt in self._assigned_calls(fn)]
+        assert seen, "no tile Calls found after flatten"
+
+        for op_name, call_span, stmt_span in seen:
+            # Nested inside its own statement — and therefore not the `def` line,
+            # since every body statement sits strictly below the signature.
+            assert stmt_span.begin_line <= call_span.begin_line, (
+                f"{op_name} span {call_span} escapes its statement {stmt_span}"
+            )
+            assert call_span.end_line <= stmt_span.end_line, (
+                f"{op_name} span {call_span} escapes its statement {stmt_span}"
+            )
+            assert call_span.begin_line > fn.span.begin_line, (
+                f"{op_name} was stamped with the function span {fn.span}"
+            )
+
+        # The rewritten body ops land on distinct source lines rather than all
+        # collapsing onto one — the property span-keyed consumers depend on.
+        body_lines = {call_span.begin_line for _, call_span, _ in seen}
+        assert len(body_lines) == len(seen), f"tile ops share source lines: {sorted(body_lines)}"
+
+    def test_rebuilt_op_keeps_the_rhs_call_span_not_the_statement_span(self):
+        """A rebuilt op takes the RHS ``Call``'s span, not the ``AssignStmt``'s.
+
+        The two coincide only when the RHS starts at the assignment. Wrapping the
+        RHS in parentheses puts the Call on a *later line* than the statement, so
+        attributing rebuilt ops to the statement would move them off the operator
+        they came from.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4])
+                a_tile: pl.Tile[[2, 3, 4], pl.FP32] = (
+                    # The Call starts here, one line below the assignment.
+                    pl.tile.exp(x_tile)
+                )
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.tile.store(a_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        before_fn = Before.get_function("main_incore_0")
+        assert before_fn is not None
+        exp_before, exp_stmt_before = next(
+            (call, stmt)
+            for call, stmt in self._assigned_calls(before_fn)
+            if call.op.name == ir.get_op("tile.exp").name
+        )
+        # The fixture only means anything if the two spans really differ by line.
+        assert exp_before.span.begin_line > exp_stmt_before.span.begin_line, (
+            "fixture must put the RHS Call on a later line than its AssignStmt"
+        )
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        exp_after, exp_stmt_after = next(
+            (call, stmt)
+            for call, stmt in self._assigned_calls(fn)
+            if call.op.name == ir.get_op("tile.exp").name
+        )
+
+        assert exp_after.span.begin_line == exp_before.span.begin_line, (
+            f"rebuilt tile.exp reported line {exp_after.span.begin_line}, expected the "
+            f"RHS Call's line {exp_before.span.begin_line} (statement is at "
+            f"{exp_stmt_before.span.begin_line})"
+        )
+        # The statement itself still carries the statement's own span.
+        assert exp_stmt_after.span.begin_line == exp_stmt_before.span.begin_line
+
+    def test_auxiliary_synthesized_statements_keep_the_assignment_span(self):
+        """Statements the lowering inserts alongside an op keep the assignment span.
+
+        A natural rank-N Mat ``tile.load`` lowers to ND2NZ, which needs a 2D source,
+        so the lowering materialises its own ``tensor.view`` statement. That
+        statement is not the operator — statement-level verifiers and
+        ``INTERNAL_CHECK_SPAN(..., assign->span_)`` consumers read it — so it must
+        report the assignment, even though the ``tensor.view`` *Call* inside it
+        correctly follows the load's RHS Call.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = (
+                    # Keep this comment: it stops `ruff format` collapsing the
+                    # wrapper that puts the Call on a later line than its
+                    # assignment. The test asserts that premise below.
+                    pl.load(lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat)
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                mm_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(mm_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP32)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        before_fn = Before.get_function("main_incore_0")
+        assert before_fn is not None
+        load_before, load_stmt_before = next(
+            (c, s) for c, s in self._assigned_calls(before_fn) if c.op.name == ir.get_op("tile.load").name
+        )
+        assert load_before.span.begin_line > load_stmt_before.span.begin_line, (
+            "fixture must put the load's RHS Call on a later line than its assignment"
+        )
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        views = [(c, s) for c, s in self._assigned_calls(fn) if c.op.name == ir.get_op("tensor.view").name]
+        assert views, "a natural rank-3 Mat load should materialise a tensor.view"
+        matched = [(c, s) for c, s in views if s.span.begin_line == load_stmt_before.span.begin_line]
+        assert matched, (
+            "no synthesized tensor.view statement reported the wrapped load's assignment line "
+            f"{load_stmt_before.span.begin_line}; got "
+            f"{sorted(s.span.begin_line for _, s in views)}"
+        )
+        for view_call, view_stmt in matched:
+            assert view_stmt.span.begin_line == load_stmt_before.span.begin_line, (
+                f"synthesized tensor.view statement reported line {view_stmt.span.begin_line}, "
+                f"expected the assignment's line {load_stmt_before.span.begin_line}"
+            )
+            assert view_call.span.begin_line == load_before.span.begin_line, (
+                f"synthesized tensor.view op reported line {view_call.span.begin_line}, "
+                f"expected the RHS Call's line {load_before.span.begin_line}"
+            )
+
+    def test_delegated_lowering_statements_keep_the_assignment_span(self):
+        """Statements the delegated lowering helpers emit keep the assignment span.
+
+        ``LowerBatchMatmul`` / ``LowerBatchMatmulAcc`` / ``ExtractBatchPage`` /
+        ``LowerNdTranspose`` receive the Call span for the ops they synthesize, but
+        each ``AssignStmt`` they emit is a statement and must report the source
+        assignment. This wraps the batch-matmul RHS so the two are on different
+        lines, then checks *every* statement the lowering produced — the helpers
+        emit slices, moves, casts, matmuls and assembles, so a single site slipping
+        back to the Call span is caught here rather than one review round at a time.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                mm_tile: pl.Tile[[2, 16, 64], pl.FP32] = (
+                    # Keep this comment: it stops `ruff format` collapsing the
+                    # wrapper that puts the Call on a later line than its
+                    # assignment. The test asserts that premise below.
+                    pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                )
+                out_0 = pl.store(mm_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP32)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        before_fn = Before.get_function("main_incore_0")
+        assert before_fn is not None
+        mm_before, mm_stmt_before = next(
+            (c, s)
+            for c, s in self._assigned_calls(before_fn)
+            if c.op.name == ir.get_op("tile.batch_matmul").name
+        )
+        mm_call_line = mm_before.span.begin_line
+        mm_stmt_line = mm_stmt_before.span.begin_line
+        assert mm_call_line > mm_stmt_line, (
+            "fixture must put the batch_matmul RHS Call on a later line than its assignment"
+        )
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        # Statements the batch-matmul lowering emitted, identified by carrying a
+        # span from that source statement's line range.
+        lowered = [
+            (c, s) for c, s in self._assigned_calls(fn) if s.span.begin_line in (mm_stmt_line, mm_call_line)
+        ]
+        assert lowered, "batch_matmul lowering should emit statements"
+        offenders = [(c.op.name, s.span.begin_line) for c, s in lowered if s.span.begin_line != mm_stmt_line]
+        assert not offenders, (
+            f"these lowered statements reported the Call line {mm_call_line} instead of the "
+            f"assignment line {mm_stmt_line}: {offenders}"
+        )
+
+    def test_fused_batch_matmul_stores_keep_the_consumed_store_span(self):
+        """Per-batch stores fused into a batch_matmul keep the *store's* span.
+
+        ``LowerBatchMatmul`` folds a consuming ``tile.store`` into per-batch
+        stores and the caller then skips the original store statement, so the
+        skipped statement's location must survive on what replaces it —
+        attributing it to the matmul line would drop it for the whole fused path.
+
+        Within that, the op/statement split applies: synthesized ops and their
+        argument expressions (including the optional tensor-rank shape tuple and
+        each of its elements) follow the store's ``Call`` span, while synthesized
+        ``AssignStmt`` nodes follow its assignment. The fixture wraps the store's
+        RHS so the two are on different lines and the split is observable.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                mm_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = (
+                    # Keep this comment: it is what stops `ruff format` collapsing
+                    # the wrapper, which is what puts the store's Call on a later
+                    # line than its assignment. The test asserts that premise, so a
+                    # collapse fails loudly rather than silently passing.
+                    pl.store(mm_tile, [0, 0, 0], out_0)
+                )
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP32]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP32)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        # Expected line comes from the pre-pass IR, so it is not derived from the
+        # pass output it is checking.
+        before_fn = Before.get_function("main_incore_0")
+        assert before_fn is not None
+        before_calls = self._assigned_calls(before_fn)
+        store_before, store_stmt_before = next(
+            (c, s) for c, s in before_calls if c.op.name == ir.get_op("tile.store").name
+        )
+        matmul_before = next(c for c, _ in before_calls if c.op.name == ir.get_op("tile.batch_matmul").name)
+        assert store_before.span.begin_line != matmul_before.span.begin_line, (
+            "fixture must put the store and the matmul on different lines"
+        )
+        # The op-vs-statement split is only observable when these differ.
+        assert store_before.span.begin_line > store_stmt_before.span.begin_line, (
+            "fixture must put the store's RHS Call on a later line than its assignment"
+        )
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+
+        fused_stmts = [s for c, s in self._assigned_calls(fn) if c.op.name == ir.get_op("tile.store").name]
+        for stmt in fused_stmts:
+            assert stmt.span.begin_line == store_stmt_before.span.begin_line, (
+                f"fused store statement reported line {stmt.span.begin_line}, expected the "
+                f"consumed assignment's line {store_stmt_before.span.begin_line}"
+            )
+
+        fused_stores = [c for c, _ in self._assigned_calls(fn) if c.op.name == ir.get_op("tile.store").name]
+        assert len(fused_stores) == 2, f"expected one fused store per batch, got {len(fused_stores)}"
+        for store in fused_stores:
+            assert store.span.begin_line == store_before.span.begin_line, (
+                f"fused store reported line {store.span.begin_line}, expected the consumed "
+                f"store's line {store_before.span.begin_line} (matmul is at "
+                f"{matmul_before.span.begin_line})"
+            )
+
+            # A rank>2 target adds the optional tensor-rank shape tuple. Its
+            # elements are synthesized too, so they must not keep the matmul span
+            # while the tuple around them carries the store's.
+            assert len(store.args) == 4, (
+                f"rank-3 fused store should carry the optional shape tuple, got {len(store.args)} args"
+            )
+            shape_tuple = store.args[3]
+            assert isinstance(shape_tuple, ir.MakeTuple)
+            assert shape_tuple.span.begin_line == store_before.span.begin_line
+            assert shape_tuple.elements, "shape tuple must not be empty"
+            for element in shape_tuple.elements:
+                assert element.span.begin_line == store_before.span.begin_line, (
+                    f"fused store shape element reported line {element.span.begin_line}, "
+                    f"expected the consumed store's line {store_before.span.begin_line}"
+                )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

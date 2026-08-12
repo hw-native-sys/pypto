@@ -315,16 +315,20 @@ def _site_of(diag: passes.Diagnostic) -> tuple[str, int, int, str]:
 
 
 def test_dedup_collapses_repeated_site_a3():
-    """Repeated identical transfers at one source span collapse to a single hint
-    with an occurrence count (issue #1305 ask 4).
+    """Post-pipeline hits are keyed one-per-source-site (issue #1305 ask 4).
 
-    A per-iteration ``pl.load`` inside a ``pl.range`` loop expands, through the
-    default pipeline, into several identical GM<->Vec transfers that all carry
-    the originating source span. The verifier must collapse them into one
-    diagnostic with an ``(N occurrences ...)`` count rather than emit N separate
-    identical hints, and no two surviving hits may share a ``(file, line, col,
-    op)`` site. This is the post-pipeline shape the unit fixtures above (single
-    hand-built ops) cannot exercise, so the full pipeline is run here.
+    Runs the default pipeline over a loop kernel and asserts that both loads
+    survive as their own hit and that no two surviving hits share a
+    ``(file, line, col, op)`` site. This is the post-pipeline shape the unit
+    fixtures above (single hand-built ops) cannot exercise, so the full pipeline
+    is run here.
+
+    Both assertions are needed. ``pl.range`` is not unrolled, so the entry load
+    and the per-iteration load are one transfer each at two distinct source
+    lines. A pass that coarsened synthesized ops onto the enclosing function's
+    ``def`` span would merge them into a single bogus "2 occurrences at this
+    source location" hit for two unrelated loads — which the uniqueness check
+    alone would still accept, since one load site plus one store site is unique.
     """
     _activate_a3()
     rows, inner = 64, 64  # fp32 inner = 256B < 512B (a3) -> fires; rows give the loop distinct offsets
@@ -339,9 +343,6 @@ def test_dedup_collapses_repeated_site_a3():
         ) -> pl.Tensor[[16, inner], pl.FP32]:
             acc: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [0, 0], [16, inner])
             for i in pl.range(4):
-                # Distinct offset per iteration (not loop-invariant, so it is not
-                # CSE'd) but identical shape/dtype/memory and source span — the
-                # exact "same site, same facts, many copies" case dedup targets.
                 t: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [i * 16, 0], [16, inner])
                 acc = pl.add(acc, t)
             return pl.store(acc, [0, 0], out)
@@ -353,17 +354,18 @@ def test_dedup_collapses_repeated_site_a3():
     assert len(perf_hints) >= 1
     assert all(d.hint_code == "PH001" for d in perf_hints)
 
+    sites = [_site_of(d) for d in perf_hints]
+
+    # Both loads must survive as their own hit. Site uniqueness alone cannot see
+    # the coarsening regression: if the two loads shared the `def` span they
+    # would dedup into ONE tile.load hit, and a set of one load site plus one
+    # store site is still trivially unique. Pinning the count is what fails.
+    load_sites = {site for site in sites if site[3] == "tile.load"}
+    assert len(load_sites) == 2, f"expected the entry and per-iteration load as distinct sites: {sites}"
+
     # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)
     # site — identical transfers were collapsed, not emitted repeatedly.
-    sites = [_site_of(d) for d in perf_hints]
     assert len(sites) == len(set(sites)), f"hits not deduplicated per site: {sites}"
-
-    # The repeated per-iteration load must have collapsed into one counted hit
-    # (the count text only appears when count > 1), proving the collapse path ran
-    # rather than the loads slipping through as separate identical hints.
-    collapsed = [d for d in perf_hints if "occurrences at this source location" in d.message]
-    messages = [d.message for d in perf_hints]
-    assert len(collapsed) >= 1, f"expected a collapsed '(N occurrences)' hit, got {messages}"
 
 
 if __name__ == "__main__":
