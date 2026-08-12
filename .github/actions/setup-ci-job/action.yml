@@ -352,6 +352,17 @@ runs:
         # colon, which the loader would read as the current directory (the codegen
         # job never sources set_env.sh, so LD_LIBRARY_PATH is often unset here).
         printf '%s\n' 'export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' >> activate.sh
+        # Keep the venv's site-packages ahead of CANN's on PYTHONPATH; the
+        # bundle step below carries the full rationale. Appended here rather
+        # than inside the heredoc above because this path sources set_env.sh
+        # AFTER the venv activate (the bundle path sources it before), and it
+        # is set_env.sh that puts CANN's site-packages on PYTHONPATH.
+        cat >> activate.sh <<'EOF'
+        _PYPTO_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+        if [ -n "$_PYPTO_SITE" ]; then
+          export PYTHONPATH="$_PYPTO_SITE${PYTHONPATH:+:$PYTHONPATH}"
+        fi
+        EOF
         # dist HCCL tests break with the runner's systemd PTO2_RING_* env; the
         # other jobs rely on it. Append the unset only when the caller asks.
         if [ "$UNSET_RING" = "true" ]; then
@@ -433,6 +444,36 @@ runs:
         # env snapshot may not carry the workspace path.
         _PYPTO_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         source "$_PYPTO_ENV_DIR/venv/bin/activate"
+        # Put the venv's own site-packages at the FRONT of PYTHONPATH.
+        #
+        # CANN's set_env.sh (sourced above on device jobs) prepends its
+        # site-packages to PYTHONPATH, and every PYTHONPATH entry is searched
+        # before the venv's site-packages — no activation order can change
+        # that, since the venv dir is only reached via the interpreter's own
+        # site step. CANN >= 9.2.0 ships a package of its own named `pypto`
+        # there (0.2.1, pybind11-based; unrelated to this project), which
+        # otherwise shadows the one this job just built and silently turns
+        # every `import pypto` into that one. CANN 9.0.0, still on the a2a3
+        # pool, carries no such package — which is why only the npu-a5 jobs
+        # hit it.
+        #
+        # Dropping CANN's entry instead is not an option: te, tbe, te_fusion,
+        # auto_tune, schedule_search, hccl and ge all live in that same dir.
+        # In a venv purelib and platlib are one dir, so this covers the
+        # compiled extension too.
+        #
+        # Prepend unconditionally, with no "skip if already present" guard.
+        # activate.sh is sourced more than once per job — the step sources it,
+        # then the task-submit child sources it again — and each source runs
+        # set_env.sh, which prepends CANN's dir afresh. A guard that skipped on
+        # finding the venv dir anywhere would leave that new CANN copy IN FRONT
+        # of it, silently restoring the shadow it exists to prevent. Re-adding
+        # keeps the venv first every time; the duplicate entries left behind are
+        # harmless and bounded by the number of sources.
+        _PYPTO_SITE="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+        if [ -n "$_PYPTO_SITE" ]; then
+          export PYTHONPATH="$_PYPTO_SITE${PYTHONPATH:+:$PYTHONPATH}"
+        fi
         EOF
         if [ "$UNSET_RING" = "true" ]; then
           printf '%s\n' 'unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL' >> activate.sh
