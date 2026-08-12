@@ -42,13 +42,26 @@ class DeviceTensor:
         data_ptr: Device pointer in the owning Worker's address space.
         shape: Logical tensor shape (all dimensions positive).
         dtype: Element ``torch.dtype``.
+        worker_id: Chip that owns ``data_ptr``, when known. Each chip has its own
+            address space, so the pointer alone does not identify an allocation:
+            equal-sized shards allocated in the same order land on the *same*
+            numeric address on every chip. Simpler's Buffer-based task args have to
+            name the owning chip's Buffer, so the owner must travel with the handle.
+            Defaults to ``None`` for handles built by callers that never had one.
     """
 
     data_ptr: int
     shape: tuple[int, ...]
     dtype: torch.dtype
+    worker_id: int | None
 
-    def __init__(self, data_ptr: int, shape: Sequence[int], dtype: torch.dtype) -> None:
+    def __init__(
+        self,
+        data_ptr: int,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        worker_id: int | None = None,
+    ) -> None:
         # bool is an int subclass — exclude it explicitly so True/False can't pose as a pointer or dim.
         if isinstance(data_ptr, bool) or not isinstance(data_ptr, int) or data_ptr <= 0:
             raise ValueError(f"DeviceTensor.data_ptr must be a positive int, got {data_ptr!r}")
@@ -63,9 +76,12 @@ class DeviceTensor:
         shape_t = raw_shape
         if not isinstance(dtype, torch.dtype):
             raise TypeError(f"DeviceTensor.dtype must be torch.dtype, got {type(dtype).__name__}")
+        if worker_id is not None and (isinstance(worker_id, bool) or not isinstance(worker_id, int) or worker_id < 0):
+            raise ValueError(f"DeviceTensor.worker_id must be a non-negative int or None, got {worker_id!r}")
         object.__setattr__(self, "data_ptr", data_ptr)
         object.__setattr__(self, "shape", shape_t)
         object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "worker_id", worker_id)
 
     @property
     def nbytes(self) -> int:
@@ -229,6 +245,7 @@ def alloc_device_tensor(
     dtype: torch.dtype,
     init: torch.Tensor | None = None,
     init_prep: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    worker_id: int | None = None,
 ) -> DeviceTensor:
     """Allocate a device buffer and (optionally) upload host data.
 
@@ -286,7 +303,7 @@ def alloc_device_tensor(
                 )
             host = (init_prep or default_init_prep)(init)
             copy_to(ptr, host.data_ptr(), nbytes)
-        return DeviceTensor(ptr, shape_t, dtype)
+        return DeviceTensor(ptr, shape_t, dtype, worker_id)
     except Exception:
         free(ptr)
         raise

@@ -201,6 +201,7 @@ class Worker(ABC):
             dtype=dtype,
             init=init,
             init_prep=self._prepare_init,
+            worker_id=worker_id,
         )
         self._owned_tensors.add((worker_id, t.data_ptr))
         return t
