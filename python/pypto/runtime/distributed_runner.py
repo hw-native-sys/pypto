@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
+from ._buffer_bridge import BufferBridge
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .runtime_base import Worker
 
@@ -1005,7 +1006,15 @@ def _dispatch(
             world_size=device_nums,
         )
 
-    w.run(orch_fn)
+    # Simpler's make_tensor_arg memoizes host tensors on a worker, and the generated
+    # entry has none in scope — bind it for the duration of the submission.
+    from .tensor_arg import bind_worker, unbind_worker  # noqa: PLC0415
+
+    token = bind_worker(w)
+    try:
+        w.run(orch_fn)
+    finally:
+        unbind_worker(token)
 
 
 def execute_distributed(
@@ -1192,7 +1201,7 @@ def execute_distributed_compiled(
     return compiled(*args, config=config)
 
 
-class DistributedWorker(Worker):
+class DistributedWorker(BufferBridge, Worker):
     """L3 distributed execution handle: prepare once, dispatch many.
 
     Holds an initialized simpler ``Worker(level=3)`` plus all setup artifacts
@@ -1304,7 +1313,7 @@ class DistributedWorker(Worker):
         # (worker_id, device address) -> the Buffer handle Simpler minted for it. The
         # public surface here still speaks addresses, so this is what lets ``free`` and
         # ``copy_to`` hand back the identity Simpler expects.
-        self._device_buffers: dict[tuple[int, int], Any] = {}
+        self._init_buffer_bridge()
         self._buffer_owner_id: bytes | None = None
         self._buffer_id_seq = 0
         self._persistent = bool(persistent)
@@ -1619,6 +1628,11 @@ class DistributedWorker(Worker):
                         _domain_provider=domain_provider,
                     )
 
+                from .tensor_arg import bind_worker, unbind_worker  # noqa: PLC0415
+
+                # Bind the runner, not the raw Worker: DeviceTensor args resolve through
+                # its device-buffer registry, and the host branch reaches ``_w`` from it.
+                token = bind_worker(self)
                 try:
                     self._w.run(run_request)
                 except BaseException as exc:  # noqa: BLE001 - rethrown on caller thread
@@ -1629,6 +1643,8 @@ class DistributedWorker(Worker):
                 else:
                     request.keepalive.clear()
                     request.done.set()
+                finally:
+                    unbind_worker(token)
                 if request.error is not None:
                     break
         except BaseException as exc:  # noqa: BLE001 - observed by start/run/close
@@ -1744,9 +1760,10 @@ class DistributedWorker(Worker):
     def _host_buffer_for(self, host_ptr: int, nbytes: int, *, api: str, writing: bool) -> Any:
         """Name an inherited host range the way Simpler's L3 copy path requires.
 
-        The range must fall inside one tensor registered through
-        ``inherited_host_tensors``: the copy runs in a forked chip child, which can only
-        reach memory that existed at fork. Each range is wrapped on its own rather than
+        Returns ``None`` when the range is not inherited — the caller then stages the
+        bytes through :meth:`_staging_buffer` instead. Only memory that existed at fork
+        can be named this way: the copy runs in a forked chip child, which cannot reach a
+        mapping its parent made afterwards. Each range is wrapped on its own rather than
         offset into a whole-tensor Buffer, because a Buffer carries no offset — a shard's
         address is interior to its stacked tensor, so per-range wrapping is what keeps a
         shard copy from moving the whole stack.
@@ -1772,10 +1789,10 @@ class DistributedWorker(Worker):
                 access=AccessMode.READWRITE if is_shared else AccessMode.READ,
                 backend_kind=BackendKind.FORK_SHM if is_shared else BackendKind.FORK_COW,
             )
-        raise ValueError(
-            f"{api}: host range 0x{host_ptr:x}+{nbytes} is not inside any tensor registered through "
-            "inherited_host_tensors, so the forked chip child cannot read it."
-        )
+        return None
+
+    def _simpler_worker(self) -> Any:
+        return self._w
 
     def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
         """Allocate ``nbytes`` on chip *worker_id*; returns a device pointer."""
@@ -1783,15 +1800,13 @@ class DistributedWorker(Worker):
 
         self._require_open("malloc")
         handle = self._w.alloc_child_tensor(int(worker_id), (int(nbytes),), DataType.UINT8)
-        self._device_buffers[(int(worker_id), int(handle.base))] = handle
+        self._register_device_buffer(int(worker_id), int(handle.base), handle)
         return int(handle.base)
 
     def free(self, ptr: int, *, worker_id: int = 0) -> None:
         """Release a pointer previously returned by :meth:`malloc`."""
         self._require_open("free")
-        handle = self._device_buffers.pop((int(worker_id), int(ptr)), None)
-        if handle is None:
-            raise ValueError(f"free: 0x{int(ptr):x} was not allocated on worker {int(worker_id)} by this Worker")
+        handle = self._pop_device_buffer(int(ptr), int(worker_id), "free")
         self._w.free(handle)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
@@ -1805,17 +1820,13 @@ class DistributedWorker(Worker):
             return 0
         return int(self._w.committed_device_memory(worker_id))
 
-    def _device_buffer_for(self, ptr: int, worker_id: int, api: str) -> Any:
-        handle = self._device_buffers.get((int(worker_id), int(ptr)))
-        if handle is None:
-            raise ValueError(f"{api}: 0x{int(ptr):x} was not allocated on worker {int(worker_id)} by this Worker")
-        return handle
-
     def copy_to(self, dst_dev_ptr: int, src_host_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         """H2D copy: ``nbytes`` from host *src_host_ptr* to device *dst_dev_ptr*."""
         self._require_open("copy_to")
         dst = self._device_buffer_for(dst_dev_ptr, worker_id, "copy_to")
         src = self._host_buffer_for(int(src_host_ptr), int(nbytes), api="copy_to", writing=False)
+        if src is None:
+            src = self._stage_host_to_buffer(worker_id, int(src_host_ptr), int(nbytes))
         self._w.copy_to(dst, src)
 
     def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
@@ -1823,7 +1834,12 @@ class DistributedWorker(Worker):
         self._require_open("copy_from")
         src = self._device_buffer_for(src_dev_ptr, worker_id, "copy_from")
         dst = self._host_buffer_for(int(dst_host_ptr), int(nbytes), api="copy_from", writing=True)
-        self._w.copy_from(dst, src)
+        if dst is not None:
+            self._w.copy_from(dst, src)
+            return
+        staging = self._staging_buffer(worker_id, nbytes)
+        self._w.copy_from(staging, src)
+        self._stage_buffer_to_host(staging, int(dst_host_ptr), int(nbytes))
 
     # ``alloc_tensor`` / ``free_tensor`` are inherited from Worker ABC.
     # Only the two behaviours that genuinely differ from L2 are overridden below:
@@ -2176,6 +2192,7 @@ class DistributedWorker(Worker):
             # still admits these calls, and BEFORE we tear down the underlying
             # worker so the free path is still live.
             self._close_owned_tensors()
+            self._release_staging_buffers()
             self._closed = True
             # Mark every still-alive RegistrationHandle as closed so subsequent
             # handle(...) calls raise instead of dispatching to a torn-down runtime.

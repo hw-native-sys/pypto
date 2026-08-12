@@ -17,12 +17,32 @@ This pypto-owned wrapper widens that conversion to also accept worker-resident
 pre-uploaded device buffers — mirroring the L2 path in
 :func:`pypto.runtime.runner.execute_compiled`.
 
-Host ``torch.Tensor`` arguments are delegated unchanged to simpler's
-``make_tensor_arg``; only the device-resident branches are added here.
+Host ``torch.Tensor`` arguments are delegated to simpler's ``make_tensor_arg``,
+which since the Buffer refactor takes ``(worker, tensor)`` — it memoizes the
+tensor as a ``FORK_SHM`` handle *on* the worker. The generated code has no worker
+in scope, so the caller binds one for the duration of the entry call through
+:func:`bind_worker`; only the device-resident branches are otherwise added here.
 """
 
+import contextvars
 from functools import cache
 from typing import Any
+
+_CURRENT_WORKER: contextvars.ContextVar[Any] = contextvars.ContextVar("pypto_l3_worker", default=None)
+
+
+def bind_worker(worker: Any) -> Any:
+    """Make *worker* the target of host-tensor arg conversion; returns a reset token.
+
+    A ContextVar rather than an attribute so nested or concurrent submissions each
+    see their own worker, and so an exception on the entry path cannot leave a stale
+    worker bound for the next request.
+    """
+    return _CURRENT_WORKER.set(worker)
+
+
+def unbind_worker(token: Any) -> None:
+    _CURRENT_WORKER.reset(token)
 
 
 @cache
@@ -70,6 +90,26 @@ def make_tensor_arg(arg: Any) -> Any:
 
     if isinstance(arg, task_interface.Tensor):
         return arg
+    holder = _CURRENT_WORKER.get()
     if isinstance(arg, device_tensor.DeviceTensor):
-        return task_interface.device_tensor_to_tensor(arg)
-    return task_interface.make_tensor_arg(arg)
+        convert = getattr(holder, "device_tensor_arg", None)
+        if convert is None:
+            raise RuntimeError(
+                "make_tensor_arg received a DeviceTensor but the bound submitter cannot name device "
+                "memory. A Simpler wire Tensor is a view over the owning chip's Buffer, so the "
+                "conversion needs the runtime that allocated it (DistributedWorker)."
+            )
+        return convert(arg)
+    # A runner binds itself (it owns the device-buffer registry); the plain
+    # non-persistent path binds a Simpler Worker directly.
+    worker = getattr(holder, "_w", holder)
+    if worker is None:
+        raise RuntimeError(
+            "make_tensor_arg received a host torch.Tensor with no worker bound. Simpler's "
+            "make_tensor_arg memoizes the tensor as a FORK_SHM handle on a specific worker, so "
+            "one has to be in scope: build task args inside a `with ChipWorker(...):` block at "
+            "L2, or let DistributedWorker's submission path bind itself at L3. Building them "
+            "before the worker exists — as execute_compiled's one-shot path still does — cannot "
+            "work under the Buffer ABI."
+        )
+    return task_interface.make_tensor_arg(worker, arg)
