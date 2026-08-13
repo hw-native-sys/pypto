@@ -480,9 +480,10 @@ class TestAutoTileMatmulL0:
         K=192 is the common cross-planner split point: all planners choose an
         output-stationary producer with k=64, so its L0 buffers pack against the
         consumer's. K=128 is planner-dependent (PyPTO splits while PTOAS can keep full K)
-        and can select a monolithic A/B-stationary buffer that the consumer's two
-        half-size buffers cannot pack against. The pass deliberately avoids that
-        issue-1908 regime by forcing chained Mat-scratch producers output-stationary.
+        and can select a monolithic A/B-stationary buffer that the legacy PYPTO
+        allocator cannot pack against the consumer's pipelined buffers. This case
+        remains output-stationary under every planner: PYPTO enforces the issue-1908
+        guard, while DSA_RP/PTOAS reach the same chooser result without the guard.
 
         Operands are bf16 and the on-chip intermediate is bf16 — the cube's FIXPIPE
         writeback to L1 downcasts the f32 accumulator, which is also the cube's native

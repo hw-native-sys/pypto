@@ -3696,20 +3696,28 @@ class TestAutoTileMatmulL0MatScratch:
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"split-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
-    def test_chained_mat_scratch_producer_forced_output_stationary(self):
-        """#1908 guard: a chained Mat-scratch producer whose geometry standalone picks
-        B-stationary (128×512×128) is forced OUTPUT-STATIONARY when its result is consumed
-        on-chip. The Mat-scratch offset-packing path can't yet pack an A/B-stationary
-        producer's monolithic single-buffered L0 panel against the consumer's
-        double-buffered operands (#1908), so the pass re-chooses OS (always legal) rather
-        than emit the unpackable A/B-stationary schedule. This exact shape is B-stationary
-        standalone (``test_b_stationary_single_buffers_held_operand`` mirror) — as a
-        chained producer it must not be.
+    @pytest.mark.parametrize(
+        ("planner", "enable_dbc", "operand_stationary"),
+        [
+            (passes.MemoryPlanner.PYPTO, False, False),
+            (passes.MemoryPlanner.DSA_RP, True, True),
+        ],
+    )
+    def test_chained_mat_scratch_stationarity_matches_planner(self, planner, enable_dbc, operand_stationary):
+        """Apply the #1908 guard only to the legacy PyPTO allocator.
+
+        This chained Mat-scratch producer standalone selects B-stationary
+        (128×512×128). PyPTO cannot subdivide its released monolithic L0B
+        panel for the consumer's smaller pipelined buffers, so AutoTile
+        re-chooses OS. DSA_RP places from actual lifetimes and retains the
+        B-stationary choice.
 
         128×512 FP32 output (256 KB) > L0c so the producer is tiled; the 128×512 bf16
         Mat scratch (128 KB) fits Mat/L1, so it reaches the fold (not the capacity gate).
         The consumer [128, 64] fits L0c (no loop), so any Sequential ``pl.range`` in the
         emitted kernel would be the producer's A/B-stationary held-operand loop."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
 
@@ -3729,22 +3737,31 @@ class TestAutoTileMatmulL0MatScratch:
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
-        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=enable_dbc):
+            After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
         printed = ir.python_print(After)
         assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
-        # The guard forces the producer output-stationary: an A/B-stationary schedule
-        # emits a Sequential ``pl.range`` held-operand outer loop, which the Mat-scratch
-        # packing cannot handle yet (#1908). OS emits nested ``pl.pipeline`` instead.
-        assert "pl.range(" not in printed, (
-            "chained Mat-scratch producer must be output-stationary (nested pl.pipeline), "
-            "not A/B-stationary (Sequential pl.range) — the #1908 guard failed"
-        )
-        _assert_ssa_valid(After, "test_mat_scratch_producer_os_guard")
-        # And it must allocate cleanly through the full Default pipeline (the A/B-stationary
-        # producer would overflow at AllocateMemoryAddr — the #1908 packing gap).
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        assert ("pl.range(" in printed) == operand_stationary
+        assert ("pipeline_double_buffer_c" in printed) == enable_dbc
+        _assert_ssa_valid(After, f"test_mat_scratch_stationarity_{planner}")
 
-        assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before) is not None
+        if not operand_stationary:
+            return
+        allocated_text = ir.python_print(allocated)
+        assert "tile.alloc(pl.Mem.Right, 65536)" in allocated_text
+        right_ranges = {
+            (int(offset), int(size))
+            for offset, size in re.findall(
+                r"pl\.MemRef\(mem_right_[^,]+, pl\.const\((\d+), pl\.INT64\), (\d+)\), pl\.Mem\.Right",
+                allocated_text,
+            )
+        }
+        assert right_ranges == {(0, 65536)}, (
+            "DSA_RP should co-place the producer and consumer Right-buffer lifetimes "
+            f"inside one 64 KiB L0B arena, got ranges {sorted(right_ranges)}"
+        )
 
     def test_misaligned_n_mat_scratch_roundtrips(self):
         """A misaligned-N Mat-scratch boundary tail survives print -> parse.

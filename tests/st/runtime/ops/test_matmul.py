@@ -88,11 +88,20 @@ def _choose_a2a3_l0(
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
 
-def _printed_through_auto_tile(program: Any, planner: MemoryPlanner) -> str:
+def _printed_through_auto_tile(
+    program: Any,
+    planner: MemoryPlanner,
+    *,
+    enable_pypto_l0c_double_buffer: bool = False,
+) -> str:
     """Run the production tensor-to-tile prefix through AutoTile for structural checks."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=planner):
+    with passes.PassContext(
+        [],
+        memory_planner=planner,
+        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+    ):
         for make_pass in (
             passes.inline_functions,
             passes.unroll_loops,
@@ -678,10 +687,16 @@ class TestChainedMatmulMatScratch(PTOTestCase):
         n: int = 64,
         *,
         memory_planner: MemoryPlanner | None = None,
+        enable_pypto_l0c_double_buffer: bool | None = None,
         platform: str | None = None,
         config=None,
     ):
-        super().__init__(config, platform=platform, memory_planner=memory_planner)
+        super().__init__(
+            config,
+            platform=platform,
+            memory_planner=memory_planner,
+            enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        )
         self.M = m
         self.K = k
         self.NMID = nmid
@@ -1660,6 +1675,33 @@ class TestMatmulOperations:
                 config=cfg,
             )
         )
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_chained_matmul_mat_scratch_issue_1908_dsa_rp_dbc(self, test_runner, platform):
+        """DSA_RP combines dbC with the operand-stationary #1908 layout.
+
+        The producer's held 64 KiB L0B panel precedes the consumer's two
+        smaller pipelined L0B buffers. DSA_RP must retain the chooser-selected
+        operand-stationary schedule, preserve dbC, and execute correctly.
+        """
+        planner = MemoryPlanner.DSA_RP
+        case = TestChainedMatmulMatScratch(
+            m=128,
+            k=128,
+            nmid=512,
+            n=64,
+            memory_planner=planner,
+            enable_pypto_l0c_double_buffer=True,
+            platform=platform,
+            config=RunConfig(platform=platform, rtol=2e-2, atol=2e-2),
+        )
+        printed = _printed_through_auto_tile(case.get_program(), planner, enable_pypto_l0c_double_buffer=True)
+        assert "pl.range(" in printed
+        assert "pipeline_double_buffer_c" in printed
+
+        result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.platforms("a2a3", "a2a3sim")

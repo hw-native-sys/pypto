@@ -1030,10 +1030,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // budgeted (no /2) and is loaded once per outer step (no re-stream across the
   // moving axis). The chooser adopts A/B-stationary only on a strictly lower wall,
   // so it stays output-stationary for compute-bound shapes.
-  // Chained Mat-scratch producers pass force_output_stationary=true to turn these
-  // off (see the #1908 guard at the fold site): the Mat-scratch offset-packing path
-  // cannot yet pack a single-buffered A/B-stationary producer against the consumer
-  // matmul's double-buffered operands, so those producers must stay output-stationary.
+  // Chained Mat-scratch producers under the legacy PyPTO planner pass
+  // force_output_stationary=true to turn these off (see the #1908 guard at the
+  // fold site): that allocator cannot pack a single-buffered A/B-stationary
+  // producer against the consumer matmul's pipelined operands. DSA_RP and
+  // PTOAS retain the operand-stationary candidates.
   cfg.allow_a_stationary = !force_output_stationary;
   cfg.allow_b_stationary = !force_output_stationary;
   // L0C double-buffering (dbC=2): the chooser budgets the accumulator at L0C/2 and
@@ -1042,13 +1043,16 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // skipped, InitMemRef keeps the buffers distinct, and ptoas assigns their
   // physical offsets.
   //
-  // Under the PyPTO-owned planners dbC=2 is an experimental opt-in (PassContext
+  // Under the in-tree planners dbC=2 is an experimental opt-in (PassContext
   // flag, default OFF). The pipeline-membership tagger gives the dbC accumulator
   // a *flat depth-2* membership — only the moving (dbC) loop tags it; enclosing
   // loops skip it since the cube serializes MADs. PYPTO's MemoryReuse uses that
   // relation to keep two buffers, while DSA_RP initially exports it as a strict
-  // separation. Kept default-off pending device validation of the numerics +
-  // drain-hidden win. The co-live emit is gated on the chooser's
+  // separation. DSA_RP can place the resulting lifetimes, but the legacy PyPTO
+  // planner can still hit #1908's operand-buffer fragmentation on chained
+  // Mat-scratch layouts even after their producer is forced output-stationary.
+  // Keep the shared in-tree opt-in default-off while that planner remains
+  // supported. The co-live emit is gated on the chooser's
   // `double_buffer_c` result below, which tags the moving loop with
   // kPipelineDoubleBufferCAttr.
   //
@@ -3032,17 +3036,20 @@ class AutoTileMutator : public IRMutator {
           // matmul result (or its downcast) to it.  Emitted at the matmul site
           // (like the K-only rewrite), with no store to defer.  Checked before the
           // direct-store fold so its hints stay clean.
-          // #1908 guard: a chained Mat-scratch producer must stay output-stationary.
-          // The Mat-scratch offset-packing path cannot yet pack an A/B-stationary
-          // producer (its held operand is a monolithic single-buffered [m,K]/[K,n]
-          // panel in the full L0 buffer) against the consumer matmul's double-buffered
-          // operands, so an A/B-stationary chained producer overflows at
-          // AllocateMemoryAddr. OS is always a legal tile and the oversized producer
-          // must be tiled (deferring would overflow L0c), so re-choose OS-only for the
-          // fold rather than defer. Remove once offset packing lands.
+          // #1908 guard: under the legacy PyPTO planner, a chained Mat-scratch
+          // producer must stay output-stationary. Its opportunistic reuse classes
+          // cannot subdivide an expired monolithic A/B-stationary operand panel for
+          // the consumer's smaller pipelined buffers, so a later slot is allocated
+          // past L0A/L0B capacity. DSA_RP and PTOAS place buffers from their actual
+          // lifetimes and can pack this layout, so preserve their chooser-selected
+          // stationarity. OS is always a legal fallback for PyPTO and the oversized
+          // producer must be tiled, so re-choose OS-only rather than defer.
           const MatmulTiling* fold_tiling = &*tiling;
           std::optional<MatmulTiling> os_tiling;
-          if (tiling->stationarity != utils::Stationarity::kOutputStationary) {
+          const auto* ctx = PassContext::Current();
+          const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+          if (planner == MemoryPlanner::PyPTO &&
+              tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
             os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
                                       /*output_box_alignment=*/std::nullopt, &direct_defs);
