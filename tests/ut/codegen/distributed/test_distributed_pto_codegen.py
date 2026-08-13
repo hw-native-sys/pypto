@@ -1511,6 +1511,33 @@ def test_put_atomic_add_variant():
     assert "!pto.partition_tensor_view<128xf32>" in mlir_add
 
 
+def test_put_atomic_add_bf16_on_ascend910b():
+    """A bf16 remote atomic-add is legal on A2/A3 (pto-isa set_atomic_bf16).
+
+    TPUT lands its chunks through the same store pipe as ``tile.store``, so the
+    bf16 gate is the shared ``BackendHandler::SupportsBf16AtomicAdd``. The
+    Ascend950 rejection lives in the ``AtomicAddDtypeValid`` verifier — see
+    ``tests/ut/ir/verifier/test_atomic_add_dtype.py``; here the 910B fixture
+    backend must let the put through and emit the combine attr.
+    """
+
+    @pl.program
+    class PBf16:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.BF16],
+            src: pld.DistributedTensor[[16, 64], pl.BF16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src, atomic=pld.AtomicType.Add)
+
+    mlir = _generate_mlir(PBf16)
+    tput_line = next(line for line in mlir.splitlines() if "pto.comm.tput(" in line)
+    assert "#pto<atomic_type atomic_add>" in tput_line
+    assert tput_line.count("!pto.partition_tensor_view<16x64xbf16>") == 2
+
+
 def test_put_subregion_uses_offset_partition_views():
     """offset put lowers dst/src subregions to matching partition views."""
 

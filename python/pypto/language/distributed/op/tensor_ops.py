@@ -426,6 +426,11 @@ def put(
         atomic: :class:`pld.AtomicType` selecting plain-store
             (``AtomicType.None_``, the default) vs atomic-add
             (``AtomicType.Add``) combine semantics (keyword-only).
+            ``Add`` requires an fp32/bf16/fp16/int32/int16/int8 destination —
+            TPUT lands its chunks through the same store pipe as ``pl.store``,
+            so the hardware atomic-add dtypes apply. A bf16 destination is
+            further Ascend910B (A2/A3) only; on Ascend950 use an fp32 window
+            and cast after the reduction.
         chunk_rows: Optional VEC staging-tile row extent (keyword-only,
             ``0`` = full). Sizes the staging tile to a sub-tile of the flattened
             transfer (``rows`` = product of leading dims), so pto-isa TPUT

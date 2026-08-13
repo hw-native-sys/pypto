@@ -121,7 +121,11 @@ void BindPass(nb::module_& m) {
       .value("AccToGmStoreValid", IRProperty::AccToGmStoreValid,
              "Every tile.store draining an Acc-resident tile targets a GM tensor whose dtype the "
              "backend fix-pipe can narrow into (INT32/FP32/FP16[/BF16]); INT8/INT16 must route "
-             "through a Vec tile instead");
+             "through a Vec tile instead")
+      .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
+             "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
+             "pld.tile.put) targets a dtype the backend store pipe can combine; a bf16 destination "
+             "requires the Ascend910B (A2/A3) profile");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

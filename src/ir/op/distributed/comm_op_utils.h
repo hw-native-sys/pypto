@@ -323,8 +323,9 @@ inline void ValidateAtomicValue(int atomic_value, const std::string& op_name) {
 // a dtype the local store path rejects is equally unsupported cross-rank.
 // Without this, `atomic=AtomicType.Add` into e.g. a UINT8 window passes the enum
 // check and reaches codegen, which then emits atomic_add for a dtype the
-// hardware cannot combine. bf16 is additionally profile-gated at codegen
-// (BackendHandler::SupportsBf16AtomicAdd); this is the dtype half of the guard.
+// hardware cannot combine. bf16 is additionally profile-gated by the
+// AtomicAddDtypeValid property verifier (BackendHandler::SupportsBf16AtomicAdd);
+// this backend-neutral allow-list is the dtype half of the guard.
 inline void ValidateAtomicAddDtype(int atomic_value, const DataType& dtype, const std::string& op_name) {
   if (atomic_value != static_cast<int>(AtomicType::kAdd)) return;
   CHECK(dtype == DataType::FP32 || dtype == DataType::BF16 || dtype == DataType::FP16 ||

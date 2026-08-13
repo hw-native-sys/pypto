@@ -14,7 +14,7 @@
 | `NotifyOp` | `AtomicAdd`, `Set` | 信号投递模式。`AtomicAdd`：原子递增对端信号槽（多 rank 屏障）。`Set`：覆盖对端信号槽（1:1 握手）。 |
 | `WaitCmp` | `Eq`, `Ge` | 等待谓词。`Eq`：等于时解除阻塞。`Ge`：大于等于时解除阻塞。 |
 | `ReduceOp` | `Sum`, `Max`, `Min`, `Prod` | 集合通信的规约算子。支持情况按操作而定：`allreduce` 支持全部四种；`reduce_scatter` 仅支持 `Sum`，其余在 deducer 阶段被拒绝。 |
-| `AtomicType` | `None_`, `Add` | 远程存储合并模式。`None_`：普通存储。`Add`：原子累加。 |
+| `AtomicType` | `None_`, `Add` | 远程存储合并模式。`None_`：普通存储。`Add`：原子累加——要求目标为 `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`，其中 `bf16` 目标仅支持 Ascend910B（A2/A3）。 |
 | `DistributedTensor` | — | 绑定到通信域 window buffer 的 tensor 视图。 |
 | `CommCtx` | — | 通信上下文句柄。 |
 
@@ -119,7 +119,7 @@ def handshake_step(
 
 | 名称 | 签名 | 变更 | 描述 |
 | ---- | ---- | ---- | ---- |
-| `put` | `(dst: DT, peer: IntLike, src: DT \| Tensor, dst_offsets=None, src_offsets=None, shape=None, *, atomic=AtomicType.None_, chunk_rows=0, chunk_cols=0, pipeline=False) -> Call` | `dst: InOut`，`src: In` | 将本地 `src` 写入对端 rank 的 `dst`。`dst` **必须**为 window-bound；`src` 可以是普通 `Tensor`。未指定 offsets/shape 时，写入完整的本地分片。`atomic=Add` 时累加而非覆盖。 |
+| `put` | `(dst: DT, peer: IntLike, src: DT \| Tensor, dst_offsets=None, src_offsets=None, shape=None, *, atomic=AtomicType.None_, chunk_rows=0, chunk_cols=0, pipeline=False) -> Call` | `dst: InOut`，`src: In` | 将本地 `src` 写入对端 rank 的 `dst`。`dst` **必须**为 window-bound；`src` 可以是普通 `Tensor`。未指定 offsets/shape 时，写入完整的本地分片。`atomic=Add` 时累加而非覆盖（仅限硬件原子加 dtype：`fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`；`bf16` 仅支持 Ascend910B）。 |
 
 ```python
 # dst 必须为 window-bound

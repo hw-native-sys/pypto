@@ -304,7 +304,9 @@ Verifier：`dst` 必须是 `DistributedTensorType`；`src` 必须是 `TensorType
 **正（positive）**维度（正性仅对静态维校验；动态维允许,由 chunk 约束）。
 full-slice `put` 要求 `dst` / `src` 形状一致；subregion `put` 允许完整切片尺寸
 不同,只要显式传输区域不越界（仅校验静态维）；任何动态传输维都需配套静态 chunk
-（见上）。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。下降出的
+（见上）。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。`atomic=Add` 还要求目标为
+`FP32/BF16/FP16/INT32/INT16/INT8`（硬件原子加 dtype——TPUT 与 `tile.store` 走同一条 store
+流水落盘）；其中 `BF16` 目标进一步由 `AtomicAddDtypeValid` 属性校验器限制为 Ascend910B（A2/A3）。下降出的
 `pld.tile.put` verifier 要求 staging tile 在两个
 **静态**维度上都**不超过**展平后的传输范围（可以更小 —— 即一个 chunk —— 但不能
 更大；动态维由 chunk 在运行时约束）。

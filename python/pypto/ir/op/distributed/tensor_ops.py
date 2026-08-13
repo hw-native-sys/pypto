@@ -139,7 +139,10 @@ def put(  # noqa: PLR0913
     Cross-rank put: synchronously write the local window-bound DistributedTensor
     ``src`` into ``peer``'s slice of the window-bound DistributedTensor ``dst``.
     ``atomic`` (:class:`ir.AtomicType`) selects plain-store vs atomic-add and is
-    packed as an ``int`` attr. Side-effect only — the result is an
+    packed as an ``int`` attr; ``Add`` requires an fp32/bf16/fp16/int32/int16/int8
+    destination (the hardware atomic-add dtypes), and a bf16 destination is
+    Ascend910B-only (checked by the ``AtomicAddDtypeValid`` verifier).
+    Side-effect only — the result is an
     ``UnknownType`` Call. The verifier rejects a non-:class:`ir.DistributedTensorType`
     ``dst`` / ``src``. With no offsets/shape this writes the full source slice
     into the full destination slice. When offsets and shape are provided it

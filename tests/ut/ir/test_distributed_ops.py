@@ -1479,6 +1479,60 @@ def test_put_full_slice_dynamic_window_requires_chunk():
         ir.create_op_call("pld.tensor.put", [dst, peer, src_mismatch], {"atomic": 0, "chunk_rows": 4}, span)
 
 
+def test_put_rejects_atomic_add_on_non_hardware_dtype():
+    """atomic-add is limited to the hardware atomic-add dtypes.
+
+    TPUT's combine runs on the ordinary store pipe (pto-isa comm TPut lands each
+    chunk with ``TSTORE_IMPL<..., AtomicAdd>``), so the dtype set is the one
+    ``tile.store`` / ``tensor.assemble`` already gate on. The gate is
+    backend-neutral; the bf16-on-A5 split is the AtomicAddDtypeValid verifier's.
+    """
+    span = ir.Span.unknown()
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.INT64, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.INT64, span)
+
+    with pytest.raises(ValueError, match="hardware atomic-add dtypes"):
+        ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": int(ir.AtomicType.Add)}, span)
+
+    # A plain (non-atomic) put of the same dtype stays legal — the gate is keyed
+    # on the atomic kwarg, not on the transfer dtype.
+    call = ir.create_op_call("pld.tensor.put", [dst, peer, src], {"atomic": 0}, span)
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_tile_put_rejects_atomic_add_on_non_hardware_dtype():
+    """The tile-level form shares ValidatePutContract, so it is gated too."""
+    span = ir.Span.unknown()
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.INT64, span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.INT64, span)
+    stage = ir.Var(
+        "stage",
+        ir.TileType(
+            [ir.ConstInt(16, DataType.INT64, span), ir.ConstInt(64, DataType.INT64, span)],
+            DataType.INT64,
+        ),
+        span,
+    )
+
+    with pytest.raises(ValueError, match="hardware atomic-add dtypes"):
+        ir.create_op_call("pld.tile.put", [dst, peer, src, stage], {"atomic": int(ir.AtomicType.Add)}, span)
+
+
+def test_put_accepts_atomic_add_on_bf16():
+    """bf16 passes the backend-neutral gate: it is a hardware atomic-add dtype on
+    A2/A3. Rejecting it on A5 is the AtomicAddDtypeValid verifier's job, so the
+    deducer must stay neutral (a program may target either profile)."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.BF16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.BF16, span)
+
+    call = dist_tensor_ops.put(dst, peer, src, ir.AtomicType.Add, span=span)
+    assert call.kwargs["atomic"] == int(ir.AtomicType.Add)
+
+
 def test_put_ir_builder_accepts_positional_atomic_compat():
     """Compatibility: raw IR builder still accepts the old positional atomic arg."""
     span = ir.Span.unknown()

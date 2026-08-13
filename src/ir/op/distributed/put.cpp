@@ -118,7 +118,15 @@ void ValidatePutContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr&
       << " vs src " << src->GetType()->TypeName();
   comm_op::ValidateTransferShapeContract(dst_type->shape_, src_type->shape_, op_name, require_same_shape);
 
-  comm_op::ValidateAtomicValue(GetRequiredKwarg<int>(kwargs, "atomic", op_name), op_name);
+  // TPUT's atomic combine runs on the ordinary store pipe: pto-isa's comm TPut
+  // streams the transfer through the staging tile and lands each chunk with
+  // TSTORE_IMPL<..., AtomicAdd> -> SetAtomicAdd<GM dtype>. So put accepts the
+  // same hardware atomic-add dtypes as tile.store / remote_store, keyed on the
+  // GM *destination* dtype (equal to src's, enforced above). The bf16 profile
+  // split is backend-specific and lives in the AtomicAddDtypeValid verifier.
+  const int atomic_value = GetRequiredKwarg<int>(kwargs, "atomic", op_name);
+  comm_op::ValidateAtomicValue(atomic_value, op_name);
+  comm_op::ValidateAtomicAddDtype(atomic_value, dst_type->dtype_, op_name);
 }
 
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,

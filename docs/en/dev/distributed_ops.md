@@ -344,7 +344,11 @@ allowed and bounded by the chunk). Full-slice `put` requires matching `dst` /
 `src` shape; subregion `put` allows different full slice extents as long as the
 explicit transfer region is in bounds (checked on static dims). Any dynamic
 transfer dim requires a matching static chunk (see above). `atomic` selects
-overwrite vs atomic-add (see `AtomicType`). The lowered `pld.tile.put` verifier
+overwrite vs atomic-add (see `AtomicType`). `atomic=Add` additionally requires a
+`FP32/BF16/FP16/INT32/INT16/INT8` destination (the hardware atomic-add dtypes,
+since TPUT lands its chunks through the same store pipe as `tile.store`); a
+`BF16` destination is further restricted to the Ascend910B (A2/A3) profile by the
+`AtomicAddDtypeValid` property verifier. The lowered `pld.tile.put` verifier
 requires the staging tile to **fit within** the flattened transfer in both
 **static** dims (it may be smaller — a chunk — but never larger; dynamic dims
 are bounded by the chunk at runtime).

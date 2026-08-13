@@ -18,6 +18,7 @@ and verifies the generated orchestration code.
 import re
 import warnings
 
+import pypto
 import pypto.language as pl
 import pytest
 from _pto_loc_common import strip_loc
@@ -3141,12 +3142,15 @@ class TestTileStoreAtomicCodegen:
         )
 
     def test_atomic_add_bf16_rejected_on_ascend950(self):
-        """bf16 atomic-add is A2/A3-only; on Ascend950 (A5) codegen rejects it cleanly.
+        """bf16 atomic-add is A2/A3-only; on Ascend950 (A5) the program is rejected.
 
         The IR-level dtype gate is backend-agnostic (a program may target A2/A3),
-        so bf16 atomic passes op validation. The backend-aware guard lives in
-        codegen: on Ascend950 the ``pto.tstore`` emit raises a clean PyPTO error
-        rather than deferring to a downstream pto-isa ``static_assert``.
+        so bf16 atomic passes op validation. The backend-aware guard is the
+        ``AtomicAddDtypeValid`` property verifier, which ``PassPipeline`` runs at
+        pipeline input — the error carries the user's own span instead of
+        deferring to a downstream pto-isa ``static_assert``. Per-verifier
+        coverage of all four atomic sites lives in
+        ``tests/ut/ir/verifier/test_atomic_add_dtype.py``.
         """
         # Capture the prior backend so the A5 override does not leak; it may be
         # unset (get_backend_type raises when no backend is configured yet).
@@ -3165,12 +3169,8 @@ class TestTileStoreAtomicCodegen:
                     t = pl.load(x, [0, 0], [16, 16])
                     pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
 
-            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
-            funcs = list(optimized.functions.values())
-            target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
-            single = ir.Program([target], target.name, optimized.span)
-            with pytest.raises(ValueError, match="bf16 atomic-add requires the Ascend910B"):
-                codegen.PTOCodegen().generate(single)
+            with pytest.raises(pypto.Error, match="AtomicAddDtypeValid"):
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
         finally:
             backend.reset_for_testing()
             if prev_backend is not None:

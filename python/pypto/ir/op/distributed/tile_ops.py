@@ -161,6 +161,10 @@ def put(
     ``stage2`` is the optional second VEC staging tile; when supplied, codegen
     emits the ping-pong (double-buffered) TPUT form. It must have the same shape
     and dtype as ``stage``.
+
+    ``atomic=Add`` requires an fp32/bf16/fp16/int32/int16/int8 destination (the
+    hardware atomic-add dtypes); a bf16 destination is Ascend910B-only, checked
+    by the ``AtomicAddDtypeValid`` verifier.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
