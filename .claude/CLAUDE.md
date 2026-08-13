@@ -13,6 +13,15 @@ All rules for this project are located in the `.claude/rules/` directory. Please
 
 Refer to the individual rule files in `.claude/rules/` for specific guidance on project conventions, coding standards, and best practices.
 
+## Machine-Local Resource Limits
+
+Before compiling or running tests, source
+`.claude/skills/testing/load-env.sh`. Always pass the resulting
+`PYPTO_BUILD_JOBS` or `PYPTO_TEST_JOBS` explicitly; never use bare
+`--parallel`, `-j`, or pytest `-n auto`. The loader reads the ignored
+machine-local `testing.env` from the primary checkout, including when invoked
+from a linked worktree, and defaults unclassified machines to two jobs.
+
 ## Skills (`.claude/skills/`)
 
 Skills are workflow guides that help the main assistant perform specific tasks:

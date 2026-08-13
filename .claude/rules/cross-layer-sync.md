@@ -94,7 +94,8 @@ After cross-layer changes:
 - [ ] Type stub matches binding signature
 - [ ] Type hints are accurate
 - [ ] Docstrings present in binding and stub
-- [ ] Project builds (`cmake --build build --parallel`)
+- [ ] Resource limits loaded (`source .claude/skills/testing/load-env.sh`)
+- [ ] Project builds (`cmake --build build --parallel "$PYPTO_BUILD_JOBS"`)
 - [ ] Python can import and use the API
 - [ ] Type checker passes (mypy/pyright)
 

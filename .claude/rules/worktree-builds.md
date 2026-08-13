@@ -16,17 +16,20 @@ Copying build artifacts from the main repo is fragile and error-prone:
 ## How to Build in a Worktree
 
 ```bash
+# Load limits from the primary checkout, with safe defaults when unclassified
+source .claude/skills/testing/load-env.sh
+
 # Configure build directory if it doesn't exist
 [ ! -f build/CMakeCache.txt ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 # Build
-cmake --build build --parallel
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
 
 # Set PYTHONPATH to worktree's python/
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
 
 # Run tests
-python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
+python -m pytest tests/ut/ -n "$PYPTO_TEST_JOBS" -v
 ```
 
 ## When No C++ Changes Exist

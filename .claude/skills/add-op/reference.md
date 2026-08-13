@@ -399,8 +399,11 @@ Add to the appropriate category table (TensorOp or TileOp section).
 ## 10. Build & Test Commands
 
 ```bash
+# Load machine-local resource limits
+source .claude/skills/testing/load-env.sh
+
 # Build after C++ changes
-cmake --build build --parallel
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
 
 # Run specific op tests
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
@@ -410,7 +413,7 @@ python3 -m pytest tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py -v -
 python3 -m pytest tests/ut/codegen/test_pto_codegen_ops.py -v -k "<op_name>"
 
 # Full test suite
-python3 -m pytest tests/ut/ -n auto --maxprocesses 8 -v
+python3 -m pytest tests/ut/ -n "$PYPTO_TEST_JOBS" -v
 
 # Pre-commit checks
 pre-commit run --all-files

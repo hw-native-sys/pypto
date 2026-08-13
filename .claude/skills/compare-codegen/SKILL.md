@@ -57,12 +57,12 @@ mkdir -p "$MAIN_OUTPUT" "$BRANCH_OUTPUT"
 Build (if needed) and run the test on the current branch:
 
 ```bash
-# Source test env if available
-[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+# Load machine-local resource limits
+source .claude/skills/testing/load-env.sh
 
 # Build
 [ ! -f build/CMakeCache.txt ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --parallel
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
 
 # Run test with save-kernels + dump-passes (full test run, not codegen-only)
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
@@ -80,16 +80,17 @@ Create a temporary worktree, build from scratch, run the same test:
 ```bash
 git fetch origin main
 WORKTREE_DIR=$(mktemp -d -p /tmp pypto-main-XXXXXX)
+RESOURCE_LOADER="$(pwd)/.claude/skills/testing/load-env.sh"
 git worktree add "$WORKTREE_DIR" origin/main
 
 pushd "$WORKTREE_DIR"
 
-# Source test env if available
-[ -f .claude/skills/testing/testing.env ] && source .claude/skills/testing/testing.env
+# Load limits from the primary checkout
+source "$RESOURCE_LOADER"
 
 # Build inside worktree
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --parallel
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
 
 # Run test
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
