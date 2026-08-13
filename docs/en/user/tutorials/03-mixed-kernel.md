@@ -124,6 +124,13 @@ operators, and you can write them yourself:
 **Every push must be paired with a pop, and every pop with a `tfree`.** A missing `tfree`
 does not error — it leaks a ring slot, and the producer stalls once the ring fills.
 
+**The explicit form also makes cross-lane ordering yours.** A boundary operator orders only
+the value it carries. Nothing orders a cube-lane write against a vector-lane read of the
+same GM buffer, so a `pl.system.syncall(core_type="mix")` belongs between those phases. The
+`pl.split` path above does not need one — the compiler inserts the transfers, and the
+result is checked against torch. See
+[Scopes and Placement](../language/04-scopes.md) for the rules.
+
 Reach for the explicit form when `pl.split` cannot express the shape: per-lane addressing,
 a gather that only one lane can compute, or a region that mixes split and unsplit work.
 `tests/st/codegen/dsl/test_split_aiv_gather_row_codegen.py` is a worked example.
