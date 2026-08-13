@@ -318,10 +318,12 @@ def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
     if not isinstance(num_return_types, int) or isinstance(num_return_types, bool) or num_return_types < 0:
         raise _bad(f"'num_return_types' must be a non-negative integer, got {num_return_types!r}")
 
-    backend_name = meta.get("backend_type", "Ascend910B")
-    backend_type = getattr(BackendType, backend_name, None) if isinstance(backend_name, str) else None
+    # Strict enum-member lookup, not getattr(): ``getattr(BackendType, "mro")``
+    # resolves to a bound method and would sail through as a bogus backend.
+    raw_backend = meta.get("backend_type", "Ascend910B")
+    backend_type = BackendType.__members__.get(raw_backend) if isinstance(raw_backend, str) else None
     if backend_type is None:
-        raise _bad(f"unknown 'backend_type' {backend_name!r}")
+        raise _bad(f"'backend_type' must be one of {sorted(BackendType.__members__)}, got {raw_backend!r}")
 
     platform = meta.get("platform")
     if platform is not None and not isinstance(platform, str):
@@ -764,6 +766,7 @@ class CompiledProgram(_RuntimeFacade):
         _param_infos: list[_ParamInfo] | None = None,
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
+        _sub_chip_names: Sequence[str] | None = None,
     ) -> None:
         # ``program`` is ``None`` on the :meth:`from_dir` reload path: param
         # metadata is supplied pre-derived via the ``_param_infos`` /
@@ -786,28 +789,10 @@ class CompiledProgram(_RuntimeFacade):
         self._runtime_config: dict[str, Any] | None = None
 
         # Multi-orch (L2-only) programs emit each Orchestration as a
-        # self-contained sub-build under ``next_levels/<name>/``. Detect
-        # those sub-dirs eagerly so ``__call__`` can error early and
-        # ``__getitem__`` / ``__getattr__`` can dispatch by orch name.
-        # The marker is ``orchestration/`` (always present after
-        # codegen) rather than ``kernel_config.py`` (only present after
-        # ptoas) so the dispatch surface works for inspection in
-        # ``skip_ptoas=True`` builds — actually calling a sub-callable
-        # without ``kernel_config.py`` fails cleanly inside
-        # ``execute_compiled`` with a ``FileNotFoundError``.
-        #
-        # Skip detection for distributed (L3+) builds: those also lay
-        # out ``next_levels/<chip_task>/`` but expose a single canonical
-        # entry point via ``orchestration/host_orch.py`` and must be
-        # invoked through ``CompiledProgram.__call__`` directly, not
-        # via subscript dispatch.
-        self._sub_chip_dirs: dict[str, Path] = {}
-        has_host_orch = (self._output_dir / "orchestration" / "host_orch.py").is_file()
-        next_levels = self._output_dir / "next_levels"
-        if next_levels.is_dir() and not has_host_orch:
-            for child in sorted(next_levels.iterdir()):
-                if child.is_dir() and (child / "orchestration").is_dir():
-                    self._sub_chip_dirs[child.name] = child
+        # self-contained sub-build under ``next_levels/<name>/``. Bind those
+        # sub-dirs eagerly so ``__call__`` can error early and ``__getitem__``
+        # / ``__getattr__`` can dispatch by orch name.
+        self._sub_chip_dirs = self._resolve_sub_chip_dirs(_sub_chip_names)
 
         # Only the fresh-compile path (live IR) writes artifacts: the reload
         # path must not clobber a user's hand-edited debug/run.py, nor rewrite
@@ -830,6 +815,49 @@ class CompiledProgram(_RuntimeFacade):
             else:
                 self._persist_metadata()
                 _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
+
+    def _resolve_sub_chip_dirs(self, sub_chip_names: Sequence[str] | None) -> dict[str, Path]:
+        """Bind each L2 orchestration name to its ``next_levels/<name>/`` sub-build.
+
+        *sub_chip_names* is the layout the caller's codegen just emitted --
+        ``ir.compile`` passes
+        :func:`~pypto.backend.pto_backend.multi_chip_orch_names` of the program it
+        compiled, and :meth:`from_dir` passes ``[]`` because a top-level
+        ``compiled_meta.json`` is only ever written for a single-orch build. It is
+        authoritative *including when empty*: an empty list states "this build's one
+        orchestration lives at the top level".
+
+        That declaration is what makes recompiling into a reused ``output_dir``
+        correct. ``ir.compile`` never clears the directory, so a ``next_levels/``
+        left by an earlier multi-orch compile of a *different* program outlives it;
+        deciding the layout by scanning for that directory would classify the new
+        single-orch build as multi-orch, hide its own top-level artifacts behind the
+        stale sub-builds, and delete the sidecar it just wrote. Sub-builds are not
+        touched by a single-chip codegen, so a leftover one keeps its own artifacts
+        *and* its matching sidecar -- stale as a pair, never mismatched.
+
+        ``None`` means the caller declared no layout (a direct construction outside
+        ``ir.compile``), leaving the on-disk scan as the only evidence of where the
+        artifacts were written. The marker is ``orchestration/`` (always present
+        after codegen) rather than ``kernel_config.py`` (only present after ptoas)
+        so the dispatch surface is inspectable in ``skip_ptoas=True`` builds --
+        calling a sub-callable without ``kernel_config.py`` then fails cleanly
+        inside ``execute_compiled`` with a ``FileNotFoundError``. Distributed (L3+)
+        builds are excluded: they also lay out ``next_levels/<chip_task>/`` but
+        expose a single canonical entry point via ``orchestration/host_orch.py`` and
+        must be invoked through :meth:`__call__` directly, not by subscript.
+        """
+        next_levels = self._output_dir / "next_levels"
+        if sub_chip_names is not None:
+            return {name: next_levels / name for name in sub_chip_names}
+
+        sub_chip_dirs: dict[str, Path] = {}
+        has_host_orch = (self._output_dir / "orchestration" / "host_orch.py").is_file()
+        if next_levels.is_dir() and not has_host_orch:
+            for child in sorted(next_levels.iterdir()):
+                if child.is_dir() and (child / "orchestration").is_dir():
+                    sub_chip_dirs[child.name] = child
+        return sub_chip_dirs
 
     def _write_meta(
         self,
@@ -883,11 +911,15 @@ class CompiledProgram(_RuntimeFacade):
 
         Each sub-build is dispatched on its own (``compiled[<name>]``, or a
         direct ``CompiledProgram.from_dir(next_levels/<name>)``), so each needs
-        the signature of *its* orchestration rather than the parent's. Same
-        best-effort contract as :meth:`_persist_metadata`: a sub-build whose
-        signature cannot be extracted emits no sidecar and drops any stale one
-        (its directory may be a leftover of a previous compile into this same
-        ``output_dir``), rather than failing the compile.
+        the signature of *its* orchestration rather than the parent's. Only the
+        sub-builds this compile emitted are visited (see
+        :meth:`_resolve_sub_chip_dirs`), which is what keeps every sidecar
+        describing the artifacts sitting next to it.
+
+        Same best-effort contract as :meth:`_persist_metadata`: a sub-build the
+        IR carries no matching function for, or whose signature cannot be
+        extracted, emits no sidecar and drops whatever an earlier compile left
+        in that directory, rather than failing the compile.
         """
         assert self._program is not None
         for name, sub_dir in self._sub_chip_dirs.items():
@@ -940,7 +972,10 @@ class CompiledProgram(_RuntimeFacade):
             accessors behave exactly like the freshly-compiled object.
             :attr:`program` is ``None`` -- the IR itself is not persisted, so
             :meth:`validate_ir` still reads the directory's ``passes_dump/``
-            rather than the live program.
+            rather than the live program. Always a single-orchestration program:
+            the sidecar is only ever written for one, so a ``next_levels/`` an
+            earlier multi-orch compile left in the same directory is ignored
+            rather than mistaken for this build's dispatch surface.
 
         Raises:
             FileNotFoundError: ``compiled_meta.json`` is absent -- the directory
@@ -966,6 +1001,9 @@ class CompiledProgram(_RuntimeFacade):
         # count matters (has_return = len(...) > 0), so placeholders suffice.
         return_types: list[Any] = [None] * meta["num_return_types"]
         bt = backend_type or meta["backend_type"]
+        # A top-level sidecar is written only for a single-orch build, so it
+        # settles the layout: dispatch through this object, not through a
+        # ``next_levels/`` an earlier multi-orch compile may have left here.
         return cls(
             None,
             str(output_dir),
@@ -974,6 +1012,7 @@ class CompiledProgram(_RuntimeFacade):
             _param_infos=param_infos,
             _output_indices=output_indices,
             _return_types=return_types,
+            _sub_chip_names=[],
         )
 
     # --- Properties -----------------------------------------------------------
@@ -1209,9 +1248,9 @@ class CompiledProgram(_RuntimeFacade):
             )
         if self._program is None:
             raise RuntimeError(
-                f"Multi-orch dispatch needs live IR; this CompiledProgram was reconstructed "
-                f"from {self._output_dir} and compiled_meta.json records one orchestration "
-                f"signature only. Reload next_levels/{name}/ directly, or recompile via ir.compile()."
+                f"Multi-orch dispatch needs live IR; this CompiledProgram for {self._output_dir} "
+                f"has none. Reload next_levels/{name}/ directly via CompiledProgram.from_dir(), "
+                f"or recompile via ir.compile()."
             )
         func = self._program.get_function(name)
         if func is None:

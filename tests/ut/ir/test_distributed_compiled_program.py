@@ -228,6 +228,21 @@ def test_from_dir_incompatible_schema_raises(compiled, tmp_path):
         DistributedCompiledProgram.from_dir(tmp_path)
 
 
+def test_from_dir_rejects_non_member_backend_type(compiled, tmp_path):
+    """A 'backend_type' naming a class attribute is not a backend.
+
+    ``getattr(BackendType, "mro")`` resolves to a bound method, so a lax lookup
+    would accept it and only fail much later inside backend dispatch.
+    """
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    for bogus in ("mro", "AscendNope", 7):
+        meta_path.write_text(json.dumps({**meta, "backend_type": bogus}))
+        with pytest.raises(ValueError, match=r"backend_type") as excinfo:
+            DistributedCompiledProgram.from_dir(tmp_path)
+        assert "ir.compile()" in str(excinfo.value), f"{bogus!r}: message lacks a recompile hint"
+
+
 def test_from_dir_overrides_platform_and_config(compiled, tmp_path):
     """Explicit platform / distributed_config override the persisted defaults."""
     dc = DistributedConfig(device_ids=[0, 1], aicpu_thread_num=3)

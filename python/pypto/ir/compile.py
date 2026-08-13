@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.backend import BackendType
-from pypto.backend.pto_backend import PartialCodegenError, generate
+from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
@@ -386,9 +386,14 @@ def compile(  # noqa: PLR0913
             distributed_config=distributed_config,
         )
 
+    # Hand over the layout codegen just produced instead of letting
+    # CompiledProgram re-derive it from the directory: a reused ``output_dir``
+    # may still hold a ``next_levels/`` from an earlier multi-orch compile, and
+    # a disk scan would mistake this build for that one.
     return CompiledProgram(
         program,
         output_dir,
         backend_type=effective_backend_type,
         platform=platform,
+        _sub_chip_names=multi_chip_orch_names(transformed_program),
     )

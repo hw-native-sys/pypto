@@ -137,9 +137,17 @@ multi-orch 的父目录自身没有 sidecar——每个 `next_levels/<name>/` �
 
 编译到**复用的 `output_dir`** 时，sidecar 始终描述本次编译的程序：写入是原子的；
 若新程序在该目录下没有可记录的签名（multi-orch 父目录、无法提取签名的
-orchestration、上一次编译遗留的 `next_levels/<name>/`），则直接删除旧文件。
+orchestration、IR 中没有同名函数的子构建），则直接删除旧文件。
 `ir.compile()` 本身不会清空 `output_dir`，正是这一步保证 `from_dir()` 不会
 交出过期的参数 ABI。
+
+一次构建究竟是哪种布局——顶层单个程序，还是每个 orchestration 一个子构建——
+由本次 codegen 决定（`pto_backend.multi_chip_orch_names`），而不是扫描目录得出。
+因此，上一次 multi-orch 编译遗留的 `next_levels/` 不会让随后编译到同一目录的
+single-orch 构建被误判成 multi-orch：新的顶层产物照常可以通过 `compiled(...)`
+和 `from_dir()` 访问。遗留的子构建不会被单芯片 codegen 改动，各自的产物与
+sidecar 仍然成对匹配（只是整体过期），
+`CompiledProgram.from_dir(next_levels/<name>)` 依旧能重放那次旧构建。
 
 ## 重放 L3 / 分布式构建
 

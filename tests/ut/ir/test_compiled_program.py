@@ -1117,11 +1117,39 @@ class TestCompiledMetaAndFromDir:
         assert meta_path.stat().st_mtime_ns == before
 
     def test_from_dir_overrides_platform_and_backend(self, tmp_path):
-        """Explicit platform / backend_type override the persisted defaults."""
+        """Explicit platform / backend_type override the persisted defaults.
+
+        Both overrides differ from what was persisted (``a2a3sim`` / Ascend910B),
+        so an ignored override cannot pass by coincidence.
+        """
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
-        reloaded = CompiledProgram.from_dir(tmp_path, platform="a2a3", backend_type=BackendType.Ascend910B)
-        assert reloaded.platform == "a2a3"
-        assert reloaded.backend_type == BackendType.Ascend910B
+        assert json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())["backend_type"] == "Ascend910B"
+
+        reloaded = CompiledProgram.from_dir(tmp_path, platform="a5sim", backend_type=BackendType.Ascend950)
+        assert reloaded.platform == "a5sim"
+        assert reloaded.backend_type == BackendType.Ascend950
+
+        # Without overrides the persisted pair comes back unchanged.
+        persisted = CompiledProgram.from_dir(tmp_path)
+        assert persisted.platform == "a2a3sim"
+        assert persisted.backend_type == BackendType.Ascend910B
+
+    def test_from_dir_keeps_the_fp4_x2_carrier_shape(self, tmp_path):
+        """Packed FP4 shapes are persisted already converted, so the reload must not re-halve.
+
+        ``_extract_func_param_infos`` stores the runtime x2 carrier shape
+        (logical ``[8, 16]`` -> ``[8, 8]``); applying ``_to_runtime_shape`` again
+        on load would silently halve it a second time.
+        """
+        live = CompiledProgram(_make_fp4_output_program(), str(tmp_path))
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        def _shapes(cp):
+            infos, _, _ = cp._get_metadata()
+            return [p.shape for p in infos]
+
+        assert _shapes(live) == [[8, 8], [8, 8]]
+        assert _shapes(reloaded) == _shapes(live)
 
     def test_from_dir_missing_meta_raises(self, tmp_path):
         """A directory without compiled_meta.json raises with a recompile hint."""
@@ -1200,6 +1228,10 @@ class TestCompiledMetaAndFromDir:
             "negative return count": json.dumps({**good, "num_return_types": -1}),
             "non-int return count": json.dumps({**good, "num_return_types": "two"}),
             "unknown backend": json.dumps({**good, "backend_type": "AscendNope"}),
+            # Same trap as ``direction`` above: ``getattr(BackendType, "mro")``
+            # resolves to a bound method a lax lookup would accept as a backend.
+            "backend names an attribute": json.dumps({**good, "backend_type": "mro"}),
+            "non-string backend": json.dumps({**good, "backend_type": 7}),
             "non-string platform": json.dumps({**good, "platform": 7}),
         }
         for label, payload in broken.items():
@@ -1227,15 +1259,33 @@ class TestCompiledMetaAndFromDir:
         with pytest.raises(ValueError, match=_COMPILED_META_FILENAME):
             CompiledProgram.from_dir(tmp_path)
 
-    def test_subscript_on_reconstructed_multi_orch_raises(self, tmp_path):
-        """A hand-placed sidecar in a multi-orch dir must not deref the absent IR."""
-        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+    def test_from_dir_ignores_stale_next_levels(self, tmp_path):
+        """A sidecar is only written for a single-orch build, so it settles the layout.
+
+        A ``next_levels/`` left by an earlier multi-orch compile into the same
+        directory must not turn the reloaded program into a multi-orch parent:
+        the artifacts the sidecar describes are the top-level ones.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
         for name in ("orch_a", "orch_b"):
             (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
         reloaded = CompiledProgram.from_dir(tmp_path)
 
+        assert reloaded.orchestration_names == []
+        args = (torch.zeros(128, 128), torch.zeros(128, 128), torch.zeros(128, 128))
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            reloaded(*args)
+        assert mock_exec.call_args.args[0] == tmp_path.resolve()
+
+    def test_subscript_without_live_ir_raises(self, tmp_path):
+        """Scanned-layout dispatch (no declared layout) must not deref the absent IR."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        cp = CompiledProgram(None, str(tmp_path))  # no _sub_chip_names → on-disk scan
+
+        assert cp.orchestration_names == ["orch_a", "orch_b"]
         with pytest.raises(RuntimeError, match="live IR"):
-            _ = reloaded["orch_a"]
+            _ = cp["orch_a"]
 
     def test_metadata_without_ir_or_sidecar_raises(self, tmp_path):
         """Constructing with neither live IR nor metadata fails loudly, not with None deref."""
@@ -1250,7 +1300,10 @@ class TestCompiledMetaOutputDirReuse:
     ``ir.compile`` never clears ``output_dir`` (``makedirs(exist_ok=True)``), so
     a sidecar left by a previous compile of a *different* program shape would
     otherwise survive and drive the new artifacts with the old parameter ABI --
-    a mismatch ``from_dir`` cannot detect.
+    a mismatch ``from_dir`` cannot detect. The same reuse also leaves the
+    previous compile's ``next_levels/`` in place, so these tests equally pin
+    that the *build layout* comes from the codegen that just ran rather than
+    from whatever the directory happens to contain.
     """
 
     def test_recompile_refreshes_meta(self, tmp_path):
@@ -1264,12 +1317,12 @@ class TestCompiledMetaOutputDirReuse:
 
     def test_multi_orch_recompile_drops_stale_parent_meta(self, tmp_path):
         """Single-orch then multi-orch into one dir: the parent sidecar must go."""
-        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
         assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity: written by the first compile
 
         for name in ("orch_a", "orch_b"):
             (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
-        CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), _sub_chip_names=["orch_a", "orch_b"])
 
         assert not (tmp_path / _COMPILED_META_FILENAME).exists()
         # The parent must now point users at the sub-builds rather than hand out
@@ -1286,22 +1339,121 @@ class TestCompiledMetaOutputDirReuse:
         with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
             CompiledProgram.from_dir(tmp_path)
 
-    def test_stale_sub_build_meta_dropped(self, tmp_path):
-        """A next_levels/<name>/ dir with no matching orchestration loses its sidecar."""
+    def test_sub_build_without_matching_function_drops_meta(self, tmp_path):
+        """A sub-build the IR has no function for loses its sidecar instead of keeping a stale one."""
         for name in ("orch_a", "orch_b"):
             (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
-        CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+        names = ["orch_a", "orch_b"]
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path), _sub_chip_names=names)
         stale = tmp_path / "next_levels" / "orch_b" / _COMPILED_META_FILENAME
         assert stale.exists()  # sanity: written by the first compile
 
-        # Recompile a program that no longer defines orch_b; its leftover
-        # build dir must not keep advertising a reloadable signature.
+        # Same layout, but the IR no longer carries orch_b: its build dir must
+        # not keep advertising the signature the previous compile recorded.
         orch_a = _make_multi_orch_program().get_function("orch_a")
         assert orch_a is not None
         only_a = ir.Program([orch_a], "OnlyOrchA", ir.Span.unknown())
-        CompiledProgram(only_a, str(tmp_path))
+        CompiledProgram(only_a, str(tmp_path), _sub_chip_names=names)
         assert not stale.exists()
         assert (tmp_path / "next_levels" / "orch_a" / _COMPILED_META_FILENAME).exists()
+
+    def test_stale_next_levels_does_not_shadow_a_single_orch_build(self, tmp_path):
+        """Multi-orch then single-orch into one dir: the new top-level build wins.
+
+        The layout comes from the codegen that just ran, so the leftover
+        ``next_levels/`` must not classify the second compile as multi-orch --
+        that would hide its top-level artifacts behind the stale sub-builds,
+        delete the sidecar it just wrote, and force dispatch through
+        ``compiled[<name>]`` into the *old* build.
+        """
+        import pypto.language as pl  # noqa: PLC0415
+
+        @pl.program
+        class TwoOrch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_add(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tf = pl.add(pl.load(a, [0, 0], [128, 128]), pl.load(b, [0, 0], [128, 128]))
+                return pl.store(tf, [0, 0], f)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def tile_sub(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tf = pl.sub(pl.load(a, [0, 0], [128, 128]), pl.load(b, [0, 0], [128, 128]))
+                return pl.store(tf, [0, 0], f)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_add(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                return self.tile_add(a, b, f)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_sub(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                return self.tile_sub(a, b, f)
+
+        @pl.program
+        class OneOrch:
+            """Deliberately different signature (x, y, z) from either orch above."""
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def mul_kernel(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                y: pl.Tensor[[64, 64], pl.FP32],
+                z: pl.Tensor[[64, 64], pl.FP32],
+            ):
+                tz = pl.tile.mul(pl.tile.load(x, [0, 0], [64, 64]), pl.tile.load(y, [0, 0], [64, 64]))
+                pl.tile.store(tz, offsets=[0, 0], output_tensor=z)
+
+        work_dir = tmp_path / "reused"
+        multi = ir.compile(TwoOrch, output_dir=str(work_dir), dump_passes=False, skip_ptoas=True)
+        assert isinstance(multi, CompiledProgram)  # L2, not the distributed wrapper
+        assert multi.orchestration_names == ["orch_add", "orch_sub"]
+        assert not (work_dir / _COMPILED_META_FILENAME).exists()
+
+        single = ir.compile(OneOrch, output_dir=str(work_dir), dump_passes=False, skip_ptoas=True)
+        assert isinstance(single, CompiledProgram)
+
+        # 1) The second compile owns the top level: its own artifacts, a sidecar
+        #    describing *its* signature, and no multi-orch dispatch surface.
+        assert {p.stem for p in (work_dir / "kernels").rglob("*.pto")} == {"mul_kernel"}
+        assert single.orchestration_names == []
+        assert single.param_names == ["x", "y", "z"]
+        meta = json.loads((work_dir / _COMPILED_META_FILENAME).read_text())
+        assert [p["name"] for p in meta["params"]] == ["x", "y", "z"]
+
+        # 2) Both call paths run the new top-level build, not a stale sub-build.
+        reloaded = CompiledProgram.from_dir(work_dir)
+        assert reloaded.orchestration_names == []
+        assert reloaded.param_names == ["x", "y", "z"]
+        args = (torch.zeros(64, 64), torch.zeros(64, 64), torch.zeros(64, 64))
+        for compiled in (single, reloaded):
+            with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+                compiled(*args)
+            assert mock_exec.call_args.args[0] == work_dir.resolve()
+
+        # 3) The leftover sub-builds keep their own artifacts *and* their own
+        #    sidecar, so reloading one replays that older build rather than
+        #    describing the new one.
+        stale = CompiledProgram.from_dir(work_dir / "next_levels" / "orch_add")
+        assert stale.param_names == ["a", "b", "f"]
 
     def test_no_temp_files_left_behind(self, tmp_path):
         """The atomic write leaves no ``.tmp`` residue next to the sidecar."""

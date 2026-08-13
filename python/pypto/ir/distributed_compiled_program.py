@@ -248,7 +248,19 @@ class DistributedCompiledProgram:
         # count matters (has_return = len(...) > 0), so placeholders suffice.
         return_types: list[Any] = [None] * int(meta.get("num_return_types", 0))
         dc = distributed_config or DistributedConfig(**meta.get("distributed_config", {}))
-        bt = backend_type or getattr(BackendType, meta.get("backend_type", "Ascend910B"))
+        # Strict enum-member lookup, not getattr(): ``getattr(BackendType, "mro")``
+        # resolves to a bound method and would sail through as a bogus backend --
+        # same contract as the L2 sidecar (``_load_compiled_meta``).
+        raw_backend = meta.get("backend_type", "Ascend910B")
+        persisted_backend = BackendType.__members__.get(raw_backend) if isinstance(raw_backend, str) else None
+        bt = backend_type or persisted_backend
+        if bt is None:
+            raise ValueError(
+                f"Invalid {_DISTRIBUTED_META_FILENAME} in {meta_path}: 'backend_type' must be one "
+                f"of {sorted(BackendType.__members__)}, got {raw_backend!r}. The metadata was "
+                f"written by a different pypto version or hand-edited — recompile via "
+                f"ir.compile() to refresh."
+            )
         return cls(
             None,
             str(output_dir),

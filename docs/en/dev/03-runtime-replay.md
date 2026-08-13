@@ -147,11 +147,20 @@ reload the sub-build you want. Distributed builds use
 
 Compiling into a **reused `output_dir`** always leaves the sidecar describing
 the program just compiled: it is rewritten atomically, and removed outright
-whenever the new program has no signature to record for that directory
-(a multi-orch parent, an unextractable orchestration, or a `next_levels/<name>/`
-left over from a previous compile). `ir.compile()` does not otherwise clear
-`output_dir`, so this is what keeps `from_dir()` from handing out a stale
-parameter ABI.
+whenever the new program has no signature to record for that directory (a
+multi-orch parent, an unextractable orchestration, or a sub-build the IR carries
+no matching function for). `ir.compile()` does not otherwise clear `output_dir`,
+so this is what keeps `from_dir()` from handing out a stale parameter ABI.
+
+Which of the two layouts a build *is* — one top-level program, or one sub-build
+per orchestration — is decided by the codegen that just ran
+(`pto_backend.multi_chip_orch_names`), never by scanning the directory. A
+`next_levels/` left by an earlier multi-orch compile therefore does not make the
+next single-orch build into the same directory look multi-orch: the new
+top-level artifacts stay reachable through `compiled(...)` and `from_dir()`.
+The leftover sub-builds are untouched by a single-chip codegen, so each keeps
+its own artifacts *and* its own sidecar — stale as a pair, never mismatched, and
+`CompiledProgram.from_dir(next_levels/<name>)` still replays that older build.
 
 ## Replaying an L3 / distributed build
 
