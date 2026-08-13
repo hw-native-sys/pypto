@@ -103,7 +103,7 @@ def _emit_pipeline_span(
             f"run_id={identity.simpler_run_id or 0} dispatch_id=0 slot_id=0 generation=0 "
             f"pypto_dispatch_id={identity.dispatch_id} pypto_frame_id={identity.frame_id}"
         )
-        _emit_host_span(name, 0, 0, 0, timestamp_ns, duration_ns, attributes)
+        _emit_host_span(name, identity.simpler_run_id or 0, 0, 0, timestamp_ns, duration_ns, attributes)
     except Exception:  # noqa: BLE001 - diagnostics must not change dispatch outcome
         logger.debug("Could not emit PyPTO pipeline trace span", exc_info=True)
 
