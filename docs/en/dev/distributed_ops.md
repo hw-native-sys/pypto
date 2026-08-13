@@ -15,7 +15,7 @@ accept a plain `Tensor` as `src`, and `get`/`tile.get` accept one as `dst` —
 TPUT/TGET only need a readable/writable *local* GM region on that side. The
 window-bound side (`put.dst`, `get.src`) still requires a `DistributedTensor`.
 
-There are **fourteen ops** and **four ABI enums**:
+There are **fifteen ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
@@ -33,8 +33,9 @@ There are **fourteen ops** and **four ABI enums**:
 | `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes the full MAX_RECV-row block per destination into a flat 2D staging window (transfer size is the full per-destination capacity block), and publishes `min(send_counts[dest], MAX_RECV)` into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver can skip rows beyond its count; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
+| `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
 
-The six side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
+The seven side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
@@ -64,9 +65,10 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
   `pld.tile.get` / `pld.tile.put`, never on the DSL surface. Both are therefore
   siblings of `pld.tensor.alloc_window_buffer` / `pld.tensor.window`, **not** of
   the tile-producing `remote_load`.
-- **`pld.system.notify` / `pld.system.wait`** drive the per-rank signal slot —
-  pure control-plane synchronisation with no data operand — so they live in
-  `pld.system`.
+- **`pld.system.notify` / `pld.system.wait` / `pld.system.defer_wait`** drive
+  the per-rank signal slot — pure control-plane synchronisation with no data
+  operand — so they live in `pld.system`. `wait` blocks and later resumes its
+  kernel; `defer_wait` returns and transfers readiness to the scheduler TaskId.
 
 ## Core placement in a mixed kernel
 
@@ -108,13 +110,13 @@ the author's job; see `docs/en/user/language/04-scopes.md`.
 ## ABI enums (`include/pypto/ir/comm.h`)
 
 The four enums are an **append-only ABI**. Their underlying `int` values are
-serialised as the op's kwarg payload (`op` for notify, `cmp` for wait, `atomic`
+serialised as the op's kwarg payload (`op` for notify, `cmp` for wait/defer_wait, `atomic`
 for put) and cast back to the enum at codegen time. New variants may only be
 added **at the end** so existing IR and cached programs keep their meaning.
 
 ```cpp
 enum class NotifyOp : int { kAtomicAdd = 0, kSet = 1 };   // pld.system.notify
-enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait
+enum class WaitCmp  : int { kEq = 0,        kGe = 1 };     // pld.system.wait / defer_wait
 enum class AtomicType : int { kNone = 0,    kAdd = 1 };    // pld.tensor.put, remote_store
 enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.tensor.allreduce
 ```
@@ -124,7 +126,7 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `NotifyOp` | `kAtomicAdd` | atomically add `value` into the peer's signal slot |
 | `NotifyOp` | `kSet` | non-atomic store of `value` into the peer's signal slot |
 | `WaitCmp` | `kEq` | block until `*signal_slot == expected` |
-| `WaitCmp` | `kGe` | block until `*signal_slot >= expected` |
+| `WaitCmp` | `kGe` | wait, or defer task completion, until `*signal_slot >= expected` |
 | `AtomicType` | `kNone` | plain remote store — overwrite the peer's dst slice |
 | `AtomicType` | `kAdd` | atomically add the source data into the peer's dst slice |
 | `ReduceOp` | `kSum` | sum-reduce every participating rank's window slice |
@@ -598,9 +600,47 @@ predicate against `expected` (see `WaitCmp`).
 Verifier: `signal` must be `DistributedTensorType`; `expected` must be
 `ScalarType`; `offsets` must be a `MakeTuple` of rank equal to the signal rank.
 
+### `pld.system.defer_wait` (Simpler deferred completion)
+
+Signature: `pld.system.defer_wait(signal, offsets, expected, *, cmp: int) -> Unknown`.
+
+Registers a local counter condition without `pto.comm.twait`. The kernel can retire and
+release its AIV, but Simpler delays the ordinary TaskId's completion until every condition
+is ready; the kernel is never resumed.
+
+V1 accepts a direct window-bound INT32 `DistributedTensor` parameter with ND/DN
+addressing, integer/index offsets and threshold, and only `WaitCmp::kGe`.
+Slices/views/SSA aliases, NZ layout, and rank-zero signals are rejected. Counter
+storage is INT32 but polling is unsigned `>=`: thresholds and published values must
+remain monotonic in `[0, INT32_MAX]`; `-1` appears as `UINT32_MAX` and falsely
+satisfies. One task may register at most 64 conditions, independent of the scheduler's
+64-concurrent-deferred-task limit.
+
+The scope outliner requires a dedicated top-level single-block pure-AIV `pl.at(CORE_GROUP)`
+waiter with no predicate or `allow_early_resolve=True`.
+Pure scalar work may occur between registrations, but `tensor.read`,
+payload/cache operations, and other communication cannot. A terminal waiter with no
+continuation may be submitted fire-and-forget and need not capture a TaskId. An
+unmarked direct `@pl.jit.incore` / AIV use is rejected because it bypasses the
+validated single-block task launch and runtime `AsyncCtx` contract. Programmatically
+constructed IR carrying the internal waiter marker is accepted only after the full
+body and orchestration call-site contract is revalidated.
+
+Continuation uses ordinary `deps=[wait_tid]`; there is no second dependency type.
+Simpler withholds the normal TaskId fanout until the counter is ready. Its standard
+task-start cache invalidation then runs on the normally dispatched consumer. The
+producer must still make payload writes visible before publishing the signal, and
+the waiter must remain ineligible for early resolve so consumer pickup cannot precede readiness.
+
+Codegen passes checked flattened offsets and raw dispatch arguments to an adapter that
+registers a counter `CompletionToken` in `AsyncCtx`. The legacy
+`pld.system.wait`/`pto.comm.twait` path is unchanged. See the
+[distributed primitives guide](../user/distributed/02-primitives.md#deferred-completion-release-the-core-keep-the-task-pending)
+for the complete programming contract and examples.
+
 ## Shared codegen infrastructure
 
-All five ops lower through PTO codegen helpers in
+The low-level RMA and synchronization ops lower through PTO codegen helpers in
 `src/backend/common/pto_ops_distributed.cpp` and `src/codegen/pto/pto_codegen.cpp`.
 The reusable pieces — shared so each op's lowering carries no bespoke peer
 arithmetic — are:
@@ -613,11 +653,13 @@ arithmetic — are:
 | `ResolveDistTensorBinding` | resolves a `DistributedTensor` arg to its codegen binding (type + window var) |
 | `AsTensorTypeLike` | kind-trait downcast accepting both `TensorType` and `DistributedTensorType` where a view's element/shape info is read uniformly |
 
-The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
-`dst`, `put`'s `src`, `wait`'s `signal`) reuses the tensor view already created by
-`EmitMakeTensorViews` with no peer arithmetic, while a *remote* operand (e.g.
+The local-vs-remote split is intentional: a *local* PTO operand (e.g. `get`'s
+`dst`, `put`'s `src`, `wait`'s `signal`) reuses the tensor view already created
+by `EmitMakeTensorViews` with no peer arithmetic, while a *remote* operand (e.g.
 `remote_load`'s `target`, `get`'s `src`, `put`'s `dst`) goes through
-`EmitCommRemoteView`.
+`EmitCommRemoteView`. `defer_wait` is also local, but its adapter receives the
+direct parameter base plus a checked flattened logical element offset rather
+than a PTO tensor view.
 
 ## Pipeline integration
 
@@ -651,6 +693,9 @@ dispatches before the final `Simplify`.
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),
   and `test_l3_remote_store.py` (tile-level subview push ✅, plus a
-  tensor-level push of a *computed* value ✅). All tests use the
-  `pld.system.notify` / `pld.system.wait` handshake pattern established by
-  notify/wait and collective STs.
+  tensor-level push of a *computed* value ✅). Deferred completion is covered by
+  `test_l3_deferred_completion.py`: A2/A3 AIV-saturation/core-release,
+  already-ready registration reuse, A5 cross-rank correctness, persistent
+  monotonic epochs, and ordinary TaskId dependency gating. Other communication
+  STs use the `pld.system.notify` / `pld.system.wait` handshake pattern
+  established by notify/wait and collective STs.

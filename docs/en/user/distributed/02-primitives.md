@@ -23,7 +23,7 @@ lower-level primitives only when building a custom protocol.
 
 These are the lowest-level distributed primitives. Scope varies per op —
 `world_size` is host-only; `get_comm_ctx` works in both host orchestrator and
-InCore kernel code; `rank`, `nranks`, `notify`, and `wait` have codegen
+InCore kernel code; `rank`, `nranks`, `notify`, `wait`, and `defer_wait` have codegen
 support only in InCore kernel code (there is no host-orchestrator lowering
 for them).
 
@@ -35,6 +35,7 @@ for them).
 | `nranks` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Number of ranks in this comm group (`INT32`). Lowers to a load of `CommContext::rankNum`. |
 | `notify` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], value: IntLike, *, op: NotifyOp) -> Call` | **InCore-only.** Cross-rank signal deposit. **Side-effect-only** — no return value. Lowers to `TNOTIFY`. |
 | `wait` | `(signal: DT, offsets: Sequence[IntLike], expected: IntLike, *, cmp: WaitCmp) -> Call` | **InCore-only.** Cross-rank wait. **Side-effect-only** — blocks until the local signal slot satisfies `cmp(expected)`. Lowers to `TWAIT`. |
+| `defer_wait` | `(signal: DT, offsets: Sequence[IntLike], expected: IntLike, *, cmp: WaitCmp) -> Call` | **Dedicated top-level `pl.at(CORE_GROUP)` waiter only.** Registers `signal[offsets] >= expected` as a completion condition and returns without spinning the AIV. The enclosing task's TaskId remains incomplete until the condition is ready. |
 
 ## Window Buffer Management (`pld.tensor.*`)
 
@@ -115,6 +116,118 @@ notify next to cube work.
 > value; after `wait` returns, the caller has observed the barrier. Do not
 > reuse the same signal buffer across back-to-back collectives — the protocol
 > uses monotonic counters that do not self-reset. Allocate a fresh buffer.
+
+## Deferred Completion: Release the Core, Keep the Task Pending
+
+`pld.system.wait` is a blocking `TWAIT`: the AIV stays in the kernel and the
+statements after the wait resume on that same AIV. `pld.system.defer_wait` has
+a different contract. It registers a counter condition with the runtime and
+returns; when the dedicated waiter kernel ends, its **physical AIV is free**, but
+the waiter's **logical TaskId is still incomplete**. The scheduler resolves that
+TaskId only after every registered condition is satisfied. The kernel is never
+resumed, so continuation work must be a separate task.
+
+```python
+# Each rank's publisher is independent: publish payload first, then the signal.
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="publish"):
+    pld.tensor.remote_store(payload_value, peer_payload, peer, [0, 0])
+    pld.system.notify(
+        signal, peer=peer, offsets=[my_rank, 0],
+        value=epoch, op=pld.NotifyOp.Set,
+    )
+
+# Receiver: observe the peer publisher. There is deliberately no local
+# publisher -> waiter dependency; add deps only for real local ordering.
+with pl.at(
+    level=pl.Level.CORE_GROUP,
+    name_hint="payload_wait",
+    allow_early_resolve=False,
+) as wait_tid:
+    pld.system.defer_wait(
+        signal, offsets=[peer, 0], expected=epoch,
+        cmp=pld.WaitCmp.Ge,
+    )
+
+# The consumer is not dispatched until wait_tid is logically complete.
+with pl.at(
+    level=pl.Level.CORE_GROUP,
+    name_hint="consume_payload",
+    deps=[wait_tid],
+) as consume_tid:
+    payload_tile = pl.load(peer_payload, [0, 0], [1, WIDTH])
+    # ... consume payload_tile ...
+```
+
+An inline SPMD consumer uses the captured form as well:
+
+```python
+with pl.spmd(
+    NUM_BLOCKS,
+    name_hint="consume_payload_spmd",
+    deps=[wait_tid],
+) as consume_tid:
+    block = pl.get_block_idx()
+    # ... each AIV block reads its payload partition ...
+```
+
+There is no second dependency namespace for deferred completion. `deps` keeps
+its normal strict TaskId meaning: Simpler dynamically delays completion of the
+ordinary waiter TaskId after its AIV retires, so the existing dependency edge
+does not release the consumer until the registered counter is ready. The
+standard Simpler AICore executor already invalidates the entire data cache
+immediately after it picks up every task (before the optional speculative gate
+and before that task's kernel reads its inputs). The waiter is not eligible for
+early resolve, so its direct consumer is never pre-staged at that gate: it is
+picked up through the normal path only after the counter-backed TaskId
+completes. Its task-start invalidation therefore happens after readiness. On
+the producer side, all payload writes must still
+become visible **before** the notify is published; task-start invalidation
+cannot repair a notify-before-data bug.
+
+### Deferred-wait contract
+
+- Put `defer_wait` in a dedicated, top-level task
+  `with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:` scope. This task-level
+  launch lets PyPTO validate single-block execution and provide the runtime
+  `AsyncCtx`. An unmarked direct `@pl.jit.incore` / AIV use is rejected because
+  it bypasses those contracts; programmatically constructed internal IR is accepted
+  only after PyPTO revalidates the complete waiter body and orchestration call site.
+- The waiter must be pure AIV, cannot have a dispatch predicate, and cannot use
+  `allow_early_resolve=True`. Pure scalar bookkeeping and control flow may run
+  between registrations, but `tensor.read`, payload/cache operations, and other
+  communication cannot continue after registration begins. This follows Simpler's own
+  early-dispatch contract: leaving the waiter at `False` disqualifies its direct
+  consumers from being pre-staged before the counter-backed TaskId completes.
+  A normal consumer may choose its own `allow_early_resolve` value; that value
+  governs pre-staging of the consumer's downstream tasks, not whether it may
+  bypass the waiter.
+- `signal` must be a direct, window-bound INT32 `DistributedTensor` parameter;
+  slices, views, and other aliases are not supported. V1 accepts only
+  `cmp=pld.WaitCmp.Ge`.
+- Conditions use monotonic uint32 polling (`counter >= expected`) over INT32
+  signal storage. Both `expected` and every published counter value must stay
+  nonnegative in `[0, INT32_MAX]`; for example, storing `-1` is observed as
+  `UINT32_MAX` and would satisfy every valid threshold. Dynamic expected values
+  are checked at runtime. Do not reset or move a counter backwards while an
+  older generation can still be pending, and do not rely on uint32 wraparound.
+- One waiter task may register at most 64 conditions. Separately, one runtime
+  scheduler may track at most 64 concurrently deferred tasks. These are two
+  different limits and neither is a physical-core count.
+- Connect continuation work with the same ordinary `deps=[..., wait_tid]`
+  accepted for any TaskId dependency. Deferred completion does not impose a
+  separate consumer kernel kind or dependency representation. A terminal
+  waiter with no continuation may submit that task scope fire-and-forget and
+  need not capture a TaskId.
+- If a producer never advances the counter to `expected`, the AIV is not
+  spinning, but the TaskId and every dependent consumer remain pending. The
+  protocol must still guarantee eventual notification.
+
+This mechanism is not asynchronous prefetch: `pl.prefetch.*` manages an SDMA
+data-movement session/event, whereas deferred completion gates a scheduler
+TaskId on a remote counter. It is also not host asynchronous execution—there
+is no Python future, host callback, or host thread waiting for the signal.
+Legacy `pld.system.wait` remains unchanged for code that must resume in the same
+kernel and still supports both `Eq` and `Ge`.
 
 ## Tile-Level RMA (`pld.tile.*`)
 
@@ -228,7 +341,7 @@ and shape must match what the peer stored — a mismatch reads garbage.
 | `pld.remote_load(...)` | `pld.tile.remote_load(...)` |
 | `pld.remote_store(...)` | `pld.tile.remote_store(...)` / `pld.tensor.remote_store(...)` (dispatches on `src`) |
 
-**No short form:** `pld.notify(...)`, `pld.wait(...)`, `pld.put(...)`,
+**No short form:** `pld.notify(...)`, `pld.wait(...)`, `pld.defer_wait(...)`, `pld.put(...)`,
 `pld.get(...)`, `pld.allreduce(...)`, and all other collective ops — these
 require the full 3-segment namespace.
 
