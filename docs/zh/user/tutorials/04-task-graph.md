@@ -56,7 +56,7 @@ assert torch.allclose(out, (x + x) + (x + x), rtol=1e-5, atol=1e-5)
 ```python
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as first:
         scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])
-    with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[first]) as second:
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[first]):
         out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])
 ```
 
