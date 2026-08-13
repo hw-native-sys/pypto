@@ -20,7 +20,9 @@ Before compiling or running tests, source
 `PYPTO_BUILD_JOBS` or `PYPTO_TEST_JOBS` explicitly; never use bare
 `--parallel`, `-j`, or pytest `-n auto`. The loader reads the ignored
 machine-local `testing.env` from the primary checkout, including when invoked
-from a linked worktree, and defaults unclassified machines to two jobs.
+from a linked worktree, and defaults unclassified machines to two jobs. These
+limits override conflicting command examples elsewhere, including the root
+`AGENTS.md` preferred commands.
 
 ## Skills (`.claude/skills/`)
 

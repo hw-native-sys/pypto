@@ -13,11 +13,40 @@ PYPTO_GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/
 PYPTO_PRIMARY_WORKTREE=$(dirname "$PYPTO_GIT_COMMON_DIR")
 PYPTO_TESTING_ENV="$PYPTO_PRIMARY_WORKTREE/.claude/skills/testing/testing.env"
 
-[ -f "$PYPTO_TESTING_ENV" ] && source "$PYPTO_TESTING_ENV"
+if [ -f "$PYPTO_TESTING_ENV" ]; then
+    source "$PYPTO_TESTING_ENV" || return $?
+fi
 
 export PYPTO_MACHINE_PROFILE="${PYPTO_MACHINE_PROFILE:-unclassified}"
 export PYPTO_BUILD_JOBS="${PYPTO_BUILD_JOBS:-2}"
 export PYPTO_TEST_JOBS="${PYPTO_TEST_JOBS:-2}"
+
+case "$PYPTO_BUILD_JOBS" in
+    '' | *[!0-9]*)
+        echo "PYPTO_BUILD_JOBS must be a positive decimal integer, got: $PYPTO_BUILD_JOBS" >&2
+        unset PYPTO_GIT_COMMON_DIR PYPTO_PRIMARY_WORKTREE PYPTO_TESTING_ENV
+        return 1
+        ;;
+esac
+if [ "$PYPTO_BUILD_JOBS" -eq 0 ]; then
+    echo "PYPTO_BUILD_JOBS must be greater than zero" >&2
+    unset PYPTO_GIT_COMMON_DIR PYPTO_PRIMARY_WORKTREE PYPTO_TESTING_ENV
+    return 1
+fi
+
+case "$PYPTO_TEST_JOBS" in
+    '' | *[!0-9]*)
+        echo "PYPTO_TEST_JOBS must be a positive decimal integer, got: $PYPTO_TEST_JOBS" >&2
+        unset PYPTO_GIT_COMMON_DIR PYPTO_PRIMARY_WORKTREE PYPTO_TESTING_ENV
+        return 1
+        ;;
+esac
+if [ "$PYPTO_TEST_JOBS" -eq 0 ]; then
+    echo "PYPTO_TEST_JOBS must be greater than zero" >&2
+    unset PYPTO_GIT_COMMON_DIR PYPTO_PRIMARY_WORKTREE PYPTO_TESTING_ENV
+    return 1
+fi
+
 export CMAKE_BUILD_PARALLEL_LEVEL="$PYPTO_BUILD_JOBS"
 export MAKEFLAGS="-j$PYPTO_BUILD_JOBS"
 export MAX_JOBS="$PYPTO_BUILD_JOBS"
