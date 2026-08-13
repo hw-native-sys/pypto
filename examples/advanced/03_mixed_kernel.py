@@ -54,7 +54,7 @@ def staged_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="cube_only"):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="vector_only"):
-        out = pl.assemble(out, pl.add(acc, bias), [0, 0])
+        out[:] = pl.add(acc, bias)
     return out
 
 
@@ -74,7 +74,7 @@ def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[p
         name_hint="mixed_up_down",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)  # cube (AIC)
-        out = pl.assemble(out, pl.add(acc, bias), [0, 0])  # vector (AIV)
+        out[:] = pl.add(acc, bias)  # vector (AIV)
     return out
 
 
@@ -87,7 +87,7 @@ def mixed_matmul_bias_lr(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Ou
         name_hint="mixed_left_right",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)
-        out = pl.assemble(out, pl.add(acc, bias), [0, 0])
+        out[:] = pl.add(acc, bias)
     return out
 
 

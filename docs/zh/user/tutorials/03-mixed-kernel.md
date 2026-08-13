@@ -17,7 +17,7 @@ cube 与 vector 在同一个作用域里同时工作。
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="cube_only"):
     acc = pl.matmul(a, b, out_dtype=pl.FP32)
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="vector_only"):
-    out = pl.assemble(out, pl.add(acc, bias), [0, 0])
+    out[:] = pl.add(acc, bias)
 ```
 
 两个作用域，两次派发。matmul 作用域没跑完之前 vector 单元无事可做，跑完之后 cube 单元又闲下来。这正是混合 kernel 要取代的写法 —— 也正是那些名为「融合」的 kernel 底下常常仍是的样子：名字上融合，执行上串行。
@@ -44,7 +44,7 @@ def mixed(
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
-        out = pl.assemble(out, pl.add(acc, bias), [0, 0])        # vector (AIV)
+        out[:] = pl.add(acc, bias)        # vector (AIV)
     return out
 
 torch.manual_seed(0)

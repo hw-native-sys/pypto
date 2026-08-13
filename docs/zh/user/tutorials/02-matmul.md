@@ -23,7 +23,7 @@ def matmul_small(
     c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul"):
-        c = pl.assemble(c, pl.matmul(a, b, out_dtype=pl.FP32), [0, 0])
+        c[:] = pl.matmul(a, b, out_dtype=pl.FP32)
     return c
 
 torch.manual_seed(0)
@@ -58,13 +58,13 @@ def matmul_k_blocked(
         for k in pl.range(1, 512 // K_CHUNK):
             k0 = k * K_CHUNK
             acc = pl.matmul_acc(acc, a[:, k0 : k0 + K_CHUNK], b[k0 : k0 + K_CHUNK, :])
-        c = pl.assemble(c, acc, [0, 0])
+        c[:] = acc
     return c
 ```
 
 `pl.matmul` **创建**累加器，`pl.matmul_acc` **累加进**一个已有的。这个不对称正是循环从 1 开始的原因 —— 第 0 块还没有可累加的对象。把每一块都写成 `pl.matmul_acc`、另外单独分配累加器也可行，代价是多一次初始化。
 
-累加器在整个循环期间都留在片上，只有最后那次 `pl.assemble` 才碰 DDR —— 这正是分块 K 而非逐块存回部分积的意义。
+累加器在整个循环期间都留在片上，只有最后那次写出才碰 DDR —— 这正是分块 K 而非逐块存回部分积的意义。
 
 ## 第 3 步：编译器替你做的部分
 
@@ -80,7 +80,7 @@ def matmul_k_blocked(
 KS = K // SPLITS                       # each core's slice of K
 
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
-    c = pl.assemble(c, pl.full([M, N], dtype=pl.FP32, value=0.0), [0, 0])
+    c[:] = pl.full([M, N], dtype=pl.FP32, value=0.0)
 for ks in pl.parallel(SPLITS):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
         k0 = ks * KS

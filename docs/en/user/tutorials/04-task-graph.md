@@ -37,9 +37,9 @@ def inferred(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1"):
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])       # writes scratch
+        scratch[:] = pl.add(x, x)       # writes scratch
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2"):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])   # reads scratch
+        out[:] = pl.add(scratch, scratch)   # reads scratch
     return scratch, out
 
 torch.manual_seed(0)
@@ -67,9 +67,9 @@ Shown here on the *same* pair as step 1, so you can still check the result:
 
 ```python
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as first:
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])
+        scratch[:] = pl.add(x, x)
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[first]):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])
+        out[:] = pl.add(scratch, scratch)
 ```
 
 `as first` binds the region's TaskId; `deps=[first]` makes the consumer wait on it.

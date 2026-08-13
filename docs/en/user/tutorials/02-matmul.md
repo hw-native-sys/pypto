@@ -25,7 +25,7 @@ def matmul_small(
     c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="matmul"):
-        c = pl.assemble(c, pl.matmul(a, b, out_dtype=pl.FP32), [0, 0])
+        c[:] = pl.matmul(a, b, out_dtype=pl.FP32)
     return c
 
 torch.manual_seed(0)
@@ -65,7 +65,7 @@ def matmul_k_blocked(
         for k in pl.range(1, 512 // K_CHUNK):
             k0 = k * K_CHUNK
             acc = pl.matmul_acc(acc, a[:, k0 : k0 + K_CHUNK], b[k0 : k0 + K_CHUNK, :])
-        c = pl.assemble(c, acc, [0, 0])
+        c[:] = acc
     return c
 ```
 
@@ -74,7 +74,7 @@ why the loop starts at 1 — the zeroth block has nothing to add into yet. Writi
 `pl.matmul_acc` for every block, over an accumulator you allocated separately, also works
 and costs one extra initialisation.
 
-The accumulator stays on-chip across the whole loop. Only the final `pl.assemble` touches
+The accumulator stays on-chip across the whole loop. Only the final store touches
 DDR — which is the point of blocking K rather than storing each partial product.
 
 ## Step 3: when the compiler does it for you
@@ -98,7 +98,7 @@ slice of K and has them accumulate into the same output with an atomic add:
 KS = K // SPLITS                       # each core's slice of K
 
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
-    c = pl.assemble(c, pl.full([M, N], dtype=pl.FP32, value=0.0), [0, 0])
+    c[:] = pl.full([M, N], dtype=pl.FP32, value=0.0)
 for ks in pl.parallel(SPLITS):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
         k0 = ks * KS

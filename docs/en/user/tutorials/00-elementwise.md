@@ -33,7 +33,7 @@ def add_tensor(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.assemble(out, pl.add(a, b), [0, 0])
+        out[:] = pl.add(a, b)
     return out
 
 a = torch.randn(128, 128)
@@ -54,21 +54,29 @@ not an error.
 itself is the control plane; it dispatches work but cannot contain operators. Writing
 `out = pl.add(a, b)` outside the block is an error — the parser says so.
 
-**`pl.assemble` is how you write an output.** This is the step everyone gets wrong:
+**`out[:] =` is how you write an output.** This is the step everyone gets wrong:
 
 ```python
-out = pl.add(a, b)                              # ✗ compiles, writes nothing
-out = pl.assemble(out, pl.add(a, b), [0, 0])    # ✓
+out = pl.add(a, b)          # ✗ compiles, writes nothing
+out[:] = pl.add(a, b)       # ✓ writes the whole tensor
 ```
 
 The first line rebinds a local name. It compiles, it runs, and nothing ever writes the
 output — you are handed whatever that buffer happened to hold, with no diagnostic from any
-stage. On the simulator these examples come back as NaN. `pl.assemble(dst, value, offset)`
-is the operator that actually places `value` into `dst` at `offset`.
+stage. On the simulator these examples come back as NaN. The subscript is what makes it a
+write rather than a rebind, exactly as it does for a numpy array.
 
-> **Fatal pitfall:** the wrong form is the one that reads naturally. If a kernel returns
-> garbage and nothing errored, check that every write goes through `pl.assemble` or
-> `pl.store`.
+For anything other than the whole tensor, name the offset:
+
+| Writing | Spell it |
+| ------- | -------- |
+| The whole tensor | `out[:] = value` |
+| A sub-region | `out[r0 : r0 + R, c0 : c0 + C] = value` |
+| At a computed offset, or atomically | `pl.assemble(out, value, [r, c], atomic=...)` |
+
+> **Fatal pitfall:** the wrong form is the one that reads most naturally. If a kernel
+> returns garbage and nothing errored, check that every write is a subscripted assignment,
+> a `pl.assemble`, or a `pl.store`.
 
 ## Step 2: tile level
 
@@ -95,8 +103,8 @@ def add_tile(
 | `pl.add(tile, tile)` | Now a *tile* op — same name, operand types decide |
 | `pl.store(tile, offset, t)` | Copies the tile back out |
 
-`pl.store` is the tile-level counterpart of `pl.assemble`. Same rule: it is the operator
-that writes, so the result has to flow through it.
+`pl.store` is the tile-level counterpart. Same rule: it is what performs the write, so the
+result has to flow through it.
 
 Both versions compute the same thing. Step 1 is shorter; step 2 is what you need as soon
 as the shape stops fitting.
@@ -155,7 +163,7 @@ python examples/beginner/02_elementwise.py
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **Output is unwritten (NaN or garbage) and nothing errored** | The result was assigned to the `Out` parameter instead of written | Route it through `pl.assemble` / `pl.store` |
+| **Output is unwritten (NaN or garbage) and nothing errored** | The result was assigned to the `Out` parameter instead of written | Write it with `out[:] = ...`, `pl.assemble`, or `pl.store` |
 | **`Misplaced tensor op`** | Operators sit in the `@pl.jit` body, outside `pl.at` | Move them inside `with pl.at(level=pl.Level.CORE_GROUP):` |
 | **Tile shape rejected** | The window exceeds what on-chip memory holds | Chunk it — step 3 |
 | **Results differ between runs** | Two tasks touching one buffer with nothing ordering them | See [The dependency model](../tasks/00-model.md) |

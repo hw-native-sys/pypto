@@ -32,9 +32,9 @@ def inferred(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1"):
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])       # writes scratch
+        scratch[:] = pl.add(x, x)       # writes scratch
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2"):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])   # reads scratch
+        out[:] = pl.add(scratch, scratch)   # reads scratch
     return scratch, out
 
 torch.manual_seed(0)
@@ -57,9 +57,9 @@ assert torch.allclose(out, (x + x) + (x + x), rtol=1e-5, atol=1e-5)
 
 ```python
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as first:
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])
+        scratch[:] = pl.add(x, x)
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[first]):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])
+        out[:] = pl.add(scratch, scratch)
 ```
 
 `as first` 绑定该区域的 TaskId；`deps=[first]` 让消费者等它。

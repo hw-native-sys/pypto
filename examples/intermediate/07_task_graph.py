@@ -45,9 +45,9 @@ def inferred_edge(x: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tenso
     derived. This is the case that needs nothing from you.
     """
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1"):
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])  # writes scratch
+        scratch[:] = pl.add(x, x)  # writes scratch
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2"):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])  # reads scratch
+        out[:] = pl.add(scratch, scratch)  # reads scratch
     return scratch, out
 
 
@@ -61,9 +61,9 @@ def declared_edge(x: pl.Tensor, scratch: pl.Out[pl.Tensor], out: pl.Out[pl.Tenso
     final wait set is the union of the two.
     """
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as first:
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])
+        scratch[:] = pl.add(x, x)
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[first]):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])
+        out[:] = pl.add(scratch, scratch)
     return scratch, out
 
 

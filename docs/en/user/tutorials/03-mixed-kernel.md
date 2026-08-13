@@ -19,7 +19,7 @@ occupies them one after the other:
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="cube_only"):
     acc = pl.matmul(a, b, out_dtype=pl.FP32)
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="vector_only"):
-    out = pl.assemble(out, pl.add(acc, bias), [0, 0])
+    out[:] = pl.add(acc, bias)
 ```
 
 Two scopes, two dispatches. The vector units have nothing to do until the matmul scope has
@@ -49,7 +49,7 @@ def mixed(
         name_hint="mixed",
     ):
         acc = pl.matmul(a, b, out_dtype=pl.FP32)                 # cube (AIC)
-        out = pl.assemble(out, pl.add(acc, bias), [0, 0])        # vector (AIV)
+        out[:] = pl.add(acc, bias)        # vector (AIV)
     return out
 
 torch.manual_seed(0)

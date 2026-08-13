@@ -30,7 +30,7 @@ def add_tensor(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.assemble(out, pl.add(a, b), [0, 0])
+        out[:] = pl.add(a, b)
     return out
 
 a = torch.randn(128, 128)
@@ -46,16 +46,24 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 
 **`with pl.at(level=pl.Level.CORE_GROUP):` 才是放算子的地方。** `@pl.jit` 函数体本身是控制面；它派发工作，但不能容纳算子。把 `out = pl.add(a, b)` 写在块外是错误 —— 解析器会说。
 
-**`pl.assemble` 才是写输出的方式。** 这一步是所有人都会栽的地方：
+**`out[:] =` 才是写输出的方式。** 这一步是所有人都会栽的地方：
 
 ```python
-out = pl.add(a, b)                              # WRONG: compiles, writes nothing
-out = pl.assemble(out, pl.add(a, b), [0, 0])    # correct
+out = pl.add(a, b)          # WRONG: compiles, writes nothing
+out[:] = pl.add(a, b)       # correct: writes the whole tensor
 ```
 
-第一行只是重绑定了一个局部名字。它编译通过、跑得起来，而**从来没有任何东西写过输出** —— 你拿到的是那块缓冲区当时恰好存着的内容，且任何一级都不会给出诊断。在模拟器上，这些示例回来的是 NaN。`pl.assemble(dst, value, offset)` 才是真正把 `value` 放进 `dst` 的 `offset` 处的那个算子。
+第一行只是重绑定了一个局部名字。它编译通过、跑得起来，而**从来没有任何东西写过输出** —— 你拿到的是那块缓冲区当时恰好存着的内容，且任何一级都不会给出诊断。在模拟器上，这些示例回来的是 NaN。让它成为「写」而不是「重绑定」的，正是那个下标 —— 与 numpy 数组完全一致。
 
-> **致命陷阱：** 错的那种写法恰恰读起来最自然。如果一个 kernel 返回垃圾而全程无报错，先检查每一次写入是否都经过 `pl.assemble` 或 `pl.store`。
+写整张量之外的情形，就要点明偏移：
+
+| 要写的是 | 怎么写 |
+| -------- | ------ |
+| 整个张量 | `out[:] = value` |
+| 一个子区域 | `out[r0 : r0 + R, c0 : c0 + C] = value` |
+| 计算出来的偏移，或原子写 | `pl.assemble(out, value, [r, c], atomic=...)` |
+
+> **致命陷阱：** 错的那种写法恰恰读起来最自然。如果一个 kernel 返回垃圾而全程无报错，先检查每一次写入是不是带下标的赋值、`pl.assemble` 或 `pl.store`。
 
 ## 第 2 步：tile 级
 
@@ -81,7 +89,7 @@ def add_tile(
 | `pl.add(tile, tile)` | 现在是 *tile* op —— 同名，由操作数类型决定 |
 | `pl.store(tile, offset, t)` | 把 tile 拷回去 |
 
-`pl.store` 是 `pl.assemble` 的 tile 级对应物。规则相同：它才是执行写入的算子，所以结果必须流经它。
+`pl.store` 是 tile 级的对应物。规则相同：它才是执行写入的那一步，所以结果必须流经它。
 
 两版算的是同一件事。第 1 步更短；第 2 步是形状一旦装不下就必须用的写法。
 
@@ -133,7 +141,7 @@ python examples/beginner/02_elementwise.py
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **输出未被写入（NaN 或垃圾）且无任何报错** | 结果被赋给了 `Out` 参数而不是写进去 | 让它流经 `pl.assemble` / `pl.store` |
+| **输出未被写入（NaN 或垃圾）且无任何报错** | 结果被赋给了 `Out` 参数而不是写进去 | 用 `out[:] = ...`、`pl.assemble` 或 `pl.store` 写它 |
 | **`Misplaced tensor op`** | 算子写在 `@pl.jit` 体内、`pl.at` 之外 | 移进 `with pl.at(level=pl.Level.CORE_GROUP):` |
 | **tile 形状被拒** | 窗口超出片上内存所能容纳 | 分块 —— 第 3 步 |
 | **多次运行结果不同** | 两个任务触碰同一缓冲区却无任何东西定序 | 见 [依赖模型](../tasks/00-model.md) |
