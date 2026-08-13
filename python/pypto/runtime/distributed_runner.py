@@ -62,6 +62,52 @@ _DTYPE_MAP: dict[str, tuple[type, torch.dtype]] = {
 _PERSISTENT_ZERO_CHUNK_BYTES = 1 << 20
 
 
+@dataclass(frozen=True)
+class DistributedRunIdentity:
+    """Stable correlation identity for one accepted distributed dispatch."""
+
+    dispatch_id: int
+    frame_id: int
+    simpler_run_id: int | None
+
+
+def _read_simpler_run_id(native_handle: Any) -> int | None:
+    """Read the run identity retained by Simpler's accepted handle."""
+    for name in ("run_id", "_run_id"):
+        try:
+            run_id = getattr(native_handle, name, None)
+        except Exception:  # noqa: BLE001 - correlation cannot change dispatch outcome
+            continue
+        if isinstance(run_id, int) and run_id > 0:
+            return run_id
+    return None
+
+
+def _emit_pipeline_span(
+    name: str,
+    identity: DistributedRunIdentity,
+    timestamp_ns: int,
+    duration_ns: int,
+) -> None:
+    """Emit one PyPTO lifecycle span through Simpler's shared host sink."""
+    try:
+        from _task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            HOST_STRACE_ENABLED,
+            _emit_host_span,
+            _host_span_sink_available,
+        )
+
+        if not HOST_STRACE_ENABLED or not _host_span_sink_available():
+            return
+        attributes = (
+            f"run_id={identity.simpler_run_id or 0} dispatch_id=0 slot_id=0 generation=0 "
+            f"pypto_dispatch_id={identity.dispatch_id} pypto_frame_id={identity.frame_id}"
+        )
+        _emit_host_span(name, 0, 0, 0, timestamp_ns, duration_ns, attributes)
+    except Exception:  # noqa: BLE001 - diagnostics must not change dispatch outcome
+        logger.debug("Could not emit PyPTO pipeline trace span", exc_info=True)
+
+
 def _resolve_persistent_window_reset(persistent: bool, reset_persistent_windows: bool | None) -> bool:
     """Resolve the retained-window reset policy.
 
@@ -115,6 +161,11 @@ class DistributedRunHandle:
         self._native_handle = native_handle
         self._frame: _DispatchFrame | None = frame
         self._dispatch_id = dispatch_id
+        self._identity: DistributedRunIdentity | None = DistributedRunIdentity(
+            dispatch_id=dispatch_id,
+            frame_id=frame.slot_id,
+            simpler_run_id=_read_simpler_run_id(native_handle) if native_handle is not None else None,
+        )
         self._postprocess = postprocess
         self._cv = threading.Condition()
         self._wait_in_progress = False
@@ -141,12 +192,31 @@ class DistributedRunHandle:
         handle._native_handle = None
         handle._frame = None
         handle._dispatch_id = 0
+        handle._identity = None
         handle._postprocess = None
         handle._cv = threading.Condition()
         handle._wait_in_progress = False
         handle._terminal = True
         handle._error = error
         return handle
+
+    @property
+    def identity(self) -> DistributedRunIdentity | None:
+        """Read-only dispatch/frame identity linked to the accepted Simpler run."""
+        with self._cv:
+            return self._identity
+
+    def _accept_native_handle(self, native_handle: Any) -> None:
+        """Retain one accepted native handle and publish its correlation id."""
+        with self._cv:
+            identity = self._identity
+            assert identity is not None
+            self._native_handle = native_handle
+            self._identity = DistributedRunIdentity(
+                dispatch_id=identity.dispatch_id,
+                frame_id=identity.frame_id,
+                simpler_run_id=_read_simpler_run_id(native_handle),
+            )
 
     @property
     def done(self) -> bool:
@@ -221,6 +291,10 @@ class DistributedRunHandle:
             self._cv.notify_all()
         if worker is not None and frame is not None:
             worker._retire_dispatch_handle(self, frame, error)
+        identity = self.identity
+        if identity is not None:
+            completion_ns = time.monotonic_ns()
+            _emit_pipeline_span("pypto_pipeline.result_completion", identity, completion_ns, 0)
         if error is not None:
             raise error
 
@@ -1934,6 +2008,7 @@ class DistributedWorker(Worker):
     ) -> None:
         """Install or recover the native handle for one published frame."""
         accepted_before = self._accepted_native_handles()
+        acceptance_start_ns = time.monotonic_ns()
         native_handle: Any | None = None
         try:
             native_handle = self._submit_prepared_native(state, tensors, call_config, frame.keepalive)
@@ -1946,9 +2021,27 @@ class DistributedWorker(Worker):
                     self._persistent_error_reported = True
                 self._discard_unsubmitted_dispatch_handle(handle, frame)
             else:
-                handle._native_handle = native_handle
+                handle._accept_native_handle(native_handle)
+                acceptance_end_ns = time.monotonic_ns()
+                identity = handle.identity
+                assert identity is not None
+                _emit_pipeline_span(
+                    "pypto_pipeline.native_acceptance",
+                    identity,
+                    acceptance_start_ns,
+                    acceptance_end_ns - acceptance_start_ns,
+                )
             raise
-        handle._native_handle = native_handle
+        handle._accept_native_handle(native_handle)
+        acceptance_end_ns = time.monotonic_ns()
+        identity = handle.identity
+        assert identity is not None
+        _emit_pipeline_span(
+            "pypto_pipeline.native_acceptance",
+            identity,
+            acceptance_start_ns,
+            acceptance_end_ns - acceptance_start_ns,
+        )
 
     def _dispatch_prepared(
         self,
@@ -1965,6 +2058,15 @@ class DistributedWorker(Worker):
             [] if keepalive is None else keepalive,
         )
         native_handle.result()
+
+    @staticmethod
+    def _trace_submit_if_accepted(handle: DistributedRunHandle, start_ns: int) -> None:
+        """Record submit completion only after native ownership is published."""
+        identity = handle.identity
+        if identity is None or identity.simpler_run_id is None:
+            return
+        end_ns = time.monotonic_ns()
+        _emit_pipeline_span("pypto_pipeline.submit", identity, start_ns, end_ns - start_ns)
 
     # ------------------------------------------------------------------
     # Device memory primitives
@@ -2280,6 +2382,7 @@ class DistributedWorker(Worker):
                 f"got {len(args)}. Parameters: {[p.name for p in param_infos]}"
             )
 
+        submit_start_ns = time.monotonic_ns()
         frame, dispatch_id = self._acquire_dispatch_frame()
         try:
             call_config, dfx_base, two_pass_swimlane = self._prepare_dispatch_config(
@@ -2350,7 +2453,12 @@ class DistributedWorker(Worker):
                 self._discard_unsubmitted_dispatch_handle(handle, frame)
                 raise
 
-            self._submit_native_dispatch(handle, frame, state, tensors, call_config)
+            try:
+                self._submit_native_dispatch(handle, frame, state, tensors, call_config)
+            except BaseException:
+                self._trace_submit_if_accepted(handle, submit_start_ns)
+                raise
+            self._trace_submit_if_accepted(handle, submit_start_ns)
             return handle
         except BaseException:
             if frame.handle is None and frame.in_use:

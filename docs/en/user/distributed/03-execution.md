@@ -73,6 +73,17 @@ Use `handle.result(timeout)` or its alias `handle.wait(timeout)` to wait and
 raise the cached dispatch error. `handle.done` reports terminal completion
 without blocking.
 
+For trace correlation, `handle.identity` returns a read-only
+`DistributedRunIdentity` containing the PyPTO `dispatch_id`, its bounded
+metadata `frame_id`, and the accepted Simpler `simpler_run_id`. The same values
+are attached to the `pypto_pipeline.submit`,
+`pypto_pipeline.native_acceptance`, and
+`pypto_pipeline.result_completion` `[STRACE]` spans. These run-level spans use
+zero for the downstream `dispatch_id`, `slot_id`, and `generation`; Simpler's
+spans carry the concrete native values under the same `run_id`. Diagnostic
+two-pass capture does not publish an asynchronous dispatch and therefore
+returns a completed handle whose identity is `None`.
+
 ```python
 with compiled.prepare() as rt:
     first = rt.submit(compiled, input_a, weight, output_a)

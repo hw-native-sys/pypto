@@ -65,6 +65,15 @@ worker 固定拥有两个可复用的分发元数据帧。前两次提交可以�
 使用 `handle.result(timeout)` 或其别名 `handle.wait(timeout)` 等待完成并抛出缓存的
 分发错误；`handle.done` 可无阻塞地报告是否已经结束。
 
+为了关联 trace，`handle.identity` 会返回只读的 `DistributedRunIdentity`，其中包含
+PyPTO `dispatch_id`、有界元数据 `frame_id`，以及 Simpler 接受该任务后分配的
+`simpler_run_id`。`pypto_pipeline.submit`、
+`pypto_pipeline.native_acceptance` 和
+`pypto_pipeline.result_completion` 三个 `[STRACE]` span 也携带相同的值。
+这些 run 层 span 的下游 `dispatch_id`、`slot_id` 和 `generation` 均为 0；Simpler
+span 会在同一个 `run_id` 下携带具体的 native 值。诊断用双遍采集不会发布异步任务，
+因此其已完成 handle 的 identity 为 `None`。
+
 ```python
 with compiled.prepare() as rt:
     first = rt.submit(compiled, input_a, weight, output_a)
