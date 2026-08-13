@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -33,7 +34,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -81,23 +81,9 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
   return (*func_name_to_id)[func_name];
 }
 
-namespace {
-
-int GetGMPipeSlotCount(int dir_mask) {
-  const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
-  if (dir_mask == bidirectional) {
-    return 4;
-  }
-  if (dir_mask == core_affinity::kDirMaskC2V || dir_mask == core_affinity::kDirMaskV2C) {
-    return 8;
-  }
-  return 0;
-}
-
-}  // namespace
-
 int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const FunctionPtr& root_func) {
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
+  std::map<std::pair<int, int>, int> slot_count_by_pipe;
 
   std::unordered_set<std::string> visited_funcs;
   std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
@@ -114,8 +100,17 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
         const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        const int slot_num = call->GetKwarg<int>("slot_num", 0);
         if (dir_mask > 0 && slot_size > 0) {
           const auto key = std::make_pair(pipe_id, dir_mask);
+          // Compare the *effective* slot count, so a call that omits slot_num and one that
+          // states the dir_mask default agree, and a call that omits it while another states a
+          // non-default value is caught rather than silently sized from the explicit one.
+          const int slot_count = codegen::gm_pipe::EffectiveSlotCount(dir_mask, slot_num);
+          auto [nit, ninserted] = slot_count_by_pipe.emplace(key, slot_count);
+          CHECK(ninserted || nit->second == slot_count)
+              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+              << " uses inconsistent slot counts: " << nit->second << " and " << slot_count;
           auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
           CHECK(inserted || it->second == slot_size)
               << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
@@ -158,12 +153,16 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
   int64_t total_bytes = 0;
   for (const auto& [key, slot_size] : slot_size_by_pipe) {
     const int dir_mask = key.second;
-    const int slot_count = GetGMPipeSlotCount(dir_mask);
-    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
-    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() -
-                             static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size))
+    // The dir_mask must describe a GM-backed pipe before any explicit slot_num is honoured,
+    // so an unlayoutable direction is still rejected rather than sized from the override.
+    CHECK(codegen::gm_pipe::SlotCountForDirMask(dir_mask) > 0)
+        << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
+    auto num_it = slot_count_by_pipe.find(key);
+    const int slot_count = num_it != slot_count_by_pipe.end() ? num_it->second : 0;
+    const int64_t pipe_bytes = codegen::gm_pipe::FootprintBytes(dir_mask, slot_count, slot_size);
+    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() - pipe_bytes)
         << "GM slot buffer size overflow while sizing frontend pipe id " << key.first;
-    total_bytes += static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size);
+    total_bytes += pipe_bytes;
   }
 
   if (total_bytes == 0) {

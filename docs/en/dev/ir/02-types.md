@@ -32,13 +32,15 @@ span = ir.Span.unknown()
 shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
-# Tensor with MemRef
-memref = ir.MemRef(ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
+# Tensor with MemRef: base allocation, byte offset within it, size in bytes
+memref = ir.MemRef("mem_ddr_0", 0, 800)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
-`TensorType.memory_space` is always `ir.Mem.DDR`. `MemRef` carries address,
-size, and id; memory space is not stored on `MemRef` itself.
+`TensorType.memory_space` is always `ir.Mem.DDR`. A `MemRef` names an
+allocation (`base_`) and a byte range within it (`byte_offset_`, `size_`);
+memory space is not stored on `MemRef` itself. See
+[MemRef](01-hierarchy.md#memref-memory-reference) for the full field list.
 
 ### DistributedTensorType
 
@@ -106,7 +108,7 @@ stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(128, DataType.INT64,
 tensor_view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
+memref = ir.MemRef("mem_ddr_1", 0, 16384)
 tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -181,13 +183,11 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
             ir.ConstInt(16, DataType.INT64, span)]
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
-# Tile with MemRef and TileView
-memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 512, 0)
+# Tile with MemRef and TileView. TileView is immutable — every field is passed
+# to the constructor; valid_shape / stride / start_offset accept int or Expr.
+memref = ir.MemRef("mem_left_0", 0, 512)
 
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16], start_offset=0)
 
 tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
@@ -195,6 +195,10 @@ tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Lef
 `TileType.memory_space` is the source of truth for tile placement. If a
 `TileType` carries a `MemRef`, provide the tile memory space on the `TileType`
 itself.
+
+The `valid_shape` above is a genuine sub-region (`[8, 16]` of a `[16, 16]`
+tile). A `valid_shape` equal to the full shape is redundant, so the constructor
+clears it — see the canonicalization rules below.
 
 For Python DSL annotations, omitted `TileView` syntax is normalized to an
 implicit TileView derived from the tile shape and, when present, the tile
@@ -464,14 +468,11 @@ program = ir.Program([square_func, main_func], "math", span)
 ### Example 6: Memory Layout with TileType
 
 ```python
-# 32x32 tile in Left memory with custom stride
+# 32x32 tile in Left memory, viewing a 16x32 valid region with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 2048, 0)
+memref = ir.MemRef("mem_left_0", 0, 2048)
 
-tile_view = ir.TileView()
-tile_view.valid_shape = shape
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(32, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+tile_view = ir.TileView(valid_shape=[16, 32], stride=[1, 32], start_offset=0)
 
 tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```

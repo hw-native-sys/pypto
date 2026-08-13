@@ -241,6 +241,21 @@ class TestGetLastYieldStmt:
         outer = ir.SeqStmts([inner_seq], _span())
         assert ir.get_last_yield_stmt(outer) is ys
 
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda body: ir.RuntimeScopeStmt(manual=True, body=body, span=_span()),
+            lambda body: ir.SplitAivScopeStmt(ir.SplitMode.UP_DOWN, body=body, span=_span()),
+        ],
+        ids=["runtime-scope", "split-aiv-scope"],
+    )
+    def test_transparent_scope(self, wrap):
+        """SSA-transparent scopes do not hide a trailing control-flow yield."""
+        value = _var("value")
+        ys = ir.YieldStmt([value], _span())
+        scope = wrap(ir.SeqStmts([ys], _span()))
+        assert ir.get_last_yield_stmt(scope) is ys
+
 
 # ---------------------------------------------------------------------------
 # TestSubstituteExpr

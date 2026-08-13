@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/distributed/comm_layout.h"
+#include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -42,14 +43,16 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace codegen {
@@ -77,6 +80,58 @@ using ir::YieldStmtPtr;
 namespace transform_utils = ir::transform_utils;
 
 namespace {
+
+// Escape a source path for an MLIR `"..."` string literal. A path is an
+// arbitrary OS byte string — on POSIX every byte except `/` and NUL is legal, so
+// a quote, a backslash, or a raw control character in one must not be able to
+// break the module. MLIR's lexer accepts `\\`, `\"`, `\n`, `\t` and `\xx` hex
+// escapes, and rejects an unescaped control character inside a literal, so
+// anything outside printable ASCII is emitted as a hex escape.
+std::string EscapeMlirString(const std::string& str) {
+  static constexpr char kHexDigits[] = "0123456789ABCDEF";
+  std::string escaped;
+  escaped.reserve(str.size());
+  for (char c : str) {
+    const auto byte = static_cast<unsigned char>(c);
+    if (c == '\\' || c == '"') {
+      escaped.push_back('\\');
+      escaped.push_back(c);
+    } else if (c == '\n') {
+      escaped += "\\n";
+    } else if (c == '\t') {
+      escaped += "\\t";
+    } else if (byte < 0x20 || byte == 0x7F) {
+      escaped += "\\";
+      escaped.push_back(kHexDigits[byte >> 4]);
+      escaped.push_back(kHexDigits[byte & 0x0F]);
+    } else {
+      escaped.push_back(c);
+    }
+  }
+  return escaped;
+}
+
+// True when `inner` is a source range nested inside `outer` — the invariant a
+// sub-expression's span satisfies with respect to its enclosing statement's span.
+//
+// This is what rejects a Call span that a pass overwrote with a coarser one.
+// ConvertTensorToTileOps rebuilds every tile op it synthesizes with the enclosing
+// *function*'s span (convert_tensor_to_tile_ops_pass.cpp), which begins before the
+// statement and therefore fails containment — so the statement's own span, which
+// that rewrite preserved, is kept instead.
+bool SpanContains(const ir::Span* outer, const ir::Span& inner) {
+  if (!inner.is_valid() || inner.filename_.empty()) return false;
+  // No usable enclosing span means nothing contradicts the inner one.
+  if (outer == nullptr || !outer->is_valid() || outer->filename_.empty()) return true;
+  if (outer->filename_ != inner.filename_) return false;
+  // An unknown end line (-1) degenerates to a single-line range at the start.
+  const int outer_end = outer->end_line_ > 0 ? outer->end_line_ : outer->begin_line_;
+  const int inner_end = inner.end_line_ > 0 ? inner.end_line_ : inner.begin_line_;
+  // Both ends must sit inside the statement. Checking only the start would accept
+  // a rebuilt span that begins within the statement but runs past its last line,
+  // which is exactly the untrustworthy case this predicate exists to reject.
+  return inner.begin_line_ >= outer->begin_line_ && inner_end <= outer_end;
+}
 
 // Full-MemRef-identity key used by PTOAS memory-planner codegen to decide when
 // two tile variables denote the *same* buffer (and must share one tile_buf
@@ -334,17 +389,6 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   return dyn_vars;
 }
 
-int GetGMPipeSlotCount(int dir_mask) {
-  const int bidirectional = ir::core_affinity::kDirMaskC2V | ir::core_affinity::kDirMaskV2C;
-  if (dir_mask == bidirectional) {
-    return 4;
-  }
-  if (dir_mask == ir::core_affinity::kDirMaskC2V || dir_mask == ir::core_affinity::kDirMaskV2C) {
-    return 8;
-  }
-  return 0;
-}
-
 // In-place DPS ops that write into input 0 rather than a freshly-allocated
 // result tile:
 //   * scatter family (`set_output_reuses_input(0)`): a tscatter into a fresh
@@ -552,8 +596,10 @@ const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return ba
 // Generate entry and GenerateFunction
 // ========================================================================
 
-std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr) {
+std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
   emit_tile_addr_ = emit_tile_addr;
+  emit_source_loc_ = emit_source_loc;
+  current_span_ = nullptr;
   stream_.str("");
   stream_.clear();
   fs_.constants_section.str("");
@@ -587,6 +633,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr)
 
 void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
+  std::map<std::pair<int, int>, int> slot_count_by_pipe;
 
   std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
   scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
@@ -596,8 +643,14 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
         const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        const int slot_num = call->GetKwarg<int>("slot_num", 0);
         if (dir_mask > 0 && slot_size > 0) {
           const auto key = std::make_pair(pipe_id, dir_mask);
+          const int slot_count = gm_pipe::EffectiveSlotCount(dir_mask, slot_num);
+          auto [nit, ninserted] = slot_count_by_pipe.emplace(key, slot_count);
+          CHECK(ninserted || nit->second == slot_count)
+              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+              << " uses inconsistent slot counts: " << nit->second << " and " << slot_count;
           auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
           CHECK(inserted || it->second == slot_size)
               << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
@@ -624,15 +677,22 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
     }
   }
 
+  // Each pipe's region must advance by its FULL footprint — both rings of a bidirectional pipe,
+  // and an explicit slot_num where given — or the next pipe's base lands inside this one. This
+  // has to stay in step with ComputeGMPipeWorkspaceElements, which sizes the whole workspace;
+  // both derive it from gm_pipe_layout.h.
   int64_t byte_offset = 0;
   for (const auto& [key, slot_size] : slot_size_by_pipe) {
     gm_slot_buffer_offsets_[key] = byte_offset;
     const int dir_mask = key.second;
-    const int slot_count = GetGMPipeSlotCount(dir_mask);
-    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
-    CHECK(byte_offset <= std::numeric_limits<int64_t>::max() - static_cast<int64_t>(slot_count) * slot_size)
+    CHECK(gm_pipe::SlotCountForDirMask(dir_mask) > 0)
+        << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
+    auto num_it = slot_count_by_pipe.find(key);
+    const int slot_count = num_it != slot_count_by_pipe.end() ? num_it->second : 0;
+    const int64_t pipe_bytes = gm_pipe::FootprintBytes(dir_mask, slot_count, slot_size);
+    CHECK(byte_offset <= std::numeric_limits<int64_t>::max() - pipe_bytes)
         << "GM slot buffer offset overflow while assigning frontend pipe id " << key.first;
-    byte_offset += static_cast<int64_t>(slot_count) * slot_size;
+    byte_offset += pipe_bytes;
   }
 }
 
@@ -711,6 +771,35 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // params on the MLIR signature (Site B further down) -- a single source of
   // truth keeps the two in lockstep.
   const std::vector<VarPtr> dyn_vars = CollectTensorShapeDynVars(func);
+
+  // Attribute every symbol that appears in a parameter's valid_shape but NOT in
+  // any physical shape to the parameter that declares it. Such a symbol gets no
+  // trailing %argN slot (CollectTensorShapeDynVars walks shape_ only) and is
+  // bound at the call site, so the kernel cannot materialize it. Recording the
+  // origin here lets GetVarName name the parameter if the symbol ever reaches
+  // an emitted expression.
+  {
+    std::set<const ir::Var*> shape_bound;
+    for (const auto& dyn_var : dyn_vars) shape_bound.insert(dyn_var.get());
+    for (const auto& param : func->params_) {
+      auto tensor_type = ir::AsTensorTypeLike(param->GetType());
+      if (!tensor_type) continue;
+      std::vector<VarPtr> valid_vars;
+      std::set<const ir::Var*> seen;
+      for (const auto& dim : ir::GetEffectiveTensorValidShape(*tensor_type)) {
+        CollectVarsFromShapeExprImpl(dim, seen, valid_vars);
+      }
+      // Report the author's parameter name, not its SSA-renamed form: the
+      // diagnostic points at DSL source the user can actually edit.
+      std::string param_name = ir::auto_name::GetCompatibleBaseName(param->name_hint_);
+      if (param_name.empty()) param_name = param->name_hint_;
+      for (const auto& valid_var : valid_vars) {
+        if (shape_bound.count(valid_var.get()) == 0) {
+          fs_.valid_shape_symbol_origin.emplace(valid_var.get(), param_name);
+        }
+      }
+    }
+  }
 
   // Reserve %argN names upfront so NewNamedTemp never collides with them
   for (size_t i = 0; i < func->params_.size(); i++) {
@@ -856,10 +945,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       auto extent = As<ir::ConstInt>(tensor_type->shape_[0]);
       INTERNAL_CHECK_SPAN(extent && tensor_type->dtype_ == DataType::INT64, param->span_)
           << "FFTS workspace must be a statically sized INT64 tensor";
-      stream_ << "%arg" << j << ": memref<" << extent->value_ << "xi64>";
-    } else {
-      stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
     }
+    stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
   }
   for (size_t j = 0; j < scalar_param_indices.size(); j++) {
     if (!first_param) stream_ << ", ";
@@ -1073,12 +1160,23 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // PTOAS *infers* DN for shape ``[M, 1]`` with degenerate strides regardless
   // of an ND declaration, so codegen forces DN + ``[1, M]`` strides. MX
   // layouts are explicit hardware contracts and bypass this legacy override.
+  ir::var_collectors::VarDefUseCollector body_vars;
+  if (func->body_) body_vars.VisitStmt(func->body_);
+
   for (const auto& param : func->params_) {
     auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
+    // Core-group outlining keeps the complete public signature on both the
+    // AIC and AIV functions.  Do not materialize a view for a tensor that the
+    // outlined body does not reference: PTOAS cannot infer a non-ND layout for
+    // such an unused view (notably the MX scale tensors on the AIV cast side).
+    if (body_vars.var_uses.count(param.get()) == 0) continue;
     if (param->name_hint_ == "__gm_pipe_buffer") continue;         // GM slot buffer is a raw pointer
-    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a memref
+    if (fs_.ffts_workspace_vars.count(param.get()) > 0) continue;  // FFTS workspace stays a raw pointer
 
+    // ptoas rejects a malformed view (bad strides / layout) on this line, so
+    // attribute it to the parameter that declared the tensor.
+    SpanScope param_loc(this, &param->span_);
     std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
 
@@ -1133,8 +1231,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // ``tensor_view_->stride`` is empty.
     auto emit_stride_mul = [&](const std::string& lhs, size_t dim_idx, size_t stride_slot) -> std::string {
       std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride_slot));
-      stream_ << GetIndent() << mul_name << " = arith.muli " << lhs << ", " << shape_dim_names[dim_idx]
-              << " : index\n";
+      Emit(mul_name + " = arith.muli " + lhs + ", " + shape_dim_names[dim_idx] + " : index");
       return mul_name;
     };
 
@@ -1201,24 +1298,27 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
     }
 
-    stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
-    stream_ << GetVarName(param);
+    // Buffer the statement so Emit() writes it as one line and can suffix the
+    // parameter's source location.
+    std::ostringstream view_line;
+    view_line << tensor_view << " = pto.make_tensor_view ";
+    view_line << GetVarName(param);
 
     // Emit shape (verbatim from IR — canonical).
-    stream_ << ", shape = [";
+    view_line << ", shape = [";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << ", ";
-      stream_ << shape_dim_names[j];
+      if (j > 0) view_line << ", ";
+      view_line << shape_dim_names[j];
     }
-    stream_ << "],";
+    view_line << "],";
 
     // Emit strides.
-    stream_ << " strides = [";
+    view_line << " strides = [";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << ", ";
-      stream_ << stride_names[j];
+      if (j > 0) view_line << ", ";
+      view_line << stride_names[j];
     }
-    stream_ << "]";
+    view_line << "]";
 
     std::string layout_str = "nd";
     switch (layout) {
@@ -1237,14 +1337,15 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       case ir::TensorLayout::ND:
         break;
     }
-    stream_ << " {layout = #pto.layout<" << layout_str << ">} : ";
+    view_line << " {layout = #pto.layout<" << layout_str << ">} : ";
 
-    stream_ << "!pto.tensor_view<";
+    view_line << "!pto.tensor_view<";
     for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << "x";
-      stream_ << "?";
+      if (j > 0) view_line << "x";
+      view_line << "?";
     }
-    stream_ << "x" << GetTypeString(tensor_type->dtype_) << ">\n";
+    view_line << "x" << GetTypeString(tensor_type->dtype_) << ">";
+    Emit(view_line.str());
   }
 }
 
@@ -1284,12 +1385,30 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     return wide;
   };
 
+  // FP4 Vec tile_bufs use PTOAS's physical x2-carrier coordinates along the
+  // BLayout packed axis. PyPTO keeps logical nibble shapes internally; matrix
+  // spaces are excluded because TMATMUL_MX has its own logical-dimension ABI.
+  const auto memory_space = tile_type->GetMemorySpace();
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+  const bool packed_fp4_vec =
+      tile_type->dtype_ == DataType::FP4 && memory_space.has_value() && *memory_space == ir::MemorySpace::Vec;
+  const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
+
   // Lower a single valid_shape dim expression to an `index` SSA value.
-  auto lower_dim = [&](const ir::ExprPtr& expr) -> std::string {
+  auto lower_dim = [&](const ir::ExprPtr& expr, size_t dim) -> std::string {
     if (!expr) return "";
     if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitConstant(ci->value_, DataType::INDEX);
+      int64_t value = ci->value_;
+      if (packed_fp4_vec && dim == packed_dim) {
+        CHECK(value > 0 && value % 2 == 0)
+            << "FP4 Vec valid_shape packed dimension must be a positive even logical extent for PTOAS, got "
+            << value;
+        value /= 2;
+      }
+      return GetOrEmitConstant(value, DataType::INDEX);
     }
+    CHECK(!(packed_fp4_vec && dim == packed_dim)) << "Dynamic FP4 Vec valid_shape on the packed dimension is "
+                                                     "not supported; provide a static even extent";
     return cast_to_index(GetExprAsCode(expr), expr);
   };
 
@@ -1309,10 +1428,10 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     if (dims->size() == 1) {
       // Match ExtractTileTypeInfo: 1-D tile maps to rows=1, cols=shape[0].
       fields.valid_row_ssa = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      fields.valid_col_ssa = lower_dim((*dims)[0]);
+      fields.valid_col_ssa = lower_dim((*dims)[0], 1);
     } else {
-      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0]);
-      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1]);
+      if (dims->size() >= 1) fields.valid_row_ssa = lower_dim((*dims)[0], 0);
+      if (dims->size() >= 2) fields.valid_col_ssa = lower_dim((*dims)[1], 1);
     }
   }
 
@@ -1535,9 +1654,11 @@ void PTOCodegen::EmitMultiBufferRegionAllocs() {
     // point of describing the slots to it. Under the PyPTO planner no region is
     // planned at all (see PlanMultiBufferRegions). Both extents are always present —
     // planning rejects an allocation whose valid shape it cannot state statically.
-    stream_ << GetIndent() << region.region_ssa << " = pto.alloc_multi_tile"
-            << " valid_row = " << region.valid_row_ssa << " valid_col = " << region.valid_col_ssa << " : "
-            << region.mtb_type_str << "\n";
+    // Region declarations are synthesized from the whole allocation rather than
+    // one statement, so the base variable's span is the closest true source.
+    SpanScope base_loc(this, &base->span_);
+    Emit(region.region_ssa + " = pto.alloc_multi_tile valid_row = " + region.valid_row_ssa +
+         " valid_col = " + region.valid_col_ssa + " : " + region.mtb_type_str);
   }
 }
 
@@ -1808,18 +1929,23 @@ void PTOCodegen::EmitExtraAllocTiles() {
   // Regions first: every `pto.multi_tile_get` in the body reads one, so the
   // declaration has to dominate them all.
   EmitMultiBufferRegionAllocs();
+  // These allocations are hoisted out of the body (e.g. reshape outputs), so no
+  // single statement owns them; the function is the closest true source.
+  SpanScope func_loc(this, fs_.current_function ? &fs_.current_function->span_ : nullptr);
   for (const auto& alloc : fs_.extra_alloc_tiles) {
-    stream_ << GetIndent() << alloc.name << " = pto.alloc_tile";
+    std::ostringstream line;
+    line << alloc.name << " = pto.alloc_tile";
     if (emit_tile_addr_ && !alloc.addr_ssa.empty()) {
-      stream_ << " addr = " << alloc.addr_ssa;
+      line << " addr = " << alloc.addr_ssa;
     }
     if (!alloc.valid_row_ssa.empty()) {
-      stream_ << " valid_row = " << alloc.valid_row_ssa;
+      line << " valid_row = " << alloc.valid_row_ssa;
     }
     if (!alloc.valid_col_ssa.empty()) {
-      stream_ << " valid_col = " << alloc.valid_col_ssa;
+      line << " valid_col = " << alloc.valid_col_ssa;
     }
-    stream_ << " : " << alloc.type_string << "\n";
+    line << " : " << alloc.type_string;
+    Emit(line.str());
   }
 }
 
@@ -1835,6 +1961,11 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   INTERNAL_CHECK_SPAN(!ir::As<ir::SplitAivScopeStmt>(stmt), stmt->span_)
       << "Internal error: SplitAivScopeStmt reached PTO codegen; it must be lowered and erased by "
          "LowerAutoVectorSplit (pass 20).";
+  // Primary location source: every op lowered under this statement is attributed
+  // to the statement's source line unless a nested Call refines it (see
+  // VisitExpr_(CallPtr)). The statement span is what passes reliably preserve —
+  // they frequently rebuild the Call underneath it with a coarser span.
+  SpanScope stmt_loc(this, &stmt->span_);
   ir::IRVisitor::VisitStmt(stmt);
 }
 
@@ -1917,15 +2048,6 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {
         BindVarToMlir(op->var_, fs_.current_result_buf);
       }
-      // Register per-variable tile_buf type from the variable's own TileType.
-      // This ensures that even when multiple variables share a MemRef, each
-      // variable's SSA value carries its correct typed annotation.
-      if (result_tile_type && !fs_.current_result_buf.empty() && fs_.current_result_buf == result_buf) {
-        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
-        if (!var_type_str.empty()) {
-          fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;
-        }
-      }
       fs_.current_result_var.reset();
       fs_.current_result_buf.clear();
       fs_.current_result_tile_type = nullptr;
@@ -1978,7 +2100,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // same shape the `s = pl.mul(...)`-style yield (no bare alias) already
       // gets. Under PyPTO (emit_tile_addr_) the baked address already aliases
       // the two allocs, so this is a no-op there and is left untouched.
-      const std::string rhs_ssa = GetVarName(rhs_var);
+      const std::string rhs_ssa = LookupVarName(rhs_var);
       if (!rhs_ssa.empty()) {
         BindVarToMlir(op->var_, rhs_ssa);
         return;
@@ -2013,6 +2135,10 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
   if (op_info == nullptr) {
     ThrowNoCodegenForCall(op_name);
   }
+  // Refine to the Call's own (column-accurate) span when it is genuinely nested
+  // in the enclosing statement; otherwise keep the statement span, which is the
+  // trustworthy one for any Call a pass rebuilt.
+  SpanScope call_loc(this, SpanContains(current_span_, op->span_) ? &op->span_ : nullptr);
   std::string mlir_line = op_info->codegen_func(op, *this);
   if (!mlir_line.empty()) {
     Emit(mlir_line);
@@ -2037,7 +2163,23 @@ std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr&
   return collector.elements();
 }
 
-void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << "\n"; }
+void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << LocSuffix() << "\n"; }
+
+void PTOCodegen::EmitStructural(const std::string& line) { stream_ << GetIndent() << line << "\n"; }
+
+std::string PTOCodegen::LocSuffix() const {
+  if (!emit_source_loc_ || current_span_ == nullptr) return "";
+  const ir::Span& span = *current_span_;
+  // Without a filename there is nothing to attribute, and MLIR's FileLineColLoc
+  // needs non-negative coordinates. Emitting nothing leaves the op exactly as it
+  // was before locations existed (ptoas then reports the .pto line) — strictly
+  // better than a misleading `loc("":0:0)`.
+  if (span.filename_.empty() || !span.is_valid()) return "";
+  // is_valid() admits an unknown column (-1); MLIR does not.
+  const int column = span.begin_column_ > 0 ? span.begin_column_ : 1;
+  return " loc(\"" + EscapeMlirString(span.filename_) + "\":" + std::to_string(span.begin_line_) + ":" +
+         std::to_string(column) + ")";
+}
 
 std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   if (auto var = As<ir::Var>(expr)) {
@@ -2063,7 +2205,23 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   return "";
 }
 
-std::string PTOCodegen::GetTypeString(const DataType& dtype) const { return DataTypeToMLIR(dtype); }
+std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
+  const auto* handler = GetBackendHandler();
+  INTERNAL_CHECK(handler) << "PTOCodegen requires a backend handler";
+  if (!handler->SupportsIncoreDataType(dtype)) {
+    const std::string arch = handler->GetPtoTargetArch();
+    if (arch == "a2a3" && dtype.GetBit() == 4) {
+      CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+                   << " is not supported for end-to-end in-core codegen on backend 'a2a3'. "
+                      "A2/A3 exposes only an isolated FP16<->INT4 conversion, while direct packed "
+                      "4-bit load/store and carrier ABI are unavailable";
+    }
+    CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+                 << " is not supported for end-to-end in-core codegen on backend '" << arch
+                 << "'; A5 currently supports only FP4 among 4-bit dtypes";
+  }
+  return DataTypeToMLIR(dtype);
+}
 
 const ir::Var* PTOCodegen::GetVarKey(const VarPtr& var) const {
   INTERNAL_CHECK(var != nullptr) << "Internal error: variable key requested for null Var";
@@ -2095,7 +2253,7 @@ void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::Var* base_ptr) {
   fs_.var_to_memref[GetVarKey(var)] = base_ptr;
 }
 
-std::string PTOCodegen::GetVarName(const VarPtr& var) const {
+std::string PTOCodegen::LookupVarName(const VarPtr& var) const {
   auto key = GetVarKey(var);
   auto it = fs_.var_to_mlir.find(key);
   if (it != fs_.var_to_mlir.end()) {
@@ -2116,8 +2274,34 @@ std::string PTOCodegen::GetVarName(const VarPtr& var) const {
       return mlir_name;
     }
   }
-  LOG_ERROR << "Variable " << var->name_hint_ << " not found in MLIR mapping";
   return "";
+}
+
+std::string PTOCodegen::DescribeUnbindableSymbol(const VarPtr& var) const {
+  auto origin = fs_.valid_shape_symbol_origin.find(GetVarKey(var));
+  if (origin != fs_.valid_shape_symbol_origin.end()) {
+    return "it appears only in the valid_shape of parameter '" + origin->second +
+           "', and MaterializeValidShapeSymbols did not turn it into a parameter (that pass runs "
+           "last in the Default strategy — a custom pass list that omits it leaves the symbol "
+           "unbound)";
+  }
+  return "it is not a physical tensor dimension, a scalar parameter, or a loop variable of this "
+         "kernel";
+}
+
+std::string PTOCodegen::GetVarName(const VarPtr& var) const {
+  // An unresolvable symbol must fail here. Emitting an empty operand instead
+  // produces MLIR that ptoas rejects with an opaque "expected SSA operand"
+  // several stages downstream, far from the annotation that caused it.
+  std::string name = LookupVarName(var);
+  CHECK_SPAN(!name.empty(), var->span_)
+      << "PTO codegen cannot materialize symbol '" << var->name_hint_ << "' in function '"
+      << (fs_.current_function ? fs_.current_function->name_ : "<unknown>")
+      << "': " << DescribeUnbindableSymbol(var)
+      << ". Pass the extent as a pl.Scalar[pl.INDEX] parameter and use it in "
+         "pl.load(..., valid_shape=[...]) instead of naming it in the parameter's "
+         "pl.TensorView(valid_shape=...) annotation.";
+  return name;
 }
 
 std::string PTOCodegen::NewTemp() {

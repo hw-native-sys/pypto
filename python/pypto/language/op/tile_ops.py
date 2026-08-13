@@ -1234,7 +1234,8 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
     Args:
         lhs: Left-hand side tile [M, K]
         rhs: Right-hand side tile [K, N]
-        bias: Bias tile [1, N]
+        bias: Bias tile [1, N] with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
 
     Returns:
         Tile wrapping the matmul_bias operation
@@ -1245,6 +1246,10 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
 
 def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
+
+    Both data tiles passed to this operation must be FP8E4M3FN. For the
+    supported FP4 x FP8 input form, explicitly cast the FP4 lhs to FP8E4M3FN
+    before calling this operation; native FP4 x FP4 is not supported.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
@@ -1261,6 +1266,9 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
+
+    Data operands follow :func:`matmul_mx`: an FP4 lhs must first be cast to
+    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
 
     Args:
         acc: Accumulator tile
@@ -1281,6 +1289,9 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
 
+    Data operands follow :func:`matmul_mx`: an FP4 lhs must first be cast to
+    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
         lhs_scale: Left-hand side scale tile (FP8E8M0)
@@ -1297,47 +1308,62 @@ def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias:
     return Tile(expr=call_expr)
 
 
-def gemv(lhs: Tile, rhs: Tile) -> Tile:
+def gemv(lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
+
+    ``lhs`` must have exactly one physical and logical row. The rhs logical K
+    must cover the lhs logical K. Inputs must use the same INT8, FP16, BF16, or FP32
+    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
 
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv operation
     """
-    call_expr = _ir_ops.gemv(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.gemv(lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 
-def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def gemv_acc(acc: Tile, lhs: Tile, rhs: Tile, acc_phase: str = "unspecified") -> Tile:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
+
+    ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
+    dtype requirements are identical to :func:`gemv`.
 
     Args:
         acc: Accumulator tile [1, N]
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv_acc operation
     """
-    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.gemv_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 
-def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile) -> Tile:
+def gemv_bias(lhs: Tile, rhs: Tile, bias: Tile, acc_phase: str = "unspecified") -> Tile:
     """GEMV with bias add: C[1,N] = A[1,K] @ B[K,N] + bias[1,N].
+
+    ``bias`` must use the GEMV output dtype and its valid shape must cover the
+    logical output shape ``[1, N]``. The logical K extents and lhs/rhs dtype
+    requirements are identical to :func:`gemv`.
 
     Args:
         lhs: Row vector tile [1, K]
         rhs: Right-hand side tile [K, N]
-        bias: Bias tile [1, N]
+        bias: Bias tile [1, N] with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
 
     Returns:
         Tile wrapping the gemv_bias operation
     """
-    call_expr = _ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap())
+    call_expr = _ir_ops.gemv_bias(lhs.unwrap(), rhs.unwrap(), bias.unwrap(), acc_phase=acc_phase)
     return Tile(expr=call_expr)
 
 

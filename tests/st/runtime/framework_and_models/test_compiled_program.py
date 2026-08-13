@@ -20,7 +20,7 @@ return-style.
 
 import pytest
 import torch
-from examples.kernels.elementwise import tile_add_128, tile_mul_128
+from examples.beginner.elementwise import tile_add_128, tile_mul_128
 from pypto.ir.compiled_program import CompiledProgram
 
 

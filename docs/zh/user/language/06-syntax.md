@@ -23,7 +23,7 @@ import pypto.language as pl
 def head(x: pl.Tensor[[128, 64], pl.FP32],
          out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
     top = x[0:16, :]              # sugar for pl.slice(x, [16, 64], [0, 0])
-    out = pl.mul(top, 2.0)        # sugar-free: an explicit operator call
+    out = pl.assemble(out, pl.mul(top, 2.0), [0, 0])        # sugar-free: an explicit operator call
     return out
 ```
 

@@ -949,7 +949,9 @@ def div(
     rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
     if isinstance(rhs_expr.type, ScalarType):
         if high_precision:
-            raise ValueError("tile.div(high_precision=True) requires a Tile rhs")
+            # TypeError, matching the unified pl.* guards: a kwarg this operand
+            # combination cannot honour is a wrong-arguments error, not a bad value.
+            raise TypeError("tile.div(high_precision=True) requires a Tile rhs")
         return _ir_core.create_op_call("tile.divs", [lhs, rhs_expr], {}, actual_span)
     kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
     return _ir_core.create_op_call("tile.div", [lhs, rhs_expr], kwargs, actual_span)
@@ -1825,7 +1827,8 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     Args:
         lhs: Left-hand side tile (TileType [M, K])
         rhs: Right-hand side tile (TileType [K, N])
-        bias: Bias tile (TileType [1, N])
+        bias: Bias tile (TileType [1, N]) with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1930,51 +1933,80 @@ def batch_matmul_acc(
     return _ir_core.create_op_call("tile.batch_matmul_acc", [acc, lhs, rhs], {}, actual_span)
 
 
-def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def gemv(lhs: Expr, rhs: Expr, span: Span | None = None, *, acc_phase: str = "unspecified") -> Call:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
+
+    ``lhs`` must have exactly one physical and logical row. The rhs logical K
+    must cover the lhs logical K. Inputs must use the same INT8, FP16, BF16, or FP32
+    dtype; the output is INT32 for INT8 inputs and FP32 otherwise.
 
     Args:
         lhs: Row vector tile (TileType [1, K])
         rhs: Right-hand side tile (TileType [K, N])
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for GEMV
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.gemv", [lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv", [lhs, rhs], {"acc_phase": acc_phase}, actual_span)
 
 
-def gemv_acc(acc: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def gemv_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+    *,
+    acc_phase: str = "unspecified",
+) -> Call:
     """GEMV with accumulation: C[1,N] += A[1,K] @ B[K,N].
+
+    ``acc`` must use the GEMV output dtype. The logical K extents and lhs/rhs
+    dtype requirements are identical to :func:`gemv`.
 
     Args:
         acc: Accumulator tile (TileType [1, N])
         lhs: Row vector tile (TileType [1, K])
         rhs: Right-hand side tile (TileType [K, N])
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for GEMV with accumulation
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.gemv_acc", [acc, lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv_acc", [acc, lhs, rhs], {"acc_phase": acc_phase}, actual_span)
 
 
-def gemv_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Call:
+def gemv_bias(
+    lhs: Expr,
+    rhs: Expr,
+    bias: Expr,
+    span: Span | None = None,
+    *,
+    acc_phase: str = "unspecified",
+) -> Call:
     """GEMV with bias add: C[1,N] = A[1,K] @ B[K,N] + bias[1,N].
+
+    ``bias`` must use the GEMV output dtype and its valid shape must cover the
+    logical output shape ``[1, N]``. The logical K extents and lhs/rhs dtype
+    requirements are identical to :func:`gemv`.
 
     Args:
         lhs: Row vector tile (TileType [1, K])
         rhs: Right-hand side tile (TileType [K, N])
-        bias: Bias tile (TileType [1, N])
+        bias: Bias tile (TileType [1, N]) with the accumulator dtype (FP32 for
+            floating-point matrix operands, INT32 for integer matrix operands)
+        acc_phase: Accumulation phase: ``"unspecified"``, ``"partial"``, or ``"final"``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for GEMV with bias
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.gemv_bias", [lhs, rhs, bias], {}, actual_span)
+    return _ir_core.create_op_call("tile.gemv_bias", [lhs, rhs, bias], {"acc_phase": acc_phase}, actual_span)
 
 
 # ============================================================================

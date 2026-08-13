@@ -64,6 +64,12 @@ class TestBackend910BMemoryPath:
             # L1 connections
             (ir.MemorySpace.Mat, ir.MemorySpace.Left, [ir.MemorySpace.Mat, ir.MemorySpace.Left]),
             (ir.MemorySpace.Mat, ir.MemorySpace.Right, [ir.MemorySpace.Mat, ir.MemorySpace.Right]),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Bias, [ir.MemorySpace.Mat, ir.MemorySpace.Bias]),
+            (
+                ir.MemorySpace.DDR,
+                ir.MemorySpace.Bias,
+                [ir.MemorySpace.DDR, ir.MemorySpace.Mat, ir.MemorySpace.Bias],
+            ),
             # Acc connections
             (ir.MemorySpace.Acc, ir.MemorySpace.Mat, [ir.MemorySpace.Acc, ir.MemorySpace.Mat]),
             (ir.MemorySpace.Acc, ir.MemorySpace.DDR, [ir.MemorySpace.Acc, ir.MemorySpace.DDR]),
@@ -91,6 +97,7 @@ class TestBackend910BMemorySize:
             (ir.MemorySpace.Right, 64),  # 64KB per AIC core
             (ir.MemorySpace.Acc, 128),  # 128KB per AIC core
             (ir.MemorySpace.Mat, 512),  # 512KB per AIC core
+            (ir.MemorySpace.Bias, 1),  # 1KB Bias table per AIC core
             # Safe Vec UB is capped at 184KB (192KB physical) per pto-isa#170;
             # restore to 192 once PTO-ISA stops reserving the top ~8KB.
             (ir.MemorySpace.Vec, 184),  # 184KB safe per AIV core (192KB physical)
@@ -121,6 +128,7 @@ class TestBackend910BMemoryHierarchy:
             (ir.MemorySpace.Vec, ir.MemorySpace.DDR, 2),
             (ir.MemorySpace.Mat, ir.MemorySpace.Left, 2),
             (ir.MemorySpace.Mat, ir.MemorySpace.Right, 2),
+            (ir.MemorySpace.Mat, ir.MemorySpace.Bias, 2),
             (ir.MemorySpace.Acc, ir.MemorySpace.Mat, 2),
             (ir.MemorySpace.Acc, ir.MemorySpace.DDR, 2),
         ]
@@ -148,12 +156,14 @@ class TestBackend910BL0Tiling:
         assert handler.get_l0a_capacity_bytes() == 64 * 1024
         assert handler.get_l0b_capacity_bytes() == 64 * 1024
         assert handler.get_l0c_capacity_bytes() == 128 * 1024
+        assert handler.get_bias_capacity_bytes() == 1 * 1024
         assert handler.get_mat_capacity_bytes() == 512 * 1024
 
         # Mirrors Backend.get_mem_size for the corresponding spaces (per-core).
         assert handler.get_l0a_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Left)
         assert handler.get_l0b_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Right)
         assert handler.get_l0c_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Acc)
+        assert handler.get_bias_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Bias)
         assert handler.get_mat_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Mat)
 
     def test_l0_fractal_alignment_default(self):
@@ -164,6 +174,14 @@ class TestBackend910BL0Tiling:
         handler = Backend910B.instance().get_handler()
         assert handler.get_l0c_m_alignment(pl.INT32) == 32
         assert handler.get_l0c_m_alignment(pl.FP32) == 16
+
+    def test_mat_to_bias_move_dtype_contract(self):
+        handler = Backend910B.instance().get_handler()
+        assert handler.supports_mat_to_bias_move(pl.INT32, pl.INT32)
+        assert handler.supports_mat_to_bias_move(pl.FP32, pl.FP32)
+        assert handler.supports_mat_to_bias_move(pl.FP16, pl.FP32)
+        assert not handler.supports_mat_to_bias_move(pl.FP16, pl.FP16)
+        assert not handler.supports_mat_to_bias_move(pl.BF16, pl.FP32)
 
     def test_min_l0_tile_dim_default(self):
         handler = Backend910B.instance().get_handler()

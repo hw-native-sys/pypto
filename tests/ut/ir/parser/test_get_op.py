@@ -24,6 +24,8 @@ import pypto.language.distributed as pld
 import pytest
 from pypto.pypto_core import ir
 
+_OP_PLD_TENSOR_GET = ir.get_op("pld.tensor.get").name
+
 
 def _get_func(program: ir.Program, name: str) -> ir.Function:
     gvar = program.get_global_var(name)
@@ -60,7 +62,7 @@ def test_get_parses_to_side_effect_op():
         for stmt in _iter_stmts(func.body)
         if isinstance(stmt, ir.EvalStmt)
         and isinstance(stmt.expr, ir.Call)
-        and stmt.expr.op.name == "pld.tensor.get"
+        and stmt.expr.op.name == _OP_PLD_TENSOR_GET
     ]
 
     assert len(get_calls) == 1
@@ -100,7 +102,7 @@ def test_get_subregion_parses_to_six_arg_op():
         for stmt in _iter_stmts(func.body)
         if isinstance(stmt, ir.EvalStmt)
         and isinstance(stmt.expr, ir.Call)
-        and stmt.expr.op.name == "pld.tensor.get"
+        and stmt.expr.op.name == _OP_PLD_TENSOR_GET
     ]
 
     assert len(get_calls) == 1

@@ -110,18 +110,23 @@ def remote_store(
     peer: int | Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     *,
+    atomic: int = 0,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tile.remote_store(src_tile, target, peer, offsets)`` Call.
 
     Args:
-        src_tile: Local :class:`ir.Expr` with :class:`ir.TileType` (dtype must
-            match ``target.dtype``).
+        src_tile: Local :class:`ir.Expr` with 2-D :class:`ir.TileType` (dtype
+            must match ``target.dtype``).
         target: A :class:`ir.Expr` with type :class:`ir.DistributedTensorType`
             (the verifier rejects plain :class:`ir.TensorType`).
         peer: Scalar peer rank index (:class:`ir.Expr` of :class:`ir.ScalarType`).
         offsets: Per-dimension offsets into ``target``'s coordinate space —
             sequence of ints/:class:`ir.Expr`, or an existing :class:`ir.MakeTuple`.
+        atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite)
+            or 1 (``kAdd``, atomic-add into the peer's region). The kwarg is
+            omitted entirely when 0 so non-atomic stores print unchanged,
+            mirroring :func:`pypto.ir.op.tile_ops.store`.
         span: Optional source span (auto-captured if absent).
 
     Returns:
@@ -133,7 +138,7 @@ def remote_store(
     return _ir_core.create_op_call(
         "pld.tile.remote_store",
         [src_tile, target, peer_expr, offsets_tuple],
-        {},
+        {"atomic": int(atomic)} if atomic else {},
         actual_span,
     )
 

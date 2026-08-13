@@ -38,7 +38,7 @@ def accumulate(
         t = pl.add(a, a)
         for i in pl.range(3):
             t = pl.add(t, a)      # carried across iterations
-        out = pl.mul(t, t)
+        out = pl.assemble(out, pl.mul(t, t), [0, 0])
     return out
 ```
 

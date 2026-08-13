@@ -25,10 +25,10 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/type.h"
@@ -50,6 +50,22 @@ struct TileTransferInfo {
   int64_t innermost_elems;            ///< Innermost-dim element count.
   std::string dtype_name;             ///< Element dtype, e.g. "int8".
   std::optional<MemorySpace> memory;  ///< target_memory of the tile, if known.
+  /// Volume of one transfer, all three derived from the *effective valid
+  /// shape* rather than the physical allocation: `tile.load` / `tile.store`
+  /// size their `pto.partition_view` from `valid_shape`, so a padded or tail
+  /// tile moves less than it allocates. `rows` is the count of
+  /// separately-addressed innermost runs, `row_bytes` the size of one run, and
+  /// `transfer_bytes` their product — computed as a product so the three stay
+  /// mutually consistent for sub-byte dtypes, where rounding each row up
+  /// separately is what the bus actually costs. All nullopt together when any
+  /// valid extent is symbolic.
+  ///
+  /// Volume is what separates a hot streaming operand from an incidental one at
+  /// the same innermost size — see issue #2309, where a [1024, 64] weight panel
+  /// and a [16, 64] activation panel share every other fact.
+  std::optional<uint64_t> rows;
+  std::optional<uint64_t> row_bytes;
+  std::optional<uint64_t> transfer_bytes;
 };
 
 /// Inspect a TileType and compute the innermost-dim transfer facts. Returns
@@ -80,6 +96,38 @@ std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   info.innermost_elems = last->value_;
   info.dtype_name = tile->dtype_.ToString();
   info.memory = tile->GetMemorySpace();
+
+  // Volume comes from the effective valid shape, not the physical allocation:
+  // both ops size their GM partition from valid_shape, so a padded or tail tile
+  // transfers only that region. A single symbolic valid extent makes the volume
+  // unknowable; the innermost facts above still stand, so the hint is emitted
+  // without the volume clause rather than dropped.
+  const TileView effective = tile_view_semantics::GetEffectiveTileView(*tile);
+  const std::vector<ExprPtr>& extent = effective.valid_shape;
+  if (extent.empty()) return info;
+
+  uint64_t rows = 1;
+  bool extent_static = true;
+  for (size_t i = 0; i + 1 < extent.size(); ++i) {
+    auto dim = std::dynamic_pointer_cast<const ConstInt>(extent[i]);
+    if (!dim || dim->value_ <= 0) {
+      extent_static = false;
+      break;
+    }
+    rows *= static_cast<uint64_t>(dim->value_);
+  }
+  auto valid_last = std::dynamic_pointer_cast<const ConstInt>(extent.back());
+  if (extent_static && valid_last && valid_last->value_ > 0) {
+    // Round the row up first, then multiply. Rounding the whole tile in one
+    // step would under-report a sub-byte transfer by the packing factor and
+    // contradict the row figures rendered beside it: a [16, 1] bool tile moves
+    // 16 rows of 1B, not a single packed 2B.
+    const uint64_t row_bytes =
+        (static_cast<uint64_t>(valid_last->value_) * static_cast<uint64_t>(bits) + 7u) / 8u;
+    info.rows = rows;
+    info.row_bytes = row_bytes;
+    info.transfer_bytes = rows * row_bytes;
+  }
   return info;
 }
 
@@ -139,21 +187,37 @@ class TileInnermostDimVisitor : public IRVisitor {
   // expansion) are not conflated — each (size, dtype, memory) gets its own
   // hint with an accurate count, rather than all collapsing onto the
   // first-seen tuple.
-  using SiteKey =
-      std::tuple<std::string, int, int, std::string, std::string, uint64_t, std::optional<MemorySpace>>;
+  // The volume facts are part of the key (issue #2309): two loads can agree on
+  // span, op, dtype, innermost size and memory space and still differ by orders
+  // of magnitude in volume — a [1024, 64] weight panel and a [16, 64]
+  // activation panel under one `pl.spmd` line. Collapsing them onto one hint
+  // reported an occurrence count that named neither operand.
+  //
+  // The key holds *every* fact BuildMessage renders, so no two transfers that
+  // would print differently can collapse onto one another's text. Element
+  // counts matter independently of byte counts under sub-byte packing, where
+  // int4[1] and int4[2] both round to one byte.
+  using SiteKey = std::tuple<std::string, int, int, std::string, std::string, uint64_t, int64_t,
+                             std::optional<MemorySpace>, std::optional<uint64_t>, std::optional<uint64_t>,
+                             std::optional<uint64_t>>;
 
   void RecordIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
     auto info_opt = InspectTile(tile_type);
     if (!info_opt.has_value()) return;
     const TileTransferInfo& info = *info_opt;
 
-    // Memory-space awareness (ask 1): the recommended-bytes threshold is an L2
-    // cache-line concern, which only applies to transfers that traverse L2
-    // (GM <-> Vec). Cube-private L0/L1 buffers (Left/Right/Acc/Mat) never touch
-    // L2, so the L2 threshold is meaningless for them — skip to avoid
-    // false-positive noise on fully-tuned cube kernels.
-    if (info.memory.has_value() && IsCubeMemorySpace(*info.memory)) return;
-
+    // Deliberately NOT skipped by memory space (issue #2309). An earlier
+    // revision returned early for cube-private spaces (Mat/Left/Right/Acc) on
+    // the grounds that they never traverse L2. That reasoning is sound for
+    // chip-internal movement, but this check inspects only `tile.load` and
+    // `tile.store`, whose non-tile side is a `TensorType` — always off-chip.
+    // Both are therefore GM<->chip transfers whatever space the tile lands in,
+    // and the GM side always crosses L2 at the innermost-dim granularity. The
+    // genuinely cube-private moves (Mat->L0 `tile.move` / `tile.extract`) are
+    // not visited here at all, so the skip could only ever suppress true
+    // positives: it silenced the GM->Mat weight load of a `b_trans` matmul,
+    // whose loaded shape is the caller's [N, K] window transposed, at 128B per
+    // row against a 512B recommendation, for a measured 16-25% penalty.
     if (info.innermost_bytes >= recommended_bytes_) return;
 
     // Invalid/unknown spans (Span::unknown() -> "", -1, -1) carry no real
@@ -168,8 +232,9 @@ class TileInnermostDimVisitor : public IRVisitor {
       return;
     }
 
-    SiteKey key{span.filename_,  span.begin_line_,     span.begin_column_, op_name,
-                info.dtype_name, info.innermost_bytes, info.memory};
+    SiteKey key{span.filename_,  span.begin_line_,     span.begin_column_,   op_name,
+                info.dtype_name, info.innermost_bytes, info.innermost_elems, info.memory,
+                info.rows,       info.row_bytes,       info.transfer_bytes};
     auto [it, inserted] = sites_.try_emplace(key, info, span, op_name);
     (void)inserted;
     ++it->second.count;
@@ -190,8 +255,19 @@ class TileInnermostDimVisitor : public IRVisitor {
     std::ostringstream msg;
     msg << site.op_name << " has innermost dim = " << info.innermost_bytes << "B"
         << " (tile " << info.dtype_name << "[" << info.innermost_elems << "], target_memory=" << mem_str
-        << ")"
-        << "; recommended >= " << recommended_bytes_ << "B for backend " << arch_
+        << ")";
+    // Volume clause (issue #2309): the row count is the number of separate
+    // short bus transactions this one transfer issues, and the total is how
+    // much traffic rides on them — together they rank a hint against its
+    // siblings at the same innermost size. These describe the valid region
+    // actually moved, so for a padded tile the row width can be narrower than
+    // the physical innermost dim reported above. Omitted when a valid extent is
+    // symbolic.
+    if (info.rows.has_value() && info.row_bytes.has_value() && info.transfer_bytes.has_value()) {
+      msg << "; moves " << *info.transfer_bytes << "B as " << *info.rows << " x " << *info.row_bytes
+          << "B rows";
+    }
+    msg << "; recommended >= " << recommended_bytes_ << "B for backend " << arch_
         << " (L2 cache line = " << l2_cache_line_bytes_
         << "B). Consider increasing tile shape on the innermost axis.";
     if (site.count > 1) {

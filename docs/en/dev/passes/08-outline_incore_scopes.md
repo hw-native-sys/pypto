@@ -9,7 +9,10 @@ This pass transforms `InCoreScopeStmt` nodes into separate `Function(InCore)` de
 **Requirements**:
 
 - Input IR must be in SSA form (run ConvertToSSA first); SSAForm is preserved (produced) by this pass
-- Only processes Opaque functions (InCore functions are left unchanged)
+- Processes Opaque and Orchestration functions (InCore functions are left
+  unchanged). An Orchestration function carries InCore scopes when the parser
+  desugars a high-level construct such as `for i in pl.spmd(...)`; an Opaque
+  parent that outlines at least one scope is promoted to Orchestration
 
 **When to use**: Run after ConvertToSSA when you need to extract InCore computation regions into separate callable functions.
 
@@ -36,7 +39,8 @@ program_outlined = outline_pass(program)
 
 ## Algorithm
 
-1. **Scan for InCore Scopes**: Find all `InCoreScopeStmt` nodes in Opaque functions
+1. **Scan for InCore Scopes**: Find all `InCoreScopeStmt` nodes in Opaque and
+   Orchestration functions
 2. **Analyze Inputs**: Collect the scope's *live-in* set — variables the body reads
    before it (re)defines them, so their incoming value comes from the caller
 3. **Analyze Outputs**: Determine internal definitions used after scope (variables defined inside, used outside)
@@ -48,6 +52,32 @@ program_outlined = outline_pass(program)
    - Call to outlined function with input arguments
    - AssignStmt for each output variable
 6. **Add to Program**: Add outlined function to program's function list
+7. **Promote the parent**: an Opaque parent that outlined at least one scope becomes
+   `Orchestration` — and its param dyn-dim reads are folded first (below)
+
+**Param dyn-dim reads fold on promotion**: a tensor's declared extent *is* its
+runtime extent, so `pl.tensor.dim(a, 0)` on a param whose axis is a `pl.dynamic`
+symbol mints a *second* IR name for one quantity, and shapes built from the copy
+no longer compare equal to shapes built from the symbol. The DSL parser folds
+that read onto the symbol (`ASTParser._fold_tensor_dim`), but only in an
+Orchestration body — that is where Orchestration codegen defines the symbol from
+the param's task-arg descriptor, and where the fold is therefore sound. A body
+written as `Opaque` keeps the read, so this pass folds it at the moment it
+promotes the function, *before* outlining:
+
+```python
+# Opaque parent, as written                # after promotion
+m = pl.tensor.dim(a, 0)                    # (binding folded away)
+with pl.spmd(m // 16):                     with pl.spmd(M_DYN // 16):
+    ...                                        ...
+```
+
+Folding before the outliner runs means the promoted body reaches it in the same
+shape the parser hands an already-Orchestration function, so both paths produce
+identical IR. Without it the pass emits IR that no longer parses back to itself
+(the printed `tensor.dim` binding vanishes on reparse), breaking print→parse
+round-trip verification. Reads the parser would not fold are left alone: a
+constant extent, a runtime axis, or a symbol the signature does not declare.
 
 **Live-in, not `uses \ defs`**: the input set is computed flow-sensitively
 (`UpwardExposedUseCollector`). A plain set difference is wrong for a captured
@@ -140,7 +170,7 @@ class Before:
 ```python
 @pl.program
 class After:
-    @pl.function  # Opaque function
+    @pl.function(type=pl.FunctionType.Orchestration)  # promoted from Opaque
     def main(self, x: Tensor[[64], FP32]) -> Tensor[[64], FP32]:
         y = x + 1
 

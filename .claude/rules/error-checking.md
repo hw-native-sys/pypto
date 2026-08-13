@@ -175,19 +175,10 @@ void InternalHelper(IRNode* node) {
 
 ## Error Message Guidelines
 
-**CHECK (user-facing):** Clear, actionable, include context
-
-```cpp
-// ✅ Good
-CHECK(dim > 0) << "Tensor dimension must be positive, got " << dim;
-```
-
-**INTERNAL_CHECK (developer-facing):** Technical, mark as "Internal error"
-
-```cpp
-// ✅ Good
-INTERNAL_CHECK(ref_count_ > 0) << "Internal error: ref count is " << ref_count_;
-```
+- **CHECK (user-facing):** clear, actionable, include context —
+  `CHECK(dim > 0) << "Tensor dimension must be positive, got " << dim;`
+- **INTERNAL_CHECK (developer-facing):** technical, mark as "Internal error" —
+  `INTERNAL_CHECK(ref_count_ > 0) << "Internal error: ref count is " << ref_count_;`
 
 ## Best Practices
 

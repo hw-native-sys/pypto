@@ -108,4 +108,4 @@ necessary hardware or environment is available.
 - `tests/st/`: system and hardware-dependent tests
 - `tests/lint/`: repo-specific lint and validation scripts
 - `docs/en/dev/`, `docs/zh/dev/`: developer documentation
-- `examples/`: user-facing examples (kernels/, models/, utils/)
+- `examples/`: user-facing examples (beginner/, intermediate/, advanced/, models/, runtime/, utils/)

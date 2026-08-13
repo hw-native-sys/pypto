@@ -29,6 +29,7 @@ For a host-orchestrator call:
 
 ```python
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 signal = pld.tensor.barrier(signal)
 data = pld.tensor.broadcast(data, signal, root=0)
@@ -69,12 +70,12 @@ pld.system.world_size()` loop.
 
 Each generated builtin call carries the collective-specific args and kwarg
 attributes from the source `pld.tensor.*` call.  Window-bound INOUT tensors
-are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`) are
-forwarded to the builtin. `all_to_all_v`'s `MAX_RECV` is not a lowering-time
-attribute: the HOST kernel derives it at entry as `target.shape[0] / nranks`
-(the runtime comm-domain size), so no per-`MAX_RECV` codegen variant mangling
-is needed and the block layout stays consistent with the devices actually
-running.
+are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`, and
+mesh-AllReduce `core_num`) are forwarded to the builtin. `all_to_all_v`'s
+`MAX_RECV` is not a lowering-time attribute: the HOST kernel derives it at
+entry as `target.shape[0] / nranks` (the runtime comm-domain size), so no
+per-`MAX_RECV` codegen variant mangling is needed and the block layout stays
+consistent with the devices actually running.
 
 Assignments preserve the user-facing rebind idiom by appending
 `<result> = <original expr>` after the generated builtin calls.
@@ -87,8 +88,22 @@ the same `CommDomainScopeStmt`. The host allreduce builtin supports
 positive element counts. It processes 256-element chunks and rounds ragged FP16
 and FP32 load spans to 32 bytes without changing the logical tensor shape.
 Its INT32 signal tensor may be rank-1 `[world_size]` or rank-2
-`[world_size, 1]`, with enough static capacity when the participating device
-count is statically known. Ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
+`[world_size, signal_stride]`, with enough static capacity when the
+participating device count is statically known. Because the signal is produced
+by `pld.window`, it is packed by construction and the builtin indexes it as a
+flat row-major array.
+
+Mesh allreduce takes one signal lane per launched AIV block: a rank-1 signal is
+valid only when `core_num == 1`, and a rank-2 signal needs a constant
+`signal_stride >= core_num` (a wider stride is accepted, so an explicit signal
+may carry spare lanes). `core_num` must also fit the configured backend's AIV
+core count — the builtin is submitted as a standalone AIV kernel with
+`require_sync_start`, so an over-subscribed launch could never be admitted and
+would hang instead of failing. The bound is skipped when no backend is
+configured (pure-IR tests). Multicore is mesh-only: `mode="ring"` requires
+`core_num == 1`.
+
+Ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
 `[2 * (NR - 1) + 1, NR]`, whose `shape[0]` must equal `2 * (NR - 1) + 1` when both
 signal dimensions are compile-time constants, and must be at least
 `2 * (NR - 1) + 1` when only `shape[0]` is statically known (no static check when
@@ -103,6 +118,20 @@ Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 `ReduceOp.Max`, `ReduceOp.Min`, `ReduceOp.Prod`, and `FP16` are not yet available
 with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
+
+All window operands of a HOST collective — data and signal alike — must
+resolve to pairwise distinct `WindowBuffer` allocations. Two `pld.window()`
+views over the same `alloc_window_buffer` are a cross-process data race under
+in-kernel TPUT/notify: data-vs-data is a reduce overwrite, data-vs-control
+races a notify/count write against a kernel read, and control-vs-control races
+a notify against a count publish. `LowerHostTensorCollectives` rejects any
+aliasing pair before emitting the builtin dispatch.
+
+`broadcast`'s `root` kwarg is additionally bounds-checked when the
+participating device count is statically known: on an explicit static device
+subset it must satisfy `root < participating device count`. The fully-dynamic
+"all device" domain cannot be checked at compile time (no device count is
+known there) — the same documented limitation as the signal-capacity check.
 
 `all_to_all_v`'s single-use Set(1)/wait≥1 signal cannot be reused across a
 `for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](41-materialize_comm_domain_scopes.md),

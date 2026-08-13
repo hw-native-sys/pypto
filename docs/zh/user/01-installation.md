@@ -79,7 +79,7 @@ Pass 流水线，并返回 Pass 后的 `ir.Program`。它不会执行代码生�
 示例，不要把函数管道给 `python -`：`@pl.jit` 需要读取被装饰函数的源码，而 stdin 上取不到。
 
 ```bash
-python examples/kernels/08_assemble.py
+python examples/intermediate/05_assemble.py
 ```
 
 最后一行是：
@@ -151,20 +151,22 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 
 | 路径 | 内容 |
 | ---- | ---- |
-| `examples/hello_world.py` | 最简单的完整程序 —— 从这里开始 |
-| `examples/kernels/` | 单 kernel 算子，按难度编号：逐元素、融合算子、矩阵乘、softmax、assemble |
+| `examples/beginner/` | 单 kernel 基础，按难度编号：hello world、逐元素、标量运算、激活函数、矩阵乘、拼接 |
+| `examples/intermediate/` | 真实 kernel 模式，按难度编号：融合线性层、softmax、归一化、矩阵乘累加、assemble、动态 valid_shape |
+| `examples/advanced/` | 性能与底层技巧：split-K、编译器驱动的分块 |
 | `examples/models/` | 多 kernel 模型，按难度编号：FFN、paged attention、LLaMA |
 | `examples/utils/` | 解析、跨函数调用、错误处理 |
 | `examples/runtime/` | 派发、显式 worker、分布式回调、多程序 KV cache |
 
-**这些例子多数会派发到硬件，而不只是编译。** `hello_world.py`、`kernels/06_softmax.py`、
-`models/01_ffn.py` 最后都以 `config=RunConfig()` 调用各自的 kernel，也就是经 ptoas 汇编后
-真正运行 —— 因此它们需要运行时和一块设备或模拟器平台，仅有上面的 `pip install` 是不够的：
+**这些例子多数会派发到硬件，而不只是编译。** `beginner/01_hello_world.py`、
+`intermediate/02_softmax.py`、`models/01_ffn.py` 最后都以 `config=RunConfig()` 调用各自的
+kernel，也就是经 ptoas 汇编后真正运行 —— 因此它们需要运行时和一块设备或模拟器平台，仅有上面的
+`pip install` 是不够的：
 
 ```bash
-python examples/hello_world.py          # 需要运行时 + 设备/模拟器
-python examples/kernels/06_softmax.py   # 需要运行时 + 设备/模拟器
-python examples/models/01_ffn.py        # 需要运行时 + 设备/模拟器
+python examples/beginner/01_hello_world.py     # 需要运行时 + 设备/模拟器
+python examples/intermediate/02_softmax.py     # 需要运行时 + 设备/模拟器
+python examples/models/01_ffn.py               # 需要运行时 + 设备/模拟器
 ```
 
 如果你只有编译器前端，读它们而不要运行 —— `examples/utils/` 是最接近“仅解析与查看”的那部分。

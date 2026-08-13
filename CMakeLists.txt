@@ -171,6 +171,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
+    src/ir/transforms/materialize_valid_shape_symbols_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
     src/ir/transforms/auto_derive_task_dependencies_pass.cpp
@@ -234,6 +235,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/utils/wrapper_call_utils.cpp
+    src/ir/transforms/utils/window_alias_utils.cpp
     src/ir/transforms/utils/window_externalization.cpp
     src/ir/transforms/visitor.cpp
 
@@ -243,6 +245,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/mixed_kernel_expanded_verifier.cpp
     src/ir/verifier/verify_hard_syncall_occupancy.cpp
     src/ir/verifier/verify_aiv_split.cpp
+    src/ir/verifier/verify_acc_to_gm_store.cpp
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_no_nested_incore.cpp

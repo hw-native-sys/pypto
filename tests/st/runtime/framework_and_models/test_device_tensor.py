@@ -28,7 +28,7 @@ call is the supported way to mix host + device tensor inputs.
 
 import pytest
 import torch
-from examples.kernels.elementwise import tile_add_128
+from examples.beginner.elementwise import tile_add_128
 from pypto.runtime import ChipWorker, RunConfig
 
 

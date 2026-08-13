@@ -41,6 +41,13 @@ ir.compile(
 pypto-ir-trace build/my_program/passes_dump
 ```
 
+`pypto-ir-trace` 命令由 `pip install` 生成。若源码检出仅设置了 `PYTHONPATH`，
+请改用模块入口点（module entry point），其参数与退出码完全一致：
+
+```bash
+python -m pypto.tools.ir_trace build/my_program/passes_dump
+```
+
 默认输出为当前目录中的 `ir_trace.html`。输出会先写入目标目录中的临时文件，
 再原子替换（atomic replacement）指定路径，因此写入失败不会留下不完整报告。
 

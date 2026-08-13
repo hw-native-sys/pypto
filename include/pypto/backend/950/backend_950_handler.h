@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/type.h"
 
@@ -39,6 +40,9 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_core_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
+  [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
+    return dtype.GetBit() != 4 || dtype == DataType::FP4;
+  }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
@@ -51,6 +55,12 @@ class Ascend950Handler : public BackendHandler {
   // A5 store pipe does NOT support bf16 atomic-add (pto-isa SetAtomicAdd<T>
   // rejects bfloat16_t on the a5 path); require an fp32 accumulator + cast.
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return false; }
+
+  // A5 fix-pipe Acc->GM destination whitelist (pto-isa kirinX90 CheckAcc2gm,
+  // non-quant branch) -- narrower than a2a3: no bf16.
+  [[nodiscard]] bool SupportsAccToGmDtype(const DataType& dtype) const override {
+    return dtype == DataType::INT32 || dtype == DataType::FP32 || dtype == DataType::FP16;
+  }
 
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
@@ -71,6 +81,14 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
   [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
+  [[nodiscard]] uint32_t GetBiasCapacityBytes() const override { return 4ULL * 1024; }
+  [[nodiscard]] bool SupportsMatToBiasMove(const DataType& source_dtype,
+                                           const DataType& bias_dtype) const override {
+    return (source_dtype == DataType::INT32 && bias_dtype == DataType::INT32) ||
+           (bias_dtype == DataType::FP32 &&
+            (source_dtype == DataType::FP32 || source_dtype == DataType::FP16 ||
+             source_dtype == DataType::BF16));
+  }
   [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
   // a5 roofline cost-model constants -- FULLY a5-sim-CALIBRATED (all 7; raw work-cycle fit;

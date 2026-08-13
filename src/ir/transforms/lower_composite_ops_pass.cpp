@@ -882,6 +882,11 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
       << "pld.tensor.allreduce lowering received unknown ReduceOp " << op_value;
   const auto reduce_op = static_cast<ReduceOp>(op_value);
 
+  auto core_num = GetRequiredKwarg<int>(call->kwargs_, "core_num", "pld.tensor.allreduce");
+  CHECK_SPAN(core_num == 1, span)
+      << "pld.tensor.allreduce core_num > 1 is supported only in a HOST orchestrator; "
+         "use an enclosing pl.spmd(...) for multi-core InCore execution";
+
   // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
   // ring schedule; "mesh" (default) uses the direct-exchange lowering below.
   // `mode` is a public DSL kwarg, so an unknown value is a user error — reject

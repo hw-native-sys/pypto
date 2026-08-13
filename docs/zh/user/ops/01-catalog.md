@@ -124,7 +124,7 @@
 | `matmul_bias` | `pl.` (t) | 带 bias 操作数的乘法 |
 | `batch_matmul` | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | `gemv` `gemv_acc` `gemv_bias` | `pl.` (t) | 矩阵-向量形式 |
-| `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | MX 块缩放矩阵乘 —— 每个操作数由一块 FP8E4M3FN 数据 tile 和一块 FP8E8M0 scale tile 组成 |
+| `matmul_mx` `matmul_mx_acc` `matmul_mx_bias` | `pl.` (t) | A5 MX 块缩放矩阵乘 —— 进入算子的两块 data tile 必须为 FP8E4M3FN；支持的 FP4 输入形式仅为 FP4×FP8，且左侧 FP4 必须先显式 cast 为 FP8；不支持原生 FP4×FP4 |
 
 ## Gather、Scatter、排序
 

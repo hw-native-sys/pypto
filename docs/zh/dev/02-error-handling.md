@@ -165,6 +165,32 @@ UNREACHABLE_SPAN(node->span_) << "Unsupported data type: " << dtype;
 
 当 `Span` 有效时，错误输出在消息末尾追加 `[file:line:col]`。使用 `Span::unknown()` 时，不显示源码位置。
 
+### Pass 中的 span 归属
+
+Pass 合成或重建 IR 节点时，必须赋予它**所代表节点**的 span，而不是外层函数的 span。
+使用 `func->span_` 很方便——它在整个变换过程中都可见——但这会让 pass 触及的每个节点
+都报告 `def` 行，从而悄悄降低所有读取 `Call` span 的消费方的精度：后续 pass 抛出的
+`CHECK_SPAN` / `INTERNAL_CHECK_SPAN` 诊断、IR trace 报告，以及按 span 归并的验证检查
+（PH001 性能提示按源码位置去重，span 被粗化后会把互不相关的搬运合并成一条错误的
+"N occurrences" 提示）。
+
+```cpp
+// ❌ 每个合成的算子都报告 `def` 行
+const auto& span = func->span_;
+for (const auto& stmt : body) { /* ... */ op_registry.Create(name, args, span); }
+
+// ✅ 将每个节点归属到正在重写的语句
+for (const auto& stmt : body) {
+  const Span& span = stmt->span_;
+  /* ... */ op_registry.Create(name, args, span);
+}
+```
+
+选择促成新节点的最近节点：正在重写的语句、正在转换的 `Call`（`call->span_`）、
+前置 load 所读取的参数（`var->span_`），或后置 store 所服务的 `ReturnStmt`。
+只有真正属于整个函数的节点——重建的 `Function` 本身及其函数体 `SeqStmts`——
+才应使用 `func->span_`。
+
 ## Python API
 
 ```python

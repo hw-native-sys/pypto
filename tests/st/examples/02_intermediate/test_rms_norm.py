@@ -16,7 +16,7 @@ One RMS normalization pattern is demonstrated:
 
 import pytest
 import torch
-from examples.kernels.normalization import rms_norm
+from examples.intermediate.normalization import rms_norm
 
 
 class TestRMSNormCore:

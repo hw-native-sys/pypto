@@ -18,6 +18,9 @@ from pypto.language.parser.ast_parser import ASTParser
 from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
 from pypto.language.parser.text_parser import parse_program
 
+_OP_SYSTEM_TASK_INVALID = ir.get_op("system.task_invalid").name
+_OP_TILE_GET_BLOCK_IDX = ir.get_op("tile.get_block_idx").name
+
 
 def _descendants(node, cls):
     """Collect every descendant of ``node`` (inclusive) that is an instance of ``cls``."""
@@ -286,7 +289,7 @@ class TestSpmdForLoop:
         assert isinstance(first_stmt, ir.AssignStmt)
         call = first_stmt.value
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.get_block_idx"
+        assert call.op.name == _OP_TILE_GET_BLOCK_IDX
         assert first_stmt.var.name_hint == "i"
 
     def test_for_spmd_accepts_core_num_kwarg(self):
@@ -695,7 +698,7 @@ class TestSpmdOptimizations:
         assert isinstance(first_stmt, ir.AssignStmt)
         call = first_stmt.value
         assert isinstance(call, ir.Call) and isinstance(call.op, ir.Op)
-        assert call.op.name == "tile.get_block_idx"
+        assert call.op.name == _OP_TILE_GET_BLOCK_IDX
 
     def test_for_spmd_qualified_split_sets_inner_incore_split(self):
         """``pl.optimizations.split(...)`` is accepted on the for-form."""
@@ -1242,7 +1245,7 @@ class TestSpmdScopeTaskId:
         return (
             isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "system.task_invalid"
+            and stmt.value.op.name == _OP_SYSTEM_TASK_INVALID
         )
 
     def _build(self):
@@ -1299,7 +1302,7 @@ class TestSpmdScopeTaskId:
         # User-written get_block_idx is the first body stmt (NOT a synthesized loop var).
         first = stmts[0]
         assert isinstance(first, ir.AssignStmt)
-        assert isinstance(first.value, ir.Call) and first.value.op.name == "tile.get_block_idx"
+        assert isinstance(first.value, ir.Call) and first.value.op.name == _OP_TILE_GET_BLOCK_IDX
         assert len(stmts) > 1, "inline body should carry multiple statements"
 
     def test_as_tid_deps_sets_manual_dep_edges(self):
@@ -1578,7 +1581,7 @@ class TestSpmdInlineWithForm:
         first = stmts[0]
         assert isinstance(first, ir.AssignStmt)
         assert isinstance(first.value, ir.Call)
-        assert first.value.op.name == "tile.get_block_idx"
+        assert first.value.op.name == _OP_TILE_GET_BLOCK_IDX
         assert len(stmts) > 1, "inline body should carry multiple statements"
 
     def test_inline_with_spmd_no_placeholder_before_scope(self):
@@ -1603,7 +1606,7 @@ class TestSpmdInlineWithForm:
         placeholders = [
             s
             for s in _descendants(main_func.body, ir.AssignStmt)
-            if isinstance(s.value, ir.Call) and s.value.op.name == "system.task_invalid"
+            if isinstance(s.value, ir.Call) and s.value.op.name == _OP_SYSTEM_TASK_INVALID
         ]
         assert not placeholders, "plain inline form must not emit a task_invalid placeholder"
         # ...but the scope itself must still be there — an empty body would also

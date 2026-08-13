@@ -1101,6 +1101,19 @@ class TestPromotedOps:
             f"names bound to different objects in pypto.language vs pypto.language.op: {divergent}"
         )
 
+    @pytest.mark.parametrize("module", [pl, language_op], ids=["pl", "pl.op"])
+    def test_all_lists_each_name_once(self, module):
+        """``__all__`` must not repeat a name.
+
+        ``pypto.language.op.__all__`` groups names by dispatch category
+        (unified / tile-only / tensor-only). A name listed under two groups is
+        invisible at runtime — ``from ... import *`` de-duplicates — but it
+        makes the groups drift, and lets a later edit delete one entry while
+        the name still looks unexported.
+        """
+        duplicates = sorted({name for name in module.__all__ if module.__all__.count(name) > 1})
+        assert not duplicates, f"{module.__name__}.__all__ lists these names more than once: {duplicates}"
+
     def test_create_tile_single_binding(self):
         """``create_tile`` is the ``tile_ops.create`` alias in both namespaces."""
         assert pl.create_tile is language_op.create_tile is tile_ops.create
@@ -1167,7 +1180,7 @@ class TestPromotedOps:
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.create([64], dtype=pl.FP32)
             return c
 
         ir.assert_structural_equal(unified, explicit)
@@ -1180,7 +1193,7 @@ class TestPromotedOps:
 
         @pl.function
         def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Scalar[pl.INT64]:
-            d: pl.Scalar[pl.INT64] = pl.dim(a, 0)
+            d: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)
             return d
 
         ir.assert_structural_equal(unified, explicit)
@@ -1216,7 +1229,7 @@ class TestPromotedSinCos:
         assert isinstance(result, Tensor)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.sin"
+        assert call.op.name == ir.get_op("tensor.sin").name
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -1229,7 +1242,7 @@ class TestPromotedSinCos:
         assert isinstance(result, Tensor)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.cos"
+        assert call.op.name == ir.get_op("tensor.cos").name
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -1290,7 +1303,7 @@ class TestPromotedTileSinCos:
         assert isinstance(result, Tile)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.sin"
+        assert call.op.name == ir.get_op("tile.sin").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -1303,7 +1316,7 @@ class TestPromotedTileSinCos:
         assert isinstance(result, Tile)
         call = result.unwrap()
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.cos"
+        assert call.op.name == ir.get_op("tile.cos").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -1364,7 +1377,7 @@ class TestUnifiedOpsTypeErrors:
         rhs = Tensor(expr=ir.Var("rhs", ir.TensorType([8, 1], DataType.FP32), span))
         tmp = Tile(expr=ir.Var("tmp", ir.TileType([8, 8], DataType.FP32), span))
 
-        with pytest.raises(ValueError, match="tmp is only supported for Tile"):
+        with pytest.raises(TypeError, match="Tensor inputs must not pass tmp"):
             unified_ops.row_expand_add(lhs, rhs, tmp)  # type: ignore[call-overload]
 
     def test_div_rejects_high_precision_for_scalar_paths(self):
@@ -1385,8 +1398,57 @@ class TestUnifiedOpsTypeErrors:
         ]
 
         for lhs, rhs in cases:
-            with pytest.raises(ValueError, match="high_precision"):
+            with pytest.raises(TypeError, match="high_precision"):
                 unified_ops.div(lhs, rhs, high_precision=True)  # type: ignore[call-overload]
+
+    @pytest.mark.parametrize(
+        "op_name",
+        [
+            "row_max",
+            "row_sum",
+            "row_min",
+            "row_prod",
+            "row_argmax",
+            "row_argmin",
+            "col_argmax",
+            "col_argmin",
+        ],
+    )
+    def test_reduction_requires_tmp_tile_for_tile_inputs(self, op_name):
+        """The scratch operand the Tensor path must omit is the one the Tile path must get.
+
+        Both directions raise ``TypeError``: a Tile cannot synthesize caller-owned
+        scratch, so omitting it is a wrong-arguments error, not a bad value.
+        """
+        span = ir.Span.unknown()
+        tile = Tile(expr=ir.Var("input", ir.TileType([8, 64], DataType.FP32), span))
+
+        with pytest.raises(TypeError, match="Tile inputs require tmp_tile"):
+            getattr(unified_ops, op_name)(tile)
+
+    @pytest.mark.parametrize("op_name", ["xor", "xors"])
+    def test_bitwise_requires_scratch_tile_for_tile_inputs(self, op_name):
+        """Same guard as the reductions, for the ops whose scratch operand is positional."""
+        span = ir.Span.unknown()
+        lhs = Tile(expr=ir.Var("lhs", ir.TileType([8, 64], DataType.INT32), span))
+
+        with pytest.raises(TypeError, match="Tile inputs require an explicit scratch tile"):
+            getattr(unified_ops, op_name)(lhs, 1)
+
+    def test_cast_rejects_non_default_mode_for_scalar(self):
+        """A *valid* mode the Scalar path cannot honour is a TypeError...
+
+        ...while a mode that is not a mode at all stays a ValueError from
+        ``resolve_cast_mode``, which runs first.
+        """
+        span = ir.Span.unknown()
+        scalar = Scalar(expr=ir.Var("s", ir.ScalarType(DataType.FP32), span))
+
+        with pytest.raises(TypeError, match="Scalar inputs do not support non-default mode"):
+            unified_ops.cast(scalar, DataType.INT32, mode="floor")
+
+        with pytest.raises(ValueError, match="Invalid rounding mode"):
+            unified_ops.cast(scalar, DataType.INT32, mode="not_a_mode")
 
     def test_matmul_invalid_lhs(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile operands"):

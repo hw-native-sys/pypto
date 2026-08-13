@@ -28,8 +28,25 @@ import time
 
 import pypto
 import pytest
-from pypto import LogLevel, set_log_level
+from pypto import LogLevel, get_log_level, set_log_level
 from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _contain_log_level_mutations():
+    """Keep this module's ``set_log_level`` calls from escaping the module.
+
+    Nearly every test here sets the process-global threshold and none of them
+    restore it, so without this the last one executed decides what the rest of
+    the session logs. ``tests/ut/conftest.py::_reset_log_level`` already pins
+    the level per test; this keeps the file self-contained rather than relying
+    on that net.
+    """
+    saved = get_log_level()
+    try:
+        yield
+    finally:
+        set_log_level(saved)
 
 
 class TestLogLevel:
@@ -84,6 +101,28 @@ class TestSetLogLevel:
         set_log_level(LogLevel(0))  # DEBUG
         set_log_level(LogLevel(3))  # ERROR
         set_log_level(LogLevel(6))  # NONE
+
+    def test_get_log_level_roundtrips_every_level(self):
+        """``get_log_level`` reads back exactly what ``set_log_level`` wrote."""
+        for level in LogLevel:
+            set_log_level(level)
+            assert get_log_level() == level
+
+    def test_get_log_level_returns_process_global_not_thread_override(self):
+        """``get_log_level`` must ignore the thread-local override.
+
+        Save-restore pairs depend on this: a getter that reported the calling
+        thread's *effective* level would promote a temporary override into the
+        process-global threshold on restore, which is the leak these accessors
+        exist to prevent.
+        """
+        set_log_level(LogLevel.INFO)
+        _set_thread_log_level(LogLevel.ERROR)
+        try:
+            assert get_log_level() == LogLevel.INFO
+        finally:
+            _clear_thread_log_level()
+        assert get_log_level() == LogLevel.INFO
 
 
 class TestLoggingFunctions:
@@ -554,6 +593,34 @@ class TestCheckFunctions:
         # Should be catchable as InternalError specifically
         with pytest.raises(pypto.InternalError):
             pypto.internal_check(False, "test")
+
+
+# Defined last on purpose: in definition order every log-level mutator in this
+# file has already run by the time this executes, so the assertion below has
+# something to catch. The invariant itself is order-independent — it must hold
+# no matter what ran first.
+class TestLogLevelIsolation:
+    """The per-test reset in ``tests/ut/conftest.py`` is what keeps stderr
+    assertions honest across the suite.
+
+    Every test above sets the process-global threshold and none restore it, so
+    without that reset the survivor decides what later tests can observe. That
+    is how ``TestCapacityGatedReuse::test_fallback_repacks_legacy_on_genuine_overflow``
+    came to fail on a leaked ``ERROR`` — MemoryReuse's warning was emitted, but
+    the logger dropped it and the test read an empty stderr.
+    """
+
+    def test_each_test_starts_from_the_session_log_level(self, initial_log_level):
+        """A sibling's ``set_log_level`` must not survive into this test."""
+        assert get_log_level() == initial_log_level
+
+    def test_warnings_reach_stderr_at_the_session_log_level(self, capfd, initial_log_level):
+        """The concrete guarantee the reset buys: a leaked NONE/ERROR would
+        swallow this warning exactly as it swallowed MemoryReuse's."""
+        if initial_log_level > LogLevel.WARN:
+            pytest.skip(f"session log level {initial_log_level.name} mutes warnings by choice")
+        pypto.log_warn("isolation canary")
+        assert "isolation canary" in capfd.readouterr().err
 
 
 if __name__ == "__main__":

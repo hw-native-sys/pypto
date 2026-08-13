@@ -14,6 +14,8 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
 
+_TILE_CAST = ir.get_op("tile.cast").name
+
 
 class _CastTargetCollector(ir.IRVisitor):
     """Record each tile.cast's (src_dtype, target_type) in visitation order."""
@@ -23,7 +25,7 @@ class _CastTargetCollector(ir.IRVisitor):
         self.pairs: list[tuple[str, str]] = []
 
     def visit_call(self, op: ir.Call) -> None:
-        if op.op.name == "tile.cast":
+        if op.op.name == _TILE_CAST:
             src_ty = op.args[0].type
             assert isinstance(src_ty, ir.TileType)
             src = str(src_ty.dtype)
@@ -77,6 +79,50 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     after = _run(Before, BackendType.Ascend950)
     pairs = _cast_pairs(after)
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
+
+
+def test_a5_explicit_fp4_to_fp8_cast_becomes_three_native_hops():
+    """The public FP4→FP8 cast expands in LegalizeTileCast and preserves valid_shape."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP4],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 64], valid_shape=[8, 48])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+    assert _cast_pairs(after) == [
+        ("fp4", "bfloat16"),
+        ("bfloat16", "fp32"),
+        ("fp32", "fp8e4m3fn"),
+    ]
+
+    class _ValidShapeCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shapes: list[tuple[int, int]] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_CAST:
+                tile_type = op.type
+                assert isinstance(tile_type, ir.TileType)
+                valid = tile_type.get_effective_tile_view().valid_shape
+                assert len(valid) == 2
+                rows, cols = valid
+                assert isinstance(rows, ir.ConstInt)
+                assert isinstance(cols, ir.ConstInt)
+                self.shapes.append((rows.value, cols.value))
+            super().visit_call(op)
+
+    collector = _ValidShapeCollector()
+    collector.visit_program(after)
+    assert collector.shapes == [(8, 48), (8, 48), (8, 48)]
 
 
 def test_a2a3_int32_to_fp16_stays_native():

@@ -65,6 +65,15 @@ inline YieldStmtPtr GetLastYieldStmt(const StmtPtr& body) {
     if (seq->stmts_.empty()) return nullptr;
     return GetLastYieldStmt(seq->stmts_.back());
   }
+  // RuntimeScopeStmt and SplitAivScopeStmt are transparent to SSA. A valid
+  // control-flow yield may therefore be the trailing statement inside either
+  // scope, so use the same traversal as SSAVerifier::GetLastStmt.
+  if (auto scope = As<RuntimeScopeStmt>(body)) {
+    return GetLastYieldStmt(scope->body_);
+  }
+  if (auto scope = As<SplitAivScopeStmt>(body)) {
+    return GetLastYieldStmt(scope->body_);
+  }
   return As<YieldStmt>(body);
 }
 

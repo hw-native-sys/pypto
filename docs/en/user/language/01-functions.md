@@ -35,7 +35,7 @@ def add_kernel(
     b: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    out = pl.add(a, b)
+    out = pl.assemble(out, pl.add(a, b), [0, 0])
     return out
 
 @pl.jit
@@ -122,13 +122,13 @@ move them into a `@pl.jit.incore` sub-function.
 ```python
 @pl.jit
 def bad(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
-    out = pl.add(x, x)        # ✗ Misplaced tensor op ... should be inside InCore block
+    out = pl.assemble(out, pl.add(x, x), [0, 0])        # ✗ Misplaced tensor op ... should be inside InCore block
     return out
 
 @pl.jit
 def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.add(x, x)    # ✓
+        out = pl.assemble(out, pl.add(x, x), [0, 0])    # ✓
     return out
 ```
 
@@ -185,6 +185,44 @@ def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 
 The decorated object is a `pl.InlineFunction` — a template the parser splices, not a
 function you can call from Python.
+
+### Function attributes: `pl.func_attr`
+
+Metadata about the function as a whole is declared with `pl.func_attr({...})` as the
+**first statement** of the body:
+
+```python
+@pl.program
+class Kernels:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], w: pl.Tensor[[64, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
+        pl.func_attr({"stationary": w, "split": pl.SplitMode.UP_DOWN})
+        ...
+```
+
+It reads oddly for a *function*-level declaration to sit inside the body, so it is worth
+saying why. A decorator is evaluated before the signature binds any name, so
+`@pl.function(attrs={"stationary": w})` cannot be written at all — `w` does not exist
+yet. Body position places the declaration after the parameters are bound, which is what
+makes an attribute that *references a parameter* expressible. The alternatives are a
+positional index (`{"stationary_param": 1}`, which breaks the moment a pass reorders
+parameters) or a naming convention nothing enforces.
+
+Rules worth knowing:
+
+| Rule | Why |
+| ---- | --- |
+| Must precede every other statement | An attribute describes the whole function; it must not appear to start applying partway down a body. This also bounds what it can reference to the parameters. |
+| A bare name is always a parameter | `pl.func_attr({"n": k})` records the parameter `k`, never a same-named Python variable from the enclosing scope. Write Python constants as literals. |
+| Multiple calls merge | A key declared twice is an error naming the key, so which value wins is never a matter of parse order. |
+| `auto_scope=` and `external_source=` stay on the decorator | The parser reads them *before* it walks the body, so a body-position declaration would arrive too late to take effect. |
+
+`@pl.function(attrs={...})` is **deprecated** and emits a `DeprecationWarning`. It still
+parses and behaves identically, but it can only ever carry values that reference nothing.
+Printed IR always uses a non-deprecated spelling — the `pl.func_attr` prologue, or the
+dedicated `auto_scope=` / `external_source=` keywords — so reparsing compiler output never
+warns.
 
 ### Splitting compile from dispatch
 

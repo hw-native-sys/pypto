@@ -11,7 +11,7 @@ bound_scale = tile.tget_scale_addr(scale, data)
 matmul_mx(..., bound_scale, ...)
 ```
 
-`tile.tget_scale_addr` is intentionally absent from the public `pypto.language` API. Users write only the high-level `matmul_mx` family; the compiler derives the Left/Right side from the matmul operand slots. The low-level `ir.op.tile.tget_scale_addr` remains available for compiler construction and IR parsing. It accepts only the resolved pairs `(LeftScale, Left)` and `(RightScale, Right)`.
+`tile.tget_scale_addr` is intentionally absent from the public `pypto.language` API. Users write only the high-level `matmul_mx` family; the compiler derives the Left/Right side from the matmul operand slots. The low-level `ir.op.tile.tget_scale_addr` remains available for compiler construction and IR parsing. It accepts only the resolved pairs `(LeftScale, Left)` and `(RightScale, Right)`, with an `FP8E4M3FN` data tile. An FP4 lhs is cast to FP8 before reaching this pass.
 
 **Pipeline position**: Immediately after [`InferTileMemorySpace`](17-infer_tile_memory_space.md), before [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md).
 

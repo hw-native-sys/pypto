@@ -11,13 +11,13 @@
 Runtime tests for tile-based elementwise operations using the @pl.jit frontend.
 
 Verifies that the migrated tile_add_64/tile_add_128/tile_mul_64/tile_mul_128 kernels
-from ``examples.kernels.elementwise`` produce results matching torch references on
+from ``examples.beginner.elementwise`` produce results matching torch references on
 the platform configured via ``test_config``.
 """
 
 import pytest
 import torch
-from examples.kernels.elementwise import (
+from examples.beginner.elementwise import (
     tile_add_64,
     tile_add_128,
     tile_mul_64,

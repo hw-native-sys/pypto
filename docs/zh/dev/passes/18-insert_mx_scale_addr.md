@@ -11,7 +11,7 @@ bound_scale = tile.tget_scale_addr(scale, data)
 matmul_mx(..., bound_scale, ...)
 ```
 
-`tile.tget_scale_addr` 有意不暴露在公共 `pypto.language` API 中。用户只编写高层 `matmul_mx` 算子族；编译器根据 matmul 操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 仍供编译器构造与 IR 解析使用，且只接受已解析的 `(LeftScale, Left)` 与 `(RightScale, Right)` 配对。
+`tile.tget_scale_addr` 有意不暴露在公共 `pypto.language` API 中。用户只编写高层 `matmul_mx` 算子族；编译器根据 matmul 操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 仍供编译器构造与 IR 解析使用，且只接受已解析的 `(LeftScale, Left)` 与 `(RightScale, Right)` 配对，data tile 必须为 `FP8E4M3FN`。左侧 FP4 输入会在进入本 pass 前先转换为 FP8。
 
 **流水线位置**：紧接在 [`InferTileMemorySpace`](17-infer_tile_memory_space.md) 之后，[`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) 之前。
 

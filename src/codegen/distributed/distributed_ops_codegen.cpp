@@ -16,8 +16,12 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/distributed/distributed_op_registry.h"
@@ -115,7 +119,8 @@ std::string ArgDirectionToTensorArgType(ir::ArgDirection dir) {
 }
 
 void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const CallPtr& call,
-                                         const std::string& variant) {
+                                         const std::string& variant,
+                                         std::optional<int> core_num = std::nullopt) {
   INTERNAL_CHECK(call && call->op_)
       << "Internal error: builtin tensor collective dispatch needs a valid Call";
 
@@ -178,6 +183,9 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
 
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
+  if (core_num.has_value()) {
+    codegen.Emit(ta_var + ".add_scalar(" + std::to_string(*core_num) + ")");
+  }
   codegen.Emit(cfg_var + " = CallConfig()");
   codegen.Emit(cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");
   codegen.Emit("_keep.append(" + ta_var + ")");
@@ -223,33 +231,51 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_window, "pld.tensor.window") {
 // builtin.tensor.allreduce: compiler-generated host collective chip dispatch.
 // ============================================================================
 
+/// Emit the chip dispatch shared by the mesh and ring host AllReduce builtins.
+///
+/// ``multicore`` is set only for the mesh builtin, which launches a synchronized
+/// SPMD AIV grid of ``core_num`` blocks. The ring builtin stays single-block, so
+/// it neither carries a ``core_num`` attr nor renders a launch-spec method.
+/// ``core_num`` itself is validated by ``LowerHostTensorCollectives`` — including
+/// the backend capacity bound — so codegen only forwards it.
 std::string EmitAllReduceLikeDispatch(DistributedCodegen& dist_codegen, const CallPtr& op,
-                                      bool include_reduce_inst) {
+                                      bool include_reduce_inst, bool multicore) {
   const int reduce_op = op->GetAttr<int>("op");
   const auto dtype = op->GetAttr<DataType>("dtype");
   const auto reduce_variant = GetAllReduceOpVariant(reduce_op);
   const auto dtype_variant = GetAllReduceDTypeVariant(dtype);
   const std::string variant = op->op_->name_ + "__" + reduce_variant.suffix + "__" + dtype_variant.suffix;
 
-  if (dist_codegen.MarkBuiltinEmitted(variant)) {
-    if (include_reduce_inst) {
-      dist_codegen.RecordBuiltinNextLevel(op, variant,
-                                          {{"op_cpp", reduce_variant.cpp},
-                                           {"reduce_inst", reduce_variant.instruction},
-                                           {"dtype_cpp", dtype_variant.cpp}});
-    } else {
-      dist_codegen.RecordBuiltinNextLevel(op, variant,
-                                          {{"op_cpp", reduce_variant.cpp}, {"dtype_cpp", dtype_variant.cpp}});
-    }
+  std::optional<int> core_num;
+  if (multicore) {
+    const int requested = op->GetAttr<int>("core_num");
+    INTERNAL_CHECK_SPAN(requested > 0, op->span_)
+        << "Internal error: builtin.tensor.allreduce core_num must be positive, got " << requested
+        << "; LowerHostTensorCollectives should have rejected it";
+    core_num = requested;
   }
-  EmitBuiltinWindowCollectiveDispatch(dist_codegen, op, variant);
+
+  if (dist_codegen.MarkBuiltinEmitted(variant)) {
+    std::map<std::string, std::string> template_vars{{"op_cpp", reduce_variant.cpp},
+                                                     {"dtype_cpp", dtype_variant.cpp}};
+    if (include_reduce_inst) {
+      template_vars["reduce_inst"] = reduce_variant.instruction;
+    }
+    if (multicore) {
+      template_vars["launch_core_count_method"] =
+          pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
+    }
+    dist_codegen.RecordBuiltinNextLevel(op, variant, std::move(template_vars));
+  }
+  EmitBuiltinWindowCollectiveDispatch(dist_codegen, op, variant, core_num);
   return "";
 }
 
 REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce, "builtin.tensor.allreduce") {
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
   INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce codegen requires DistributedCodegen";
-  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/true);
+  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/true,
+                                   /*multicore=*/true);
 }
 
 // ============================================================================
@@ -258,7 +284,8 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce, "builtin.tensor.allreduce") {
 REGISTER_DISTRIBUTED_OP(builtin_tensor_allreduce_ring, "builtin.tensor.allreduce_ring") {
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
   INTERNAL_CHECK(dist_codegen) << "builtin.tensor.allreduce_ring codegen requires DistributedCodegen";
-  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/false);
+  return EmitAllReduceLikeDispatch(*dist_codegen, op, /*include_reduce_inst=*/false,
+                                   /*multicore=*/false);
 }
 
 // ============================================================================

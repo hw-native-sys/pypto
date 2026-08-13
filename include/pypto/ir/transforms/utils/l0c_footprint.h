@@ -23,6 +23,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::utils {
@@ -105,11 +106,7 @@ inline std::optional<uint64_t> StaticPhysicalAllocationBytes(const ShapedTypePtr
     if (elements > std::numeric_limits<uint64_t>::max() / extent) return std::nullopt;
     elements *= extent;
   }
-  const uint64_t element_bytes = type->dtype_.GetByte();
-  if (element_bytes == 0 || elements > std::numeric_limits<uint64_t>::max() / element_bytes) {
-    return std::nullopt;
-  }
-  return elements * element_bytes;
+  return storage_size::StaticStorageBytes(elements, type->dtype_);
 }
 
 }  // namespace pypto::ir::utils

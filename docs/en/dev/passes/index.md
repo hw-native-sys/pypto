@@ -64,6 +64,7 @@ a pipeline pass at all.
 | 44 | [MaterializeRuntimeScopes](44-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `PTO2_SCOPE` 1:1 |
 | 45 | [ClassifyIterArgCarry](45-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
 | 46 | [InsertCommFence](46-insert_comm_fence.md) | Inserts a whole-tensor `system.cacheinvalid` + GM `system.fence` between each publishing write and the `pld.system.notify` that releases it |
+| 47 | [MaterializeValidShapeSymbols](47-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
 
 ## Outside the default pipeline
 

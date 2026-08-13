@@ -98,6 +98,9 @@ void BindLogging(nb::module_& m) {
   // Bind LoggerManager functions
   m.def("set_log_level", &LoggerManager::ResetLevel, nb::arg("level"),
         "Set the global log level threshold. Only messages at or above this level will be logged.");
+  m.def("get_log_level", &LoggerManager::GetGlobalLevel,
+        "Get the global log level threshold. Ignores any thread-local override installed by "
+        "_set_thread_log_level, so get_log_level() / set_log_level() form a save-restore pair.");
   m.def("_set_thread_log_level", &LoggerManager::SetThreadLevel, nb::arg("level"),
         "Override the log level threshold for the calling thread.");
   m.def("_clear_thread_log_level", &LoggerManager::ClearThreadLevel,

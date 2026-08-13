@@ -18,6 +18,7 @@ mutations land on the same backing storage.
 import pypto.language as pl
 import pytest
 from _orchestration_codegen_common import _finalize_handbuilt_for_codegen
+from _pto_loc_common import strip_loc
 from pypto import codegen, passes
 from pypto.pypto_core import DataType, ir
 
@@ -503,7 +504,7 @@ def test_incore_array_declare_set_get_lower_to_local_array():
     for ln in set_lines + get_lines:
         assert array_ssa in ln, ln
         assert ": !pto.local_array<8xi32>" in ln, ln
-    assert get_lines[0].rstrip().endswith("-> i32"), get_lines[0]
+    assert strip_loc(get_lines[0]).endswith("-> i32"), get_lines[0]
     # The get rvalue is the value operand of the second set.
     get_result = get_lines[0].split("=")[0].strip()
     assert get_result in set_lines[1], (get_lines[0], set_lines[1])

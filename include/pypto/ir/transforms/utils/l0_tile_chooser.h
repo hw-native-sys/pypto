@@ -86,6 +86,25 @@ struct L0TileConfig {
   int box_align_m = 1;
   int box_align_n = 1;
 
+  // Optional caller-imposed upper bound on the logical N tile extent. Zero
+  // means unbounded. AutoTileMatmulL0 uses this for auxiliary L0 resources
+  // whose footprint depends only on N, notably the architectural bias table
+  // used by tile.matmul_bias. This is a capacity constraint, not a cost-model
+  // coefficient.
+  int max_n = 0;
+
+  // Optional tighter N bound for a full-K output-grid candidate whose N axis
+  // is the moving axis of the emitted pipeline. This models an N-dependent
+  // auxiliary resource that is stage-replicated in that schedule. Zero means
+  // no additional bound. A/B/output stationarity remain in one exhaustive
+  // search: candidates that hold N in the sequential outer loop keep max_n.
+  int max_n_pipelined = 0;
+
+  // Optional bound for the same N-dependent resource when its definition is
+  // nested under two pipeline levels. Zero means no additional bound. This is
+  // normally tighter than max_n_pipelined because stage replication composes.
+  int max_n_nested_pipelined = 0;
+
   // --- Realizable mask -----------------------------------------------------
   // The chooser scores the design space (stationarity x dbC), but only EMITS
   // design points whose caller can lower. These gates select the realizable
@@ -237,7 +256,10 @@ struct L0TileResult {
  *        A0 = L0A/(bytes_a*dbA), B0 = L0B/(bytes_b*dbB), C0 = L0C/(bytes_c*dbC).
  *   2. Enumerate every legal aligned (m, n) with
  *      AlignUp(AlignUp(m, box_align_m), l0c_align_m) *
- *      AlignUp(n, box_align_n) <= C0, and for each (m, n)
+ *      AlignUp(n, box_align_n) <= C0 and n <= max_n when max_n > 0. A full-K
+ *      output-grid candidate additionally obeys max_n_pipelined when its
+ *      N-dependent resource is under one pipeline level, and
+ *      max_n_nested_pipelined when under two. For each (m, n),
  *      every legal aligned k (AlignUp(m, box_align_m)*k <= A0,
  *      AlignUp(n, box_align_n)*k <= B0, k >= min_k; k | K when neither
  *      padding nor k_boundary; plus k == K when the full K fits one block). ALL k

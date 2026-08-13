@@ -427,12 +427,18 @@ def matmul(
 ) -> Call:
     """Matrix multiplication with optional transpose.
 
+    A transpose flag swaps its own operand's two trailing axes, so that operand
+    must be at least 2D: ``a_trans`` with a 1D ``lhs`` (or ``b_trans`` with a 1D
+    ``rhs``) raises rather than being ignored. On the mixed mat-vec / vec-mat
+    forms the flag applies to the matrix side, so a ``lhs`` stored ``[K, M]``
+    with ``a_trans=True`` against a ``[K]`` ``rhs`` deduces ``[M]``.
+
     Args:
         lhs: Left-hand side tensor
         rhs: Right-hand side tensor
         out_dtype: Output data type (optional, inferred if not provided)
-        a_trans: Whether to transpose lhs
-        b_trans: Whether to transpose rhs
+        a_trans: Whether to transpose lhs (requires a 2D+ lhs)
+        b_trans: Whether to transpose rhs (requires a 2D+ rhs)
         c_matrix_nz: C matrix non-zero flag
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -627,7 +633,9 @@ def div(
     rhs_type = rhs_expr.type
     if isinstance(rhs_type, ScalarType):
         if high_precision:
-            raise ValueError("tensor.div(high_precision=True) requires a Tensor rhs")
+            # TypeError, matching the unified pl.* guards: a kwarg this operand
+            # combination cannot honour is a wrong-arguments error, not a bad value.
+            raise TypeError("tensor.div(high_precision=True) requires a Tensor rhs")
         return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
     kwargs: dict[str, Any] = {"high_precision": True} if high_precision else {}
     return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], kwargs, actual_span)

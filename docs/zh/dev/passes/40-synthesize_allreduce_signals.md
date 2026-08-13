@@ -38,17 +38,17 @@ allocation 处理，并放入 allreduce data buffer 所属的通信域。
 
 ```python
 __allreduce_signal_world_size_0 = pld.system.world_size()
-__allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * pl.INT32.get_byte())
+__allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * core_num * pl.INT32.get_byte())
 __allreduce_signal_0 = pld.tensor.window(
     __allreduce_signal_buf_0,
-    [__allreduce_signal_world_size_0, 1],
+    [__allreduce_signal_world_size_0, core_num],
     dtype=pl.INT32,
 )
 data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
 ```
 
-合成 signal 使用 rank-2 `[world_size, 1]`。这个形态与 InCore allreduce 的
-signal 索引模型一致，也让 host lowering 面向同一种 canonical signal 表示。
+合成 signal 使用 rank-2 `[world_size, core_num]`，buffer 字节数也使用相同的
+lane 数。默认 `core_num=1`，因此保留原有表示和行为。
 
 ## Print / Parse Round Trip
 

@@ -20,7 +20,7 @@ torch tensors::
 
 import ctypes
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,6 +111,33 @@ def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
     return _DATATYPE_TO_TORCH.get(str(dtype))
 
 
+def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
+    """Convert logical IR shape to the runtime carrier shape.
+
+    Only packed FP4 differs: Torch/runtime use one x2 element per byte while
+    PyPTO IR counts logical nibbles. The conversion remains at the call ABI
+    boundary, so no persistent storage_shape is needed in IR types.
+    """
+    runtime_shape = list(shape)
+    if dtype == DataType.FP4 and runtime_shape[-1] != -1:
+        # Static FP4 shape validity is centralized in ShapedType construction.
+        runtime_shape[-1] //= 2
+    return runtime_shape
+
+
+def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> None:
+    """Validate the runtime x2 carrier shape for one FP4 parameter."""
+    if info.dtype != DataType.FP4:
+        return
+    if not shape:
+        raise TypeError(f"Packed FP4 parameter {info.name!r} must have rank >= 1")
+    if shape[-1] <= 0:
+        raise TypeError(
+            f"Packed FP4 parameter {info.name!r} requires a positive runtime x2 carrier last dimension; "
+            f"got shape {tuple(shape)}"
+        )
+
+
 @dataclass
 class _ParamInfo:
     """Metadata for a single orchestration function parameter."""
@@ -182,7 +209,8 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
 
         if isinstance(param_type, ShapedType):
             dtype = param_type.dtype
-            shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
+            logical_shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
+            shape = _to_runtime_shape(logical_shape, dtype)
         elif isinstance(param_type, ScalarType):
             dtype = param_type.dtype
         else:
@@ -257,6 +285,7 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
                     f"got DeviceTensor shape {arg.shape}"
                 )
+    _validate_fp4_carrier_shape(arg.shape, info)
     expected_dtype = _to_torch_dtype(info.dtype)
     if expected_dtype is not None and arg.dtype != expected_dtype:
         raise TypeError(
@@ -288,6 +317,7 @@ def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
                     f"got StackedDeviceTensor full_shape {arg.full_shape}"
                 )
+    _validate_fp4_carrier_shape(arg.full_shape, info)
     expected_dtype = _to_torch_dtype(info.dtype)
     if expected_dtype is not None and arg.dtype != expected_dtype:
         raise TypeError(
@@ -388,6 +418,8 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
                 )
             if isinstance(arg, DeviceTensor):
                 _validate_device_tensor(arg, info)
+            else:
+                _validate_fp4_carrier_shape(arg.shape, info)
             coerced.append(arg)
 
     return coerced, return_style

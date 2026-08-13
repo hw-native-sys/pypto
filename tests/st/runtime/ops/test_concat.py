@@ -11,7 +11,7 @@
 
 import pytest
 import torch
-from examples.kernels.concat import tile_concat_32x32
+from examples.beginner.concat import tile_concat_32x32
 
 
 class TestConcatOperations:

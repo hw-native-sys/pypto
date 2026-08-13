@@ -110,13 +110,13 @@ PyPTO 包含按复杂度组织的示例：
 #### 1. Hello World（最简单的程序）
 
 ```bash
-python examples/hello_world.py
+python examples/beginner/01_hello_world.py
 ```
 
-#### 2. 算子示例（逐元素、矩阵乘、softmax 等）
+#### 2. 入门与进阶示例（逐元素、矩阵乘、softmax 等）
 
 ```bash
-python examples/kernels/06_softmax.py
+python examples/intermediate/02_softmax.py
 ```
 
 #### 3. 模型示例（FFN、paged attention、LLaMA 等）

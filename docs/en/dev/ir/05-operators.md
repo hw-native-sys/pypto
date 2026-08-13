@@ -135,7 +135,7 @@ later unrolls the batched form into per-batch 2D ops.
 ### MX block-scale matmul (Ascend950)
 
 MX uses dedicated `LeftScale` / `RightScale` memory spaces and the `FP8E8M0`
-scale dtype. PyPTO supports the host-prequant MXFP8 path on Ascend950 through
+scale dtype. PyPTO supports host-prequant MXFP8 and an explicit FP4×FP8 conversion path on Ascend950 through
 the `matmul_mx` family. `InsertMxScaleAddr` (after `InferTileMemorySpace`)
 inserts the internal `tile.tget_scale_addr` bindings once operand memory
 spaces are resolved.
@@ -145,14 +145,15 @@ spaces are resolved.
 | `tile.load` of `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | The source TensorLayout carries the MX scale GM layout. Dtype is FP8E8M0 or UINT8, `target_memory=Mat` is required, and strided sources are rejected. |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat-to-Scale move with hardware-fixed row/row/32 (left) or col/col/32 (right) layout; the source Mat tile and layout overrides must match exactly. |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | Not supported; load MX scale data into Mat and then move it into scale memory. |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; data is `FP8E4M3FN` only; scale is `FP8E8M0`; physical `M % 16 == 0`, `K % 64 == 0`, `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`; both data operands reaching the op must be `FP8E4M3FN`, and scale is `FP8E8M0`. The supported FP4-input form is FP4 lhs × FP8 rhs with an explicit `pl.cast(fp4, pl.FP8E4M3FN)` before the op; native FP4×FP4 and FP8×FP4 are rejected. Physical M/K/N, valid K, and scale-group counts use the post-cast FP8 tile extents, never the packed x2 carrier shape. Physical `M % 16 == 0`, `K % 64 == 0`, and `N % 32 == 0`; valid K must satisfy `ceil(validK/32) == ceil(physicalK/32)`. Alignment / scale-group checks run only for constant extents; symbolic dims skip the numeric checks and fall back to the declared scale tile geometry (later PTOAS still verifies). |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`; in-place through `set_output_reuses_input(0)`; accumulator physical and valid M/N must match the matmul output. |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`; bias is `[1, N]` FP32. |
 | `tile.tget_scale_addr` | Compiler-generated A5 binding from `LeftScale↔Left` or `RightScale↔Right`; DPS in-place on `dst_scale`. Users write only the `matmul_mx` family. |
 
 The canonical shape is `M=128, K=64, N=64`, with FP8E4M3FN data,
 FP8E8M0 scales shaped `[128,2]` and `[2,64]`, and `mx_a_zz` / `mx_b_nn`
-host layouts. Align M↑16, K↑64, N↑32 (fp8).
+host layouts. The left input may originate as FP4 only when explicitly cast to FP8 first.
+Align M↑16, K↑64, and N↑32.
 
 MX tensor subviews are a legacy limitation. `tensor.slice`, `tensor.reshape`,
 `tensor.transpose`, `tensor.reinterpret_view`, and `tensor.view` reject
@@ -160,16 +161,23 @@ MX-layout sources because the hardware path cannot represent a subview base
 offset. `pld.tile.remote_load` also rejects MX layouts until its complete scale
 layout contract is implemented.
 
+FP4 Tensor/Tile shapes and `valid_shape` are logical nibble counts; the innermost extent must be positive and even, and slice origins cannot select a byte's second nibble.
+Torch/runtime carries `float4_e2m1fn_x2` in a physical x2 shape; JIT/compiled-call conversion avoids a persistent IR `storage_shape`.
+
+An explicit left-side FP4→FP8 tile cast is legalized on A5 as
+FP4→BF16→FP32→FP8E4M3FN. Scale values are unchanged because this is a numerical
+cast of the data operand. Native packed-FP4 matmul and MXFP4 quantization remain deferred.
+
 #### MX / Ascend950: pto-isa constraints
 
 | Constraint | Detail |
 | ---------- | ------ |
 | Distinct scale buffers | Cube does not fold scales into Left/Right data. `TileType::ScaleLeft` / `ScaleRight` sidecars map to PyPTO `LeftScale` / `RightScale`. |
-| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; MX data is **`FP8E4M3FN` only** (**rejects `FP8E5M2`**). Physical `K%64==0`, with `ceil(K/32)` scale groups and fractal 32. |
+| Payload | Scale is `float8_e8m0_t` / `FP8E8M0`; the emitted MX data pair is `FP8E4M3FN × FP8E4M3FN` (rejects `FP8E5M2` and native packed FP4). A logical FP4×FP8 input first casts the FP4 lhs to FP8. Physical K, valid K, and `ceil(K/32)` scale groups are measured on that post-cast FP8 tile, not the packed x2 carrier; physical `K%64==0` and fractal is 32. |
 | Layouts | `mx_a_zz` is row-major ZZ; `mx_b_nn` is col-major NN; loads use `TLoadMxCube*` (AZZ2ZZ). |
 | `TMov` `CommonCheckMX` | Allows UINT8 Mat → FP8E8M0 ScaleLeft/Right; canonical path: ui8 Mat reshape then ui8→f8 Scale. |
 | Bind then fill | Fill **after** `GetScaleAddr(Left/Right)`; writing the provisional alloc address is orphaned once rebound. |
-| Alignment | Physical `M%16==0`, `K%64==0`, and `N%32==0` (fp8); `DeduceTileMatMulMxType` enforces these for **constant** extents only. Symbolic dims skip numeric checks. |
+| Alignment | Post-cast FP8 tile extents require physical `M%16==0`, `K%64==0`, and `N%32==0`; `DeduceTileMatMulMxType` enforces these for **constant** extents only. Symbolic dims skip numeric checks. |
 
 #### MX / Ascend950: PTOAS constraints
 
@@ -182,6 +190,26 @@ layout contract is implemented.
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; this stage uses **host ZZ/NN** (AZZ2ZZ). |
 | Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`. |
+
+### Tile-only GEMV family (A2/A3)
+
+The tile-only GEMV family uses logical shape `[1, N]` but follows the Cube
+instruction's padded physical contract. Its Acc result has 16 physical rows,
+while its physical column count follows the RHS tile (and must satisfy the
+target's normal C0 alignment); the bias uses the same physical column count.
+Their `valid_shape` retains the logical `[K, N]`, `[1, N]`, and `[1, N]`
+regions. The lhs must have exactly one physical and logical row. A single-row Mat load uses `blayout=row_major` and
+`slayout=none_box`, selecting PTO-ISA's row-vector extraction path.
+
+The rhs logical K must cover the lhs logical K. Supported dtype triples
+are `INT8 x INT8 -> INT32` and same-type `FP16`, `BF16`, or `FP32` inputs to
+`FP32`; `gemv_acc` uses that output dtype for `acc`, and `gemv_bias` requires
+the same output dtype for `bias`. The bias valid shape must cover the logical
+output shape `[1, N]`; its valid N may be wider when the physical N matches.
+
+`tile.gemv`, `tile.gemv_acc`, and `tile.gemv_bias` accept `acc_phase` as
+`"unspecified"` (the default), `"partial"`, or `"final"`. Use `"partial"`
+while more K chunks remain and `"final"` for the last chunk.
 
 ## Python Usage
 

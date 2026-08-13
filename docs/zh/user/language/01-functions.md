@@ -23,7 +23,7 @@ def add_kernel(
     b: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    out = pl.add(a, b)
+    out = pl.assemble(out, pl.add(a, b), [0, 0])
     return out
 
 @pl.jit
@@ -99,13 +99,13 @@ def host_orch(
 ```python
 @pl.jit
 def bad(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
-    out = pl.add(x, x)        # ✗ Misplaced tensor op ... should be inside InCore block
+    out = pl.assemble(out, pl.add(x, x), [0, 0])        # ✗ Misplaced tensor op ... should be inside InCore block
     return out
 
 @pl.jit
 def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.add(x, x)    # ✓
+        out = pl.assemble(out, pl.add(x, x), [0, 0])    # ✓
     return out
 ```
 
@@ -149,6 +149,39 @@ def normalize(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
 ```
 
 被装饰的对象是一个 `pl.InlineFunction` —— 供解析器展开的模板，而不是你能从 Python 调用的函数。
+
+### 函数属性：`pl.func_attr`
+
+描述整个函数的元数据，用 `pl.func_attr({...})` 声明为函数体的**第一条语句**：
+
+```python
+@pl.program
+class Kernels:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], w: pl.Tensor[[64, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
+        pl.func_attr({"stationary": w, "split": pl.SplitMode.UP_DOWN})
+        ...
+```
+
+一个*函数*级的声明却写在函数体内，看起来有些别扭，因此值得说明缘由：装饰器在签名绑定任何名字
+*之前*求值，所以 `@pl.function(attrs={"stationary": w})` 根本写不出来——此时 `w` 尚不存在。
+函数体位置把声明放在参数绑定*之后*，这正是让*引用参数*的属性成为可能的原因。其余可选做法只有
+位置下标（`{"stationary_param": 1}`，一旦某个 pass 重排参数就会失效）或无人强制的命名约定。
+
+需要了解的规则：
+
+| 规则 | 原因 |
+| ---- | ---- |
+| 必须位于所有其他语句之前 | 属性描述的是整个函数，不应显得从函数体中段才开始生效；这同时把可引用的名字限定为参数。 |
+| 裸名字始终表示参数 | `pl.func_attr({"n": k})` 记录的是参数 `k`，绝不会是外层作用域中同名的 Python 变量。Python 常量请写成字面量。 |
+| 多次调用会合并 | 同一个键声明两次会报错并指出该键，因此哪个取值生效永远不取决于解析顺序。 |
+| `auto_scope=` 与 `external_source=` 保留在装饰器上 | 解析器在遍历函数体*之前*就要读取它们，写在函数体位置为时已晚，不会生效。 |
+
+`@pl.function(attrs={...})` 已**废弃**，会发出 `DeprecationWarning`。它仍可解析且行为完全
+一致，但只能承载不引用任何名字的取值。打印出的 IR 始终使用未废弃的写法——`pl.func_attr`
+prologue，或专用的 `auto_scope=` / `external_source=` 关键字——因此重新解析编译器输出永远
+不会触发警告。
 
 ### 把编译与派发拆开
 

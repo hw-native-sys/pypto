@@ -23,12 +23,15 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)  # mesh mode, in-place
 # InCore kernel — explicit signal.
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="mesh")
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+
+# Host orchestrator — spread one call across 4 AIV cores per rank.
+data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 ```
 
 ### Mesh Mode
 
 - O(N) remote traffic per step — every rank reads every peer
-- One global barrier per call (AtomicAdd/Ge on `[NR, 1]` signal)
+- One global barrier per call (AtomicAdd/Ge on `[NR, core_num]` signal)
 - Works with `pl.dynamic("NR")`
 - Best for small messages and low latency
 
@@ -51,14 +54,36 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 | ------ | ---- | ---- |
 | Remote traffic per step | O(N) — every rank reads every peer | O(N/P) — each rank reads one neighbour |
 | Barrier rounds | 1 (global AtomicAdd/Ge) | 2(P-1) — reduce-scatter + allgather phases |
-| Signal shape | `[NR, 1]` | `[2 × (NR − 1), NR]` |
+| Signal shape | `[NR, core_num]` | `[2 × (NR − 1), NR]` |
 | Best for | Small messages, low latency | Large messages, high bandwidth |
 
 **Rule of thumb:** Use the default `mode="mesh"`. Switch to `mode="ring"` when
 your payload exceeds ~16 KiB and you see mesh bandwidth plateau.
 
 The host orchestrator form (`signal` omitted) is syntactic sugar — the compiler
-synthesizes a signal of `[world_size(), 1]` (mesh only).
+synthesizes a signal of `[world_size(), core_num]` (mesh only).
+
+### Multi-core (`core_num`)
+
+On a host orchestrator, `core_num` spreads one AllReduce call across several
+AIV cores **on each rank**. It does not change the task hierarchy: `device=r`
+still selects the card; that rank's builtin task now launches a synchronized
+grid of `core_num` blocks that split the payload into 256-element tiles
+block-cyclically.
+
+```python
+data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
+```
+
+- Defaults to `1` (single block — the previous behaviour).
+- Mesh only: `mode="ring"` requires `core_num == 1`.
+- Must not exceed the target's AIV core count (48 on 910B, 36 on 950) — the
+  launch requires all blocks to be admitted at once, so an over-subscribed
+  request is rejected at compile time.
+- An explicit `signal` needs one lane per block: `[world_size(), stride]` with
+  `stride >= core_num`. A rank-1 `[world_size()]` signal only works for
+  `core_num=1`.
+- InCore kernels keep `core_num=1` and use an enclosing `pl.spmd(...)` instead.
 
 ### Mutation
 
@@ -193,7 +218,18 @@ only.
 ## Runnable Examples
 
 Every collective above has a runnable counterpart under
-`tests/st/distributed/` (paths below are relative to that directory):
+`tests/st/distributed/` (paths below are relative to that directory). The
+[tutorials](05-tutorials.md) are the user-facing counterparts that
+build each collective by hand before the builtin is revealed:
+
+| Collective | Tutorial step | Hand-rolled first? |
+| ---------- | ------------- | ------------------ |
+| barrier | [09-barrier](09-barrier.md) | yes (step 04, then reveal) |
+| allreduce | planned — steps 08–11 | yes (mesh, two-phase, ring, then reveal) |
+| broadcast | planned — step 12 | yes |
+| allgather | planned — step 13 | yes |
+| reduce_scatter | planned — step 14 | yes |
+| all_to_all | planned — step 15 | yes |
 
 | Collective | InCore hand-rolled | InCore composite | HOST builtin |
 | ---------- | ------------------ | ---------------- | ------------ |

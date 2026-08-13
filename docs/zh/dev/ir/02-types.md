@@ -32,13 +32,15 @@ span = ir.Span.unknown()
 shape = [ir.ConstInt(10, DataType.INT64, span), ir.ConstInt(20, DataType.INT64, span)]
 tensor_type = ir.TensorType(shape, DataType.FP32)
 
-# Tensor with MemRef
-memref = ir.MemRef(ir.ConstInt(0x1000, DataType.INT64, span), 800, 0)
+# Tensor with MemRef: base allocation, byte offset within it, size in bytes
+memref = ir.MemRef("mem_ddr_0", 0, 800)
 tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 ```
 
-`TensorType.memory_space` 始终是 `ir.Mem.DDR`。`MemRef` 只保存地址、大小和
-id；内存空间不再存储在 `MemRef` 本身上。
+`TensorType.memory_space` 始终是 `ir.Mem.DDR`。`MemRef` 标识一块分配
+(`base_`) 以及其中的一段字节区间 (`byte_offset_`、`size_`)；内存空间不再
+存储在 `MemRef` 本身上。完整字段列表见
+[内存引用 (MemRef)](01-hierarchy.md#memref)。
 
 ### DistributedTensorType
 
@@ -104,7 +106,7 @@ stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(128, DataType.INT64,
 tensor_view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
 
 # Tensor with both MemRef and TensorView
-memref = ir.MemRef(ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
+memref = ir.MemRef("mem_ddr_1", 0, 16384)
 tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
@@ -177,19 +179,21 @@ shape_3d = [ir.ConstInt(4, DataType.INT64, span),
             ir.ConstInt(16, DataType.INT64, span)]
 tile_type_3d = ir.TileType(shape_3d, DataType.FP16)
 
-# Tile with MemRef and TileView
-memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 512, 0)
+# Tile with MemRef and TileView. TileView is immutable — every field is passed
+# to the constructor; valid_shape / stride / start_offset accept int or Expr.
+memref = ir.MemRef("mem_left_0", 0, 512)
 
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16], start_offset=0)
 
 tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```
 
 `TileType.memory_space` 才是 Tile 放置位置的唯一来源。如果 `TileType`
 携带 `MemRef`, 请在 `TileType` 自身上显式提供 tile 内存空间。
+
+上面的 `valid_shape` 是一个真正的子区域（`[16, 16]` Tile 中的 `[8, 16]`）。
+若 `valid_shape` 与完整 shape 相同则是冗余的，构造函数会将其清空 ——
+参见下文的规范化规则。
 
 对于 Python DSL 类型标注，省略的 `TileView` 语法会被规范化为一个隐式
 TileView：它由 tile shape 以及（如果存在）tile memory space 推导得到。
@@ -449,14 +453,11 @@ program = ir.Program([square_func, main_func], "math", span)
 ### 示例 6：使用 TileType 的内存布局
 
 ```python
-# 32x32 tile in Left memory with custom stride
+# 32x32 tile in Left memory, viewing a 16x32 valid region with custom stride
 shape = [ir.ConstInt(32, DataType.INT64, span)] * 2
-memref = ir.MemRef(ir.ConstInt(0, DataType.INT64, span), 2048, 0)
+memref = ir.MemRef("mem_left_0", 0, 2048)
 
-tile_view = ir.TileView()
-tile_view.valid_shape = shape
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(32, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+tile_view = ir.TileView(valid_shape=[16, 32], stride=[1, 32], start_offset=0)
 
 tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
 ```

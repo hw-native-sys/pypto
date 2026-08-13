@@ -61,6 +61,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 44 | [MaterializeRuntimeScopes](44-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `PTO2_SCOPE` |
 | 45 | [ClassifyIterArgCarry](45-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
 | 46 | [InsertCommFence](46-insert_comm_fence.md) | 在每个发布性写入与释放它的 `pld.system.notify` 之间插入整张 tensor 的 `system.cacheinvalid` + GM `system.fence` |
+| 47 | [MaterializeValidShapeSymbols](47-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
 
 ## 默认流水线之外
 

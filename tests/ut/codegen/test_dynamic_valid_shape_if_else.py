@@ -27,11 +27,19 @@ if/else, then performing a single load+fillpad with that computed length:
 
 The tile buffer type is uniform (same v_row=?, v_col=?, pad=min) regardless
 of which branch executed. Only the runtime valid-shape value differs.
+
+The programs below are written with ``@pl.program`` and explicit
+``pl.Scalar[...]`` parameters. The final section covers the same pattern
+reached through ``@pl.jit``, where the specializer must leave the in-DSL
+``if``/``else`` intact for the branch to survive to an ``scf.if``.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
 # from type-checking annotations that reference module-level names.
 # pyright: reportUndefinedVariable=false
+
+import importlib
+import re
 
 import pypto.language as pl
 import pytest
@@ -214,6 +222,156 @@ def test_loop_if_else_dyn_valid_shape_has_scf_for(loop_mlir: str):
 def test_loop_if_else_dyn_valid_shape_has_scf_if(loop_mlir: str):
     """Verify the if/else generates scf.if in the MLIR output."""
     assert "scf.if" in loop_mlir, f"Expected scf.if in MLIR output:\n{loop_mlir}"
+
+
+# ---------------------------------------------------------------------------
+# The same patterns reached through @pl.jit
+# ---------------------------------------------------------------------------
+#
+# The JIT specializer rewrites the user's function into the @pl.program form
+# above. It must leave an in-DSL if/else that rebinds one name in both branches
+# alone: aliasing the else-branch binding to a distinct name (`vlen_v1`) would
+# make ConvertToSSA reject the read as "used outside its defining scope".
+# `tests/ut/jit/test_specializer.py::test_if_else_branch_rebind` guards the
+# rewrite at source level; these tests guard the whole path down to PTO.
+
+
+def _jit_device_mlir(jit_func, *args) -> str:
+    """Lower a @pl.jit kernel and run PTO codegen on its device function."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    program = jit_func.lower(*args)
+    device_funcs = [f for f in program.functions.values() if f.func_type != ir.FunctionType.Orchestration]
+    assert len(device_funcs) == 1, (
+        f"expected exactly one device function, got {[f.name for f in device_funcs]}"
+    )
+    single_func_program = ir.Program([device_funcs[0]], device_funcs[0].name, program.span)
+    return codegen.PTOCodegen().generate(single_func_program)
+
+
+def _s_tile_alloc(mlir: str) -> str:
+    """Return the ``pto.alloc_tile`` line that allocates ``s_tile``."""
+    alloc_lines = [line.strip() for line in mlir.split("\n") if "pto.alloc_tile" in line]
+    s_tile_allocs = [line for line in alloc_lines if "s_tile" in line]
+    assert len(s_tile_allocs) >= 1, f"Expected s_tile alloc, got alloc_lines: {alloc_lines}"
+    return s_tile_allocs[0]
+
+
+def _valid_col_operand(alloc_line: str) -> str:
+    """Extract the ``valid_col`` operand from a ``pto.alloc_tile`` line."""
+    match = re.search(r"valid_col = (\S+)", alloc_line)
+    assert match is not None, f"No valid_col operand in alloc: {alloc_line}"
+    return match.group(1)
+
+
+def _dyn_valid_shape_example():
+    """Import the numbered example module.
+
+    The package registers an unnumbered ``dyn_valid_shape`` alias in
+    ``sys.modules``, but that alias exists only at runtime, so a static import
+    of it does not resolve. Import the real module name instead, as
+    ``tests/st/runtime/framework_and_models/test_paged_attention_spmd.py`` does.
+    """
+    return importlib.import_module("examples.intermediate.06_dyn_valid_shape")
+
+
+@pytest.fixture(scope="module")
+def jit_if_else_mlir() -> str:
+    """Codegen the @pl.jit if/else kernel once for all tests in this module."""
+    torch = pytest.importorskip("torch")
+    example = _dyn_valid_shape_example()
+
+    data = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    cfg = torch.tensor([1, 48, example.BLOCK_COL], dtype=torch.int64)
+    return _jit_device_mlir(example.dyn_valid_shape_if_else, data, cfg, out)
+
+
+@pytest.fixture(scope="module")
+def jit_loop_mlir() -> str:
+    """Codegen the @pl.jit loop + if/else kernel once for all tests in this module."""
+    torch = pytest.importorskip("torch")
+    example = _dyn_valid_shape_example()
+
+    sij_buf = torch.zeros((example.N_ROW, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.N_ROW, example.BLOCK_COL), dtype=torch.float32)
+    cfg = torch.tensor([2, 48, example.BLOCK_COL], dtype=torch.int64)
+    return _jit_device_mlir(example.dyn_valid_shape_loop, sij_buf, cfg, out)
+
+
+@pytest.fixture(scope="module")
+def jit_scalar_param_mlir() -> str:
+    """Codegen the @pl.jit scalar-parameter kernel (the specialized-constant form)."""
+    torch = pytest.importorskip("torch")
+    example = _dyn_valid_shape_example()
+
+    data = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    out = torch.zeros((example.Q_TILE, example.BLOCK_COL), dtype=torch.float32)
+    return _jit_device_mlir(example.dyn_valid_shape, data, 2.0, 48, out)
+
+
+def test_jit_if_else_survives_specialization(jit_if_else_mlir: str):
+    """The in-DSL if/else must reach PTO as a real scf.if.
+
+    Regression guard: the specializer previously alpha-renamed the else-branch
+    rebinding of ``vlen``, which failed ConvertToSSA outright.
+    """
+    assert "scf.if" in jit_if_else_mlir, f"Expected scf.if in MLIR output:\n{jit_if_else_mlir}"
+
+
+def test_jit_if_else_valid_col_is_runtime(jit_if_else_mlir: str):
+    """The s_tile alloc's valid_col comes from the branch, not a folded constant.
+
+    ``cfg`` is read at runtime, so neither branch value is known at
+    specialization time and ``valid_col`` must be an SSA operand rather than a
+    ``%c<n>`` literal.
+    """
+    alloc = _s_tile_alloc(jit_if_else_mlir)
+    operand = _valid_col_operand(alloc)
+    assert not re.fullmatch(r"%c\d+(_\w+)?", operand), (
+        f"valid_col was constant-folded to {operand}; expected a runtime operand: {alloc}"
+    )
+    assert "v_col=?" in alloc, f"Expected dynamic v_col=? in s_tile alloc: {alloc}"
+
+
+def test_jit_if_else_has_fillpad_with_pad_min(jit_if_else_mlir: str):
+    """The padded tile keeps pad=3 (PadValue.min) through the JIT path."""
+    assert "pto.tfillpad" in jit_if_else_mlir, f"Expected pto.tfillpad in MLIR output:\n{jit_if_else_mlir}"
+    alloc_lines = [line.strip() for line in jit_if_else_mlir.split("\n") if "pto.alloc_tile" in line]
+    padded_allocs = [line for line in alloc_lines if "s_padded" in line]
+    assert len(padded_allocs) >= 1, f"Expected s_padded alloc, got alloc_lines: {alloc_lines}"
+    assert "pad=3>" in padded_allocs[0], f"Expected pad=3 (PadValue.min) in padded alloc: {padded_allocs[0]}"
+
+
+def test_jit_loop_has_scf_for_and_scf_if(jit_loop_mlir: str):
+    """The runtime trip count and the per-iteration branch both survive."""
+    assert "scf.for" in jit_loop_mlir, f"Expected scf.for in MLIR output:\n{jit_loop_mlir}"
+    assert "scf.if" in jit_loop_mlir, f"Expected scf.if in MLIR output:\n{jit_loop_mlir}"
+
+
+def test_jit_loop_valid_col_is_runtime(jit_loop_mlir: str):
+    """The per-iteration valid_col is the scf.if result, not a constant."""
+    alloc = _s_tile_alloc(jit_loop_mlir)
+    operand = _valid_col_operand(alloc)
+    assert not re.fullmatch(r"%c\d+(_\w+)?", operand), (
+        f"valid_col was constant-folded to {operand}; expected a runtime operand: {alloc}"
+    )
+
+
+def test_jit_scalar_param_valid_col_is_constant(jit_scalar_param_mlir: str):
+    """A scalar *parameter* is a specialization constant, so valid_col folds.
+
+    Counterpart to :func:`test_jit_if_else_valid_col_is_runtime`: the
+    specializer inlines scalar arguments at their use sites, so ``vlen=48``
+    reaches codegen as a literal and each distinct value compiles its own
+    kernel. Runtime selection requires reading the value from a tensor.
+    """
+    alloc = _s_tile_alloc(jit_scalar_param_mlir)
+    operand = _valid_col_operand(alloc)
+    assert re.fullmatch(r"%c48(_\w+)?", operand), (
+        f"expected valid_col folded to the constant 48, got {operand}: {alloc}"
+    )
 
 
 if __name__ == "__main__":

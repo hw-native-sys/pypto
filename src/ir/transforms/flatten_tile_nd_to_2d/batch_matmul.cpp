@@ -335,10 +335,12 @@ struct BatchPageResult {
 ///
 /// The operand is always 2D by the time it reaches here (loads flatten to 2D,
 /// transpose_views are 2D, safe batch-only reshapes are peeled to the 2D load).
+/// `span` is the source Call's span (for synthesized ops and expressions);
+/// `stmt_span` is the enclosing assignment's (for synthesized statements).
 BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector<int64_t>& operand_dims,
                                  const std::vector<int64_t>& operand_batch_shape, int64_t batch_index,
                                  const std::string& base_name, const FlattenContext& ctx,
-                                 const OpRegistry& op_registry, const Span& span) {
+                                 const OpRegistry& op_registry, const Span& span, const Span& stmt_span) {
   BatchPageResult page;
   const auto& operand = info.operand;
   const auto& operand_type = info.operand_type;
@@ -394,7 +396,7 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
     INTERNAL_CHECK_SPAN(load_shape, span) << "FlattenTileNdTo2D: !fit per-batch load shape must be a tuple";
     auto view_call = CreateCollapsedTensorView(load_tensor_var, load_tensor_type, span);
     auto view_var = std::make_shared<Var>(base_name + "_pbview2d_" + suffix, view_call->GetType(), span);
-    page.stmts.push_back(std::make_shared<AssignStmt>(view_var, view_call, span));
+    page.stmts.push_back(std::make_shared<AssignStmt>(view_var, view_call, stmt_span));
 
     auto row_offset = CollapseLeadingOffsetsToRow(load_offsets->elements_, load_tensor_type->shape_, span);
     auto load_2d_shape = CollapseLeadingDimsTo2D(load_shape->elements_, span);
@@ -418,12 +420,12 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
     INTERNAL_CHECK_SPAN(load_2d_type && load_2d_type->shape_.size() == 2, span)
         << "FlattenTileNdTo2D: !fit per-batch collapsed load must produce a 2D tile";
     current = std::make_shared<Var>(base_name + "_pbload_" + suffix, load_2d_type, span);
-    page.stmts.push_back(std::make_shared<AssignStmt>(current, load_2d, span));
+    page.stmts.push_back(std::make_shared<AssignStmt>(current, load_2d, stmt_span));
 
     if (info.from_transpose_view) {
       auto view = op_registry.Create("tile.transpose_view", {current}, {}, span);
       auto view_var = std::make_shared<Var>(base_name + "_pbview_" + suffix, view->GetType(), span);
-      page.stmts.push_back(std::make_shared<AssignStmt>(view_var, view, span));
+      page.stmts.push_back(std::make_shared<AssignStmt>(view_var, view, stmt_span));
       current = view_var;
     }
     page.var = current;
@@ -451,7 +453,7 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
     auto shape = MakeShapeTupleFromInts({source_rows, source_cols}, span);
     auto slice = op_registry.Create("tile.slice", {operand, shape, offset}, span);
     current = std::make_shared<Var>(base_name + "_slice_" + suffix, slice->GetType(), span);
-    page.stmts.push_back(std::make_shared<AssignStmt>(current, slice, span));
+    page.stmts.push_back(std::make_shared<AssignStmt>(current, slice, stmt_span));
   }
 
   // No per-batch transpose: a transposed (b_trans/a_trans) operand arrives as a
@@ -572,10 +574,10 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
     int64_t rhs_batch_idx =
         BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
 
-    auto lhs_page =
-        ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx, op_registry, span);
-    auto rhs_page =
-        ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx, op_registry, span);
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx,
+                                     op_registry, span, assign->span_);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx,
+                                     op_registry, span, assign->span_);
     auto matmul = op_registry.Create("tile.matmul", {lhs_page.var, rhs_page.var}, span);
     auto matmul_type = As<TileType>(matmul->GetType());
     bool needs_cast = matmul_type && matmul_type->dtype_ != orig_result_type->dtype_;
@@ -583,7 +585,7 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
       out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
       auto matmul_var = std::make_shared<Var>(assign->var_->name_hint_, matmul->GetType(), span);
-      out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, span));
+      out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, assign->span_));
       out.output_var = matmul_var;
       return out;
     }
@@ -606,10 +608,20 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
     };
     auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
     out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, assign->span_));
   }
 
   // Prepare direct-store state.
+  //
+  // Everything synthesized for the fused store replaces the consumed `tile.store`
+  // statement, which the caller skips, so it is attributed to *that* statement
+  // rather than to `span` (the batch-matmul's). Ops and expressions take the
+  // store's `Call` span and the synthesized statements take its `AssignStmt` span
+  // — the same split the rewrite loop applies, and they differ whenever the
+  // store's RHS does not start at its assignment. Bound once each, up front, so
+  // the shape tuple built here cannot drift from the stores emitted below.
+  const Span& store_span = direct_store.detected ? direct_store.store_call->span_ : span;
+  const Span& store_stmt_span = direct_store.detected ? direct_store.store_assign->span_ : span;
   ExprPtr current_store_tensor;
   MakeTuplePtr direct_store_offsets;
   std::vector<ExprPtr> direct_store_shape;
@@ -628,10 +640,10 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       const size_t tile_rank = 2;  // matmul result is always 2D
       direct_store_shape.reserve(tensor_rank);
       for (size_t i = tile_rank; i < tensor_rank; ++i) {
-        direct_store_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, span));
+        direct_store_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, store_span));
       }
-      direct_store_shape.push_back(std::make_shared<ConstInt>(lhs_rows, DataType::INDEX, span));
-      direct_store_shape.push_back(std::make_shared<ConstInt>(rhs_cols, DataType::INDEX, span));
+      direct_store_shape.push_back(std::make_shared<ConstInt>(lhs_rows, DataType::INDEX, store_span));
+      direct_store_shape.push_back(std::make_shared<ConstInt>(rhs_cols, DataType::INDEX, store_span));
     }
   }
 
@@ -644,17 +656,17 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
         BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
 
     // Extract 2D pages.
-    auto lhs_page =
-        ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx, op_registry, span);
-    auto rhs_page =
-        ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx, op_registry, span);
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx,
+                                     op_registry, span, assign->span_);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx,
+                                     op_registry, span, assign->span_);
     out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
     out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
 
     // Emit tile.matmul.
     auto matmul = op_registry.Create("tile.matmul", {lhs_page.var, rhs_page.var}, span);
     auto matmul_var = std::make_shared<Var>("matmul_" + std::to_string(i), matmul->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, assign->span_));
 
     // Move matmul result from Acc to Vec, then cast dtype if needed.
     // The explicit tile.move is always required for the non-fused (assemble) path so
@@ -669,7 +681,7 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       };
       auto move = op_registry.Create("tile.move", {matmul_var}, move_kw, span);
       auto move_var = std::make_shared<Var>("matmul_vec_" + std::to_string(i), move->GetType(), span);
-      out.stmts.push_back(std::make_shared<AssignStmt>(move_var, move, span));
+      out.stmts.push_back(std::make_shared<AssignStmt>(move_var, move, assign->span_));
       batch_result = move_var;
     }
     if (needs_cast) {
@@ -679,7 +691,7 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       };
       auto cast = op_registry.Create("tile.cast", {batch_result}, cast_kw, span);
       auto cast_var = std::make_shared<Var>("matmul_cast_" + std::to_string(i), cast->GetType(), span);
-      out.stmts.push_back(std::make_shared<AssignStmt>(cast_var, cast, span));
+      out.stmts.push_back(std::make_shared<AssignStmt>(cast_var, cast, assign->span_));
       batch_result = cast_var;
     }
 
@@ -688,25 +700,27 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
       // Keep the original tensor-rank offsets — codegen reconstructs the
       // corresponding partition_view from that window description.
       auto store_offset_elems = BuildBatchAdjustedOffsets(
-          direct_store_offsets->elements_, output_batch_indices, output_batch_dims.size(), span);
-      auto store_offset = std::make_shared<MakeTuple>(store_offset_elems, span);
+          direct_store_offsets->elements_, output_batch_indices, output_batch_dims.size(), store_span);
+      auto store_offset = std::make_shared<MakeTuple>(store_offset_elems, store_span);
 
       std::vector<ExprPtr> store_args = {batch_result, store_offset, current_store_tensor};
       if (!direct_store_shape.empty()) {
-        store_args.push_back(std::make_shared<MakeTuple>(direct_store_shape, span));
+        store_args.push_back(std::make_shared<MakeTuple>(direct_store_shape, store_span));
       }
-      auto batch_store = op_registry.Create("tile.store", store_args, span);
+      auto batch_store = op_registry.Create("tile.store", store_args, store_span);
+      // The Var stands for the store's bound name and the AssignStmt for the whole
+      // statement, so both follow the consumed statement rather than its RHS Call.
       auto batch_store_var =
           std::make_shared<Var>(direct_store.store_assign->var_->name_hint_ + "_" + std::to_string(i),
-                                batch_store->GetType(), span);
-      out.stmts.push_back(std::make_shared<AssignStmt>(batch_store_var, batch_store, span));
+                                batch_store->GetType(), direct_store.store_assign->var_->span_);
+      out.stmts.push_back(std::make_shared<AssignStmt>(batch_store_var, batch_store, store_stmt_span));
       current_store_tensor = batch_store_var;
     } else {
       // Non-fused path: assemble into output tile.
       auto out_offset = MakeShapeTupleFromInts({i * lhs_rows, 0}, span);
       auto assemble = op_registry.Create("tile.assemble", {out_var, batch_result, out_offset}, span);
       out_var = std::make_shared<Var>(out_var->name_hint_, assemble->GetType(), span);
-      out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, span));
+      out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, assign->span_));
     }
   }
 
@@ -853,16 +867,16 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     int64_t rhs_batch_idx =
         BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
 
-    auto lhs_page =
-        ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx, op_registry, span);
-    auto rhs_page =
-        ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx, op_registry, span);
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx,
+                                     op_registry, span, assign->span_);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx,
+                                     op_registry, span, assign->span_);
     out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
     out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
 
     auto matmul_acc = op_registry.Create("tile.matmul_acc", {current_acc, lhs_page.var, rhs_page.var}, span);
     auto new_acc = std::make_shared<Var>(current_acc->name_hint_, matmul_acc->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(new_acc, matmul_acc, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(new_acc, matmul_acc, assign->span_));
     out.output_var = new_acc;
     return out;
   }
@@ -875,10 +889,10 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     int64_t rhs_batch_idx =
         BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
 
-    auto lhs_page =
-        ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx, op_registry, span);
-    auto rhs_page =
-        ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx, op_registry, span);
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", ctx,
+                                     op_registry, span, assign->span_);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", ctx,
+                                     op_registry, span, assign->span_);
     out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
     out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
 
@@ -887,15 +901,15 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     auto acc_shape = MakeShapeTupleFromInts({lhs_rows, rhs_cols}, span);
     auto acc_slice = op_registry.Create("tile.slice", {current_acc, acc_shape, acc_offset}, span);
     auto acc_page_var = std::make_shared<Var>("acc_page_" + suffix, acc_slice->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(acc_page_var, acc_slice, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(acc_page_var, acc_slice, assign->span_));
 
     auto matmul_acc = op_registry.Create("tile.matmul_acc", {acc_page_var, lhs_page.var, rhs_page.var}, span);
     auto matmul_var = std::make_shared<Var>("matmul_acc_" + suffix, matmul_acc->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul_acc, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul_acc, assign->span_));
 
     auto assemble = op_registry.Create("tile.assemble", {current_acc, matmul_var, acc_offset}, span);
     current_acc = std::make_shared<Var>(current_acc->name_hint_, assemble->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(current_acc, assemble, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(current_acc, assemble, assign->span_));
   }
 
   out.output_var = current_acc;

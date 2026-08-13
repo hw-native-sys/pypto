@@ -107,7 +107,14 @@ collectives; most users call `pld.tensor.*` collectives instead.
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `remote_load` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], shape: Sequence[IntLike], valid_shape=None) -> Tile` | Load a region of peer rank's `DT` into a local tile. `shape` defines the tile dimensions. `valid_shape` keeps the physical tile fixed-size while a ragged tail reads only real data. Offsets must match what the peer stored — a 1-element misalignment causes silent corruption. |
-| `remote_store` | `(src_tile: Tile, target: DT, peer: IntLike, offsets: Sequence[IntLike]) -> Call` | Write a local tile into peer rank's `DT`. Side-effect-only. |
+| `remote_store` | `(src_tile: Tile, target: DT, peer: IntLike, offsets: Sequence[IntLike], *, atomic=AtomicType.None_) -> Call` | Write a local tile into peer rank's `DT`. Side-effect-only. `atomic=Add` accumulates into the peer's region instead of overwriting. The pushed region must fit inside `target` at `offsets`. |
+
+`remote_store` also exists one IR level up as **`pld.tensor.remote_store`**
+`(src: Tensor, target: DT, peer: IntLike, offsets, *, atomic=...)`, for pushing a
+*computed* value out of a tensor-level `@pl.jit` kernel (where there are no tiles
+to name). It lowers 1:1 to the tile form, so the value reaches the peer as a single
+remote write with no global-memory round-trip. The short form `pld.remote_store`
+dispatches between the two on the operand you pass.
 
 ## Put and Get (`pld.tensor.*`)
 
@@ -202,13 +209,23 @@ and shape must match what the peer stored — a mismatch reads garbage.
 | `pld.alloc_window_buffer(...)` | `pld.tensor.alloc_window_buffer(...)` |
 | `pld.window(...)` | `pld.tensor.window(...)` |
 | `pld.remote_load(...)` | `pld.tile.remote_load(...)` |
-| `pld.remote_store(...)` | `pld.tile.remote_store(...)` |
+| `pld.remote_store(...)` | `pld.tile.remote_store(...)` / `pld.tensor.remote_store(...)` (dispatches on `src`) |
 
 **No short form:** `pld.notify(...)`, `pld.wait(...)`, `pld.put(...)`,
 `pld.get(...)`, `pld.allreduce(...)`, and all other collective ops — these
 require the full 3-segment namespace.
 
 ## Runnable Examples
+
+The [tutorials](05-tutorials.md) teach each primitive by hand before
+any builtin is revealed (steps 03–07 ship; 08–16 are planned):
+
+| Primitive | Tutorial step |
+| --------- | ------------- |
+| window buffer | [08-window_buffer](08-window_buffer.md) (step 03) |
+| notify / wait | [09-barrier](09-barrier.md) (step 04) |
+| remote_load / remote_store | [10-remote_load_store](10-remote_load_store.md) (step 05) |
+| put / get | [11-put_get](11-put_get.md) (step 06) |
 
 | Primitive | Test |
 | --------- | ---- |

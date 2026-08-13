@@ -82,6 +82,7 @@ struct DeviceDescriptor {
   }
   bool operator<(const DeviceDescriptor& o) const {
     if (is_all != o.is_all) return is_all < o.is_all;
+    if (is_all) return false;  // all-device: subset is meaningless, matches operator==
     return subset < o.subset;
   }
 
@@ -589,7 +590,12 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Phase 6: cluster allocs into pending domain entries by merged descriptor
   // (alloc-order within a domain). Use a vector for deterministic order: scan
   // collector.allocs in source order and append to the first matching entry
-  // or create a new one.
+  // or create a new one. `desc_to_index` maps a merged descriptor to its
+  // `pending` slot (O(log domains) via DeviceDescriptor::operator<, per
+  // pass-complexity.md — a per-alloc linear scan of `pending` would make this
+  // Phase O(allocs^2) for programs with many distinct comm domains). Store
+  // indices, not pointers, into the map: `pending.push_back` may reallocate
+  // and invalidate any previously-taken `PendingDomain*`.
   struct PendingDomain {
     DeviceDescriptor desc;
     std::vector<WindowBufferPtr> slots;
@@ -597,24 +603,24 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     Span span;
   };
   std::vector<PendingDomain> pending;
+  std::map<DeviceDescriptor, size_t> desc_to_index;
   for (const auto& rec : collector.allocs) {
     DeviceDescriptor merged;
     for (const auto& d : rec->seen) merged.Merge(d);
-    PendingDomain* tgt = nullptr;
-    for (auto& g : pending) {
-      if (g.desc == merged) {
-        tgt = &g;
-        break;
-      }
-    }
-    if (!tgt) {
+    auto it = desc_to_index.find(merged);
+    size_t index;
+    if (it == desc_to_index.end()) {
+      index = pending.size();
+      desc_to_index.emplace(merged, index);
       pending.push_back({merged, {}, {}, rec->span});
-      tgt = &pending.back();
+    } else {
+      index = it->second;
     }
-    INTERNAL_CHECK_SPAN(tgt->names.insert(rec->name).second, rec->span)
+    PendingDomain& tgt = pending[index];
+    INTERNAL_CHECK_SPAN(tgt.names.insert(rec->name).second, rec->span)
         << "MaterializeCommDomainScopes: duplicate allocation name '" << rec->name
         << "' within the same comm domain";
-    tgt->slots.push_back(rec->wb);
+    tgt.slots.push_back(rec->wb);
   }
 
   // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result

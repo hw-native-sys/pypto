@@ -6,7 +6,7 @@ baseline is Little-oil/PTOAS `main`
 `d852dd2dba3e5bf7a69ce8324eb88afc336e8a33`: 189 public interfaces from the manual
 plus 15 source-only compatibility/tile interfaces still present in `PTOOps.td`, for a
 total of 204. Column statuses were checked against the **current PyPTO source** (last
-updated 2026-07-27). When an op is added or changed, update only its corresponding row.
+updated 2026-08-11). When an op is added or changed, update only its corresponding row.
 
 The matrix includes public/compatibility interfaces even when their PyPTO level is
 `internal`. Separately, it excludes 32 additional `PTOOps.td` ops that exist only
@@ -77,12 +77,12 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (minimal MXFP8 host-prequant); see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints); device numerical follow-up #1975 |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_acc`); ST pending |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 MXFP8 host-prequant frontend+codegen+ST; FP4 input is limited to FP4×FP8 with an explicit lhs FP4→FP8 cast; native FP4×FP4 is deferred; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST (`tile.matmul_mx_acc`) |
 | pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ❌ | — | NEW frontend+codegen (`tile.matmul_mx_bias`); ST pending |
-| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
+| pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
+| pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed; A5 hardware validation is pending |
 | pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |

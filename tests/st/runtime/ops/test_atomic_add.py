@@ -19,7 +19,7 @@ Covers both surface forms that emit an atomic-add store:
   * ``pl.assemble(tensor, tile, offsets, atomic=pl.AtomicType.Add)``
       Tensor-level atomic accumulation. Used canonically by Split-K
       matmul, where each parallel core atomic-adds its partial product
-      into a shared output (see ``examples/kernels/10_split_k.py``).
+      into a shared output (see ``examples/advanced/01_split_k.py``).
 
 Codegen-level coverage already exists in
 ``tests/ut/codegen/test_pto_codegen_ops.py`` and ``tests/ut/jit/test_split_k.py``;

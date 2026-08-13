@@ -11,7 +11,6 @@
 
 #include "pypto/ir/transforms/base/visitor.h"
 
-#include <any>
 #include <cstddef>
 #include <vector>
 
@@ -38,6 +37,13 @@ void IRVisitor::VisitProgram(const ProgramPtr& program) {
 void IRVisitor::VisitFunction(const FunctionPtr& func) {
   for (auto& param : func->params_) {
     VisitExpr(param);
+  }
+  // Function attrs are evaluated where the parameters bind, so walk them after
+  // the params and before the body. Today every Function attr is static or a
+  // ConstInt, making this inert; it is what lets a reference-valued function
+  // attr be seen by def-use / liveness analyses at all (see RFC #2338).
+  for (const auto& [k, v] : func->attrs_) {
+    ForEachAttrExpr(v, [this](const ExprPtr& e) { VisitExpr(e); });
   }
   if (func->body_) {
     VisitStmt(func->body_);
@@ -79,25 +85,14 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
     INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
     VisitExpr(op->args_[i]);
   }
-  // Var-typed attrs reference Vars defined elsewhere in the IR. Treat them as
-  // real uses so analyses such as the unused-variable check don't flag a Var
-  // referenced only via ``deps=[tid]`` or ``dumps=[t]`` / ``pl.dump_tag``.
-  // Expr-valued attrs (IsExprValuedCallAttr: ``device=``, ``core_num``) are real
-  // operands evaluated in this function's scope, so recurse into them too —
-  // otherwise a scalar assigned only to size an SPMD launch looks dead, gets
-  // eliminated, and leaves the attr dangling. Mirrors ``Submit::core_num_``
-  // below and the matching arm in ``IRMutator::VisitExpr_(CallPtr)``.
+  // Reference-typed attrs name Vars defined elsewhere in the IR — ``deps=[tid]``,
+  // ``dumps=[t]`` / ``pl.dump_tag``, ``device=``, an SPMD ``core_num``. They are
+  // real uses: without visiting them a scalar assigned only to size a launch
+  // looks dead, gets eliminated, and leaves the attr dangling. Dispatch on the
+  // stored type (see ``ForEachAttrExpr``) so a key nobody thought to enumerate
+  // is still walked.
   for (const auto& [k, v] : op->attrs_) {
-    if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges || k == kAttrDumpVars) {
-      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-      if (!edges) continue;
-      for (const auto& e : *edges) {
-        if (e) VisitExpr(e);
-      }
-    } else if (IsExprValuedCallAttr(k)) {
-      const auto* attr_expr = std::any_cast<ExprPtr>(&v);
-      if (attr_expr && *attr_expr) VisitExpr(*attr_expr);
-    }
+    ForEachAttrExpr(v, [this](const ExprPtr& e) { VisitExpr(e); });
   }
 }
 
@@ -128,18 +123,14 @@ void IRVisitor::VisitExpr_(const SubmitPtr& op) {
     INTERNAL_CHECK_SPAN(*op->predicate_, op->span_) << "Submit predicate is null";
     VisitExpr(*op->predicate_);
   }
-  // Var-typed attrs reference Vars defined elsewhere in the IR.
-  // IRMutator::VisitExpr_(SubmitPtr) already rewrites those Vars on
-  // substitution; the visitor must walk them too so unused-var / def-use /
-  // SSA-liveness analyses do not silently drop a Var that is referenced only
-  // through these attrs.
+  // Reference-typed attrs name Vars defined elsewhere in the IR.
+  // IRMutator::VisitExpr_(SubmitPtr) rewrites them on substitution; the visitor
+  // must walk them too so unused-var / def-use / SSA-liveness analyses do not
+  // silently drop a Var referenced only through an attr. Type-dispatched, so
+  // this arm no longer diverges from the Call arm the way the old key lists did
+  // (``kAttrDevice`` was walked on a Call but not here).
   for (const auto& [k, v] : op->attrs_) {
-    if (k != kAttrArgDirOverrideVars && k != kAttrCompilerManualDepEdges && k != kAttrDumpVars) continue;
-    const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-    if (!edges) continue;
-    for (const auto& e : *edges) {
-      if (e) VisitExpr(e);
-    }
+    ForEachAttrExpr(v, [this](const ExprPtr& e) { VisitExpr(e); });
   }
 }
 
@@ -279,32 +270,21 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
-// Visit Var-typed entries in a ScopeStmt's ``attrs_``. Mirrors the Call.attrs
-// handling in VisitExpr_(CallPtr) so analyses (unused-var detection, SSA Var
-// liveness, etc.) see Var refs stashed on a ScopeStmt's ``manual_dep_edges`` /
-// ``task_id_var`` / ``arg_direction_overrides_vars`` / ``dump_vars`` attrs, plus
-// the Expr-valued ``predicate`` attr. Subclasses opt a key out via
-// ShouldVisitScopeAttr rather than by overriding this walk.
+// Visit reference-typed entries in a ScopeStmt's ``attrs_``. Mirrors the
+// Call.attrs handling in VisitExpr_(CallPtr) so analyses (unused-var detection,
+// SSA Var liveness, etc.) see Var refs stashed on a ScopeStmt's
+// ``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars`` /
+// ``dump_vars`` attrs, plus whole-Expr attrs such as ``predicate`` (a comparison
+// over ``tensor.read`` whose operand tensor and index Vars are live SSA values
+// the outliner later moves onto ``Submit::predicate_``).
+//
+// Dispatch is on the stored type, so this walk covers any future
+// reference-valued scope attr without being edited. Subclasses still opt a key
+// out via ShouldVisitScopeAttr rather than by overriding this walk.
 void IRVisitor::VisitScopeAttrs(const ScopeStmtPtr& op) {
   for (const auto& [k, v] : op->attrs_) {
     if (!ShouldVisitScopeAttr(k)) continue;
-    if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars || k == kAttrDumpVars) {
-      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-      if (!edges) continue;
-      for (const auto& e : *edges) {
-        if (e) VisitExpr(e);
-      }
-    } else if (k == kAttrTaskIdVar) {
-      const auto* var = std::any_cast<VarPtr>(&v);
-      if (var && *var) VisitExpr(*var);
-    } else if (k == kAttrPredicate) {
-      // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — unlike the keys above
-      // this is a whole Expr tree (a comparison over ``tensor.read``), so
-      // recurse into it: the operand tensor and its index Vars are live SSA
-      // values the outliner later moves onto ``Submit::predicate_``.
-      const auto* pred = std::any_cast<ExprPtr>(&v);
-      if (pred && *pred) VisitExpr(*pred);
-    }
+    ForEachAttrExpr(v, [this](const ExprPtr& e) { VisitExpr(e); });
   }
 }
 

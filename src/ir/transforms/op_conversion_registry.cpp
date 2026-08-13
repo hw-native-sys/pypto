@@ -36,6 +36,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
@@ -708,12 +709,12 @@ void OpConversionRegistry::RegisterMemoryOps() {
             }
           }
           if (all_const) {
-            uint64_t tile_bytes = static_cast<uint64_t>(total_elements) * dtype.GetBit() / 8;
+            auto tile_bytes = storage_size::StaticStorageBytes(static_cast<uint64_t>(total_elements), dtype);
             const auto* be = backend::GetBackend();
-            if (be) {
+            if (be && tile_bytes.has_value()) {
               uint64_t mem_size = be->GetMemSize(target_mem);
-              INTERNAL_CHECK_SPAN(mem_size == 0 || tile_bytes <= mem_size, span)
-                  << "tensor.create: tile size (" << tile_bytes << " bytes) exceeds buffer capacity ("
+              INTERNAL_CHECK_SPAN(mem_size == 0 || *tile_bytes <= mem_size, span)
+                  << "tensor.create: tile size (" << *tile_bytes << " bytes) exceeds buffer capacity ("
                   << mem_size << " bytes) for memory space " << static_cast<int>(target_mem) << " at "
                   << span.to_string();
             }
@@ -2503,6 +2504,20 @@ std::vector<std::pair<std::string, std::any>> StripChunkKwargs(
 }  // namespace
 
 void OpConversionRegistry::RegisterDistributedOps() {
+  // pld.tensor.remote_store -> pld.tile.remote_store, 1:1 (the same shape as
+  // tensor.aiv_shard -> tile.aiv_shard: one op, two IR levels, identical
+  // argument surface, so no argument can be silently dropped by the lowering).
+  //
+  // The InputSpaceReq is what makes the op total on its src. BridgeInputSpaces
+  // only rewrites TensorType operands, so:
+  //   - a computed value has already been lowered to a tile by its producer
+  //     earlier in this pass and passes straight through, keeping whatever space
+  //     it computed in (Vec or Acc — both are legal pto.tstore sources);
+  //   - a src still resident in GM is auto-bridged with a natural tile.load into
+  //     Vec, and a tensor.slice producer is loaded directly into Vec by the
+  //     consumer-driven path.
+  RegisterSimple("pld.tensor.remote_store", "pld.tile.remote_store", {{0, {MemorySpace::Vec, std::nullopt}}});
+
   // pld.tensor.put -> tile.create(stage) + pld.tile.put(dst, peer, src, stage).
   // Stage shape is [rows, cols] with rows = product(leading dims), cols =
   // innermost dim: the 2-D-flattened transfer extent codegen previously
@@ -2523,6 +2538,20 @@ void OpConversionRegistry::RegisterDistributedOps() {
         INTERNAL_CHECK_SPAN(dst_type, span)
             << "pld.tensor.put conversion: dst must be DistributedTensorType, got "
             << args[0]->GetType()->TypeName();
+
+        // A tile-typed src means the author pushed a *computed* value: its
+        // producer lowered to a tile earlier in this pass. TPUT needs two GM
+        // descriptors (the staging tile it takes is its own bounce buffer, not a
+        // data source), so there is no lowering here. Reject at the op the author
+        // actually wrote — deferring to pld.tile.put's deducer produces
+        // "pld.tile.put src must be a Tensor..." naming an internal op, and the
+        // put-only args below (atomic, chunking, src_offsets) would be silently
+        // dropped by any tile-level fallback.
+        CHECK_SPAN(!As<TileType>(args[2]->GetType()), span)
+            << "pld.tensor.put src must be a GM tensor, but got a computed value that lowers to a "
+               "tile: TPUT transfers between two GM regions, and a UB tile has no GM address. "
+               "Use pld.tensor.remote_store(src, target, peer, offsets) to push a computed value "
+               "straight to a peer (pld.remote_store dispatches to it automatically).";
         std::vector<ExprPtr> transfer_shape = dst_type->shape_;
         if (args.size() == 6) {
           auto shape_tuple_arg = As<MakeTuple>(args[5]);

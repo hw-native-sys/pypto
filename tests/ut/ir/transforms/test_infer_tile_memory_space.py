@@ -23,6 +23,10 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
 
+_OP_TILE_GET_BLOCK_IDX = ir.get_op("tile.get_block_idx").name
+_OP_TILE_LOAD = ir.get_op("tile.load").name
+_OP_TILE_MATMUL = ir.get_op("tile.matmul").name
+
 
 @pytest.fixture(autouse=True)
 def _reset_backend():
@@ -325,7 +329,7 @@ class TestInferTileMemorySpaceCubeOps:
             def visit_call(self, op):
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != "tile.matmul":
+                if call.op.name != _OP_TILE_MATMUL:
                     return expr
                 attrs = dict(call.attrs)
                 attrs["dump_vars"] = [call.args[0]]
@@ -344,7 +348,7 @@ class TestInferTileMemorySpaceCubeOps:
 
         class _CollectMatmul(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name == "tile.matmul":
+                if op.op.name == _OP_TILE_MATMUL:
                     matmuls.append(op)
                 super().visit_call(op)
 
@@ -374,7 +378,7 @@ class TestInferTileMemorySpaceCubeOps:
             def visit_call(self, op):
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != "tile.matmul":
+                if call.op.name != _OP_TILE_MATMUL:
                     return expr
                 attrs = dict(call.attrs)
                 attrs["dump_vars"] = [call.args[0]]
@@ -393,7 +397,7 @@ class TestInferTileMemorySpaceCubeOps:
 
         class _CollectMatmul(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name == "tile.matmul":
+                if op.op.name == _OP_TILE_MATMUL:
                     matmuls.append(op)
                 super().visit_call(op)
 
@@ -2229,7 +2233,7 @@ class MarkedResidencyGate:
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
                 if (
-                    call.op.name == "tile.load"
+                    call.op.name == _OP_TILE_LOAD
                     and isinstance(call.type, ir.TileType)
                     and call.type.memory_space == pl.MemorySpace.Mat
                 ):
@@ -2367,7 +2371,7 @@ class RetargetedBridgeAttrs:
                 nonlocal stamped
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name == "tile.load" and not stamped:
+                if call.op.name == _OP_TILE_LOAD and not stamped:
                     stamped = True
                     attrs = dict(call.attrs)
                     attrs[marker] = True
@@ -2389,7 +2393,7 @@ class RetargetedBridgeAttrs:
 
         class _CollectLoadAttrs(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name == "tile.load":
+                if op.op.name == _OP_TILE_LOAD:
                     load_attrs.append(dict(op.attrs))
                 super().visit_call(op)
 
@@ -2421,7 +2425,7 @@ class MarkerOnlyScalarCall:
             def visit_call(self, op):
                 expr = super().visit_call(op)
                 call = expr if isinstance(expr, ir.Call) else op
-                if call.op.name != "tile.get_block_idx":
+                if call.op.name != _OP_TILE_GET_BLOCK_IDX:
                     return expr
                 attrs = dict(call.attrs)
                 attrs[marker] = True
@@ -2442,7 +2446,7 @@ class MarkerOnlyScalarCall:
 
         class _CollectScalarAttrs(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name == "tile.get_block_idx":
+                if op.op.name == _OP_TILE_GET_BLOCK_IDX:
                     scalar_attrs.append(dict(op.attrs))
                 super().visit_call(op)
 

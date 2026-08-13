@@ -161,6 +161,15 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   TileTypeComponents c;
   c.dtype_str = dtype_str_override.empty() ? DataTypeToMLIR(tile_type.dtype_) : dtype_str_override;
 
+  // Effective view encodes implicit defaults for the memory space (Mat/Right/Acc),
+  // so read it before lowering the shape. PTOAS represents FP4 Vec tiles in
+  // physical x2-carrier coordinates: the packed BLayout axis is half the PyPTO
+  // logical nibble extent. Matrix spaces deliberately keep their logical MX
+  // dimensions because PTOAS/TMATMUL_MX use a separate packed-matrix contract.
+  ir::TileView view = ir::tile_view_semantics::GetEffectiveTileView(tile_type);
+  const bool packed_fp4_vec =
+      tile_type.dtype_ == DataType::FP4 && tile_type.GetMemorySpace() == ir::MemorySpace::Vec;
+
   if (tile_type.shape_.size() >= 2) {
     if (auto c0 = As<ir::ConstInt>(tile_type.shape_[0])) c.rows = c0->value_;
     if (auto c1 = As<ir::ConstInt>(tile_type.shape_[1])) c.cols = c1->value_;
@@ -169,6 +178,13 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
       c.rows = 1;
       c.cols = c0->value_;
     }
+  }
+  if (packed_fp4_vec) {
+    int64_t* packed_dim = view.blayout == ir::TileLayout::col_major ? &c.rows : &c.cols;
+    CHECK(*packed_dim > 0 && *packed_dim % 2 == 0)
+        << "FP4 Vec tile packed dimension must be a positive even logical extent for PTOAS, got "
+        << *packed_dim;
+    *packed_dim /= 2;
   }
   // Valid extent is always conveyed dynamically via `valid_row` / `valid_col`
   // operands on `pto.alloc_tile`; the type string therefore always reads
@@ -179,10 +195,6 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   c.v_row_dynamic = true;
   c.v_col_dynamic = true;
 
-  // Effective view encodes implicit defaults for the memory space (Mat/Right/Acc),
-  // so reading via GetEffectiveTileView preserves layout after the constructor's
-  // canonicalization elides views that match the implicit semantics.
-  ir::TileView view = ir::tile_view_semantics::GetEffectiveTileView(tile_type);
   c.blayout = view.blayout;
   c.slayout = view.slayout;
   c.fractal = view.fractal;

@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +35,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -339,9 +341,13 @@ inline ExprPtr MulByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
 }
 
 /// Compute byte offset for a slice operation.
-/// byte_offset = (o0 * s1 * ... * sN + o1 * s2 * ... * sN + ... + oN) * elem_bytes
+/// byte_offset = (o0 * s1 * ... * sN + o1 * s2 * ... * sN + ... + oN) * storage_bits / 8
+///
+/// MemRef carries a byte offset rather than a nibble offset. Packed 4-bit
+/// slices therefore require a static, byte-aligned logical origin in v1.
 inline ExprPtr ComputeSliceByteOffset(const std::vector<ExprPtr>& offsets,
-                                      const std::vector<ExprPtr>& parent_shape, uint64_t elem_bytes) {
+                                      const std::vector<ExprPtr>& parent_shape, const DataType& dtype,
+                                      const Span& span) {
   INTERNAL_CHECK(offsets.size() == parent_shape.size())
       << "Internal error: slice offset rank (" << offsets.size() << ") must match parent shape rank ("
       << parent_shape.size() << ")";
@@ -356,9 +362,29 @@ inline ExprPtr ComputeSliceByteOffset(const std::vector<ExprPtr>& offsets,
     result = AddByteOffsets(result, MulByteOffsets(offsets[i], stride));
   }
 
-  auto elem_size_expr =
-      std::make_shared<ConstInt>(static_cast<int64_t>(elem_bytes), DataType::INDEX, Span::unknown());
-  return MulByteOffsets(result, elem_size_expr);
+  const uint64_t storage_bits = storage_size::GetStorageBitWidth(dtype);
+  INTERNAL_CHECK_SPAN(storage_bits > 0, span)
+      << "Internal error: slice dtype has no storage width: " << dtype.ToString();
+  if (storage_bits % 8 == 0) {
+    auto elem_size_expr =
+        std::make_shared<ConstInt>(static_cast<int64_t>(storage_bits / 8), DataType::INDEX, Span::unknown());
+    return MulByteOffsets(result, elem_size_expr);
+  }
+
+  auto logical_offset = As<ConstInt>(result);
+  CHECK_SPAN(logical_offset, span)
+      << "Packed 4-bit slice offsets must be compile-time constants because MemRef cannot represent "
+         "a dynamic nibble offset";
+  CHECK_SPAN(logical_offset->value_ >= 0, span)
+      << "Packed 4-bit slice offsets must be non-negative, but got logical offset " << logical_offset->value_;
+  const auto byte_offset =
+      storage_size::StaticLogicalOffsetToByte(static_cast<uint64_t>(logical_offset->value_), dtype);
+  CHECK_SPAN(byte_offset.has_value(), span)
+      << "Packed 4-bit slice origins must be byte-aligned; logical linear offset " << logical_offset->value_
+      << " selects the second nibble of a byte";
+  CHECK_SPAN(*byte_offset <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), span)
+      << "Packed 4-bit slice byte offset overflows int64";
+  return std::make_shared<ConstInt>(static_cast<int64_t>(*byte_offset), DataType::INDEX, Span::unknown());
 }
 
 /// Compute additional byte offset for a view operation.
@@ -384,8 +410,7 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
       offsets.push_back(call->args_[offset_arg_idx]);
     }
 
-    uint64_t elem_bytes = (shaped->dtype_.GetBit() + 7) / 8;
-    return ComputeSliceByteOffset(offsets, shaped->shape_, elem_bytes);
+    return ComputeSliceByteOffset(offsets, shaped->shape_, shaped->dtype_, call->span_);
   }
 
   // Non-slice view ops (reshape, transpose, extract):

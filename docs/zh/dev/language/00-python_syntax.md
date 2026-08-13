@@ -257,6 +257,19 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+**枚举类算子实参 (Enum op arguments):** 算子包装函数中有一类形参接收 Python
+枚举而非 IR 表达式 —— `DataType`、`MemorySpace`、`TensorLayout`、`TileLayout`、
+`PadValue`、`ArgDirection`。无论按位置传入还是按关键字传入，也无论写成字面属性
+还是闭包名称，它们的解析结果完全一致，因此下面两行构建出相同的调用:
+
+```python
+p = pl.fillpad(t, pl.PadValue.min)              # positional
+p = pl.fillpad(t, pad_value=pl.PadValue.min)    # keyword
+```
+
+算子在此类形参上接受的数值糖也同样如此: `pl.fillpad` 在两种位置上都接受 `0`、
+`0.0`、`math.inf` 和 `-math.inf`。
+
 ### 下标索引 (Subscript Indexing)
 
 `Tensor` 和 `Tile` 的下标采用 numpy/torch 风格的语义:
@@ -351,6 +364,30 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 # 缓冲区大小需自行设置：a3 -> slot_size * local_slot_num，a5 -> slot_size * slot_num。
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
+
+#### 统一算子的跨路径参数 (Cross-path arguments)
+
+统一算子 `pl.<op>` 接受两个层级参数的并集，因此只有*另一条*分发路径才能处理的
+参数会被**拒绝，而不会被丢弃**——被悄悄丢弃的 `b_trans` 会编译出错误的数学
+语义。反方向同样成立：Tensor 输入必须省略的临时操作数
+(`pl.row_max(tensor)`)，正是 Tile 输入必须提供的那一个
+(`pl.row_max(tile, tmp_tile)`)，因为 tile 缓冲区的生命周期由用户管理。
+
+**两个方向都抛出 `TypeError`**——它们属于"参数与该重载不匹配"这一类错误，
+即 Python 自身在遇到意外关键字参数或缺少必需参数时抛出的类型。通过该包装器
+到达更深层的校验 (形状、dtype、边界——任何由 C++ `CHECK` 拒绝的情况) 仍然抛出
+`ValueError`，因此保护整个调用的代码应当同时捕获两者:
+
+```python
+pl.matmul(tile_a, tile_b, b_trans=True)   # TypeError — tile 转置是视图，不是标志位
+pl.rsqrt(tile, high_precision=True)       # TypeError — tile 精度通过传入 tmp 选择
+pl.div(tile, 2.0, high_precision=True)    # TypeError — high_precision 需要 Tile rhs
+pl.row_max(tile)                          # TypeError — Tile 输入必须提供 tmp_tile
+pl.slice(tile, [64, 64], [64, 0])         # ValueError — 窗口越出源 tile 边界
+```
+
+在 `@pl.function` 函数体内这一区别是不可见的: 解析器会同时捕获两者，并重新
+抛出带有源码位置的 `InvalidOperationError`。
 
 ## 语句 (Statement)
 

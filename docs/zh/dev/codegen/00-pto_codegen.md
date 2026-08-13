@@ -419,6 +419,36 @@ pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
 - 输入操作数通过变量名查找解析
 - 所有 `ins`/`outs` 子句包含类型标注
 
+### 源码位置 (`loc`)
+
+每条生成的**操作**都会带上由 IR `Span` 构造的 MLIR 尾随位置, 例如
+`pto.tadd ins(...) outs(...) loc("kernels/attn.py":41:9)`。ptoas 会原样把
+`loc()` 传递到自己的诊断信息里, 因此校验失败时报告的是用户 `.py` 中的行, 而不是
+生成的 `.pto` 中的行 —— 在 `@pl.jit` 下用户根本看不到后者 (该路径上 span 已由
+解析器从合成的 `<jit:name>` 文本重映射回真实源文件)。
+
+**使用哪个 span** —— 在两个层级绑定, 后者细化前者:
+
+| 层级 | 绑定位置 | 来源 |
+| ---- | -------- | ---- |
+| 语句 (主) | `PTOCodegen::VisitStmt` | `Stmt::span_` |
+| Call (细化) | `PTOCodegen::VisitExpr_(CallPtr)` | `Call::span_`, 仅当它嵌套在语句 span 内 |
+
+包含性 (containment) 检查是正确性的关键。`Call::span_` 在被保留时精确到列, 但
+合成 tile 算子的 pass (`ConvertTensorToTileOps`) 会用所在**函数**的 span 重建
+`Call`, 同时保留 `AssignStmt` 自身的 span。这类 span 起始于语句之前, 包含性检查
+不通过, 于是被丢弃并回退到语句 span —— 否则大多数操作都会指向 `def` 行。
+
+**不带位置的内容**: 区域花括号、分隔符和基本块标签 (`loc(...)` 只在一条完整操作
+的末尾合法, 因此这些行走 `EmitStructural()` 而不是 `Emit()`); 常量段中的
+`arith.constant` (在所有使用点之间去重, 没有唯一正确的 span); 以及 span 未知或
+没有文件名的节点。
+
+**关闭方式** —— `Generate(program, emit_tile_addr, emit_source_loc)`、
+`compile(..., emit_source_loc=...)`, 或环境变量 `PYPTO_EMIT_PTO_LOC=0`。关闭后
+输出与不带位置的形式逐字节一致; 由于 ptoas 独立于 PyPTO 发布, 这是应对某个
+ptoas 版本解析器拒绝尾随位置时的应急开关。
+
 ## 完整示例
 
 ### 输入: PyPTO 程序

@@ -29,6 +29,167 @@ from pypto.pypto_core import DataType, ir
 class TestOrchestrationMore:
     """Orchestration codegen — additional core cases (continued)."""
 
+    def test_fp4_runtime_shapes_use_x2_carrier_only_at_abi_boundary(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        logical_k = pl.dynamic("FP4_LOGICAL_K")
+
+        @pl.program
+        class Fp4CarrierProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def copy(
+                self,
+                src: pl.Tensor[[8, logical_k], pl.FP4],
+                out: pl.Out[pl.Tensor[[8, logical_k], pl.FP4]],
+            ) -> pl.Tensor[[8, logical_k], pl.FP4]:
+                tile = pl.load(src, [0, 0], [8, logical_k])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                src: pl.Tensor[[8, logical_k], pl.FP4],
+            ) -> pl.Tensor[[8, logical_k], pl.FP4]:
+                width = pl.tensor.dim(src, 1)
+                out = pl.create_tensor([8, width], dtype=pl.FP4)
+                return self.copy(src, out)
+
+        code = _generate_orch_code(Fp4CarrierProgram)
+        assert "const int64_t fp4_carrier_dim = (int64_t)orch_args.tensor(0).ref().shapes[1];" in code
+        assert "always_assert(fp4_carrier_dim > 0);" in code
+        assert "const int64_t fp4_logical_dim = static_cast<int64_t>" in code
+        assert "always_assert(fp4_logical_dim > 0 && (fp4_logical_dim & 1u) == 0u);" in code
+        assert "static_cast<uint32_t>(fp4_logical_dim / 2)" in code
+        assert "DataType::FP4E2M1" in code
+
+    def test_fp4_slice_uses_x2_carrier_shape_and_offset(self):
+        """FP4 slice metadata passed to runtime Tensor::view is in carrier units."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Fp4SliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[8, 16], pl.FP4],
+            ) -> pl.Tensor[[1, 8], pl.FP4]:
+                chunk: pl.Tensor[[1, 8], pl.FP4] = pl.slice(data, [1, 8], [0, 8])
+                return chunk
+
+        code = _generate_orch_code(Fp4SliceProgram)
+        assert "uint32_t chunk_offsets[2] = {0, 4};" in code
+        assert "std::min<uint32_t>(4, ext_data.shapes[1] - chunk_offsets[1])" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+
+    def test_fp4_slice_dynamic_offset_checks_alignment_before_conversion(self):
+        """Dynamic packed-axis offsets are checked before conversion to carrier units."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Fp4DynamicSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[8, 16], pl.FP4],
+                logical_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, 8], pl.FP4]:
+                chunk: pl.Tensor[[1, 8], pl.FP4] = pl.slice(data, [1, 8], [0, logical_offset])
+                return chunk
+
+        code = _generate_orch_code(Fp4DynamicSliceProgram)
+        assert "uint32_t chunk_logical_fp4_offset = static_cast<uint32_t>(logical_offset);" in code
+        assert "always_assert((chunk_logical_fp4_offset & 1u) == 0u);" in code
+        assert "uint32_t chunk_offsets[2] = {0, (chunk_logical_fp4_offset / 2)};" in code
+
+    def test_fp4_slice_rejects_odd_packed_axis_offset(self):
+        """A constant odd offset starts on the unrepresentable second nibble."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Fp4OddSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[8, 16], pl.FP4],
+            ) -> pl.Tensor[[1, 8], pl.FP4]:
+                chunk: pl.Tensor[[1, 8], pl.FP4] = pl.slice(data, [1, 8], [0, 7])
+                return chunk
+
+        with pytest.raises(ValueError, match="packed FP4 last-axis offset must be byte-aligned"):
+            _generate_orch_code(Fp4OddSliceProgram)
+
+    def test_fp4_reshape_and_view_use_x2_carrier_last_dimension(self):
+        """Both shape-reinterpret paths preserve physical carrier element counts."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Fp4ShapeViewProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[8, 16], pl.FP4],
+            ) -> pl.Tensor[[2, 64], pl.FP4]:
+                reshaped: pl.Tensor[[4, 32], pl.FP4] = pl.reshape(data, [4, 32])
+                viewed: pl.Tensor[[2, 64], pl.FP4] = pl.tensor.view(reshaped, [2, 64])
+                return viewed
+
+        code = _generate_orch_code(Fp4ShapeViewProgram)
+        assert "uint32_t reshaped_shapes[2] = {4, 16};" in code
+        assert "Tensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
+        assert "uint32_t viewed_shapes[2] = {2, 32};" in code
+        assert "Tensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
+
+    def test_fp4_transpose_keeps_packed_axis_fixed(self):
+        """Swapping non-packed axes is representable; moving the packed axis is not."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Fp4NonPackedTransposeProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[2, 4, 16], pl.FP4],
+            ) -> pl.Tensor[[4, 2, 16], pl.FP4]:
+                transposed: pl.Tensor[[4, 2, 16], pl.FP4] = pl.transpose(data, axis1=0, axis2=1)
+                return transposed
+
+        code = _generate_orch_code(Fp4NonPackedTransposeProgram)
+        assert "Tensor transposed = ext_data.transpose(0, 1);" in code
+
+        @pl.program
+        class Fp4PackedTransposeProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[2, 4, 16], pl.FP4],
+            ) -> pl.Tensor[[2, 16, 4], pl.FP4]:
+                transposed: pl.Tensor[[2, 16, 4], pl.FP4] = pl.transpose(data, axis1=1, axis2=2)
+                return transposed
+
+        with pytest.raises(ValueError, match="cannot move the packed FP4 last axis"):
+            _generate_orch_code(Fp4PackedTransposeProgram)
+
+    def test_fp4_view_rejects_layout_flip_across_packed_axis(self):
+        """ND/DN layout flips swap the trailing pair and cannot preserve FP4 packing."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        ib = IRBuilder()
+        with ib.function("orch_fp4_view", type=ir.FunctionType.Orchestration) as f:
+            data = f.param("data", ir.TensorType([8, 16], DataType.FP4))
+            data_dn = ib.let("data_dn", tensor_ops.view(data, layout=ir.TensorLayout.DN))
+            f.return_type(data_dn.type)
+            ib.return_stmt(data_dn)
+        program = ir.Program([f.get_result()], "test_fp4_view_layout_flip", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="cannot move the packed FP4 last axis"):
+            _generate_orch_code(program)
+
     def test_dynamic_gm_pipe_buffer_alloc_follows_its_size_local(self):
         """A dynamically-sized injected GM pipe buffer must not be hoisted above
         the body-local it is sized by (issue #1768).
@@ -69,14 +230,12 @@ class TestOrchestrationMore:
                     out = pl.assemble(out, c_vec, [m0, 0])
                 return out
 
-        # VerificationLevel.NONE: a dynamic ``pl.spmd`` block count lands on the
-        # outlined Spmd function as a ``core_num`` attr that references a local
-        # defined in the *caller* Orchestration function. The printer emits that
-        # attr verbatim, but the roundtrip parser rejects the standalone function
-        # (the var is out of scope) — a known print/parse gap unrelated to the
-        # codegen ordering under test here.
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynPipeProgram)
+        # Runs under the session's verification settings (roundtrip by default in
+        # this suite): a dynamic ``pl.spmd`` block count is the case where
+        # OutlineIncoreScopes promotes an Opaque body to Orchestration, so the
+        # ``m = pl.tensor.dim(a, 0)`` read must fold onto the param's dyn-dim
+        # symbol there — otherwise the printed IR no longer parses back to itself.
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DynPipeProgram)
         orch_func = next(
             f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration
         )

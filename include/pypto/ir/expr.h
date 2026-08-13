@@ -891,6 +891,37 @@ inline constexpr const char* kAttrSyncStart = "sync_start";
 }
 
 /**
+ * @brief Invoke ``fn`` on every ``ExprPtr`` an attr value references.
+ *
+ * Dispatches on the value's stored TYPE, never on its key name. This is the
+ * same discipline the serializer (``serializer.cpp``, ``value.type() ==
+ * typeid(ExprPtr)``), the deserializer and the printer (``PrintAttrValue``)
+ * already use, and it is what makes attr edges self-maintaining: a newly
+ * invented attr key that happens to hold a ``Var`` is walked automatically, so
+ * it cannot open a blind spot in SSA renaming, liveness, DCE or ``UseAfterDef``.
+ *
+ * A key-name-gated walk cannot offer that. The three former walk sites
+ * (``VisitExpr_(CallPtr)``, ``VisitExpr_(SubmitPtr)``, ``VisitScopeAttrs``)
+ * each carried a different hand-maintained list, which is how ``kAttrDevice``
+ * came to be walked on a ``Call`` but not on a ``Submit``.
+ *
+ * Non-reference values (scalars, enums, ``vector<int32_t>``,
+ * ``vector<ArgDirection>``) are ignored: they name nothing.
+ */
+template <typename F>
+void ForEachAttrExpr(const std::any& value, F&& fn) {
+  if (const auto* var = std::any_cast<VarPtr>(&value)) {
+    if (*var) fn(ExprPtr(*var));
+  } else if (const auto* vars = std::any_cast<std::vector<VarPtr>>(&value)) {
+    for (const auto& v : *vars) {
+      if (v) fn(ExprPtr(v));
+    }
+  } else if (const auto* expr = std::any_cast<ExprPtr>(&value)) {
+    if (*expr) fn(*expr);
+  }
+}
+
+/**
  * @brief Reserved attr key for a dispatch predicate — ``predicate=(t[i] > 0)``.
  *
  * Value type: ``ExprPtr`` — the comparison Expr as written (e.g.

@@ -84,7 +84,7 @@ Run the checked-in lowering example rather than piping a function to `python -`:
 `@pl.jit` reads the decorated function's source, which is unavailable on stdin.
 
 ```bash
-python examples/kernels/08_assemble.py
+python examples/intermediate/05_assemble.py
 ```
 
 The final line is:
@@ -160,21 +160,22 @@ PYPTO_PROG_BUILD_DIR=/scratch/pypto-out python my_kernel.py
 
 | Path | What is in it |
 | ---- | ------------- |
-| `examples/hello_world.py` | The simplest complete program — start here |
-| `examples/kernels/` | Single-kernel operators, numbered by difficulty: elementwise, fused ops, matmul, softmax, assemble |
+| `examples/beginner/` | Single-kernel basics, numbered by difficulty: hello world, elementwise, scalar ops, activation, matmul, concat |
+| `examples/intermediate/` | Real-kernel patterns, numbered by difficulty: fused linear, softmax, normalization, matmul accumulation, assemble, dynamic valid shape |
+| `examples/advanced/` | Performance and low-level techniques: split-K, compiler-driven tiling |
 | `examples/models/` | Multi-kernel models, numbered by difficulty: FFN, paged attention, LLaMA |
 | `examples/utils/` | Parsing, cross-function calls, error handling |
 | `examples/runtime/` | Dispatch, explicit workers, distributed callbacks, multi-program KV cache |
 
-**Most of these dispatch to hardware, not just compile.** `hello_world.py`,
-`kernels/06_softmax.py`, and `models/01_ffn.py` all end by calling their kernel with
+**Most of these dispatch to hardware, not just compile.** `beginner/01_hello_world.py`,
+`intermediate/02_softmax.py`, and `models/01_ffn.py` all end by calling their kernel with
 `config=RunConfig()`, which assembles through ptoas and runs it — so they need the
 runtime and a device or simulator platform, not only the `pip install` above:
 
 ```bash
-python examples/hello_world.py          # needs runtime + device/simulator
-python examples/kernels/06_softmax.py   # needs runtime + device/simulator
-python examples/models/01_ffn.py        # needs runtime + device/simulator
+python examples/beginner/01_hello_world.py     # needs runtime + device/simulator
+python examples/intermediate/02_softmax.py     # needs runtime + device/simulator
+python examples/models/01_ffn.py               # needs runtime + device/simulator
 ```
 
 If you only have the compiler front end, read them rather than running them —

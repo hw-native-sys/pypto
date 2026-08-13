@@ -146,6 +146,17 @@ def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
 # tile leaves the caller's buffer dead while it still consumes UB budget.
 # Only a non-default value raises — spelling out the documented default keeps
 # working.
+#
+# **Every guard in this module raises ``TypeError``**, in both directions: an
+# argument the dispatched path cannot honour, and one it requires but did not
+# get. Both are "these arguments do not match this overload" — the class CPython
+# itself raises for an unexpected keyword or a missing required argument — not a
+# bad *value*. Deeper validation reached through these wrappers still raises
+# ``ValueError`` (``pypto::ValueError`` from a C++ ``CHECK`` is registered as a
+# Python ``ValueError`` subclass), so a direct-API caller guarding a whole call
+# should catch both; the split here is only about which layer rejected it.
+# The DSL path is unaffected either way: ``ast_parser`` catches ``(TypeError,
+# ValueError)`` and re-raises ``InvalidOperationError`` with a span.
 # ---------------------------------------------------------------------------
 
 # The ``@overload`` declarations mirror that rule with ``Literal[False]`` /
@@ -175,6 +186,40 @@ def _reject_tmp_for_tensor(op_name: str, tmp: Any, param: str = "tmp") -> None:
             f"pl.{op_name}: Tensor inputs must not pass {param} — the scratch tile is "
             f"allocated during Tensor-to-Tile lowering"
         )
+
+
+def _require_tmp_for_tile(op_name: str, tmp: Tile | None, requirement: str) -> Tile:
+    """Guard the Tile path of an op whose Tile form *requires* a scratch operand.
+
+    The mirror image of :func:`_reject_tmp_for_tensor`: tile buffer lifetimes are
+    user-managed, so the operand the Tensor path must omit is the same one the
+    Tile path cannot synthesize. Both directions raise ``TypeError`` — this is a
+    wrong-arguments-for-this-overload error, the same class CPython raises for a
+    missing required argument, not a bad *value*.
+
+    ``requirement`` completes the sentence "Tile inputs require ..." and carries
+    the per-op constraint on the scratch operand. Returns the operand so the call
+    site keeps the non-``None`` narrowing the inline ``is None`` check gave it.
+    """
+    if tmp is None:
+        raise TypeError(f"pl.{op_name}: Tile inputs require {requirement}")
+    return tmp
+
+
+# Scratch-operand requirements, shared by the ops that impose the same one.
+_TMP_ROW_REDUCTION_REQUIREMENT = (
+    "tmp_tile with the same dtype and rank as the input, and every dimension at least as large "
+    "as the corresponding input dimension"
+)
+_TMP_ROW_ARG_REDUCTION_REQUIREMENT = "tmp_tile with exactly the same shape and dtype as the input"
+_TMP_COL_ARG_REDUCTION_REQUIREMENT = (
+    "tmp_tile — the tile form takes caller-owned scratch, unlike pl.col_max / pl.col_min"
+)
+
+
+def _tmp_scratch_requirement(op_name: str) -> str:
+    """Requirement text for the bitwise ops, whose scratch operand is positional."""
+    return f"an explicit scratch tile — call pl.{op_name}(lhs, rhs, tmp) or pl.tile.{op_name}(lhs, rhs, tmp)"
 
 
 def _reject_tile_unsupported(op_name: str, /, **flags: tuple[bool, str]) -> None:
@@ -348,11 +393,11 @@ def div(lhs, rhs, high_precision: bool = False):
         return _tile.div(lhs, rhs, high_precision=high_precision)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         if high_precision:
-            raise ValueError("pl.div: high_precision requires a Tile rhs")
+            raise TypeError("pl.div: high_precision requires a Tile rhs")
         return _tile.divs(lhs, rhs)
     if _is_scalar_like(lhs) and _is_scalar_like(rhs):
         if high_precision:
-            raise ValueError("pl.div: high_precision is only supported for Tensor or Tile division")
+            raise TypeError("pl.div: high_precision is only supported for Tensor or Tile division")
         return Scalar(expr=_to_scalar_expr(lhs) / _to_scalar_expr(rhs))
     _raise_type_dispatch_error("div", lhs, rhs)
 
@@ -604,8 +649,7 @@ def row_expand_add(lhs: Tile, rhs: Tile, tmp: Tile | None = None) -> Tile: ...
 def row_expand_add(lhs, rhs, tmp: Tile | None = None):
     """Row-wise broadcast addition; ``tmp`` is available only for Tile inputs."""
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
-        if tmp is not None:
-            raise ValueError("pl.row_expand_add: tmp is only supported for Tile inputs")
+        _reject_tmp_for_tensor("row_expand_add", tmp)
         return _tensor.row_expand_add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_add(lhs, rhs, tmp)
@@ -808,7 +852,7 @@ def slice(
         return _tensor.slice(input, shape, offset, valid_shape, drop_dims, clamp=clamp)
     if isinstance(input, Tile):
         if clamp:
-            raise ValueError(
+            raise TypeError(
                 "pl.slice: clamp=True is not supported for a Tile. An on-chip window has no "
                 "clamping mechanism, so offset + shape must stay inside the source tile. "
                 "Clamp the read at the tensor boundary instead — pl.load(..., clamp=True) or "
@@ -889,6 +933,12 @@ def matmul(
     carries no layout, so a flag is the only place the information can live. At
     tile level transposition is a *type* property, so passing any of them with a
     Tile operand raises rather than being dropped.
+
+    A transpose flag swaps its own operand's two trailing axes, so that operand
+    must be at least 2D — ``a_trans`` with a 1D ``lhs`` (or ``b_trans`` with a 1D
+    ``rhs``) raises rather than being ignored. On the mixed mat-vec / vec-mat
+    forms the flag applies to the matrix side: a ``lhs`` stored ``[K, M]`` with
+    ``a_trans=True`` against a ``[K]`` ``rhs`` deduces ``[M]``.
 
     ``out_dtype`` is likewise Tensor-only. ``tile.matmul``'s result dtype is
     fixed by the Cube accumulator (FP32 for float operands, INT32 for int), so
@@ -999,11 +1049,7 @@ def row_max(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_max", tmp_tile, "tmp_tile")
         return _tensor.row_max(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_max on Tile requires tmp_tile with the same dtype and rank and every dimension "
-                "at least as large as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_max", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
         return _tile.row_max(input, tmp_tile)
     raise TypeError(f"pl.row_max: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1024,11 +1070,7 @@ def row_sum(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_sum", tmp_tile, "tmp_tile")
         return _tensor.row_sum(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_sum on Tile requires tmp_tile with the same dtype and rank and every dimension "
-                "at least as large as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_sum", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
         return _tile.row_sum(input, tmp_tile)
     raise TypeError(f"pl.row_sum: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1049,11 +1091,7 @@ def row_min(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_min", tmp_tile, "tmp_tile")
         return _tensor.row_min(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_min on Tile requires tmp_tile with the same dtype and rank and every dimension "
-                "at least as large as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_min", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
         return _tile.row_min(input, tmp_tile)
     raise TypeError(f"pl.row_min: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1074,11 +1112,7 @@ def row_prod(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_prod", tmp_tile, "tmp_tile")
         return _tensor.row_prod(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_prod on Tile requires tmp_tile with the same dtype and rank and every dimension "
-                "at least as large as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_prod", tmp_tile, _TMP_ROW_REDUCTION_REQUIREMENT)
         return _tile.row_prod(input, tmp_tile)
     raise TypeError(f"pl.row_prod: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1155,10 +1189,7 @@ def row_argmax(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_argmax", tmp_tile, "tmp_tile")
         return _tensor.row_argmax(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_argmax on Tile requires tmp_tile with exactly the same shape and dtype as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_argmax", tmp_tile, _TMP_ROW_ARG_REDUCTION_REQUIREMENT)
         return _tile.row_argmax(input, tmp_tile)
     raise TypeError(f"pl.row_argmax: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1178,10 +1209,7 @@ def row_argmin(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("row_argmin", tmp_tile, "tmp_tile")
         return _tensor.row_argmin(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError(
-                "row_argmin on Tile requires tmp_tile with exactly the same shape and dtype as the input"
-            )
+        tmp_tile = _require_tmp_for_tile("row_argmin", tmp_tile, _TMP_ROW_ARG_REDUCTION_REQUIREMENT)
         return _tile.row_argmin(input, tmp_tile)
     raise TypeError(f"pl.row_argmin: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1200,8 +1228,7 @@ def col_argmax(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("col_argmax", tmp_tile, "tmp_tile")
         return _tensor.col_argmax(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError("col_argmax on Tile requires tmp_tile argument")
+        tmp_tile = _require_tmp_for_tile("col_argmax", tmp_tile, _TMP_COL_ARG_REDUCTION_REQUIREMENT)
         return _tile.col_argmax(input, tmp_tile)
     raise TypeError(f"pl.col_argmax: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1220,8 +1247,7 @@ def col_argmin(input, tmp_tile: Tile | None = None):
         _reject_tmp_for_tensor("col_argmin", tmp_tile, "tmp_tile")
         return _tensor.col_argmin(input)
     if isinstance(input, Tile):
-        if tmp_tile is None:
-            raise ValueError("col_argmin on Tile requires tmp_tile argument")
+        tmp_tile = _require_tmp_for_tile("col_argmin", tmp_tile, _TMP_COL_ARG_REDUCTION_REQUIREMENT)
         return _tile.col_argmin(input, tmp_tile)
     raise TypeError(f"pl.col_argmin: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1261,8 +1287,10 @@ def cast(
     if isinstance(input, Tile):
         return _tile.cast(input, target_type, mode)
     if _is_scalar_like(input):
+        # ``resolve_cast_mode`` runs first, so an invalid mode is still a ValueError;
+        # only a *valid* mode this path cannot honour reaches the TypeError below.
         if resolve_cast_mode(mode) != 2:
-            raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
+            raise TypeError(f"pl.cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
         return Scalar(expr=_ir_core.cast(_to_scalar_expr(input), dtype))
     raise TypeError(f"pl.cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")
@@ -1370,11 +1398,7 @@ def xor(lhs, rhs, tmp=None):
         _reject_tmp_for_tensor("xor", tmp)
         return _tensor.xor(lhs, rhs)
     if isinstance(lhs, Tile):
-        if tmp is None:
-            raise TypeError(
-                "pl.xor: Tile inputs require an explicit scratch tile — "
-                "call pl.xor(lhs, rhs, tmp) or pl.tile.xor(lhs, rhs, tmp)"
-            )
+        tmp = _require_tmp_for_tile("xor", tmp, _tmp_scratch_requirement("xor"))
         if isinstance(rhs, Tile):
             return _tile.xor(lhs, rhs, tmp)
         if _is_scalar_like(rhs):
@@ -1395,11 +1419,7 @@ def xors(lhs, rhs, tmp=None):
         _reject_tmp_for_tensor("xors", tmp)
         return _tensor.xors(lhs, rhs)
     if isinstance(lhs, Tile):
-        if tmp is None:
-            raise TypeError(
-                "pl.xors: Tile inputs require an explicit scratch tile — "
-                "call pl.xors(lhs, rhs, tmp) or pl.tile.xors(lhs, rhs, tmp)"
-            )
+        tmp = _require_tmp_for_tile("xors", tmp, _tmp_scratch_requirement("xors"))
         return _tile.xors(lhs, rhs, tmp)
     _raise_type_dispatch_error("xors", lhs, rhs)
 

@@ -438,6 +438,41 @@ pto.tmul ins(%tile_a_buf : !pto.tile_buf<...>,
 - Input operands resolved through variable name lookup
 - All `ins`/`outs` clauses include type annotations
 
+### Source Locations (`loc`)
+
+Every emitted **operation** carries a trailing MLIR location built from the IR
+`Span`, e.g. `pto.tadd ins(...) outs(...) loc("kernels/attn.py":41:9)`. ptoas
+propagates `loc()` verbatim into its diagnostics, so a verifier rejection names
+the user's `.py` line instead of a line in the generated `.pto` — a file that,
+under `@pl.jit`, the user never sees (spans there are already remapped from the
+synthesized `<jit:name>` text back to the real source).
+
+**Which span is used** — bound at two levels, the second refining the first:
+
+| Level | Bound in | Source |
+| ----- | -------- | ------ |
+| Statement (primary) | `PTOCodegen::VisitStmt` | `Stmt::span_` |
+| Call (refinement) | `PTOCodegen::VisitExpr_(CallPtr)` | `Call::span_`, only when nested inside the statement span |
+
+The containment test is what makes this correct. `Call::span_` is
+column-accurate when preserved, but passes that synthesize tile ops
+(`ConvertTensorToTileOps`) rebuild the `Call` carrying the enclosing
+*function*'s span while leaving the `AssignStmt`'s own span intact. Such a span
+begins before the statement, fails containment, and is discarded in favour of
+the statement span — otherwise most operations would report the `def` line.
+
+**No location is emitted for**: region braces, separators and block labels
+(`loc(...)` is legal only at the end of a complete operation, so these use
+`EmitStructural()` rather than `Emit()`); `arith.constant` in the constants
+section (deduplicated across uses, so no single span fits); and nodes whose span
+is unknown or has no filename.
+
+**Disabling** — `Generate(program, emit_tile_addr, emit_source_loc)`,
+`compile(..., emit_source_loc=...)`, or `PYPTO_EMIT_PTO_LOC=0`. The output is
+then byte-identical to the location-free form; this is the escape hatch for a
+ptoas build whose parser rejects a trailing location, since ptoas ships
+independently of PyPTO.
+
 ## Complete Example
 
 ### Input: PyPTO Program

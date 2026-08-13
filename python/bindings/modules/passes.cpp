@@ -117,7 +117,11 @@ void BindPass(nb::module_& m) {
       .value("IterArgCarryClassified", IRProperty::IterArgCarryClassified,
              "Every ForStmt with iter_args in an Orchestration function carries an "
              "attrs['iter_arg_rebind_<i>'] classification per slot (plus attrs['iter_arg_array_size_<i>'] "
-             "for TaskId array carries), so orchestration codegen reads the carry lowering");
+             "for TaskId array carries), so orchestration codegen reads the carry lowering")
+      .value("AccToGmStoreValid", IRProperty::AccToGmStoreValid,
+             "Every tile.store draining an Acc-resident tile targets a GM tensor whose dtype the "
+             "backend fix-pipe can narrow into (INT32/FP32/FP16[/BF16]); INT8/INT16 must route "
+             "through a Vec tile instead");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -474,7 +478,7 @@ void BindPass(nb::module_& m) {
              "Prefer same byte-width→float then adjust width (e.g. A5 INT32→FP16\n"
              "becomes INT32→FP32→FP16). Already-native casts are left untouched.");
   passes.def("auto_tile_matmul_l0", &pass::AutoTileMatmulL0,
-             "Create a pass that auto-tiles static 2D tile.matmul / tile.matmul_acc for L0\n\n"
+             "Create a pass that auto-tiles static 2D tile.matmul family calls for L0\n\n"
              "The active backend's roofline chooser selects (m,n,k,stationarity,dbC). K-split\n"
              "reductions use a 2-stage pipelined loop and peel a supported non-divisor aligned\n"
              "tail. Plain tile.matmul may also use an M/N grid with direct-GM placement or an\n"
@@ -483,8 +487,10 @@ void BindPass(nb::module_& m) {
              "B-stationary schedules. dbC=2 is enabled under PTOAS and available as a PyPTO\n"
              "planner opt-in. Under PyPTO, a canonical already-L0 stationary-panel pipeline\n"
              "may automatically use two L0C slots when its post-lowering Acc footprint fits.\n"
-             "Other already-L0-sized and unsupported regimes are left untouched;\n"
-             "useful deferred cases emit PerfHint diagnostics. tile.matmul_bias is deferred.");
+             "Mat-resident tile.matmul_bias is supported with accumulator-typed bias, bias-once K\n"
+             "reduction, and bias-capacity-bounded N-window reloads followed by Mat-to-Bias moves. Other\n"
+             "already-L0-sized and unsupported regimes are left untouched;\n"
+             "useful deferred cases emit PerfHint diagnostics.");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
              "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"
@@ -559,6 +565,12 @@ void BindPass(nb::module_& m) {
              "Lower host-level pld.tensor.allreduce calls to builtin tensor collective dispatches.");
   passes.def("materialize_dist_tensor_ctx", &pass::MaterializeDistTensorCtx,
              "Materialize CommCtx parameters and arguments for DistributedTensor function parameters.");
+  passes.def("materialize_valid_shape_symbols", &pass::MaterializeValidShapeSymbols,
+             "Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.\n\n"
+             "A pl.dynamic() symbol named only in a parameter's pl.TensorView(valid_shape=...) is\n"
+             "neither a physical tensor dimension nor a scalar parameter, so a precompiled kernel\n"
+             "never receives it. Adds the symbol as a leading Scalar[INDEX] parameter and passes\n"
+             "the caller's actual extent at every call/submit site.");
   passes.def("stamp_tfree_split", &pass::StampTfreeSplit,
              "Copy each cross-core tpop's split/pipe-id onto its matching tfree op so codegen\n"
              "reads them from the op directly. Covers mixed-kernel and explicit AIC/AIV tfrees.");
@@ -744,8 +756,12 @@ void BindPass(nb::module_& m) {
       .value("AStationary", utils::Stationarity::kAStationary)
       .value("BStationary", utils::Stationarity::kBStationary);
 
-  nb::class_<utils::L0TileConfig>(l0_tile, "L0TileConfig",
-                                  "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs")
+  nb::class_<utils::L0TileConfig>(
+      l0_tile, "L0TileConfig",
+      "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs. max_n caps the logical chosen "
+      "tile-N extent (not the problem N); max_n_pipelined may tighten that bound when N moves through "
+      "a full-K output pipeline, and max_n_nested_pipelined handles two nested pipeline levels. Zero "
+      "means unbounded.")
       .def(nb::init<>())
       .def_rw("M", &utils::L0TileConfig::M)
       .def_rw("N", &utils::L0TileConfig::N)
@@ -765,6 +781,9 @@ void BindPass(nb::module_& m) {
       .def_rw("l0c_align_m", &utils::L0TileConfig::l0c_align_m)
       .def_rw("box_align_m", &utils::L0TileConfig::box_align_m)
       .def_rw("box_align_n", &utils::L0TileConfig::box_align_n)
+      .def_rw("max_n", &utils::L0TileConfig::max_n)
+      .def_rw("max_n_pipelined", &utils::L0TileConfig::max_n_pipelined)
+      .def_rw("max_n_nested_pipelined", &utils::L0TileConfig::max_n_nested_pipelined)
       .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
       .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)

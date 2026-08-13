@@ -175,17 +175,13 @@ and IfStmt/WhileStmt constructors (stmt.h:288,544) do no validation.
 
 # ✅ Detailed
 "Test strategy:
-1. Unit test (`tests/ut/ir/statements/test_for_stmt.py`):
-   - Add `test_is_chunked_true` to verify `is_chunked()` returns True
-     when `chunk_size` is provided.
-   - Add `test_is_chunked_false` to verify it returns False when
-     `chunk_size` is None.
-2. Printer test (`tests/ut/ir/printing/`):
-   - Update ForStmt printing test to verify the new step expression
-     appears in printed output.
-3. Round-trip test (`tests/ut/ir/parser/`):
-   - Add a ForStmt with explicit step to ensure it survives
-     parse → print → reparse correctly.
+1. Unit test (`tests/ut/ir/statements/test_for_stmt.py`): add
+   `test_is_chunked_true` / `test_is_chunked_false`, covering `chunk_size`
+   provided vs None.
+2. Printer test (`tests/ut/ir/printing/`): update the ForStmt printing test to
+   verify the new step expression appears in printed output.
+3. Round-trip test (`tests/ut/ir/parser/`): add a ForStmt with explicit step to
+   ensure it survives parse → print → reparse correctly.
 "
 ````
 

@@ -25,6 +25,12 @@ from pypto.language.typing import Scalar
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
+# A `pl.add` / `pl.cast` wrapper lowers to the tensor or the tile form depending on the operand
+# kind, so these tests accept either. Built through the getter so a renamed operator fails at
+# import rather than silently emptying the collected-call list.
+_ADD_OPS = frozenset({ir.get_op("tensor.add").name, ir.get_op("tile.add").name})
+_CAST_OPS = frozenset({ir.get_op("tensor.cast").name, ir.get_op("tile.cast").name})
+
 
 class TestWrapperErrorsThroughParser:
     """Wrapper errors surface as InvalidOperationError with op name + span."""
@@ -140,7 +146,7 @@ class TestSpanPropagatesIntoWrapperConstructedNodes:
                 super().visit_call(op)
 
         _Collect().visit_program(Prog)
-        add_calls = [c for c in found_calls if c.op.name in ("tensor.add", "tile.add")]
+        add_calls = [c for c in found_calls if c.op.name in _ADD_OPS]
         assert add_calls, "expected at least one tensor.add or tile.add Call in IR"
 
         for call in add_calls:
@@ -204,9 +210,9 @@ class TestFullPythonCallingConvention:
 
         class _Collect(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name == "tile.load":
+                if op.op.name == ir.get_op("tile.load").name:
                     load_calls.append(op)
-                elif op.op.name == "tile.add":
+                elif op.op.name == ir.get_op("tile.add").name:
                     add_calls.append(op)
                 super().visit_call(op)
 
@@ -235,7 +241,7 @@ class TestFullPythonCallingConvention:
 
         class _Collect(ir.IRVisitor):
             def visit_call(self, op):
-                if op.op.name in ("tensor.cast", "tile.cast"):
+                if op.op.name in _CAST_OPS:
                     cast_calls.append(op)
                 super().visit_call(op)
 

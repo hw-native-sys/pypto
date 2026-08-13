@@ -244,6 +244,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index,
+                                    std::map<std::string, int64_t> packed_fp4_axis,
                                     std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
       : program_(prog),
         func_name_to_id_(func_ids),
@@ -253,6 +254,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         emit_name_map_(std::move(param_to_emit_name)),
         param_name_set_(std::move(param_name_set)),
         param_name_to_orch_index_(std::move(param_name_to_orch_index)),
+        packed_fp4_axis_(std::move(packed_fp4_axis)),
         dist_param_to_ctx_param_(std::move(dist_param_to_ctx_param)) {
     declared_var_names_ = param_name_set_;
     CollectCompilerDepTaskIds(program_);
@@ -459,12 +461,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return CodegenBase::TryGetVarName(expr);
   }
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {
+    std::string physical_dim;
     auto it = param_name_to_orch_index_.find(name);
     if (it != param_name_to_orch_index_.end()) {
-      return "(int64_t)orch_args.tensor(" + std::to_string(it->second) + ").ref().shapes[" +
-             std::to_string(axis) + "]";
+      physical_dim = "(int64_t)orch_args.tensor(" + std::to_string(it->second) + ").ref().shapes[" +
+                     std::to_string(axis) + "]";
+    } else {
+      physical_dim = "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
     }
-    return "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
+    auto packed = packed_fp4_axis_.find(name);
+    if (packed != packed_fp4_axis_.end() && packed->second == axis) {
+      return "([&]() -> int64_t { const int64_t fp4_carrier_dim = " + physical_dim +
+             "; always_assert(fp4_carrier_dim > 0); return fp4_carrier_dim * 2; }())";
+    }
+    return physical_dim;
   }
 
   [[nodiscard]] std::string GetTensorCreateSizeExpr(const std::string& result_var,
@@ -1156,6 +1166,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
     std::string var_name = ReserveVarEmitName(assign->var_.get());
+    if (auto tensor_type = AsTensorTypeLike(assign->var_->GetType())) {
+      if (tensor_type->dtype_ == DataType::FP4) {
+        packed_fp4_axis_[var_name] = static_cast<int64_t>(tensor_type->shape_.size() - 1);
+      }
+    }
 
     // Funnel Submit through the existing Call codepath via the synthetic
     // SubmitToCallView adapter (deps_ → attrs[manual_dep_edges]). The IR
@@ -1792,7 +1807,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(tensor_ty, param->span_)
         << "Submit synthesised output for callee '" << callee_func->name_ << "' param[" << param_idx
         << "] must have TensorType, got " << param->GetType()->TypeName();
-
     const size_t ndim = tensor_ty->shape_.size();
     std::string ci_var =
         "params_t" + std::to_string(task_counter_) + "_synth_out_" + std::to_string(param_idx);
@@ -1803,9 +1817,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (i > 0) shapes << ", ";
         std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
         if (As<ConstInt>(tensor_ty->shape_[i])) {
-          shapes << dim_str;
+          if (tensor_ty->dtype_ == DataType::FP4 && i + 1 == ndim) {
+            shapes << GetConstIntValue(tensor_ty->shape_[i]) / 2;
+          } else {
+            shapes << dim_str;
+          }
         } else {
-          shapes << "static_cast<uint32_t>(" << dim_str << ")";
+          if (tensor_ty->dtype_ != DataType::FP4 || i + 1 != ndim) {
+            dim_str = "static_cast<uint32_t>(" + dim_str + ")";
+          }
+          shapes << GetRuntimeTensorShapeDim(tensor_ty->dtype_, i, ndim, dim_str);
         }
       }
       shapes << "};";
@@ -3946,6 +3967,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
+  std::map<std::string, int64_t> packed_fp4_axis_;
   CodeEmitter emitter_;
   CodeEmitter* active_emitter_ = &emitter_;
   std::string current_result_var_;
@@ -4091,6 +4113,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   std::unordered_map<const Var*, std::string> emit_name_map;
   std::set<std::string> param_name_set;
   std::map<std::string, int> param_name_to_orch_index;
+  std::map<std::string, int64_t> packed_fp4_axis;
   int tensor_param_count = 0;
   struct ScalarParamInfo {
     std::string emit_name;
@@ -4111,8 +4134,11 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     std::string emit_name = GetSSABaseName(var->name_hint_);
     emit_name_map[var.get()] = emit_name;
     param_name_set.insert(emit_name);
-    if (AsTensorTypeLike(var->GetType())) {
+    if (auto tensor_type = AsTensorTypeLike(var->GetType())) {
       param_name_to_orch_index[emit_name] = tensor_param_count;
+      if (tensor_type->dtype_ == DataType::FP4) {
+        packed_fp4_axis[emit_name] = static_cast<int64_t>(tensor_type->shape_.size() - 1);
+      }
       tensor_param_count++;
       orchestration_signature.emplace_back(ParamDirectionToRuntimeName(func->param_directions_[param_idx]));
       if (As<DistributedTensorType>(var->GetType())) {
@@ -4150,7 +4176,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type,
                                         &func_name_to_signature, &next_func_id, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index),
-                                        std::move(dist_param_to_ctx_param));
+                                        std::move(packed_fp4_axis), std::move(dist_param_to_ctx_param));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));

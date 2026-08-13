@@ -321,5 +321,72 @@ def test_valid_then_only_leak_visible_after_if():
     assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
 
 
+# ---------------------------------------------------------------------------
+# Function attrs
+#
+# ``Function::attrs_`` is evaluated where the parameters bind, so a reference to
+# a parameter is a legal use and a reference to anything else has no definition
+# in this function. Covering both here is what makes a separate "function attrs
+# must be static" property unnecessary (RFC #2338).
+# ---------------------------------------------------------------------------
+
+
+def _func_with_attrs(attrs):
+    """Single-parameter function carrying ``attrs``, returning its parameter."""
+    span = ir.Span.unknown()
+    x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+    func = ir.Function(
+        "kernel",
+        [x],
+        [ir.ScalarType(DataType.INT64)],
+        ir.ReturnStmt([x], span),
+        span,
+        attrs=attrs(x),
+    )
+    return ir.Program([func], "prog", span)
+
+
+def test_function_attr_referencing_a_param_is_valid():
+    """A parameter is bound where function attrs are evaluated, so this is a real def."""
+    program = _func_with_attrs(lambda x: {"stationary": x})
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
+def test_function_attr_referencing_an_undefined_var_is_flagged():
+    """A caller-local in a function attr — the old Function-carried SPMD launch spec."""
+    span = ir.Span.unknown()
+    ghost = ir.Var("ghost", ir.ScalarType(DataType.INT32), span)
+    program = _func_with_attrs(lambda x: {"core_num": ghost})
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert len(errors) == 1
+    assert "ghost" in errors[0].message
+
+
+def test_function_attr_var_list_is_walked():
+    """vector<VarPtr> attrs are walked element-wise, like Call attrs."""
+    span = ir.Span.unknown()
+    ghost = ir.Var("ghost", ir.ScalarType(DataType.INT32), span)
+    program = _func_with_attrs(lambda x: {"dump_vars": [x, ghost]})
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert len(errors) == 1
+    assert "ghost" in errors[0].message
+
+
+def test_function_attr_expr_tree_is_walked():
+    """A whole Expr attr is recursed into, not just its root node."""
+    span = ir.Span.unknown()
+    ghost = ir.Var("ghost", ir.ScalarType(DataType.INT32), span)
+    program = _func_with_attrs(lambda x: {"core_num": ir.add(ghost, ir.ConstInt(1, DataType.INT32, span))})
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert len(errors) == 1
+    assert "ghost" in errors[0].message
+
+
+def test_static_function_attrs_are_ignored():
+    """Scalars and strings name nothing, so they produce no diagnostics."""
+    program = _func_with_attrs(lambda x: {"core_num": 8, "tag": "abc", "flag": True})
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

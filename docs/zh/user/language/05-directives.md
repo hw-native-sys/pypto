@@ -22,7 +22,7 @@ def probe(x: pl.Tensor[[64, 128], pl.FP32],
           out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
     pl.static_print("x =", x)                      # prints at parse time
     pl.static_assert(x.shape[1] == 128, "expected 128 columns")
-    out = pl.mul(x, 2.0)
+    out = pl.assemble(out, pl.mul(x, 2.0), [0, 0])
     return out
 ```
 

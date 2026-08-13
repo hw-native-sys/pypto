@@ -284,6 +284,16 @@ class LoggerManager {
   static void ResetLevel(LogLevel l) { GetManager().level = l; }
 
   /**
+   * @brief Get the process-global log level threshold
+   * @return The global threshold, ignoring any thread-local override
+   *
+   * The counterpart of ResetLevel: what this returns is exactly what a later
+   * ResetLevel with the same value restores. Use GetLevel() to ask what the
+   * calling thread will actually log.
+   */
+  static LogLevel GetGlobalLevel() { return GetManager().level; }
+
+  /**
    * @brief Get the effective log level for the calling thread
    * @return Thread override when set, otherwise the process-global level
    */

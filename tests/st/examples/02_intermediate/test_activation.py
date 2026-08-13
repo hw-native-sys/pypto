@@ -19,7 +19,7 @@ Four activation patterns are demonstrated:
 
 import pytest
 import torch
-from examples.kernels.activation import geglu, gelu, silu, swiglu
+from examples.beginner.activation import geglu, gelu, silu, swiglu
 
 
 class TestSiluActivation:

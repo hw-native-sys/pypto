@@ -16,7 +16,7 @@ One layer normalization pattern is demonstrated:
 
 import pytest
 import torch
-from examples.kernels.normalization import layer_norm
+from examples.intermediate.normalization import layer_norm
 
 
 class TestLayerNormCore:

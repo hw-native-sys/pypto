@@ -283,6 +283,20 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+**Enum op arguments:** Op wrappers have parameter slots that take a Python enum
+rather than an IR expression — `DataType`, `MemorySpace`, `TensorLayout`,
+`TileLayout`, `PadValue`, `ArgDirection`. These resolve identically whether
+written positionally or by keyword, both as literal attributes and as closure
+names, so the two lines below build the same call:
+
+```python
+p = pl.fillpad(t, pl.PadValue.min)              # positional
+p = pl.fillpad(t, pad_value=pl.PadValue.min)    # keyword
+```
+
+The same holds for the numeric sugars an op accepts in such a slot: `pl.fillpad`
+takes `0`, `0.0`, `math.inf`, and `-math.inf` in either position.
+
 ### Subscript Indexing
 
 `Tensor` and `Tile` subscripts use numpy/torch-style semantics:
@@ -378,6 +392,32 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 # a5 -> slot_size * slot_num.
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
+
+#### Cross-path arguments on unified ops
+
+A unified `pl.<op>` accepts the union of both levels' arguments, so an argument
+only the *other* dispatch path can honour is **rejected, never dropped** — a
+silently discarded `b_trans` would compile wrong math. The same holds in
+reverse: the scratch operand a Tensor input must omit (`pl.row_max(tensor)`) is
+the one a Tile input must supply (`pl.row_max(tile, tmp_tile)`), because tile
+buffer lifetimes are user-managed.
+
+**Both directions raise `TypeError`** — these are wrong-arguments-for-this-overload
+errors that Python itself raises for an unexpected keyword or a missing
+required argument. Deeper validation reached through the wrapper (shape, dtype,
+bounds — anything a C++ `CHECK` rejects) still raises `ValueError`, so code
+guarding a whole call should catch both:
+
+```python
+pl.matmul(tile_a, tile_b, b_trans=True)   # TypeError — tile transpose is a view, not a flag
+pl.rsqrt(tile, high_precision=True)       # TypeError — tile precision is selected by passing tmp
+pl.div(tile, 2.0, high_precision=True)    # TypeError — high_precision needs a Tile rhs
+pl.row_max(tile)                          # TypeError — Tile inputs require tmp_tile
+pl.slice(tile, [64, 64], [64, 0])         # ValueError — window runs off the source tile
+```
+
+Inside a `@pl.function` body this distinction is invisible: the parser catches
+both and re-raises `InvalidOperationError` with the source span.
 
 ## Statements
 

@@ -17,7 +17,7 @@ with a clear hint so the user is never silently given a different value.
 
 import math
 
-from pypto.pypto_core.ir import PadValue
+from pypto.pypto_core.ir import ConstFloat, ConstInt, PadValue
 
 _HINT = (
     "Use pl.PadValue.zero / pl.PadValue.max / pl.PadValue.min, "
@@ -33,11 +33,20 @@ def normalize_pad_value(pad_value: object) -> PadValue:
       * ``0`` / ``0.0`` — mapped to ``PadValue.zero``.
       * ``math.inf`` — mapped to ``PadValue.max``.
       * ``-math.inf`` — mapped to ``PadValue.min``.
+      * A ``ConstInt`` / ``ConstFloat`` wrapping one of those literals.
 
     ``PadValue.null`` is rejected because "no padding mode" is meaningless
     for an op that exists to write a fill value. Anything else (other
     numbers, ``NaN``, ``bool``, ``str``, ``None``, ...) also raises.
     """
+    # A literal written positionally inside a ``@pl.function`` body reaches the
+    # IR builders as a ``ConstInt`` / ``ConstFloat``: the DSL parser materializes
+    # positional constants into IR so they carry its chosen dtype. Unwrap here so
+    # ``fillpad(t, 0)`` normalizes like ``fillpad(t, pad_value=0)``, and so a
+    # rejected value is reported as the number the user wrote rather than as
+    # "ConstInt".
+    if isinstance(pad_value, (ConstInt, ConstFloat)):
+        pad_value = pad_value.value
     if isinstance(pad_value, PadValue):
         if pad_value == PadValue.null:
             raise ValueError(

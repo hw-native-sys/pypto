@@ -90,6 +90,11 @@ enum class IRProperty : uint64_t {
                                     ///< ``iter_arg_array_size_<i>`` for TaskId array carries), so
                                     ///< orchestration codegen reads the carry lowering instead of
                                     ///< re-deriving it
+  AccToGmStoreValid,                ///< Every tile.store whose source tile is Acc-resident targets a GM
+                                    ///< tensor whose dtype the backend's fix-pipe can narrow into
+                                    ///< (BackendHandler::SupportsAccToGmDtype). Verifiable only once
+                                    ///< InferTileMemorySpace has resolved memory spaces -- the same DSL
+                                    ///< program is legal when its result routes through Vec instead
   kCount                            ///< Sentinel (must be last)
 };
 

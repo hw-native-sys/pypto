@@ -18,6 +18,8 @@ from pypto import ir
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.language.parser.diagnostics.exceptions import UnsupportedFeatureError
 
+_OP_TILE_SLICE = ir.get_op("tile.slice").name
+
 
 class TestTensorSubscript:
     """Tests for tensor subscript syntax: A[i, j], A[0:16, :]."""
@@ -220,7 +222,7 @@ class TestTileSubscript:
         slice_stmt = slice_tile_dynamic.body.stmts[1]
         assert isinstance(slice_stmt, ir.AssignStmt)
         assert isinstance(slice_stmt.value, ir.Call)
-        assert slice_stmt.value.op.name == "tile.slice"
+        assert slice_stmt.value.op.name == _OP_TILE_SLICE
         assert len(slice_stmt.value.args) == 4
 
         shape_tuple = slice_stmt.value.args[1]
@@ -249,7 +251,7 @@ class TestTileSubscript:
         slice_stmt = slice_tile_full.body.stmts[1]
         assert isinstance(slice_stmt, ir.AssignStmt)
         assert isinstance(slice_stmt.value, ir.Call)
-        assert slice_stmt.value.op.name == "tile.slice"
+        assert slice_stmt.value.op.name == _OP_TILE_SLICE
         assert len(slice_stmt.value.args) == 4
 
         valid_shape_tuple = slice_stmt.value.args[3]
@@ -275,7 +277,7 @@ class TestTileSubscript:
         slice_stmt = slice_tile_capped.body.stmts[1]
         assert isinstance(slice_stmt, ir.AssignStmt)
         assert isinstance(slice_stmt.value, ir.Call)
-        assert slice_stmt.value.op.name == "tile.slice"
+        assert slice_stmt.value.op.name == _OP_TILE_SLICE
         assert len(slice_stmt.value.args) == 4
 
         shape_tuple = slice_stmt.value.args[1]
@@ -303,7 +305,7 @@ class TestTileSubscript:
         slice_stmt = slice_tile_clamped.body.stmts[1]
         assert isinstance(slice_stmt, ir.AssignStmt)
         assert isinstance(slice_stmt.value, ir.Call)
-        assert slice_stmt.value.op.name == "tile.slice"
+        assert slice_stmt.value.op.name == _OP_TILE_SLICE
         assert len(slice_stmt.value.args) == 3
 
         shape_tuple = slice_stmt.value.args[1]
@@ -484,7 +486,7 @@ class TestTensorSubscriptWrite:
         assemble_stmt = write_const.body.stmts[0]
         assert isinstance(assemble_stmt, ir.AssignStmt)
         assert isinstance(assemble_stmt.value, ir.Call)
-        assert assemble_stmt.value.op.name == "tensor.assemble"
+        assert assemble_stmt.value.op.name == ir.get_op("tensor.assemble").name
 
         offset_tuple = assemble_stmt.value.args[2]
         assert isinstance(offset_tuple, ir.MakeTuple)
@@ -789,7 +791,7 @@ class TestTileSubscriptWrite:
         assemble_stmt = write_tile.body.stmts[1]
         assert isinstance(assemble_stmt, ir.AssignStmt)
         assert isinstance(assemble_stmt.value, ir.Call)
-        assert assemble_stmt.value.op.name == "tile.assemble"
+        assert assemble_stmt.value.op.name == ir.get_op("tile.assemble").name
 
         offset_tuple = assemble_stmt.value.args[2]
         assert isinstance(offset_tuple, ir.MakeTuple)

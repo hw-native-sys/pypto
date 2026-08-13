@@ -27,6 +27,7 @@ from pypto.jit.decorator import (
     _discover_deps,
     _extract_call_args_for_dep,
     _extract_local_tensor_metas,
+    _extract_tensor_meta,
     _resolve_dep_call_metadata,
     _rewrite_jit_error,
     _run_config_compile_kwargs,
@@ -59,6 +60,25 @@ class TestJitDecoration:
             return a
 
         assert my_kernel.__name__ == "my_kernel"
+
+    def test_torch_fp4_x2_shape_becomes_logical_ir_shape(self):
+        torch = pytest.importorskip("torch")
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is None:
+            pytest.skip("torch.float4_e2m1fn_x2 required")
+        packed = torch.empty((128, 32), dtype=fp4_dtype)
+        meta = _extract_tensor_meta(packed)
+        assert meta.dtype == DataType.FP4
+        assert meta.static_shape() == (128, 64)
+
+    def test_torch_fp4_x2_rejects_empty_packed_dimension(self):
+        torch = pytest.importorskip("torch")
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is None:
+            pytest.skip("torch.float4_e2m1fn_x2 required")
+        packed = torch.empty((128, 0), dtype=fp4_dtype)
+        with pytest.raises(TypeError, match="positive runtime x2 carrier last dimension"):
+            _extract_tensor_meta(packed)
 
     def test_jit_incore_creates_jitfunction(self):
         @jit.incore

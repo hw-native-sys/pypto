@@ -360,7 +360,7 @@ def test_remote_load_short_form():
 
     func = _get_func(P, "kernel")
     call = _find_call(func, "pld.tile.remote_load")
-    assert call.op.name == "pld.tile.remote_load"
+    assert call.op.name == ir.get_op("pld.tile.remote_load").name
     assert isinstance(call.type, ir.TileType)
 
 

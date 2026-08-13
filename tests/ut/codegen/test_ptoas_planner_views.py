@@ -24,6 +24,7 @@ import re
 
 import pypto.language as pl
 import pytest
+from _pto_loc_common import strip_loc
 from pypto import ir as _ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -59,9 +60,19 @@ def _emit_incore_pto(program, planner: passes.MemoryPlanner) -> str:
 
 
 def _sole_line(mlir: str, needle: str) -> str:
+    """The unique line containing `needle`, without its trailing MLIR location.
+
+    `_result_type` / `_operand_type` slice from the end of the line, so the
+    `loc("file":line:col)` suffix codegen appends must come off here.
+    """
     lines = [ln for ln in mlir.splitlines() if needle in ln]
     assert len(lines) == 1, f"expected exactly one {needle!r} line, got {lines}:\n{mlir}"
-    return lines[0]
+    return strip_loc(lines[0])
+
+
+def _tile_buf_types(op_line: str) -> list[str]:
+    """Return every tile_buf type annotation carried by one PTO operation."""
+    return re.findall(r"!pto\.tile_buf<[^>]+>", op_line)
 
 
 # ── reserve_buffer: base resolution deferred to ptoas ────────────────────────
@@ -128,7 +139,49 @@ def test_reserve_buffer_bakes_resolved_base_under_pypto_planner(planner):
         assert "base = 0" in line, line
 
 
-# ── reshape of a subview: def/use tile_buf types must agree ──────────────────
+# Shared in-place handle: the definition type is immutable
+
+
+@pl.program
+class InplaceFillPadProgram:
+    """Fill a dynamically valid tile in place, then consume its shared handle."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 16], pl.FP32],
+        valid_rows: pl.Scalar[pl.INDEX],
+        valid_cols: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        src: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16], valid_shape=[valid_rows, valid_cols])
+        padded: pl.Tile[[16, 16], pl.FP32] = pl.tile.fillpad_inplace(src, pad_value=0)
+        return pl.store(padded, [0, 0], out)
+
+
+def test_inplace_alias_keeps_shared_handle_definition_type():
+    """An alias result must not re-type the already-defined shared tile_buf SSA.
+
+    PTOAS mode collapses ``src`` and ``padded`` onto one handle because
+    ``tile.fillpad_inplace`` reuses its input MemRef. The result TileType carries
+    new pad metadata, but MLIR SSA types are fixed by the original alloc_tile
+    definition, so every later use of that handle must retain the definition's
+    annotation.
+    """
+    mlir = _emit_pto(InplaceFillPadProgram, passes.MemoryPlanner.PTOAS)
+    alloc = _sole_line(mlir, "= pto.alloc_tile")
+    fillpad = _sole_line(mlir, "pto.tfillpad")
+    store = _sole_line(mlir, "pto.tstore")
+
+    alloc_types = _tile_buf_types(alloc)
+    fillpad_types = _tile_buf_types(fillpad)
+    store_types = _tile_buf_types(store)
+    assert len(alloc_types) == 1 and len(fillpad_types) == 2 and len(store_types) == 1, mlir
+    assert fillpad_types == [alloc_types[0], alloc_types[0]], f"{alloc}\n{fillpad}"
+    assert store_types == alloc_types, f"{alloc}\n{store}"
+
+
+# Reshape of a subview: def/use tile_buf types must agree
 
 PAD, VALID, D = 16, 5, 128
 

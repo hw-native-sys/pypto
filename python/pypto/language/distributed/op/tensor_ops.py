@@ -304,6 +304,78 @@ def window(
     return DistributedTensor(expr=call)
 
 
+def remote_store(
+    src: Tensor | Expr,
+    target: DistributedTensor,
+    peer: IntLike,
+    offsets: Sequence[IntLike],
+    *,
+    atomic: AtomicType = AtomicType.None_,
+) -> Call:
+    """Push a tensor-level value into a region of ``peer`` rank's slice of ``target``.
+
+    Tensor-level twin of :func:`pld.tile.remote_store` — same four arguments,
+    same single ``pto.tstore``, one IR level up. This is the entry point a
+    tensor-level ``@pl.jit`` kernel uses to push a **computed** value cross-rank:
+    ``ConvertTensorToTileOps`` lowers it 1:1 to ``pld.tile.remote_store``, so the
+    value goes straight from on-core memory to the peer's window with no global-
+    memory round-trip in between.
+
+    .. code-block:: python
+
+       @pl.jit
+       def push(x: pl.Tensor[[16, 256], pl.FP32], win: pld.DistributedTensor[[16, 256], pl.FP32], peer):
+           with pl.at(level=pl.Level.CORE_GROUP):
+               scaled = pl.mul(x[0:16, 0:256], 2.0)
+               pld.tensor.remote_store(scaled, win, peer, [0, 0])
+               # ...then pld.system.notify() to release it to the peer.
+
+    A ``src`` that is still resident in global memory at lowering time (e.g. a
+    kernel parameter pushed unchanged) is auto-bridged with a ``tile.load``, so
+    the op is total on its argument surface. Prefer :func:`pld.tensor.put` for a
+    **bulk** global-memory transfer: TPUT streams through a staging tile and owns
+    the ``chunk_rows`` / ``chunk_cols`` / ``pipeline`` knobs, so it is not bounded
+    by what fits on-core.
+
+    Args:
+        src: Local 2-D :class:`pl.Tensor` value (dtype must match
+            ``target.dtype``). A :class:`pld.DistributedTensor` is refused — a
+            window-to-window transfer is :func:`put`'s job.
+        target: Window-bound :class:`pld.DistributedTensor` destination
+            (rank >= 2). The C++ verifier refuses a plain :class:`pl.Tensor`.
+        peer: Peer rank index.
+        offsets: Offsets into the remote slice, one per ``target`` dimension.
+            The pushed region must fit inside ``target`` at these offsets.
+        atomic: :class:`pld.AtomicType` selecting plain-store
+            (``AtomicType.None_``, the default) vs atomic-add combine semantics
+            on the peer's region (keyword-only).
+
+    Returns:
+        A side-effect-only :class:`ir.Call` (no SSA result for downstream use).
+    """
+    src_expr = _unwrap(src)
+    target_expr = _unwrap(target)
+    if not isinstance(target_expr, Expr) or not isinstance(target_expr.type, _ir.DistributedTensorType):
+        got = (
+            _ir.python_print_type(target_expr.type)
+            if isinstance(target_expr, Expr)
+            else type(target_expr).__name__
+        )
+        raise TypeError(
+            f"pld.tensor.remote_store expects a DistributedTensor target (window-bound); got {got}"
+        )
+    if not isinstance(src_expr, Expr) or not isinstance(src_expr.type, _ir.TensorType):
+        got = _ir.python_print_type(src_expr.type) if isinstance(src_expr, Expr) else type(src_expr).__name__
+        raise TypeError(
+            f"pld.tensor.remote_store expects a Tensor src (a tensor-level value); got {got}. "
+            "In a tile-level kernel use pld.tile.remote_store; to push one window buffer into "
+            "another use pld.tensor.put."
+        )
+    return _ir_tensor.remote_store(
+        src_expr, target_expr, _unwrap(peer), _normalize_intlike(offsets), atomic=int(atomic)
+    )
+
+
 def put(
     dst: DistributedTensor,
     peer: IntLike,
@@ -503,7 +575,11 @@ def get(
 
 @overload
 def allreduce(
-    target: DistributedTensor, *, op: ReduceOp = ReduceOp.Sum, mode: str = "mesh"
+    target: DistributedTensor,
+    *,
+    op: ReduceOp = ReduceOp.Sum,
+    mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor: ...
 
 
@@ -514,6 +590,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor: ...
 
 
@@ -523,6 +600,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
+    core_num: int = 1,
 ) -> DistributedTensor:
     """In-place cross-rank allreduce of a window-bound DistributedTensor.
 
@@ -630,7 +708,8 @@ def allreduce(
         signal: Optional window-bound INT32 :class:`pld.DistributedTensor`.
             In InCore code this remains required. In host-orchestrator code
             outside ``for`` / ``while`` loops, omitting it lets the compiler
-            synthesize a private signal of shape ``[pld.world_size(), 1]``.
+            synthesize a private signal of shape
+            ``[pld.world_size(), core_num]``.
         op: :class:`pld.ReduceOp` selecting element-wise ``Sum``, ``Max``,
             ``Min``, or ``Prod`` (keyword-only). Defaults to
             :attr:`pld.ReduceOp.Sum`.
@@ -640,13 +719,27 @@ def allreduce(
             requires an explicit ``signal`` — host signal synthesis is
             mesh-only, so omitting the signal with ``mode="ring"`` is
             rejected.
+        core_num: Number of AIV blocks used by a HOST AllReduce builtin
+            (keyword-only). Must be a positive compile-time Python integer and
+            may not exceed the configured backend's AIV core count. Defaults to
+            1. Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
+            ``core_num=1``. InCore calls must keep this value at 1 and use an
+            enclosing :func:`pl.spmd` for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
         identical shape / dtype / window-buffer binding, post-reduce content.
     """
+    if not isinstance(core_num, int) or isinstance(core_num, bool):
+        raise TypeError(
+            "pld.tensor.allreduce core_num must be a positive compile-time int, "
+            f"got {type(core_num).__name__}"
+        )
+    if core_num <= 0:
+        raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
+
     if signal is _ALLREDUCE_SIGNAL_MISSING:
-        # Host signal synthesis only produces a mesh-shaped [world_size, 1]
+        # Host signal synthesis produces a mesh-shaped [world_size, core_num]
         # signal. Ring mode needs a [2*(NR-1), NR] signal, so it must be
         # passed explicitly — reject the synthesized-signal path for it.
         if mode != "mesh":
@@ -656,7 +749,7 @@ def allreduce(
                 'signal, e.g. pld.tensor.allreduce(target, signal, mode="ring").'
             )
         (target_expr,) = _unwrap_distributed_tensors("pld.tensor.allreduce", target=target)
-        call = _ir_tensor.allreduce(target_expr, op=op)
+        call = _ir_tensor.allreduce(target_expr, op=op, core_num=core_num)
         return DistributedTensor(expr=call)
     if signal is None:
         raise TypeError(
@@ -666,7 +759,7 @@ def allreduce(
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allreduce", target=target, signal=signal
     )
-    call = _ir_tensor.allreduce(target_expr, signal_expr, op, mode=mode)
+    call = _ir_tensor.allreduce(target_expr, signal_expr, op, mode=mode, core_num=core_num)
     return DistributedTensor(expr=call)
 
 
@@ -691,7 +784,8 @@ def barrier(
 
     Args:
         signal: Window-bound INT32 :class:`pld.DistributedTensor` whose
-            shape provides one cell per rank.
+            shape provides one cell per rank — rank-1 ``[world_size]`` or
+            rank-2 ``[world_size, 1]``.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``signal``.
@@ -730,9 +824,16 @@ def broadcast(
             data.  Root must stage its data before the call; non-root slots
             are ignored on input.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
-            cross-rank barrier.  Reusable across calls — see
+            cross-rank barrier — rank-1 ``[world_size]`` or rank-2
+            ``[world_size, 1]``.  Reusable across calls — see
             :func:`allreduce` for the shared barrier protocol.
         root: Root rank index (int, keyword-only).  Must be non-negative.
+            On the HOST path with an explicit static device subset, ``root``
+            must also be a valid rank of that subset (``root <``
+            participating device count) — checked once the subset size is
+            known during ``LowerHostTensorCollectives``.  Not checked at
+            compile time for the fully-dynamic "all device" domain, since no
+            device count is known there.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target``.
@@ -775,7 +876,8 @@ def allgather(
             After the call, ``target[src, :]`` holds the chunk from rank
             ``src``.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier
-            tensor. Reusable across calls — see :func:`allreduce` for the
+            tensor — rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``.
+            Reusable across calls — see :func:`allreduce` for the
             shared barrier protocol.
 
     Returns:
@@ -812,7 +914,8 @@ def reduce_scatter(
         target: Window-bound :class:`pld.DistributedTensor` of shape
             [NR, SIZE].  Each rank stages all NR chunks, one per row.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for
-            the cross-rank barrier. Reusable across calls (2 credits per
+            the cross-rank barrier — rank-1 ``[world_size]`` or rank-2
+            ``[world_size, 1]``.  Reusable across calls (2 credits per
             call — ready + post-reduce) — see :func:`allreduce` for the
             shared barrier protocol.
         op: :class:`pld.ReduceOp` (keyword-only).  ``Sum`` only in
@@ -859,9 +962,10 @@ def all_to_all(
         target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
             the result in-place.  After the call,
             ``target[src, :]`` holds the chunk received from rank ``src``.
-        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
-            Reusable across calls — see :func:`allreduce` for the shared
-            barrier protocol.
+        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier —
+            rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``.  Reusable
+            across calls — see :func:`allreduce` for the shared barrier
+            protocol.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).
@@ -963,6 +1067,7 @@ __all__ = [
     "broadcast",
     "get",
     "put",
+    "remote_store",
     "reduce_scatter",
     "window",
 ]

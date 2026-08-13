@@ -23,7 +23,7 @@ operand memory spaces:
 
 import pytest
 import torch
-from examples.kernels.assemble import (
+from examples.intermediate.assemble import (
     tile_assemble_acc_mat,
     tile_assemble_double_loop,
     tile_assemble_double_loop_broadcast,

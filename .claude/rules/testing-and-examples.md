@@ -128,11 +128,14 @@ def test_example_transform(self):
 
 ### Examples Directory
 
-The `examples/` directory contains **user-facing examples only:**
+The `examples/` directory contains **user-facing examples only**, in a two-axis layout —
+difficulty tiers for the teaching kernels, category folders for everything else:
 
-- `examples/hello_world.py` - Entry point, simplest program
-- `examples/kernels/` - Single-kernel op examples, numbered by difficulty (01_elementwise.py through 08_assemble.py)
-- `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 08_llama_mini.py)
+- `examples/beginner/` - Language basics, one concept per file (01_hello_world.py through 06_concat.py)
+- `examples/intermediate/` - Real-kernel patterns (01_fused_linear.py through 06_dyn_valid_shape.py)
+- `examples/advanced/` - Performance and low-level techniques (01_split_k.py, 02_auto_tile_matmul.py)
+- `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 09_paged_attention_spmd.py)
+- `examples/runtime/` - Host/runtime patterns (dispatch, distributed callbacks, KV cache)
 - `examples/utils/` - Parsing, cross-function calls, error handling
 
 ### When to Write Examples

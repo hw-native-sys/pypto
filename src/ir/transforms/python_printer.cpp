@@ -2504,42 +2504,49 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   // Build rename map for this function to handle SSA name shadowing.
   BuildVarRenameMap(func);
 
+  // A ``split`` of ``SplitMode::None`` is filtered because it is a non-canonical
+  // spelling of "no split" (``Function::GetSplitMode`` maps a stored 0 to
+  // ``nullopt``, exactly as an absent key does), and the parser drops it — so
+  // emitting it would make print -> parse lossy. No pass produces it; this only
+  // normalizes IR that bypassed them (a ``.pto`` blob written before
+  // OutlineIncoreScopes stopped stamping it, a programmatically built Function).
+  // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg.
+  // The pointer form of ``any_cast`` keeps a mistyped attr failing at the
+  // existing print site rather than in this predicate, which also runs for the
+  // ``has_attrs`` tests.
+  // Every function attr prints as a ``pl.func_attr({...})`` body prologue except
+  // the two the parser must read BEFORE it can walk the body — a body-position
+  // declaration would arrive too late to take effect. Those two print as their
+  // own ``@pl.function(...)`` keyword (``auto_scope=`` / ``external_source=``),
+  // which is also the user-facing spelling, so reparsing never goes through the
+  // deprecated ``attrs=`` keyword and the compiler never warns on its own
+  // output. Kept in sync with the parser's ``_DECORATOR_ONLY_FUNC_ATTRS``.
+  auto is_filtered_attr = [](const std::string& k, const std::any& v) {
+    if (k == "auto_scope" || k == "external_source") return true;
+    if (k != "split") return false;
+    const int* split_value = std::any_cast<int>(&v);
+    return split_value != nullptr && *split_value == static_cast<int>(SplitMode::None);
+  };
+  auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
+    if (key == "split") {
+      int split_value = AnyCast<int>(value, "func attr key: " + key);
+      auto split_mode = static_cast<SplitMode>(split_value);
+      stream_ << prefix_ << ".SplitMode." << SplitModeToPythonString(split_mode);
+    } else {
+      PrintAttrValue(value, func->span_);
+    }
+  };
+
   // Print decorator
   stream_ << GetIndent() << "@" << prefix_ << ".function";
   {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
-    // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
+    // Absent ⇒ default True ⇒ not printed.
     bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
-    // A ``split`` of ``SplitMode::None`` is filtered for a different reason: it is
-    // a non-canonical spelling of "no split" (``Function::GetSplitMode`` maps a
-    // stored 0 to ``nullopt``, exactly as an absent key does), and the parser drops
-    // it — so emitting it would make print -> parse lossy. No pass produces it; this
-    // only normalizes IR that bypassed them (a ``.pto`` blob written before
-    // OutlineIncoreScopes stopped stamping it, a programmatically built Function).
-    // The pointer form of ``any_cast`` keeps a mistyped attr failing at the
-    // existing print site rather than in this predicate, which also runs for the
-    // ``has_attrs`` test.
-    auto is_filtered_attr = [](const std::string& k, const std::any& v) {
-      if (k == "auto_scope") return true;
-      if (k != "split") return false;
-      const int* split_value = std::any_cast<int>(&v);
-      return split_value != nullptr && *split_value == static_cast<int>(SplitMode::None);
-    };
-    bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
-                                 [&](const auto& kv) { return !is_filtered_attr(kv.first, kv.second); });
-    auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
-      if (key == "split") {
-        int split_value = AnyCast<int>(value, "func attr key: " + key);
-        auto split_mode = static_cast<SplitMode>(split_value);
-        stream_ << prefix_ << ".SplitMode." << SplitModeToPythonString(split_mode);
-      } else {
-        PrintAttrValue(value, func->span_);
-      }
-    };
-    if (has_type || has_level || has_role || auto_scope_off || has_attrs) {
+    std::string external_source = func->GetAttr<std::string>("external_source", "");
+    if (has_type || has_level || has_role || auto_scope_off || !external_source.empty()) {
       stream_ << "(";
       bool first = true;
       if (has_type) {
@@ -2561,18 +2568,10 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "auto_scope=False";
         first = false;
       }
-      if (has_attrs) {
+      // Last keyword: nothing reads `first` after this, so it is not updated.
+      if (!external_source.empty()) {
         if (!first) stream_ << ", ";
-        stream_ << "attrs={";
-        bool first_attr = true;
-        for (const auto& [key, value] : func->attrs_) {
-          if (is_filtered_attr(key, value)) continue;
-          if (!first_attr) stream_ << ", ";
-          stream_ << std::quoted(key) << ": ";
-          print_func_attr_value(key, value);
-          first_attr = false;
-        }
-        stream_ << "}";
+        stream_ << "external_source=" << std::quoted(external_source);
       }
       stream_ << ")";
     }
@@ -2634,6 +2633,30 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
 
   // Print body - convert yield to return in function context
   IncreaseIndent();
+
+  // ``pl.func_attr({...})`` prologue: every attr that is not decorator-only.
+  // Emitted before the body statements so it reparses as a prologue. Skipped
+  // for bodyless functions (abstract SubWorker / external kernel), which must
+  // round-trip as a bare ``...`` — those carry only decorator-only attrs.
+  std::vector<const std::pair<std::string, std::any>*> prologue_attrs;
+  for (const auto& kv : func->attrs_) {
+    if (is_filtered_attr(kv.first, kv.second)) continue;
+    prologue_attrs.push_back(&kv);
+  }
+  // An abstract SubWorker prints its prologue too, before the bare ``...``.
+  // ``_is_abstract_subworker_body`` skips the directive exactly as it skips a
+  // docstring, so the body still reads as abstract on reparse and the attrs
+  // survive — they would otherwise have no printable position at all.
+  if (!prologue_attrs.empty()) {
+    stream_ << GetIndent() << prefix_ << ".func_attr({";
+    for (size_t i = 0; i < prologue_attrs.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << std::quoted(prologue_attrs[i]->first) << ": ";
+      print_func_attr_value(prologue_attrs[i]->first, prologue_attrs[i]->second);
+    }
+    stream_ << "})\n";
+  }
+
   if (func->requires_runtime_binding_) {
     // Abstract SubWorker: runtime-bound callback. Round-trips as `...`, which
     // the parser re-detects (see `_is_abstract_subworker_body`).
@@ -2871,10 +2894,57 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
   }
 
+  // A parameter whose name is ALSO read inside a parameter *type annotation*
+  // still needs its pl.dynamic() declaration: Python evaluates annotations in the
+  // enclosing scope, before any parameter exists, so without the declaration the
+  // printed signature raises NameError on re-parse. MaterializeValidShapeSymbols
+  // produces exactly this shape — the valid_shape symbol becomes a scalar
+  // parameter while the tensor parameter's annotation keeps naming it — and the
+  // parser re-unifies the two (see ast_parser's DynVar re-point on f.param).
+  // Collected separately from the pass above: that one dedups through seen_ptrs,
+  // which would swallow every repeat occurrence.
+  // Deliberately narrow (issue #854 keeps the other two cases undeclared):
+  //   * a body-local var read in a valid_shape stays undeclared — it is defined
+  //     in the body, so the annotation resolves against the local;
+  //   * a param read as a *physical* dim stays undeclared — orchestration codegen
+  //     defines those symbols from the runtime tensor's shapes[].
+  // Only a param read in a valid_shape has neither escape, which is exactly what
+  // MaterializeValidShapeSymbols produces.
+  std::unordered_set<const Var*> read_in_param_types;
+  {
+    std::unordered_set<const Var*> param_vars;
+    for (const auto& [gvar, func] : program->functions_) {
+      for (const auto& param : func->params_) param_vars.insert(param.get());
+    }
+    std::function<void(const ExprPtr&)> collect_reads = [&](const ExprPtr& expr) {
+      if (!expr) return;
+      if (auto var = As<Var>(expr)) {
+        if (param_vars.count(var.get()) > 0) read_in_param_types.insert(var.get());
+      } else if (auto bin = As<BinaryExpr>(expr)) {
+        collect_reads(bin->left_);
+        collect_reads(bin->right_);
+      } else if (auto unary = As<UnaryExpr>(expr)) {
+        collect_reads(unary->operand_);
+      }
+    };
+    for (const auto& [gvar, func] : program->functions_) {
+      for (const auto& param : func->params_) {
+        // AsTensorTypeLike, not As<TensorType>: DistributedTensorType has its own
+        // ObjectKind and carries valid_shape symbols the same way.
+        auto tensor_type = AsTensorTypeLike(param->GetType());
+        if (!tensor_type || !tensor_type->tensor_view_.has_value()) continue;
+        for (const auto& dim : tensor_type->tensor_view_->valid_shape) collect_reads(dim);
+      }
+    }
+  }
+
   // Filter out locally-defined vars and function params: they should not get
-  // pl.dynamic() declarations — only truly free dimension variables should.
+  // pl.dynamic() declarations — only truly free dimension variables should, plus
+  // the params that a parameter annotation reads (see read_in_param_types above).
   dyn_var_ptrs.erase(std::remove_if(dyn_var_ptrs.begin(), dyn_var_ptrs.end(),
-                                    [&defined_vars](const Var* v) { return defined_vars.count(v) > 0; }),
+                                    [&defined_vars, &read_in_param_types](const Var* v) {
+                                      return defined_vars.count(v) > 0 && read_in_param_types.count(v) == 0;
+                                    }),
                      dyn_var_ptrs.end());
 
   // Phase 2: Assign unique printed names, disambiguating collisions.

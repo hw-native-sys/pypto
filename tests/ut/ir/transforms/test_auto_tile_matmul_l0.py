@@ -46,6 +46,105 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 
 
+class TestAutoTileMatmulL0ExplicitL0Diagnostics:
+    """Actionable failures for manual L0 operands that cannot fit."""
+
+    def test_oversized_right_operand_names_tile_and_fix(self):
+        """The hpgemm-step0 shape is one impossible 128 KiB L0B tile.
+
+        AutoTile must fail at the explicit ``b_right`` definition instead of
+        silently skipping the already-L0 matmul and letting MemoryReuse blame
+        packing before AllocateMemoryAddr reports only an aggregate overflow.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 256], pl.FP16],
+                b: pl.Tensor[[256, 256], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [128, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 256], target_memory=pl.Mem.Right)
+                acc = pl.tile.matmul(a_left, b_right)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        before_ssa = passes.convert_to_ssa()(Before)
+        with pytest.raises(ValueError) as exc_info:
+            passes.auto_tile_matmul_l0()(before_ssa)
+
+        message = str(exc_info.value)
+        assert "tile.matmul right operand 'b_right'" in message
+        assert "Right (L0B)" in message
+        assert "physical shape [256, 256]" in message
+        assert "requiring 131072 bytes" in message
+        assert "provides 65536 bytes" in message
+        assert "does not retile operands already placed in Left or Right" in message
+        assert "Keep this operand in Mat" in message
+        assert "manually extract a smaller Right tile" in message
+        assert "b_right__ssa" not in message
+        assert "Check failed" not in message
+
+    def test_oversized_left_matmul_acc_operand_is_also_diagnosed(self):
+        """The same check covers matmul_acc's shifted lhs/rhs argument slots."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[256, 256], pl.FP16],
+                b: pl.Tensor[[256, 64], pl.FP16],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [256, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 64], target_memory=pl.Mem.Right)
+                acc = pl.tile.create([256, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                result = pl.tile.matmul_acc(acc, a_left, b_right)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with pytest.raises(ValueError) as exc_info:
+            passes.auto_tile_matmul_l0()(Before)
+
+        message = str(exc_info.value)
+        assert "tile.matmul_acc left operand 'a_left'" in message
+        assert "Left (L0A)" in message
+        assert "physical shape [256, 256]" in message
+        assert "requiring 131072 bytes" in message
+        assert "manually extract a smaller Left tile" in message
+
+    def test_exact_capacity_manual_operands_remain_untouched(self):
+        """Manual L0 scheduling remains valid at the inclusive capacity boundary."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 256], pl.FP16],
+                b: pl.Tensor[[256, 128], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 128], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [128, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 128], target_memory=pl.Mem.Right)
+                acc = pl.tile.matmul(a_left, b_right)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+
 class TestAutoTileMatmulL0KOnly:
     """K-tiling rewrites for Mat-resident tile.matmul."""
 
@@ -547,6 +646,88 @@ class TestAutoTileMatmulL0KOnly:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)  # non-aligned K -> untouched
 
+    def test_matmul_bias_k_split_applies_bias_once(self):
+        """The first K block applies bias; every later block only accumulates."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                bias: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert printed.count("pl.tile.matmul_bias(") == 1
+        assert "pl.tile.matmul_acc(" in printed
+        assert printed.count("pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)") == 1
+        assert "pl.tile.extract(bias_mat" not in printed
+        _assert_ssa_valid(After, "test_matmul_bias_k_split_applies_bias_once")
+
+    def test_matmul_bias_a2a3_float_mat_bias_is_supported(self):
+        """The pinned A2/A3 ISA supports an FP32 Mat-to-Bias move."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                bias: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+        assert "pl.tile.matmul_acc(" in printed
+        assert "pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)" in printed
+
+    def test_matmul_bias_a2a3_int_k_split_is_supported(self):
+        """A2/A3 supports the INT32 Mat-to-Bias path used by INT8 matmul."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.INT8],
+                rhs: pl.Tensor[[2048, 64], pl.INT8],
+                bias: pl.Tensor[[1, 64], pl.INT32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.INT32]],
+            ) -> pl.Tensor[[16, 64], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+        assert "pl.tile.matmul_acc(" in printed
+        assert "pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)" in printed
+
 
 def _torch_codegen_matches_matmul(program, m_dim, n_dim, k_dim):
     """Drive ``program`` through ``torch_codegen`` and check the executed
@@ -668,6 +849,368 @@ class TestAutoTileMatmulL0MNTiling:
     direct-store / DDR-output path).  The output tensor is chained through the
     per-sub-tile stores in SSA form.
     """
+
+    def test_matmul_bias_mn_and_k_tiling_slices_bias_by_n(self):
+        """Each output-column tile reloads one Bias window and applies it once."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)" not in printed
+        assert "pl.tile.matmul_bias(" in printed
+        assert "pl.tile.matmul_acc(" in printed
+        assert "pl.tile.slice(bias_mat" not in printed
+        assert re.search(r"pl\.tile\.load\(\s*bias,", printed)
+        assert not re.search(r"pl\.tile\.load\(\s*bias,\s*\[0, 0\],\s*\[1, 512\]", printed), (
+            "the original redundant full bias load must be removed"
+        )
+        assert "pl.tile.move(" in printed and "target_memory=pl.Mem.Bias" in printed
+        assert "pl.tile.extract(bias_mat" not in printed
+        assert "target_memory=pl.Mem.Bias" in printed
+        assert printed.count("pl.tile.store(") >= 2, "the oversized output must use a direct-store grid"
+        _assert_ssa_valid(After, "test_matmul_bias_mn_and_k_tiling_slices_bias_by_n")
+
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        torch.manual_seed(0)
+        # Keep each unsplit torch reference dot inside INT8 range. Torch's
+        # debug backend preserves the input dtype for `@`, whereas the device
+        # cube accumulates INT8 products in INT32.
+        lhs = torch.randint(-1, 2, (M, K), dtype=torch.int8)
+        rhs = torch.randint(-1, 2, (K, N), dtype=torch.int8)
+        bias = torch.randint(-20, 21, (1, N), dtype=torch.int32)
+        out = torch.zeros(M, N, dtype=torch.int32)
+        ns: dict = {}
+        exec(torch_codegen(After), ns)  # noqa: S102 -- executing generated reference code is the point
+        ns["kernel"](lhs, rhs, bias, out)
+        expected = lhs.int() @ rhs.int() + bias
+        assert torch.equal(out, expected), (
+            f"mismatches={(out != expected).sum().item()}, max_abs={(out - expected).abs().max().item()}"
+        )
+
+    def test_matmul_bias_n_tiling_with_partial_valid_load_is_deferred(self):
+        """A narrowed bias snapshot cannot be widened by reconstructed N-window loads."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], [K, N - 16], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], [1, N - 16], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_matmul_bias_n_tiling_without_store_reports_placement_hint(self, capfd):
+        """A missing store is a placement gap, not a bias-snapshot ordering hazard."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                _ = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "PH-AT-011" not in diagnostics
+
+    def test_matmul_bias_n_tiling_with_intervening_store_is_deferred(self):
+        """Reloading after an intervening effect must not replace the earlier bias snapshot."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                snapshot_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                # Keep bias_mat single-use so only the post-matmul barrier, not
+                # the load-use-count guard, rejects deferred reconstruction.
+                out_snapshot = pl.store(snapshot_mat, [0, 0], out)
+                out_final = pl.store(c, [0, 0], out_snapshot)
+                return out_final
+
+        ir.assert_structural_equal(passes.auto_tile_matmul_l0()(Before), Before)
+
+    def test_matmul_bias_partial_n_boundary_keeps_logical_store_extent(self):
+        """A 16-column N tail is sliced from bias and stored only at its logical width."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        M, K, N = 528, 32, 528
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert re.search(r"pl\.tile\.load\(\s*bias,\s*\[0, 512\],\s*\[1, 16\],\s*\[1, 16\]", printed)
+        assert "pl.tile.slice(bias_mat" not in printed
+        assert "target_memory=pl.Mem.Bias" in printed
+        assert "pl.tile.extract(bias_mat" not in printed
+        assert re.search(r"pl\.tile\.store\([^\n]+\[\d+, 512\]", printed)
+        _assert_ssa_valid(After, "test_matmul_bias_partial_n_boundary")
+
+        # Exercise the production lowering as well as the AutoTile-local IR:
+        # the boundary's physical boxes and narrowed valid shapes must survive
+        # memory inference and PTO codegen.
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        post = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        pto = "\n".join(
+            _codegen_core.PTOCodegen().generate(_ir_core.Program([func], func.name, post.span))
+            for func in post.functions.values()
+        )
+        assert "pto.tmatmul.bias" in pto
+        assert "pto.tload" in pto
+        assert "pto.tmov" in pto
+
+    def test_matmul_bias_window_load_uses_tensor_remapped_by_earlier_fold(self):
+        """A prior M/N store fold must update a later reconstructed bias load."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 256, 1024, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a0: pl.Tensor[[M, K], pl.INT8],
+                b0: pl.Tensor[[K, N], pl.INT8],
+                a1: pl.Tensor[[M, K], pl.INT8],
+                b1: pl.Tensor[[K, N], pl.INT8],
+                scratch: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                a0_mat = pl.tile.load(a0, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b0_mat = pl.tile.load(b0, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                produced = pl.tile.matmul(a0_mat, b0_mat)
+                bias_tensor = pl.store(produced, [0, 0], scratch)
+                bias_mat = pl.tile.load(bias_tensor, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                a1_mat = pl.tile.load(a1, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b1_mat = pl.tile.load(b1, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_bias(a1_mat, b1_mat, bias_mat)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.tile.matmul_bias(" in printed
+        assert not re.search(
+            r"^\s*bias_mat:.*tile\.load\(bias_tensor, \[0, 0\], \[1, 512\]", printed, re.MULTILINE
+        )
+        _assert_ssa_valid(After, "test_matmul_bias_window_load_uses_tensor_remapped_by_earlier_fold")
+
+    def test_matmul_bias_capacity_caps_n_even_when_l0abc_fit(self):
+        """The 910B 1 KiB bias table limits INT32 bias windows to N=256."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 16, 32, 512
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+        assert "pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)" not in printed
+        windows = [
+            int(n) for n in re.findall(r"pl\.tile\.load\(\s*bias,\s*\[[^]]+\],\s*\[1, (\d+)\]", printed)
+        ]
+        assert windows and max(windows) <= 256
+
+    def test_matmul_bias_nonfractal_mn_is_deferred(self):
+        """AutoTile does not emit physically illegal narrow cube/Bias boxes."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.INT8],
+                rhs: pl.Tensor[[2048, 150], pl.INT8],
+                bias: pl.Tensor[[1, 150], pl.INT32],
+                out: pl.Out[pl.Tensor[[16, 150], pl.INT32]],
+            ) -> pl.Tensor[[16, 150], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 150], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 150], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_matmul_bias_nondivisor_k_tail_applies_bias_once_per_output_tile(self):
+        """A peeled K tail accumulates after, rather than re-applying, bias."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        M, K, N = 64, 272, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert printed.count("pl.tile.matmul_bias(") == 1
+        assert printed.count("pl.tile.matmul_acc(") >= 1
+        assert "_l0_bt" in printed, "expected the peeled K-tail Right extract"
+        _assert_ssa_valid(After, "test_matmul_bias_nondivisor_k_tail")
+
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        torch.manual_seed(2)
+        lhs = torch.randn(M, K, dtype=torch.bfloat16)
+        rhs = torch.randn(K, N, dtype=torch.bfloat16)
+        bias = torch.randn(1, N)
+        out = torch.zeros(M, N)
+        ns: dict = {}
+        exec(torch_codegen(After), ns)  # noqa: S102 -- executing generated reference code is the point
+        ns["kernel"](lhs, rhs, bias, out)
+        expected = lhs.float() @ rhs.float() + bias
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-2, f"peeled-K matmul_bias rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_matmul_bias_m_only_tiling_reuses_bias_resident_source(self):
+        """M-only tiling reuses one full-width Bias tile without pipeline replication."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        # FP32 Bias capacity is N=256 on 910B. The output needs M tiling,
+        # while full N fits only when the existing Bias tile is charged once;
+        # applying the Mat-window /2 pipeline bound would force unsupported N
+        # tiling and incorrectly defer this legal case.
+        M, K, N = 528, 64, 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                bias_l0 = pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_l0)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.pipeline(" in printed
+        assert printed.count("pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)") == 1
+        assert "pl.tile.extract(bias_l0" not in printed
+        assert printed.count("pl.tile.matmul_bias(") == 2
+        _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_reuses_bias_resident_source")
 
     def test_mn_tiling_rewrites_to_subtile_grid(self):
         """512×512 @ 512 FP32 on Ascend950 (L0c = 256 KB): the [512, 512] FP32
@@ -2537,6 +3080,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
             def kernel(
                 self,
                 q: pl.Tensor[[16, 128], pl.BF16],
+                q_row: pl.Tensor[[1, 128], pl.BF16],
                 b: pl.Tensor[[128, 512], pl.BF16],
                 out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
@@ -2546,6 +3090,12 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 q_l0: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
                     q_mat, target_memory=pl.Mem.Left
                 )
+                q_row_mat: pl.Tile[[1, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    q_row, [0, 0], [1, 128], target_memory=pl.Mem.Mat
+                )
+                q_row_l0: pl.Tile[[1, 128], pl.BF16, pl.Mem.Left] = pl.tile.move(
+                    q_row_mat, target_memory=pl.Mem.Left
+                )
                 b_mat: pl.Tile[[128, 512], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                     b, [0, 0], [128, 512], target_memory=pl.Mem.Mat
                 )
@@ -2553,7 +3103,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                     b_l0: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
                         b_mat, 0, ni, [128, 128], target_memory=pl.Mem.Right
                     )
-                    _other: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.gemv(q_l0, b_l0)
+                    _other: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.gemv(q_row_l0, b_l0)
                     c: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(q_l0, b_l0)
                     out_s: pl.Tensor[[16, 512], pl.FP32] = pl.store(c, [0, ni], out_i)
                     out_r = pl.yield_(out_s)
@@ -2788,6 +3338,57 @@ class TestAutoTileMatmulL0Skips:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_matmul_bias_n_tiling_with_bias_resident_source_is_deferred(self):
+        """The architectural bias table cannot form a Bias-to-Bias N sub-window."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 512], pl.BF16],
+                bias: pl.Tensor[[1, 512], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+            ) -> pl.Tensor[[256, 512], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [256, 64], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 512], target_memory=pl.Mem.Mat)
+                bias_l0 = pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_l0)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_matmul_bias_vec_left_is_out_of_scope(self):
+        """The historical Vec-left K-only exception is not widened to biased matmul."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                bias: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 64], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_vec, rhs_mat, bias_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
     def test_non_incore_function_untouched(self):
         """The pass only walks InCore-typed functions
         (``TransformFunction`` guard, pass line 593 — ``IsInCoreType``).  An
@@ -2853,6 +3454,100 @@ class TestAutoTileMatmulL0MatScratch:
     scratch via per-sub-tile ``tile.assemble`` (Acc→Mat) and keeps it on-chip for the
     consumer, instead of the direct-GM store path. Split-K uses a constant-offset
     grid; full-K uses pipelined loop-variable offsets."""
+
+    def test_matmul_bias_producer_uses_mat_scratch(self):
+        """An oversized biased producer may stay on-chip for one later matmul."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        M, K, N, out_n = 256, 192, 512, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.BF16],
+                b: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                e: pl.Tensor[[N, out_n], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                e_mat = pl.tile.load(e, [0, 0], [N, out_n], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.tile.matmul(cb, e_mat)
+                out = pl.store(d, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "tile.create" in printed and "Mem.Mat" in printed
+        assert printed.count("pl.tile.assemble(") >= 2
+        assert "pl.tile.cast(" not in printed
+        assert "pl.tile.matmul_bias(" in printed and "pl.tile.matmul_acc(" in printed
+        _assert_ssa_valid(After, "test_matmul_bias_producer_uses_mat_scratch")
+
+        torch = pytest.importorskip("torch")
+        from pypto.debug import torch_codegen  # noqa: PLC0415
+
+        torch.manual_seed(1)
+        a = torch.randn(M, K, dtype=torch.bfloat16)
+        b = torch.randn(K, N, dtype=torch.bfloat16)
+        bias = torch.randn(1, N)
+        e = torch.randn(N, out_n, dtype=torch.bfloat16)
+        out = torch.zeros(M, out_n)
+        ns: dict = {}
+        exec(torch_codegen(After), ns)  # noqa: S102 -- executing generated reference code is the point
+        ns["kernel"](a, b, bias, e, out)
+        intermediate = (a.float() @ b.float() + bias).to(torch.bfloat16).float()
+        expected = intermediate @ e.float()
+        rel_err = ((out - expected).norm() / expected.norm()).item()
+        assert rel_err < 5e-2, f"matmul_bias Mat-scratch rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_matmul_bias_mat_scratch_load_removal_uses_forced_os_tile(self):
+        """#1908 re-selection keeps the full bias load when forced OS only K-tiles.
+
+        Standalone, this geometry selects A-stationary with N=128. The
+        Mat-scratch path re-chooses output stationarity and keeps full N=192
+        while splitting K. The emitted full-width Bias move still reads the
+        original load, so load removal must follow that final OS choice rather
+        than the discarded A-stationary candidate.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        M, K, N, out_n = 208, 128, 192, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.BF16],
+                b: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                e: pl.Tensor[[N, out_n], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                e_mat = pl.tile.load(e, [0, 0], [N, out_n], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(a_mat, b_mat, bias_mat)
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.tile.matmul(cb, e_mat)
+                out = pl.store(d, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert re.search(r"pl\.tile\.load\(\s*bias,\s*\[0, 0\],\s*\[1, 192\]", printed)
+        assert printed.count("pl.tile.matmul_bias(") == 1
+        assert "pl.tile.matmul_acc(" in printed
+        assert "pl.tile.assemble(" in printed
+        _assert_ssa_valid(After, "test_matmul_bias_mat_scratch_load_removal_uses_forced_os_tile")
 
     def test_chained_matmul_uses_mat_scratch(self):
         """An oversized producer feeding a matmul: the pass assembles the result into an

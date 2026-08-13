@@ -16,7 +16,7 @@ One tile reduction pattern is demonstrated:
 
 import pytest
 import torch
-from examples.kernels.softmax import tile_softmax
+from examples.intermediate.softmax import tile_softmax
 
 
 class TestTileSoftmax:

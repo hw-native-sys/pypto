@@ -439,18 +439,23 @@ The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential
 Describes memory allocation metadata shared by tensors/tiles. The memory space is
 stored on `TileType.memory_space_` for tiles; `TensorType` is canonically DDR.
 
+`MemRef` is a `Var` subclass, so it is a first-class expression. A MemRef names
+an allocation (`base_`) and a byte range within it (`byte_offset_`, `size_`);
+aliasing is answered by `MemRef.same_allocation(a, b)` and `MemRef.may_alias(a, b)`.
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `addr_` | ExprPtr | Base address |
-| `size_` | size_t | Size in bytes |
-| `id_` | uint64_t | Stable MemRef identifier |
+| `base_` | VarPtr | Allocation identity — the Ptr `Var` from `tile.alloc` / `tensor.alloc`. Two MemRefs alias only if they share it. |
+| `byte_offset_` | ExprPtr | Byte offset from `base_` (0 for a full alloc, a view offset otherwise) |
+| `size_` | uint64_t | Size in bytes of this region |
+| `is_pinned_` | bool | Author-declared allocation (`pl.MemRef("name")`), until `InitMemRef` resolves it |
+| `slot_count_` | uint64_t | Equally-sized slots the declaration holds (`pl.MemRef("name", slots=N)`); 1 when `slots` is omitted |
+| `slot_index_` | ExprPtr \| None | Which slot this MemRef denotes (`l0c[k]`); None until a slot is selected, and may be a runtime value |
 
 ```python
-memref = ir.MemRef(
-    ir.ConstInt(0x1000, DataType.INT64, span),
-    1024,  # bytes
-    0     # id
-)
+# base allocation name, byte offset within it, size in bytes
+memref = ir.MemRef("mem_left_0", 0, 1024)
+assert ir.MemRef.same_allocation(memref, memref)
 ```
 
 > **Note:** `ir.Mem` is a short alias for `ir.MemorySpace`.
@@ -461,15 +466,23 @@ Describes tile layout and access pattern:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `valid_shape` | list[ExprPtr] | Valid dimensions |
+| `valid_shape` | list[ExprPtr] | Valid dimensions (empty ⇒ full shape) |
 | `stride` | list[ExprPtr] | Stride per dimension |
 | `start_offset` | ExprPtr | Starting offset |
+| `blayout` | TileLayout | Block layout (default `row_major`) |
+| `slayout` | TileLayout | Scatter layout (default `none_box`) |
+| `fractal` | uint64_t | Fractal size in **bytes**, not elements (default 512) |
+| `pad` | PadValue | Pad mode for out-of-`valid_shape` access (default `null`) |
+| `compact` | CompactMode | Partial-tile compact mode (default `null`) |
 
 ```python
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
-tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+# TileView is immutable: pass every field to the constructor.
+# valid_shape / stride / start_offset accept int or Expr.
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16], start_offset=0)
+
+# Expr form, for symbolic dimensions
+rows = ir.Var("rows", ir.ScalarType(DataType.INT64), span)
+symbolic_view = ir.TileView(valid_shape=[rows, ir.ConstInt(16, DataType.INT64, span)])
 ```
 
 ## Function Node

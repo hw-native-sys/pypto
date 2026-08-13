@@ -7,60 +7,51 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Lowering smoke tests for dynamic valid_shape (single-block @pl.jit kernel).
+"""Lowering smoke tests for the per-block loop + if/else valid_shape idiom.
 
-The pre-JIT version of this test exercised a per-block loop with an in-DSL
-``if/else`` that selected ``vlen`` per iteration.  In the @pl.jit world the
-specializer's alpha-renamer rewrites the rebinding of ``vlen`` in the
-else-branch to a distinct alias, which then fails ``ConvertToSSA`` ("used
-outside its defining scope").  The current recommended workaround --
-documented in ``examples/kernels/09_dyn_valid_shape.py`` -- is to push the
-per-call/per-iteration choice of ``vlen`` to the caller and pass a single
-scalar parameter.
+``dyn_valid_shape_loop`` reads ``[n_blocks, last_valid_len, block_size]`` from
+a config tensor and loops over blocks, selecting the partial valid length on
+the last iteration.  All three values are runtime reads, so the loop lowers to
+an ``scf.for`` with a runtime trip count and the per-iteration ``if``/``else``
+to an ``scf.if`` nested inside it -- the ragged-tail idiom used by the
+paged-attention kernels.
 
-These tests verify that the JIT pipeline (specialize + full pass pipeline)
-succeeds for both vlen values that previously appeared inside the if/else:
+The cases below vary the config the single specialization runs with:
 
-  * full-block vlen (= BLOCK_COL): ``valid_shape`` matches the physical
-    tile shape; ``fillpad`` is a no-op.
-  * partial-block vlen (< BLOCK_COL): ``valid_shape`` < physical;
-    ``fillpad`` writes the padding region.
+  * ragged tail: last block partial (``last_valid_len < block_size``)
+  * uniform: every block full (``last_valid_len == block_size``), so the
+    per-iteration fillpad is a no-op
 """
 
 import pytest
 import torch
-from examples.kernels.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
+from examples.intermediate.dyn_valid_shape import BLOCK_COL, N_ROW, dyn_valid_shape_loop
 
-# Original tests carried this constant for the multi-block tensor row count
-# (2 blocks of Q_TILE=64).  The single-block @pl.jit kernel is per-block, so
-# the constant only survives as a documentation marker.
-N_ROW = Q_TILE
+# sij_buf holds N_ROW rows = 2 blocks of Q_TILE.
+N_BLOCKS = 2
 
 
 class TestLoopDynValidShape:
-    """Lowering smoke for dynamic valid_shape across both block lengths.
+    """Lowering smoke for the loop + if/else valid_shape selection."""
 
-    The two cases mirror the two branches of the original in-DSL ``if/else``:
-    the partial-last-block path (``vlen < BLOCK_COL``) and the full-block
-    path (``vlen == BLOCK_COL``).
-    """
-
-    def test_partial_block(self):
-        """Partial vlen (48) -- mirrors the ``is_last`` branch of the old loop."""
-        data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.lower(data, 2.0, 48, out)
+    def test_ragged_tail(self):
+        """Last block partial (48) -- the if/else takes its ``is_last`` branch."""
+        sij_buf = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
+        out = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
+        cfg = torch.tensor([N_BLOCKS, 48, BLOCK_COL], dtype=torch.int64)
+        program = dyn_valid_shape_loop.lower(sij_buf, cfg, out)
         # Post-pass program must be non-empty and well-formed.
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"
         )
 
-    def test_full_block(self):
-        """Full vlen (= BLOCK_COL) -- mirrors the non-last branch of the old loop."""
-        data = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        out = torch.zeros((Q_TILE, BLOCK_COL), dtype=torch.float32)
-        program = dyn_valid_shape.lower(data, 2.0, BLOCK_COL, out)
+    def test_uniform_blocks(self):
+        """Every block full (= BLOCK_COL) -- fillpad is a no-op on all iterations."""
+        sij_buf = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
+        out = torch.zeros((N_ROW, BLOCK_COL), dtype=torch.float32)
+        cfg = torch.tensor([N_BLOCKS, BLOCK_COL, BLOCK_COL], dtype=torch.int64)
+        program = dyn_valid_shape_loop.lower(sij_buf, cfg, out)
         assert program is not None
         assert len(program.functions) >= 1, (
             f"expected >= 1 function in post-pass IR, got {len(program.functions)}"

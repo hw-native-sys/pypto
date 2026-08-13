@@ -11,6 +11,7 @@
 
 #include "pypto/ir/builder.h"
 
+#include <algorithm>
 #include <any>
 #include <memory>
 #include <optional>
@@ -63,6 +64,25 @@ VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Sp
 void IRBuilder::ReturnType(const TypePtr& type) {
   ValidateInFunction("ReturnType");
   static_cast<FunctionContext*>(CurrentContext())->AddReturnType(type);
+}
+
+void IRBuilder::AddFunctionAttrs(const std::vector<std::pair<std::string, std::any>>& attrs) {
+  ValidateInFunction("AddFunctionAttrs");
+  auto* func_ctx = static_cast<FunctionContext*>(CurrentContext());
+  // Bind the key to a named local rather than destructuring in the loop: a
+  // structured binding cannot be captured by a lambda before C++20.
+  for (const auto& entry : attrs) {
+    const std::string& key = entry.first;
+    const auto& existing = func_ctx->GetAttrs();
+    // A duplicate key is a user error: the same attribute declared twice (two
+    // pl.func_attr calls, or pl.func_attr plus a decorator attrs=). Attrs are
+    // unique-keyed, so silently keeping one of the two would make which value
+    // wins an artifact of parse order.
+    CHECK(std::none_of(existing.begin(), existing.end(), [&key](const auto& kv) { return kv.first == key; }))
+        << "Duplicate function attribute '" << key << "' in function '" << func_ctx->GetName()
+        << "'. Each attribute may be declared only once.";
+    func_ctx->AddAttr(key, entry.second);
+  }
 }
 
 FunctionPtr IRBuilder::EndFunction(const Span& end_span) {

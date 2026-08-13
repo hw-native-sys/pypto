@@ -43,6 +43,7 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
@@ -188,8 +189,15 @@ def test_remote_load_without_valid_shape_uses_source_valid_extent():
     assert "sizes = [%c1_index, %c8_index]" in remote_partition, remote_partition
 
 
-def test_remote_load_rejects_type_only_dynamic_partition_extent():
-    """A repeated type-only symbol is not a runtime codegen binding."""
+def test_remote_load_binds_type_only_dynamic_partition_extent():
+    """A type-only symbol becomes a runtime argument instead of being rejected.
+
+    Was ``..._rejects_...``: a symbol named only in a valid_shape used to have no
+    binding, so codegen refused it. MaterializeValidShapeSymbols now prepends it as
+    a Scalar[INDEX] parameter fed from the call site, so the partition extent is a
+    real SSA value. The ``shape_anchor`` trick in the next test remains valid; it
+    is simply no longer the only way to supply the extent.
+    """
     n = pl.dynamic("REMOTE_VALID_N")
 
     @pl.program
@@ -214,8 +222,15 @@ def test_remote_load_rejects_type_only_dynamic_partition_extent():
             )
             return pl.store(tile, [0, 0], out)
 
-    with pytest.raises(ValueError, match="depends on unbound symbol 'REMOTE_VALID_N'"):
-        _generate_mlir(P)
+    mlir = _generate_mlir(P)
+    assert "func.func @kernel" in mlir
+    # The symbol is a scalar parameter now, so the peer partition reads a real
+    # SSA value rather than an empty operand.
+    remote_partition = next(
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_peer" in line
+    )
+    assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
+    assert "sizes = [%c1_index, ]" not in remote_partition, remote_partition
 
 
 def test_remote_load_intersects_runtime_bound_dynamic_source_valid_extent():
@@ -538,6 +553,107 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "func.call @CommRemoteOffset_f16" in kernel, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
+
+
+def test_remote_store_accepts_nd_tile_with_unit_leading_dims():
+    """A `[1, H, W]` tile pushed into a `[1, H, W]` window lowers end-to-end.
+
+    The deducer's push contract runs at authoring time, before FlattenTileNdTo2D
+    collapses N-D tiles, so it has to admit leading unit dims — rejecting rank > 2
+    outright would refuse a program that compiles to a correct 3-D partition view.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            inp: pl.Tensor[[1, 16, 32], pl.FP16],
+            data: pld.DistributedTensor[[1, 16, 32], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pl.load(inp, [0, 0, 0], [1, 16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "!pto.partition_tensor_view<1x16x32xf16>" in kernel, kernel
+    assert "_peer_pview" in kernel, kernel
+
+
+def test_remote_store_emits_atomic_add_attr():
+    """``atomic=AtomicType.Add`` makes the cross-rank push a combine.
+
+    Same ``atomicType`` attr ``tile.store`` already emits for split-K
+    accumulation — this is what an all-to-all combine needs to sum every peer's
+    contribution in place instead of overwriting it.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0], atomic=pld.AtomicType.Add)
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "{atomicType = #pto<atomic_type atomic_add>}" in kernel, kernel
+
+
+def test_remote_store_omits_atomic_attr_for_plain_store():
+    """A plain push emits no atomicType attr — non-atomic codegen is unchanged."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            tile = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[16, 32])
+            pld.tile.remote_store(tile, target=data, peer=peer, offsets=[0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "atomicType" not in kernel, kernel
+
+
+def test_tensor_remote_store_of_computed_value_emits_tstore_without_tput():
+    """A computed value pushed with ``pld.tensor.remote_store`` reaches the peer
+    as a single ``pto.tstore`` — no TPUT, no staging tile, no GM round-trip.
+
+    This is the end-to-end shape issue #2349 asked for: before it, the value was
+    rejected from both directions and the only way to push it was to store it
+    back to global memory and TPUT from there.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP16],
+            data: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            scaled = pl.tensor.add(x, x)
+            pld.tensor.remote_store(scaled, data, peer, [0, 0])
+
+    kernel = _split_module(_generate_mlir(P))["kernel"]
+    assert "pto.tstore" in kernel, kernel
+    assert "_peer_pview" in kernel, kernel
+    assert "func.call @CommRemoteOffset_f16" in kernel, kernel
+    # The push is a direct tstore of the computed tile: no TPUT bounce buffer.
+    assert "pto.comm.tput" not in kernel, kernel
+    # ...and the vector add's result feeds it directly rather than being spilled
+    # to global memory first.
+    assert "pto.vadd" in kernel or "pto.add" in kernel, kernel
 
 
 def test_remote_store_pads_partition_view_with_ones_for_3d_target():
@@ -926,7 +1042,7 @@ def test_wait_casts_loop_induction_expected_to_i32():
 
     mlir = _generate_mlir(P)
     twait_line = next(line for line in mlir.splitlines() if "pto.comm.twait(" in line)
-    assert twait_line.rstrip().endswith("i32) {cmp = #pto<wait_cmp ge>}"), twait_line
+    assert strip_loc(twait_line).endswith("i32) {cmp = #pto<wait_cmp ge>}"), twait_line
     body = mlir.split("func.func @kernel", 1)[1]
     assert "arith.index_cast" in body and "to i32" in body, body
 
@@ -951,7 +1067,7 @@ def test_notify_casts_loop_induction_value_to_i32():
 
     mlir = _generate_mlir(P)
     tnotify_line = next(line for line in mlir.splitlines() if "pto.comm.tnotify(" in line)
-    assert tnotify_line.rstrip().endswith("i32) {notifyOp = #pto<notify_op set>}"), tnotify_line
+    assert strip_loc(tnotify_line).endswith("i32) {notifyOp = #pto<notify_op set>}"), tnotify_line
     body = mlir.split("func.func @kernel", 1)[1]
     assert "arith.index_cast" in body and "to i32" in body, body
 

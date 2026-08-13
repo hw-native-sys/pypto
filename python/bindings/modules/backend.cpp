@@ -155,6 +155,10 @@ void BindBackend(nb::module_& m) {
            "L0b (Right) on-chip SRAM capacity in bytes")
       .def("get_l0c_capacity_bytes", &BackendHandler::GetL0cCapacityBytes,
            "L0c (Acc) on-chip SRAM capacity in bytes")
+      .def("get_bias_capacity_bytes", &BackendHandler::GetBiasCapacityBytes,
+           "Bias-table on-chip SRAM capacity in bytes")
+      .def("supports_mat_to_bias_move", &BackendHandler::SupportsMatToBiasMove, nb::arg("source_dtype"),
+           nb::arg("bias_dtype"), "Whether the backend supports this Mat-to-Bias tile.move dtype pair")
       .def("get_mat_capacity_bytes", &BackendHandler::GetMatCapacityBytes,
            "Mat (L1) on-chip SRAM capacity in bytes")
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,

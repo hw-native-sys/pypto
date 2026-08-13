@@ -62,7 +62,7 @@ def test_put_parses_to_op_with_atomic_attr():
         for stmt in _iter_stmts(func.body)
         if isinstance(stmt, ir.EvalStmt)
         and isinstance(stmt.expr, ir.Call)
-        and stmt.expr.op.name == "pld.tensor.put"
+        and stmt.expr.op.name == ir.get_op("pld.tensor.put").name
     ]
     assert len(put_calls) == 1
     call = put_calls[0]

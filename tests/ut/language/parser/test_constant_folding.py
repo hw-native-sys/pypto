@@ -18,6 +18,11 @@ import pypto.language as pl
 import pytest
 from pypto.pypto_core import ir
 
+_OP_TENSOR_ADD = ir.get_op("tensor.add").name
+_OP_TENSOR_MULS = ir.get_op("tensor.muls").name
+_OP_TENSOR_SLICE = ir.get_op("tensor.slice").name
+_OP_TENSOR_SUB = ir.get_op("tensor.sub").name
+
 
 def _collect_call_args(func: ir.Function, op_name: str) -> list[list]:
     """Collect argument lists of all Calls matching *op_name* anywhere in the
@@ -60,7 +65,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstInt), (
@@ -79,7 +84,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstInt), (
@@ -98,7 +103,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstInt)
@@ -115,7 +120,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstInt)
@@ -133,7 +138,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstInt)
@@ -150,7 +155,7 @@ class TestBinopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         assert isinstance(scalar_arg, ir.ConstFloat), (
@@ -172,7 +177,7 @@ class TestUnaryopConstantFolding:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         # After folding, -42 should become a single ConstInt(-42) or Neg(ConstInt(42)).
@@ -236,8 +241,8 @@ class TestMixedExpressionFallback:
             for stmt in body.stmts
             if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
         ]
-        assert "tensor.add" in call_ops
-        assert "tensor.sub" in call_ops
+        assert _OP_TENSOR_ADD in call_ops
+        assert _OP_TENSOR_SUB in call_ops
 
 
 class TestDimensionEqualityAfterFolding:
@@ -317,7 +322,7 @@ class TestScopeShadowingSafety:
         assert isinstance(func, ir.Function)
         body = func.body
         assert isinstance(body, ir.SeqStmts)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         # Look through the explicit cast to the folded-or-not expression.
@@ -344,7 +349,7 @@ class TestScopeShadowingSafety:
             return result
 
         assert isinstance(func, ir.Function)
-        mul_calls = _collect_call_args(func, "tensor.muls")
+        mul_calls = _collect_call_args(func, _OP_TENSOR_MULS)
         assert len(mul_calls) == 1
         scalar_arg = mul_calls[0][1]
         # Look through the explicit cast: idx + M must remain an Add node,
@@ -357,7 +362,7 @@ class TestScopeShadowingSafety:
 
 def _assert_all_slice_extents_are_constint(func: ir.Function, expected_dims: list[int]) -> None:
     """Verify every ``tensor.slice`` call in *func* has shape_tuple = expected_dims."""
-    slice_calls = _collect_call_args(func, "tensor.slice")
+    slice_calls = _collect_call_args(func, _OP_TENSOR_SLICE)
     assert slice_calls, "expected tensor.slice calls to be emitted"
     for args in slice_calls:
         extent = args[1]  # tensor.slice(tensor, shape_tuple, offset_tuple)

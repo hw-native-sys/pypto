@@ -44,7 +44,7 @@ def add(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.add(a, b)
+        out = pl.assemble(out, pl.add(a, b), [0, 0])
     return out
 
 compiled = add.compile()
@@ -91,7 +91,7 @@ def add_then_square(
 ):
     with pl.at(level=pl.Level.CORE_GROUP):
         s = pl.add(a, b)
-        out = pl.mul(s, s)
+        out = pl.assemble(out, pl.mul(s, s), [0, 0])
     return out
 ```
 
@@ -115,7 +115,7 @@ def accumulate(
         t = pl.add(a, a)
         for i in pl.range(3):
             t = pl.add(t, a)      # carried across iterations
-        out = pl.mul(t, t)
+        out = pl.assemble(out, pl.mul(t, t), [0, 0])
     return out
 ```
 
@@ -143,7 +143,7 @@ def add_kernel(
     b: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    out = pl.add(a, b)
+    out = pl.assemble(out, pl.add(a, b), [0, 0])
     return out
 
 @pl.jit
@@ -262,7 +262,7 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 
 Calling a `@pl.jit` function directly does the whole thing: specialize on the argument
 shapes and dtypes, compile, cache, dispatch. Later calls with the same shapes reuse the
-cached compilation. `examples/hello_world.py` is this pattern, at tile level.
+cached compilation. `examples/beginner/01_hello_world.py` is this pattern, at tile level.
 
 ## Edge Cases
 
@@ -294,4 +294,4 @@ effect.
 - [Language Guide](language/index.md) — the full surface: tile-level authoring, `pl.load` / `pl.store`, memory spaces, and the `@pl.function` / `@pl.program` form `@pl.jit` specializes into.
 - [Operations](ops/index.md) — the operator surface across `pl.*`, `pl.tensor.*`, and `pl.tile.*`.
 - [Running on Device](00-getting_started.md) — resident device tensors, explicit dispatch, benchmarking, distributed execution.
-- `examples/kernels/` — tile-level kernels in the same `@pl.jit` idiom.
+- `examples/beginner/` and `examples/intermediate/` — tile-level kernels in the same `@pl.jit` idiom.

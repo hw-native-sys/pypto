@@ -15,6 +15,7 @@ import inspect
 import linecache
 import sys
 import textwrap
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar, cast, overload
@@ -29,13 +30,31 @@ from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, 
 from .source_lookup import get_class_source_lines
 
 
+def _is_pl_func_attr_stmt(stmt: ast.stmt) -> bool:
+    """True when ``stmt`` is a ``pl.func_attr({...})`` prologue directive."""
+    if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+        return False
+    func = stmt.value.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "func_attr"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pl"
+    )
+
+
 def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
     """True if the SubWorker body is an abstract ``...`` declaration.
 
     An abstract SubWorker declares only ``...`` (optionally preceded by a
-    docstring) and carries no implementation — it is a runtime-bound callback
-    point that must be supplied via ``prepare(callbacks={...})``. A bare ``pass``
-    is *not* abstract: it is a valid no-op SubWorker with a concrete body.
+    docstring and a ``pl.func_attr({...})`` prologue) and carries no
+    implementation — it is a runtime-bound callback point that must be supplied
+    via ``prepare(callbacks={...})``. A bare ``pass`` is *not* abstract: it is a
+    valid no-op SubWorker with a concrete body.
+
+    The prologue is skipped for the same reason the docstring is: it is
+    parse-time metadata, not an implementation, so a SubWorker carrying function
+    attrs stays abstract and keeps a printable spelling for them.
     """
     non_doc = [
         stmt
@@ -45,6 +64,7 @@ def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
             and isinstance(stmt.value, ast.Constant)
             and isinstance(stmt.value.value, str)
         )
+        and not _is_pl_func_attr_stmt(stmt)
     ]
     return (
         len(non_doc) == 1
@@ -404,22 +424,112 @@ def _extract_function_auto_scope_from_decorator(node: ast.FunctionDef) -> bool |
     return None
 
 
-def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize function attrs: convert SplitMode enums to int values for C++ storage.
+def _normalize_attrs(attrs: Any) -> dict[str, Any] | None:
+    """Normalize function attrs for C++ storage.
 
-    SplitMode.NONE entries are dropped (equivalent to no split).
+    ``SplitMode`` enums become their int value; ``SplitMode.NONE`` is dropped
+    (equivalent to no split, and the printer filters it for the same reason).
+
+    DSL wrapper values are unwrapped to the IR ``Expr`` they carry. The printer
+    emits that ``Expr`` in DSL spelling (e.g. ``pl.system.available_cluster_count()``),
+    so reparsing printed source evaluates the wrapper again — without this the
+    attr store rejects it as an unsupported kwarg type.
+
     Returns None if the result is empty.
+
+    Raises:
+        ParserSyntaxError: If ``attrs`` is not a dict, a key is not a string, or
+            a value references an SSA binding (see the ``StaticAttrs`` IR
+            property — a Function attr has no legal spelling for one).
     """
-    if not attrs:
-        return None
+    if not isinstance(attrs, dict):
+        raise ParserSyntaxError(
+            f"`@pl.function(attrs=...)` must be a dict, got {type(attrs).__name__}",
+            hint='Use a dict, e.g. attrs={"split": pl.SplitMode.UP_DOWN}.',
+        )
     result: dict[str, Any] = {}
     for key, value in attrs.items():
+        if not isinstance(key, str):
+            raise ParserSyntaxError(
+                f"`@pl.function(attrs=...)` keys must be strings, got {key!r}",
+                hint='Use string keys, e.g. attrs={"core_num": 8}.',
+            )
         if isinstance(value, ir.SplitMode):
             if value != ir.SplitMode.NONE:
                 result[key] = value.value
-        else:
-            result[key] = value
+            continue
+        if hasattr(value, "unwrap"):
+            # Annotation-only wrappers raise on unwrap, but not uniformly:
+            # Scalar/Ptr raise RuntimeError while Tensor/Tile/Array raise
+            # ValueError. Catch both so the actionable diagnostic is not
+            # bypassed by whichever wrapper the caller passed.
+            try:
+                value = value.unwrap()
+            except (RuntimeError, ValueError) as e:
+                raise ParserSyntaxError(
+                    f"@pl.function attr '{key}' is an annotation-only {type(value).__name__}",
+                    hint="Pass a value expression, not a type annotation.",
+                ) from e
+        _reject_ssa_referencing_attr(key, value)
+        result[key] = value
     return result or None
+
+
+def _reject_ssa_referencing_attr(key: str, value: Any) -> None:
+    """Reject a Function attr value that references an SSA binding.
+
+    The DSL-side half of the ``StaticAttrs`` IR property. A ``Var`` in a
+    function attr names something the function does not bind: a decorator is
+    evaluated before the body binds anything, and a launch-site value belongs
+    to the *calling* function. Such an attr is unprintable as a decorator and
+    invisible to every pass that walks the use-def chain, so it is rejected at
+    the source rather than surfacing later as a structural mismatch.
+    """
+    if isinstance(value, (list, tuple)):
+        offenders = [v for v in value if isinstance(v, ir.Expr)]
+    else:
+        offenders = [value] if isinstance(value, ir.Expr) else []
+    for expr in offenders:
+        if not _expr_references_ssa(expr):
+            continue
+        raise ParserSyntaxError(
+            f"@pl.function attr '{key}' references a variable, which a function attr cannot carry",
+            hint=(
+                "A decorator is evaluated before the signature binds any name, so it cannot spell a "
+                "reference. To reference a parameter, declare the attr in the body prologue instead: "
+                "`pl.func_attr({'stationary': w})` as the first statement, where the parameters are "
+                "bound. To pass a launch width, use the launch site — `with pl.spmd(n):` rather than "
+                "`attrs={'core_num': n}`."
+            ),
+        )
+
+
+class _SsaRefFinder(ir.IRVisitor):
+    """Detects any Var-like reference inside an attr expression subtree.
+
+    ``Var`` and ``IterArg`` are overridden separately rather than through
+    ``visit_var_like`` because each carries its own ``ObjectKind`` and so
+    dispatches independently (see ``.claude/rules/ir-kind-traits.md``).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found = False
+
+    def visit_var(self, op: ir.Var) -> None:
+        self.found = True
+
+    def visit_iter_arg(self, op: Any) -> None:
+        self.found = True
+
+    def visit_mem_ref(self, op: Any) -> None:
+        self.found = True
+
+
+def _expr_references_ssa(expr: ir.Expr) -> bool:
+    finder = _SsaRefFinder()
+    finder.visit_expr(expr)
+    return finder.found
 
 
 # Function-attr key carrying the path to a hand-written external C++ kernel
@@ -842,6 +952,15 @@ def function(
     caller_frame = sys._getframe(1)
     closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
 
+    if attrs:
+        warnings.warn(
+            "@pl.function(attrs={...}) is deprecated: a decorator is evaluated before the "
+            "signature binds, so it cannot reference parameters. Use pl.func_attr({...}) as "
+            "the first statement of the function body instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     resolved_external_source = (
         _resolve_external_source(external_source, caller_frame) if external_source is not None else None
     )
@@ -855,7 +974,12 @@ def function(
             # object: reconstructing the dict from AST loses closure values,
             # DataType values, and every other non-literal expression. The
             # @pl.program walker reads this snapshot before building the IR.
-            f._pl_function_attrs = _normalize_attrs(attrs or {}) or {}  # type: ignore[attr-defined]
+            # Gate on `is not None`, not truthiness: a falsey non-dict such as
+            # `attrs=[]` or `attrs=""` must reach the validator rather than be
+            # silently treated as absent.
+            f._pl_function_attrs = (  # type: ignore[attr-defined]
+                _normalize_attrs(attrs) or {} if attrs is not None else {}
+            )
             # Stash the resolved external_source for the same reason: the value
             # is a runtime Path expression that cannot be re-read from the AST.
             if resolved_external_source is not None:
@@ -894,7 +1018,7 @@ def function(
             )
 
             # Normalize attrs: convert enum values to ints for storage
-            func_attrs = _normalize_attrs(attrs) if attrs else None
+            func_attrs = _normalize_attrs(attrs) if attrs is not None else None
             # Fold auto_scope=False into attrs (absent ⇒ default True).
             if auto_scope is False:
                 func_attrs = {**(func_attrs or {}), "auto_scope": False}

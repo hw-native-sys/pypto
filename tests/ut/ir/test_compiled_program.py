@@ -135,6 +135,23 @@ def _make_program_with_scalar() -> ir.Program:
     return ir.Program([orch], "ScalarProgram", span)
 
 
+def _make_fp4_output_program() -> ir.Program:
+    span = ir.Span.unknown()
+    logical_type = ir.TensorType([8, 16], DataType.FP4)
+    src = ir.Var("src", logical_type, span)
+    out = ir.Var("out", logical_type, span)
+    params = [(src, ir.ParamDirection.In), (out, ir.ParamDirection.Out)]
+    orch = ir.Function(
+        "orchestrator",
+        params,
+        [logical_type],
+        ir.SeqStmts([], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    return ir.Program([orch], "Fp4OutputProgram", span)
+
+
 class TestCompiledProgramBackwardCompat:
     """Verify CompiledProgram behaves like a path string for backward compat."""
 
@@ -197,6 +214,12 @@ class TestExtractParamInfos:
         infos, _, _ = _extract_param_infos(prog)
         assert infos[0].shape == [128, 128]
         assert infos[0].dtype == DataType.FP32
+
+    def test_fp4_metadata_uses_torch_x2_carrier_shape(self):
+        infos, out_idx, _ = _extract_param_infos(_make_fp4_output_program())
+        assert [info.shape for info in infos] == [[8, 8], [8, 8]]
+        assert all(info.dtype == DataType.FP4 for info in infos)
+        assert out_idx == [1]
 
     def test_return_types(self):
         prog = _make_program_with_orchestration(has_return=True)
@@ -329,6 +352,19 @@ class TestBuildFullArgs:
         assert out.shape == (128, 128)
         assert out.dtype == torch.float32
         assert torch.all(out == 0)
+
+    @pytest.mark.skipif(
+        not hasattr(torch, "float4_e2m1fn_x2"),
+        reason="torch.float4_e2m1fn_x2 required",
+    )
+    def test_allocates_fp4_output_with_physical_x2_shape(self):
+        infos, output_indices, _ = _extract_param_infos(_make_fp4_output_program())
+        src = torch.zeros((8, 8), dtype=torch.float4_e2m1fn_x2)
+        full_args = _build_full_args((src,), infos, output_indices)
+        out = full_args[1]
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == (8, 8)
+        assert out.dtype == torch.float4_e2m1fn_x2
 
 
 class TestCompileReturnsCompiledProgram:

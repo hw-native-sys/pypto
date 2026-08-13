@@ -9,7 +9,9 @@
 **前置条件**：
 
 - 输入 IR 必须为静态单赋值 (SSA) 形式（需先运行 ConvertToSSA）；该 Pass 保持（产生）SSAForm
-- 仅处理 Opaque 函数（InCore 函数保持不变）
+- 处理 Opaque 与 Orchestration 函数（InCore 函数保持不变）。当解析器将
+  `for i in pl.spmd(...)` 这类高层构造展开时，Orchestration 函数同样会携带
+  InCore 作用域；至少提取出一个作用域的 Opaque 父函数会被提升为 Orchestration
 
 **使用时机**：在 ConvertToSSA 之后运行，当需要将 InCore 计算区域提取为独立的可调用函数时使用。
 
@@ -36,7 +38,8 @@ program_outlined = outline_pass(program)
 
 ## 算法
 
-1. **扫描 InCore 作用域**：在 Opaque 函数中查找所有 `InCoreScopeStmt` 节点
+1. **扫描 InCore 作用域**：在 Opaque 与 Orchestration 函数中查找所有
+   `InCoreScopeStmt` 节点
 2. **分析输入**：收集作用域的 *live-in*（活跃入口）集合——作用域体在（重新）定义
    某变量之前就读取它，说明该变量的入口值来自调用方
 3. **分析输出**：确定在作用域之后仍被使用的内部定义（在作用域内定义、在作用域外使用的变量）
@@ -48,6 +51,30 @@ program_outlined = outline_pass(program)
    - 带有输入参数的提取函数调用
    - 每个输出变量对应一个 AssignStmt
 6. **添加到程序**：将提取的函数添加到程序的函数列表中
+7. **提升父函数**：至少提取出一个作用域的 Opaque 父函数将变为 `Orchestration`——
+   并在此之前先折叠其参数动态维度读取（见下）
+
+**参数动态维度读取在提升时折叠**：tensor 声明的 extent *就是*它的运行期
+extent，因此对以 `pl.dynamic` 符号为某一轴的参数调用 `pl.tensor.dim(a, 0)`，会
+为同一个量再造出**第二个** IR 名字，由该副本构造的 shape 也就不再与由符号构造
+的 shape 结构相等。DSL 解析器会把该读取折叠到符号上
+（`ASTParser._fold_tensor_dim`），但仅限 Orchestration 函数体——只有在那里
+Orchestration codegen 才会从参数的 task-arg 描述符定义该符号，折叠才是可靠的。
+写成 `Opaque` 的函数体会保留该读取，因此本 pass 在提升该函数的那一刻、**在提取
+之前**完成折叠：
+
+```python
+# 写法为 Opaque 的父函数                      # 提升之后
+m = pl.tensor.dim(a, 0)                    # （绑定语句已折叠消失）
+with pl.spmd(m // 16):                     with pl.spmd(M_DYN // 16):
+    ...                                        ...
+```
+
+在提取器运行前折叠，意味着被提升的函数体进入提取器时，与解析器交给一个本就是
+Orchestration 的函数的形态完全一致，两条路径产出相同的 IR。若不折叠，本 pass 产
+出的 IR 将无法再解析回自身（打印出的 `tensor.dim` 绑定在重新解析时消失），从而
+破坏 print→parse 往返验证。解析器不会折叠的读取同样保持原样：常量 extent、运行期
+轴，或并非该签名所声明的符号。
 
 **使用 live-in 而非 `uses \ defs`**：输入集合按流敏感方式计算
 （`UpwardExposedUseCollector`）。对于「先读取、再以同名重新绑定」的被捕获
@@ -133,7 +160,7 @@ class Before:
 ```python
 @pl.program
 class After:
-    @pl.function  # Opaque function
+    @pl.function(type=pl.FunctionType.Orchestration)  # promoted from Opaque
     def main(self, x: Tensor[[64], FP32]) -> Tensor[[64], FP32]:
         y = x + 1
 

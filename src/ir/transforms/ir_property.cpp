@@ -99,6 +99,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HardSyncallOccupancyValid";
     case IRProperty::IterArgCarryClassified:
       return "IterArgCarryClassified";
+    case IRProperty::AccToGmStoreValid:
+      return "AccToGmStoreValid";
     default:
       return "Unknown";
   }
@@ -147,7 +149,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::AivSplitValid,
                                    IRProperty::HardSyncallOccupancyValid,
                                    IRProperty::IterArgCarryClassified,
-                                   IRProperty::RuntimeScopesMaterialized};
+                                   IRProperty::RuntimeScopesMaterialized,
+                                   IRProperty::AccToGmStoreValid};
   return props;
 }
 

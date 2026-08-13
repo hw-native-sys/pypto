@@ -114,7 +114,7 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     auto reshape_shape = std::make_shared<MakeTuple>(Make2DShapeExprs(merged, last, span), span);
     auto reshape = op_registry.Create("tile.reshape", {operand, reshape_shape}, span);
     auto reshape_var = std::make_shared<Var>("trans_in_2d", reshape->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(reshape_var, reshape, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(reshape_var, reshape, assign->span_));
     operand = reshape_var;
     operand_type = As<TileType>(operand->GetType());
   }
@@ -127,7 +127,7 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
   };
   auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
   VarPtr out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
-  out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, span));
+  out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, assign->span_));
 
   // Pre-create one flat scratch pool [batch_count*A, B] sliced per batch.
   // pto.ttrans requires a scratch operand whose type matches the source page's;
@@ -148,7 +148,7 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
   };
   auto tmp_pool_create = op_registry.Create("tile.create", {tmp_pool_shape}, tmp_pool_kw, span);
   VarPtr tmp_pool_var = std::make_shared<Var>("trans_tmp_pool", tmp_pool_create->GetType(), span);
-  out.stmts.push_back(std::make_shared<AssignStmt>(tmp_pool_var, tmp_pool_create, span));
+  out.stmts.push_back(std::make_shared<AssignStmt>(tmp_pool_var, tmp_pool_create, assign->span_));
 
   auto axis0_expr = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto axis1_expr = std::make_shared<ConstInt>(1, DataType::INDEX, span);
@@ -161,7 +161,7 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     auto in_shape = MakeShapeTupleFromInts({a, b}, span);
     auto slice = op_registry.Create("tile.slice", {operand, in_shape, in_offset}, span);
     ExprPtr src_page = std::make_shared<Var>("trans_page_" + suffix, slice->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(src_page), slice, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(src_page), slice, assign->span_));
 
     // Slice the i-th 2D scratch page [A, B] from the flat tmp pool (subview with
     // STATIC valid [A, B], matching the source page's type exactly).
@@ -169,19 +169,19 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     auto tmp_shape = MakeShapeTupleFromInts({a, b}, span);
     auto tmp_slice = op_registry.Create("tile.slice", {tmp_pool_var, tmp_shape, tmp_offset}, span);
     ExprPtr scratch_page = std::make_shared<Var>("trans_tmp_" + suffix, tmp_slice->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(scratch_page), tmp_slice, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(scratch_page), tmp_slice, assign->span_));
 
     // Transpose the page [A, B] -> [B, A]. Ranks match, CHECK passes.
     auto transpose =
         op_registry.Create("tile.transpose", {src_page, axis0_expr, axis1_expr, scratch_page}, span);
     auto transpose_var = std::make_shared<Var>("trans_" + suffix, transpose->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(transpose_var, transpose, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(transpose_var, transpose, assign->span_));
 
     // Assemble the [B, A] result into the flat output at row offset i*B.
     auto out_offset = MakeShapeTupleFromInts({i * b, 0}, span);
     auto assemble = op_registry.Create("tile.assemble", {out_var, transpose_var, out_offset}, span);
     out_var = std::make_shared<Var>(out_var->name_hint_, assemble->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, span));
+    out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, assign->span_));
   }
 
   out.output_var = out_var;

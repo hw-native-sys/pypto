@@ -78,7 +78,6 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -118,10 +117,7 @@ void ValidatePutContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr&
       << " vs src " << src->GetType()->TypeName();
   comm_op::ValidateTransferShapeContract(dst_type->shape_, src_type->shape_, op_name, require_same_shape);
 
-  auto atomic_value = GetRequiredKwarg<int>(kwargs, "atomic", op_name);
-  CHECK(atomic_value == static_cast<int>(AtomicType::kNone) ||
-        atomic_value == static_cast<int>(AtomicType::kAdd))
-      << op_name << " atomic must be AtomicType.None_ or AtomicType.Add (got int " << atomic_value << ")";
+  comm_op::ValidateAtomicValue(GetRequiredKwarg<int>(kwargs, "atomic", op_name), op_name);
 }
 
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,

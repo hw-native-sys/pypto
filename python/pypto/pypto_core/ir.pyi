@@ -3228,6 +3228,21 @@ class IRBuilder:
             type: Return type
         """
 
+    def add_function_attrs(self, attrs: dict[str, Any]) -> None:
+        """Merge attributes into the current function.
+
+        Attributes normally arrive at ``begin_function``. A ``pl.func_attr({...})``
+        body prologue is evaluated only after the parameters bind — which is what
+        lets an attribute reference a parameter — so it merges here instead.
+
+        Args:
+            attrs: Attribute dict to merge
+
+        Raises:
+            RuntimeError: If not inside a function context
+            ValueError: If a key is already present (attrs are unique-keyed)
+        """
+
     def end_function(self, end_span: Span) -> Function:
         """End building a function.
 

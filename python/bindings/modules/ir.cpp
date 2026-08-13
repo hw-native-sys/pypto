@@ -194,13 +194,36 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           vars.push_back(nb::cast<VarPtr>(elem));
         }
         kwargs.emplace_back(key, std::move(vars));
+      } else if (nb::len(seq) > 0 && nb::isinstance<Var>(*seq.begin())) {
+        // Open-world key holding a Var list — ``pl.func_attr({"operands": [x, w]})``.
+        // Function attrs are an open key namespace, so no reserved-key list can
+        // cover them; a non-empty list of Vars is unambiguous by element type.
+        // Reserved keys are matched above, and an EMPTY list still falls through
+        // to the ArgDirection default below, since element type says nothing
+        // there and the key is what carries the intended type.
+        std::vector<VarPtr> vars;
+        for (auto elem : seq) {
+          if (!nb::isinstance<Var>(elem)) {
+            throw pypto::TypeError("Mixed list element types for key: " + key +
+                                   " (expected all Var, matching the first element)");
+          }
+          vars.push_back(nb::cast<VarPtr>(elem));
+        }
+        kwargs.emplace_back(key, std::move(vars));
       } else {
         // Default: kAttrArgDirections and any future ArgDirection list key.
+        // Naming only ArgDirection here misleads: reaching this arm usually
+        // means the value's element type is supported for some OTHER key, or
+        // is not a list attr type at all. Report what a list under this key may
+        // hold so the message names something the caller could actually write.
         std::vector<ArgDirection> dirs;
         for (auto elem : seq) {
           if (!nb::isinstance<ArgDirection>(elem)) {
-            throw pypto::TypeError("Unsupported list element type for key: " + key +
-                                   " (expected ArgDirection)");
+            throw pypto::TypeError(
+                "Unsupported list element type for key: " + key +
+                ". A list-valued attr under an arbitrary key may hold Var (a reference) or "
+                "ArgDirection. Integer lists are accepted only for the reserved key '" +
+                std::string(kAttrArgDirectionOverrides) + "'.");
           }
           dirs.push_back(nb::cast<ArgDirection>(elem));
         }

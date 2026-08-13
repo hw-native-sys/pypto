@@ -546,6 +546,64 @@ class TestSliceView:
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
+    def test_four_bit_dtypes_share_packed_allocation_accounting(self, dtype):
+        """All semantic 4-bit dtypes occupy one byte per two logical elements."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], dtype],
+                output: pl.Out[pl.Tensor[[8, 16], dtype]],
+            ) -> pl.Tensor[[8, 16], dtype]:
+                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                return pl.store(tile_a, [0, 0], output)
+
+        printed = ir.python_print(passes.init_mem_ref()(Before))
+        zero = r"(?:0|pl\.const\(0, pl\.INT64\))"
+        assert re.search(rf'input_a: .*pl\.MemRef\("mem_ddr_0", {zero}, 64\)', printed), printed
+        assert re.search(rf'output: .*pl\.MemRef\("mem_ddr_1", {zero}, 64\)', printed), printed
+        assert re.search(rf"tile_a: .*pl\.MemRef\(mem_vec_\d+, {zero}, 64\)", printed), printed
+        assert "pl.tile.alloc(pl.Mem.Vec, 64)" in printed
+
+    def test_fp4_slice_uses_packed_byte_offset_and_span(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], pl.FP4],
+                output: pl.Out[pl.Tensor[[1, 16], pl.FP4]],
+            ) -> pl.Tensor[[1, 16], pl.FP4]:
+                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                row = pl.tile.slice(tile_a, [1, 16], [1, 0])
+                return pl.store(row, [0, 0], output)
+
+        printed = ir.python_print(passes.init_mem_ref()(Before))
+        assert "pl.tile.alloc(pl.Mem.Vec, 64)" in printed
+        assert re.search(
+            r"row: .*pl\.MemRef\(mem_vec_\d+, (?:8|pl\.const\(8, pl\.INT64\)), 8\)",
+            printed,
+        ), printed
+
+    def test_fp4_slice_rejects_second_nibble_origin(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], pl.FP4],
+                output: pl.Out[pl.Tensor[[1, 14], pl.FP4]],
+            ) -> pl.Tensor[[1, 14], pl.FP4]:
+                tile_a = pl.load(input_a, [0, 0], [8, 16])
+                tail = pl.tile.slice(tile_a, [1, 14], [0, 1])
+                return pl.store(tail, [0, 0], output)
+
+        with pytest.raises(ValueError, match="Packed 4-bit slice origins must be byte-aligned"):
+            passes.init_mem_ref()(Before)
+
 
 class TestYieldMemRef:
     """MemRef propagation through yield in ForStmt and IfStmt."""

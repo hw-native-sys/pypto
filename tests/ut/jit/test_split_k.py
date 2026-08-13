@@ -15,11 +15,12 @@ partial product into one global-memory output via
 in-kernel before the parallel loop. This test compiles the pattern through the
 full pass pipeline and verifies the per-core kernel emits an atomic-add store.
 
-Mirrors ``examples/kernels/10_split_k.py``.
+Mirrors ``examples/advanced/01_split_k.py``.
 """
 
 import re
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
@@ -429,6 +430,108 @@ def test_split_k_down_projection_pattern_numerically_correct():
     assert torch.allclose(actual.float(), expected.float(), rtol=2e-2, atol=2e-2), (
         f"down-proj split-K mismatch: max abs diff "
         f"{(actual.float() - expected.float()).abs().max().item():.3e}"
+    )
+
+
+# The DSL parser resolves dtype arguments syntactically, so each narrow-int
+# variant needs its dtype spelled as a literal rather than passed in.
+@jit
+def _split_k_i8_atomic(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
+        c = pl.assemble(c, pl.full([_M, _N], dtype=pl.INT8, value=0), [0, 0])
+    for ks in pl.parallel(0, _SPLIT):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
+            k0 = ks * _KS
+            partial = pl.matmul(a[:, k0 : k0 + _KS], b[k0 : k0 + _KS, :], out_dtype=pl.INT32)
+            c = pl.assemble(c, partial, [0, 0], atomic=pl.AtomicType.Add)
+    return c
+
+
+@jit
+def _split_k_i16_atomic(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
+        c = pl.assemble(c, pl.full([_M, _N], dtype=pl.INT16, value=0), [0, 0])
+    for ks in pl.parallel(0, _SPLIT):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
+            k0 = ks * _KS
+            partial = pl.matmul(a[:, k0 : k0 + _KS], b[k0 : k0 + _KS, :], out_dtype=pl.INT32)
+            c = pl.assemble(c, partial, [0, 0], atomic=pl.AtomicType.Add)
+    return c
+
+
+@jit
+def _split_k_i8_plain(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
+        c = pl.assemble(c, pl.full([_M, _N], dtype=pl.INT8, value=0), [0, 0])
+    for ks in pl.parallel(0, 1):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
+            partial = pl.matmul(a, b, out_dtype=pl.INT32)
+            c = pl.assemble(c, partial, [0, 0])
+    return c
+
+
+@pytest.mark.parametrize(
+    "prog_name,out_dtype_name",
+    [("_split_k_i8_atomic", "int8"), ("_split_k_i16_atomic", "int16"), ("_split_k_i8_plain", "int8")],
+)
+def test_acc_to_gm_narrow_int_dest_rejected(prog_name, out_dtype_name):
+    """An Acc->GM store into an int8/int16 tensor fails AccToGmStoreValid.
+
+    ptoas would reject the resulting ``pto.tstore`` ("expects A2/A3 acc tstore
+    dst element type to be i32/f32/f16/bf16"), but only against a line in a
+    generated ``.pto``. The verifier catches it right after InferTileMemorySpace
+    — the first point where the tile's Acc residency is known — so the error
+    carries the user's own source span. The last case is non-atomic: the
+    whitelist is independent of the atomic kwarg.
+    """
+    torch = pytest.importorskip("torch")
+    prog = globals()[prog_name]
+    with pytest.raises(pypto.Error, match="AccToGmStoreValid"):
+        prog.lower(
+            torch.randint(-4, 4, (_M, _K), dtype=torch.int8),
+            torch.randint(-4, 4, (_K, _N), dtype=torch.int8),
+            torch.zeros(_M, _N, dtype=getattr(torch, out_dtype_name)),
+        )
+
+
+def _mm_via_vec_to_int8_program():
+    """The same narrow-int GM destination, reached legally through Vec.
+
+    An explicit ``pl.cast`` narrows the int32 accumulator in the vector unit, so
+    the store sources a Vec tile — a legal int8 store, not an Acc->GM one.
+    """
+
+    @jit
+    def mm_via_vec_to_i8(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm_vec"):
+            partial = pl.matmul(a, b, out_dtype=pl.INT32)
+            narrowed = pl.cast(partial, pl.INT8)
+            c = pl.assemble(c, narrowed, [0, 0])
+        return c
+
+    return mm_via_vec_to_i8
+
+
+def test_int8_dest_via_vec_still_compiles():
+    """Regression guard against an over-strict AccToGmStoreValid.
+
+    Legality is a property of the tile's memory space, not of the user-visible
+    dtypes: this program has the identical INT32-matmul-into-INT8-tensor shape
+    as the rejected cases above, but routes through Vec and is legal. A check
+    phrased on dtypes alone (e.g. at the DSL level) would wrongly reject it.
+    """
+    torch = pytest.importorskip("torch")
+    post = _mm_via_vec_to_int8_program().lower(
+        torch.randint(-4, 4, (_M, _K), dtype=torch.int8),
+        torch.randint(-4, 4, (_K, _N), dtype=torch.int8),
+        torch.zeros(_M, _N, dtype=torch.int8),
+    )
+    incore = [f for f in post.functions.values() if ir.is_incore_type(f.func_type)]
+    mlir = "\n".join(codegen.PTOCodegen().generate(ir.Program([f], f.name, post.span)) for f in incore)
+    int8_stores = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line and "xi8>" in line]
+    assert int8_stores, f"expected an int8 store in the vector kernel:\n{mlir}"
+    assert all("loc=vec" in line for line in int8_stores), (
+        f"the int8 store must source a Vec tile, not an Acc one:\n{int8_stores}"
     )
 
 

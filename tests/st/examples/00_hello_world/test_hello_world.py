@@ -15,8 +15,7 @@ Verifies the simplest end-to-end @pl.jit kernel: load → add → store.
 
 import pytest
 import torch
-
-from examples.hello_world import tile_add
+from examples.beginner.hello_world import tile_add
 
 
 class TestHelloWorld:

@@ -8,12 +8,15 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-PyPTO Examples — organized from easy to hard.
+PyPTO Examples — a two-axis layout: difficulty tiers for the teaching kernels,
+category folders for everything else.
 
-  0. hello_world.py — simplest program: 128x128 add (start here)
-  1. kernels/       — single-kernel programs (elementwise, matmul, softmax, ...)
-  2. models/        — multi-kernel programs with orchestration (FFN, attention, ...)
-  3. utils/         — parsing, cross-function calls, error handling
+  beginner/     — language basics, one concept per file (start here)
+  intermediate/ — real-kernel patterns
+  advanced/     — performance and low-level techniques
+  models/       — multi-kernel programs with orchestration (FFN, attention, ...)
+  runtime/      — host/runtime patterns (dispatch, distributed callbacks, KV cache)
+  utils/        — parsing, cross-function calls, error handling
 
 See each folder's __init__.py for detailed reading order within.
 """

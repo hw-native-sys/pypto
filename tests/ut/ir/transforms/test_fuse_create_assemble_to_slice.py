@@ -537,6 +537,89 @@ class TestFuseCreateAssembleToSlice:
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
 
+    def test_zero_trip_rebind_does_not_alias_yield_root(self):
+        """A zero-trip loop returns its init buffer, not the body yield root.
+
+        Treating the return as an alias of ``fresh`` would make fusion delete
+        the required post-loop assemble even though ``fresh`` is never created.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [0, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                initial: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                initial = self.fill_row(x, initial)
+                for _i, (carried,) in pl.range(0, 0, 1, init_values=(initial,)):
+                    fresh: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    fresh = self.fill_row(x, fresh)
+                    (carried_rv,) = pl.yield_(fresh)
+                out = pl.assemble(out, carried_rv, [0, 0])
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_dynamic_trip_rebind_does_not_alias_one_root(self):
+        """A dynamic range may return either its init or yielded buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                trip_count: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                initial: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                for _i, (carried,) in pl.range(0, trip_count, 1, init_values=(initial,)):
+                    fresh: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    (carried_rv,) = pl.yield_(fresh)
+                out = pl.assemble(out, carried_rv, [0, 0])
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_maybe_false_while_rebind_does_not_alias_yield_root(self):
+        """A while may return its init value without entering the body."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                keep_going: pl.Scalar[pl.BOOL],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                initial: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                for (carried,) in pl.while_(init_values=(initial,)):
+                    pl.cond(keep_going)
+                    fresh: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    (carried_rv,) = pl.yield_(fresh)
+                out = pl.assemble(out, carried_rv, [0, 0])
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Before)
+        ir.assert_structural_equal(after, expected)
+
     def test_atomic_assemble_not_fused(self):
         """tensor.assemble with atomic=Add → not fused; the atomic assemble must survive.
 

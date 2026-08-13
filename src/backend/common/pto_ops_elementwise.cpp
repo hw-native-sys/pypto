@@ -29,6 +29,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -106,9 +107,29 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
 
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
-                                      codegen::CodegenBase& codegen_base) {
+                                      codegen::CodegenBase& codegen_base,
+                                      std::optional<size_t> i32_operand_idx = std::nullopt) {
   auto& codegen = AsPto(codegen_base);
   CheckArity(op, pto_op_name, arity);
+  if (i32_operand_idx.has_value()) {
+    INTERNAL_CHECK_SPAN(*i32_operand_idx < op->args_.size(), op->span_)
+        << "Internal error: " << pto_op_name << " i32 operand index " << *i32_operand_idx
+        << " is outside the " << op->args_.size() << " input operands";
+    std::vector<std::pair<std::string, std::string>> ins;
+    ins.reserve(op->args_.size());
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      const ExprPtr& arg = op->args_[i];
+      std::string operand = codegen.GetExprAsCode(arg);
+      std::string type = codegen.GetExprTypeAnnotation(arg);
+      if (i == *i32_operand_idx) {
+        operand = codegen.EmitCastToI32(arg, operand);
+        type = codegen.GetTypeString(DataType::INT32);
+      }
+      ins.emplace_back(std::move(operand), std::move(type));
+    }
+    EmitInsOuts(codegen, pto_op_name, ins);
+    return "";
+  }
   // The pto.tcolexpand* family requires materialized tile data — their hardware
   // lowering reads physical tile rows/cols from the operand type, which is
   // incorrect for a pto.subview alias.  Other tile ops (tmov, tfillpad, tadd,
@@ -150,6 +171,22 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
     }
   }
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+static std::string GemvAccPhaseAttr(const CallPtr& op) {
+  const auto acc_phase = op->GetKwarg<std::string>("acc_phase", "unspecified");
+  CHECK(acc_phase == "unspecified" || acc_phase == "partial" || acc_phase == "final")
+      << "GEMV acc_phase must be one of {unspecified, partial, final}, but got " << acc_phase;
+  if (acc_phase == "unspecified") return "";
+  return " {accPhase = #pto<acc_phase " + acc_phase + ">}";
+}
+
+static std::string MakeGemvCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
+                                      codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, pto_op_name, arity);
+  codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen) + GemvAccPhaseAttr(op));
   return "";
 }
 
@@ -545,6 +582,7 @@ struct SimpleOpEntry {
   const char* op_name;
   const char* pto_op_name;
   size_t arity;
+  std::optional<size_t> i32_operand_idx = std::nullopt;
 };
 
 // clang-format off
@@ -588,11 +626,11 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.divs",            "pto.tdivs",            2},
     {"tile.rems",            "pto.trems",            3},  // src0, scalar, tmp
     {"tile.fmods",           "pto.tfmods",           2},
-    {"tile.ands",            "pto.tands",            2},
-    {"tile.ors",             "pto.tors",             2},
-    {"tile.xors",            "pto.txors",            3},  // src0, scalar, tmp
-    {"tile.shls",            "pto.tshls",            2},
-    {"tile.shrs",            "pto.tshrs",            2},
+    {"tile.ands",            "pto.tands",            2, 1},
+    {"tile.ors",             "pto.tors",             2, 1},
+    {"tile.xors",            "pto.txors",            3, 1},  // src0, scalar, tmp
+    {"tile.shls",            "pto.tshls",            2, 1},
+    {"tile.shrs",            "pto.tshrs",            2, 1},
     {"tile.maximums",        "pto.tmaxs",            2},
     {"tile.minimums",        "pto.tmins",            2},
     {"tile.lrelu",           "pto.tlrelu",           2},
@@ -637,9 +675,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.matmul_acc / tile.gemv_acc / tile.matmul_mx_acc have custom codegen
     // (in-place accumulation: ptoas requires ins(acc) == outs).
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
-    {"tile.gemv",            "pto.tgemv",            2},
     // tile.gemv_acc has custom codegen (in-place accumulation)
-    {"tile.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
     // tile.move has custom codegen (no-op elision for same-space same-address moves)
@@ -668,9 +704,10 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(entry.op_name) > 0) continue;
     std::string pto_op = entry.pto_op_name;
     size_t arity = entry.arity;
+    std::optional<size_t> i32_operand_idx = entry.i32_operand_idx;
     auto reg_entry = backend.RegisterOp(entry.op_name);
-    reg_entry.f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
-      return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
+    reg_entry.f_codegen([pto_op, arity, i32_operand_idx](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeNaryCodegenPTO(pto_op, arity, op, codegen, i32_operand_idx);
     });
     if (RequiresRowMajorLayout(entry.op_name)) {
       for (size_t i = 0; i < arity; ++i) {
@@ -959,7 +996,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
       acc_inst << ") outs(" << dst;
       if (!dst_type.empty()) acc_inst << " : " << dst_type;
-      acc_inst << ")";
+      acc_inst << ")" << GemvAccPhaseAttr(op);
       codegen.Emit(acc_inst.str());
       return "";
     };
@@ -1011,8 +1048,14 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   };
 
   reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
+  reg("tile.gemv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGemvCodegenPTO("pto.tgemv", 2, op, codegen);
+  });
   reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
   reg("tile.matmul_mx_acc", make_mx_acc_codegen("pto.tmatmul.mx.acc"));
+  reg("tile.gemv_bias", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGemvCodegenPTO("pto.tgemv.bias", 3, op, codegen);
+  });
 }
 }  // namespace backend
 }  // namespace pypto

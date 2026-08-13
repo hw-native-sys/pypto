@@ -92,6 +92,12 @@ PropertyVerifierPtr CreateTypeCheckPropertyVerifier();
 PropertyVerifierPtr CreateNoNestedCallPropertyVerifier();
 
 /**
+ * @brief Factory for the Acc->GM store destination-dtype property verifier
+ * @return Shared pointer to AccToGmStoreValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
+
+/**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier
  */

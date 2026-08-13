@@ -24,7 +24,7 @@ class PTOCodegen:
     def __init__(self) -> None:
         """Create a new PTO code generator."""
 
-    def generate(self, program: Program, emit_tile_addr: bool = True) -> str:
+    def generate(self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True) -> str:
         """Generate PTO assembly from PyPTO IR Program.
 
         Args:
@@ -33,6 +33,10 @@ class PTOCodegen:
                 on ``pto.alloc_tile`` (ptoas ``--pto-level=level3``). When False,
                 omit ``addr`` so the ptoas PlanMemory pass allocates instead
                 (``--pto-level=level2``).
+            emit_source_loc: When True (default), suffix every emitted operation
+                with an MLIR ``loc("file":line:col)`` taken from the IR ``Span``,
+                so ptoas diagnostics name the user's source instead of a line in
+                the generated ``.pto``. When False, emit no locations.
 
         Returns:
             PTO assembly code string (.pto format) with instructions like tmul, tadd, FOR/ENDFOR, etc.

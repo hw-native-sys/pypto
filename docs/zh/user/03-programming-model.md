@@ -32,7 +32,7 @@ def square_tensor(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     # 张量级：命名整个数组。放置与搬运是编译器的事。
-    out = pl.mul(x, x)
+    out = pl.assemble(out, pl.mul(x, x), [0, 0])
     return out
 
 @pl.jit.incore

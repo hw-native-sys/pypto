@@ -167,6 +167,19 @@ class BackendHandler {
    */
   [[nodiscard]] virtual std::vector<std::string> GetExtraPtoasFlags() const = 0;
 
+  /**
+   * @brief Whether a dtype has an end-to-end in-core storage and PTO ABI on
+   *        this backend.
+   *
+   * Semantic 4-bit dtypes are packed in PyPTO's memory accounting, but that
+   * alone does not make them executable. Backends opt in only after their
+   * load/store and instruction ABI is available. Byte-addressable dtypes keep
+   * their existing support path.
+   */
+  [[nodiscard]] virtual bool SupportsIncoreDataType(const DataType& dtype) const {
+    return dtype.GetBit() != 4;
+  }
+
   // ---------------------------------------------------------------------------
   // Pass behavioural hooks
   // ---------------------------------------------------------------------------
@@ -249,6 +262,29 @@ class BackendHandler {
    * Ascend910B: true. Ascend950: false.
    */
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
+
+  /**
+   * @brief Whether the cube fix-pipe may store an Acc-resident tile straight
+   *        into a GM tensor of @p dtype.
+   *
+   * The fix-pipe narrows an accumulator on its way to global memory, but only
+   * into a fixed destination set. pto-isa encodes this as the non-quant
+   * `CheckAcc2gm` whitelist and ptoas as a `pto.tstore` verifier rule:
+   *
+   *   Ascend910B (a2a3): INT32 / FP32 / FP16 / BF16
+   *   Ascend950  (a5)  : INT32 / FP32 / FP16   (no BF16)
+   *
+   * Anything else -- notably INT8/INT16 -- must reach GM either through a Vec
+   * tile (an explicit `pl.cast` narrows in the vector unit, then stores) or via
+   * the quantized fix-pipe path, never a plain Acc->GM store. Legality is
+   * therefore a property of the *tile's memory space*, not of the user-visible
+   * dtypes: the identical DSL program is legal when its matmul result routes
+   * through Vec and illegal when it stays in Acc.
+   *
+   * The two sets above mirror ptoas exactly; keep them in step when the pinned
+   * assembler moves (`toolchain/versions.env`, `runtime/pto_isa.pin`).
+   */
+  [[nodiscard]] virtual bool SupportsAccToGmDtype(const DataType& dtype) const = 0;
 
   /**
    * @brief Compute the destination tile view for a cross-core transfer.
@@ -336,6 +372,27 @@ class BackendHandler {
    * @brief L0c (Acc) on-chip SRAM capacity, in bytes.
    */
   [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const = 0;
+
+  /**
+   * @brief Bias-table on-chip SRAM capacity, in bytes.
+   *
+   * Used by AutoTileMatmulL0 to cap the N extent of ``tile.matmul_bias``
+   * output tiles. Must match the AIC-core ``MemorySpace::Bias`` size in the
+   * SoC config and the PTO ISA Mat-to-Bias transfer limit.
+   */
+  [[nodiscard]] virtual uint32_t GetBiasCapacityBytes() const = 0;
+
+  /**
+   * @brief Whether the PTO ISA can transfer this dtype pair from Mat to Bias.
+   *
+   * AutoTileMatmulL0 uses this before materialising a Mat-resident
+   * `tile.matmul_bias` operand in the architectural Bias table. The memory
+   * graph only describes reachability; this query captures the narrower raw
+   * PTO-ISA dtype contract for that edge. Callers must separately ensure their
+   * IR operation can express any requested dtype conversion.
+   */
+  [[nodiscard]] virtual bool SupportsMatToBiasMove(const DataType& source_dtype,
+                                                   const DataType& bias_dtype) const = 0;
 
   /**
    * @brief Mat (L1) on-chip SRAM capacity, in bytes.

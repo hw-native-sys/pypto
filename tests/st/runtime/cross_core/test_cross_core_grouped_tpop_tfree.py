@@ -26,6 +26,7 @@ frees.
 
 import importlib.util
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -103,6 +104,20 @@ def _resolve_backend_type(platform: str) -> BackendType:
         ) from exc
 
 
+_TRAILING_LOC_RE = re.compile(r'\s+loc\("(?:[^"\\]|\\.)*":\d+:\d+\)\s*$')
+
+
+def _op_text(line: str) -> str:
+    """Return one generated ``.pto`` line without its trailing MLIR location.
+
+    PTO codegen suffixes every operation with ``loc("file":line:col)``, so an
+    assertion that anchors on the end of an op must drop it first. Mirrors
+    ``tests/ut/_pto_loc_common.strip_loc``, duplicated because the UT helper is
+    not on the ST tree's import path.
+    """
+    return _TRAILING_LOC_RE.sub("", line).strip()
+
+
 def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
     lines = pto_path.read_text(encoding="utf-8").splitlines()
 
@@ -120,7 +135,7 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
 
     tpop_indices = [i for i in range(func_start, func_end) if "pto.tpop_from_aiv" in lines[i]]
     tfree_indices = [
-        i for i in range(func_start, func_end) if lines[i].strip() == "pto.tfree_from_aiv {split = 1}"
+        i for i in range(func_start, func_end) if _op_text(lines[i]) == "pto.tfree_from_aiv {split = 1}"
     ]
     assert len(tpop_indices) == 2, (
         f"Expected 2 tpop lines in reordered-artifact test, got {len(tpop_indices)}"
@@ -137,8 +152,8 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
     pop0, alloc0, use0, free0, pop1, alloc1, use1, free1 = original_block
     assert use0.strip().startswith("pto.tmov ins("), use0
     assert use1.strip().startswith("pto.tmov ins("), use1
-    assert free0.strip() == "pto.tfree_from_aiv {split = 1}", free0
-    assert free1.strip() == "pto.tfree_from_aiv {split = 1}", free1
+    assert _op_text(free0) == "pto.tfree_from_aiv {split = 1}", free0
+    assert _op_text(free1) == "pto.tfree_from_aiv {split = 1}", free1
 
     consecutive_pop_then_free_block = [
         pop0,
@@ -152,8 +167,8 @@ def _rewrite_consecutive_tpop_tfree_pto(pto_path: Path) -> None:
     ]
     assert "pto.tpop_from_aiv" in consecutive_pop_then_free_block[0], consecutive_pop_then_free_block[0]
     assert "pto.tpop_from_aiv" in consecutive_pop_then_free_block[1], consecutive_pop_then_free_block[1]
-    assert consecutive_pop_then_free_block[-2].strip() == "pto.tfree_from_aiv {split = 1}"
-    assert consecutive_pop_then_free_block[-1].strip() == "pto.tfree_from_aiv {split = 1}"
+    assert _op_text(consecutive_pop_then_free_block[-2]) == "pto.tfree_from_aiv {split = 1}"
+    assert _op_text(consecutive_pop_then_free_block[-1]) == "pto.tfree_from_aiv {split = 1}"
 
     rewritten = (
         "\n".join(lines[: tpop_indices[0]] + consecutive_pop_then_free_block + lines[tfree_indices[1] + 1 :])

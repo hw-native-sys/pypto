@@ -88,7 +88,13 @@ def handshake_step(
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
 | `remote_load` | `(target, peer, offsets, shape, valid_shape=None) -> Tile` | 加载对端区域到本地 tile。`shape` 定义 tile 维度。`valid_shape` 可在物理 tile 保持固定大小的同时，让参差不齐的尾部只读取真实数据。Offsets 必须与对端写入时使用的一致——偏移 1 个元素就会导致静默数据损坏。 |
-| `remote_store` | `(src_tile, target, peer, offsets) -> Call` | 写入本地 tile 到对端。 |
+| `remote_store` | `(src_tile, target, peer, offsets, *, atomic=AtomicType.None_) -> Call` | 写入本地 tile 到对端。`atomic=Add` 表示累加到对端区域而非覆写。被写入的区域必须在 `offsets` 处落在 `target` 内部。 |
+
+`remote_store` 还有一个上移一层的形式 **`pld.tensor.remote_store`**
+`(src: Tensor, target: DT, peer: IntLike, offsets, *, atomic=...)`，用于在 tensor 级
+`@pl.jit` kernel 中推送*计算值*（那里没有 tile 可命名）。它 1:1 下降为 tile 形式，
+因此该值以单次远程写抵达对端，中间不经过全局内存往返。短形式 `pld.remote_store`
+会按传入的操作数在两者之间分派。
 
 ## Put 和 Get (`pld.tensor.*`)
 
@@ -184,12 +190,22 @@ for peer in pl.range(nranks):
 | `pld.alloc_window_buffer(...)` | `pld.tensor.alloc_window_buffer(...)` |
 | `pld.window(...)` | `pld.tensor.window(...)` |
 | `pld.remote_load(...)` | `pld.tile.remote_load(...)` |
-| `pld.remote_store(...)` | `pld.tile.remote_store(...)` |
+| `pld.remote_store(...)` | `pld.tile.remote_store(...)` / `pld.tensor.remote_store(...)`（按 `src` 分派） |
 
 **无短格式：** `pld.notify(...)`、`pld.wait(...)`、`pld.put(...)`、
 `pld.get(...)`、`pld.allreduce(...)` 等——这些需要完整的 3 段命名空间。
 
 ## 可运行示例
+
+[教程](05-tutorials.md)在揭示任何内置原语之前，先手工教授每个原语
+（步骤 03–07 已交付；08–16 为规划中）：
+
+| 原语 | 教程步骤 |
+| ---- | -------- |
+| window buffer | [08-window_buffer](08-window_buffer.md)（步骤 03） |
+| notify / wait | [09-barrier](09-barrier.md)（步骤 04） |
+| remote_load / remote_store | [10-remote_load_store](10-remote_load_store.md)（步骤 05） |
+| put / get | [11-put_get](11-put_get.md)（步骤 06） |
 
 | 原语 | 测试 |
 | ---- | ---- |

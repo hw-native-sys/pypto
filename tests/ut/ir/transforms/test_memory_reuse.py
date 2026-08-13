@@ -23,6 +23,10 @@ from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
+# Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
+# rather than silently dropping out of the membership test below.
+_LOAD_LIKE_OPS = frozenset({ir.get_op("tile.load").name, ir.get_op("tile.read").name})
+
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
@@ -4342,7 +4346,7 @@ class TestPipelineStageSeparation:
                 var_type = stmt.var.type
                 if isinstance(var_type, ir.TileType) and var_type.memref is not None:
                     val = stmt.value
-                    is_load = isinstance(val, ir.Call) and val.op.name in ("tile.load", "tile.read")
+                    is_load = isinstance(val, ir.Call) and val.op.name in _LOAD_LIKE_OPS
                     defs.append((is_load, var_type.memref.base_.name_hint))
                 super().visit_assign_stmt(stmt)
 
@@ -5414,6 +5418,41 @@ class TestCapacityGatedReuse:
         assert "fell back to the legacy packing" in err, (
             f"force_legacy must warn through the diagnostic channel, got stderr: {err!r}"
         )
+
+    def test_intrinsically_oversized_buffer_defers_to_allocator_without_reuse_warning(self, capfd):
+        """One 128 KiB Right tile in a 64 KiB L0B is not a reuse failure.
+
+        MemoryReuse still applies its legacy fallback so placement behavior is
+        unchanged, but it must not suggest that packing or pipeline depth caused
+        the failure. AllocateMemoryAddr remains the hard generic capacity gate;
+        operation-specific passes may diagnose it earlier with more context.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 256], pl.FP16],
+                b: pl.Tensor[[256, 256], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 256], pl.FP32]],
+            ) -> pl.Tensor[[128, 256], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                a_left = pl.tile.extract(a_mat, 0, 0, [128, 256], target_memory=pl.Mem.Left)
+                b_right = pl.tile.extract(b_mat, 0, 0, [256, 256], target_memory=pl.Mem.Right)
+                acc = pl.tile.matmul(a_left, b_right)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        after = passes.memory_reuse()(passes.init_mem_ref()(Before))
+        err = capfd.readouterr().err
+        assert "capacity-gated reuse could not fit memory space Right" not in err
+
+        with pytest.raises(ValueError, match=r"Right buffer usage \(131072 bytes\).*\(65536 bytes\)"):
+            passes.allocate_memory_addr()(after)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,9 @@
 """
 Basic Fused Operations System Tests for PyPTO.
 
-Corresponds to examples.kernels.fused_ops (02_fused_ops.py), implemented using @pl.jit.
+Corresponds to examples.beginner.scalar_ops / examples.beginner.activation /
+examples.intermediate.fused_linear (split from the former 02_fused_ops.py),
+implemented using @pl.jit.
 
 Four fused operation patterns are demonstrated:
   1. fused_add_scale     — vector: c = (a + b) * 2.0
@@ -21,12 +23,9 @@ Four fused operation patterns are demonstrated:
 
 import pytest
 import torch
-from examples.kernels.fused_ops import (
-    fused_add_relu,
-    fused_add_scale,
-    fused_linear_relu,
-    fused_matmul_bias,
-)
+from examples.beginner.activation import fused_add_relu
+from examples.beginner.scalar_ops import fused_add_scale
+from examples.intermediate.fused_linear import fused_linear_relu, fused_matmul_bias
 
 
 class TestBasicFusedOps:

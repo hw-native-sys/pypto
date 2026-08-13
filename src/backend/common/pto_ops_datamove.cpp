@@ -35,6 +35,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -518,8 +519,9 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
   return "";
 }
 
-// Helper function for GatherMask: emits pto.tgather with maskPattern attribute
-// PTOAS expects: ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type) outs(dst : dst_type)
+// Helper function for GatherMask: emits row-axis pto.tgather with maskPattern attribute.
+// PTOAS expects:
+//   ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type, "row") outs(dst : dst_type)
 static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CHECK(op->args_.size() == 1) << "tile.gather_mask requires 1 argument (src), but got " << op->args_.size();
@@ -539,7 +541,7 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
-  oss << ") outs(" << dst;
+  oss << ", \"row\") outs(" << dst;
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
@@ -706,8 +708,8 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
-// Helper for tile.scatter_mask (DPS; PyPTO codegen mask form, not a real ISA op):
-//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
+// Helper for tile.scatter_mask (DPS; row-direction mask form):
+//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty, "row")
 //                outs(%dst : dst_ty)
 //
 // The maskPattern rides *inside* ins() right after the src operand, exactly
@@ -716,10 +718,8 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 // The type annotation follows the attr dict, still inside ins().
 //
 // IR surface: 2-input op (dst, src) + mask_pattern attr; dst aliased via
-// set_output_reuses_input(0). NOTE: pto-isa/PTOAS expose a maskPattern form
-// only for tgather, not tscatter — this tscatter mask emission is a PyPTO
-// codegen construct, not a distinct ISA instruction. Emitted for A2/A3 /
-// CPU-sim style lowering paths.
+// set_output_reuses_input(0). PyPTO's mask-scatter semantics expand columns
+// within each row, which PTOAS v0.55 names the "row" axis.
 static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   CHECK(op->args_.size() == 2) << "tile.scatter_mask requires 2 arguments (dst, src), but got "
@@ -745,14 +745,16 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
       << ", input=" << input_ssa;
 
   std::ostringstream oss;
-  // maskPattern rides inside ins() after src, then the type annotation:
-  //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty) outs(%dst : dst_ty)
+  // maskPattern rides inside ins() after src, followed by the type annotation
+  // and the mandatory PTOAS v0.55 row axis:
+  //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty, "row")
+  //                outs(%dst : dst_ty)
   oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
       << ">}";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
-  oss << ") outs(" << dst;
+  oss << ", \"row\") outs(" << dst;
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
@@ -1107,7 +1109,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     auto col_offset_const = ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
     mat_info.const_offset = row_offset_const != nullptr && col_offset_const != nullptr;
 
-    // A subview's address is base + (row * source_cols + col) * element_bytes.
+    // A subview's address is base + (row * source_cols + col) * storage_bits / 8.
     // Record whether that address is provably 32-byte aligned for every runtime
     // offset. A dynamic row remains safe when the physical row stride is a
     // multiple of 32 bytes; a dynamic column is conservatively unknown.
@@ -1122,20 +1124,30 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         source_base_mod_32 = source_byte_offset->value_ % 32;
       }
     }
-    const int64_t element_bytes = static_cast<int64_t>(source_tile_type->dtype_.GetByte());
+    const int64_t storage_bits =
+        static_cast<int64_t>(ir::storage_size::GetStorageBitWidth(source_tile_type->dtype_));
     int64_t local_offset_mod_32 = -1;
-    if (col_offset_const != nullptr && element_bytes > 0) {
+    if (col_offset_const != nullptr && storage_bits > 0) {
+      auto mod_256 = [](int64_t value) {
+        const int64_t result = value % 256;
+        return result < 0 ? result + 256 : result;
+      };
+      auto logical_to_byte_mod_32 = [&](int64_t logical_mod_256) {
+        const int64_t bit_offset_mod_256 = (mod_256(logical_mod_256) * mod_256(storage_bits)) % 256;
+        return bit_offset_mod_256 % 8 == 0 ? bit_offset_mod_256 / 8 : int64_t{-1};
+      };
       if (row_offset_const != nullptr) {
         if (mat_info.source_cols > 0 || row_offset_const->value_ == 0) {
-          const int64_t row_bytes_mod =
-              ((row_offset_const->value_ % 32) * (mat_info.source_cols % 32) * (element_bytes % 32)) % 32;
-          const int64_t col_bytes_mod = ((col_offset_const->value_ % 32) * (element_bytes % 32)) % 32;
-          local_offset_mod_32 = (row_bytes_mod + col_bytes_mod) % 32;
+          const int64_t linear_mod_256 = (mod_256(row_offset_const->value_) * mod_256(mat_info.source_cols) +
+                                          mod_256(col_offset_const->value_)) %
+                                         256;
+          local_offset_mod_32 = logical_to_byte_mod_32(linear_mod_256);
         }
       } else if (mat_info.source_cols > 0) {
-        const int64_t row_stride_bytes_mod = (mat_info.source_cols % 32) * (element_bytes % 32) % 32;
-        const int64_t col_bytes_mod = ((col_offset_const->value_ % 32) * (element_bytes % 32)) % 32;
-        if (row_stride_bytes_mod == 0) local_offset_mod_32 = col_bytes_mod;
+        const int64_t row_stride_bit_mod_256 = (mod_256(mat_info.source_cols) * mod_256(storage_bits)) % 256;
+        if (row_stride_bit_mod_256 == 0) {
+          local_offset_mod_32 = logical_to_byte_mod_32(mod_256(col_offset_const->value_));
+        }
       }
     }
     if (source_base_mod_32 >= 0 && local_offset_mod_32 >= 0) {

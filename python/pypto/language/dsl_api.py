@@ -600,6 +600,50 @@ def static_assert(condition: Any, msg: str = "") -> None:
     """
 
 
+def func_attr(attrs: dict[str, Any]) -> None:
+    """Attach function-level attributes from inside the function body.
+
+    Written as the **first statement** of a function body, ``pl.func_attr``
+    declares metadata about the function as a whole::
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[64, 64], pl.FP32],
+                   w: pl.Tensor[[64, 64], pl.FP32],
+                   out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
+            pl.func_attr({"stationary": w})
+            ...
+
+    Why the body and not the decorator: a decorator is evaluated *before* the
+    signature binds any name, so ``@pl.function(attrs={"stationary": w})``
+    cannot be written — ``w`` does not exist yet. Body position places the
+    declaration after the parameters are bound, which is what makes an
+    attribute that references a parameter expressible at all.
+
+    Semantics:
+
+    * **Prologue only.** Every ``pl.func_attr`` call must precede every other
+      statement in the body. An attribute describes the whole function, so it
+      must not appear to start applying partway down a body; pinning it to the
+      prologue also keeps the printed form deterministic. Consequently only
+      parameters — not body-locals — are referenceable.
+    * **A bare name is always a parameter reference.** ``pl.func_attr({"n": k})``
+      records the parameter ``k``, never the value of an enclosing Python
+      variable named ``k``. Write Python-level constants as literals.
+    * **Multiple calls merge.** A key repeated across two calls — or between
+      ``pl.func_attr`` and a decorator ``attrs=`` — is a ``ParserSyntaxError``
+      naming the key.
+    * **Consumed at parse time.** The dict lands in ``Function.attrs`` and emits
+      no IR statement of its own.
+
+    Attributes the parser must read *before* it can parse the body stay on the
+    decorator as dedicated keywords: ``auto_scope=`` and ``external_source=``.
+
+    Args:
+        attrs: Attribute dict. Keys must be string literals.
+    """
+    # Runtime no-op - parser handles semantics
+
+
 class ClusterContext:
     """Context manager for Cluster scope.
 

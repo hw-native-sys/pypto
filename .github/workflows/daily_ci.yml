@@ -53,7 +53,7 @@ jobs:
         run: |
           pip install -v .[dev]
 
-      - name: Cache ptoas binary
+      - name: Cache ptoas environment
         id: cache-ptoas
         uses: actions/cache@v4
         with:
@@ -63,14 +63,17 @@ jobs:
       - name: Install ptoas
         if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
+          PTOAS_PACKAGE_VERSION="${PTOAS_VERSION#v}"
+          PTOAS_WHEEL_NAME="ptoas-${PTOAS_PACKAGE_VERSION}-cp310-cp310-manylinux_2_34_aarch64.whl"
+          PTOAS_WHEEL="/tmp/$PTOAS_WHEEL_NAME"
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
-             -o /tmp/ptoas-bin-aarch64.tar.gz
-          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
-          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+            "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/${PTOAS_WHEEL_NAME}" \
+            -o "$PTOAS_WHEEL"
+          echo "${PTOAS_SHA256}  $PTOAS_WHEEL" | sha256sum -c -
+          rm -rf "$PTOAS_ROOT"
+          python -m venv "$PTOAS_ROOT" --system-site-packages
+          "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
+          "$PTOAS_ROOT/bin/ptoas" --version
 
       - name: Clone pto-isa repository
         run: |
@@ -119,7 +122,7 @@ jobs:
     #
     # No container: each perf sample borrows an NPU via `task-submit --device
     # auto` (mechanism B), so the job holds no card and runs on a CPU runner.
-    # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh).
+    # Host setup mirrors dist-system-tests (toolchain bundle + venv + activate.sh).
     needs: toolchain
     # Perf sampling only reads the repo — no write scopes needed on GITHUB_TOKEN.
     permissions:
@@ -166,6 +169,7 @@ jobs:
           needs-device: 'true'
           pip-cache-name: pip-perf
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+          toolchain: bundle
 
       - name: Clone pypto-lib (Qwen3-14B decode forward)
         # $GITHUB_WORKSPACE/pypto-lib is a sibling of the perf-checkout checkout
@@ -179,7 +183,16 @@ jobs:
       - name: Install pypto-lib runner dependencies
         run: |
           source activate.sh
-          pip install nanobind torch
+          # uv, not pip: this job asks for toolchain: bundle, and that venv is
+          # built by `uv venv` and carries no pip.
+          #
+          # torch is deliberately NOT named here, though the samples need it.
+          # setup-ci-job installs it at a pin and from the CPU index, and naming
+          # it again would either duplicate that pin — two places to keep in step
+          # on the next bump — or, bare as it was, let a future divergence
+          # resolve `torch` from PyPI, whose aarch64 wheel drags in the entire
+          # CUDA stack on an Ascend host. One owner for that decision.
+          uv pip install nanobind
 
       - name: Run Qwen3-14B decode perf samples (L2 swimlane, 5x)
         id: qwen3_perf_run

@@ -392,6 +392,19 @@ bool Better(const Candidate& a, const Candidate& b, const L0TileConfig& cfg) {
 std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& cfg, int64_t C0,
                                        const Regime& regime) {
   if (m < cfg.min_m || n < cfg.min_n || k < cfg.min_k) return std::nullopt;
+  if (cfg.max_n > 0 && n > cfg.max_n) return std::nullopt;
+  const bool is_full_k_output_grid = k == cfg.K && (m != cfg.M || n != cfg.N);
+  const bool output_stationary = regime.stat == Stationarity::kOutputStationary;
+  const bool n_resource_is_pipelined = regime.stat == Stationarity::kAStationary || output_stationary;
+  const bool n_resource_is_nested = output_stationary && OSHoldsHoldA(m, n, cfg);
+  if (cfg.max_n_pipelined > 0 && is_full_k_output_grid && n_resource_is_pipelined &&
+      n > cfg.max_n_pipelined) {
+    return std::nullopt;
+  }
+  if (cfg.max_n_nested_pipelined > 0 && is_full_k_output_grid && n_resource_is_nested &&
+      n > cfg.max_n_nested_pipelined) {
+    return std::nullopt;
+  }
   // Without padding, the chosen tile must not exceed the problem dimensions.
   // Aligned-down boundary tiles (m <= M but M % m != 0) are still permitted —
   // the full-K emitter peels the partial boundary into a straight-line tail.
@@ -432,7 +445,8 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
                                        int64_t C0, bool require_2d, bool require_full_k) {
   const int64_t m_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.M), cfg.align_m) : cfg.M;
-  const int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
+  int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
+  if (cfg.max_n > 0) n_hi = std::min<int64_t>(n_hi, cfg.max_n);
   std::optional<Candidate> best;
   for (int64_t m = cfg.min_m; m <= m_hi; m += cfg.align_m) {
     const auto boxed_m = BoxedExtent(m, cfg.box_align_m);
@@ -491,6 +505,19 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: element byte sizes must be positive";
   CHECK(cfg.min_m > 0 && cfg.min_n > 0 && cfg.min_k > 0)
       << "ChooseL0Tile: minimum tile dimensions must be positive";
+  CHECK(cfg.max_n == 0 || cfg.max_n >= cfg.min_n)
+      << "ChooseL0Tile: max_n must be zero (unbounded) or at least min_n (got max_n=" << cfg.max_n
+      << ", min_n=" << cfg.min_n << ")";
+  CHECK(cfg.max_n_pipelined >= 0 &&
+        (cfg.max_n == 0 || cfg.max_n_pipelined == 0 || cfg.max_n_pipelined <= cfg.max_n))
+      << "ChooseL0Tile: max_n_pipelined must be non-negative and no greater than max_n when both "
+         "are bounded (got max_n_pipelined="
+      << cfg.max_n_pipelined << ", max_n=" << cfg.max_n << ")";
+  CHECK(cfg.max_n_nested_pipelined >= 0 && (cfg.max_n_pipelined == 0 || cfg.max_n_nested_pipelined == 0 ||
+                                            cfg.max_n_nested_pipelined <= cfg.max_n_pipelined))
+      << "ChooseL0Tile: max_n_nested_pipelined must be non-negative and no greater than "
+         "max_n_pipelined when both are bounded (got max_n_nested_pipelined="
+      << cfg.max_n_nested_pipelined << ", max_n_pipelined=" << cfg.max_n_pipelined << ")";
   CHECK(cfg.align_m > 0 && cfg.align_n > 0 && cfg.align_k > 0 && cfg.l0c_align_m > 0 && cfg.box_align_m > 0 &&
         cfg.box_align_n > 0)
       << "ChooseL0Tile: tile and physical L0C alignments must be positive";

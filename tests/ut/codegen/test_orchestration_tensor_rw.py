@@ -983,6 +983,86 @@ class TestTensorReadWriteOffsetCodegen:
             f"large=(1024*8+2048*8) / f32), got {shape_values}. Generated code:\n{code}"
         )
 
+    def test_gm_pipe_buffer_bidirectional_reserves_two_rings(self):
+        """A bidirectional pipe is TWO rings in GM, so its workspace is 2 * slot_num * slot_size.
+
+        The C2V ring lives at the workspace base and the V2C ring at
+        base + slot_num * slot_size (pto-isa `TPipe`, A2A3 GM layout). Sizing a
+        bidirectional pipe as a single ring leaves the whole V2C ring past the end
+        of the allocation.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class BidirGMPipeProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube(self):
+                c2v_peer = pl.import_peer_buffer(name="bidir_c2v", peer_func="vector")
+                v2c_buf = pl.reserve_buffer(name="bidir_v2c", size=2048, base=pl.AUTO)
+                pl.aic_initialize_pipe(c2v_peer, v2c_buf, dir_mask=3, slot_size=512)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector(self):
+                c2v_buf = pl.reserve_buffer(name="bidir_c2v", size=2048, base=pl.AUTO)
+                v2c_peer = pl.import_peer_buffer(name="bidir_v2c", peer_func="cube")
+                pl.aiv_initialize_pipe(c2v_buf, v2c_peer, dir_mask=3, slot_size=512)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group(self):
+                self.cube()
+                self.vector()
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                self.group()
+
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(BidirGMPipeProgram)
+
+        code = _generate_orch_code(transformed)
+        shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
+        # 2 rings * 4 slots * 512 B / sizeof(float) == 1024 elements.
+        assert shape_values == ["1024"], (
+            "Expected a bidirectional GM workspace of 2 * 4 * 512 B, got "
+            f"{shape_values} elements. Generated code:\n{code}"
+        )
+
+    def test_gm_pipe_buffer_honours_explicit_slot_num(self):
+        """Workspace sizing follows the slot_num the pipe was actually initialized with."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DeepGMPipeProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube(self):
+                buf = pl.reserve_buffer(name="deep_v2c", size=8192, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector(self):
+                peer = pl.import_peer_buffer(name="deep_v2c", peer_func="cube")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, slot_num=16)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group(self):
+                self.cube()
+                self.vector()
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                self.group()
+
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(DeepGMPipeProgram)
+
+        code = _generate_orch_code(transformed)
+        shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
+        # 1 ring * 16 slots * 512 B / sizeof(float) == 2048 elements; the dir_mask
+        # default of 8 slots would under-allocate by half.
+        assert shape_values == ["2048"], (
+            f"Expected slot_num=16 to be honoured when sizing, got {shape_values}. Generated code:\n{code}"
+        )
+
     def test_submit_dispatched_pipe_group_sizes_workspace_and_resolves_callees(self):
         """Submitted pipe kernels with different signatures share one Group ABI (#2097)."""
         backend.reset_for_testing()
@@ -1050,7 +1130,8 @@ class TestTensorReadWriteOffsetCodegen:
         code = result.code
 
         shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
-        assert shape_values == ["512"], code
+        # dir_mask=3 is two rings: 2 * 4 slots * 512 B / sizeof(float) == 1024 elements.
+        assert shape_values == ["1024"], code
         assert "rt_submit_task" in code, code
         assert result.func_name_to_signature["cube_side"] == result.func_name_to_signature["vec_side"]
         expected_mixed = (

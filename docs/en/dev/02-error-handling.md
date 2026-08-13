@@ -168,6 +168,35 @@ Every IR node inherits a `span_` field from `IRNode` (see [IR Overview](ir/00-ov
 
 When a `Span` is valid, the error output appends `[file:line:col]` to the message. When `Span::unknown()` is used, no source location is shown.
 
+### Span attribution in passes
+
+A pass that synthesizes or re-creates an IR node must give it the span of the
+**node it stands for**, not the enclosing function's span. Reaching for
+`func->span_` is convenient — it is in scope for the whole transform — but it
+reports the `def` line for every node the pass touches, which silently degrades
+each consumer that reads a span off a `Call`: `CHECK_SPAN` / `INTERNAL_CHECK_SPAN`
+diagnostics raised by later passes, IR-trace reports, and span-keyed verifier
+checks (the PH001 perf hint deduplicates by source site, so coarsened spans merge
+unrelated transfers into one bogus "N occurrences" hint).
+
+```cpp
+// ❌ every synthesized op reports the `def` line
+const auto& span = func->span_;
+for (const auto& stmt : body) { /* ... */ op_registry.Create(name, args, span); }
+
+// ✅ attribute each node to the statement being rewritten
+for (const auto& stmt : body) {
+  const Span& span = stmt->span_;
+  /* ... */ op_registry.Create(name, args, span);
+}
+```
+
+Pick the nearest node that motivated the new one: the statement being rewritten,
+the `Call` being converted (`call->span_`), the parameter a prologue load reads
+(`var->span_`), or the `ReturnStmt` an epilogue store serves. `func->span_` is
+correct only for nodes that genuinely belong to the whole function — the rebuilt
+`Function` itself and its body `SeqStmts`.
+
 ## Python API
 
 ```python

@@ -178,7 +178,7 @@ class TestCastModeRoundTrip:
         # Call with int mode
         call = op.tensor.cast(tensor_var, DataType.FP32, mode=2, span=span)
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tensor.cast"
+        assert call.op.name == ir.get_op("tensor.cast").name
 
     def test_cast_mode_round_trip(self):
         """Test parse → print → re-parse round-trip with mode='round'."""

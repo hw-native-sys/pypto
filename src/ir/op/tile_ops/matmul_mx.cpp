@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -34,6 +35,8 @@
 
 namespace pypto {
 namespace ir {
+
+static bool IsSupportedMxDataType(const DataType& dtype) { return dtype == DataType::FP8E4M3FN; }
 
 // Static-dim checks only: when either side is symbolic (non-ConstInt), the match
 // is skipped. Full PTOAS alignment (M%16 / K%64 / N%32 / ceil(K/32) groups) is
@@ -96,12 +99,18 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                   << args[2]->GetType()->TypeName();
   CHECK(lhs_type->shape_.size() == 2 && rhs_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D lhs/rhs tiles";
-  CHECK(lhs_type->dtype_ == DataType::FP8E4M3FN)
+  CHECK(IsSupportedMxDataType(lhs_type->dtype_))
       << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
-      << lhs_type->dtype_.ToString();
-  CHECK(rhs_type->dtype_ == DataType::FP8E4M3FN)
+      << lhs_type->dtype_.ToString()
+      << (lhs_type->dtype_ == DataType::FP4
+              ? "; native FP4 matmul is not supported, so cast the FP4 lhs to FP8E4M3FN with pl.cast first"
+              : "");
+  CHECK(IsSupportedMxDataType(rhs_type->dtype_))
       << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
-      << rhs_type->dtype_.ToString();
+      << rhs_type->dtype_.ToString()
+      << (rhs_type->dtype_ == DataType::FP4
+              ? "; native FP4 matmul is not supported, so cast the FP4 rhs to FP8E4M3FN with pl.cast first"
+              : "");
 
   ExprPtr m_phys = lhs_type->shape_[0];
   ExprPtr k_phys_lhs = lhs_type->shape_[1];
@@ -125,9 +134,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
         << " requires physical M divisible by 16 (ISA/PTOAS tmatmul_mx), but got M=" << m_phys_c->value_;
   }
   if (n_phys_c) {
-    CHECK(n_phys_c->value_ > 0 && n_phys_c->value_ % 32 == 0)
-        << "The operator " << op_name
-        << " requires physical N divisible by 32 (ISA/PTOAS tmatmul_mx fp8), but got N=" << n_phys_c->value_;
+    constexpr int64_t n_align = 32;
+    CHECK(n_phys_c->value_ > 0 && n_phys_c->value_ % n_align == 0)
+        << "The operator " << op_name << " requires physical N divisible by " << n_align << " for "
+        << rhs_type->dtype_.ToString()
+        << " (ISA/PTOAS tmatmul_mx 32-byte row), but got N=" << n_phys_c->value_;
   }
   if (k_phys_lhs_c && k_phys_rhs_c) {
     CHECK(k_phys_lhs_c->value_ == k_phys_rhs_c->value_)
@@ -364,7 +375,7 @@ TypePtr DeduceTileTGetScaleAddrType(const std::vector<ExprPtr>& args,
   CHECK(dst_type->dtype_ == DataType::FP8E8M0)
       << "The operator " << op_name << " requires dst_scale dtype FP8E8M0, but got "
       << dst_type->dtype_.ToString();
-  CHECK(src_type->dtype_ == DataType::FP8E4M3FN)
+  CHECK(IsSupportedMxDataType(src_type->dtype_))
       << "The operator " << op_name << " requires src dtype FP8E4M3FN, but got "
       << src_type->dtype_.ToString();
   CHECK(dst_type->shape_.size() == 2 && src_type->shape_.size() == 2)

@@ -127,7 +127,7 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 ### MX block-scale matmul（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale
-dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8 路径。
+dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant MXFP8，以及显式转换后的 FP4×FP8 路径。
 `InsertMxScaleAddr`（在 `InferTileMemorySpace` 之后）在操作数内存空间解析完成后插入内部 `tile.tget_scale_addr` 绑定。
 
 | IR / DSL | 说明 |
@@ -135,29 +135,33 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.load` 读取 `pl.Tensor[..., pl.MX_A_ZZ \| pl.MX_B_NN]` | 源 TensorLayout 携带 MX scale GM layout。dtype 为 FP8E8M0 或 UINT8，必须指定 `target_memory=Mat`，且不支持 strided source。 |
 | `tile.move(..., target_memory=LeftScale/RightScale)` | Mat→Scale move；硬件 layout 固定为左侧 row/row/32、右侧 col/col/32，源 Mat tile 与 layout override 必须完全匹配。 |
 | `tile.create(..., target_memory=LeftScale/RightScale)` | 不支持；应先把 MX scale 数据加载到 Mat，再 move 到 scale 内存。 |
-| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；data 仅支持 `FP8E4M3FN`，scale 为 `FP8E8M0`；physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
+| `tile.matmul_mx` / `pl.matmul_mx` | `Left, LeftScale, Right, RightScale → Acc`；进入算子的两块 data operand 必须都是 `FP8E4M3FN`，scale 为 `FP8E8M0`。支持的 FP4 输入形式仅为左侧 FP4×右侧 FP8，且必须先显式写 `pl.cast(fp4, pl.FP8E4M3FN)`；原生 FP4×FP4 与反向 FP8×FP4 会被拒绝。Physical M/K/N、valid K 与 scale-group 数均以 cast 后进入算子的 FP8 tile extent 为准，不使用 packed x2 carrier shape。Physical `M % 16 == 0`、`K % 64 == 0`、`N % 32 == 0`；valid K 必须满足 `ceil(validK/32) == ceil(physicalK/32)`。对齐与 scale-group 数值检查仅作用于常量维；符号维跳过数值校验，回退到声明的 scale tile 几何（后续仍由 PTOAS 验证）。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 
-规范样例：`M=128,K=64,N=64`，A/B=`FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
-GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）；对齐 M↑16、K↑64、N↑32（fp8）。
+规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
+GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。左侧输入可来自 FP4，但必须先显式转为 FP8；对齐 M↑16、K↑64、N↑32。
 
 MX tensor subview 是当前遗留限制。由于硬件路径无法表达 subview base
 offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
 `tensor.reinterpret_view` 和 `tensor.view` 均拒绝 MX-layout source。
 在完整的 scale layout contract 实现前，`pld.tile.remote_load` 也拒绝 MX layout。
 
+FP4 Tensor/Tile shape 与 `valid_shape` 都以逻辑 nibble 计数；末维必须是正偶数，slice 的线性起点也不能落在一个字节的第二个 nibble。Torch/runtime 继续以物理 x2 shape 携带 `float4_e2m1fn_x2`，JIT/compiled-call 边界负责换算，因此 IR 不增加持久化 `storage_shape`。
+
+A5 会把左侧显式 FP4→FP8 tile cast 展开为 FP4→BF16→FP32→FP8E4M3FN。它是 data operand 的数值 cast，不修改 scale。原生 packed-FP4 矩阵乘与 MXFP4 quant 本次仍暂缓。
+
 #### MX / Ascend950：pto-isa 约束
 
 | 约束 | 要点 |
 | ---- | ---- |
 | 独立 scale buffer | Cube **不**把 scale 折进 Left/Right data；`TileType::ScaleLeft` / `ScaleRight`（L0A/L0B sidecar）↔ PyPTO `LeftScale` / `RightScale` |
-| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；本阶段 MX data **仅 `FP8E4M3FN`**（**拒绝 `FP8E5M2`**）；physical `K%64==0`，scale 组数 `ceil(K/32)`，fractal=32 |
+| payload | scale 为 `float8_e8m0_t` / `FP8E8M0`；实际发射的 MX data pair 为 `FP8E4M3FN × FP8E4M3FN`（拒绝 `FP8E5M2` 与原生 packed FP4）。逻辑 FP4×FP8 输入先把左侧 FP4 转为 FP8；physical K、valid K 与 `ceil(K/32)` scale 组数均以 cast 后的 FP8 tile 为准，而非 packed x2 carrier；physical `K%64==0`，fractal=32 |
 | layout | `mx_a_zz` → row-major ZZ；`mx_b_nn` → col-major NN；`TLoadMxCube*`（AZZ2ZZ 等） |
 | `TMov` `CommonCheckMX` | 允许 `uint8_t` Mat → `float8_e8m0` ScaleLeft/Right；canonical：ui8 Mat reshape 再 ui8→f8 Scale |
 | bind-then-fill | **先** `GetScaleAddr(Left/Right)` 再填 sidecar；写 provisional alloc 地址在 rebound 后无效 |
-| 对齐 | 与 ISA `tmatmul_mx` 一致：physical `M%16==0`、`K%64==0`、`N%32==0`（fp8）；`DeduceTileMatMulMxType` **仅对常量维**强制；符号维跳过数值检查 |
+| 对齐 | cast 后的 FP8 tile extent 要求 physical `M%16==0`、`K%64==0`、`N%32==0`；`DeduceTileMatMulMxType` **仅对常量维**强制；符号维跳过数值检查 |
 
 #### MX / Ascend950：PTOAS 约束
 
@@ -170,6 +174,26 @@ offset，`tensor.slice`、`tensor.reshape`、`tensor.transpose`、
 | 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill） |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；本阶段用 **host ZZ/NN**（AZZ2ZZ） |
 | 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr` |
+
+### 仅 Tile 的 GEMV 家族（A2/A3）
+
+仅 tile 的 GEMV 家族逻辑形状为 `[1, N]`，但物理形状遵循 Cube 指令的对齐契约：
+Acc 结果使用 16 个物理行，物理列数沿用 RHS tile（并须满足目标平台通常的
+C0 对齐要求），bias 使用相同的物理列数；
+各自的 `valid_shape` 仍保留逻辑 `[K, N]`、`[1, N]` 和 `[1, N]` 区域。
+lhs 的物理行数和逻辑行数都必须恰好为 1。
+单行 Mat load 使用 `blayout=row_major` 和 `slayout=none_box`，从而选择
+PTO-ISA 的行向量提取路径。
+
+rhs 的逻辑 K 必须覆盖 lhs 的逻辑 K。支持的 dtype 三元组为
+`INT8 x INT8 -> INT32`，以及同类型 `FP16`、`BF16` 或 `FP32` 输入到
+`FP32`；`gemv_acc` 的 `acc` 使用对应输出 dtype，`gemv_bias` 的 `bias`
+也必须使用相同的输出 dtype，且 bias 的 valid shape 必须覆盖逻辑输出
+`[1, N]`；物理 N 一致时，bias 的 valid N 可以更宽。
+
+`tile.gemv`、`tile.gemv_acc` 和 `tile.gemv_bias` 的 `acc_phase` 可设为
+`"unspecified"`（默认值）、`"partial"` 或 `"final"`。后续仍有 K 分块时
+使用 `"partial"`，最后一个分块使用 `"final"`。
 
 ## Python 用法
 

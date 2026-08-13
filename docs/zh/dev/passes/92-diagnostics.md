@@ -80,20 +80,32 @@ Register(DiagnosticCheck::MyCheck,
 
 ### 第一项检查：`TileInnermostDimGranularity` (PH001)
 
-检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查**感知内存空间**：阈值建模的是 L2 cache-line 关注点，因此 `target_memory` 为 cube 私有 L0/L1（`Mat`/`Left`/`Right`/`Acc`）的 tile 不会经过 L2，会被跳过，以避免在已调优的 cube kernel 上误报。命中按 `(file, line, col, op, dtype, innermost_bytes, target_memory)` 站点**去重**——循环展开 / 分片展开在同一源 span 产生的多个*相同* tile 传输会折叠为一条带出现次数的 hint；而共享同一 span 的不同传输（dtype/大小/内存空间不同）各自保留自己的 hint，使计数不会产生误导。位于无效 / 未知 span 的命中会单独发出，而非折叠在一起。消息会回显其评估的 `(dtype[innermost], target_memory)` 元组，便于将字节数与 IR 对照。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
+检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查适用于**所有内存空间，包括 cube 私有空间**（issue #2309）：本检查只考察 `tile.load` / `tile.store`，而它们的非 tile 一侧是 `TensorType`——始终位于片外——因此无论 tile 落在哪个空间，二者都是 GM↔片上传输，其 GM 侧总是以最内层维度的粒度穿越 L2。真正的片内搬移（`tile.move` / `tile.extract`，如 Mat→L0）才是 cube 私有的，而本检查根本不考察它们。早期版本以 L2 局部性为由跳过 `Mat`/`Left`/`Right`/`Acc` tile；由于任何片内传输都不会到达本检查，该跳过只可能压制真阳性——典型的就是 `b_trans` matmul 的 GM→Mat 权重加载，其加载窗口是调用方 `[N, K]` 切片的转置（每行 128 B，而建议值为 512 B，实测有 16–25% 的性能损失）。
+
+每条 hint 还会报告**传输规模**——`moves <total>B as <rows> x <row>B rows`——其中 `rows` 是该次传输发出的短总线事务数量。规模是同一最内层尺寸下区分 hint 轻重的依据：`[1024, 64]` 权重面板与 `[16, 64]` 激活面板在 span、op、dtype、最内层尺寸和内存空间上完全一致，只在流量上相差 64 倍。有三点需要注意：
+
+- 这些数字取自**有效 valid shape**，而非物理分配。两个 op 的 `pto.partition_view` 都按 `valid_shape` 定尺寸，因此带 padding 的 tile 或尾块搬运的数据少于其分配量；对这类 tile，报告的行宽会小于标题中的物理最内层维度。
+- 总量为 `rows × row_bytes`，先对每行向上取整再相乘。若对整个 tile 一次性取整，会把位打包传输低估一个打包倍数，并与紧邻的行数据自相矛盾——`[16, 1]` 的 bool tile 搬运的是 16 行 × 1B，而不是打包后的 2B。
+- 当任一 valid 维度为符号量时省略该子句。
+
+命中按 `(file, line, col, op, dtype, innermost_bytes, innermost_elems, target_memory, rows, row_bytes, transfer_bytes)` 站点**去重**——即消息渲染的全部事实，因此两条打印结果不同的传输绝不会折叠到彼此的文本上（在位打包下元素数与字节数各自独立地重要：`int4[1]` 与 `int4[2]` 都向上取整为 1 字节）——循环展开 / 分片展开在同一源 span 产生的多个*相同* tile 传输会折叠为一条带出现次数的 hint；而共享同一 span 的不同传输（dtype/大小/内存空间不同）各自保留自己的 hint，使计数不会产生误导。位于无效 / 未知 span 的命中会单独发出，而非折叠在一起。消息会回显其评估的 `(dtype[innermost], target_memory)` 元组，便于将字节数与 IR 对照。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
 
 > **源 span 限制：** span 为流水线后 IR 文本位置（`<string>:line:col`），并非原始 DSL `pl.at` / 切片表达式，也未命名控制内层维度的 chunk 常量。回溯到用户源代码并命名内层维度常量需要将 DSL 源 span 通过 parser/IR 传递到 tile op 上——目前 `TileType`、`Call` op、`Span` 都未携带该元数据（issue #1305 第 2/3 项）。
 
-示例：stderr 摘要 + `perf_hints.log` 内容（`examples/kernels/08_assemble.py`，Ascend950）：
+示例：stderr 摘要 + `perf_hints.log` 内容（`examples/intermediate/05_assemble.py`，Ascend910B）。注意前两行——op、span、dtype、最内层尺寸与内存空间完全相同，仅靠传输规模区分：
 
 ```text
 # stderr：
-[perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
+[perf_hint] 4 hints across 4 sites; see /tmp/build/perf_hints.log
 
 # /tmp/build/perf_hints.log：
-[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
-[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Mat); moves 1024B as 16 x 64B rows; recommended >= 512B for backend a2a3 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:70:5
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Mat); moves 2048B as 32 x 64B rows; recommended >= 512B for backend a2a3 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:70:5
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 128B (tile fp32[32], target_memory=Mat); moves 4096B as 32 x 128B rows; recommended >= 512B for backend a2a3 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:70:5
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 128B (tile fp32[32], target_memory=Vec); moves 4096B as 32 x 128B rows; recommended >= 512B for backend a2a3 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:83:9
 ```
+
+**Hint 数量。** 由于 cube 空间的传输现已纳入检查范围，暂存大量小 GM→Mat 面板的 kernel 会看到比以往更多的 PH001 行。这些 hint 仅为建议性质，写入 `perf_hints.log`（stderr 只有一行摘要）；请按 `moves …` 子句排序取舍，若某个 kernel 的 tiling 是有意为之，可用 `disabled_diagnostics` 整体关闭该检查。
 
 ## 用户面 API
 

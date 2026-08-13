@@ -88,6 +88,9 @@ class DataType(Enum):
     BF16 = "bf16"
     FP32 = "fp32"
     FP16 = "fp16"
+    FP8E4M3FN = "fp8e4m3fn"
+    FP8E8M0 = "fp8e8m0"
+    FP4 = "fp4"
     INT32 = "int32"
     UINT32 = "uint32"
     INT16 = "int16"
@@ -113,7 +116,18 @@ class DataType(Enum):
             DataType.INT64: torch.int64,
             DataType.BOOL: torch.bool,
         }
-        return mapping[self]
+        if self in mapping:
+            return mapping[self]
+
+        optional_name = {
+            DataType.FP8E4M3FN: "float8_e4m3fn",
+            DataType.FP8E8M0: "float8_e8m0fnu",
+            DataType.FP4: "float4_e2m1fn_x2",
+        }[self]
+        optional_dtype = getattr(torch, optional_name, None)
+        if not isinstance(optional_dtype, torch.dtype):
+            raise ValueError(f"PyTorch does not provide the dtype torch.{optional_name}")
+        return optional_dtype
 
 
 @dataclass

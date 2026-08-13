@@ -79,23 +79,21 @@ assert restored.kwargs["a_trans"] == True
 硬件特定的内存分配详情被完整保留：
 
 ```python
-# Create MemRef and TileView
-memref = ir.MemRef(
-    ir.ConstInt(0x1000, DataType.INT64, span),
-    512, 0
-)
+span = ir.Span.unknown()
 
-tile_view = ir.TileView()
-tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)] * 2
-tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(16, DataType.INT64, span)]
+# TileView is immutable — construct it with all values
+memref = ir.MemRef("mem_left_0", 0, 512)
+tile_view = ir.TileView(valid_shape=[8, 16], stride=[1, 16])
 
-# Create TileType with memory info
-tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Left)
+# Create TileType with memory info, and a Var that carries it
+tile_type = ir.TileType([16, 16], DataType.FP16, memref, tile_view, ir.Mem.Left)
+tile_var = ir.Var("t", tile_type, span)
 
 # Serialize and deserialize
 restored = ir.deserialize(ir.serialize(tile_var))
 assert restored.type.memory_space == ir.Mem.Left
 assert len(restored.type.tile_view.valid_shape) == 2
+assert restored.type.memref.size_ == 512
 ```
 
 ## MessagePack 格式
@@ -126,7 +124,7 @@ assert len(restored.type.tile_view.valid_shape) == 2
 | **Span** | Map | `filename`, `begin_line`, `begin_column`, `end_line`, `end_column` |
 | **ScalarType** | Map | `type_kind: "ScalarType"`, `dtype: 19` |
 | **TensorType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref` |
-| **TileType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tile_view` |
+| **TileType** | Map | `type_kind`, `dtype`, `shape`, 可选 `memref`, 可选 `tile_view`, 可选 `memory_space` |
 | **Op/GlobalVar** | Map | `name`, `is_global_var` |
 
 ### MemRef 和 TileView 格式
@@ -135,9 +133,13 @@ assert len(restored.type.tile_view.valid_shape) == 2
 // MemRef (optional field in TensorType/TileType)
 {
   "memref": {
-    "memory_space": 3,    // uint8: MemorySpace enum
-    "addr": {...},        // Expr node
-    "size": 512           // uint64
+    "base": "mem_left_0", // string: the base Ptr's name
+    "base_node": {...},   // Node: the base Ptr itself
+    "byte_offset": {...}, // Expr node
+    "size": 512,          // uint64
+    "is_pinned": true,    // bool,      omitted when false
+    "slot_count": 2,      // uint64,    omitted when 1
+    "slot_index": {...}   // Expr node, omitted when absent
   }
 }
 
@@ -155,6 +157,16 @@ assert len(restored.type.tile_view.valid_shape) == 2
   }
 }
 ```
+
+`base` 和 `base_node` 都描述同一块分配，且两者都会写出。`base` 是旧 blob
+携带、旧读取端期待的名字；`base_node` 则是作为真实节点的 base `Ptr`，它才是
+保持分配身份的关键 —— 身份由 `base_` 的*指针*同一性决定，而节点图会在所有
+引用之间共享同一个对象，包括定义该 `Ptr` 的 alloc 语句。若仅凭名字重建
+base，每个 MemRef 会得到一个并非 alloc 所属的 `Var`，地址分配器就无法再把
+它们匹配到各自的分配上。
+
+内存空间**不是** `MemRef` 的字段：它序列化在 `TileType` 上，键为
+`memory_space`（uint8）；`TensorType` 的规范内存空间固定为 DDR。
 
 在引入 `compact` 字段之前写出的 blob 会省略该键，反序列化时按
 `CompactMode.null` 处理。

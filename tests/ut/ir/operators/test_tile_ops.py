@@ -19,6 +19,14 @@ from pypto import DataType, ir
 from pypto.ir.op import tile
 from pypto.language.parser.diagnostics import InvalidOperationError
 
+_OP_TILE_EXTRACT = ir.get_op("tile.extract").name
+_OP_TILE_FILLPAD_EXPAND = ir.get_op("tile.fillpad_expand").name
+_OP_TILE_MSCATTER = ir.get_op("tile.mscatter").name
+_OP_TILE_ROW_EXPAND_ADD = ir.get_op("tile.row_expand_add").name
+_OP_TILE_SET_VALIDSHAPE = ir.get_op("tile.set_validshape").name
+_OP_TILE_SLICE = ir.get_op("tile.slice").name
+_OP_TILE_TRANSPOSE = ir.get_op("tile.transpose").name
+
 
 def _operand_dtype(expr: ir.Expr) -> DataType:
     """Return a constant operand's dtype, narrowing ``Expr`` for the type checker."""
@@ -153,9 +161,9 @@ class TestTileElementwiseOps:
 
         assert dict(default_call.kwargs) == {}
         assert dict(high_precision_call.kwargs) == {"high_precision": True}
-        assert scalar_call.op.name == "tile.divs"
+        assert scalar_call.op.name == ir.get_op("tile.divs").name
         assert dict(scalar_call.kwargs) == {}
-        with pytest.raises(ValueError, match=r"requires a Tile rhs"):
+        with pytest.raises(TypeError, match=r"requires a Tile rhs"):
             tile.div(lhs, 2.0, high_precision=True)
 
     def test_tile_div_rejects_integer_high_precision_template_gap(self):
@@ -524,7 +532,7 @@ class TestTileUnaryOps:
         call = tile.sin(tile_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.sin"
+        assert call.op.name == ir.get_op("tile.sin").name
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -540,7 +548,7 @@ class TestTileUnaryOps:
         call = tile.cos(tile_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.cos"
+        assert call.op.name == ir.get_op("tile.cos").name
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
@@ -1441,7 +1449,7 @@ class TestTileBroadcastOps:
         )
 
         call = tile.row_expand_add(main, packed_row)
-        assert call.op.name == "tile.row_expand_add"
+        assert call.op.name == _OP_TILE_ROW_EXPAND_ADD
         assert len(call.args) == 2
 
     def test_tile_row_expand_add_rejects_invalid_packed_valid_width_and_tmp_type(self):
@@ -1526,7 +1534,7 @@ class TestTileBroadcastOps:
             ir.TileType([8, 1], DataType.FP32, tile_view=matching_row_view),
             span,
         )
-        assert tile.row_expand_add(main, matching_row).op.name == "tile.row_expand_add"
+        assert tile.row_expand_add(main, matching_row).op.name == _OP_TILE_ROW_EXPAND_ADD
 
         unrelated_row_view = ir.TileView(
             valid_shape=[other_rows, 1],
@@ -2349,7 +2357,7 @@ class TestTileMatMulOps:
             ) -> pl.Tensor[[1, 128], pl.FP32]:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv(tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2364,15 +2372,15 @@ class TestTileMatMulOps:
             @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
-                acc_in: pl.Tensor[[1, 128], pl.FP32],
+                acc_in: pl.Tensor[[16, 128], pl.FP32],
                 a: pl.Tensor[[1, 64], pl.FP32],
                 b: pl.Tensor[[64, 128], pl.FP32],
                 output: pl.Tensor[[1, 128], pl.FP32],
             ) -> pl.Tensor[[1, 128], pl.FP32]:
-                tile_acc: pl.Tile[[1, 32], pl.FP32] = pl.load(acc_in, [0, 0], [1, 32])
+                tile_acc: pl.Tile[[16, 32], pl.FP32] = pl.load(acc_in, [0, 0], [16, 32], valid_shape=[1, 32])
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_acc(tile_acc, tile_a, tile_b)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
@@ -2395,12 +2403,206 @@ class TestTileMatMulOps:
                 tile_a: pl.Tile[[1, 16], pl.FP32] = pl.load(a, [0, 0], [1, 16])
                 tile_b: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
                 tile_bias: pl.Tile[[1, 32], pl.FP32] = pl.load(bias, [0, 0], [1, 32])
-                tile_c: pl.Tile[[1, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
+                tile_c: pl.Tile[[16, 32], pl.FP32] = pl.gemv_bias(tile_a, tile_b, tile_bias)
                 result: pl.Tensor[[1, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
         assert "tile.gemv_bias" in ir_str
+
+    def test_tile_gemv_physical_accumulator_and_logical_valid_shape(self):
+        """GEMV pads Acc rows to 16 while preserving the logical [1, N] extent."""
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+
+        result = tile.gemv(lhs, rhs)
+        result_type = result.type
+        assert isinstance(result_type, ir.TileType)
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+        assert _valid_of(result_type) == [1, 48]
+
+        acc_result = tile.gemv_acc(result, lhs, rhs)
+        bias_result = tile.gemv_bias(lhs, rhs, bias)
+        for call in (acc_result, bias_result):
+            call_type = call.type
+            assert isinstance(call_type, ir.TileType)
+            assert [d.value for d in call_type.shape if isinstance(d, ir.ConstInt)] == [16, 128]
+            assert _valid_of(call_type) == [1, 48]
+
+    @pytest.mark.parametrize(
+        ("input_dtype", "output_dtype"),
+        [
+            (DataType.INT8, DataType.INT32),
+            (DataType.FP16, DataType.FP32),
+            (DataType.BF16, DataType.FP32),
+            (DataType.FP32, DataType.FP32),
+        ],
+    )
+    def test_tile_gemv_family_accepts_supported_dtype_triples(self, input_dtype, output_dtype):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], input_dtype, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], input_dtype, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 128], output_dtype, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], output_dtype, tile_view=ir.TileView(valid_shape=[1, 48])),
+            span,
+        )
+
+        for call in (tile.gemv(lhs, rhs), tile.gemv_acc(acc, lhs, rhs), tile.gemv_bias(lhs, rhs, bias)):
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType)
+            assert result_type.dtype == output_dtype
+
+    def test_tile_gemv_rejects_insufficient_rhs_logical_k(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 96])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="rhs valid K to cover lhs valid K"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_unsupported_input_dtype(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.INT16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.INT16), span)
+
+        with pytest.raises(ValueError, match="supports only INT8"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_mixed_input_dtypes(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP32), span)
+
+        with pytest.raises(ValueError, match="identical lhs and rhs data types"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_bias_rejects_input_dtype_bias(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP16), span)
+        bias = ir.Var("bias", ir.TileType([1, 128], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires bias dtype fp32"):
+            tile.gemv_bias(lhs, rhs, bias)
+
+    def test_tile_gemv_acc_rejects_input_dtype_accumulator(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([1, 128], DataType.FP16), span)
+        rhs = ir.Var("rhs", ir.TileType([128, 128], DataType.FP16), span)
+        acc = ir.Var("acc", ir.TileType([16, 128], DataType.FP16), span)
+
+        with pytest.raises(ValueError, match="requires accumulator dtype fp32"):
+            tile.gemv_acc(acc, lhs, rhs)
+
+    def test_tile_gemv_rejects_multiple_logical_lhs_rows(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[2, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="logical row extent to be exactly 1"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_rejects_padded_physical_lhs_rows(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([16, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="physical row extent to be exactly 1"):
+            tile.gemv(lhs, rhs)
+
+    def test_tile_gemv_bias_rejects_undersized_valid_shape(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        bias = ir.Var(
+            "bias",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 32])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match=r"bias valid N to cover output valid N=48"):
+            tile.gemv_bias(lhs, rhs, bias)
+
+    def test_tile_gemv_acc_rejects_mismatched_valid_shape(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var(
+            "lhs",
+            ir.TileType([1, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 64])),
+            span,
+        )
+        rhs = ir.Var(
+            "rhs",
+            ir.TileType([128, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[64, 48])),
+            span,
+        )
+        acc = ir.Var(
+            "acc",
+            ir.TileType([16, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[1, 32])),
+            span,
+        )
+
+        with pytest.raises(ValueError, match="accumulator valid_shape"):
+            tile.gemv_acc(acc, lhs, rhs)
 
 
 class TestTileTransformOps:
@@ -2443,7 +2645,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -2462,7 +2664,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, valid_n])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -2555,7 +2757,7 @@ class TestTileSliceReshapeOps:
         call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.zero)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -2662,7 +2864,7 @@ class TestTileSliceReshapeOps:
         call = tile.reshape(tile_var, [8, 4])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.reshape"
+        assert call.op.name == ir.get_op("tile.reshape").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2804,7 +3006,7 @@ class TestTileSliceReshapeOps:
         call = tile.fillpad_expand(src, [64, 128], pad_value=ir.PadValue.zero)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.fillpad_expand"
+        assert call.op.name == _OP_TILE_FILLPAD_EXPAND
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2837,7 +3039,7 @@ class TestTileSliceReshapeOps:
         src = ir.Var("src", src_type, span)
 
         call = tile.fillpad_expand(src, [32, 32], pad_value=ir.PadValue.zero)
-        assert call.op.name == "tile.fillpad_expand"
+        assert call.op.name == _OP_TILE_FILLPAD_EXPAND
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         dim0 = result_type.shape[0]
@@ -2889,7 +3091,7 @@ class TestTileSliceReshapeOps:
         call = tile.transpose(tile_var, 0, 1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -2910,7 +3112,7 @@ class TestTileSliceReshapeOps:
         call = tile.transpose(tile_var, -2, -1)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
@@ -2948,7 +3150,7 @@ class TestTileSliceReshapeOps:
         call = tile.set_validshape(tile_var, 16, 24)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.set_validshape"
+        assert call.op.name == _OP_TILE_SET_VALIDSHAPE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -2969,7 +3171,7 @@ class TestTileSliceReshapeOps:
         call = tile.set_validshape(tile_var, valid_rows, valid_cols)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.set_validshape"
+        assert call.op.name == _OP_TILE_SET_VALIDSHAPE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None
@@ -3249,7 +3451,7 @@ class TestTileBatchMatMulOps:
         call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul"
+        assert call.op.name == ir.get_op("tile.batch_matmul").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -3347,7 +3549,7 @@ class TestTileBatchMatMulOps:
         call = tile.batch_matmul_acc(acc, lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul_acc"
+        assert call.op.name == ir.get_op("tile.batch_matmul_acc").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -3412,7 +3614,7 @@ class TestTileBatchMatMulOps:
         call = tile.transpose(tile_var, 0, 2)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.transpose"
+        assert call.op.name == _OP_TILE_TRANSPOSE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -3433,7 +3635,7 @@ class TestTileBatchMatMulOps:
         call = tile.row_max(tile_var, tmp_tile)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.row_max"
+        assert call.op.name == ir.get_op("tile.row_max").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -3455,7 +3657,7 @@ class TestTileBatchMatMulOps:
         call = tile.slice(tile_var, new_shape, offset)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.slice"
+        assert call.op.name == _OP_TILE_SLICE
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
@@ -4795,7 +4997,7 @@ class TestTileAssembleOp:
         call = tile.assemble(target_var, source_var, [0, 0])
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.assemble"
+        assert call.op.name == ir.get_op("tile.assemble").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -4839,7 +5041,7 @@ class TestTileExtractOp:
         call = tile.extract(src_var, 0, 0, shape=[64, 64], target_memory=ir.MemorySpace.Left)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP16
@@ -4907,7 +5109,7 @@ class TestTileExtractOp:
 
         call = tile.extract(src_var, 0, 0, shape=[32, 32], target_memory=ir.MemorySpace.Mat)
 
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -4924,7 +5126,7 @@ class TestTileExtractOp:
 
         call = tile.extract(src_var, row, col, shape=[16, 16], target_memory=ir.MemorySpace.Left)
 
-        assert call.op.name == "tile.extract"
+        assert call.op.name == _OP_TILE_EXTRACT
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         rows, cols = result_type.shape
@@ -5007,7 +5209,7 @@ class TestTileScatterUpdateOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter_update"
+        assert call.op.name == ir.get_op("tile.scatter_update").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == dtype
@@ -5078,7 +5280,7 @@ class TestTileMscatterOps:
         call = tile.mscatter(src_var, idx_var, out_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.mscatter"
+        assert call.op.name == _OP_TILE_MSCATTER
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP32
@@ -5099,7 +5301,7 @@ class TestTileMscatterOps:
         out_var = ir.Var("out", tensor_type, span)
 
         call = tile.mscatter(src_var, idx_var, out_var)
-        assert call.op.name == "tile.mscatter"
+        assert call.op.name == _OP_TILE_MSCATTER
         result_type = call.type
         assert isinstance(result_type, ir.TensorType)
         assert result_type.dtype == DataType.FP16
@@ -5260,7 +5462,7 @@ class TestTileScatterOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter"
+        assert call.op.name == ir.get_op("tile.scatter").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == dtype
@@ -5416,7 +5618,7 @@ class TestTileScatterMaskOps:
         )
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter_mask"
+        assert call.op.name == ir.get_op("tile.scatter_mask").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
@@ -5505,7 +5707,7 @@ class TestTileConcatOps:
         call = tile.concat(t0_var, t1_var)
 
         assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.concat"
+        assert call.op.name == ir.get_op("tile.concat").name
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == DataType.FP32
@@ -5895,7 +6097,7 @@ class TestWindowReadValidRegion:
 
         # And the DSL rejects the flag itself rather than silently dropping it.
         tile_arg = pl.Tile(expr=src)
-        with pytest.raises(ValueError, match="clamp=True is not supported for a Tile"):
+        with pytest.raises(TypeError, match="clamp=True is not supported for a Tile"):
             pl.slice(tile_arg, [64, 64], [64, 0], clamp=True)
 
     def test_slice_drop_dims_rejected_when_axis_is_not_provably_valid(self):
@@ -6256,6 +6458,66 @@ class TestDestinationSpaceLayoutDeduction:
             assert isinstance(result_type, ir.TileType), name
             assert result_type.memory_space == ir.MemorySpace.Acc, name
             assert self._layout_of(result_type) == acc_nz, name
+
+    def test_matmul_bias_propagates_physical_box_and_logical_valid_shape(self):
+        """Biased matmul follows the same padded-box contract as plain matmul."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [1, 16], name="bias")
+
+        result_type = tile.matmul_bias(lhs, rhs, bias).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert all(isinstance(dim, ir.ConstInt) for dim in result_type.shape)
+        assert [cast(ir.ConstInt, dim).value for dim in result_type.shape] == [32, 32]
+        assert _valid_of(result_type) == [16, 16]
+
+    def test_gemv_bias_uses_the_shared_product_geometry_contract(self):
+        """Shared bias geometry preserves GEMV's padded Acc box and valid N."""
+        lhs = _partial_tile([1, 64], [1, 48], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [1, 24], name="bias")
+
+        result_type = tile.gemv_bias(lhs, rhs, bias).type
+
+        assert isinstance(result_type, ir.TileType)
+        assert [cast(ir.ConstInt, dim).value for dim in result_type.shape] == [16, 32]
+        assert _valid_of(result_type) == [1, 16]
+
+    def test_matmul_bias_rejects_insufficient_valid_bias_n(self):
+        """Bias must cover every valid output column read by the cube."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 24], name="rhs")
+        bias = _partial_tile([1, 32], [1, 16], name="bias")
+
+        with pytest.raises(ValueError, match="bias valid N to cover output valid N"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_rejects_empty_valid_bias_row(self):
+        """The cube always reads and broadcasts one logical bias row."""
+        lhs = _partial_tile([32, 64], [16, 64], name="lhs")
+        rhs = _partial_tile([64, 32], [64, 16], name="rhs")
+        bias = _partial_tile([1, 32], [0, 16], name="bias")
+
+        with pytest.raises(ValueError, match="bias valid rows to cover one broadcast row"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+    def test_matmul_bias_requires_accumulator_dtype_bias(self):
+        """TMATMUL_BIAS requires FP32/INT32 bias to match its Acc output."""
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TileType([16, 64], DataType.BF16), span)
+        rhs = ir.Var("rhs", ir.TileType([64, 32], DataType.BF16), span)
+        bias = ir.Var("bias", ir.TileType([1, 32], DataType.BF16), span)
+
+        with pytest.raises(ValueError, match="requires bias dtype fp32"):
+            tile.matmul_bias(lhs, rhs, bias)
+
+        int_lhs = ir.Var("int_lhs", ir.TileType([16, 64], DataType.INT8), span)
+        int_rhs = ir.Var("int_rhs", ir.TileType([64, 32], DataType.INT8), span)
+        int_bias = ir.Var("int_bias", ir.TileType([1, 32], DataType.INT32), span)
+        result_type = tile.matmul_bias(int_lhs, int_rhs, int_bias).type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.INT32
 
 
 class TestWriteValidRegionUnion:

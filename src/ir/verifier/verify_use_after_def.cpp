@@ -244,6 +244,15 @@ class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
         }
       }
 
+      // Function attrs are evaluated where the parameters bind: a reference to
+      // a param is legal, a reference to anything else (a caller-local, as the
+      // old Function-carried SPMD launch spec did) is a use with no definition
+      // in this function and is reported here. This is why no separate
+      // "attrs must be static" property is needed.
+      for (const auto& [k, v] : func->attrs_) {
+        ForEachAttrExpr(v, [&checker](const ExprPtr& e) { checker.VisitExpr(e); });
+      }
+
       if (func->body_) checker.VisitStmt(func->body_);
     }
   }

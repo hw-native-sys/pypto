@@ -55,6 +55,7 @@ class IRProperty(Enum):
     ReturnParamsExplicit = ...
     AivSplitValid = ...
     IterArgCarryClassified = ...
+    AccToGmStoreValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -487,7 +488,7 @@ def legalize_tile_cast() -> Pass:
     """
 
 def auto_tile_matmul_l0() -> Pass:
-    """Create a pass that auto-tiles static 2D ``tile.matmul`` / ``tile.matmul_acc`` for L0.
+    """Create a pass that auto-tiles static 2D ``tile.matmul`` family calls for L0.
 
     The active backend's roofline chooser selects
     ``(m, n, k, stationarity, dbC)``. K-split reductions use a 2-stage
@@ -503,7 +504,13 @@ def auto_tile_matmul_l0() -> Pass:
     although a chained result may still be remapped to Mat by the compatible
     cast-fold placement above. Other unsupported regimes are left untouched;
     useful deferred cases emit ``PerfHint`` diagnostics. ``tile.matmul_bias``
-    is deferred.
+    is supported for Mat-resident matrix operands and an accumulator-typed
+    bias: the bias is applied once on the first K block and a Mat-resident bias
+    is reconstructed from single-use tensor loads separated from the call only
+    by sibling loads, then moved to Bias as independent N windows. Candidate N is bounded by
+    the backend bias-table capacity and the emitted pipeline replication depth
+    for those Mat-backed windows. An already-Bias-resident source remains one
+    external full-N slot and is never N-tiled.
 
     Under the PyPTO planner, a canonical static already-L0 pipeline containing
     one stationary-panel ``tile.matmul`` and one direct store or assemble drain
@@ -692,6 +699,16 @@ def lower_host_tensor_collectives() -> Pass:
 def materialize_dist_tensor_ctx() -> Pass:
     """Materialize CommCtx parameters and arguments for DistributedTensor function parameters."""
 
+def materialize_valid_shape_symbols() -> Pass:
+    """Materialize a Scalar[INDEX] parameter per unbindable device-kernel valid_shape symbol.
+
+    A ``pl.dynamic()`` symbol named only in a parameter's
+    ``pl.TensorView(valid_shape=...)`` is neither a physical tensor dimension nor a
+    scalar parameter, so a precompiled kernel never receives it. Adds the symbol
+    as a leading ``Scalar[INDEX]`` parameter and passes the caller's actual extent
+    at every call/submit site.
+    """
+
 def stamp_tfree_split() -> Pass:
     """Copy each cross-core tpop's split/pipe-id onto its matching tfree op.
 
@@ -840,7 +857,14 @@ class l0_tile_chooser:
         BStationary = 2
 
     class L0TileConfig:
-        """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates."""
+        """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates.
+
+        ``max_n`` caps the logical N extent of a chosen tile, not the full
+        problem N. ``max_n_pipelined`` may impose a tighter bound when N is
+        used under one level of a full-K output-grid pipeline, while
+        ``max_n_nested_pipelined`` covers two nested pipeline levels. A value
+        of zero leaves the corresponding bound disabled.
+        """
 
         M: int
         N: int
@@ -860,6 +884,9 @@ class l0_tile_chooser:
         l0c_align_m: int
         box_align_m: int
         box_align_n: int
+        max_n: int
+        max_n_pipelined: int
+        max_n_nested_pipelined: int
         allow_a_stationary: bool
         allow_b_stationary: bool
         allow_double_buffer_c: bool
@@ -954,6 +981,7 @@ __all__ = [
     "simplify",
     "lower_composite_ops",
     "materialize_dist_tensor_ctx",
+    "materialize_valid_shape_symbols",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

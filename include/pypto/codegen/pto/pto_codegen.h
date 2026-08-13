@@ -115,9 +115,20 @@ class PTOCodegen : public CodegenBase {
    *        on `pto.alloc_tile` from the MemRef byte offset (ptoas
    *        --pto-level=level3). When false, omit `addr` so the ptoas PlanMemory
    *        pass allocates instead (--pto-level=level2).
+   * @param emit_source_loc When true (default), suffix every emitted operation
+   *        with an MLIR `loc("file":line:col)` derived from the IR Span, so
+   *        ptoas diagnostics name the user's source instead of a line in the
+   *        generated `.pto`. Three kinds of line are excluded by design: the
+   *        structural region braces and block labels emitted by
+   *        EmitStructural(), which MLIR forbids a trailing location on; the
+   *        `arith.constant` operations GetOrEmitConstant() writes to the
+   *        constants section, which are deduplicated across every use so no
+   *        single span fits them; and any operation whose span is unknown or
+   *        carries no filename. When false, emit no locations at all.
    * @return MLIR code as string
    */
-  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true);
+  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true,
+                       bool emit_source_loc = true);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -126,6 +137,36 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
   int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
   std::string GetVarName(const ir::VarPtr& var) const override;
+
+  /**
+   * @brief Emit one structural (non-operation) MLIR line
+   *
+   * MLIR's trailing `loc(...)` is only legal at the end of a complete
+   * operation. Region openers (`scf.for ... {`), separators (`} else {`,
+   * `} do {`), closers (`}`) and block labels (`^bb0(...):`) are not
+   * operations, so they must bypass the location suffix that Emit() appends.
+   *
+   * @param line Line of MLIR to emit verbatim (indented, no location)
+   */
+  void EmitStructural(const std::string& line);
+
+  /**
+   * @brief Resolve @p var to its MLIR SSA name, or "" when nothing binds it.
+   *
+   * The lenient counterpart to GetVarName, for the rare caller that can
+   * genuinely proceed without a binding. GetVarName is the default: an
+   * unresolvable symbol there is a user error, and emitting an empty operand
+   * would produce MLIR that only fails much later inside ptoas.
+   */
+  [[nodiscard]] std::string LookupVarName(const ir::VarPtr& var) const;
+
+  /**
+   * @brief Explain why @p var has no SSA binding, for the GetVarName failure.
+   *
+   * Names the parameter whose valid_shape introduced the symbol when the origin
+   * is known, so the diagnostic points at editable DSL source.
+   */
+  [[nodiscard]] std::string DescribeUnbindableSymbol(const ir::VarPtr& var) const;
 
   // PTO-specific helper methods for operator codegen functions
 
@@ -867,6 +908,11 @@ class PTOCodegen : public CodegenBase {
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
 
     std::map<const ir::Var*, std::string> var_to_mlir;
+    /// Symbols that appear ONLY in a tensor parameter's valid_shape, mapped to
+    /// that parameter's name. Such a symbol is bound at the call site, so a
+    /// precompiled kernel never receives it — read on the GetVarName failure
+    /// path to name the parameter the unbindable symbol came from.
+    std::map<const ir::Var*, std::string> valid_shape_symbol_origin;
     std::map<const ir::Var*, std::string> tensor_to_view;
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
@@ -964,6 +1010,7 @@ class PTOCodegen : public CodegenBase {
       constants_indent.clear();
 
       var_to_mlir.clear();
+      valid_shape_symbol_origin.clear();
       tensor_to_view.clear();
       tensor_to_base_ptr.clear();
       view_ssa_to_base_ptr.clear();
@@ -1033,6 +1080,51 @@ class PTOCodegen : public CodegenBase {
   /// When false, `pto.alloc_tile` omits the physical `addr` operand so the
   /// ptoas PlanMemory pass owns allocation (--pto-level=level2). Set by Generate.
   bool emit_tile_addr_ = true;
+
+  /// When false, no operation carries a trailing `loc(...)`. Set by Generate.
+  bool emit_source_loc_ = true;
+
+  /// Source span attached to the operations being emitted right now; null means
+  /// "no location", which makes Emit() behave exactly as it did before locations
+  /// existed. Points into IR-owned storage — see SpanScope.
+  const ir::Span* current_span_ = nullptr;
+
+  /**
+   * @brief RAII guard binding the source location of every op emitted while alive
+   *
+   * Set at two levels: once per statement (PTOCodegen::VisitStmt) and once more
+   * per Call when the Call's own span is a genuine refinement
+   * (PTOCodegen::VisitExpr_(CallPtr)). Restores the previous span on scope exit,
+   * so nesting composes.
+   *
+   * A null @p span leaves the enclosing scope's location in place, which lets
+   * callers express "refine only if the span is trustworthy" without an
+   * `std::optional<SpanScope>`.
+   */
+  class SpanScope {
+   public:
+    SpanScope(PTOCodegen* codegen, const ir::Span* span) : codegen_(codegen), saved_(codegen->current_span_) {
+      if (span != nullptr) codegen_->current_span_ = span;
+    }
+    ~SpanScope() { codegen_->current_span_ = saved_; }
+
+    /// `current_span_` is a non-owning pointer, so a temporary would dangle.
+    SpanScope(PTOCodegen* codegen, ir::Span&& span) = delete;
+    SpanScope(const SpanScope&) = delete;
+    SpanScope& operator=(const SpanScope&) = delete;
+
+   private:
+    PTOCodegen* codegen_;
+    const ir::Span* saved_;
+  };
+
+  /**
+   * @brief Trailing MLIR location for the currently bound span
+   *
+   * @return `" loc(\"file\":line:col)"`, or an empty string when locations are
+   *         disabled or no usable span is bound.
+   */
+  [[nodiscard]] std::string LocSuffix() const;
 
   /// Emit an arith binary op, return SSA result name
   std::string EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs, const std::string& rhs,

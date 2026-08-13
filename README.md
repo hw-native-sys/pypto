@@ -112,13 +112,13 @@ PyPTO includes examples organized by complexity:
 #### 1. Hello World (simplest program)
 
 ```bash
-python examples/hello_world.py
+python examples/beginner/01_hello_world.py
 ```
 
-#### 2. Kernel Examples (element-wise, matmul, softmax, ...)
+#### 2. Beginner & Intermediate Examples (element-wise, matmul, softmax, ...)
 
 ```bash
-python examples/kernels/06_softmax.py
+python examples/intermediate/02_softmax.py
 ```
 
 #### 3. Model Examples (FFN, paged attention, LLaMA, ...)
