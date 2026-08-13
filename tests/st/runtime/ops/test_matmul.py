@@ -601,8 +601,9 @@ class TestMatmulAutoL0AStationary(PTOTestCase):
 
     The held A panel is single-buffered in L0A while B streams double-buffered.
     The emitted schedule is a sequential outer M loop and pipelined inner N
-    loop. PyPTO and PTOAS use different shapes because PTOAS also searches
-    dbC=2 design points.
+    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
+    search dbC=2 design points automatically and therefore use a different
+    regression shape.
     """
 
     __test__ = False
@@ -775,8 +776,9 @@ class TestMatmulAutoL0BStationary(PTOTestCase):
 
     The held B panel is single-buffered in L0B while A streams double-buffered.
     The emitted schedule is a sequential outer N loop and pipelined inner M
-    loop. PyPTO and PTOAS use different shapes because PTOAS also searches
-    dbC=2 design points.
+    loop. Legacy PYPTO uses a single accumulator by default; DSA_RP and PTOAS
+    search dbC=2 design points automatically and therefore use a different
+    regression shape.
     """
 
     __test__ = False
@@ -990,8 +992,8 @@ class TestMatmulOuterPipelinedBF16(PTOTestCase):
     def __init__(
         self,
         m: int = 16,
-        k_chunk: int = 128,
-        n: int = 256,
+        k_chunk: int = 192,
+        n: int = 128,
         num_chunks: int = 8,
         *,
         memory_planner: MemoryPlanner | None = None,
@@ -1287,7 +1289,7 @@ _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
-    (64, 256, 256, 32),
+    (64, 384, 256, 32),
     (128, 384, 64, 64),
 ]
 # Tolerance for AutoL0 K-split: HW reduces K chunks in a different order than
@@ -1579,6 +1581,7 @@ class TestMatmulOperations:
             f"expected K-only tile {(m, n, l0_k)} under {planner}, got {(choice.m, choice.n, choice.k)}"
         )
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
+        assert not choice.double_buffer_c
         assert choice.k < k, "the system case must exercise a real K split"
         cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
         result = test_runner.run(
@@ -1636,8 +1639,8 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 256, 128, 544, (256, 128, 128), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 256, 128, 544, (256, 128, 128), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 384, 256, 128, (128, 64, 256), id="ptoas"),
+            pytest.param(MemoryPlanner.DSA_RP, 48, 352, 96, (48, 32, 352), id="dsa_rp"),
+            pytest.param(MemoryPlanner.PTOAS, 48, 352, 96, (48, 32, 352), id="ptoas"),
         ],
     )
     def test_matmul_autol0_a_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
@@ -1645,6 +1648,7 @@ class TestMatmulOperations:
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.AStationary
+        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0AStationary(
@@ -1709,8 +1713,8 @@ class TestMatmulOperations:
         "planner,m,k,n,expected_tile",
         [
             pytest.param(MemoryPlanner.PYPTO, 192, 64, 512, (64, 512, 64), id="pypto"),
-            pytest.param(MemoryPlanner.DSA_RP, 192, 64, 512, (64, 512, 64), id="dsa_rp"),
-            pytest.param(MemoryPlanner.PTOAS, 64, 80, 288, (32, 256, 80), id="ptoas"),
+            pytest.param(MemoryPlanner.DSA_RP, 64, 80, 256, (32, 256, 80), id="dsa_rp"),
+            pytest.param(MemoryPlanner.PTOAS, 64, 80, 256, (32, 256, 80), id="ptoas"),
         ],
     )
     def test_matmul_autol0_b_stationary(self, test_runner, platform, planner, m, k, n, expected_tile):
@@ -1718,6 +1722,7 @@ class TestMatmulOperations:
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=2, bytes_b=2)
         assert (choice.m, choice.n, choice.k) == expected_tile
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.BStationary
+        assert choice.double_buffer_c == (planner != MemoryPlanner.PYPTO)
         cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0BStationary(
@@ -1782,6 +1787,7 @@ class TestMatmulOperations:
             bytes_a=2,
             bytes_b=2,
         )
+        assert not choice.double_buffer_c, "the nested-pipeline case must retain a K-only inner split"
         assert choice.k < case.K_CHUNK, "the inner per-chunk matmul must be K-tiled"
         printed = _printed_through_auto_tile(case.get_program(), planner)
         outer_pipeline = f"pl.pipeline({case.NUM_CHUNKS}, stage=2"
