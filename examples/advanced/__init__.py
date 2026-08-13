@@ -12,6 +12,7 @@ Advanced examples — performance and low-level techniques.
 
   01_split_k.py          — split-K matmul (parallel K reduction, atomic-add)
   02_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
+  03_mixed_kernel.py     — cube and vector in one scope via pl.split (vs. two scopes)
 """
 
 import importlib
@@ -20,6 +21,7 @@ import sys
 _ALIASES = {
     "split_k": "01_split_k",
     "auto_tile_matmul": "02_auto_tile_matmul",
+    "mixed_kernel": "03_mixed_kernel",
 }
 
 for _alias, _numbered in _ALIASES.items():

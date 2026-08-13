@@ -16,6 +16,7 @@ Intermediate examples — real-kernel patterns, ordered by complexity.
   04_matmul_acc.py      — cube unit matmul with K-dimension tiling/accumulation
   05_assemble.py        — tile assembly patterns (Acc->Mat, Vec->Vec)
   06_dyn_valid_shape.py — dynamic valid_shape via scalar, if/else and loop patterns
+  07_task_graph.py      — an inferred dependency edge, and the same edge declared
 """
 
 import importlib
@@ -28,6 +29,7 @@ _ALIASES = {
     "matmul_acc": "04_matmul_acc",
     "assemble": "05_assemble",
     "dyn_valid_shape": "06_dyn_valid_shape",
+    "task_graph": "07_task_graph",
 }
 
 for _alias, _numbered in _ALIASES.items():

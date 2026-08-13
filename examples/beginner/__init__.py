@@ -11,7 +11,7 @@
 Beginner examples — language basics, one concept per file, ordered by complexity.
 
   01_hello_world.py — simplest program: 128x128 add (start here)
-  02_elementwise.py — add, mul
+  02_elementwise.py — add, mul, and chunking a tensor larger than one tile
   03_scalar_ops.py  — scaling a tile by a constant
   04_activation.py  — relu, SiLU, GELU, SwiGLU, GeGLU
   05_matmul.py      — cube unit matmul (cube basics)
