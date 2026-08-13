@@ -96,9 +96,10 @@ program_tiled = l0_tile_pass(program)
 若外层流水化，则需要两倍的满 L0 预算。
 
 **dbC=2** 是双累加器 L0C ping-pong，即 tile *i* 的 FIXPIPE drain 与 tile
-*i+1* 的 MAD 重叠。它在 `memory_planner=PTOAS` 下无条件开启；对 PyPTO 自己
-管理的 `PYPTO` 与 `DSA_RP` 两种 planner，则都是实验性显式开关
-（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭）。
+*i+1* 的 MAD 重叠。它在 `memory_planner=DSA_RP` 与
+`memory_planner=PTOAS` 下自动开启。旧版 `PYPTO` planner 仍保留实验性显式
+开关（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭），因为
+issue #1908 在某些链式 Mat-scratch 布局下仍可能导致操作数缓冲溢出。
 `BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`，
 `CanonicalizeIOOrder` 把两个 store 都浮到两个 matmul 之后
 （`matmul, matmul, store, store`），从而让两个累加器生命周期共存。
@@ -111,13 +112,16 @@ PTOAS 自行把对应 stage buffer 放到不同 offset。`PYPTO` 使用
 `MemoryReuse` 的容量门控（#1475）在可负担深度内保持 buffer 分离。`DSA_RP`
 也跳过 `MemoryReuse`；它把流水线 stage 分离表示为硬约束，
 先运行有界严格搜索，仅当该搜索未找到满足容量的放置时才把流水线意图分离放宽为软
-惩罚。dbC=2 要求 full-K 且 ≥2×2 网格；Mat-scratch（`Acc→Mat`，
-`tile.assemble`）的 drain 也以相同方式浮动。若 `PassManager` 在一个 planner
+惩罚。dbC=2 要求 full-K，且移动的内层轴至少有两个**完整** tile；固定的外层轴
+可以只有一个 tile。发射的循环方向遵循 chooser 的 stationarity/hoist 决策，
+peeled 的部分边界不计作 ping-pong stage。因此，以行作为外层时允许 1×2 网格，
+以列作为外层时允许 2×1 网格。Mat-scratch（`Acc→Mat`，`tile.assemble`）的
+drain 也以相同方式浮动。若 `PassManager` 在一个 planner
 下构造却在另一个下运行，会显式报错，因为 pass 列表与 chooser gate 必须一致。
 代价模型公式本身与 gate 无关。共存浮动与 `{0, L0C/2}` 不同 offset 的运行时验证
 见 [`29-canonicalize_io_order.md`](29-canonicalize_io_order.md)。
 
-上段的 full-K 与 ≥2×2 限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
+上段的 full-K 与移动内层限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
 
 > **这是模型驱动的 tile 选择变更，并非行为中立的重构。** roofline 目标替换了此前以流量最小化为目标的闭式 chooser，因此对 MAD-bound 形状所选的 `(m, n, k)` 与之前不同。代表性形状的前后 tile 在 `test_l0_tile_chooser.py::TestL0TilingRooflineMigration` 中固定下来。
 

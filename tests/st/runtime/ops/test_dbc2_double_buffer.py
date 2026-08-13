@@ -9,21 +9,21 @@
 
 """On-device validation of AutoTileMatmulL0's dbC=2 (double-buffered L0C) emit.
 
-dbC=2 keeps two co-live L0C accumulators so tile i's FIXPIPE drain overlaps tile
-i+1's MAD.  It is opt-in and reachable under all three memory planners:
-  - ``memory_planner=MemoryPlanner.PTOAS`` (always on): PTOAS skips MemoryReuse, so
+Chooser-selected dbC=2 keeps two co-live L0C accumulators so tile i's FIXPIPE
+drain overlaps tile i+1's MAD. It is reachable under all three memory planners:
+  - ``memory_planner=MemoryPlanner.PTOAS`` (automatic): PTOAS skips MemoryReuse, so
     InitMemRef keeps the two buffers distinct and ptoas places them.
+  - ``memory_planner=MemoryPlanner.DSA_RP`` (automatic): DSA-RP skips legacy
+    MemoryReuse and places the two co-live accumulators itself.
   - ``memory_planner=MemoryPlanner.PYPTO`` + ``enable_pypto_l0c_double_buffer=True``
     (experimental opt-in): MemoryReuse runs, but its capacity gate (#1475) keeps the
     two co-live accumulators in distinct buffers via their flat depth-2
     ``pipeline_membership``, then AllocateMemoryAddr places them.
-  - ``memory_planner=MemoryPlanner.DSA_RP`` with the same opt-in: DSA-RP skips
-    legacy MemoryReuse and assigns the two co-live accumulators itself.
 Under the default PyPTO planner (flag off) these shapes get one accumulator and
 would not exercise the feature.
 
 Coverage:
-  - minimal one-dimensional 1x2 / 2x1 grids under both PyPTO-owned planners;
+  - minimal one-dimensional 1x2 / 2x1 grids under both in-tree planners;
   - direct-store (Acc->GM) sweep over chooser-pinned 4 / 6 / 8 / 16-tile grids,
     under all three planners —
     the WAR reuse boundary (tile i+2's matmul into a buffer must wait for tile i's
@@ -111,7 +111,7 @@ class _DbcDirectStore(PTOTestCase):
             config,
             platform=platform,
             memory_planner=planner,
-            enable_pypto_l0c_double_buffer=planner != MemoryPlanner.PTOAS,
+            enable_pypto_l0c_double_buffer=planner == MemoryPlanner.PYPTO,
         )
         self.M, self.K, self.N = m, 64, n
         self._planner = planner
@@ -193,7 +193,7 @@ class _DbcMatScratch(PTOTestCase):
             config,
             platform=platform,
             memory_planner=planner,
-            enable_pypto_l0c_double_buffer=planner != MemoryPlanner.PTOAS,
+            enable_pypto_l0c_double_buffer=planner == MemoryPlanner.PYPTO,
         )
         self.M, self.K, self.N, self.P = 256, 64, 256, 64
         self._planner = planner

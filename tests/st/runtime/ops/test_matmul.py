@@ -83,7 +83,7 @@ def _choose_a2a3_l0(
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = planner == MemoryPlanner.PTOAS
+    cfg.allow_double_buffer_c = planner != MemoryPlanner.PYPTO
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
@@ -1693,11 +1693,10 @@ class TestMatmulOperations:
             nmid=512,
             n=64,
             memory_planner=planner,
-            enable_pypto_l0c_double_buffer=True,
             platform=platform,
             config=RunConfig(platform=platform, rtol=2e-2, atol=2e-2),
         )
-        printed = _printed_through_auto_tile(case.get_program(), planner, enable_pypto_l0c_double_buffer=True)
+        printed = _printed_through_auto_tile(case.get_program(), planner)
         assert "pl.range(" in printed
         assert "pipeline_double_buffer_c" in printed
 

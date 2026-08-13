@@ -2126,6 +2126,7 @@ class TestAutoTileMatmulL0MNTiling:
         ("planner", "pypto_dbc"),
         [
             (passes.MemoryPlanner.PYPTO, True),
+            (passes.MemoryPlanner.DSA_RP, False),
             (passes.MemoryPlanner.PTOAS, False),
         ],
     )
@@ -2384,11 +2385,11 @@ class TestAutoTileMatmulL0MNTiling:
         ],
     )
     def test_dbc_one_dimensional_grid_allocates_two_accumulators(self, planner, M, N, held_memory):
-        """PyPTO-owned planners realize 1x2 and 2x1 dbC with two L0C buffers.
+        """Both in-tree planners realize 1x2 and 2x1 dbC with two L0C buffers.
 
         The singleton axis is outer and holds its operand; the two-tile axis is
         the inner loop carrying ``pipeline_double_buffer_c``. Both PYPTO and
-        DSA_RP must preserve exactly two co-live accumulator allocations.
+        DSA_RP does so automatically and must ignore the legacy-PYPTO opt-in.
         """
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
@@ -2411,9 +2412,17 @@ class TestAutoTileMatmulL0MNTiling:
                 out = pl.tile.store(result, [0, 0], out)
                 return out
 
-        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+        pypto_opt_in = planner == passes.MemoryPlanner.PYPTO
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=pypto_opt_in):
             tiled = passes.auto_tile_matmul_l0()(Before)
             optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
+        if planner == passes.MemoryPlanner.DSA_RP:
+            with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+                explicit_tiled = passes.auto_tile_matmul_l0()(Before)
+                explicit_optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            ir.assert_structural_equal(tiled, explicit_tiled)
+            ir.assert_structural_equal(optimized, explicit_optimized)
 
         tiled_lines = ir.python_print(tiled).splitlines()
         outer_i = next(i for i, line in enumerate(tiled_lines) if "pl.pipeline(0, 16, 16," in line)
@@ -3697,13 +3706,15 @@ class TestAutoTileMatmulL0MatScratch:
         assert rel_err < 5e-2, f"split-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
 
     @pytest.mark.parametrize(
-        ("planner", "enable_dbc", "operand_stationary"),
+        ("planner", "pypto_opt_in", "operand_stationary", "double_buffer_c"),
         [
-            (passes.MemoryPlanner.PYPTO, False, False),
-            (passes.MemoryPlanner.DSA_RP, True, True),
+            (passes.MemoryPlanner.PYPTO, False, False, False),
+            (passes.MemoryPlanner.DSA_RP, False, True, True),
         ],
     )
-    def test_chained_mat_scratch_stationarity_matches_planner(self, planner, enable_dbc, operand_stationary):
+    def test_chained_mat_scratch_stationarity_matches_planner(
+        self, planner, pypto_opt_in, operand_stationary, double_buffer_c
+    ):
         """Apply the #1908 guard only to the legacy PyPTO allocator.
 
         This chained Mat-scratch producer standalone selects B-stationary
@@ -3737,14 +3748,14 @@ class TestAutoTileMatmulL0MatScratch:
                 out = pl.assemble(out, d, [0, 0])
                 return out
 
-        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=enable_dbc):
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=pypto_opt_in):
             After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
             allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
 
         printed = ir.python_print(After)
         assert "tile.create" in printed and "Mem.Mat" in printed, "expected a Mat output scratch"
         assert ("pl.range(" in printed) == operand_stationary
-        assert ("pipeline_double_buffer_c" in printed) == enable_dbc
+        assert ("pipeline_double_buffer_c" in printed) == double_buffer_c
         _assert_ssa_valid(After, f"test_mat_scratch_stationarity_{planner}")
 
         if not operand_stationary:

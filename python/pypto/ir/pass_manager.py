@@ -516,7 +516,7 @@ class PassManager:
         # so callers' diagnostic intent isn't reset.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner AND the PyPTO dbC=2 opt-in: a nested
+        # Propagate the outer memory planner AND the legacy-PYPTO dbC=2 opt-in: a nested
         # PassContext otherwise resets them to the binding defaults, which silently
         # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
         # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
@@ -562,7 +562,7 @@ class PassManager:
         ctx = passes.PassContext.current()
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner + PyPTO dbC=2 opt-in (see run_passes)
+        # Propagate the outer memory planner + legacy-PYPTO dbC=2 opt-in (see run_passes)
         # so profiling doesn't silently reset them and disable planner-gated behaviour.
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False

@@ -98,9 +98,10 @@ loop would require twice its full-L0 budget.
 
 **dbC=2** is the two-accumulator L0C ping-pong in which tile *i*'s FIXPIPE
 drain overlaps tile *i+1*'s MAD. It is enabled unconditionally for
-`memory_planner=PTOAS` and is an experimental opt-in for both PyPTO-owned
-planners, `PYPTO` and `DSA_RP`
-(`PassContext(enable_pypto_l0c_double_buffer=True)`, default off).
+`memory_planner=DSA_RP` and `memory_planner=PTOAS`. The legacy `PYPTO`
+planner retains an experimental opt-in
+(`PassContext(enable_pypto_l0c_double_buffer=True)`, default off) because
+issue #1908 can still overflow operand buffers in chained Mat-scratch layouts.
 `BuildFullKPipelined` tags the moving loop with
 `kPipelineDoubleBufferCAttr`, and `CanonicalizeIOOrder` floats both stores
 below both matmuls (`matmul, matmul, store, store`) to make the two accumulator

@@ -1498,14 +1498,13 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
-    """Resolve the effective dbC=2 (L0C double-buffer) opt-in for the cache key.
+    """Resolve the legacy-PYPTO chooser dbC=2 opt-in for the cache key.
 
     Like ``_resolve_memory_planner``, this flag is most often set by wrapping a
     call in ``with PassContext([], enable_pypto_l0c_double_buffer=True)``, which
     ``ir.compile()`` inherits. ``RunConfig`` does not carry this PassContext-only
-    flag, so the active context is the only source. Keying on it matters: without
-    it a JIT kernel first compiled with the flag off would be handed that dbC=1
-    artifact when later called under a context with the flag on (or vice versa).
+    flag, so the active context is the only source. ``make_cache_key`` ignores it
+    for DSA_RP and PTOAS, where dbC=2 is automatic.
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False

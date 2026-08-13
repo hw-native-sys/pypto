@@ -433,6 +433,10 @@ def compile_program(  # noqa: PLR0913
         profiling: If ``True``, enable compile profiling.
         analyze_auto_scopes_for_deps: If ``True``, enable compiler-derived task
             dependency analysis for AUTO runtime scopes.
+        memory_planner: On-chip memory planner forwarded to :func:`ir.compile`.
+        enable_pypto_l0c_double_buffer: Opt the legacy ``PYPTO`` planner in to
+            chooser-emitted dbC=2. Ignored under ``DSA_RP`` and ``PTOAS``, where
+            chooser dbC is automatic.
     """
     from pypto import ir  # noqa: PLC0415
 

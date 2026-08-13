@@ -248,11 +248,11 @@ def compile(  # noqa: PLR0913
             semantics-required aliasing (loop-carried accumulators, in-place ops)
             is preserved as a shared ``tile_buf`` handle that ptoas keeps as one
             buffer.
-        enable_pypto_l0c_double_buffer: Opt in to dbC=2 (L0C double-buffering)
-            under the PyPTO-owned ``PYPTO`` and ``DSA_RP`` planners
-            (experimental, default off). ``None`` inherits the setting from an
-            active outer ``PassContext`` (else ``False``); has no effect under
-            ``PTOAS``, which already emits dbC=2 unconditionally.
+        enable_pypto_l0c_double_buffer: Opt the legacy ``PYPTO`` planner in to
+            chooser-emitted dbC=2 (L0C double-buffering; experimental, default
+            off). ``None`` inherits the setting from an active outer
+            ``PassContext`` (else ``False``). It has no effect under ``DSA_RP``
+            or ``PTOAS``, which enable chooser dbC=2 automatically.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
