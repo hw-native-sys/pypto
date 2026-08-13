@@ -192,6 +192,11 @@ normalises to that form.
 > (`local_slot_num < slot_num`, an a2/a3-only optimisation) is not yet exposed
 > on the automatic split path — use the manual `pl.aic_initialize_pipe` /
 > `pl.aiv_initialize_pipe` system ops for that.
+>
+> That manual route is a2/a3-only too, and not just for `local_slot_num <
+> slot_num`: ptoas rejects the `local_slot_num` operand on
+> `pto.{aic,aiv}_initialize_pipe` for the 950 frontend pipe lowering whatever
+> its value, so on a5 the operand must be omitted entirely.
 
 For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has a matching
 `system.tfree_*`. When an existing free is obviously too early, the pass delays it to a later statement in the same

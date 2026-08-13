@@ -157,6 +157,10 @@ scope：完全没有 split 的内核同样会驱动一条（a2a3 上通过双 AI
 > 将逻辑环深与更小的本地驻留窗口解耦（`local_slot_num < slot_num`，仅 a2/a3 的
 > 优化）目前尚未在自动拆分路径暴露——如需该能力请使用手动的
 > `pl.aic_initialize_pipe` / `pl.aiv_initialize_pipe` 系统算子。
+>
+> 该手动路径同样仅限 a2/a3，且不只限于 `local_slot_num < slot_num` 的情形：
+> 950 前端 pipe lowering 下，ptoas 会拒绝 `pto.{aic,aiv}_initialize_pipe` 上的
+> `local_slot_num` 操作数（无论取值为何），因此在 a5 上必须完全省略该操作数。
 
 对于消费侧跨核 tile，该 Pass 还会保证每个 `tile.tpop_*` 都有匹配的
 `system.tfree_*`。若现有 `tfree` 明显过早，Pass 会在不重排彼此独立 `tpop`
