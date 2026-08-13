@@ -1121,6 +1121,16 @@ jobs:
     #                                              scope (out-proj + residual +
     #                                              RMSNorm + MLP). Runs on a5 in
     #                                              daily_ci.yml `a5-system-tests`.
+    # Two cross_core cases are xfail under --platform=a5 — the first on-board run
+    # of this job is what found them, and neither is a mixed-kernel regression
+    # this job should gate on until it is fixed:
+    #   - test_explicit_slot_num       ptoas rejects `local_slot_num` on
+    #                                  pto.{aic,aiv}_initialize_pipe for the 950
+    #                                  frontend pipe lowering (was already xfail
+    #                                  on a5sim; the gap is the backend, not the sim).
+    #   - test_multiple_pipes_nosplit  compiles and runs, but every output element
+    #                                  is wrong on 950 silicon; passes on a5sim.
+    # Both are xfail rather than deselected, so a backend fix surfaces as XPASS here.
     # Deliberately NOT here: the mixed suites carrying `@pytest.mark.platforms("a2a3")`
     # (syncall, sync_set_wait, split parity incl. split_aiv, tpush/grouped-tfree
     # valid-shape, split-reduce parity) — pytest deselects them under --platform=a5,
