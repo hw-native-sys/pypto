@@ -9,7 +9,7 @@
 
 """IR builders for distributed system-level ops (``pld.system.world_size``,
 ``pld.system.get_comm_ctx``, ``pld.system.rank`` / ``pld.system.nranks``,
-``pld.system.notify`` / ``pld.system.wait``).
+``pld.system.notify`` / ``pld.system.wait`` / ``pld.system.defer_wait``).
 
 Mirror of :mod:`pypto.ir.op.system_ops` for the distributed namespace —
 exposes the registered C++ ops as Python builders. The DSL layer in
@@ -116,4 +116,30 @@ def wait(
     )
 
 
-__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def defer_wait(
+    signal: _ir_core.Expr,
+    offsets: Sequence[int | _ir_core.Expr] | _ir_core.MakeTuple,
+    expected: int | _ir_core.Expr,
+    cmp: WaitCmp,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.system.defer_wait(signal, offsets, expected)`` Call.
+
+    Register a ``signal >= expected`` condition on the enclosing task without
+    blocking its device core. The task may finish executing, but its TaskId
+    remains incomplete until the condition is satisfied. The kernel is not
+    resumed afterward, so continuation work must live in a dependent task.
+
+    ``signal`` must be an INT32 window-bound DistributedTensor and ``cmp`` must
+    be :class:`ir.WaitCmp.Ge`. The result is an ``UnknownType`` Call.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    expected_expr = _normalize_expr(expected, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.system.defer_wait", [signal, offsets_tuple, expected_expr], {"cmp": int(cmp)}, actual_span
+    )
+
+
+__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]

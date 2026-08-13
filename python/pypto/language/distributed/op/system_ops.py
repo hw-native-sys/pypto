@@ -19,7 +19,8 @@ cross-rank synchronisation primitives:
 * :func:`get_comm_ctx` — lift a :class:`pld.DistributedTensor` to its
   :class:`pld.CommCtx` handle. The op verifier (C++) refuses any argument
   that is not :class:`ir.DistributedTensorType`.
-* :func:`notify` / :func:`wait` — cross-rank TNOTIFY / TWAIT on a window-bound
+* :func:`notify` / :func:`wait` / :func:`defer_wait` — cross-rank notification,
+  blocking wait, and deferred task-completion registration on a window-bound
   signal matrix. Side-effect-only; the C++ verifier refuses a plain
   :class:`pl.Tensor` target.
 * :func:`rank` / :func:`nranks` — CommContext scalar reads (``INT32``). The
@@ -185,4 +186,28 @@ def wait(
     return _ir_system.wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def defer_wait(
+    signal: Tensor,
+    offsets: Sequence[IntLike],
+    expected: IntLike,
+    *,
+    cmp: WaitCmp,
+) -> Call:
+    """Register a deferred completion condition on a local signal slot.
+
+    Unlike :func:`wait`, this operation does not block the device core and does
+    not resume the kernel when the condition becomes true. The enclosing task
+    may finish executing, while its TaskId remains incomplete until
+    ``signal[offsets] >= expected``. Continuation work must therefore be placed
+    in a dependent task.
+
+    Args:
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` signal matrix.
+        offsets: Offsets into the local slice, one per ``signal`` dimension.
+        expected: Integer scalar threshold value to compare against.
+        cmp: Must be :class:`pld.WaitCmp.Ge` (keyword-only).
+    """
+    return _ir_system.defer_wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
+
+
+__all__ = ["defer_wait", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
