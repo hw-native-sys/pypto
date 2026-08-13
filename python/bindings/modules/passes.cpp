@@ -124,8 +124,9 @@ void BindPass(nb::module_& m) {
              "through a Vec tile instead")
       .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
-             "pld.tile.put) targets a dtype the backend store pipe can combine; a bf16 destination "
-             "requires the Ascend910B (A2/A3) profile");
+             "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
+             "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
+             "profile");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

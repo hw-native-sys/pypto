@@ -143,8 +143,10 @@ def put(  # noqa: PLR0913
     destination (the hardware atomic-add dtypes), and a bf16 destination is
     Ascend910B-only (checked by the ``AtomicAddDtypeValid`` verifier).
     Side-effect only — the result is an
-    ``UnknownType`` Call. The verifier rejects a non-:class:`ir.DistributedTensorType`
-    ``dst`` / ``src``. With no offsets/shape this writes the full source slice
+    ``UnknownType`` Call. The verifier requires ``dst`` to be a
+    :class:`ir.DistributedTensorType`; ``src`` may be either that or a plain
+    :class:`ir.TensorType` (TPUT only needs a readable local GM region). With
+    no offsets/shape this writes the full source slice
     into the full destination slice. When offsets and shape are provided it
     writes ``src[src_offsets:src_offsets+shape]`` into the peer rank's
     ``dst[dst_offsets:dst_offsets+shape]``.

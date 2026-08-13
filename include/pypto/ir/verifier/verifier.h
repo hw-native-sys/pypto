@@ -101,7 +101,8 @@ PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
  * @brief Factory for the atomic-add destination-dtype property verifier
  *
  * Checks every atomic-add write into GM (``tile.store`` / ``tensor.assemble`` /
- * ``pld.tensor.put`` / ``pld.tile.put``) against
+ * ``pld.tensor.put`` / ``pld.tile.put`` / ``pld.tensor.remote_store`` /
+ * ``pld.tile.remote_store``) against
  * ``BackendHandler::SupportsBf16AtomicAdd``. Listed in
  * ``GetStructuralProperties()``, so it is verified at pipeline input on the
  * user's own IR.

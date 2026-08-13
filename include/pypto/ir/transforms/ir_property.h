@@ -96,10 +96,11 @@ enum class IRProperty : uint64_t {
                                     ///< InferTileMemorySpace has resolved memory spaces -- the same DSL
                                     ///< program is legal when its result routes through Vec instead
   AtomicAddDtypeValid,              ///< Every atomic-add write into GM (tile.store / tensor.assemble /
-                                    ///< pld.tensor.put / pld.tile.put) targets a destination dtype the
-                                    ///< backend's store pipe can combine (BackendHandler::
-                                    ///< SupportsBf16AtomicAdd). Decidable on the user's own IR, so it is
-                                    ///< a structural property verified at pipeline input
+                                    ///< pld.tensor.put / pld.tile.put / pld.tensor.remote_store /
+                                    ///< pld.tile.remote_store) targets a destination dtype the backend's
+                                    ///< store pipe can combine (BackendHandler::SupportsBf16AtomicAdd).
+                                    ///< Decidable on the user's own IR, so it is a structural property
+                                    ///< verified at pipeline input
   kCount                            ///< Sentinel (must be last)
 };
 
