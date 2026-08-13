@@ -88,6 +88,62 @@ using tpop_tfree::FinalizeTpopTfrees;
 // Use the shared utility; local alias preserves call sites.
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
+/// Validate that a deferred waiter is reached only through the task-level
+/// orchestration dispatch shape produced by ScopeOutliner. The marker is
+/// printable and therefore cannot be treated as provenance by itself.
+class DeferredWaiterCallSiteValidator : public IRVisitor {
+ public:
+  DeferredWaiterCallSiteValidator(const std::unordered_set<std::string>& waiter_names, FunctionPtr caller)
+      : waiter_names_(waiter_names), caller_(std::move(caller)) {}
+
+  [[nodiscard]] const std::unordered_set<std::string>& called_waiters() const { return called_waiters_; }
+
+ protected:
+  void VisitExpr_(const CallPtr& call) override {
+    if (IsWaiter(call->op_)) {
+      RecordCall(call->op_, call->GetAttr<bool>("allow_early_resolve", false), call->HasAttr(kAttrPredicate),
+                 call->HasAttr(kAttrCoreNum) || call->GetAttr<bool>(kAttrSyncStart, false), call->span_);
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+
+  void VisitExpr_(const SubmitPtr& submit) override {
+    if (IsWaiter(submit->op_)) {
+      RecordCall(submit->op_, submit->allow_early_resolve_, submit->predicate_.has_value(),
+                 submit->core_num_.has_value() || submit->sync_start_, submit->span_);
+    }
+    IRVisitor::VisitExpr_(submit);
+  }
+
+ private:
+  [[nodiscard]] bool IsWaiter(const OpPtr& op) const {
+    auto global = As<GlobalVar>(op);
+    return global && waiter_names_.count(global->name_) != 0;
+  }
+
+  void RecordCall(const OpPtr& op, bool allow_early_resolve, bool predicate, bool has_launch_shape,
+                  const Span& span) {
+    auto global = As<GlobalVar>(op);
+    INTERNAL_CHECK_SPAN(global, span) << "Internal error: deferred waiter call target is not a GlobalVar";
+    CHECK_SPAN(caller_->func_type_ == FunctionType::Orchestration, span)
+        << "deferred waiter '" << global->name_
+        << "' must be dispatched directly from an Orchestration function via a task-level "
+           "pl.at(CORE_GROUP) scope";
+    CHECK_SPAN(!allow_early_resolve, span)
+        << "deferred waiter '" << global->name_ << "' cannot use allow_early_resolve=True";
+    CHECK_SPAN(!predicate, span) << "deferred waiter '" << global->name_
+                                 << "' cannot use a dispatch predicate";
+    CHECK_SPAN(!has_launch_shape, span)
+        << "deferred waiter '" << global->name_
+        << "' must be a single-block task and cannot use core_num or sync_start";
+    called_waiters_.insert(global->name_);
+  }
+
+  const std::unordered_set<std::string>& waiter_names_;
+  FunctionPtr caller_;
+  std::unordered_set<std::string> called_waiters_;
+};
+
 // ============================================================================
 // Explicit split-reshape op helpers (tile.aiv_shard / tile.aic_gather)
 // ============================================================================
@@ -1847,6 +1903,48 @@ namespace pass {
 
 Pass ExpandMixedKernel() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Audit every function before filtering to InCore below. A hand-authored
+    // AIV/AIC function, or a user-stamped marker without a validated waiter
+    // body and task-level call site, must not bypass the deferred contract.
+    std::unordered_set<std::string> deferred_waiter_names;
+    for (const auto& [gvar, func] : program->functions_) {
+      // Detect the real op independently of the printable compiler marker.
+      if (!outline_utils::ContainsDeferredWait(func->body_)) continue;
+      CHECK_SPAN(func->GetAttr<bool>(kAttrDeferredCompletionWaiter, false), func->span_)
+          << "pld.system.defer_wait in function '" << func->name_
+          << "' bypasses the deferred-waiter task contract. Use a task-level "
+             "`with pl.at(level=pl.Level.CORE_GROUP)` scope; capture its TaskId and use "
+             "`deps=[wait_tid]` only when a later consumer must be gated.";
+      CHECK_SPAN(func->func_type_ == FunctionType::InCore || func->func_type_ == FunctionType::AIV,
+                 func->span_)
+          << "deferred waiter '" << func->name_
+          << "' must be an outlined InCore function or its pure-AIV expanded form";
+      CHECK_SPAN(
+          !func->GetAttr<ExprPtr>(kAttrCoreNum, nullptr) && !func->GetAttr<bool>(kAttrSyncStart, false),
+          func->span_)
+          << "deferred waiter '" << func->name_
+          << "' must be a single-block task and cannot carry core_num or sync_start";
+      auto contract = outline_utils::DeferredWaitContractValidator::Validate(func->body_, func->span_);
+      INTERNAL_CHECK_SPAN(contract.has_deferred_wait, func->span_)
+          << "Internal error: deferred-wait finder/contract-validator disagreement";
+      deferred_waiter_names.insert(func->name_);
+    }
+
+    if (!deferred_waiter_names.empty()) {
+      std::unordered_set<std::string> called_waiters;
+      for (const auto& [gvar, func] : program->functions_) {
+        DeferredWaiterCallSiteValidator validator(deferred_waiter_names, func);
+        validator.VisitStmt(func->body_);
+        called_waiters.insert(validator.called_waiters().begin(), validator.called_waiters().end());
+      }
+      for (const auto& waiter_name : deferred_waiter_names) {
+        CHECK_SPAN(called_waiters.count(waiter_name) != 0, program->span_)
+            << "deferred waiter '" << waiter_name
+            << "' has no task-level Orchestration call site; a printable function attr alone is not a "
+               "valid deferred-completion contract";
+      }
+    }
+
     // Phase 1: Pre-scan — find InCore functions that have existing callers.
     std::unordered_set<std::string> incore_names;
     for (const auto& [gvar, func] : program->functions_) {
@@ -1892,6 +1990,14 @@ Pass ExpandMixedKernel() {
       std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
       std::unordered_map<const Var*, CoreAffinity> var_affinity;
       auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs);
+
+      const bool is_deferred_waiter = deferred_waiter_names.count(func->name_) != 0;
+
+      if (is_deferred_waiter) {
+        CHECK_SPAN(combined != CoreAffinity::CUBE && combined != CoreAffinity::MIXED, func->span_)
+            << "deferred waiter '" << func->name_
+            << "' must lower to a pure AIV kernel; AIC and mixed AIC/AIV waiters are not supported";
+      }
 
       // A function is mixed if combined affinity says so. Leaf boundary moves
       // (tile.move across the C/V divide) classify as MIXED via ClassifyCallAffinity,
