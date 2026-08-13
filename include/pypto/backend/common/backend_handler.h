@@ -251,13 +251,20 @@ class BackendHandler {
   /**
    * @brief Whether this backend's store pipe honours a bf16 atomic-add into GM.
    *
-   * The pto-isa `SetAtomicAdd<T>` dispatch accepts `__gm__ bfloat16_t`
-   * (`set_atomic_bf16`) on the A2/A3 store path (Ascend910B) but NOT on the A5
-   * path (Ascend950), where a bf16 atomic-add store fails a pto-isa
-   * `static_assert`. PTOCodegen gates a bf16 atomic-add `pto.tstore` on this so
-   * A5 users get a clean PyPTO error instead of a downstream C++ compile
-   * failure. The atomic dispatch keys on the GM *destination* dtype, so this
-   * also covers the cube path (fp32 Acc -> bf16 GM via fix-pipe).
+   * A bf16 atomic-add lowers to `set_atomic_bf16`, honoured on the A2/A3 store
+   * path (Ascend910B) and not on the A5 one (Ascend950). Both arches'
+   * `SetAtomicAdd<T>` helpers *do* list `bfloat16_t`, so that dispatch
+   * static_assert is not the evidence; the pinned ST suite is. a2a3 covers
+   * atomic-add into a bf16 destination (`tstore_acc2gm` case 60,
+   * `<1, float, bfloat16_t, bfloat16_t, ...>`) while a5's port of that same
+   * case runs it non-atomically (`<0, ...>`), and the `set_atomic_bf16`
+   * costmodel mock exists only under `costmodel/a2a3/`.
+   *
+   * The `AtomicAddDtypeValid` property verifier gates every atomic-add site on
+   * this, so A5 users get a clean PyPTO error at pipeline input instead of a
+   * downstream C++ compile failure. The atomic dispatch keys on the GM
+   * *destination* dtype, so this also covers the cube path (fp32 Acc -> bf16 GM
+   * via fix-pipe).
    *
    * Ascend910B: true. Ascend950: false.
    */
@@ -272,7 +279,11 @@ class BackendHandler {
    * `CheckAcc2gm` whitelist and ptoas as a `pto.tstore` verifier rule:
    *
    *   Ascend910B (a2a3): INT32 / FP32 / FP16 / BF16
-   *   Ascend950  (a5)  : INT32 / FP32 / FP16   (no BF16)
+   *   Ascend950  (a5)  : INT32 / FP32 / FP16 / BF16
+   *
+   * The two arches accept the same set today. The hook stays per-backend
+   * because the sets are independent facts about each pinned target, not one
+   * shared constant -- they have differed before and may again.
    *
    * Anything else -- notably INT8/INT16 -- must reach GM either through a Vec
    * tile (an explicit `pl.cast` narrows in the vector unit, then stores) or via
@@ -282,7 +293,9 @@ class BackendHandler {
    * through Vec and illegal when it stays in Acc.
    *
    * The two sets above mirror ptoas exactly; keep them in step when the pinned
-   * assembler moves (`toolchain/versions.env`, `runtime/pto_isa.pin`).
+   * assembler moves (`toolchain/versions.env`, `runtime/pto_isa.pin`). As of
+   * ptoas v0.57 / pto-isa 83d01313 both arches are `i32/f32/f16/bf16`
+   * (`PTO.cpp` "acc tstore dst element type", a2a3/a5 `CheckStaticAcc`).
    */
   [[nodiscard]] virtual bool SupportsAccToGmDtype(const DataType& dtype) const = 0;
 

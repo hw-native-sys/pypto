@@ -52,14 +52,21 @@ class Ascend950Handler : public BackendHandler {
   // A5 acc->mat tinsert accepts dst=f32, so the Mat scratch may stay f32.
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return false; }
 
-  // A5 store pipe does NOT support bf16 atomic-add (pto-isa SetAtomicAdd<T>
-  // rejects bfloat16_t on the a5 path); require an fp32 accumulator + cast.
+  // A5 store pipe does NOT support bf16 atomic-add; require an fp32
+  // accumulator + cast. Note the a5 `SetAtomicAdd<T>` static_assert *does*
+  // list bfloat16_t, so the dispatch helper alone is not evidence either way.
+  // What settles it is the pinned ST suite: a2a3 covers atomic-add into a bf16
+  // destination (tstore_acc2gm case 60, `<1, float, bfloat16_t, bfloat16_t>`)
+  // while the a5 port of that same case runs it with atomicType `<0, ...>`.
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return false; }
 
-  // A5 fix-pipe Acc->GM destination whitelist (pto-isa kirinX90 CheckAcc2gm,
-  // non-quant branch) -- narrower than a2a3: no bf16.
+  // A5 fix-pipe Acc->GM destination whitelist, non-quant branch: same set as
+  // a2a3. ptoas rejects anything else at `pto.tstore` ("expects A5 acc tstore
+  // dst element type to be i32/f32/f16/bf16") and pto-isa's a5 CheckStaticAcc
+  // static_asserts the identical four.
   [[nodiscard]] bool SupportsAccToGmDtype(const DataType& dtype) const override {
-    return dtype == DataType::INT32 || dtype == DataType::FP32 || dtype == DataType::FP16;
+    return dtype == DataType::INT32 || dtype == DataType::FP32 || dtype == DataType::FP16 ||
+           dtype == DataType::BF16;
   }
 
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,

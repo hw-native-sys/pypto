@@ -27,6 +27,7 @@ from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.debug import torch_codegen
 from pypto.jit.decorator import jit
+from pypto.runtime import RunConfig
 
 # Module-level constants — the JIT specializer inlines module-level ints.
 _M = 64
@@ -510,6 +511,62 @@ def _mm_via_vec_to_int8_program():
         return c
 
     return mm_via_vec_to_i8
+
+
+def _mm_acc_to_bf16_program():
+    """Cube matmul whose fp32 accumulator is stored straight into a bf16 output.
+
+    Deliberately non-atomic: this isolates the Acc->GM destination whitelist
+    (``AccToGmStoreValid``) from the separate bf16 atomic-add gate
+    (``AtomicAddDtypeValid``), which is A2/A3-only. The store keeps a
+    ``loc=acc, dtype=f32`` source and a bf16 destination, so it exercises the
+    fix-pipe down-convert.
+    """
+
+    @jit
+    def mm_acc_to_bf16(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm_bf16"):
+            partial = pl.matmul(a, b, out_dtype=pl.FP32)
+            c = pl.assemble(c, partial, [0, 0])
+        return c
+
+    return mm_acc_to_bf16
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a5"])
+def test_acc_to_bf16_gm_store_compiles_on_both_backends(platform):
+    """The fix-pipe narrows an Acc tile into a bf16 GM tensor on A2/A3 *and* A5.
+
+    Both pinned layers accept the same non-quant Acc->GM destination set: ptoas
+    v0.57 verifies ``pto.tstore`` against ``i32/f32/f16/bf16`` for A2/A3 and A5
+    alike, and pto-isa 83d01313's ``CheckStaticAcc`` static_asserts the identical
+    four on both arches (its a5 ST suite covers a bf16 destination directly).
+    PyPTO's A5 entry used to omit BF16, so this program was rejected on A5 only
+    and users had to insert a needless ``pl.cast`` through the vector unit.
+    """
+    torch = pytest.importorskip("torch")
+    # The jit path selects its own backend from the RunConfig platform, so the
+    # arch is chosen here rather than by overriding the module fixture.
+    backend.reset_for_testing()
+    post = _mm_acc_to_bf16_program().lower(
+        torch.randn(_M, _K, dtype=torch.bfloat16),
+        torch.randn(_K, _N, dtype=torch.bfloat16),
+        torch.empty(_M, _N, dtype=torch.bfloat16),
+        config=RunConfig(platform=platform),
+    )
+    incore = [f for f in post.functions.values() if ir.is_incore_type(f.func_type)]
+    assert incore, "expected at least one InCore kernel"
+    mlir = "\n".join(codegen.PTOCodegen().generate(ir.Program([f], f.name, post.span)) for f in incore)
+
+    acc_stores = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line and "loc=acc" in line]
+    assert acc_stores, f"expected a cube (loc=acc) store into the bf16 target:\n{mlir}"
+    assert all(re.search(r"partition_tensor_view<[0-9x]+xbf16>", line) for line in acc_stores), (
+        f"the Acc->GM store must target a bf16 GM partition view, got:\n{acc_stores}"
+    )
+    # Non-atomic: the bf16 atomic-add gate is a separate, still-A2/A3-only rule.
+    assert all("atomicType" not in line for line in acc_stores), (
+        f"this program must not emit an atomic combine, got:\n{acc_stores}"
+    )
 
 
 def test_int8_dest_via_vec_still_compiles():
