@@ -35,6 +35,8 @@ std::string DiagnosticCheckToString(DiagnosticCheck check) {
       return "UnusedControlFlowResult";
     case DiagnosticCheck::TileInnermostDimGranularity:
       return "TileInnermostDimGranularity";
+    case DiagnosticCheck::OutParamWriteDropped:
+      return "OutParamWriteDropped";
     default:
       return "Unknown";
   }
@@ -81,6 +83,10 @@ DiagnosticCheckRegistry::DiagnosticCheckRegistry() {
   Register(DiagnosticCheck::UnusedControlFlowResult, DiagnosticSeverity::Warning,
            DiagnosticPhase::PrePipeline,
            /*hint_code=*/"", CreateUnusedControlFlowResultWarningVerifier);
+  // Issue #2352 — runs on the pipeline input so the message names the
+  // parameter the user wrote, before ConvertToSSA versions it to `out__ssa_v2`.
+  Register(DiagnosticCheck::OutParamWriteDropped, DiagnosticSeverity::Warning, DiagnosticPhase::PrePipeline,
+           /*hint_code=*/"", CreateOutParamWriteDroppedWarningVerifier);
 
   // Performance hints (issue #1180) — run once at the end of the pipeline,
   // after tile shapes and memory layout are fully resolved.

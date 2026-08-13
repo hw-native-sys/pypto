@@ -932,6 +932,70 @@ def kernel(
 
 **Constraint:** `Scalar` parameters cannot have `InOut` direction (raises `ParserTypeError`).
 
+#### Writing an `Out` / `InOut` parameter
+
+**A bare assignment does not write the parameter.** It rebinds the Python name:
+the parameter Var is re-pointed at a freshly computed tensor and the caller's
+buffer is left untouched. The program still compiles and runs. What the caller
+gets back depends on the direction: an `Out` buffer is freshly allocated and
+never initialised, so it reads as garbage; an `InOut` buffer still holds the
+input the caller passed in, so the result is silently stale.
+
+```python
+out = pl.add(a, b)          # ❌ writes nothing
+out[:] = pl.add(a, b)       # ✅ writes the whole tensor
+```
+
+Use the subscript form to write through the parameter:
+
+| Spelling | Writes | Use when |
+| -------- | ------ | -------- |
+| `out[:] = <expr>` | the whole tensor | the result is the entire output |
+| `out[<slices>] = <expr>` | that sub-window | writing part of the output |
+| `out = pl.assemble(out, <expr>, <offset>)` | a window at `<offset>` | the explicit form the subscript sugar builds |
+| `out = <expr>` | **nothing** | never — see the warning below |
+
+Only the first and third are equivalent, and only when the slice covers the full
+extent and `<offset>` is all zeros.
+
+##### The `OutParamWriteDropped` warning
+
+The compiler reports a bare assignment that drops the write:
+
+```text
+[warning] [OutParamWriteDropped] (pipeline_input) Assigning to Out parameter 'out'
+in function 'main' rebinds the name only — the caller's buffer is never written.
+Use 'out[:] = <expr>' to write the whole tensor, or 'out[<slices>] = <expr>' for
+a sub-window. at repro.py:12:9
+```
+
+The check is data-flow based, not syntactic. A value can reach the parameter
+without naming it — through a loop carry, for instance — and that is a genuine
+write-through, so it stays silent:
+
+```python
+for col, (d,) in pl.range(0, n, chunk, init_values=(data,)):
+    d = pl.store(local, [0, col], d)
+    staged = pl.yield_(d)
+data = pld.tensor.allreduce(staged, signal, ...)   # `staged` *is* `data`; no warning
+```
+
+The check is deliberately conservative: a value that merely *reads* the
+parameter, such as `out = pl.add(out, b)`, is not reported even though it also
+drops the write. Telling "reads the parameter" from "writes through the
+parameter" needs per-op write semantics the operator registry does not record, and
+a false warning on correct code costs more than a missed one. Write
+`out[:] = pl.add(out, b)` when the whole tensor is meant.
+
+Disable the check with `disabled_diagnostics` if it is not useful for your
+program:
+
+```python
+disabled = passes.DiagnosticCheckSet()
+disabled.insert(passes.DiagnosticCheck.OutParamWriteDropped)
+ir.compile(program, disabled_diagnostics=disabled)
+```
+
 ## Complete Example
 
 ### Tensor Operations (Loop with iter_args)

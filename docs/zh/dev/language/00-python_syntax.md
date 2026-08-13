@@ -875,6 +875,62 @@ def kernel(
 
 **约束:** `Scalar` 参数不能使用 `InOut` 方向 (会抛出 `ParserTypeError`)。
 
+#### 写入 `Out` / `InOut` 参数
+
+**裸赋值不会写入参数。** 它只是重新绑定 Python 名字: 参数 Var 指向一个新算出来的
+张量，调用方的 buffer 完全没被碰过。程序照样能编译、能运行。调用方拿回什么取决于方向:
+`Out` buffer 是新分配且从未初始化的，读出来是垃圾值; `InOut` buffer 里仍是调用方传进来的
+输入，结果是悄悄地陈旧。
+
+```python
+out = pl.add(a, b)          # ❌ 什么也没写
+out[:] = pl.add(a, b)       # ✅ 写入整个张量
+```
+
+要真正写入参数，请用下标形式:
+
+| 写法 | 写入内容 | 适用场景 |
+| ---- | -------- | -------- |
+| `out[:] = <expr>` | 整个张量 | 结果就是整个输出 |
+| `out[<slices>] = <expr>` | 该子窗口 | 只写输出的一部分 |
+| `out = pl.assemble(out, <expr>, <offset>)` | `<offset>` 处的窗口 | 下标语法糖展开后的显式形式 |
+| `out = <expr>` | **什么也不写** | 永远不要这么写——见下面的告警 |
+
+只有第一行和第三行等价，且仅当切片覆盖全部范围、`<offset>` 全为 0 时才等价。
+
+##### `OutParamWriteDropped` 告警
+
+编译器会对丢失写入的裸赋值报告:
+
+```text
+[warning] [OutParamWriteDropped] (pipeline_input) Assigning to Out parameter 'out'
+in function 'main' rebinds the name only — the caller's buffer is never written.
+Use 'out[:] = <expr>' to write the whole tensor, or 'out[<slices>] = <expr>' for
+a sub-window. at repro.py:12:9
+```
+
+该检查基于数据流而非语法。一个值可以不提参数名就流回该参数——例如经由 loop carry——
+那是真正的回写，因此不会告警:
+
+```python
+for col, (d,) in pl.range(0, n, chunk, init_values=(data,)):
+    d = pl.store(local, [0, col], d)
+    staged = pl.yield_(d)
+data = pld.tensor.allreduce(staged, signal, ...)   # `staged` 就是 `data`; 不告警
+```
+
+该检查刻意保守: 仅仅*读取*参数的值 (例如 `out = pl.add(out, b)`) 同样会丢失写入，
+但不会被报告。要区分「读取参数」和「通过参数回写」需要算子注册表并未记录的逐算子写语义，
+而对正确代码误报的代价高于漏报。需要全量写入时请写成 `out[:] = pl.add(out, b)`。
+
+如果该检查对你的程序没有价值，可以用 `disabled_diagnostics` 关闭:
+
+```python
+disabled = passes.DiagnosticCheckSet()
+disabled.insert(passes.DiagnosticCheck.OutParamWriteDropped)
+ir.compile(program, disabled_diagnostics=disabled)
+```
+
 ## 完整示例
 
 ### 张量操作 (带 iter_args 的循环)

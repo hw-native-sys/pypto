@@ -41,6 +41,8 @@ enum class DiagnosticCheck : uint32_t {
   // --- Performance hints (issue #1180) -----------------------------------
   TileInnermostDimGranularity = 2,
   // future: TileShapeBlocksDmaVectorization, PartialPipelineFill, ...
+  // --- Warnings (appended; values are stable across releases) -------------
+  OutParamWriteDropped = 3,
   kCount
 };
 
@@ -148,6 +150,9 @@ PropertyVerifierPtr CreateUnusedControlFlowResultWarningVerifier();
 
 /// Factory function for creating TileInnermostDimGranularity perf-hint verifier (issue #1180)
 PropertyVerifierPtr CreateTileInnermostDimGranularityVerifier();
+
+/// Factory function for creating OutParamWriteDropped warning verifier (issue #2352)
+PropertyVerifierPtr CreateOutParamWriteDroppedWarningVerifier();
 
 }  // namespace ir
 }  // namespace pypto

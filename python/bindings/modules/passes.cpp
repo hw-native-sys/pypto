@@ -188,7 +188,9 @@ void BindPass(nb::module_& m) {
       .value("UnusedControlFlowResult", DiagnosticCheck::UnusedControlFlowResult,
              "Unused return variable from for/while/if statement")
       .value("TileInnermostDimGranularity", DiagnosticCheck::TileInnermostDimGranularity,
-             "Tile innermost dim below recommended HW memory-access granularity (PH001)");
+             "Tile innermost dim below recommended HW memory-access granularity (PH001)")
+      .value("OutParamWriteDropped", DiagnosticCheck::OutParamWriteDropped,
+             "Rebinding an Out/InOut parameter drops the caller's write");
 
   // Bind DiagnosticCheckSet
   auto diagnostic_check_set =
