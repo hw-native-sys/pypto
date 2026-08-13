@@ -1730,6 +1730,19 @@ class ASTParser:
                     and value_expr.type.dtype == DataType.INDEX
                 ):
                     override_type = resolved
+        # A bare int literal parses as an untyped placeholder (``ConstInt(v,
+        # INDEX)`` — see ``_normalize_scalar_operand``), so the scalar branch
+        # above would otherwise bind an annotated Var to a constant of a
+        # different dtype: ``acc: pl.Scalar[pl.INT64] = 0`` produced
+        # ``AssignStmt(Var[INT64], ConstInt[INDEX])``, violating
+        # AssignTypeSymmetry. The mismatch only surfaces much later — Simplify
+        # propagates the constant into a loop's ``iter_arg`` init, where
+        # TypeCheck compares it against the declared carry dtype. Re-stamp the
+        # placeholder to the annotated dtype instead. The dtype stays integral:
+        # ``validate_annotation_consistency`` already rejected an int literal
+        # under a float annotation (float literals never carry INDEX).
+        if isinstance(override_type, ir.ScalarType) and isinstance(value_expr, ir.ConstInt):
+            value_expr = ir.ConstInt(value_expr.value, override_type.dtype, value_expr.span)
         # If annotation syntax determines the result type more precisely than the
         # raw call inference, rebuild the Call with that type so structural
         # equality sees the same IR after print→parse.

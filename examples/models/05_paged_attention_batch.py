@@ -399,16 +399,10 @@ def BuildBatchPagedAttentionProgram(
             q_loop_cfg = (num_heads_cfg + q_tile - 1) // q_tile
 
             # Compute max_bn across all batches (mirrors C++ max_bn loop).
-            # The loop carries max_bn, so it must be seeded from a bound variable:
-            # batch 0 is peeled into the if/else phi and the loop starts at 1.
-            zero_bn_cfg: pl.Scalar[pl.INT64] = 0
-            if batch_cfg == 0:
-                max_bn: pl.Scalar[pl.INT64] = pl.yield_(zero_bn_cfg)
-            else:
-                first_seq = pl.tensor.read(context_lens, [0])
-                first_bn_cfg: pl.Scalar[pl.INT64] = (first_seq + block_size_cfg - 1) // block_size_cfg
-                max_bn: pl.Scalar[pl.INT64] = pl.yield_(first_bn_cfg)
-            for b in pl.range(1, batch_cfg):
+            # A loop carry may be seeded straight from a literal; codegen emits
+            # the constant as the carry's initializer.
+            max_bn: pl.Scalar[pl.INT64] = 0
+            for b in pl.range(batch_cfg):
                 cur_seq_b = pl.tensor.read(context_lens, [b])
                 bn_b = (cur_seq_b + block_size_cfg - 1) // block_size_cfg
                 max_bn = pl.max(max_bn, bn_b)  # type: ignore[reportArgumentType]

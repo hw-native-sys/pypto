@@ -713,14 +713,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
       const auto& return_var = for_stmt->return_vars_[i];
       const bool is_rebind = carry_plans[i].is_rebind;
       const int64_t array_size = carry_plans[i].array_size;
-      std::string init_var_name = TryGetVarName(iter_arg->initValue_);
-      INTERNAL_CHECK_SPAN(!init_var_name.empty(), for_stmt->span_)
-          << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
+      // An init value is usually an SSA Var, but a scalar carry seeded by a
+      // constant reaches codegen as a bare expression: Simplify propagates
+      // ``acc: pl.Scalar[pl.INT64] = 0`` into the iter_arg, and
+      // ``pl.range(..., init_values=(0,))`` writes the literal directly. Both
+      // are legal IR, so emit the init expression instead of demanding an
+      // identifier. Only the ArrayType copy-in below genuinely needs a name.
+      const std::string init_emit_name = TryGetVarName(iter_arg->initValue_);
+      const bool init_is_var = !init_emit_name.empty();
       // Function tensor params get rewritten to `ext_<name>` in the emitted C++,
       // so the bare emit name is not a valid identifier when the init value is
       // a param. Apply the same translation as everything else that names a
       // tensor in the emitted code.
-      init_var_name = GetExternalTensorName(init_var_name);
+      const std::string init_var_name =
+          init_is_var ? GetExternalTensorName(init_emit_name) : GenerateExprString(iter_arg->initValue_);
 
       if (array_size > 0) {
         // ARRAY CARRY PATH — allocate ``PTO2TaskId <name>[N]`` and init it.
@@ -810,6 +816,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (init_carry) {
           carry_name = init_carry->array_name;
         } else {
+          // The copy-in indexes the init slot-by-slot (``src[i]``), so this is
+          // the one carry path that needs the init to name a backing array
+          // rather than be an arbitrary expression.
+          INTERNAL_CHECK_SPAN(init_is_var, for_stmt->span_)
+              << "Internal error: ArrayType iter_arg init value must be a variable naming a backing "
+              << "array, got " << iter_arg->initValue_->TypeName();
           carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
           EmitIndentedLine(cpp_dtype + " " + carry_name + "[" + std::to_string(N) + "];");
 

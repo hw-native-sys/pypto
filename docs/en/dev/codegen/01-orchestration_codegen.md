@@ -403,6 +403,15 @@ for (int64_t i = 0; i < 4; i += 1) {
 
 Iter_args are initialized before the loop. `YieldStmt` updates are emitted at the end of each iteration.
 
+An `IterArg::initValue_` is usually an SSA `Var`, but any expression is legal —
+a scalar carry seeded by a constant (`acc: pl.Scalar[pl.INT64] = 0` before the
+loop, which `Simplify` propagates into the loop, or an explicit
+`pl.range(..., init_values=(0,))`) arrives as a `ConstInt`. Codegen emits the
+init expression directly (`int64_t acc__rv_v1 = 0;`); a trivial carry — one the
+body never rebinds — aliases both names straight to that expression instead. The
+one path that still requires the init to *name* something is the `ArrayType`
+carry copy-in, which indexes it slot-by-slot.
+
 ### IfStmt
 
 ```python

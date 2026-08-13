@@ -975,6 +975,101 @@ class TestScalarCarryPhiCodegen:
             if "out_b" in lhs and "out_c" in rhs and "out_b" not in rhs:
                 raise AssertionError(f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}")
 
+    def test_literal_seeded_scalar_carry_emits_constant_init(self):
+        """A scalar carry seeded by a literal must compile, not raise InternalError.
+
+        ``max_bn = 0`` before the loop is a constant binding, so Simplify
+        propagates the literal into the ForStmt's ``init_values``: the iter_arg
+        init reaches codegen as a ``ConstInt``, not a ``Var``. The carry
+        declaration must emit the constant directly (``int64_t <carry> = 0;``).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class LiteralSeededCarry:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, a_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                lens: pl.Tensor[[8], pl.INT64],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                max_bn: pl.Scalar[pl.INT64] = 0
+                for b in pl.range(8):
+                    bn_b = pl.tensor.read(lens, [b])
+                    max_bn = pl.max(max_bn, bn_b)
+                for _ in pl.range(max_bn):
+                    d = self.kernel_add(a, d)
+                return d
+
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LiteralSeededCarry)
+        code = _generate_orch_code(transformed)
+
+        carry_decl = re.search(r"int64_t (max_bn\w*) = 0;", code)
+        assert carry_decl, "literal-seeded scalar carry must declare ``int64_t <carry> = 0;``\n" + code
+        carry = carry_decl.group(1)
+        # The carry feeds the running max, the yield writes back into it, and the
+        # post-loop use reads it as the second loop's trip count.
+        assert f"std::max<int64_t>({carry}," in code, "loop body must read the carry\n" + code
+        assert re.search(rf"^\s*{carry} = \w+;$", code, re.MULTILINE), (
+            "yield must write back into the carry\n" + code
+        )
+        assert f"< {carry};" in code, "post-loop use must read the carry variable\n" + code
+
+    def test_literal_seeded_trivial_carry_aliases_to_constant(self):
+        """A never-rebound carry seeded by a literal aliases straight to the constant.
+
+        ``pl.range(..., init_values=(4,))`` with a yield that returns the iter_arg
+        unchanged is a trivial alias: codegen declares no carry variable and
+        every use of the loop's return var emits the literal.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TrivialLiteralCarry:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, a_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for _k, (acc,) in pl.range(8, init_values=(4,)):
+                    d = self.kernel_add(a, d)
+                    acc_out: pl.Scalar[pl.INT64] = pl.yield_(acc)
+                for _ in pl.range(acc_out):
+                    d = self.kernel_add(a, d)
+                return d
+
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(TrivialLiteralCarry)
+        code = _generate_orch_code(transformed)
+
+        assert "acc" not in code, "trivial literal carry must not declare a carry variable\n" + code
+        assert "< 4;" in code, "post-loop use of the trivial carry must emit the literal 4\n" + code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

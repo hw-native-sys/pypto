@@ -392,6 +392,13 @@ for (int64_t i = 0; i < 4; i += 1) {
 
 迭代参数在循环前初始化。`YieldStmt` 更新在每次迭代末尾发出。
 
+`IterArg::initValue_` 通常是一个 SSA `Var`，但任意表达式都是合法的 —— 由常量播种的标量
+循环携带值（循环前的 `acc: pl.Scalar[pl.INT64] = 0`，`Simplify` 会将其传播进循环；或者显式
+写出的 `pl.range(..., init_values=(0,))`）会以 `ConstInt` 的形式到达。codegen 直接发出该
+初始化表达式（`int64_t acc__rv_v1 = 0;`）；对于循环体从不重新绑定的平凡携带值，两个名字都
+直接别名到该表达式。唯一仍要求初始值必须*命名*某个对象的路径是 `ArrayType` 携带值的拷入，
+它需要逐槽位索引该初始值。
+
 ### IfStmt
 
 ```python

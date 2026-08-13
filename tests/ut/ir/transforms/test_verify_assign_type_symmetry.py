@@ -84,6 +84,38 @@ def test_parsed_clean_program_passes():
     assert len(_verify(Program)) == 0
 
 
+def test_annotated_scalar_literal_matches_annotation_dtype():
+    """``acc: pl.Scalar[pl.INT64] = 0`` binds an INT64 constant, not an INDEX one.
+
+    A bare int literal parses as the untyped placeholder ``ConstInt(v, INDEX)``.
+    The annotation retypes the Var, so the parser must re-stamp the constant to
+    match — otherwise the AssignStmt is asymmetric, and the mismatch resurfaces
+    far downstream (Simplify propagates the constant into a loop's ``iter_arg``
+    init, where TypeCheck compares it against the declared carry dtype).
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, d: pl.Out[pl.Tensor[[4], pl.FP32]]) -> pl.Tensor[[4], pl.FP32]:
+            acc: pl.Scalar[pl.INT64] = 0
+            for _k in pl.range(4):
+                acc = acc + 1
+            return d
+
+    assert len(_verify(Program)) == 0
+
+    orch = next(f for f in Program.functions.values() if f.name == "orch")
+    body = orch.body
+    assert isinstance(body, ir.SeqStmts)
+    seed = body.stmts[0]
+    assert isinstance(seed, ir.AssignStmt)
+    assert isinstance(seed.value, ir.ConstInt)
+    seed_type = seed.value.type
+    assert isinstance(seed_type, ir.ScalarType)
+    assert seed_type.dtype == DataType.INT64
+
+
 # --------------------------------------------------------------------------- #
 # Negative cases — each field divergence is detected.
 # --------------------------------------------------------------------------- #
