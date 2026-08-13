@@ -86,7 +86,7 @@ out, _ = pl.submit(self.consumer, x, out, deps=[gate])
 
 和 `pl.submit` 一样，它是解析器构造 —— 在被装饰函数体外调用会抛异常。注意拼写：它在 `pl.system` 下，不在顶层。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：**
 >

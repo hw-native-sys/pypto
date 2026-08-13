@@ -112,7 +112,7 @@ tile = pl.load(a, [0, 0], [64, 64], valid_shape=[64, vlen])
 
 见 [动态有效形状](../language/03-memory.md) 与 `examples/intermediate/06_dyn_valid_shape.py` 里那个遍历末块不满的张量的循环。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 对带 padding 的 tile 做规约会读到 padding。它产出的是一个看起来合理的数，不是报错。只要一个 tile 带了 `valid_shape=` 又遇上 `row_max` / `row_sum`，就必须决定 padding 里放什么。
 

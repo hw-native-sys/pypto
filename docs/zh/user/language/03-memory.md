@@ -130,7 +130,7 @@ m = pl.row_max(t)                              # pad value decides what the tail
 
 为循环的每一块 tile 重复加载同一个操作数，是最常见的可避免开销。当操作数是循环不变量时把 load 提到循环外；对在 K 轴循环中被反复使用的矩阵乘操作数，优先让它常驻 `Mat`。编译器在这里做与不做什么 —— 缓冲区复用、地址分配 —— 由 [MemoryReuse](../../dev/passes/33-memory_reuse.md) 与 [AllocateMemoryAddr](../../dev/passes/34-allocate_memory_addr.md) 决定；讲如何驾驭它们的性能章节尚未编写。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 对一块用零填充的部分有效 tile 做 `max` 规约，全负数的行会返回 0。没有报错也没有告警 —— 只是恰好那些不满的行数字错了。请根据规约类型选择填充值：`max` 用 `PadValue.min`，`sum` 用 `0`。
 

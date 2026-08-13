@@ -57,10 +57,13 @@ ordering is guaranteed.
 This is the case that needs nothing from this page. Reach for the rest only when the
 inference is wrong in one of two directions.
 
-## Step 2: an edge the inference cannot see
+## Step 2: saying the edge yourself
 
 If task B must follow task A for a reason that never shows up as a shared buffer, nothing
-derives it. Bind the producer's TaskId and name it:
+derives that edge — you have to declare it. The mechanism is a TaskId on the producer and
+`deps=` on the consumer.
+
+Shown here on the *same* pair as step 1, so you can still check the result:
 
 ```python
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as first:
@@ -70,6 +73,12 @@ derives it. Bind the producer's TaskId and name it:
 ```
 
 `as first` binds the region's TaskId; `deps=[first]` makes the consumer wait on it.
+
+Be clear about what this example does and does not prove. These two regions share
+`scratch`, so the edge was **already** inferred in step 1 — writing it out changes nothing
+here. It is the mechanism on a case you can verify, not a case that needs it. You need it
+when the two tasks share no buffer at all, and there the result cannot be checked by
+comparing against a golden: the wrong answer is a race, not a number.
 
 **Explicit edges compose with automatic ones.** The final wait set is the union:
 

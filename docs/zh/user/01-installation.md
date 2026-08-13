@@ -182,7 +182,7 @@ python -m pytest tests/ut/core/test_error.py -v            # 单个文件
 
 系统测试位于 `tests/st/`，需要设备或模拟器，参见 `tests/st/README.md`。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 在装 CPU 版 torch 之前先装 PyPTO，会静默拉取完整的 CUDA 版 torch ——
 > 约 2GB 的包，而 PyPTO 工作流一个都不会加载。没有任何报错和警告，唯一的症状是安装极慢、

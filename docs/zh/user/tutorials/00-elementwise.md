@@ -129,7 +129,7 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 python examples/beginner/02_elementwise.py
 ```
 
-## Edge Cases
+## 边界情况
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |

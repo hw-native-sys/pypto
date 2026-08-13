@@ -49,7 +49,7 @@ def probe(x: pl.Tensor[[64, 128], pl.FP32],
 step = pl.const(1, pl.INT32)
 ```
 
-## Edge Cases
+## 边界情况
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |

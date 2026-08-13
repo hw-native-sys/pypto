@@ -110,7 +110,7 @@ tile that crosses the cube/vector boundary
 
 机器级契约见 [TPUSH/TPOP](../../reference/pto-isa/01-tpush_tpop.md)；pass 做了什么见 [ExpandMixedKernel](../../dev/passes/21-expand_mixed_kernel.md)。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 环是按 cube/vector 边界上的整 tile 计量的。一个变大的 tile 会把本来能跑的 kernel 变成分配不出来的；而报错给的是字节数而非 tile —— 请把它读作「跨越的 tile 太大，或者环太深」。
 

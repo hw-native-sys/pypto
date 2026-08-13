@@ -135,7 +135,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 
 流水线很早就会跑 [ConvertToSSA](../../dev/passes/04-convert_to_ssa.md)，所以非 SSA 源码是正常输入，不是兼容模式。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 循环之后去读 `init_values` 里的那个名字，读到的是**初值**而不是累加结果。得到的往往是一整块初始化时的内容（常常是零），看起来像计算 bug 而不是命名问题。请读 `pl.yield_` 绑定的名字。
 

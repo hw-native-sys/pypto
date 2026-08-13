@@ -246,7 +246,7 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 后续用相同形状调用会复用缓存的编译产物。`examples/beginner/01_hello_world.py` 就是这个模式，
 只是写在 tile 级。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** `@pl.jit` 是**解析**函数体，不是执行它。函数体里的 `print()` 或 `assert`
 > 在运行期永远不会执行，用调试器单步进去看到的是解析过程而不是计算过程。调试请读

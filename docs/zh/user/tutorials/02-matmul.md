@@ -77,15 +77,18 @@ def matmul_k_blocked(
 分块 K 让一个核忙过每一块。**split-K** 则给每个核自己的一段 K，让它们用原子加累加进同一个输出：
 
 ```python
+KS = K // SPLITS                       # each core's slice of K
+
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
     c = pl.assemble(c, pl.full([M, N], dtype=pl.FP32, value=0.0), [0, 0])
 for ks in pl.parallel(SPLITS):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
-        partial = pl.matmul(a_k, b_k, out_dtype=pl.FP32)
+        k0 = ks * KS
+        partial = pl.matmul(a[:, k0 : k0 + KS], b[k0 : k0 + KS, :], out_dtype=pl.FP32)
         c = pl.assemble(c, partial, [0, 0], atomic=pl.AtomicType.Add)
 ```
 
-片段 —— 可运行版本是 `examples/advanced/01_split_k.py`。
+片段 —— `M`、`N`、`K` 与 `SPLITS` 来自外层函数；可运行版本是 `examples/advanced/01_split_k.py`。注意与第 2 步不同：这里每个核都写**整个** `[M, N]` 输出，被切分的是 K，不是输出。
 
 | 方面 | 代价 |
 | ---- | ---- |
@@ -95,7 +98,7 @@ for ks in pl.parallel(SPLITS):
 
 第二行才是要掂量的。如果下游测试按位比较，或者你正在追一个数值差异，split-K 会让答案变成移动靶。当并行度比可复现性更值钱时再用它。
 
-## Edge Cases
+## 边界情况
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |

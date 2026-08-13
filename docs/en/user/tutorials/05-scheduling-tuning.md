@@ -9,8 +9,9 @@ Finding out what the runtime did with your graph, and changing it on evidence.
 A loop you can re-run on your own kernel: **look at the graph → look at the concurrency →
 look at the resource high-water marks → change one thing → measure again.**
 
-Every step is a `RunConfig` flag that writes a file. Nothing here requires instrumenting
-your kernel.
+Steps 1-4 are `RunConfig` flags that each write a file — nothing there requires
+instrumenting your kernel. Steps 5 and 6 are changes to how the work is shaped, not
+observations.
 
 ## The four observation points
 

@@ -68,7 +68,7 @@ def mixed_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, out: pl.Out[p
     with pl.at(
         level=pl.Level.CORE_GROUP,
         # The [128,128] FP32 tile that crosses the cube/vector boundary is 64KB.
-        # The V2C ring defaults to 8 slots of it (512KB) — far past the vector
+        # The C2V ring defaults to 8 slots of it (512KB) — far past the vector
         # buffer limit, so the depth has to come down with it.
         optimizations=[pl.split(pl.SplitMode.UP_DOWN), pl.cross_core_slot(slot_num=2)],
         name_hint="mixed_up_down",

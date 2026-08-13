@@ -200,7 +200,7 @@ print("artifacts in:", compiled.output_dir)
 
 手写的 C++ kernel 可以像普通函数一样被调用。见 [集成手写 C++ Kernel](../../dev/language/01-external-kernels.md)。
 
-## Edge Cases
+## 边界情况
 
 > **致命陷阱：** 验证新的 `@pl.jit` 示例要用完整的 `compile()`，不能只用 `lower()`。`lower()` 在 Pass 之后就停下，所以上面那条"Orchestration 体内放算子"的错误根本不会触发 —— kernel 看上去通过了，直到有人真正去跑它才失败。
 

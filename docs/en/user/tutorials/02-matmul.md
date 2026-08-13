@@ -95,15 +95,20 @@ Blocking K keeps one core busy across every block. **Split-K** gives each core i
 slice of K and has them accumulate into the same output with an atomic add:
 
 ```python
+KS = K // SPLITS                       # each core's slice of K
+
 with pl.at(level=pl.Level.CORE_GROUP, name_hint="zero_init"):
     c = pl.assemble(c, pl.full([M, N], dtype=pl.FP32, value=0.0), [0, 0])
 for ks in pl.parallel(SPLITS):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="split_k"):
-        partial = pl.matmul(a_k, b_k, out_dtype=pl.FP32)
+        k0 = ks * KS
+        partial = pl.matmul(a[:, k0 : k0 + KS], b[k0 : k0 + KS, :], out_dtype=pl.FP32)
         c = pl.assemble(c, partial, [0, 0], atomic=pl.AtomicType.Add)
 ```
 
-Fragment — the runnable version is `examples/advanced/01_split_k.py`.
+Fragment — `M`, `N`, `K` and `SPLITS` come from the enclosing function; the runnable
+version is `examples/advanced/01_split_k.py`. Note that unlike step 2, every core writes
+the *whole* `[M, N]` output — it is K that is divided, not the output.
 
 | Aspect | Cost |
 | ------ | ---- |
