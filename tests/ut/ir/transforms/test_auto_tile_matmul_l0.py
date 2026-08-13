@@ -2388,8 +2388,8 @@ class TestAutoTileMatmulL0MNTiling:
         """Both in-tree planners realize 1x2 and 2x1 dbC with two L0C buffers.
 
         The singleton axis is outer and holds its operand; the two-tile axis is
-        the inner loop carrying ``pipeline_double_buffer_c``. Both PYPTO and
-        DSA_RP does so automatically and must ignore the legacy-PYPTO opt-in.
+        the inner loop carrying ``pipeline_double_buffer_c``. PYPTO requires
+        its legacy opt-in; DSA_RP enables dbC automatically and ignores it.
         """
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
