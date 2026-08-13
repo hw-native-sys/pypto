@@ -56,15 +56,15 @@ mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```
 
-`pl.split(mode)` 把作用域标记为混合。编译器沿所选轴把工作对半分，一半给 cube、一半给 vector 单元，并插入在两者之间搬运结果的跨核传输。
+`pl.split(mode)` 把作用域标记为混合，而 mode 指的是 **vector** 子区域沿哪个轴对半。cube 子区域保持全尺寸：split 把 vector 的工作分摊到两个 AIV 通道上，编译器则插入在两个单元间搬运结果的跨核传输（cube→vector 边界上的 `aiv_shard`，回程的 `aic_gather`）。重叠来自 cube 与 vector 并发执行，而不是各拿同一个 tile 的一半。
 
-| 模式 | 沿哪个方向对半 |
-| ---- | -------------- |
+| 模式 | vector 子区域沿哪个方向对半 |
+| ---- | --------------------------- |
 | `pl.SplitMode.UP_DOWN` | 行（高度） |
 | `pl.SplitMode.LEFT_RIGHT` | 列（宽度） |
 | `pl.SplitMode.NONE` | 不 split |
 
-选哪个由形状决定：选那个大到对半后不会让某个单元闲着的轴。用 `--mode left_right` 跑配套文件可以对比。
+选哪个由 vector 操作数的形状决定：选那个大到能在两个通道间均分的轴。用 `--mode left_right` 跑配套文件可以对比。
 
 ## 第 2 步：环默认装不下
 

@@ -32,9 +32,9 @@ def inferred(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1"):
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])       # 写 scratch
+        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])       # writes scratch
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2"):
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])   # 读 scratch
+        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])   # reads scratch
     return scratch, out
 
 torch.manual_seed(0)

@@ -65,13 +65,16 @@ writes single-unit kernels. See [Operations](../ops/01-catalog.md) for the full 
 
 ## Running the examples
 
-Every page names a file under `examples/`. They take a `--platform` flag and default to the
-simulator, so nothing here needs a device:
+Every page names a file under `examples/`. `RunConfig.platform` defaults to `"a2a3sim"`, so
+none of them needs a device:
 
 ```bash
 python examples/beginner/02_elementwise.py
 python examples/advanced/03_mixed_kernel.py --mode staged
 ```
+
+Most of the companions hard-code that default. `03_mixed_kernel.py` is the exception: it
+takes `--mode` to pick between the split forms, and `--platform` to retarget.
 
 ## See Also
 

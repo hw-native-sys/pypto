@@ -61,18 +61,22 @@ mixed(a, b, bias, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a.float() @ b.float() + bias, rtol=1e-2, atol=1e-2)
 ```
 
-`pl.split(mode)` marks the scope as mixed. The compiler halves the work along the chosen
-axis, gives the cube one half and the vector units the other, and inserts the cross-core
-transfers that move results between them.
+`pl.split(mode)` marks the scope as mixed, and the mode names the axis along which the
+**vector** sub-region is halved. The cube sub-region stays full-sized: the split shards the
+vector work across the two AIV lanes, and the compiler inserts the cross-core transfers
+(`aiv_shard` at cube→vector boundaries, `aic_gather` on the way back) that carry results
+between the units. Overlap comes from cube and vector running concurrently, not from each
+taking half of one tile.
 
-| Mode | Halves along |
-| ---- | ------------ |
+| Mode | Halves the vector sub-region along |
+| ---- | ---------------------------------- |
 | `pl.SplitMode.UP_DOWN` | Rows (height) |
 | `pl.SplitMode.LEFT_RIGHT` | Columns (width) |
 | `pl.SplitMode.NONE` | No split |
 
-Which one to pick follows from the shape: split the axis that is large enough to halve
-without leaving a unit idle. Run the companion file with `--mode left_right` to compare.
+Which one to pick follows from the vector operands' shape: halve the axis that is large
+enough to divide across two lanes evenly. Run the companion file with `--mode left_right`
+to compare.
 
 ## Step 2: the ring will not fit by default
 

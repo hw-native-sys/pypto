@@ -108,7 +108,7 @@ Fragment — the runnable version is `examples/advanced/01_split_k.py`.
 | Aspect | Cost |
 | ------ | ---- |
 | Zero-init | The output must be zeroed first; atomic add has no "first writer" |
-| Determinism | **Accumulation order across cores is not fixed.** Repeated runs give bitwise different results |
+| Determinism | **Accumulation order across cores is not fixed**, so repeated runs may differ in the last bits |
 | When it pays | K is large and M/N are too small to fill the cores on their own |
 
 That second row is the one to weigh. If a downstream test compares bitwise, or you are

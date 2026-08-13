@@ -61,9 +61,10 @@ out = pl.add(a, b)                              # ✗ compiles, writes nothing
 out = pl.assemble(out, pl.add(a, b), [0, 0])    # ✓
 ```
 
-The first line rebinds a local name. It compiles, it runs, and the output buffer keeps
-whatever was in it — you get NaN, with no diagnostic from any stage. `pl.assemble(dst, value,
-offset)` is the operator that actually places `value` into `dst` at `offset`.
+The first line rebinds a local name. It compiles, it runs, and nothing ever writes the
+output — you are handed whatever that buffer happened to hold, with no diagnostic from any
+stage. On the simulator these examples come back as NaN. `pl.assemble(dst, value, offset)`
+is the operator that actually places `value` into `dst` at `offset`.
 
 > **Fatal pitfall:** the wrong form is the one that reads naturally. If a kernel returns
 > garbage and nothing errored, check that every write goes through `pl.assemble` or
@@ -140,8 +141,9 @@ add_chunked(a, b, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-Assert rather than print. A kernel that silently writes nothing produces NaN, and NaN
-compares unequal to everything — `allclose` catches it, a glance at printed output may not.
+Assert rather than print. A kernel that silently writes nothing leaves an unwritten
+buffer, and `allclose` catches that whatever it holds — a glance at printed output may
+not.
 
 Run the finished file:
 
@@ -153,7 +155,7 @@ python examples/beginner/02_elementwise.py
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| **Output is NaN and nothing errored** | The result was assigned to the `Out` parameter instead of written | Route it through `pl.assemble` / `pl.store` |
+| **Output is unwritten (NaN or garbage) and nothing errored** | The result was assigned to the `Out` parameter instead of written | Route it through `pl.assemble` / `pl.store` |
 | **`Misplaced tensor op`** | Operators sit in the `@pl.jit` body, outside `pl.at` | Move them inside `with pl.at(level=pl.Level.CORE_GROUP):` |
 | **Tile shape rejected** | The window exceeds what on-chip memory holds | Chunk it — step 3 |
 | **Results differ between runs** | Two tasks touching one buffer with nothing ordering them | See [The dependency model](../tasks/00-model.md) |

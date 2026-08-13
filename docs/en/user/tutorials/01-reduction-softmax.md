@@ -60,10 +60,10 @@ unfused version works.
 
 ## Step 3: the whole softmax
 
-Softmax is `exp(x) / sum(exp(x))`, but computed that way it overflows: `exp(88)` already
-leaves FP32 range. Subtracting the row maximum first is mathematically a no-op — the
-`exp(-max)` factors cancel between numerator and denominator — and keeps every exponent
-at or below zero.
+Softmax is `exp(x) / sum(exp(x))`, but computed that way it overflows: FP32 tops out
+around `3.4e38`, which `exp(89)` already exceeds. Subtracting the row maximum first is
+mathematically a no-op — the `exp(-max)` factors cancel between numerator and denominator
+— and keeps every exponent at or below zero.
 
 ```python
 import pypto.language as pl
@@ -97,8 +97,9 @@ softmax(a, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, torch.softmax(a, dim=1), rtol=1e-5, atol=1e-5)
 ```
 
-Two scratch tiles, because the two reductions are live at different times and each needs
-its own working space.
+Two scratch tiles here, one per reduction. Their lifetimes do not actually overlap, so a
+single scratch could serve both — worth doing once buffer pressure matters, and left
+separate here because it reads more clearly.
 
 Run it:
 

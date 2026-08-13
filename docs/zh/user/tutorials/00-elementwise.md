@@ -49,11 +49,11 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 **`pl.assemble` 才是写输出的方式。** 这一步是所有人都会栽的地方：
 
 ```python
-out = pl.add(a, b)                              # ✗ 编译通过，什么都没写
-out = pl.assemble(out, pl.add(a, b), [0, 0])    # ✓
+out = pl.add(a, b)                              # WRONG: compiles, writes nothing
+out = pl.assemble(out, pl.add(a, b), [0, 0])    # correct
 ```
 
-第一行只是重绑定了一个局部名字。它编译通过、跑得起来，而输出缓冲区里还是原来的东西 —— 你拿到 NaN，且任何一级都不会给出诊断。`pl.assemble(dst, value, offset)` 才是真正把 `value` 放进 `dst` 的 `offset` 处的那个算子。
+第一行只是重绑定了一个局部名字。它编译通过、跑得起来，而**从来没有任何东西写过输出** —— 你拿到的是那块缓冲区当时恰好存着的内容，且任何一级都不会给出诊断。在模拟器上，这些示例回来的是 NaN。`pl.assemble(dst, value, offset)` 才是真正把 `value` 放进 `dst` 的 `offset` 处的那个算子。
 
 > **致命陷阱：** 错的那种写法恰恰读起来最自然。如果一个 kernel 返回垃圾而全程无报错，先检查每一次写入是否都经过 `pl.assemble` 或 `pl.store`。
 
@@ -121,7 +121,7 @@ add_chunked(a, b, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-要断言，不要打印。一个静默什么都没写的 kernel 产出 NaN，而 NaN 与任何值比较都不相等 —— `allclose` 能抓住它，扫一眼打印结果未必。
+要断言，不要打印。一个静默什么都没写的 kernel 留下的是一块没被写过的缓冲区，无论它装着什么 `allclose` 都能抓住 —— 扫一眼打印结果未必。
 
 跑完整文件：
 
@@ -133,7 +133,7 @@ python examples/beginner/02_elementwise.py
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| **输出是 NaN 且无任何报错** | 结果被赋给了 `Out` 参数而不是写进去 | 让它流经 `pl.assemble` / `pl.store` |
+| **输出未被写入（NaN 或垃圾）且无任何报错** | 结果被赋给了 `Out` 参数而不是写进去 | 让它流经 `pl.assemble` / `pl.store` |
 | **`Misplaced tensor op`** | 算子写在 `@pl.jit` 体内、`pl.at` 之外 | 移进 `with pl.at(level=pl.Level.CORE_GROUP):` |
 | **tile 形状被拒** | 窗口超出片上内存所能容纳 | 分块 —— 第 3 步 |
 | **多次运行结果不同** | 两个任务触碰同一缓冲区却无任何东西定序 | 见 [依赖模型](../tasks/00-model.md) |

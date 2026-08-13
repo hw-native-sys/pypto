@@ -47,7 +47,7 @@ row_max: pl.Tile[[64, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
 
 ## 第 3 步：完整的 softmax
 
-softmax 是 `exp(x) / sum(exp(x))`，但照字面算会溢出：`exp(88)` 就已经出了 FP32 范围。先减去行最大值在数学上是恒等变换 —— `exp(-max)` 这个因子在分子分母间约掉了 —— 并且能让每个指数都不大于零。
+softmax 是 `exp(x) / sum(exp(x))`，但照字面算会溢出：FP32 的上限约为 `3.4e38`，而 `exp(89)` 已经超过它。先减去行最大值在数学上是恒等变换 —— `exp(-max)` 这个因子在分子分母间约掉了 —— 并且能让每个指数都不大于零。
 
 ```python
 import pypto.language as pl
@@ -81,7 +81,7 @@ softmax(a, out, config=RunConfig(platform="a2a3sim"))
 assert torch.allclose(out, torch.softmax(a, dim=1), rtol=1e-5, atol=1e-5)
 ```
 
-两个 scratch tile，因为两次规约的存活期不同，各需自己的工作空间。
+这里用了两个 scratch tile，每次规约一个。它们的存活期其实并不重叠，所以一个 scratch 就能兼顾两者 —— 缓冲区吃紧时值得这么做；此处分开只是因为读起来更清楚。
 
 跑它：
 

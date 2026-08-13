@@ -52,12 +52,14 @@
 
 ## 跑这些示例
 
-每页都指名 `examples/` 下的一个文件。它们都接受 `--platform`，且默认走模拟器，所以这里没有任何一步需要真机：
+每页都指名 `examples/` 下的一个文件。`RunConfig.platform` 默认就是 `"a2a3sim"`，所以它们都不需要真机：
 
 ```bash
 python examples/beginner/02_elementwise.py
 python examples/advanced/03_mixed_kernel.py --mode staged
 ```
+
+多数配套文件直接沿用这个默认值。`03_mixed_kernel.py` 是例外：它用 `--mode` 在几种 split 形式间切换，用 `--platform` 改目标平台。
 
 ## 参见
 
