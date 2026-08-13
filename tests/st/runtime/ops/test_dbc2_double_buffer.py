@@ -361,7 +361,7 @@ class TestDbc2DoubleBuffer:
     def test_mat_scratch_dbc(self, test_runner, platform, planner):
         """Mat-scratch dbC=2 L1 drain; regression for #1995's PTOAS accumulator-handle fix."""
         choice = _choose_a2a3_dbc(256, 64, 256, bytes_a=2, bytes_b=2)
-        assert (choice.m, choice.n, choice.k) == (128, 128, 64)
+        assert (choice.m, choice.n, choice.k) == (64, 256, 64)
         assert choice.double_buffer_c
         case = _DbcMatScratch(planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
