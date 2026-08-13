@@ -4295,6 +4295,7 @@ class ASTParser:
         sync_start: bool,
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
+        timing_slot: int | None,
         span: "ir.Span",
     ) -> None:
         """Reject per-task metadata on a Submit nested inside ``pl.cluster()``.
@@ -4318,6 +4319,8 @@ class ASTParser:
             metadata_fields.append("allow_early_resolve")
         if predicate is not None:
             metadata_fields.append("predicate")
+        if timing_slot is not None:
+            metadata_fields.append("timing_slot")
         if not metadata_fields:
             return
 
@@ -6362,7 +6365,8 @@ class ASTParser:
         """Reject unknown keyword arguments on a cross-function kernel call.
 
         ``attrs=`` surfaces call-site directions and is always allowed.
-        ``deps=`` / ``dumps=`` are accepted only on ``pl.submit(...)``;
+        ``deps=`` / ``dumps=`` / ``timing_slot=`` are accepted only on
+        ``pl.submit(...)``;
         ``core_num=`` / ``sync_start=`` only on ``pl.spmd_submit(...)``;
         ``device=`` only when the callee is an Orchestrator. Raises
         ``ParserTypeError`` with a targeted hint for the common
@@ -6374,6 +6378,7 @@ class ASTParser:
             allowed_kwargs.add("dumps")
             allowed_kwargs.add("allow_early_resolve")
             allowed_kwargs.add("predicate")
+            allowed_kwargs.add("timing_slot")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
         if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
@@ -6574,9 +6579,11 @@ class ASTParser:
         # (recorded on the Submit; no-op for a plain self.kernel(...) call).
         allow_early_resolve = False
         predicate: ir.Expr | None = None
+        timing_slot: int | None = None
         if as_submit:
             allow_early_resolve = self._parse_submit_allow_early_resolve_kwarg(method_name, keywords)
             predicate = self._parse_submit_predicate_kwarg(method_name, keywords)
+            timing_slot = self._record_submit_timing_slot_attr(method_name, keywords, extra_attrs)
             if predicate is not None:
                 self._validate_predicate_deps(method_name, predicate, user_dep_vars, span)
             self._reject_submit_dispatch_metadata_in_cluster(
@@ -6585,6 +6592,7 @@ class ASTParser:
                 sync_start=sync_start,
                 allow_early_resolve=allow_early_resolve,
                 predicate=predicate,
+                timing_slot=timing_slot,
                 span=span,
             )
         return_types = func_obj.return_types if func_obj else []
@@ -6986,6 +6994,46 @@ class ASTParser:
                 hint="Write allow_early_resolve=True to opt this submit into early-dispatch.",
             )
         return kw.value.value
+
+    def _parse_submit_timing_slot_kwarg(self, method_name: str, keywords: list[ast.keyword]) -> int | None:
+        """Extract an optional ``timing_slot=0..15`` task-timing tag.
+
+        The runtime has sixteen fixed task-timing slots. A tagged task contributes
+        its scheduler dispatch/finish window to the selected slot, which is
+        returned as a device-domain trace span. The slot is a compile-time
+        configuration value, so it must be an integer literal rather than an IR
+        expression.
+        """
+        kw = next((k for k in keywords if k.arg == "timing_slot"), None)
+        if kw is None:
+            return None
+        if (
+            not isinstance(kw.value, ast.Constant)
+            or not isinstance(kw.value.value, int)
+            or isinstance(kw.value.value, bool)
+        ):
+            raise ParserSyntaxError(
+                f"'{method_name}' timing_slot must be an integer literal in 0..15",
+                span=self.span_tracker.get_span(kw.value),
+                hint="Write timing_slot=0 to tag this task with task-timing slot 0.",
+            )
+        slot = kw.value.value
+        if not 0 <= slot < 16:
+            raise ParserSyntaxError(
+                f"'{method_name}' timing_slot must be in 0..15, got {slot}",
+                span=self.span_tracker.get_span(kw.value),
+                hint="Choose one of the runtime's sixteen task-timing slots (0 through 15).",
+            )
+        return slot
+
+    def _record_submit_timing_slot_attr(
+        self, method_name: str, keywords: list[ast.keyword], extra_attrs: dict[str, Any]
+    ) -> int | None:
+        """Parse ``timing_slot=`` and record its Call attr when present."""
+        slot = self._parse_submit_timing_slot_kwarg(method_name, keywords)
+        if slot is not None:
+            extra_attrs["task_timing_slot"] = slot
+        return slot
 
     def _parse_submit_predicate_kwarg(self, method_name: str, keywords: list[ast.keyword]) -> ir.Expr | None:
         """Extract the optional ``predicate=(<tensor>[<indices>] <op> <int>)`` kwarg.

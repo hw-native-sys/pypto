@@ -204,6 +204,64 @@ class TestAllowEarlyResolveParsing:
                     return out
 
 
+class TestTimingSlotParsing:
+    def test_spmd_submit_records_slot_as_attr(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def producer(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+                with pl.manual_scope():
+                    out, _ = pl.spmd_submit(self.producer, x, core_num=4, timing_slot=15)
+                return out
+
+        (submit,) = _main_submits(Prog)
+        assert submit.attrs["task_timing_slot"] == 15
+
+    @pytest.mark.parametrize("slot", ["-1", "16", "True", "1.5", "slot"])
+    def test_invalid_slot_rejected(self, slot):
+        source = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def producer(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+        with pl.manual_scope():
+            out, _ = pl.submit(self.producer, x, timing_slot=SLOT)
+        return out
+""".replace("SLOT", slot)
+        with pytest.raises(ParserSyntaxError, match="timing_slot must"):
+            pl.parse_program(source)
+
+    def test_timing_slot_round_trips_as_submit_attr(self):
+        source = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def producer(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[1], pl.FP32]) -> pl.Tensor[[1], pl.FP32]:
+        with pl.manual_scope():
+            out, _ = pl.submit(self.producer, x, timing_slot=0)
+        return out
+"""
+        program = pl.parse_program(source)
+        reparsed = pl.parse_program(program.as_python())
+        ir.assert_structural_equal(reparsed, program)
+
+
 class TestAllowEarlyResolveRoundTrip:
     def test_round_trips_through_printer(self):
         Prog = _plain_flag_program()

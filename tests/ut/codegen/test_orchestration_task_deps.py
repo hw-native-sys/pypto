@@ -1098,6 +1098,36 @@ def test_plain_submit_emits_no_allow_early_resolve():
     assert "set_allow_early_resolve" not in code, code
 
 
+def test_submit_timing_slot_emits_device_marker():
+    """A tagged submit lowers to ``set_task_timing_slot`` before submission."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            t = pl.load(x, [0], [128])
+            out = pl.store(t, [0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            with pl.manual_scope():
+                scratch = pl.create_tensor([128], dtype=pl.FP32)
+                scratch, tid = pl.submit(self.k, x, scratch)
+                out, _ = pl.spmd_submit(self.k, scratch, out, core_num=2, deps=[tid], timing_slot=3)
+            return out
+
+    code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
+    marker = "params_t1.set_task_timing_slot(3);"
+    assert marker in code, code
+    assert code.count("set_task_timing_slot(") == 1, code
+    assert code.index(marker) < code.index("rt_submit_aiv_task", code.index("params_t1")), code
+
+
 def test_at_allow_early_resolve_emits_hint():
     """``pl.at(..., allow_early_resolve=True)`` outlines into a Submit carrying
     the flag, so codegen emits ``set_allow_early_resolve(true)`` on the

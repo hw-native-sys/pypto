@@ -97,7 +97,7 @@ For programs written as a `@pl.program` class with pre-declared kernels:
 
 ```text
 result, tid = pl.submit(self.kernel, *kernel_args, deps=[...], dumps=[...],
-                        allow_early_resolve=False, predicate=(...))
+                        allow_early_resolve=False, timing_slot=N, predicate=(...))
 ```
 
 The positional slots after the callee are the kernel's own arguments; everything else is an
@@ -126,7 +126,26 @@ a, tid = pl.spmd_submit(self.k1, x, core_num=8)
 
 `core_num` is a **required keyword** — the positional slots belong to the kernel.
 `sync_start` (default `False`) requires all blocks to launch atomically. `deps=`,
-`allow_early_resolve=` and `predicate=` behave exactly as on `pl.submit`.
+`allow_early_resolve=`, `timing_slot=` and `predicate=` behave exactly as on `pl.submit`.
+
+### Device timing slots
+
+`timing_slot=N` (`N` is an integer literal from `0` through `15`) tags one task
+for device timing. The runtime emits one span for each slot: from the earliest
+dispatch to the latest completion among all tasks tagged with that slot. Tag the
+all-gather and GEMM tasks with the same slot to measure their combined device
+region, while leaving warmup and an alignment barrier untagged:
+
+```python
+_, barrier_tid = pl.submit(self.all_rank_barrier, signal)
+gathered, _ = pl.spmd_submit(self.gather, x, core_num=N, deps=[barrier_tid], timing_slot=0)
+out, _ = pl.spmd_submit(self.gemm, gathered, w, core_num=N, deps=[barrier_tid], timing_slot=0)
+```
+
+The resulting trace span is named
+`simpler_run.runner_run.device_wall.task_slot_0`. A slot is local to one device;
+for L3, aggregate its duration as the maximum across ranks, not by comparing
+timestamps from different devices.
 
 ### Fan-in through a TaskId array
 
