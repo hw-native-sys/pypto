@@ -74,6 +74,11 @@ For anything other than the whole tensor, name the offset:
 | A sub-region | `out[r0 : r0 + R, c0 : c0 + C] = value` |
 | At a computed offset, or atomically | `pl.assemble(out, value, [r, c], atomic=...)` |
 
+The subscript form is sugar: the parser rewrites `dst[...] = src` into
+`dst = pl.assemble(dst, src, [...])`. Because that rebinds `dst`, it is rejected under
+`@pl.function(strict_ssa=True)` and in any post-SSA context — call `pl.assemble` directly
+there. See [Syntax](../language/06-syntax.md).
+
 > **Fatal pitfall:** the wrong form is the one that reads most naturally. If a kernel
 > returns garbage and nothing errored, check that every write is a subscripted assignment,
 > a `pl.assemble`, or a `pl.store`.

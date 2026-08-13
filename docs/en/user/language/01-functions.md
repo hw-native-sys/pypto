@@ -35,7 +35,7 @@ def add_kernel(
     b: pl.Tensor[[128, 128], pl.FP32],
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
 ):
-    out = pl.assemble(out, pl.add(a, b), [0, 0])
+    out[:] = pl.add(a, b)
     return out
 
 @pl.jit
@@ -122,13 +122,13 @@ move them into a `@pl.jit.incore` sub-function.
 ```python
 @pl.jit
 def bad(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
-    out = pl.assemble(out, pl.add(x, x), [0, 0])        # ✗ Misplaced tensor op ... should be inside InCore block
+    out[:] = pl.add(x, x)        # ✗ Misplaced tensor op ... should be inside InCore block
     return out
 
 @pl.jit
 def good(x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]):
     with pl.at(level=pl.Level.CORE_GROUP):
-        out = pl.assemble(out, pl.add(x, x), [0, 0])    # ✓
+        out[:] = pl.add(x, x)    # ✓
     return out
 ```
 

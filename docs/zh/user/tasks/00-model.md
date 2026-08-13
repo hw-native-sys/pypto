@@ -21,7 +21,7 @@ import pypto.language as pl
 
 @pl.jit.incore
 def twice(x: pl.Tensor[[256, 128], pl.FP32], out: pl.Out[pl.Tensor[[256, 128], pl.FP32]]):
-    out = pl.assemble(out, pl.add(x, x), [0, 0])
+    out[:] = pl.add(x, x)
     return out
 
 @pl.jit

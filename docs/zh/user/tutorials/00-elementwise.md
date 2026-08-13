@@ -63,6 +63,8 @@ out[:] = pl.add(a, b)       # correct: writes the whole tensor
 | 一个子区域 | `out[r0 : r0 + R, c0 : c0 + C] = value` |
 | 计算出来的偏移，或原子写 | `pl.assemble(out, value, [r, c], atomic=...)` |
 
+下标形式是语法糖：解析器会把 `dst[...] = src` 改写成 `dst = pl.assemble(dst, src, [...])`。由于这会重绑定 `dst`，它在 `@pl.function(strict_ssa=True)` 以及任何 post-SSA 语境下都会被拒绝 —— 那里请直接调用 `pl.assemble`。见 [语法](../language/06-syntax.md)。
+
 > **致命陷阱：** 错的那种写法恰恰读起来最自然。如果一个 kernel 返回垃圾而全程无报错，先检查每一次写入是不是带下标的赋值、`pl.assemble` 或 `pl.store`。
 
 ## 第 2 步：tile 级

@@ -32,9 +32,9 @@ def two_stage(
     out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
 ):
     with pl.at(level=pl.Level.CORE_GROUP) as first:
-        scratch = pl.assemble(scratch, pl.add(x, x), [0, 0])
+        scratch[:] = pl.add(x, x)
     with pl.at(level=pl.Level.CORE_GROUP, deps=[first]) as second:
-        out = pl.assemble(out, pl.add(scratch, scratch), [0, 0])
+        out[:] = pl.add(scratch, scratch)
     return scratch, out
 ```
 
