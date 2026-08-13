@@ -183,6 +183,13 @@ def test_pipeline_accepts_bf16_atomic_put_on_ascend910b():
 # test_manual_deps_on_submit_only.py does, and run the property verifier on it.
 
 
+# Operator names routed through the registry getter: a typo raises at import
+# rather than silently skipping a branch or parameterizing over a
+# non-existent op (see .claude/rules/operator-identity-checks.md).
+_TILE_PUT = _ir.get_op("pld.tile.put").name
+_TILE_REMOTE_STORE = _ir.get_op("pld.tile.remote_store").name
+
+
 def _dist_tensor_var(name, shape, dtype, span):
     """A DistributedTensor-typed Var, as a window-bound parameter binds."""
     shape_exprs = [_ir.ConstInt(v, DataType.INT64, span) for v in shape]
@@ -206,7 +213,7 @@ def _tile_level_program(op_name, dtype, atomic):
     dist = _dist_tensor_var("target", [16, 64], dtype, span)
     kwargs = {"atomic": int(atomic)}
 
-    if op_name == "pld.tile.put":
+    if op_name == _TILE_PUT:
         src = _dist_tensor_var("src", [16, 64], dtype, span)
         stage = _tile_var("stage", [16, 64], dtype, span)
         call = _ir.create_op_call(op_name, [dist, peer, src, stage], kwargs, span)
@@ -229,7 +236,7 @@ def _tile_level_program(op_name, dtype, atomic):
     return _ir.Program([func], "kernel", span)
 
 
-_TILE_LEVEL_OPS = ["pld.tile.put", "pld.tile.remote_store"]
+_TILE_LEVEL_OPS = [_TILE_PUT, _TILE_REMOTE_STORE]
 
 
 @pytest.mark.parametrize("op_name", _TILE_LEVEL_OPS)
