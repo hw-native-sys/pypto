@@ -39,6 +39,9 @@ from typing import Any
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, decode_external_include_dirs
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
+from pypto.backend._ptoas_locate import (
+    describe_python_requirement_mismatch as _describe_python_requirement_mismatch,
+)
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
@@ -191,8 +194,9 @@ def _run_ptoas(
 ) -> None:
     """Run the ptoas tool to compile a .pto file to C++.
 
-    Locates ptoas via the PTOAS_ROOT env var (``$PTOAS_ROOT/ptoas``, falling back
-    to ``$PTOAS_ROOT/bin/ptoas`` for the v0.51+ layout) or PATH fallback.
+    Locates ptoas via the PTOAS_ROOT env var — preferring the ``$PTOAS_ROOT/ptoas``
+    and ``$PTOAS_ROOT/ptoas.sh`` launchers over the bare ``$PTOAS_ROOT/bin/ptoas``
+    wrapper — or via PATH when PTOAS_ROOT is unset.
 
     Args:
         pto_path: Path to the input .pto file
@@ -232,7 +236,13 @@ def _run_ptoas(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"ptoas compilation failed: {result.stderr.strip()}")
+        message = f"ptoas compilation failed: {result.stderr.strip()}"
+        # An interpreter mismatch aborts ptoas before it ever reads the .pto, so
+        # the stderr above describes the toolchain rather than the kernel.
+        mismatch = _describe_python_requirement_mismatch(ptoas_bin)
+        if mismatch is not None:
+            message = f"{message}\n{mismatch}"
+        raise RuntimeError(message)
 
 
 _KERNEL_HEADER = """\

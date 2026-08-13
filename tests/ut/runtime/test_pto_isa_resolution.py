@@ -140,10 +140,20 @@ def _missing_config_message(device_runner, work_dir):
     return str(exc_info.value)
 
 
+def _make_ptoas_executable(path):
+    """Create *path* (and parents) as an executable ptoas stub."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def test_missing_kernel_config_explains_unavailable_ptoas(device_runner, monkeypatch, tmp_path):
     _write_raw_pto(tmp_path)
     monkeypatch.delenv("PTOAS_ROOT", raising=False)
-    monkeypatch.setattr(device_runner.shutil, "which", lambda _name: None)
+    empty_path_dir = tmp_path / "empty-path"
+    empty_path_dir.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path_dir))
 
     message = _missing_config_message(device_runner, tmp_path)
     assert str(tmp_path / "kernel_config.py") in message
@@ -161,8 +171,10 @@ def test_missing_kernel_config_reports_invalid_ptoas_root(device_runner, monkeyp
 
     message = _missing_config_message(device_runner, tmp_path)
     assert f"PTOAS_ROOT is set to '{ptoas_root}'" in message
-    assert str(ptoas_root / "ptoas") in message
-    assert "does not exist or is not executable" in message
+    assert "no executable ptoas was found there" in message
+    # Every probed layout is named, so the user can see which tree shape is expected.
+    for relative in device_runner._PTOAS_RELATIVE_PATHS:
+        assert str(ptoas_root / relative) in message
     assert "Correct or remove the invalid PTOAS_ROOT setting" in message
     assert "unset PTOAS_ROOT" in message
     assert 'unset PTOAS_ROOT\n       eval "$(pypto-setup --export)"' in message
@@ -173,10 +185,7 @@ def test_missing_kernel_config_requires_recompile_when_ptoas_is_now_available(
 ):
     _write_raw_pto(tmp_path)
     ptoas_root = tmp_path / "ptoas-bin"
-    ptoas_root.mkdir()
-    ptoas_path = ptoas_root / "ptoas"
-    ptoas_path.write_text("#!/bin/sh\n", encoding="utf-8")
-    ptoas_path.chmod(0o755)
+    ptoas_path = _make_ptoas_executable(ptoas_root / "ptoas")
     monkeypatch.setenv("PTOAS_ROOT", str(ptoas_root))
 
     message = _missing_config_message(device_runner, tmp_path)
@@ -185,13 +194,27 @@ def test_missing_kernel_config_requires_recompile_when_ptoas_is_now_available(
     assert "export PTOAS_ROOT" not in message
 
 
+def test_missing_kernel_config_accepts_v0_55_archive_root(device_runner, monkeypatch, tmp_path):
+    """A v0.55+ archive root is valid: its executable is the ``ptoas.sh`` launcher."""
+    _write_raw_pto(tmp_path)
+    ptoas_root = tmp_path / "ptoas-0.57"
+    (ptoas_root / "ptoas").mkdir(parents=True)
+    _make_ptoas_executable(ptoas_root / "bin" / "ptoas")
+    launcher = _make_ptoas_executable(ptoas_root / "ptoas.sh")
+    monkeypatch.setenv("PTOAS_ROOT", str(ptoas_root))
+
+    message = _missing_config_message(device_runner, tmp_path)
+    assert f"ptoas is now available at '{launcher}'" in message
+    assert "Correct or remove the invalid PTOAS_ROOT setting" not in message
+
+
 def test_missing_kernel_config_requires_recompile_when_ptoas_is_now_on_path(
     device_runner, monkeypatch, tmp_path
 ):
     _write_raw_pto(tmp_path)
     monkeypatch.delenv("PTOAS_ROOT", raising=False)
-    ptoas_path = tmp_path / "bin" / "ptoas"
-    monkeypatch.setattr(device_runner.shutil, "which", lambda _name: str(ptoas_path))
+    ptoas_path = _make_ptoas_executable(tmp_path / "bin" / "ptoas")
+    monkeypatch.setenv("PATH", str(ptoas_path.parent))
 
     message = _missing_config_message(device_runner, tmp_path)
     assert f"ptoas is now available on PATH at '{ptoas_path}'" in message

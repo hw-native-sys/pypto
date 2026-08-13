@@ -181,9 +181,9 @@ debug/         一个可直接运行的 `run.py`
 passes_dump/   逐 pass 的 IR 快照
 ```
 
-**`compile()` 不需要任何 ptoas 开关。** `@pl.jit` 会自己查这个二进制 —— `$PTOAS_ROOT/ptoas`
-或 `PATH` 上的 `ptoas` —— 不存在时自动跳过汇编步骤。只装了 Python 包的机器照样能拿到 IR 和
-生成的 C++。
+**`compile()` 不需要任何 ptoas 开关。** `@pl.jit` 会自己查这个二进制 —— 先在 `$PTOAS_ROOT`
+下找 `ptoas` / `ptoas.sh` 启动脚本，再退到 `bin/ptoas`，或者 `PATH` 上的 `ptoas` —— 不存在时
+自动跳过汇编步骤。只装了 Python 包的机器照样能拿到 IR 和生成的 C++。
 
 `compile()` 从哪里取形状：
 

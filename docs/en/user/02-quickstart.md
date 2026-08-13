@@ -194,9 +194,10 @@ debug/         a runnable `run.py` harness
 passes_dump/   per-pass IR snapshots
 ```
 
-**`compile()` needs no ptoas flag.** `@pl.jit` checks for the binary itself — `$PTOAS_ROOT/ptoas`,
-or `ptoas` on `PATH` — and skips the assembly step when it is absent. A machine with only
-the Python package still gets IR and generated C++.
+**`compile()` needs no ptoas flag.** `@pl.jit` checks for the binary itself — under
+`$PTOAS_ROOT` (a `ptoas` / `ptoas.sh` launcher first, then `bin/ptoas`), or `ptoas` on `PATH`
+— and skips the assembly step when it is absent. A machine with only the Python package
+still gets IR and generated C++.
 
 How `compile()` gets its shapes:
 

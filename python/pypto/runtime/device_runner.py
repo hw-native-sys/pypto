@@ -47,6 +47,8 @@ from typing import Any
 import torch
 
 from pypto._external_source import kernel_binary_cache_path
+from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
+from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 
 from ._binary_cache import (
     BinaryCacheContext,
@@ -632,46 +634,44 @@ def _missing_kernel_config_error(work_dir: Path) -> FileNotFoundError:
         )
 
     ptoas_root = os.environ.get("PTOAS_ROOT")
+    # Shared discovery, not a local `<root>/ptoas` probe: every release layout
+    # since v0.51 puts the executable somewhere else, and calling a valid
+    # PTOAS_ROOT invalid sends the user to fix the one thing that is correct.
+    ptoas_path = _find_ptoas_binary()
     configuration_step: str | None = None
-    if ptoas_root:
-        ptoas_path = Path(ptoas_root) / "ptoas"
-        if ptoas_path.is_file() and os.access(ptoas_path, os.X_OK):
-            environment_status = (
-                f"ptoas is now available at '{ptoas_path}', but this artifact was generated "
-                "without it and must be recompiled."
-            )
-        else:
-            environment_status = (
-                f"PTOAS_ROOT is set to '{ptoas_root}', but the expected executable "
-                f"'{ptoas_path}' does not exist or is not executable."
-            )
-            configuration_step = (
-                "Correct or remove the invalid PTOAS_ROOT setting:\n"
-                "       export PTOAS_ROOT=/path/to/ptoas-bin\n"
-                "     Or use a ptoas executable from PATH instead:\n"
-                "       unset PTOAS_ROOT\n"
-                "       export PATH=/path/to/ptoas-bin:$PATH\n"
-                "     On a managed PyPTO development machine, reset the invalid override first:\n"
-                "       unset PTOAS_ROOT\n"
-                '       eval "$(pypto-setup --export)"'
-            )
+    if ptoas_path is not None:
+        # Discovery pins PTOAS_ROOT when it is set and only consults PATH
+        # otherwise, so the root tells which of the two actually resolved.
+        found_in = "at" if ptoas_root else "on PATH at"
+        environment_status = (
+            f"ptoas is now available {found_in} '{ptoas_path}', but this artifact was "
+            "generated without it and must be recompiled."
+        )
+    elif ptoas_root:
+        tried = ", ".join(f"'{os.path.join(ptoas_root, rel)}'" for rel in _PTOAS_RELATIVE_PATHS)
+        environment_status = (
+            f"PTOAS_ROOT is set to '{ptoas_root}', but no executable ptoas was found there. Tried: {tried}."
+        )
+        configuration_step = (
+            "Correct or remove the invalid PTOAS_ROOT setting:\n"
+            "       export PTOAS_ROOT=/path/to/ptoas-bin\n"
+            "     Or use a ptoas executable from PATH instead:\n"
+            "       unset PTOAS_ROOT\n"
+            "       export PATH=/path/to/ptoas-bin:$PATH\n"
+            "     On a managed PyPTO development machine, reset the invalid override first:\n"
+            "       unset PTOAS_ROOT\n"
+            '       eval "$(pypto-setup --export)"'
+        )
     else:
-        ptoas_path = shutil.which("ptoas")
-        if ptoas_path:
-            environment_status = (
-                f"ptoas is now available on PATH at '{ptoas_path}', but this artifact was "
-                "generated without it and must be recompiled."
-            )
-        else:
-            environment_status = "PTOAS_ROOT is not set and 'ptoas' was not found on PATH."
-            configuration_step = (
-                "Configure ptoas with one of these options:\n"
-                "       export PTOAS_ROOT=/path/to/ptoas-bin\n"
-                "     Or:\n"
-                "       export PATH=/path/to/ptoas-bin:$PATH\n"
-                "     On a managed PyPTO development machine, run:\n"
-                '       eval "$(pypto-setup --export)"'
-            )
+        environment_status = "PTOAS_ROOT is not set and 'ptoas' was not found on PATH."
+        configuration_step = (
+            "Configure ptoas with one of these options:\n"
+            "       export PTOAS_ROOT=/path/to/ptoas-bin\n"
+            "     Or:\n"
+            "       export PATH=/path/to/ptoas-bin:$PATH\n"
+            "     On a managed PyPTO development machine, run:\n"
+            '       eval "$(pypto-setup --export)"'
+        )
 
     recovery_steps = []
     if configuration_step is not None:
