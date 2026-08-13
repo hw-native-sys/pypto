@@ -28,6 +28,7 @@
 | `nranks` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 通信组中 rank 数量。 |
 | `notify` | `(target, peer, offsets, value, *, op) -> Call` | **仅限 InCore。** 跨 rank 信号投递。仅副作用。 |
 | `wait` | `(signal, offsets, expected, *, cmp) -> Call` | **仅限 InCore。** 跨 rank 等待。仅副作用。 |
+| `defer_wait` | `(signal, offsets, expected, *, cmp) -> Call` | **仅限专用的顶层 `pl.at(CORE_GROUP)` waiter。** 注册 `signal[offsets] >= expected` 完成条件并返回，不让 AIV 自旋；条件满足前，所在任务的 TaskId 保持未完成。 |
 
 ## Window Buffer 管理 (`pld.tensor.*`)
 
@@ -96,6 +97,101 @@ def handshake_step(
 
 > **Buffer 重用安全：** Signal 使用单调计数器且不会自重置。不要在背靠背集合通信中
 > 重用同一 signal buffer。每次调用分配新 buffer。
+
+## 延迟完成：释放物理核，保留逻辑任务
+
+`pld.system.wait` 是阻塞式 `TWAIT`：AIV 留在 kernel 内，等待之后的语句继续在同一
+AIV 上执行。`pld.system.defer_wait` 的契约不同。它向 runtime 注册计数器条件后即
+返回；专用 waiter kernel 结束时，**物理 AIV 已释放**，但 waiter 的**逻辑 TaskId
+仍未完成**。只有全部注册条件都满足后，scheduler 才会解析该 TaskId。原 kernel
+不会恢复执行，因此 continuation 必须放在独立任务中。
+
+```python
+# 每个 rank 的 publisher 独立运行：先发布 payload，再发布 signal。
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="publish"):
+    pld.tensor.remote_store(payload_value, peer_payload, peer, [0, 0])
+    pld.system.notify(
+        signal, peer=peer, offsets=[my_rank, 0],
+        value=epoch, op=pld.NotifyOp.Set,
+    )
+
+# Receiver：观察 peer publisher。这里有意不添加本地 publisher -> waiter 依赖；
+# 只有存在真实的本地顺序要求时才添加 deps。
+with pl.at(
+    level=pl.Level.CORE_GROUP,
+    name_hint="payload_wait",
+    allow_early_resolve=False,
+) as wait_tid:
+    pld.system.defer_wait(
+        signal, offsets=[peer, 0], expected=epoch,
+        cmp=pld.WaitCmp.Ge,
+    )
+
+# wait_tid 在逻辑上完成之后，consumer 才会被派发。
+with pl.at(
+    level=pl.Level.CORE_GROUP,
+    name_hint="consume_payload",
+    deps=[wait_tid],
+) as consume_tid:
+    payload_tile = pl.load(peer_payload, [0, 0], [1, WIDTH])
+    # ... consume payload_tile ...
+```
+
+内联 SPMD consumer 同样使用捕获形式：
+
+```python
+with pl.spmd(
+    NUM_BLOCKS,
+    name_hint="consume_payload_spmd",
+    deps=[wait_tid],
+) as consume_tid:
+    block = pl.get_block_idx()
+    # ... each AIV block reads its payload partition ...
+```
+
+延迟完成不引入第二套依赖命名空间。`deps` 仍表示普通的严格 TaskId 依赖：waiter 的
+AIV 结束后，Simpler 动态延迟这个普通 TaskId 的完成，因此已存在的依赖边要等注册的
+counter 达标后才会释放 consumer。Simpler 的标准 AICore executor 会在取得每个任务后
+立即失效整个 data cache；该操作位于可选的 speculative gate 之前，也位于任务 kernel
+读取输入之前。waiter 不允许 early resolve，因此其直接 consumer 不会被预放到这个 gate，
+而只会在 counter-backed TaskId 完成后通过普通路径被取得；该 consumer 的任务起始
+invalidation 因而发生在 readiness 之后。producer 端仍必须在发布 notify
+**之前**让所有 payload 写入可见；任务开始时的 cache invalidation 无法修复先 notify、
+后写数据的错误。
+
+### 延迟等待契约
+
+- 把 `defer_wait` 放在专用的顶层 task
+  `with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:` 作用域内。该 task-level launch
+  让 PyPTO 能验证 single-block 执行并提供 runtime `AsyncCtx`。未标记而直接从
+  `@pl.jit.incore` / AIV 使用会因绕过这些契约而被拒绝；以编程方式构造的内部 IR 只有在
+  PyPTO 重新验证完整 waiter body 与 orchestration call site 后才会被接受。
+- Waiter 必须是 pure AIV，不能带 dispatch predicate，也不能使用
+  `allow_early_resolve=True`。registration 之间可以执行纯标量 bookkeeping 与控制流，但
+  registration 开始后不能继续做 `tensor.read`、payload/cache 操作或其他通信。这正是 Simpler 自身的 early-dispatch
+  契约：waiter 保持 `False` 会使其直接 consumer 不具备在 counter-backed TaskId 完成前
+  预派发的资格。普通 consumer 可以按需设置自己的 `allow_early_resolve`；该值控制的是
+  consumer 的下游任务能否预派发，而不是让当前 consumer 绕过 waiter。
+- `signal` 必须是直接作为参数传入、绑定 window 的 INT32 `DistributedTensor`；
+  v1 不支持 slice、view 或其他 alias，且仅接受 `cmp=pld.WaitCmp.Ge`。
+- 条件在 INT32 signal storage 上按单调 uint32 轮询（`counter >= expected`）。
+  `expected` 和每一个发布的 counter 值都必须保持非负并位于 `[0, INT32_MAX]`；例如写入
+  `-1` 会被观察成 `UINT32_MAX`，从而错误满足所有合法 threshold。动态 expected 值在
+  运行时检查。旧 generation 仍可能 pending 时，不要重置 counter 或让其后退，也不要
+  依赖 uint32 回绕。
+- 单个 waiter task 最多注册 64 个条件。另有一个独立限制：每个 runtime scheduler
+  最多同时跟踪 64 个延迟任务。这两个 64 含义不同，且都不是物理核数。
+- continuation 使用与任意 TaskId 相同的普通 `deps=[..., wait_tid]` 连接。延迟完成不要求
+  另一种 consumer kernel 类型或依赖表示。没有 continuation 的末端 waiter 可以在同一
+  task 作用域中 fire-and-forget，无需捕获 TaskId。
+- 如果 producer 永远没有把 counter 推进到 `expected`，AIV 虽不再自旋，TaskId 及
+  所有依赖它的 consumer 仍会一直 pending。协议仍必须保证 notify 最终到达。
+
+该机制不是异步预取：`pl.prefetch.*` 管理的是 SDMA 数据搬运 session/event，而延迟
+完成机制是在远程 counter 上门控 scheduler TaskId。它也不是 host 异步执行——没有
+Python future、host callback 或等待信号的 host thread。需要在同一个 kernel 中从
+等待点继续执行的代码仍使用原有 `pld.system.wait`；其行为不变，并继续支持 `Eq` 和
+`Ge`。
 
 ## Tile 级 RMA (`pld.tile.*`)
 
@@ -206,7 +302,7 @@ for peer in pl.range(nranks):
 | `pld.remote_load(...)` | `pld.tile.remote_load(...)` |
 | `pld.remote_store(...)` | `pld.tile.remote_store(...)` / `pld.tensor.remote_store(...)`（按 `src` 分派） |
 
-**无短格式：** `pld.notify(...)`、`pld.wait(...)`、`pld.put(...)`、
+**无短格式：** `pld.notify(...)`、`pld.wait(...)`、`pld.defer_wait(...)`、`pld.put(...)`、
 `pld.get(...)`、`pld.allreduce(...)` 等——这些需要完整的 3 段命名空间。
 
 ## 可运行示例

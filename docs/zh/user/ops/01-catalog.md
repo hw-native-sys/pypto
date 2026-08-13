@@ -166,6 +166,7 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
 | `submit` `spmd_submit` | `pl.` | 派发 kernel 并捕获其生产者 TaskId |
+| `deps=` | `pl.at`、内联捕获形式 `pl.spmd` | 添加严格 TaskId 依赖；deferred waiter 使用同一条依赖路径 |
 | `no_dep` | `pl.` | 让单个任务的单个实参退出依赖跟踪 |
 | `dump_tag` | `pl.` | 标记张量做选择性 dump |
 
@@ -197,6 +198,7 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | Get | `pld.tensor.get` | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
 | Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
 | Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
+| Deferred Wait | `pld.system.defer_wait` | 仅 `Ge` | — | — | INT32 signal | 注册单调 counter 条件而不让 AIV 自旋；Simpler 保持普通 waiter TaskId 未完成，后续工作使用普通 `deps=[wait_tid]`。 |
 | Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
 | Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |
 
