@@ -124,7 +124,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
-from pypto.ir.utils import _normalize_expr, has_partial_valid_region
+from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TensorLayout
@@ -473,7 +473,9 @@ def slice(
             f"If you intend to narrow the valid region later via "
             f"tensor.set_validshape, you can ignore this warning; otherwise "
             f"pass valid_shape=... to tensor.slice.",
-            stacklevel=2,
+            # Not a literal 2: pl.slice forwards here, and a fixed level would
+            # name the dispatcher and collapse every call site's warning.
+            stacklevel=caller_warning_stacklevel(),
         )
 
     tensor_expr = tensor.unwrap()

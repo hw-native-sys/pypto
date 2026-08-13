@@ -10,9 +10,11 @@
 """Utility functions for IR construction."""
 
 import inspect
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -200,6 +202,46 @@ def has_partial_valid_region(expr: _ir.Expr) -> bool:
     if view is None:
         view = getattr(expr_type, "tile_view", None)
     return view is not None and bool(view.valid_shape)
+
+
+# Directory holding the ``pypto`` package, with a trailing separator so the
+# match is on a path *component*. A frame whose file lives under it is library
+# code, never the call site a user-facing warning should name. Without the
+# separator a sibling like ``<parent>/pypto_kernels/k.py`` would prefix-match
+# ``<parent>/pypto`` and a real user frame would be skipped.
+_PYPTO_PACKAGE_PREFIX = f"{Path(__file__).resolve().parent.parent}{os.sep}"
+
+
+def caller_warning_stacklevel() -> int:
+    """``stacklevel`` naming the nearest frame outside the ``pypto`` package.
+
+    A literal ``stacklevel=2`` names the *immediate* caller, which is user code
+    only when the warning site is called directly. Reached through a wrapper —
+    ``pl.slice`` dispatching to ``tensor.slice``, say — that frame is library
+    code instead, and the damage is worse than a misleading filename: Python's
+    default filter dedupes on ``(text, category, lineno)`` recorded in the
+    frame at ``stacklevel``, so every user call site collapses onto one fixed
+    library line and only the first warning of many is ever shown.
+
+    Walking out to the first non-``pypto`` frame keeps one warning per real
+    call site through any depth of forwarding. Call it from the frame that
+    invokes :func:`warnings.warn`.
+
+    Returns:
+        A ``stacklevel`` for :func:`warnings.warn`, at least 1
+    """
+    frame = inspect.currentframe()
+    if frame is not None:
+        frame = frame.f_back  # the caller, i.e. the frame that will warn
+    level = 1
+    while frame is not None:
+        if not frame.f_code.co_filename.startswith(_PYPTO_PACKAGE_PREFIX):
+            return level
+        frame = frame.f_back
+        level += 1
+    # Every frame is library code (e.g. the DSL parser drives the wrapper with
+    # no user frame below it). Name the outermost one rather than a bare 1.
+    return max(level - 1, 1)
 
 
 def _to_int32_scalar(value: int | _ir.Expr, span: _ir.Span) -> _ir.Expr:

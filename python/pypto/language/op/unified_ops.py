@@ -831,6 +831,7 @@ def slice(
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | _ir_core.Expr] | None = None,
+    pad_value: PadValue | int | float | None = None,
     clamp: bool = False,
 ) -> T:
     """Slice operation, dispatched by input type.
@@ -842,6 +843,14 @@ def slice(
     reduction); each must be a static unit dim of ``shape`` that is still fully
     valid after that intersection. ``None`` / ``[]`` drops nothing.
 
+    ``pad_value`` sets the padding mode for elements outside the effective valid
+    region, on either path. ``None`` carries the source's mode through. Accepts
+    ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or the literal
+    sugars ``0``, ``math.inf``, ``-math.inf`` (same spelling as :func:`fillpad`).
+    It only bites when the valid region is smaller than ``shape`` — which an
+    explicit ``valid_shape``, a partially-valid source, or (Tensor-only)
+    ``clamp=True`` can each bring about; passing it otherwise warns.
+
     ``clamp`` sanctions a window that runs off the end of the source: by default
     the slice asserts ``offset + shape`` stays inside the source and is rejected
     when that provably fails, whereas ``clamp=True`` lets the window overhang and
@@ -849,7 +858,7 @@ def slice(
     Tensor — an on-chip tile window has nothing that could clamp it.
     """
     if isinstance(input, Tensor):
-        return _tensor.slice(input, shape, offset, valid_shape, drop_dims, clamp=clamp)
+        return _tensor.slice(input, shape, offset, valid_shape, drop_dims, pad_value, clamp=clamp)
     if isinstance(input, Tile):
         if clamp:
             raise TypeError(
@@ -858,7 +867,7 @@ def slice(
                 "Clamp the read at the tensor boundary instead — pl.load(..., clamp=True) or "
                 "pl.slice(tensor, ..., clamp=True) — and slice the resulting tile in bounds."
             )
-        return _tile.slice(input, shape, offset, valid_shape, drop_dims)
+        return _tile.slice(input, shape, offset, valid_shape, drop_dims, pad_value)
     raise TypeError(f"pl.slice: expected Tensor or Tile, got {type(input).__name__}")
 
 

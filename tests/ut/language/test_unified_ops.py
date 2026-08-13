@@ -14,6 +14,11 @@ using the explicit ``pl.tensor.X`` / ``pl.tile.X`` API — then asserts
 they produce structurally equal IR.
 """
 
+import os
+import pathlib
+import warnings
+
+import pypto.ir.utils as pypto_ir_utils
 import pypto.language as pl
 import pypto.language.op as language_op
 import pytest
@@ -1679,6 +1684,203 @@ class TestUnifiedOpsCrossPathKwargs:
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
         # The binary-tree form is distinguishable from the sequential one.
         assert not ir.structural_equal(unified.unwrap(), pl.tile.col_sum(t).unwrap())
+
+
+class TestUnifiedSlicePadValue:
+    """``pl.slice`` forwards ``pad_value``, which both dispatch paths honour.
+
+    ``clamp`` is the only slice kwarg one path cannot honour; ``pad_value``
+    exists at both levels, so it is plain forwarding rather than a cross-path
+    guard. Each test pairs the structural match against the explicit call with
+    a negative assertion that the no-``pad_value`` IR differs — otherwise the
+    match would stay green if both sides dropped the kwarg.
+    """
+
+    def _pad_of(self, value: Tensor | Tile) -> ir.PadValue:
+        """Padding mode recorded on a sliced value's view."""
+        value_type = value.unwrap().type
+        view = getattr(value_type, "tensor_view", None)
+        if view is None:
+            view = getattr(value_type, "tile_view", None)
+        assert view is not None, "a narrowed slice must carry a view"
+        return view.pad
+
+    def test_tensor_path_forwards_pad_value(self):
+        x = _tensor("x", [16, 32])
+
+        unified = unified_ops.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=ir.PadValue.min)
+        explicit = pl.tensor.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=ir.PadValue.min)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        assert self._pad_of(unified) == ir.PadValue.min
+        unpadded = pl.tensor.slice(x, [8, 32], [0, 0], valid_shape=[8, 8])
+        assert not ir.structural_equal(unified.unwrap(), unpadded.unwrap())
+
+    def test_tile_path_forwards_pad_value(self):
+        t = _tile("t", [16, 32])
+
+        unified = unified_ops.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=ir.PadValue.min)
+        explicit = pl.tile.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=ir.PadValue.min)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        assert self._pad_of(unified) == ir.PadValue.min
+        unpadded = pl.tile.slice(t, [8, 32], [0, 0], valid_shape=[8, 8])
+        assert not ir.structural_equal(unified.unwrap(), unpadded.unwrap())
+
+    def test_literal_sugar_forwards(self):
+        """The ``0`` / ``inf`` sugars resolve on the unified path too."""
+        x = _tensor("x", [16, 32])
+
+        unified = unified_ops.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=0)
+        explicit = pl.tensor.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=ir.PadValue.zero)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        assert self._pad_of(unified) == ir.PadValue.zero
+
+    def test_pad_value_binds_sixth_positional(self):
+        """Positional order matches ``pl.tensor.slice`` — pad_value precedes clamp."""
+        x = _tensor("x", [16, 32])
+
+        unified = unified_ops.slice(x, [8, 32], [0, 0], [8, 8], None, ir.PadValue.max)
+        explicit = pl.tensor.slice(x, [8, 32], [0, 0], [8, 8], None, ir.PadValue.max)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        assert self._pad_of(unified) == ir.PadValue.max
+
+    def test_pad_value_rides_alongside_clamp(self):
+        """clamp narrows the valid region, so pad_value has something to paint."""
+        x = _tensor("x", [16, 32])
+
+        unified = unified_ops.slice(x, [16, 32], [8, 0], pad_value=ir.PadValue.max, clamp=True)
+        explicit = pl.tensor.slice(x, [16, 32], [8, 0], pad_value=ir.PadValue.max, clamp=True)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        assert self._pad_of(unified) == ir.PadValue.max
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_omitted_pad_value_is_unchanged(self, kind):
+        """The default stays byte-identical to the pre-``pad_value`` behaviour."""
+        # One shared source Var — structural equality matches Vars by pointer.
+        if kind == "tensor":
+            src: Tensor | Tile = _tensor("x", [16, 32])
+            explicit = pl.tensor.slice(src, [8, 32], [0, 0], valid_shape=[8, 8])
+        else:
+            src = _tile("t", [16, 32])
+            explicit = pl.tile.slice(src, [8, 32], [0, 0], valid_shape=[8, 8])
+
+        unified = unified_ops.slice(src, [8, 32], [0, 0], valid_shape=[8, 8])
+        with_none = unified_ops.slice(src, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=None)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        ir.assert_structural_equal(with_none.unwrap(), explicit.unwrap())
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_pad_value_without_narrowing_still_warns(self, kind):
+        """The underlying no-op warning is not swallowed by the dispatcher."""
+        src: Tensor | Tile = _tensor("x", [16, 32]) if kind == "tensor" else _tile("t", [16, 32])
+
+        with pytest.warns(UserWarning, match="pad_value has no effect"):
+            unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_warning_names_the_caller_not_the_dispatcher(self, kind):
+        """The warning must point at user code, not at ``unified_ops``.
+
+        ``pytest.warns`` checks neither filename nor lineno, so it cannot catch
+        this; the assertion has to read the record.
+        """
+        src: Tensor | Tile = _tensor("x", [16, 32]) if kind == "tensor" else _tile("t", [16, 32])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+
+        assert len(caught) == 1
+        assert caught[0].filename == __file__
+
+    @pytest.mark.parametrize("kind", ["tensor", "tile"])
+    def test_each_call_site_warns_under_the_default_filter(self, kind):
+        """Distinct call sites must not collapse into a single warning.
+
+        The default filter dedupes on ``(text, category, lineno)`` in the frame
+        named by ``stacklevel``. A dispatcher-fixed stacklevel would key every
+        call site to one library line, showing the first and silently dropping
+        the rest.
+        """
+        src: Tensor | Tile = _tensor("x", [16, 32]) if kind == "tensor" else _tile("t", [16, 32])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("default")
+            unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+            unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+            unified_ops.slice(src, [8, 32], [0, 0], pad_value=ir.PadValue.min)
+
+        assert len(caught) == 3, "each distinct call site must surface its own warning"
+
+    def test_pad_value_reaches_the_parser_path(self):
+        """A DSL body reaches the wrapper dynamically — pad_value must survive that."""
+
+        @pl.function
+        def unified(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            narrowed = pl.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=pl.PadValue.min)
+            return pl.fillpad_expand(narrowed, [16, 32])
+
+        @pl.function
+        def explicit(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            narrowed = pl.tensor.slice(x, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=pl.PadValue.min)
+            return pl.fillpad_expand(narrowed, [16, 32])
+
+        ir.assert_structural_equal(unified, explicit)
+
+        @pl.function
+        def unpadded(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            narrowed = pl.tensor.slice(x, [8, 32], [0, 0], valid_shape=[8, 8])
+            return pl.fillpad_expand(narrowed, [16, 32])
+
+        assert not ir.structural_equal(unified, unpadded)
+
+    def test_sibling_directory_is_not_mistaken_for_library_code(self):
+        """A user path that merely *starts with* the package dir is user code.
+
+        ``<parent>/pypto_kernels/k.py`` prefix-matches ``<parent>/pypto``, so a
+        bare ``startswith`` on the package directory would skip a real user
+        frame and walk on to name someone else's. The match has to be on a path
+        component.
+        """
+        pkg_dir = pathlib.Path(pypto_ir_utils.__file__).resolve().parent.parent
+        sibling = f"{pkg_dir}_kernels{os.sep}k.py"
+
+        namespace = {"probe": pypto_ir_utils.caller_warning_stacklevel}
+        exec(compile("def warn_site():\n    return probe()\n", sibling, "exec"), namespace)  # noqa: S102
+
+        # The frame that would call warnings.warn is itself user code, so the
+        # level naming it is 1 — not 2, which would name this test instead.
+        assert namespace["warn_site"]() == 1
+
+    def test_pad_value_reaches_the_parser_path_for_tiles(self):
+        """The Tile forward is reached dynamically through the parser too."""
+
+        @pl.function
+        def unified(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
+            narrowed = pl.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=pl.PadValue.min)
+            return pl.store(pl.fillpad_expand(narrowed, [16, 32]), [0, 0], x)
+
+        @pl.function
+        def explicit(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
+            narrowed = pl.tile.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=pl.PadValue.min)
+            return pl.store(pl.fillpad_expand(narrowed, [16, 32]), [0, 0], x)
+
+        ir.assert_structural_equal(unified, explicit)
+
+        @pl.function
+        def unpadded(x: pl.Tensor[[16, 32], pl.FP32]) -> pl.Tensor[[16, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
+            narrowed = pl.tile.slice(t, [8, 32], [0, 0], valid_shape=[8, 8])
+            return pl.store(pl.fillpad_expand(narrowed, [16, 32]), [0, 0], x)
+
+        assert not ir.structural_equal(unified, unpadded)
 
 
 if __name__ == "__main__":

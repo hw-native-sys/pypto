@@ -165,7 +165,12 @@ __all__ = [
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
-from pypto.ir.utils import _get_span_or_capture, _normalize_expr, has_partial_valid_region
+from pypto.ir.utils import (
+    _get_span_or_capture,
+    _normalize_expr,
+    caller_warning_stacklevel,
+    has_partial_valid_region,
+)
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
@@ -1930,7 +1935,9 @@ def slice(
             f"If you intend to narrow the valid region later via "
             f"tile.set_validshape, you can ignore this warning; otherwise "
             f"pass valid_shape=... to tile.slice.",
-            stacklevel=2,
+            # Not a literal 2: pl.slice forwards here, and a fixed level would
+            # name the dispatcher and collapse every call site's warning.
+            stacklevel=caller_warning_stacklevel(),
         )
 
     tile_expr = tile.unwrap()
