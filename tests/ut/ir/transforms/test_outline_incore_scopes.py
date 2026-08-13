@@ -11,6 +11,7 @@
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir.printer import python_print
@@ -898,6 +899,433 @@ class TestOutlineSubmitTaskId:
         tail = call.type.types[-1]
         assert isinstance(tail, ir.ScalarType)
         assert tail.dtype == DataType.TASK_ID
+
+    def test_deferred_wait_does_not_order_later_notify_behind_waiter(self):
+        """Signal control ops stay Input; notify has no waiter dependency.
+
+        The deferred waiter is logically live after its AIV kernel returns, so
+        a spurious waiter -> notifier edge would recreate the physical-core
+        saturation deadlock.  ``defer_wait`` and ``notify`` are side-effect ops
+        with no memory-write specification, hence both outlined signal params
+        derive as Input and a MANUAL scope leaves the later notifier unordered.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                payload: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.manual_scope():
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait") as wait_tid:
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="notifier"):
+                        pld.system.notify(
+                            signal,
+                            peer=peer,
+                            offsets=[0, 0],
+                            value=1,
+                            op=pld.NotifyOp.Set,
+                        )
+                    with pl.at(
+                        level=pl.Level.CORE_GROUP,
+                        name_hint="consumer",
+                        deps=[wait_tid],
+                    ):
+                        payload_value = pl.read(payload, [0])
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        after = passes.derive_call_directions()(after)
+        after = passes.auto_derive_task_dependencies(analyze_auto_scopes=True)(after)
+
+        main = after.get_function("main")
+        assert main is not None
+        calls: list[ir.Call | ir.Submit] = []
+
+        class _Collector(ir.IRVisitor):
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    calls.append(op)
+                super().visit_call(op)
+
+            def visit_submit(self, op):
+                calls.append(op)
+                super().visit_submit(op)
+
+        _Collector().visit_stmt(main.body)
+        assert len(calls) == 3
+        waiter, notifier, consumer = calls
+        assert isinstance(waiter, ir.Submit)
+        assert list(waiter.arg_directions) == [ir.ArgDirection.Input]
+        assert isinstance(notifier, ir.Call)
+        assert list(notifier.arg_directions) == [ir.ArgDirection.Input, ir.ArgDirection.Scalar]
+        assert "manual_dep_edges" not in notifier.attrs
+        assert "compiler_manual_dep_edges" not in notifier.attrs
+        assert isinstance(consumer, ir.Submit)
+        assert len(consumer.deps) == 1
+
+    def test_deferred_wait_rejects_allow_early_resolve(self):
+        """A deferred-completion TaskId cannot also opt into early resolve."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="deferred_wait",
+                    allow_early_resolve=True,
+                ) as wait_tid:
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait.*cannot use.*allow_early_resolve=True"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_terminal_deferred_waiter_needs_no_task_id_capture(self):
+        """A fire-and-forget terminal waiter is a valid ordinary task dispatch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="terminal_waiter"):
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("terminal_waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+        main = after.get_function("main")
+        assert main is not None
+        calls: list[ir.Call] = []
+
+        class _CallCollector(ir.IRVisitor):
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    calls.append(op)
+                super().visit_call(op)
+
+        _CallCollector().visit_stmt(main.body)
+        assert len(calls) == 1
+
+    def test_deferred_waiter_rejects_nested_early_resolve_launch(self):
+        """An outer launch must not silently own waiter scheduling semantics."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.spmd(1, allow_early_resolve=True):
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="nested_waiter"):
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait must be in a task-level.*nesting.*unsupported"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_waiter_rejects_nested_predicated_launch(self):
+        """A predicated outer launch cannot carry a deferred waiter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                gate: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.spmd(1, predicate=(gate[0] > 0)):
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="nested_waiter"):
+                        pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="defer_wait must be in a task-level.*nesting.*unsupported"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_consumer_may_allow_early_resolve(self):
+        """The hint is producer-side; it does not pre-stage this consumer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                payload: pl.Tensor[[1], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    deps=[wait_tid],
+                    allow_early_resolve=True,
+                ):
+                    payload_value = pl.read(payload, [0])
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        main = after.get_function("main")
+        assert main is not None
+        submits: list[ir.Submit] = []
+
+        class _SubmitCollector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
+
+        _SubmitCollector().visit_stmt(main.body)
+        assert len(submits) == 2
+        assert submits[0].allow_early_resolve is False
+        assert submits[1].allow_early_resolve is True
+        assert len(submits[1].deps) == 1
+
+    def test_deferred_waiter_rejects_scalar_returning_helper_call(self):
+        """Scalar bookkeeping cannot hide arbitrary kernel side effects."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def scalar_helper(self, value: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                return value
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                expected: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="deferred_wait"):
+                    hidden: pl.Scalar[pl.INT32] = self.scalar_helper(expected)
+                    pld.system.defer_wait(signal, offsets=[0, 0], expected=hidden, cmp=pld.WaitCmp.Ge)
+
+        with pytest.raises(ValueError, match="supports only a pre-registration tensor.read"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_accepts_static_conditional_registration_loop(self):
+        """The MoE waiter is bounded and consumers use ordinary deps unchanged."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[8, 1], pl.INT32],
+                indices: pl.Tensor[[1, 1], pl.INT32],
+                payload: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                my_rank: pl.Scalar[pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="dispatch_wait") as wait_tid:
+                    idx_anchor = pl.read(indices, [0, 0])
+                    for src in pl.range(8):
+                        if src != my_rank:
+                            pld.system.defer_wait(
+                                signal,
+                                offsets=[src, 0],
+                                expected=epoch,
+                                cmp=pld.WaitCmp.Ge,
+                            )
+                with pl.spmd(
+                    4,
+                    name_hint="dispatch_gather",
+                    deps=[wait_tid],
+                ) as _gather_tid:
+                    block = pl.tile.get_block_idx()
+                    offset = block * 16
+                    value = pl.load(payload, [offset], [16])
+                    out = pl.store(value, [offset], out)
+                return out
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("dispatch_wait")
+        consumer = after.get_function("dispatch_gather")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+        assert consumer is not None
+
+        calls: list[ir.Call] = []
+
+        class _CallCollector(ir.IRVisitor):
+            def visit_call(self, op):
+                calls.append(op)
+                super().visit_call(op)
+
+        _CallCollector().visit_stmt(consumer.body)
+        assert all(call.op.name != ir.get_op("system.cacheinvalid").name for call in calls)
+
+        after = passes.outline_cluster_scopes()(after)
+        main = after.get_function("main")
+        assert main is not None
+        submits: list[ir.Submit] = []
+
+        class _SubmitCollector(ir.IRVisitor):
+            def visit_submit(self, op):
+                submits.append(op)
+                super().visit_submit(op)
+
+        _SubmitCollector().visit_stmt(main.body)
+        assert len(submits) == 2
+        assert len(submits[1].deps) == 1
+
+    def test_deferred_wait_accepts_pure_scalar_temporary_in_registration_loop(self):
+        """Hoisting pure expected-value arithmetic must not change legality."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[4, 1], pl.INT32],
+                epoch: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    for src in pl.range(4):
+                        wanted = epoch * 4
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_tensor_read_in_registration_loop(self):
+        """A later iteration must not read tensor state after registration began."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[2, 1], pl.INT32],
+                expected_values: pl.Tensor[[2], pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(2):
+                        wanted = pl.read(expected_values, [src])
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=wanted,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="loop may execute tensor reads.*after registering"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_accepts_exactly_64_static_conditions(self):
+        """The runtime capacity is inclusive: 64 conditions are supported."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[64, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="waiter"):
+                    for src in pl.range(64):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        after = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+        waiter = after.get_function("waiter")
+        assert waiter is not None
+        assert waiter.attrs["deferred_completion_waiter"] is True
+
+    def test_deferred_wait_rejects_more_than_64_static_conditions(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[65, 1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    for src in pl.range(65):
+                        if src != my_rank:
+                            pld.system.defer_wait(
+                                signal,
+                                offsets=[src, 0],
+                                expected=1,
+                                cmp=pld.WaitCmp.Ge,
+                            )
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[wait_tid]):
+                    pl.system.cacheinvalid()
+
+        with pytest.raises(ValueError, match="at most 64 conditions"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_dynamic_registration_loop(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[64, 1], pl.INT32],
+                limit: pl.Scalar[pl.INDEX],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(limit):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="statically known positive trip count"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_zero_trip_registration_loop(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for src in pl.range(0):
+                        pld.system.defer_wait(
+                            signal,
+                            offsets=[src, 0],
+                            expected=1,
+                            cmp=pld.WaitCmp.Ge,
+                        )
+
+        with pytest.raises(ValueError, match="statically known positive trip count"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+    def test_deferred_wait_rejects_nested_tensor_read_after_registration(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                signal: pld.DistributedTensor[[1, 1], pl.INT32],
+                expected_values: pl.Tensor[[1], pl.INT32],
+                my_rank: pl.Scalar[pl.INT32],
+            ):
+                with pl.at(level=pl.Level.CORE_GROUP) as wait_tid:
+                    pld.system.defer_wait(
+                        signal,
+                        offsets=[0, 0],
+                        expected=1,
+                        cmp=pld.WaitCmp.Ge,
+                    )
+                    if my_rank >= 0:
+                        next_expected = pl.read(expected_values, [0])
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[wait_tid]):
+                    pl.system.cacheinvalid()
+
+        with pytest.raises(ValueError, match="cannot execute tensor reads.*after.*registration"):
+            passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
 
 
 class TestOutlineSpmdScope:

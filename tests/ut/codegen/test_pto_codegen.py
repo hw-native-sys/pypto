@@ -22,6 +22,7 @@ Tests verify:
 import re
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType, pto_backend
@@ -1598,6 +1599,61 @@ class TestGenerateKernelWrapper:
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         # Tensors-first: a=arg0, out=arg1, s=arg2
         assert "my_kernel(a, out, s);" in wrapper
+
+    def test_defer_wait_wrapper_forwards_raw_args_through_checked_adapter(self):
+        @pl.program
+        class DeferredWrapperProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def deferred_kernel(
+                self,
+                signal: pld.DistributedTensor[[4, 8], pl.INT32],
+                expected: pl.Scalar[pl.INT32],
+            ):
+                # Backend-only fixture: outlining a validated ``pl.at`` waiter
+                # scope stamps this internal marker in production pipelines.
+                pl.func_attr({"deferred_completion_waiter": True})
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[1, 2],
+                    expected=expected,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+        func = DeferredWrapperProgram.get_function("deferred_kernel")
+        assert func is not None
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+
+        assert '#include "pto_async_kernel_api.h"' in wrapper
+        assert '#if !__has_include("pto_async_kernel_api.h")' in wrapper
+        assert "requires a Simpler runtime that provides pto_async_kernel_api.h" in wrapper
+        assert "static __aicore__ void pypto_register_counter_completion(" in wrapper
+        assert "AsyncCtx ctx = get_async_ctx(raw_args);" in wrapper
+        assert "if (!async_ctx_is_deferred(ctx))" in wrapper
+        assert "const bool slab_is_valid =" in wrapper
+        assert "ctx.completion_count != nullptr" in wrapper
+        assert "ctx.completion_error_code != nullptr" in wrapper
+        assert "ctx.completion_entries != nullptr" in wrapper
+        assert "ctx.completion_capacity > 0" in wrapper
+        assert "ctx.completion_capacity <= static_cast<uint32_t>(MAX_COMPLETIONS_PER_TASK)" in wrapper
+        assert (
+            wrapper.index("if (!async_ctx_is_deferred(ctx))")
+            < wrapper.index("const bool slab_is_valid =")
+            < wrapper.index("expected < 0 || expected > kMaxExpected")
+        )
+        assert wrapper.count("*ctx.completion_count = 0;") == 2
+        assert "*ctx.completion_error_code = PTO2_ERROR_ASYNC_COMPLETION_INVALID;" in wrapper
+        assert "ctx.task_token.raw = 0;" in wrapper
+        assert "__builtin_trap();" in wrapper and "trap();" in wrapper
+        assert "expected < 0 || expected > kMaxExpected" in wrapper
+        assert wrapper.index("expected < 0 || expected > kMaxExpected") < wrapper.index(
+            "static_cast<uint32_t>(expected)"
+        )
+        assert "PTO2_ERROR_ASYNC_COMPLETION_INVALID" in wrapper
+        assert "register_completion_condition(ctx, token)" in wrapper
+        assert "PTO2_ERROR_ASYNC_REGISTRATION_FAILED" in wrapper
+        assert "pto2::detail::defer_flush(ctx);" in wrapper
+        assert ") + signal_tensor->start_offset;" in wrapper
+        assert "deferred_kernel(signal, expected, args);" in wrapper
 
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])

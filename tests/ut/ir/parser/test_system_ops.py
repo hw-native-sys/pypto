@@ -9,8 +9,8 @@
 # ruff: noqa: F722, F821
 
 """Parser tests for ``pld.system.get_comm_ctx`` / ``pld.system.rank`` /
-``pld.system.nranks`` (and the matching unified short forms ``pld.get_comm_ctx``
-/ ``pld.rank`` / ``pld.nranks``).
+``pld.system.nranks`` (and their unified short forms) plus the canonical
+``pld.system.defer_wait`` form.
 
 These ops are called explicitly (no attribute-access sugar). Dispatch mirrors
 the rest of the ``pld.*`` surface — the canonical 3-segment form and the
@@ -59,9 +59,13 @@ def _find_calls_in_func(func: ir.Function, op_name: str) -> list[ir.Call]:
     def walk(stmt: ir.Stmt) -> None:
         if isinstance(stmt, ir.AssignStmt):
             visit(stmt.value)
+        if isinstance(stmt, ir.EvalStmt):
+            visit(stmt.expr)
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
                 walk(s)
+        if isinstance(stmt, ir.ForStmt):
+            walk(stmt.body)
         if isinstance(stmt, ir.ReturnStmt):
             for v in stmt.value:
                 visit(v)
@@ -135,6 +139,82 @@ def test_long_form_system_ops():
     assert len(_find_calls_in_func(func, "pld.system.get_comm_ctx")) == 1
     assert len(_find_calls_in_func(func, "pld.system.rank")) == 1
     assert len(_find_calls_in_func(func, "pld.system.nranks")) == 1
+
+
+def test_defer_wait_long_form_parses_and_round_trips():
+    """The canonical deferred-wait spelling creates the registered IR op."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def worker(self, signal: pld.DistributedTensor[[4], pl.INT32]):
+            pld.system.defer_wait(signal, offsets=[0], expected=1, cmp=pld.WaitCmp.Ge)
+
+    func = _get_func(P, "worker")
+    calls = _find_calls_in_func(func, ir.get_op("pld.system.defer_wait").name)
+    assert len(calls) == 1
+    assert isinstance(calls[0].type, ir.UnknownType)
+    assert calls[0].kwargs["cmp"] == int(ir.WaitCmp.Ge)
+
+    reparsed = pl.parse_program(str(P))
+    ir.assert_structural_equal(P, reparsed)
+
+
+def test_defer_wait_accepts_index_expected_and_round_trips():
+    """A ``pl.range`` induction variable is a valid INDEX threshold."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def worker(self, signal: pld.DistributedTensor[[4], pl.INT32]):
+            for expected in pl.range(1, 4):
+                pld.system.defer_wait(signal, offsets=[0], expected=expected, cmp=pld.WaitCmp.Ge)
+
+    func = _get_func(P, "worker")
+    calls = _find_calls_in_func(func, ir.get_op("pld.system.defer_wait").name)
+    assert len(calls) == 1
+    assert isinstance(calls[0].args[2].type, ir.ScalarType)
+    assert calls[0].args[2].type.dtype == DataType.INDEX
+
+    reparsed = pl.parse_program(str(P))
+    ir.assert_structural_equal(P, reparsed)
+
+
+def test_defer_wait_rejects_float_offset():
+    """The parser surfaces the integer/index coordinate contract."""
+    with pytest.raises(InvalidOperationError, match="offset 0 must be an integer or index scalar"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(type=pl.FunctionType.InCore)
+            def worker(self, signal: pld.DistributedTensor[[4], pl.INT32]):
+                pld.system.defer_wait(signal, offsets=[0.5], expected=1, cmp=pld.WaitCmp.Ge)
+
+
+def test_defer_wait_rejects_float_expected():
+    """The parser rejects a non-integer dynamic threshold before lowering."""
+    with pytest.raises(InvalidOperationError, match="expected must be an integer or index scalar"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(type=pl.FunctionType.InCore)
+            def worker(
+                self,
+                signal: pld.DistributedTensor[[4], pl.INT32],
+                expected: pl.Scalar[pl.FP32],
+            ):
+                pld.system.defer_wait(signal, offsets=[0], expected=expected, cmp=pld.WaitCmp.Ge)
+
+
+def test_defer_wait_rejects_eq_comparison():
+    """The parser surfaces the verifier's monotonic-comparison contract."""
+    with pytest.raises(InvalidOperationError, match=r"only supports WaitCmp\.Ge"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(type=pl.FunctionType.InCore)
+            def worker(self, signal: pld.DistributedTensor[[4], pl.INT32]):
+                pld.system.defer_wait(signal, offsets=[0], expected=1, cmp=pld.WaitCmp.Eq)
 
 
 def test_rank_inline_nested_get_comm_ctx():
