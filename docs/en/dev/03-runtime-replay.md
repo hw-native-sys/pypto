@@ -145,6 +145,14 @@ has no sidecar of its own — each `next_levels/<name>/` sub-build carries one, 
 reload the sub-build you want. Distributed builds use
 `DistributedCompiledProgram.from_dir` (below).
 
+Compiling into a **reused `output_dir`** always leaves the sidecar describing
+the program just compiled: it is rewritten atomically, and removed outright
+whenever the new program has no signature to record for that directory
+(a multi-orch parent, an unextractable orchestration, or a `next_levels/<name>/`
+left over from a previous compile). `ir.compile()` does not otherwise clear
+`output_dir`, so this is what keeps `from_dir()` from handing out a stale
+parameter ABI.
+
 ## Replaying an L3 / distributed build
 
 Distributed (L3) programs — a `@pl.jit.host` orchestrator compiled to a

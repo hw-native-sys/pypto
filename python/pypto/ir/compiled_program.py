@@ -197,13 +197,63 @@ def _param_info_to_dict(info: _ParamInfo) -> dict[str, Any]:
 
 
 def _param_info_from_dict(d: dict[str, Any]) -> _ParamInfo:
-    """Reconstruct a :class:`_ParamInfo` from :func:`_param_info_to_dict` output."""
+    """Reconstruct a :class:`_ParamInfo` from :func:`_param_info_to_dict` output.
+
+    Every field is validated here rather than trusted: the sidecars this parses
+    live in a user-supplied build directory, so a hand-edited or version-skewed
+    value must fail at load time with an actionable :class:`ValueError` instead
+    of surfacing much later as an unrelated ``TypeError`` from output
+    allocation or shape handling.
+
+    Raises:
+        KeyError: A required field is absent.
+        ValueError: A field is present but not a valid value for its slot.
+    """
+    name = d["name"]
+    if not isinstance(name, str):
+        raise ValueError(f"'name' must be a string, got {name!r}")
+
+    # Strict enum-member lookup, not getattr(): ``getattr(ParamDirection, "mro")``
+    # resolves to a bound method and would sail through as a bogus direction.
+    raw_direction = d["direction"]
+    direction = ParamDirection.__members__.get(raw_direction) if isinstance(raw_direction, str) else None
+    if direction is None:
+        raise ValueError(
+            f"'direction' must be one of {sorted(ParamDirection.__members__)}, got {raw_direction!r}"
+        )
+
+    # ``bool`` is an ``int`` subclass; a JSON ``true`` is never a dimension.
+    shape = d["shape"]
+    if shape is not None:
+        is_dim_list = isinstance(shape, list) and all(
+            isinstance(dim, int) and not isinstance(dim, bool) for dim in shape
+        )
+        if not is_dim_list:
+            raise ValueError(f"'shape' must be null or a list of ints, got {shape!r}")
+
+    raw_dtype = d["dtype"]
+    if not isinstance(raw_dtype, str):
+        raise ValueError(f"'dtype' must be a string, got {raw_dtype!r}")
+
     return _ParamInfo(
-        name=d["name"],
-        direction=getattr(ParamDirection, d["direction"]),
-        shape=d["shape"],
-        dtype=_datatype_from_string(d["dtype"]),
+        name=name,
+        direction=direction,
+        shape=shape,
+        dtype=_datatype_from_string(raw_dtype),
     )
+
+
+def _remove_meta(output_dir: Path) -> None:
+    """Drop ``<output_dir>/compiled_meta.json`` if present.
+
+    ``ir.compile`` never clears ``output_dir`` (``os.makedirs(exist_ok=True)``),
+    so recompiling a *different* program shape into a reused directory can leave
+    a sidecar describing the previous one. Every fresh-compile path that does
+    not overwrite the sidecar must therefore remove it: a stale signature would
+    drive the new artifacts with the old parameter ABI, which
+    :meth:`CompiledProgram.from_dir` has no way to detect.
+    """
+    (output_dir / _COMPILED_META_FILENAME).unlink(missing_ok=True)
 
 
 def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
@@ -232,7 +282,13 @@ def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
         )
 
     try:
-        meta = json.loads(meta_path.read_text())
+        raw_text = meta_path.read_text()
+    except OSError as exc:  # unreadable / vanished / replaced by a directory
+        raise _bad(f"cannot be read ({exc})") from exc
+    except UnicodeDecodeError as exc:  # binary or mis-encoded file
+        raise _bad(f"is not valid UTF-8 text ({exc})") from exc
+    try:
+        meta = json.loads(raw_text)
     except ValueError as exc:  # JSONDecodeError is a ValueError subclass
         raise _bad(f"not valid JSON ({exc})") from exc
     if not isinstance(meta, dict):
@@ -764,6 +820,12 @@ class CompiledProgram(_RuntimeFacade):
                 # reload the parent's error message points at actually work.
                 # The debug runner stays parent-less for the same reason as
                 # before: one script per sub-build, from its own pipeline.
+                #
+                # Drop any parent sidecar left by an earlier single-orch compile
+                # into this same directory -- ``ir.compile`` never clears
+                # output_dir, and a stale parent signature would silently drive
+                # the new artifacts with the old parameter ABI.
+                _remove_meta(self._output_dir)
                 self._persist_sub_chip_metadata()
             else:
                 self._persist_metadata()
@@ -775,7 +837,12 @@ class CompiledProgram(_RuntimeFacade):
         param_infos: list[_ParamInfo],
         return_types: list[Any],
     ) -> None:
-        """Write one ``compiled_meta.json`` describing a single orchestration."""
+        """Write one ``compiled_meta.json`` describing a single orchestration.
+
+        Written atomically (temp file + :func:`os.replace`) so a reader never
+        observes a half-written sidecar, and so a crash mid-write leaves the
+        previous file intact rather than a truncated one.
+        """
         meta = {
             "schema": _COMPILED_META_SCHEMA,
             "params": [_param_info_to_dict(p) for p in param_infos],
@@ -783,7 +850,10 @@ class CompiledProgram(_RuntimeFacade):
             "platform": self._platform,
             "backend_type": self._backend_type.name,
         }
-        (output_dir / _COMPILED_META_FILENAME).write_text(json.dumps(meta, indent=2))
+        target = output_dir / _COMPILED_META_FILENAME
+        tmp = target.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(meta, indent=2))
+        os.replace(tmp, target)
 
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/compiled_meta.json`` for :meth:`from_dir`.
@@ -796,12 +866,15 @@ class CompiledProgram(_RuntimeFacade):
         from the generated ``kernel_config.py``.
 
         Best-effort: a program without a resolvable orchestration signature
-        skips emission (mirrors :func:`_write_debug_runner`); :meth:`from_dir`
-        then reports the missing file with a recompile hint.
+        emits nothing (mirrors :func:`_write_debug_runner`) *and* deletes any
+        sidecar a previous compile into this directory left behind, so
+        :meth:`from_dir` reports the missing file with a recompile hint instead
+        of handing out a signature that no longer describes these artifacts.
         """
         try:
             param_infos, _, return_types = self._get_metadata()
         except (ValueError, TypeError):
+            _remove_meta(self._output_dir)
             return
         self._write_meta(self._output_dir, param_infos, return_types)
 
@@ -811,17 +884,21 @@ class CompiledProgram(_RuntimeFacade):
         Each sub-build is dispatched on its own (``compiled[<name>]``, or a
         direct ``CompiledProgram.from_dir(next_levels/<name>)``), so each needs
         the signature of *its* orchestration rather than the parent's. Same
-        best-effort contract as :meth:`_persist_metadata`: an orchestration
-        whose signature cannot be extracted is skipped, not fatal.
+        best-effort contract as :meth:`_persist_metadata`: a sub-build whose
+        signature cannot be extracted emits no sidecar and drops any stale one
+        (its directory may be a leftover of a previous compile into this same
+        ``output_dir``), rather than failing the compile.
         """
         assert self._program is not None
         for name, sub_dir in self._sub_chip_dirs.items():
             func = self._program.get_function(name)
             if func is None:
+                _remove_meta(sub_dir)
                 continue
             try:
                 param_infos, _, return_types = _extract_func_param_infos(func)
             except (ValueError, TypeError):
+                _remove_meta(sub_dir)
                 continue
             self._write_meta(sub_dir, param_infos, return_types)
 

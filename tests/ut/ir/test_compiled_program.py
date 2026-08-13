@@ -1175,14 +1175,28 @@ class TestCompiledMetaAndFromDir:
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
         good = json.loads(meta_path.read_text())
 
+        def _param(**overrides):
+            """Serialise ``good`` with its first param entry field-patched."""
+            return json.dumps({**good, "params": [{**good["params"][0], **overrides}]})
+
         broken = {
             "not JSON": "{ this is not json",
             "top-level list": json.dumps([good]),
             "params not a list": json.dumps({**good, "params": "abc"}),
             "param entry not an object": json.dumps({**good, "params": ["abc"]}),
             "param missing a key": json.dumps({**good, "params": [{"name": "a"}]}),
-            "bad direction": json.dumps({**good, "params": [{**good["params"][0], "direction": "Sideways"}]}),
-            "bad dtype": json.dumps({**good, "params": [{**good["params"][0], "dtype": "fp99"}]}),
+            "non-string name": _param(name=7),
+            "bad direction": _param(direction="Sideways"),
+            # ``getattr(ParamDirection, "mro")`` resolves to a bound method — a
+            # lax getattr() lookup would accept it as a direction.
+            "direction names an attribute": _param(direction="mro"),
+            "non-string direction": _param(direction=0),
+            "shape not a list": _param(shape="invalid"),
+            "shape holds a non-int": _param(shape=[128, "x"]),
+            # bool is an int subclass; JSON ``true`` is never a dimension.
+            "shape holds a bool": _param(shape=[128, True]),
+            "bad dtype": _param(dtype="fp99"),
+            "non-string dtype": _param(dtype=["fp32"]),
             "negative return count": json.dumps({**good, "num_return_types": -1}),
             "non-int return count": json.dumps({**good, "num_return_types": "two"}),
             "unknown backend": json.dumps({**good, "backend_type": "AscendNope"}),
@@ -1193,6 +1207,25 @@ class TestCompiledMetaAndFromDir:
             with pytest.raises(ValueError, match=_COMPILED_META_FILENAME) as excinfo:
                 CompiledProgram.from_dir(tmp_path)
             assert "ir.compile()" in str(excinfo.value), f"{label}: message lacks a recompile hint"
+
+    def test_unreadable_meta_raises_value_error(self, tmp_path):
+        """An OSError from reading the sidecar is reported like any malformed payload."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        meta_path.unlink()
+        meta_path.mkdir()  # exists(), but read_text() raises IsADirectoryError
+
+        with pytest.raises(ValueError, match=_COMPILED_META_FILENAME) as excinfo:
+            CompiledProgram.from_dir(tmp_path)
+        assert "ir.compile()" in str(excinfo.value)
+
+    def test_undecodable_meta_raises_value_error(self, tmp_path):
+        """A non-UTF-8 sidecar is bad input, not an internal UnicodeDecodeError."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        (tmp_path / _COMPILED_META_FILENAME).write_bytes(b"\xff\xfe\x00binary")
+
+        with pytest.raises(ValueError, match=_COMPILED_META_FILENAME):
+            CompiledProgram.from_dir(tmp_path)
 
     def test_subscript_on_reconstructed_multi_orch_raises(self, tmp_path):
         """A hand-placed sidecar in a multi-orch dir must not deref the absent IR."""
@@ -1209,6 +1242,71 @@ class TestCompiledMetaAndFromDir:
         cp = CompiledProgram(None, str(tmp_path))
         with pytest.raises(RuntimeError, match="from_dir"):
             _ = cp.param_names
+
+
+class TestCompiledMetaOutputDirReuse:
+    """Recompiling into a reused ``output_dir``.
+
+    ``ir.compile`` never clears ``output_dir`` (``makedirs(exist_ok=True)``), so
+    a sidecar left by a previous compile of a *different* program shape would
+    otherwise survive and drive the new artifacts with the old parameter ABI --
+    a mismatch ``from_dir`` cannot detect.
+    """
+
+    def test_recompile_refreshes_meta(self, tmp_path):
+        """A second single-orch compile overwrites the first one's signature."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        CompiledProgram(_make_program_with_inout(), str(tmp_path))
+
+        reloaded = CompiledProgram.from_dir(tmp_path)
+        live = CompiledProgram(_make_program_with_inout(), str(tmp_path))
+        assert reloaded.param_names == live.param_names
+
+    def test_multi_orch_recompile_drops_stale_parent_meta(self, tmp_path):
+        """Single-orch then multi-orch into one dir: the parent sidecar must go."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity: written by the first compile
+
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        # The parent must now point users at the sub-builds rather than hand out
+        # the previous program's signature.
+        with pytest.raises(FileNotFoundError, match="multi-orch"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_unextractable_recompile_drops_stale_meta(self, tmp_path):
+        """A program with no resolvable signature removes the stale sidecar instead of keeping it."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        CompiledProgram(_make_program_without_orchestration(), str(tmp_path))
+
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_stale_sub_build_meta_dropped(self, tmp_path):
+        """A next_levels/<name>/ dir with no matching orchestration loses its sidecar."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+        CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+        stale = tmp_path / "next_levels" / "orch_b" / _COMPILED_META_FILENAME
+        assert stale.exists()  # sanity: written by the first compile
+
+        # Recompile a program that no longer defines orch_b; its leftover
+        # build dir must not keep advertising a reloadable signature.
+        orch_a = _make_multi_orch_program().get_function("orch_a")
+        assert orch_a is not None
+        only_a = ir.Program([orch_a], "OnlyOrchA", ir.Span.unknown())
+        CompiledProgram(only_a, str(tmp_path))
+        assert not stale.exists()
+        assert (tmp_path / "next_levels" / "orch_a" / _COMPILED_META_FILENAME).exists()
+
+    def test_no_temp_files_left_behind(self, tmp_path):
+        """The atomic write leaves no ``.tmp`` residue next to the sidecar."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 if __name__ == "__main__":

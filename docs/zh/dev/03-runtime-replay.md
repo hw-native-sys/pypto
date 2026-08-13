@@ -135,6 +135,12 @@ multi-orch 的父目录自身没有 sidecar——每个 `next_levels/<name>/` �
 重载你要的那个子构建即可。分布式构建用
 `DistributedCompiledProgram.from_dir`（见下一节）。
 
+编译到**复用的 `output_dir`** 时，sidecar 始终描述本次编译的程序：写入是原子的；
+若新程序在该目录下没有可记录的签名（multi-orch 父目录、无法提取签名的
+orchestration、上一次编译遗留的 `next_levels/<name>/`），则直接删除旧文件。
+`ir.compile()` 本身不会清空 `output_dir`，正是这一步保证 `from_dir()` 不会
+交出过期的参数 ABI。
+
 ## 重放 L3 / 分布式构建
 
 分布式（L3）程序——即 `@pl.jit.host` orchestrator 编译出的
