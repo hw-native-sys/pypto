@@ -580,6 +580,42 @@ _TASK_DUMMY_ONLY_ATTRS = frozenset({"manual_dep_edges", "dummy_task"})
 # fails at import instead of silently dropping the hint from the error message below.
 _TASK_INVALID_OP = ir.get_op("system.task_invalid").name
 
+# Ops that build a brand-new buffer, so routing one through ``assemble`` into an
+# Out param would only write uninitialised data. ``_desugar_out_param_write``
+# leaves them alone and lets the ``OutParamNotShadowed`` verifier report the
+# shadowing (see src/ir/verifier/verify_out_param_pass.cpp).
+_TENSOR_CREATING_OPS = frozenset(
+    {
+        ir.get_op("tensor.create").name,
+        ir.get_op("tensor.full").name,
+        ir.get_op("tile.create").name,
+        ir.get_op("tile.full").name,
+    }
+)
+
+
+class _VarReferenceFinder(ir.IRVisitor):
+    """Record whether a target Var is referenced anywhere in an expression."""
+
+    def __init__(self, target_id: int) -> None:
+        super().__init__()
+        self._target_id = target_id
+        self.found = False
+
+    # ``IterArg`` is a Var subclass with its own ObjectKind, so the var-like hook
+    # is the one that sees both.
+    def visit_var_like(self, op: ir.Var) -> None:
+        if op.unique_id == self._target_id:
+            self.found = True
+        super().visit_var_like(op)
+
+
+def _expr_references_var(expr: ir.Expr, var: ir.Var) -> bool:
+    """Return True when ``var`` appears anywhere inside ``expr``."""
+    finder = _VarReferenceFinder(var.unique_id)
+    finder.visit_expr(expr)
+    return finder.found
+
 
 def _split_spmd_for_loop_name_hints(name_hint: str) -> tuple[str, str]:
     """Map one ``for i in pl.spmd(..., name_hint=...)`` hint to Spmd vs InCore names.
@@ -741,6 +777,13 @@ class ASTParser:
         # ``_fold_tensor_dim``). Per-function; reset in parse_function.
         self._param_dim_symbols: set[int] = set()
 
+        # Out / InOut params of the current signature, keyed by ``Var.unique_id``
+        # (see ``_desugar_out_param_write``). Per-function; reset in
+        # parse_function. Keyed by Var identity rather than by name because
+        # scopes are a stack — a name-keyed set desyncs the moment an inner
+        # scope rebinds the name.
+        self._out_param_vars: set[int] = set()
+
         # Current function's auto_scope flag (set during parse_function). When
         # True (default) the compiler owns AUTO scope placement, so a hand-placed
         # AUTO `with pl.scope()` is rejected; set False to take control. MANUAL
@@ -888,6 +931,35 @@ class ASTParser:
             self._loop_kind_stack.pop()
             self._split_aiv_mode_stack.pop()
 
+    def _record_param_metadata(
+        self,
+        param_type: ir.Type,
+        param_direction: ir.ParamDirection,
+        param_var: ir.Var,
+    ) -> None:
+        """Record the per-function parameter facts the body parser needs.
+
+        Both sets are keyed by ``Var.unique_id`` and reset per function.
+
+        Args:
+            param_type: Resolved type of the parameter
+            param_direction: Resolved direction of the parameter
+            param_var: The Var the parameter is bound to
+        """
+        # An Out/InOut param is written, not rebound; see
+        # ``_desugar_out_param_write``.
+        if param_direction in (ir.ParamDirection.Out, ir.ParamDirection.InOut):
+            self._out_param_vars.add(param_var.unique_id)
+
+        # A bare ``pl.dynamic()`` Var in a tensor param's shape names that
+        # argument's runtime extent. Orchestration codegen defines exactly
+        # these symbols from the task-arg descriptors, which is what makes
+        # them usable as values — and what ``_fold_tensor_dim`` folds onto.
+        if isinstance(param_type, ir.TensorType):
+            for extent in param_type.shape:
+                if isinstance(extent, ir.Var):
+                    self._param_dim_symbols.add(extent.unique_id)
+
     def _bind_dynvar_to_scalar_param(
         self,
         param_name: str,
@@ -984,6 +1056,7 @@ class ASTParser:
         self._func_auto_scope = bool((func_attrs or {}).get("auto_scope", True))
         self._func_type = func_type
         self._param_dim_symbols = set()
+        self._out_param_vars = set()
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -1037,19 +1110,12 @@ class ASTParser:
                 # Add parameter to function with direction
                 param_var = f.param(param_name, param_type, param_span, direction=param_direction)
 
+                self._record_param_metadata(param_type, param_direction, param_var)
+
                 self._bind_dynvar_to_scalar_param(
                     param_name, param_type, param_var, param_span, symbols_used_so_far
                 )
                 symbols_used_so_far.update(_collect_type_symbol_ids(param_type))
-
-                # A bare ``pl.dynamic()`` Var in a tensor param's shape names that
-                # argument's runtime extent. Orchestration codegen defines exactly
-                # these symbols from the task-arg descriptors, which is what makes
-                # them usable as values — and what ``_fold_tensor_dim`` folds onto.
-                if isinstance(param_type, ir.TensorType):
-                    for extent in param_type.shape:
-                        if isinstance(extent, ir.Var):
-                            self._param_dim_symbols.add(extent.unique_id)
 
                 # Register in scope
                 self.scope_manager.define_var(param_name, param_var, allow_redef=True)
@@ -1765,6 +1831,11 @@ class ASTParser:
         # Reuse existing Var on reassignment (override_type is intentionally
         # discarded — the Var's type was fixed at first definition; the SSA
         # pass will create properly typed versioned copies later).
+        # No Out-param write sugar here: ``name: T = value`` is the form the
+        # printer emits for already-lowered IR, so rewriting it would break
+        # print -> parse round-tripping (a printed ``o0: T = _tuple_tmp[0]``
+        # would come back as an assemble). The sugar is defined over the bare
+        # ``name = value`` spelling only; see ``_desugar_out_param_write``.
         var = self._assign_or_let(var_name, value_expr, span, override_type)
 
         # Register in scope
@@ -1780,8 +1851,18 @@ class ASTParser:
         value_expr: ir.Expr,
         span: ir.Span,
         override_type: ir.Type | None = None,
+        *,
+        out_param_write_sugar: bool = False,
     ) -> ir.Var:
-        """Assign to existing Var if possible, otherwise create a new let binding."""
+        """Assign to existing Var if possible, otherwise create a new let binding.
+
+        ``out_param_write_sugar`` is set only by the bare ``name = value``
+        statement form, the surface syntax the Out-param write sugar is defined
+        over (see ``_desugar_out_param_write``). Every other caller binds a name
+        to an already-lowered value — a tuple element, a submit result, an
+        ``assemble`` the subscript sugar just built, or an annotated assignment
+        the printer emitted — where re-wrapping would be wrong.
+        """
         existing_var = self.scope_manager.lookup_var(var_name)
 
         # ``n = pl.tensor.dim(x, 0)`` folded to a dyn-dim symbol (see
@@ -1825,9 +1906,74 @@ class ASTParser:
                     span=span,
                     hint="Use a different variable name for tensors with different shapes or dtypes",
                 )
+            if out_param_write_sugar:
+                value_expr = self._desugar_out_param_write(existing_var, value_expr, span)
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
         return self.builder.let(var_name, value_expr, type=override_type, span=span)
+
+    def _desugar_out_param_write(self, param_var: ir.Var, value_expr: ir.Expr, span: ir.Span) -> ir.Expr:
+        """Route ``out = <expr>`` on an Out/InOut param through a whole-tensor assemble.
+
+        Rebinding the name alone re-points the parameter Var at a freshly
+        computed tensor and leaves the caller's buffer untouched — it compiles,
+        runs, and silently returns uninitialised memory (#2352). The value is
+        therefore threaded through ``assemble`` at offset 0, producing exactly
+        the IR the explicit ``out = pl.assemble(out, <expr>, [0, ..., 0])`` and
+        the ``out[:] = <expr>`` subscript-write spellings already build. A
+        partial write still needs an explicit offset, which is the case where
+        the offset actually carries information.
+
+        Args:
+            param_var: The Var the assignment target resolved to
+            value_expr: The parsed right-hand side
+            span: Source span of the assignment
+
+        Returns:
+            The assemble call to assign, or ``value_expr`` unchanged when the
+            rewrite does not apply
+        """
+        if param_var.unique_id not in self._out_param_vars:
+            return value_expr
+
+        # Same restriction as the ``dst[...] = src`` sugar: the rewrite rebinds
+        # the parameter, which strict-SSA forbids.
+        if self.scope_manager.strict_ssa:
+            return value_expr
+
+        # The value already mentions the parameter, so the user is threading it
+        # explicitly — ``out = pl.assemble(out, ...)``, ``out = pl.store(t, off,
+        # out)``, ``out = pl.scatter(out, ...)``, ``out = out``. Which argument
+        # slot is the destination differs per op and the registry has no single
+        # answer (the facts are spread across the assemble / store / scatter /
+        # accumulate families), so any mention is treated as "already threaded".
+        # Wrapping those again would emit a second whole-tensor write and break
+        # the writeback chain the later passes match on.
+        #
+        # The cost of this conservatism is that a read-only mention such as
+        # ``out = pl.add(out, b)`` is left alone, so it keeps today's behaviour
+        # instead of being repaired. That is the safe direction to be wrong in:
+        # a missed repair leaves a pre-existing bug, an inserted write would
+        # corrupt a correct program.
+        if _expr_references_var(value_expr, param_var):
+            return value_expr
+
+        # Shadowing an Out param with a fresh buffer stays an error; see
+        # ``_TENSOR_CREATING_OPS``.
+        if isinstance(value_expr, ir.Call) and value_expr.op.name in _TENSOR_CREATING_OPS:
+            return value_expr
+
+        # The #642 type check above already established that the value's type
+        # matches the parameter's, so a full-extent assemble is always in range.
+        if isinstance(param_var.type, ir.TensorType):
+            assemble_op = ir_op.tensor.assemble
+        elif isinstance(param_var.type, ir.TileType):
+            assemble_op = ir_op.tile.assemble
+        else:
+            return value_expr
+
+        offsets: list[int | ir.Expr] = [0] * len(param_var.type.shape)
+        return assemble_op(param_var, value_expr, offsets, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
         """Parse regular assignment: var = value or tuple unpacking.
@@ -1932,7 +2078,7 @@ class ASTParser:
                         return
 
                 value_expr = self.parse_expression(stmt.value)
-                var = self._assign_or_let(var_name, value_expr, span)
+                var = self._assign_or_let(var_name, value_expr, span, out_param_write_sugar=True)
                 self.scope_manager.define_var(var_name, var, span=span)
 
                 # Track buffer metadata for attribute access (e.g., pipe_buf.base)

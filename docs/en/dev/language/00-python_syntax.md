@@ -932,6 +932,48 @@ def kernel(
 
 **Constraint:** `Scalar` parameters cannot have `InOut` direction (raises `ParserTypeError`).
 
+#### Writing an `Out` / `InOut` parameter
+
+A bare assignment to an `Out` or `InOut` parameter writes the **whole** tensor.
+The parser rewrites
+
+```python
+out = pl.add(a, b)
+```
+
+to the explicit whole-tensor write
+
+```python
+out = pl.assemble(out, pl.add(a, b), [0, 0])
+```
+
+so all three spellings below build the same IR:
+
+| Spelling | Use when |
+| -------- | -------- |
+| `out = <expr>` | the result is the entire output |
+| `out[<slices>] = <expr>` | writing a sub-window |
+| `out = pl.assemble(out, <expr>, <offset>)` | writing at an explicit offset |
+
+Without the rewrite the assignment would only rebind the Python name: the
+parameter Var would point at a freshly computed tensor and the caller's buffer
+would never be written, which compiles and runs but hands back uninitialised
+memory.
+
+The rewrite applies only when the value does **not** already mention the
+parameter. A value that does — `out = pl.assemble(out, ...)`,
+`out = pl.store(tile, offset, out)`, `out = pl.scatter(out, ...)` — is left
+alone, because those ops already write through the parameter and wrapping them
+again would emit a second whole-tensor write. One consequence is that a value
+that merely *reads* the parameter, such as `out = pl.add(out, b)`, is also left
+alone and therefore still drops the write; write it as
+`out[:] = pl.add(out, b)` when the whole tensor is meant.
+
+Two further limits: the rewrite is defined over the bare `out = <expr>`
+statement only — the annotated form `out: <type> = <expr>` is the shape the
+printer emits for already-lowered IR and is passed through unchanged — and it
+does not apply under `strict_ssa`, which forbids rebinding.
+
 ## Complete Example
 
 ### Tensor Operations (Loop with iter_args)

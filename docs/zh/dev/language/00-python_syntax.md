@@ -875,6 +875,40 @@ def kernel(
 
 **约束:** `Scalar` 参数不能使用 `InOut` 方向 (会抛出 `ParserTypeError`)。
 
+#### 写入 `Out` / `InOut` 参数
+
+对 `Out` 或 `InOut` 参数的裸赋值表示写入**整个**张量。解析器会把
+
+```python
+out = pl.add(a, b)
+```
+
+改写为显式的全量写入
+
+```python
+out = pl.assemble(out, pl.add(a, b), [0, 0])
+```
+
+因此下面三种写法生成相同的 IR:
+
+| 写法 | 适用场景 |
+| ---- | -------- |
+| `out = <expr>` | 结果就是整个输出 |
+| `out[<slices>] = <expr>` | 写入子窗口 |
+| `out = pl.assemble(out, <expr>, <offset>)` | 按显式偏移写入 |
+
+若不做这层改写，赋值只会重新绑定 Python 名字: 参数 Var 指向一个新算出来的张量，
+调用方的 buffer 从未被写入——程序能编译、能运行，但返回的是未初始化内存。
+
+改写仅在值**没有**提到该参数时生效。已经提到它的写法——`out = pl.assemble(out, ...)`、
+`out = pl.store(tile, offset, out)`、`out = pl.scatter(out, ...)`——保持不变，
+因为这些 op 本身就通过该参数回写，再包一层会产生第二次全量写入。由此带来的一个后果是:
+仅仅*读取*该参数的值 (例如 `out = pl.add(out, b)`) 同样不会被改写，因而仍会丢失写入;
+需要全量写入时请写成 `out[:] = pl.add(out, b)`。
+
+另有两点限制: 改写只针对裸的 `out = <expr>` 语句——带标注的 `out: <type> = <expr>`
+是打印器为已下降 IR 输出的形式，原样透传; 以及在 `strict_ssa` 下不生效 (该模式禁止重绑定)。
+
 ## 完整示例
 
 ### 张量操作 (带 iter_args 的循环)

@@ -460,7 +460,10 @@ class TestFlattenCallInForRange:
             def child(
                 self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
             ) -> pl.Tensor[[16, 32], pl.FP32]:
-                b = pl.add(a, 1.0)
+                # ``b = pl.add(a, 1.0)`` desugars to a whole-tensor assemble
+                # (#2352), whose nested operand this pass then hoists.
+                t__tmp_v0: pl.Tensor[[16, 32], pl.FP32] = pl.add(a, 1.0)
+                b = pl.assemble(b, t__tmp_v0, [0, 0])
                 return b
 
             @pl.function
@@ -1057,7 +1060,10 @@ class TestFlattenCallInClusterScope:
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP):
-                    out = pl.add(x, x)
+                    # ``out = pl.add(x, x)`` desugars to a whole-tensor assemble
+                    # (#2352), whose nested operand this pass then hoists.
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    out = pl.assemble(out, t__tmp_v0, [0])
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
