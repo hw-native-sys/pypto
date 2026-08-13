@@ -222,8 +222,9 @@ def spmd_submit(*args: Any, **kwargs: Any) -> Any:
     ``core_num`` is a **required keyword argument** (a positive integer
     expression) — the positional slots are the kernel's own arguments.
     ``sync_start`` (default ``False``) requires all blocks to launch atomically.
-    ``deps=[...]``, ``allow_early_resolve=True`` and ``predicate=(...)`` work
-    exactly as on [`submit`][pypto.language.submit] (note: a ``sync_start`` task cannot itself be
+    ``deps=[...]``, ``allow_early_resolve=True``, ``timing_slot=N`` and
+    ``predicate=(...)`` work exactly as on [`submit`][pypto.language.submit]
+    (note: a ``sync_start`` task cannot itself be
     block-by-block pre-staged, but it can still be flagged to let its consumers
     pre-stage). The callee may be an InCore / AIC / AIV kernel or a co-scheduled
     Group.
