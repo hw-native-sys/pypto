@@ -37,8 +37,8 @@ with ChipWorker(config=cfg) as w:
 
 **代价 —— 三份从此归你的义务：**
 
-- `DeviceTensor` **永远不会**被拷回 host。如果 kernel 往里写了，用同一个 worker 上的 `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读出来。
-- 在 worker 关闭之前用 `w.free_tensor(t)` 释放，否则这块内存会泄漏到 worker 的生命期结束。
+- `DeviceTensor` **不会自动**被拷回 host。如果 kernel 往里写了，自己用同一个 worker 上的 `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回来。
+- 用完就用 `w.free_tensor(t)` 释放。否则这块 buffer 会一直占到 worker 生命期结束；`close()` 确实会兜底自动释放你忘掉的那些，但那是兜底，不是方案。
 - 只有分配它的那个 worker 能使用它。
 
 **怎么确认：** `host_wall_us` 变小，`device_wall_us` 不动。如果 device 时间也变了，说明还有别的东西一起变了。
@@ -53,7 +53,7 @@ with ChipWorker(config=cfg) as w:
 | KV cache | 上一次调用写，下一次调用读 | `examples/runtime/multi_program_kv_cache.py` |
 | 临时 / workspace | 根本不离开设备 | 分配一次，每次调用都传进去 |
 
-KV cache 是那种「常驻不只是优化」的情形 —— 把它来回拷贝会主导一整个 decode step。`rt.alloc_tensor(...)` 让一块 buffer 跨越注册在同一个 worker 上的多个程序存活。
+KV cache 是那种「常驻不只是优化」的情形 —— 把它来回拷贝会主导一整个 decode step。`w.alloc_tensor(...)` 让一块 buffer 跨越注册在同一个 worker 上的多个程序存活。
 
 ## 只注册一次
 

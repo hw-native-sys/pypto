@@ -45,10 +45,11 @@ with ChipWorker(config=cfg) as w:
 
 **Cost — three obligations you now own:**
 
-- A `DeviceTensor` is **never** copied back to the host. If a kernel writes to one, read it
-  with `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` on the same worker.
-- Free it with `w.free_tensor(t)` before the worker closes, or the memory leaks for the
-  worker's lifetime.
+- A `DeviceTensor` is **not** copied back automatically. If a kernel writes to one, read it
+  back yourself with `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` on the same worker.
+- Free it with `w.free_tensor(t)` when you are done. The buffer is otherwise held for the
+  worker's whole lifetime; `close()` does auto-free what you forgot, but that is a backstop,
+  not the plan.
 - Only the worker that allocated the buffer can use it.
 
 **How to confirm:** `host_wall_us` shrinks and `device_wall_us` does not move. If device
@@ -65,7 +66,7 @@ The same reasoning covers anything that outlives one call:
 | Scratch / workspace | Never leaves the device at all | Allocate once, pass every call |
 
 A KV cache is the case where residency is not just an optimisation — copying it back and
-forth would dominate a decode step. `rt.alloc_tensor(...)` holds one buffer across several
+forth would dominate a decode step. `w.alloc_tensor(...)` holds one buffer across several
 programs registered on the same worker.
 
 ## Registering once

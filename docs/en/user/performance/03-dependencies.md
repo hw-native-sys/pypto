@@ -126,8 +126,9 @@ with pl.at(level=pl.Level.CORE_GROUP,
     ...
 ```
 
-Inside `pl.manual_scope()` nothing registers in the tensormap at all — producer
-registration is a no-op there — so every edge in the region is one you wrote. That is the
+Inside `pl.manual_scope()` the runtime skips fan-in computation for the region outright —
+not just producer registration, but creator retention and the producer lookup with it — so
+every edge in the region is one you wrote. That is the
 point of it: on a path where the inferred edges were mostly false, declaring the true ones
 is less work than removing the wrong ones.
 
