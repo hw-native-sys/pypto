@@ -8,7 +8,7 @@
 > | 小节 | 去向 |
 > | ---- | ---- |
 > | 常驻设备张量、显式派发、从签名编译 | `execution/01-run.md` |
-> | 单次 launch 计时、`benchmark` | `performance/00-methodology.md` |
+> | 单次 launch 计时、`benchmark` | `performance/06-host.md` |
 > | 分布式（L3+）执行 | `distributed/03-execution.md` |
 >
 > 这里的内容都没有废弃，只是地址是临时的。

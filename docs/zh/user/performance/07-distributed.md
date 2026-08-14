@@ -2,7 +2,7 @@
 
 多于一个 rank 之后有什么不同：一项新的主导开销、一种新的串行化方式，以及需要换种读法的指标。
 
-> **前置**：[度量闭环](00-methodology.md) 与 [分布式编程](../distributed/index.md)。[单机手段](01-single-node.md) 里的一切仍然逐 rank 适用 —— 本页只讲**额外多出来**的部分。
+> **前置**：[读泳道图](00-swimlane.md) 与 [分布式编程](../distributed/index.md)。第 [01](01-task-granularity.md)–[06](06-host.md) 页里的一切仍然逐 rank 适用 —— 本页只讲**额外多出来**的部分。
 
 ## 三件不一样的事
 
@@ -72,7 +72,7 @@
 2. **然后是图** —— 到底有没有计算被允许与 collective 并行？
 3. **然后是算法** —— mesh 还是 ring，按 rank 数与窗口内存来选。
 4. **然后是 setup 与常驻** —— 只在 host span 里可见。
-5. **然后才是逐 rank 的 kernel 工作** —— [单机手段](01-single-node.md)。
+5. **然后才是逐 rank 的 kernel 工作** —— 第 [01](01-task-granularity.md)–[06](06-host.md) 页。
 
 第 1 步先于第 3 步是最省时间的一条。在某个 rank 迟到的情况下调 collective，优化的是一条没人在等的队列。
 
@@ -88,7 +88,7 @@
 
 ## 参见
 
-- [度量闭环](00-methodology.md) —— 五个步骤，与单机共用。
-- [单机手段](01-single-node.md) —— 仍然逐 rank 适用。
+- [读泳道图](00-swimlane.md) —— 逐任务计时，与单卡共用。
+- [任务粒度](01-task-granularity.md) 及其后 —— 仍然逐 rank 适用。
 - [分布式编程](../distributed/index.md) —— API 面本身。
 - [集合通信](../distributed/01-collectives.md) —— 各 collective 的语义。

@@ -11,7 +11,7 @@ distributed programs.
 > | Section | Destination |
 > | ------- | ----------- |
 > | Resident device tensors, explicit dispatch, compiling from a signature | `execution/01-run.md` |
-> | Per-launch timing, `benchmark` | `performance/00-methodology.md` |
+> | Per-launch timing, `benchmark` | `performance/06-host.md` |
 > | Distributed (L3+) execution | `distributed/03-execution.md` |
 >
 > Nothing here is deprecated — only the address is temporary.

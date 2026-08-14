@@ -1,61 +1,71 @@
 # Performance
 
-Measure, locate, change, confirm — in that order, on one device or many.
+Tuning a single-card kernel: making the execution visible first, then working through the
+places time actually goes.
 
-> **Prerequisites:** [Tutorials](../tutorials/index.md), at least through
-> [Tuning the schedule](../tutorials/05-scheduling-tuning.md).
+> **Prerequisites:** [Tasks and Ordering](../tasks/index.md) and
+> [Scopes and Placement](../language/04-scopes.md).
 
-## What this chapter is
+## The shape of the problem
 
-Not a list of tricks. A **loop**: five questions that narrow a gap to one cause, then a
-catalog of techniques each stated with its cost and — the part that keeps a codebase
-honest — how to confirm it worked.
+A PyPTO kernel's wall-clock time is spent in three different machines, and they fail in
+different ways:
 
-The loop is the same whether you have one rank or sixty-four; only the dominant cost
-changes.
+```text
+host          orchestration            AICore
+ │                  │                     │
+ ├─ copies          ├─ task dispatch      ├─ the kernel itself
+ │  (06-host)       │  (01, 02, 03)       │  (04-incore)
+ │                  │                     │
+ └────────────── memory: on-chip buffers + runtime rings (05-memory) ──────┘
+```
+
+Most first-time tuning goes straight to the third column — the arithmetic inside the
+kernel — and finds that the first two were the problem. The chapter is ordered so you meet
+them in the order they usually bite.
 
 ## Contents
 
 | Page | Covers |
 | ---- | ------ |
-| [The measurement loop](00-methodology.md) | Five questions, their tools, and why the order matters |
-| [Single-node techniques](01-single-node.md) | Splitting, pipelining, the matmul path, memory, scheduling |
-| [Distributed performance](02-distributed.md) | Rank skew, collective algorithms, overlap, residency |
-| [Worked cases](03-cases.md) | The loop applied end to end |
+| [Reading the swimlane](00-swimlane.md) | Capturing the L2 swimlane and opening it — the one view that shows where time went |
+| [Task granularity](01-task-granularity.md) | Dispatch is not free; growing and merging InCore functions without starving the cores |
+| [Runtime overhead](02-runtime-overhead.md) | Mixed kernels, SPMD, `allow_early_resolve`, in-kernel `syncall` |
+| [Managing dependencies](03-dependencies.md) | Why the runtime serializes work that could overlap, and how to say otherwise |
+| [Tuning the InCore function](04-incore.md) | Double buffering, algorithmic splits, L0 instruction traces, hardware granularity, external kernels |
+| [Memory](05-memory.md) | The four scope-depth rings, scope placement, and ring sizing |
+| [Host](06-host.md) | Keeping resident data resident |
+| [Multi-card measurement](07-distributed.md) | Beyond one card: which rank, and which collective |
 
-## Where to start
+## How to use it
 
-```text
-                    00-methodology
-                   (always start here)
-                          │
-            ┌─────────────┴─────────────┐
-     01-single-node                02-distributed
-   (per-device work)          (adds: skew, collectives)
-            └─────────────┬─────────────┘
-                     03-cases
-```
+Every technique below is written with the same four fields, because a speedup with an
+unstated cost is not a result:
 
-**Read `00-methodology` first even if you think you know the cause.** Its whole purpose is
-to stop you optimising the wrong layer — a scheduling fix cannot help when the time is
-going to the host, and no amount of tuning recovers a tile whose innermost dimension the
-compiler already flagged.
+| Field | What it answers |
+| ----- | --------------- |
+| **When it applies** | The symptom that makes this the right move |
+| **How** | The code change |
+| **Cost** | What it spends — memory, generality, or a correctness obligation you now own |
+| **How to confirm** | The artifact that shows it worked, and what should change in it |
 
-## What this chapter does not give you
+**There are no speedup numbers in this chapter.** They depend on your shapes, platform, and
+toolchain versions, and a stale number is worse than none because you cannot tell it has
+gone stale. The confirmation step is the transferable part: run it on your kernel and you
+have your own number.
 
-**Numbers.** No page here says "this made it 30% faster", because that number depends on
-your shapes, your platform, and the version you are on — it would be wrong by the time you
-read it, and wrong in a way that is hard to notice.
+## Before you tune anything
 
-What every technique does carry is **how to confirm it**: which tool shows the change took
-effect. That is the durable half. A speedup you cannot see in a tool is a
-speedup you cannot defend when someone deletes it six months from now.
+Two cheap checks come before any of this, and both are already done for you:
 
-## See Also
+- **`report/perf_hints.log`** in the build output. The compiler writes what it noticed
+  during compilation — undersized transfers, matmuls it could not tile, a pipeline depth
+  that did not fit. One summary line goes to stderr on every compile.
+- **The benchmark tree.** `run()` reports host and device time separately. If the time is
+  on the host, nothing in pages 00–05 will move it — go to [Host](06-host.md).
 
-- [Precision](../precision/index.md) — the sibling loop, for when the answer is *wrong*
-  rather than slow.
-- [Tuning the schedule](../tutorials/05-scheduling-tuning.md) — the hands-on version of
-  step 5.
-- [Diagnostics](../../dev/passes/92-diagnostics.md) — the compile-time hint registry behind
-  step 1.
+## See also
+
+- [Tuning the schedule](../tutorials/05-scheduling-tuning.md) — the same ground as a
+  hands-on walkthrough.
+- [Precision](../precision/index.md) — the equivalent treatment for "the result is wrong".

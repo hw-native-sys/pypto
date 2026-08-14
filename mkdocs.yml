@@ -186,10 +186,14 @@ nav:
           - en/user/tutorials/05-scheduling-tuning.md
       - Performance:
           - en/user/performance/index.md
-          - en/user/performance/00-methodology.md
-          - en/user/performance/01-single-node.md
-          - en/user/performance/02-distributed.md
-          - en/user/performance/03-cases.md
+          - en/user/performance/00-swimlane.md
+          - en/user/performance/01-task-granularity.md
+          - en/user/performance/02-runtime-overhead.md
+          - en/user/performance/03-dependencies.md
+          - en/user/performance/04-incore.md
+          - en/user/performance/05-memory.md
+          - en/user/performance/06-host.md
+          - en/user/performance/07-distributed.md
       - Precision:
           - en/user/precision/index.md
           - en/user/precision/00-workflow.md

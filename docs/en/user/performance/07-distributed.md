@@ -3,9 +3,10 @@
 What changes when there is more than one rank: a new dominant cost, a new way to be
 serialized, and metrics that need reading differently.
 
-> **Prerequisites:** [The measurement loop](00-methodology.md) and
+> **Prerequisites:** [Reading the swimlane](00-swimlane.md) and
 > [Distributed Programming](../distributed/index.md). Everything in
-> [Single-node techniques](01-single-node.md) still applies per rank — this page is only
+> everything in pages [01](01-task-granularity.md)–[06](06-host.md) still applies per
+> rank — this page is only
 > what is *additional*.
 
 ## The three things that are different
@@ -103,7 +104,7 @@ measurement that only looks at `device` will report no improvement from either.
 2. **Then the graph** — is compute allowed beside the collective at all?
 3. **Then the algorithm** — `mesh` vs `ring`, chosen against rank count and window memory.
 4. **Then setup and residency** — visible only in host spans.
-5. **Then per-rank kernel work** — [Single-node techniques](01-single-node.md).
+5. **Then per-rank kernel work** — pages [01](01-task-granularity.md)–[06](06-host.md).
 
 Step 1 before step 3 is the one that saves time. Tuning a collective while one rank arrives
 late optimises a queue nobody is waiting in.
@@ -120,7 +121,7 @@ late optimises a queue nobody is waiting in.
 
 ## See Also
 
-- [The measurement loop](00-methodology.md) — the five steps, shared with single-node.
-- [Single-node techniques](01-single-node.md) — still applies, per rank.
+- [Reading the swimlane](00-swimlane.md) — per-task timing, shared with single-card.
+- [Task granularity](01-task-granularity.md) onwards — still applies, per rank.
 - [Distributed Programming](../distributed/index.md) — the API surface itself.
 - [Collectives](../distributed/01-collectives.md) — semantics of each collective.

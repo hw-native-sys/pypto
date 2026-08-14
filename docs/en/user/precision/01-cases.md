@@ -118,5 +118,5 @@ there was nothing to find.
 ## See Also
 
 - [Narrowing down a gap](00-workflow.md) — the procedure.
-- [Performance cases](../performance/03-cases.md) — the same treatment for slow.
+- [Performance](../performance/index.md) — the same treatment for slow.
 - [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) — cast chain exactness.

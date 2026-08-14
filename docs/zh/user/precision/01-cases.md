@@ -83,5 +83,5 @@ cfg = RunConfig(platform="a2a3sim", enable_dump_args=1)
 ## 参见
 
 - [缩小精度差距](00-workflow.md) —— 这套流程。
-- [性能实例](../performance/03-cases.md) —— 对「慢」的同类处理。
+- [性能](../performance/index.md) —— 对「慢」的同类处理。
 - [LegalizeTileCast](../../dev/passes/14-legalize_tile_cast.md) —— cast 链的精确性。
