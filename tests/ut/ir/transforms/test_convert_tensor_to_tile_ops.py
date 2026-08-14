@@ -5123,6 +5123,83 @@ class TestWindowSliceIncoreConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_notify_upgrades_signal_to_out(self):
+        """``pld.system.notify(target=signal, ...)`` upgrades ``signal`` from In to Out.
+
+        The TNOTIFY deposits ``value`` into the peer rank's slot of the signal
+        window, so the param is a write target. Without the marking it would
+        stay In and a downstream reader would miss the RAW edge."""
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(
+                    target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.AtomicAdd
+                )
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pl.Out[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(
+                    target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.AtomicAdd
+                )
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_notify_plus_wait_upgrades_signal_to_inout(self):
+        """A notify/wait handshake on one window makes ``signal`` InOut.
+
+        ``pld.system.notify`` supplies the write side; ``pld.system.wait``
+        falls through to the read-only default, so the param ends up InOut
+        rather than Out. Uses ``NotifyOp.Set`` so both notify semantics are
+        pinned across this pair of tests (the Out case covers AtomicAdd)."""
+        nr = 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.Set)
+                pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                peer: pl.Scalar[pl.INT32],
+                tag: pl.Scalar[pl.INT32],
+            ):
+                pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=tag, op=pld.NotifyOp.Set)
+                pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_broadcast_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.broadcast(target, signal, root=...)`` upgrades both
         ``target`` and ``signal`` params from In to InOut."""

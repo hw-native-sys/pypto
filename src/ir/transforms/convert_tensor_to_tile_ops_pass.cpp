@@ -1283,6 +1283,15 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if ((IsOp(call, "pld.tile.put") || IsOp(call, "pld.tile.get")) && !call->args_.empty()) {
     return call->args_[0];
   }
+  // pld.system.notify(target, peer, offsets, value, *, op): the TNOTIFY
+  // deposits `value` into the peer rank's slot of `target` (args_[0]), so the
+  // enclosing window param must be upgraded from In to Out/InOut — otherwise a
+  // later reader of the same signal gets no RAW edge. The op is side-effect-only
+  // (UnknownType result), so this entry only ever feeds AnalyzeCallAccess, never
+  // the result-aliasing path in GetAliasOrigins.
+  if (IsOp(call, "pld.system.notify") && !call->args_.empty()) {
+    return call->args_[0];
+  }
   // pld.tensor.allreduce(target, signal, *, op): the composite collective
   // writes the reduced value back into `target` (args_[0]) — the in-place
   // rebind idiom shared with `pl.store`. `signal` (args_[1]) is also
@@ -1462,6 +1471,24 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     //   the local window slot); peer/src/stage and any subregion offsets are
     //   all read.
     // Mirrors the pld.tile.remote_store handling above.
+    for (size_t i = 1; i < call->args_.size(); ++i) {
+      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
+    }
+    if (auto write_target = GetWriteTargetExpr(call)) {
+      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+    }
+    return;
+  }
+
+  if (IsOp(call, "pld.system.notify")) {
+    // pld.system.notify(target, peer, offsets, value, *, op): target (args_[0])
+    // is the cross-rank write target; peer/offsets/value are reads. Mirrors the
+    // pld.tile.put/get handling above — a signal window touched only by notify
+    // becomes Out, and a companion pld.system.wait on the same window adds the
+    // read side (fall-through branch below) so it surfaces as InOut.
+    // Write-only holds for both NotifyOp values: the accumulate half of
+    // NotifyOp::kAtomicAdd runs atomically on the *peer* rank's slot, so this
+    // rank's kernel never reads the local buffer and needs no local RAW edge.
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
