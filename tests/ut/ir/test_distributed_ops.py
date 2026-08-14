@@ -1403,7 +1403,9 @@ def test_defer_wait_accepts_index_offsets_and_expected():
     call = dist_system_ops.defer_wait(signal, [offset], expected, ir.WaitCmp.Ge, span=span)
 
     assert isinstance(call.type, ir.UnknownType)
-    assert call.args[1].elements[0] is offset
+    offsets = call.args[1]
+    assert isinstance(offsets, ir.MakeTuple)
+    assert offsets.elements[0] is offset
     assert call.args[2] is expected
 
 

@@ -171,7 +171,7 @@ class DeferredWaitContractValidator {
  private:
   explicit DeferredWaitContractValidator(Span span) : span_(std::move(span)) {}
 
-  Result ValidateStmt(const StmtPtr& stmt) const {
+  [[nodiscard]] Result ValidateStmt(const StmtPtr& stmt) const {
     if (auto seq = As<SeqStmts>(stmt)) {
       Result total;
       bool registration_started = false;
@@ -209,9 +209,9 @@ class DeferredWaitContractValidator {
     if (auto loop = As<ForStmt>(stmt)) {
       CHECK_SPAN(loop->kind_ == ForKind::Sequential || loop->kind_ == ForKind::Unroll, stmt->span_)
           << "deferred waiter supports only sequential/unrolled scalar registration loops";
-      ValidateScalarExpr(loop->start_, stmt->span_, /*allow_tensor_read=*/false);
-      ValidateScalarExpr(loop->stop_, stmt->span_, /*allow_tensor_read=*/false);
-      ValidateScalarExpr(loop->step_, stmt->span_, /*allow_tensor_read=*/false);
+      static_cast<void>(ValidateScalarExpr(loop->start_, stmt->span_, /*allow_tensor_read=*/false));
+      static_cast<void>(ValidateScalarExpr(loop->stop_, stmt->span_, /*allow_tensor_read=*/false));
+      static_cast<void>(ValidateScalarExpr(loop->step_, stmt->span_, /*allow_tensor_read=*/false));
       auto body_result = ValidateStmt(loop->body_);
       CHECK_SPAN(body_result.has_deferred_wait, stmt->span_)
           << "deferred waiter loop must register at least one pld.system.defer_wait condition";
@@ -231,7 +231,7 @@ class DeferredWaitContractValidator {
       return body_result;
     }
     if (auto branch = As<IfStmt>(stmt)) {
-      ValidateScalarExpr(branch->condition_, stmt->span_, /*allow_tensor_read=*/false);
+      static_cast<void>(ValidateScalarExpr(branch->condition_, stmt->span_, /*allow_tensor_read=*/false));
       auto then_result = ValidateStmt(branch->then_body_);
       auto else_result = branch->else_body_.has_value() ? ValidateStmt(*branch->else_body_) : Result{};
       Result result;
@@ -247,7 +247,7 @@ class DeferredWaitContractValidator {
     return {};
   }
 
-  Result ValidateCall(const CallPtr& call, const Span& span) const {
+  [[nodiscard]] Result ValidateCall(const CallPtr& call, const Span& span) const {
     CHECK_SPAN(call, span) << "deferred waiter contains a non-call side-effect statement";
     if (IsOp(call, "pld.system.defer_wait")) {
       INTERNAL_CHECK_SPAN(call->args_.size() == 3, span)
@@ -255,9 +255,9 @@ class DeferredWaitContractValidator {
       auto offsets = As<MakeTuple>(call->args_[1]);
       INTERNAL_CHECK_SPAN(offsets, span) << "Internal error: pld.system.defer_wait offsets were not verified";
       for (const auto& offset : offsets->elements_) {
-        ValidateScalarExpr(offset, span, /*allow_tensor_read=*/false);
+        static_cast<void>(ValidateScalarExpr(offset, span, /*allow_tensor_read=*/false));
       }
-      ValidateScalarExpr(call->args_[2], span, /*allow_tensor_read=*/false);
+      static_cast<void>(ValidateScalarExpr(call->args_[2], span, /*allow_tensor_read=*/false));
       return Result{true, 1, true};
     }
     CHECK_SPAN(false, span) << "deferred waiter is registration-only; unexpected operation '"
@@ -275,7 +275,8 @@ class DeferredWaitContractValidator {
                                                                                 : ScalarEffect::kPure;
   }
 
-  ScalarEffect ValidateScalarExpr(const ExprPtr& expr, const Span& span, bool allow_tensor_read) const {
+  [[nodiscard]] ScalarEffect ValidateScalarExpr(const ExprPtr& expr, const Span& span,
+                                                bool allow_tensor_read) const {
     if (!expr) return ScalarEffect::kPure;
     CHECK_SPAN(!AsTensorTypeLike(expr->GetType()), span)
         << "deferred waiter scalar bookkeeping cannot produce a tensor value";
@@ -292,7 +293,7 @@ class DeferredWaitContractValidator {
       // The first tensor.read argument is the tensor source. Skip that
       // position, not every ExprPtr that happens to alias it.
       for (size_t i = 1; i < call->args_.size(); ++i) {
-        ValidateScalarExpr(call->args_[i], span, /*allow_tensor_read=*/false);
+        static_cast<void>(ValidateScalarExpr(call->args_[i], span, /*allow_tensor_read=*/false));
       }
       return ScalarEffect::kTensorRead;
     }

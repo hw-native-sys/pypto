@@ -188,7 +188,12 @@ def test_defer_wait_rejects_float_offset():
         class P:  # noqa: F841
             @pl.function(type=pl.FunctionType.InCore)
             def worker(self, signal: pld.DistributedTensor[[4], pl.INT32]):
-                pld.system.defer_wait(signal, offsets=[0.5], expected=1, cmp=pld.WaitCmp.Ge)
+                pld.system.defer_wait(
+                    signal,
+                    offsets=[0.5],  # pyright: ignore[reportArgumentType]  # invalid input under test
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
 
 
 def test_defer_wait_rejects_float_expected():
