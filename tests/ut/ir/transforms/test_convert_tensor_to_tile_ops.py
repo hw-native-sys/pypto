@@ -3084,8 +3084,8 @@ class TestGmLocalTensorConversion:
                     aux[0:16, 0:1] = aux_fill
                 else:
                     for i in pl.range(16):
-                        pl.tensor.write(dst, [i, 0], 0.0)
-                        pl.tensor.write(aux, [i, 0], -1.0)
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
+                        pl.tensor.write(aux, [i, 0], pl.const(-1.0, pl.FP32))
                 return dst
 
         after = passes.convert_tensor_to_tile_ops()(Before)
@@ -3109,7 +3109,7 @@ class TestGmLocalTensorConversion:
                     dst[0:16, 0:1] = fill
                 else:
                     for i in pl.range(4):
-                        pl.tensor.write(dst, [i, 0], 0.0)
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
                 return dst
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
@@ -3129,8 +3129,8 @@ class TestGmLocalTensorConversion:
                     dst[0:16, 0:1] = fill
                 else:
                     for i in pl.range(16):
-                        pl.tensor.write(dst, [i, 0], 0.0)
-                        pl.tensor.write(dst, [i + 1, 0], -1.0)
+                        pl.tensor.write(dst, [i, 0], pl.const(0.0, pl.FP32))
+                        pl.tensor.write(dst, [i + 1, 0], pl.const(-1.0, pl.FP32))
                 return dst
 
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
