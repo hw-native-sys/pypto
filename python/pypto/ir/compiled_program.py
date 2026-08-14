@@ -243,8 +243,8 @@ def _param_info_from_dict(d: dict[str, Any]) -> _ParamInfo:
     )
 
 
-def _remove_meta(output_dir: Path) -> None:
-    """Drop ``<output_dir>/compiled_meta.json`` if present.
+def _remove_meta(output_dir: Path, filename: str = _COMPILED_META_FILENAME) -> None:
+    """Drop ``<output_dir>/<filename>`` if present.
 
     ``ir.compile`` never clears ``output_dir`` (``os.makedirs(exist_ok=True)``),
     so recompiling a *different* program shape into a reused directory can leave
@@ -252,12 +252,45 @@ def _remove_meta(output_dir: Path) -> None:
     not overwrite the sidecar must therefore remove it: a stale signature would
     drive the new artifacts with the old parameter ABI, which
     :meth:`CompiledProgram.from_dir` has no way to detect.
+
+    Shared with the L3 ``distributed_meta.json``, which carries the same
+    contract; *filename* selects which sidecar to drop.
     """
-    (output_dir / _COMPILED_META_FILENAME).unlink(missing_ok=True)
+    (output_dir / filename).unlink(missing_ok=True)
 
 
-def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
-    """Read and fully validate a ``compiled_meta.json`` sidecar.
+def _write_meta_atomically(target: Path, meta: dict[str, Any]) -> None:
+    """Serialise *meta* to *target* via a temp file and :func:`os.replace`.
+
+    Atomic so a reader never observes a half-written sidecar, and so a crash
+    mid-write leaves the previous file intact rather than a truncated one — a
+    truncated sidecar is exactly the input the loaders must otherwise reject.
+    The temp name carries the writing pid, so concurrent compiles into one
+    directory cannot clobber each other's intermediate file.
+
+    Shared by the L2 ``compiled_meta.json`` and L3 ``distributed_meta.json``
+    writers.
+    """
+    tmp = target.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, target)
+
+
+def _meta_error(filename: str, meta_path: Path, detail: str) -> ValueError:
+    """Build the shared "this sidecar is not loadable" error.
+
+    One message shape for both sidecars: name the file, say what is wrong, and
+    point at the recompile that regenerates it.
+    """
+    return ValueError(
+        f"Invalid {filename} in {meta_path}: {detail}. The metadata was "
+        f"written by a different pypto version or hand-edited — recompile via "
+        f"ir.compile() to refresh."
+    )
+
+
+def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]:
+    """Read and fully validate the fields the L2 and L3 sidecars share.
 
     Every malformed-payload failure surfaces as a single :class:`ValueError`
     naming *meta_path* and the recompile fix, rather than leaking whichever
@@ -266,20 +299,24 @@ def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
     input, so a hand-edited or truncated sidecar must fail like bad input, not
     like an internal error.
 
+    Args:
+        meta_path: The sidecar to read.
+        filename: Its bare filename, for error messages.
+        schema: The schema version this build understands. The two sidecars
+            version independently, so each caller passes its own.
+
     Returns:
-        ``{"param_infos", "num_return_types", "platform", "backend_type"}``,
-        already converted to their runtime types.
+        ``{"param_infos", "num_return_types", "platform", "backend_type"}``
+        already converted to their runtime types, plus ``"raw"`` — the parsed
+        JSON object, so a caller can validate the fields only its own sidecar
+        carries (e.g. the L3 ``distributed_config``).
 
     Raises:
         ValueError: the file is not readable as the expected schema.
     """
 
     def _bad(detail: str) -> ValueError:
-        return ValueError(
-            f"Invalid {_COMPILED_META_FILENAME} in {meta_path}: {detail}. The metadata was "
-            f"written by a different pypto version or hand-edited — recompile via "
-            f"ir.compile() to refresh."
-        )
+        return _meta_error(filename, meta_path, detail)
 
     try:
         raw_text = meta_path.read_text()
@@ -294,11 +331,11 @@ def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
     if not isinstance(meta, dict):
         raise _bad(f"expected a JSON object, got {type(meta).__name__}")
 
-    schema = meta.get("schema")
-    if schema != _COMPILED_META_SCHEMA:
+    found_schema = meta.get("schema")
+    if found_schema != schema:
         raise ValueError(
-            f"Incompatible {_COMPILED_META_FILENAME} schema {schema!r} (expected "
-            f"{_COMPILED_META_SCHEMA}) in {meta_path}. The metadata was written by a "
+            f"Incompatible {filename} schema {found_schema!r} (expected "
+            f"{schema}) in {meta_path}. The metadata was written by a "
             f"different pypto version — recompile via ir.compile() to refresh."
         )
 
@@ -334,6 +371,7 @@ def _load_compiled_meta(meta_path: Path) -> dict[str, Any]:
         "num_return_types": num_return_types,
         "platform": platform,
         "backend_type": backend_type,
+        "raw": meta,
     }
 
 
@@ -867,9 +905,7 @@ class CompiledProgram(_RuntimeFacade):
     ) -> None:
         """Write one ``compiled_meta.json`` describing a single orchestration.
 
-        Written atomically (temp file + :func:`os.replace`) so a reader never
-        observes a half-written sidecar, and so a crash mid-write leaves the
-        previous file intact rather than a truncated one.
+        Written atomically (see :func:`_write_meta_atomically`).
         """
         meta = {
             "schema": _COMPILED_META_SCHEMA,
@@ -878,10 +914,7 @@ class CompiledProgram(_RuntimeFacade):
             "platform": self._platform,
             "backend_type": self._backend_type.name,
         }
-        target = output_dir / _COMPILED_META_FILENAME
-        tmp = target.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(meta, indent=2))
-        os.replace(tmp, target)
+        _write_meta_atomically(output_dir / _COMPILED_META_FILENAME, meta)
 
     def _persist_metadata(self) -> None:
         """Write ``<output_dir>/compiled_meta.json`` for :meth:`from_dir`.
@@ -994,7 +1027,7 @@ class CompiledProgram(_RuntimeFacade):
                 f"a multi-orch build (each next_levels/<name>/ sub-build has its own sidecar "
                 f"— reload one of those). Recompile via ir.compile() to refresh."
             )
-        meta = _load_compiled_meta(meta_path)
+        meta = _load_meta(meta_path, filename=_COMPILED_META_FILENAME, schema=_COMPILED_META_SCHEMA)
         param_infos = meta["param_infos"]
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the

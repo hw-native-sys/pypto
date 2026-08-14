@@ -21,7 +21,8 @@ from unittest.mock import patch
 import pypto.language as pl
 import pytest
 import torch
-from pypto import ir
+from pypto import DataType, ir
+from pypto.backend import BackendType
 from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
     DistributedCompiledProgram,
@@ -241,6 +242,108 @@ def test_from_dir_rejects_non_member_backend_type(compiled, tmp_path):
         with pytest.raises(ValueError, match=r"backend_type") as excinfo:
             DistributedCompiledProgram.from_dir(tmp_path)
         assert "ir.compile()" in str(excinfo.value), f"{bogus!r}: message lacks a recompile hint"
+
+    # An explicit override does not excuse the payload: the sidecar is loaded as
+    # a whole, and every other field (the params!) is still being trusted.
+    with pytest.raises(ValueError, match=r"backend_type"):
+        DistributedCompiledProgram.from_dir(tmp_path, backend_type=BackendType.Ascend950)
+
+
+def test_malformed_meta_raises_value_error(compiled, tmp_path):
+    """Every malformed payload surfaces as ValueError naming the file, not a raw KeyError.
+
+    Same contract as the L2 ``compiled_meta.json`` (both sidecars share
+    ``_load_meta``): a build directory is user-supplied input, so a hand-edited
+    or truncated sidecar must fail like bad input rather than leaking whichever
+    ``JSONDecodeError`` / ``KeyError`` / ``TypeError`` the offending field
+    happened to raise.
+    """
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    good = json.loads(meta_path.read_text())
+    serialised = json.dumps(good)
+
+    def _param(**overrides):
+        """Serialise ``good`` with its first param entry field-patched."""
+        return json.dumps({**good, "params": [{**good["params"][0], **overrides}]})
+
+    def _dist_config(value):
+        return json.dumps({**good, "distributed_config": value})
+
+    broken = {
+        "not JSON": "{ this is not json",
+        # A non-atomic writer used to be able to leave exactly this behind.
+        "truncated mid-write": serialised[: len(serialised) // 2],
+        "top-level list": json.dumps([good]),
+        "params not a list": json.dumps({**good, "params": "abc"}),
+        "param entry not an object": json.dumps({**good, "params": ["abc"]}),
+        "param missing a key": json.dumps({**good, "params": [{"name": "a"}]}),
+        # ``getattr(ParamDirection, "mro")`` resolves to a bound method.
+        "direction names an attribute": _param(direction="mro"),
+        "shape holds a bool": _param(shape=[128, True]),
+        "bad dtype": _param(dtype="fp99"),
+        "negative return count": json.dumps({**good, "num_return_types": -1}),
+        "backend names an attribute": json.dumps({**good, "backend_type": "mro"}),
+        "non-string platform": json.dumps({**good, "platform": 7}),
+        "distributed_config not an object": _dist_config("abc"),
+        "distributed_config unknown key": _dist_config({"device_id": 0}),
+        "device_ids not a list": _dist_config({"device_ids": "0"}),
+        "device_ids holds a bool": _dist_config({"device_ids": [True]}),
+        "non-int aicpu_thread_num": _dist_config({"aicpu_thread_num": "two"}),
+        "non-string runtime": _dist_config({"runtime": 7}),
+    }
+    for label, payload in broken.items():
+        meta_path.write_text(payload)
+        with pytest.raises(ValueError, match=_DISTRIBUTED_META_FILENAME) as excinfo:
+            DistributedCompiledProgram.from_dir(tmp_path)
+        assert "ir.compile()" in str(excinfo.value), f"{label}: message lacks a recompile hint"
+
+
+def test_unextractable_recompile_drops_stale_meta(tmp_path):
+    """Recompiling into a reused dir must not leave the previous program's ABI behind.
+
+    ``ir.compile`` never clears ``output_dir``, so a sidecar the new compile
+    declines to write would otherwise survive and drive the new artifacts with
+    the old parameter ABI — a mismatch ``from_dir`` cannot detect.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([128, 128], DataType.FP32)
+    body = ir.SeqStmts([], span)
+    orch = ir.Function(
+        "orch",
+        [
+            (ir.Var("a", tensor_type, span), ParamDirection.In),
+            (ir.Var("b", tensor_type, span), ParamDirection.In),
+            (ir.Var("c", tensor_type, span), ParamDirection.Out),
+        ],
+        [],
+        body,
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    DistributedCompiledProgram(ir.Program([orch], "WithSignature", span), str(tmp_path))
+    assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()  # sanity: written by the first compile
+
+    # No Orchestration and several InCore functions — no resolvable signature,
+    # so this compile writes nothing and must remove what the previous one left.
+    unextractable = ir.Program(
+        [
+            ir.Function("k1", [], [], body, span, ir.FunctionType.InCore),
+            ir.Function("k2", [], [], body, span, ir.FunctionType.InCore),
+        ],
+        "NoSignature",
+        span,
+    )
+    DistributedCompiledProgram(unextractable, str(tmp_path))
+
+    assert not (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+    with pytest.raises(FileNotFoundError, match=r"distributed_meta\.json"):
+        DistributedCompiledProgram.from_dir(tmp_path)
+
+
+def test_no_temp_files_left_behind(compiled, tmp_path):
+    """The atomic write leaves no ``.tmp`` residue next to the sidecar."""
+    assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_from_dir_overrides_platform_and_config(compiled, tmp_path):

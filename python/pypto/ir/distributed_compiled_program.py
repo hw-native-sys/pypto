@@ -16,10 +16,9 @@ through simpler's distributed runtime (Worker level=3)::
     compiled(a, b, c)   # executes via simpler Worker(level=3)
 """
 
-import json
 import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,13 +33,16 @@ from .compiled_program import (
     _default_platform,
     _extract_func_param_infos,
     _extract_param_infos,
-    _param_info_from_dict,
+    _load_meta,
+    _meta_error,
     _param_info_to_dict,
     _ParamInfo,
+    _remove_meta,
     _to_torch_dtype,
     _validate_device_tensor,
     _validate_stacked_tensor,
     _write_debug_runner,
+    _write_meta_atomically,
 )
 
 # Filename of the small JSON sidecar persisted alongside the build artifacts so
@@ -81,6 +83,44 @@ class DistributedConfig:
     num_sub_workers: int = 0
     runtime: str = "tensormap_and_ringbuffer"
     aicpu_thread_num: int = 0
+
+
+def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> DistributedConfig:
+    """Rebuild the :class:`DistributedConfig` a sidecar recorded.
+
+    Validated like every other sidecar field (see
+    :func:`~pypto.ir.compiled_program._load_meta`): the block must be an object
+    keyed only by ``DistributedConfig`` fields, each correctly typed. A
+    hand-edited ``device_ids`` therefore fails here, naming the file, instead of
+    reaching ``DistributedConfig(**raw)`` as a raw ``TypeError`` or surfacing
+    much later inside worker startup.
+    """
+
+    def _bad(detail: str) -> ValueError:
+        return _meta_error(_DISTRIBUTED_META_FILENAME, meta_path, detail)
+
+    # ``bool`` is an ``int`` subclass; a JSON ``true`` is never a count or index.
+    def _is_int(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    raw = meta.get("distributed_config", {})
+    if not isinstance(raw, dict):
+        raise _bad(f"'distributed_config' must be an object, got {type(raw).__name__}")
+    known = {f.name for f in fields(DistributedConfig)}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise _bad(f"'distributed_config' has unknown key(s) {unknown}; known: {sorted(known)}")
+
+    if "device_ids" in raw and not (
+        isinstance(raw["device_ids"], list) and all(_is_int(d) for d in raw["device_ids"])
+    ):
+        raise _bad(f"'distributed_config.device_ids' must be a list of ints, got {raw['device_ids']!r}")
+    for key in ("num_sub_workers", "aicpu_thread_num"):
+        if key in raw and not _is_int(raw[key]):
+            raise _bad(f"'distributed_config.{key}' must be an int, got {raw[key]!r}")
+    if "runtime" in raw and not isinstance(raw["runtime"], str):
+        raise _bad(f"'distributed_config.runtime' must be a string, got {raw['runtime']!r}")
+    return DistributedConfig(**raw)
 
 
 class DistributedCompiledProgram:
@@ -164,12 +204,17 @@ class DistributedCompiledProgram:
         layout and needs no persistence.
 
         Best-effort: a program without a resolvable orchestrator signature
-        skips emission (mirrors :func:`_write_debug_runner`); :meth:`from_dir`
-        then reports the missing file with a recompile hint.
+        emits nothing (mirrors :func:`_write_debug_runner`) *and* deletes any
+        sidecar a previous compile into this directory left behind, so
+        :meth:`from_dir` reports the missing file with a recompile hint instead
+        of handing out a signature that no longer describes these artifacts --
+        ``ir.compile`` never clears ``output_dir``, and the mismatch is one
+        :meth:`from_dir` cannot detect.
         """
         try:
             param_infos, _, return_types = self._get_metadata()
         except (ValueError, TypeError):
+            _remove_meta(self._output_dir, _DISTRIBUTED_META_FILENAME)
             return
         dc = self._distributed_config
         meta = {
@@ -185,7 +230,7 @@ class DistributedCompiledProgram:
                 "aicpu_thread_num": dc.aicpu_thread_num,
             },
         }
-        (self._output_dir / _DISTRIBUTED_META_FILENAME).write_text(json.dumps(meta, indent=2))
+        _write_meta_atomically(self._output_dir / _DISTRIBUTED_META_FILENAME, meta)
 
     @classmethod
     def from_dir(
@@ -224,8 +269,8 @@ class DistributedCompiledProgram:
         Raises:
             FileNotFoundError: ``distributed_meta.json`` is absent (the directory
                 predates this feature or is not a distributed build).
-            ValueError: ``distributed_meta.json`` records a ``schema`` version
-                incompatible with this pypto build (the metadata format changed).
+            ValueError: ``distributed_meta.json`` is unreadable, malformed, or
+                records a ``schema`` version incompatible with this pypto build.
         """
         meta_path = Path(output_dir).resolve() / _DISTRIBUTED_META_FILENAME
         if not meta_path.exists():
@@ -234,38 +279,22 @@ class DistributedCompiledProgram:
                 f"directory. It predates the L3 replay feature or is not a distributed (L3+) "
                 f"build. Recompile via ir.compile() to refresh."
             )
-        meta = json.loads(meta_path.read_text())
-        schema = meta.get("schema")
-        if schema != _META_SCHEMA:
-            raise ValueError(
-                f"Incompatible {_DISTRIBUTED_META_FILENAME} schema {schema!r} (expected "
-                f"{_META_SCHEMA}) in {meta_path}. The metadata was written by a different "
-                f"pypto version — recompile via ir.compile() to refresh."
-            )
-        param_infos = [_param_info_from_dict(p) for p in meta["params"]]
+        # Shares the L2 loader, so every malformed field -- unreadable file, bad
+        # JSON, bad params, a ``backend_type`` naming a class attribute instead
+        # of an enum member -- surfaces as one ValueError naming the file and
+        # the recompile fix, rather than whichever internal exception it raised.
+        meta = _load_meta(meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=_META_SCHEMA)
+        param_infos = meta["param_infos"]
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the
         # count matters (has_return = len(...) > 0), so placeholders suffice.
-        return_types: list[Any] = [None] * int(meta.get("num_return_types", 0))
-        dc = distributed_config or DistributedConfig(**meta.get("distributed_config", {}))
-        # Strict enum-member lookup, not getattr(): ``getattr(BackendType, "mro")``
-        # resolves to a bound method and would sail through as a bogus backend --
-        # same contract as the L2 sidecar (``_load_compiled_meta``).
-        raw_backend = meta.get("backend_type", "Ascend910B")
-        persisted_backend = BackendType.__members__.get(raw_backend) if isinstance(raw_backend, str) else None
-        bt = backend_type or persisted_backend
-        if bt is None:
-            raise ValueError(
-                f"Invalid {_DISTRIBUTED_META_FILENAME} in {meta_path}: 'backend_type' must be one "
-                f"of {sorted(BackendType.__members__)}, got {raw_backend!r}. The metadata was "
-                f"written by a different pypto version or hand-edited — recompile via "
-                f"ir.compile() to refresh."
-            )
+        return_types: list[Any] = [None] * meta["num_return_types"]
+        dc = distributed_config or _distributed_config_from_dict(meta["raw"], meta_path)
         return cls(
             None,
             str(output_dir),
-            backend_type=bt,
-            platform=platform or meta.get("platform"),
+            backend_type=backend_type or meta["backend_type"],
+            platform=platform or meta["platform"],
             distributed_config=dc,
             _param_infos=param_infos,
             _output_indices=output_indices,

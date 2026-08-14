@@ -204,6 +204,11 @@ prog(a, b, c)
 post-SSA 名字），chip callables 通过遍历 `next_levels/` 重建；
 `distributed_config` 与 `platform` 一样可覆盖。
 
+`distributed_meta.json` 与单芯片 sidecar 共用同一套加载逻辑，因而契约一致：
+原子写入；当编译进该目录的程序没有可记录的签名时直接删除；加载时逐字段校验
+（含 `distributed_config` 块）。所以手改或被截断的 sidecar 会以一个
+`ValueError` 失败，并指明文件名与重新编译的修复方式。
+
 L3 replay 会把 `RunConfig` 中的运行时 DFX 字段透传到每个芯片派发，产物写入
 `dfx_outputs/rank{r}/d{k}/`；onboard 泳道使用
 [运行时 DFX 开关](03-runtime-dfx.md) 里描述的抓图/计时两趟协议。

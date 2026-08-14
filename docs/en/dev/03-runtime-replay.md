@@ -218,6 +218,13 @@ Here the persisted param metadata is the HOST orchestrator's (post-SSA names
 matching `host_orch.py`), and chip callables are rebuilt by walking
 `next_levels/`; `distributed_config` joins `platform` as an overridable default.
 
+`distributed_meta.json` carries the same contract as its single-chip
+counterpart, through the same loader: it is written atomically, removed
+whenever the program compiled into that directory has no signature to record,
+and validated field by field on load — including the `distributed_config` block
+— so a hand-edited or truncated sidecar fails with one `ValueError` naming the
+file and the recompile that regenerates it.
+
 L3 replay forwards runtime DFX fields from `RunConfig` through each chip
 dispatch. Artifacts are written under
 `dfx_outputs/rank{r}/d{k}/`; onboard swimlane uses the graph/timing two-pass
