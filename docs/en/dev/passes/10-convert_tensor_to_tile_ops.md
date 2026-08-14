@@ -47,6 +47,37 @@ For each `FunctionType::InCore` function:
 
 4. **Insert tile.store (exit stores)**: For each return value converted from `TensorType` to `TileType`, add an `Out` parameter and insert `tile.store(tile, zeros, out_param)`. If the return value comes from a `tile.assemble` loop, the loop is rewritten to use `tile.store` directly (conversion-time assemble-loop rewrite; distinct from `OptimizeOrchTensors` Pattern 3 which handles cross-function optimization).
 
+### GM Store Coherence Restriction
+
+An InCore function may not combine a bulk store (`tensor.assemble`, lowered to
+`tile.store`) with `tensor.write` on the same underlying GM tensor. The bulk
+store uses MTE3 while the scalar store uses the D-cache path; barriers alone do
+not guarantee cache-line coherence between those paths on A2/A3. The pass
+therefore rejects the combination instead of emitting code that can silently
+lose either the scalar overrides or neighbouring bulk-written bytes.
+
+The check follows assignment aliases and loop/branch carries. It is deliberately
+conservative: it rejects mixed store paths to one GM tensor even when source
+offsets appear disjoint, because the compiler does not yet prove cache-line
+separation across symbolic views and control flow. Mixed paths to distinct GM
+tensors remain valid.
+
+```python
+# Rejected: the assignment becomes MTE3 TSTORE, then pl.write uses D-cache.
+output[0:1, 0:32] = pl.full([1, 32], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(output, [0, i], pl.cast(i, pl.INT32))
+
+# Supported: update the local on-chip value, then issue one GM store.
+staged = pl.full([1, 32], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(staged, [0, i], pl.cast(i, pl.INT32))
+output[0:1, 0:32] = staged
+```
+
+Using `tensor.write` for every element is also supported when a single bulk
+store is not practical.
+
 ### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
 `OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1

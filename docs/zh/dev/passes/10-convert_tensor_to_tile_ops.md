@@ -47,6 +47,34 @@ program_tiled = convert_pass(program)
 
 4. **插入 tile.store（出口存储）**：对每个从 `TensorType` 转换为 `TileType` 的返回值，添加 `Out` 参数并插入 `tile.store(tile, zeros, out_param)`。如果返回值来自 `tile.assemble` 循环，则将循环重写为直接使用 `tile.store`（转换时 assemble-loop 重写；与 `OptimizeOrchTensors` 模式 3 不同，该模式处理跨函数优化）。
 
+### GM 存储一致性限制
+
+同一个 InCore 函数不能对同一底层 GM 张量同时使用批量存储
+（`tensor.assemble`，下沉为 `tile.store`）和 `tensor.write`。批量存储走
+MTE3，标量存储走 D-cache；在 A2/A3 上，仅靠 barrier 不能保证两条路径间的
+cache-line 一致性。因此本 pass 会拒绝该组合，而不是生成可能静默丢失标量
+覆盖值或相邻批量写入字节的代码。
+
+检查会跟踪赋值别名以及循环 / 分支携带值。该限制有意保持保守：即使源码中的
+offset 看似不相交，只要两种存储路径写入同一个 GM 张量也会被拒绝，因为编译器
+目前还不能跨符号 view 与控制流证明 cache-line 分离。写入不同 GM 张量的混合
+路径仍然合法。
+
+```python
+# 拒绝：切片赋值生成 MTE3 TSTORE，随后 pl.write 走 D-cache。
+output[0:1, 0:32] = pl.full([1, 32], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(output, [0, i], pl.cast(i, pl.INT32))
+
+# 支持：先更新本地片上值，最后只执行一次 GM 存储。
+staged = pl.full([1, 32], dtype=pl.INT32, value=-1)
+for i in pl.range(4):
+    pl.write(staged, [0, i], pl.cast(i, pl.INT32))
+output[0:1, 0:32] = staged
+```
+
+如果不适合使用单次批量存储，也可以对所有元素统一使用 `tensor.write`。
+
 ### 阶段二a：通过 Spmd/Group 包装函数转发新增 Out 参数
 
 `OutlineClusterScopes` 产生的 Spmd/Group 包装函数是对其参数到单个内部 InCore

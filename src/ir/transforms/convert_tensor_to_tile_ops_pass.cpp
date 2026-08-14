@@ -867,6 +867,15 @@ void MarkAccess(const ParamOrigins& origins, std::vector<bool>& flags) {
   }
 }
 
+void RecordFirstStoreSpan(const ParamOrigins& origins, std::vector<std::optional<Span>>& spans,
+                          const Span& span) {
+  for (size_t index : origins) {
+    if (index < spans.size() && !spans[index].has_value()) {
+      spans[index].emplace(span);
+    }
+  }
+}
+
 ParamOrigins LookupOrigins(const Var* var, const AliasOriginMap& origin_map) {
   if (!var) return {};
   auto it = origin_map.find(var);
@@ -993,7 +1002,7 @@ ParamOrigins GetAliasOrigins(const ExprPtr& expr, const AliasOriginMap& origin_m
   if (auto write_target = GetWriteTargetExpr(call)) {
     return GetAliasOrigins(write_target, origin_map);
   }
-  if (IsOp(call, "tensor.slice") && !call->args_.empty()) {
+  if ((IsOp(call, "tensor.slice") || IsOp(call, "tensor.view")) && !call->args_.empty()) {
     return GetAliasOrigins(call->args_[0], origin_map);
   }
   return {};
@@ -1034,7 +1043,8 @@ ParamOrigins CollectReferencedOrigins(const ExprPtr& expr, const AliasOriginMap&
 }
 
 void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, std::vector<bool>& has_read,
-                       std::vector<bool>& has_write) {
+                       std::vector<bool>& has_write, std::vector<std::optional<Span>>& dma_store_spans,
+                       std::vector<std::optional<Span>>& scalar_store_spans) {
   if (!call) return;
 
   if (IsOp(call, "tile.load") || IsOp(call, "tensor.read")) {
@@ -1058,7 +1068,9 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
       MarkAccess(CollectReferencedOrigins(GetCallKwargExpr(call, "offsets"), origin_map), has_read);
     }
     if (auto write_target = GetWriteTargetExpr(call)) {
-      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+      auto origins = GetAliasOrigins(write_target, origin_map);
+      MarkAccess(origins, has_write);
+      RecordFirstStoreSpan(origins, dma_store_spans, call->span_);
     }
     return;
   }
@@ -1186,7 +1198,9 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
     if (auto write_target = GetWriteTargetExpr(call)) {
-      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+      auto origins = GetAliasOrigins(write_target, origin_map);
+      MarkAccess(origins, has_write);
+      RecordFirstStoreSpan(origins, scalar_store_spans, call->span_);
     }
     return;
   }
@@ -1196,7 +1210,9 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }
     if (!call->args_.empty()) {
-      MarkAccess(GetAliasOrigins(call->args_[0], origin_map), has_write);
+      auto origins = GetAliasOrigins(call->args_[0], origin_map);
+      MarkAccess(origins, has_write);
+      RecordFirstStoreSpan(origins, dma_store_spans, call->span_);
     }
     return;
   }
@@ -1245,13 +1261,70 @@ YieldAliasInfo MergeYieldInfos(const YieldAliasInfo& lhs, const YieldAliasInfo& 
 }
 
 YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_map,
-                                  std::vector<bool>& has_read, std::vector<bool>& has_write);
+                                  std::vector<bool>& has_read, std::vector<bool>& has_write,
+                                  std::vector<std::optional<Span>>& dma_store_spans,
+                                  std::vector<std::optional<Span>>& scalar_store_spans);
+
+void BindLoopOrigins(const std::vector<IterArgPtr>& iter_args, const std::vector<ParamOrigins>& origins,
+                     AliasOriginMap& origin_map) {
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    if (i < origins.size() && !origins[i].empty()) {
+      origin_map[iter_args[i].get()] = origins[i];
+    } else {
+      origin_map.erase(iter_args[i].get());
+    }
+  }
+}
+
+std::vector<ParamOrigins> AnalyzeLoopCarriedOrigins(const StmtPtr& body,
+                                                    const std::vector<IterArgPtr>& iter_args,
+                                                    const AliasOriginMap& origin_map,
+                                                    std::vector<bool>& has_read, std::vector<bool>& has_write,
+                                                    std::vector<std::optional<Span>>& dma_store_spans,
+                                                    std::vector<std::optional<Span>>& scalar_store_spans) {
+  std::vector<ParamOrigins> carried_origins(iter_args.size());
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    carried_origins[i] = GetAliasOrigins(iter_args[i]->initValue_, origin_map);
+  }
+
+  auto body_map = origin_map;
+  BindLoopOrigins(iter_args, carried_origins, body_map);
+  auto yield_info =
+      AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+
+  bool origins_widened = false;
+  if (yield_info.has_yield) {
+    for (size_t i = 0; i < carried_origins.size() && i < yield_info.origins.size(); ++i) {
+      size_t previous_size = carried_origins[i].size();
+      MergeOrigins(carried_origins[i], yield_info.origins[i]);
+      origins_widened |= carried_origins[i].size() != previous_size;
+    }
+  }
+
+  // Alias transfers only preserve or union parameter origins. One widened
+  // rescan therefore covers stores in later iterations without an unbounded
+  // fixed-point traversal of the loop body.
+  if (origins_widened) {
+    body_map = origin_map;
+    BindLoopOrigins(iter_args, carried_origins, body_map);
+    yield_info = AnalyzeStmtAliases(body, body_map, has_read, has_write, dma_store_spans, scalar_store_spans);
+    if (yield_info.has_yield) {
+      for (size_t i = 0; i < carried_origins.size() && i < yield_info.origins.size(); ++i) {
+        MergeOrigins(carried_origins[i], yield_info.origins[i]);
+      }
+    }
+  }
+  return carried_origins;
+}
 
 YieldAliasInfo AnalyzeStmtSequenceAliases(const std::vector<StmtPtr>& stmts, AliasOriginMap& origin_map,
-                                          std::vector<bool>& has_read, std::vector<bool>& has_write) {
+                                          std::vector<bool>& has_read, std::vector<bool>& has_write,
+                                          std::vector<std::optional<Span>>& dma_store_spans,
+                                          std::vector<std::optional<Span>>& scalar_store_spans) {
   YieldAliasInfo last_yield;
   for (const auto& stmt : stmts) {
-    auto yield_info = AnalyzeStmtAliases(stmt, origin_map, has_read, has_write);
+    auto yield_info =
+        AnalyzeStmtAliases(stmt, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     if (yield_info.has_yield) {
       last_yield = yield_info;
     }
@@ -1260,12 +1333,14 @@ YieldAliasInfo AnalyzeStmtSequenceAliases(const std::vector<StmtPtr>& stmts, Ali
 }
 
 YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_map,
-                                  std::vector<bool>& has_read, std::vector<bool>& has_write) {
+                                  std::vector<bool>& has_read, std::vector<bool>& has_write,
+                                  std::vector<std::optional<Span>>& dma_store_spans,
+                                  std::vector<std::optional<Span>>& scalar_store_spans) {
   if (!stmt) return {};
 
   if (auto assign = As<AssignStmt>(stmt)) {
     if (auto call = As<Call>(assign->value_)) {
-      AnalyzeCallAccess(call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
 
     if (AsTensorTypeLike(assign->var_->GetType())) {
@@ -1277,29 +1352,33 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto eval = As<EvalStmt>(stmt)) {
     if (auto call = As<Call>(eval->expr_)) {
-      AnalyzeCallAccess(call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
     return {};
   }
 
   if (auto seq = As<SeqStmts>(stmt)) {
-    return AnalyzeStmtSequenceAliases(seq->stmts_, origin_map, has_read, has_write);
+    return AnalyzeStmtSequenceAliases(seq->stmts_, origin_map, has_read, has_write, dma_store_spans,
+                                      scalar_store_spans);
   }
 
   if (auto scope = As<ScopeStmt>(stmt)) {
-    return AnalyzeStmtAliases(scope->body_, origin_map, has_read, has_write);
+    return AnalyzeStmtAliases(scope->body_, origin_map, has_read, has_write, dma_store_spans,
+                              scalar_store_spans);
   }
 
   if (auto if_stmt = As<IfStmt>(stmt)) {
     if (auto cond_call = As<Call>(if_stmt->condition_)) {
-      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
     auto then_map = origin_map;
-    auto then_yield = AnalyzeStmtAliases(if_stmt->then_body_, then_map, has_read, has_write);
+    auto then_yield = AnalyzeStmtAliases(if_stmt->then_body_, then_map, has_read, has_write, dma_store_spans,
+                                         scalar_store_spans);
     YieldAliasInfo else_yield;
-    if (if_stmt->else_body_.has_value()) {
+    if (auto else_body = if_stmt->else_body_.value_or(nullptr)) {
       auto else_map = origin_map;
-      else_yield = AnalyzeStmtAliases(*if_stmt->else_body_, else_map, has_read, has_write);
+      else_yield =
+          AnalyzeStmtAliases(else_body, else_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
     auto merged_yield = MergeYieldInfos(then_yield, else_yield);
     for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
@@ -1314,35 +1393,20 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto for_stmt = As<ForStmt>(stmt)) {
     if (auto start_call = As<Call>(for_stmt->start_)) {
-      AnalyzeCallAccess(start_call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(start_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
     if (auto stop_call = As<Call>(for_stmt->stop_)) {
-      AnalyzeCallAccess(stop_call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(stop_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
     if (auto step_call = As<Call>(for_stmt->step_)) {
-      AnalyzeCallAccess(step_call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(step_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
 
-    auto body_map = origin_map;
-    std::vector<ParamOrigins> init_origins(for_stmt->iter_args_.size());
-    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
-      init_origins[i] = GetAliasOrigins(for_stmt->iter_args_[i]->initValue_, origin_map);
-      if (!init_origins[i].empty()) {
-        body_map[for_stmt->iter_args_[i].get()] = init_origins[i];
-      } else {
-        body_map.erase(for_stmt->iter_args_[i].get());
-      }
-    }
-
-    auto yield_info = AnalyzeStmtAliases(for_stmt->body_, body_map, has_read, has_write);
+    auto carried_origins =
+        AnalyzeLoopCarriedOrigins(for_stmt->body_, for_stmt->iter_args_, origin_map, has_read, has_write,
+                                  dma_store_spans, scalar_store_spans);
     for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
-      ParamOrigins origins;
-      if (yield_info.has_yield && i < yield_info.origins.size()) {
-        origins = yield_info.origins[i];
-      }
-      if (origins.empty() && i < init_origins.size()) {
-        origins = init_origins[i];
-      }
+      ParamOrigins origins = i < carried_origins.size() ? carried_origins[i] : ParamOrigins{};
       UpdateTensorAliasOrigin(for_stmt->return_vars_[i], origins, origin_map);
     }
     return {};
@@ -1350,34 +1414,15 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
 
   if (auto while_stmt = As<WhileStmt>(stmt)) {
     if (auto cond_call = As<Call>(while_stmt->condition_)) {
-      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write);
+      AnalyzeCallAccess(cond_call, origin_map, has_read, has_write, dma_store_spans, scalar_store_spans);
     }
 
-    auto body_map = origin_map;
-    std::vector<ParamOrigins> init_origins(while_stmt->iter_args_.size());
-    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
-      init_origins[i] = GetAliasOrigins(while_stmt->iter_args_[i]->initValue_, origin_map);
-      if (!init_origins[i].empty()) {
-        body_map[while_stmt->iter_args_[i].get()] = init_origins[i];
-      } else {
-        body_map.erase(while_stmt->iter_args_[i].get());
-      }
-    }
-
-    auto yield_info = AnalyzeStmtAliases(while_stmt->body_, body_map, has_read, has_write);
+    auto carried_origins =
+        AnalyzeLoopCarriedOrigins(while_stmt->body_, while_stmt->iter_args_, origin_map, has_read, has_write,
+                                  dma_store_spans, scalar_store_spans);
     for (size_t i = 0; i < while_stmt->return_vars_.size(); ++i) {
-      ParamOrigins origins;
-      if (yield_info.has_yield && i < yield_info.origins.size()) {
-        origins = yield_info.origins[i];
-      }
-      if (origins.empty() && i < init_origins.size()) {
-        origins = init_origins[i];
-      }
-      if (AsTensorTypeLike(while_stmt->return_vars_[i]->GetType()) && !origins.empty()) {
-        origin_map[while_stmt->return_vars_[i].get()] = origins;
-      } else {
-        origin_map.erase(while_stmt->return_vars_[i].get());
-      }
+      ParamOrigins origins = i < carried_origins.size() ? carried_origins[i] : ParamOrigins{};
+      UpdateTensorAliasOrigin(while_stmt->return_vars_[i], origins, origin_map);
     }
     return {};
   }
@@ -1400,6 +1445,8 @@ void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, cons
                                          std::vector<ParamDirection>& param_directions) {
   std::vector<bool> has_read(params.size(), false);
   std::vector<bool> has_write(params.size(), false);
+  std::vector<std::optional<Span>> dma_store_spans(params.size());
+  std::vector<std::optional<Span>> scalar_store_spans(params.size());
   AliasOriginMap origin_map;
 
   for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
@@ -1412,9 +1459,18 @@ void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, cons
   }
 
   auto analysis_map = origin_map;
-  AnalyzeStmtSequenceAliases(stmts, analysis_map, has_read, has_write);
+  AnalyzeStmtSequenceAliases(stmts, analysis_map, has_read, has_write, dma_store_spans, scalar_store_spans);
 
   for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
+    if (dma_store_spans[i].has_value() && scalar_store_spans[i].has_value()) {
+      CHECK_SPAN(false, scalar_store_spans[i].value_or(Span::unknown()))
+          << "GM tensor '" << params[i]->name_hint_
+          << "' mixes MTE3 and scalar stores in one InCore function. tile.store/tensor.assemble "
+             "uses the MTE3 path while tensor.write uses the scalar D-cache path; PyPTO cannot "
+             "guarantee ordering or cache-line coherence between them. Rewrite the updates through "
+             "one UB tile (use tile.write, then one tile.store), or use tensor.write for every GM "
+             "element written to this tensor.";
+    }
     if (param_directions[i] != ParamDirection::In || !has_write[i]) {
       continue;
     }

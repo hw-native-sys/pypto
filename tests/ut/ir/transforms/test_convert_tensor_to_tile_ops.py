@@ -3045,6 +3045,92 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_mixed_tile_and_scalar_store_to_same_gm_tensor_rejected(self):
+        """DMA and scalar stores to one GM tensor have no coherence guarantee."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[32], pl.INT32],
+                val: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[32], pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dst[0:32] = fill
+                for i in pl.range(4):
+                    pl.tensor.write(dst, [i], val)
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_tile_and_scalar_stores_to_distinct_gm_tensors_allowed(self):
+        """The coherence restriction is per underlying GM tensor."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dma_dst: pl.Tensor[[32], pl.INT32],
+                scalar_dst: pl.Tensor[[32], pl.INT32],
+                val: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[32], pl.INT32]:
+                fill = pl.full([32], dtype=pl.INT32, value=-1)
+                dma_dst[0:32] = fill
+                pl.tensor.write(scalar_dst, [0], val)
+                return dma_dst
+
+        passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_mixed_store_through_tensor_view_rejected(self):
+        """A GM tensor.view preserves the parameter's store identity."""
+        tensor_type = ir.TensorType([32], DataType.INT32)
+        ib = IRBuilder()
+        with ib.function("view_alias", type=ir.FunctionType.InCore) as f:
+            dst = f.param("dst", tensor_type)
+            val = f.param("val", ir.ScalarType(DataType.INT32))
+            f.return_type(tensor_type)
+            viewed = ib.let("viewed", tensor_ops.view(dst, [32]))
+            src = ib.let("src", tile_ops.load(dst, [0], [32]))
+            stored = ib.let("stored", tile_ops.store(src, [0], viewed))
+            ib.let("scalar_stored", tensor_ops.write(dst, [0], val))
+            ib.return_stmt(stored)
+        program = ir.Program([f.get_result()], "ViewAliasMixedStores", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(program)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_mixed_store_through_loop_carried_alias_rejected(self, loop_kind: str):
+        """Later loop iterations inherit tensor origins yielded by the body."""
+        tensor_type = ir.TensorType([32], DataType.INT32)
+        ib = IRBuilder()
+        with ib.function(f"{loop_kind}_alias", type=ir.FunctionType.InCore) as f:
+            dma_dst = f.param("dma_dst", tensor_type)
+            scalar_dst = f.param("scalar_dst", tensor_type)
+            val = f.param("val", ir.ScalarType(DataType.INT32))
+            f.return_type(tensor_type)
+            src = ib.let("src", tile_ops.load(dma_dst, [0], [32]))
+            loop_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+            loop_context = (
+                ib.for_loop(loop_var, 0, 2, 1)
+                if loop_kind == "for"
+                else ib.while_loop(ir.ConstBool(True, ir.Span.unknown()))
+            )
+            with loop_context as loop:
+                carried = loop.iter_arg("carried", dma_dst)
+                final = loop.return_var("final")
+                ib.let("stored", tile_ops.store(src, [0], carried))
+                ib.emit(ir.YieldStmt([scalar_dst], ir.Span.unknown()))
+            ib.let("scalar_stored", tensor_ops.write(scalar_dst, [0], val))
+            ib.return_stmt(final)
+        program = ir.Program([f.get_result()], f"{loop_kind.title()}AliasMixedStores", ir.Span.unknown())
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(program)
+
     def test_local_tensor_write_to_tile_write(self):
         """tensor.write to a local_tensor (result of tensor.add) converts to tile.write."""
 

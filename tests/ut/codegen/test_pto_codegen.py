@@ -37,6 +37,7 @@ from pypto.backend.pto_backend import (
 )
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile
 
 PTOCodegen = codegen.PTOCodegen
@@ -878,35 +879,41 @@ def test_pto_codegen_iter_arg_alias_resolves_store_view():
     assert len(partition_lines) >= 2, f"Expected load + store partition_view, got: {partition_lines}"
 
 
-def test_pto_codegen_mixed_slice_assign_and_write_keeps_ptr():
-    """Mixing slice-assign (view) with pl.write (ptr) on one tensor must not clash.
+def test_pto_codegen_lowered_mixed_store_keeps_ptr():
+    """Low-level mixed stores keep distinct tensor-view and pointer SSA values.
 
     Regression for #1493: slice-assign lowers to `pto.make_tensor_view`/`tstore`
     (a `!pto.tensor_view`) while pl.write lowers to `store_scalar` (a `!pto.ptr`).
     Both must not bind to the same SSA name, or ptoas rejects one value typed two
     ways. The base pointer must flow through to store_scalar, not the view SSA.
+
+    ConvertTensorToTileOps rejects this source-level combination for memory
+    coherence (#2005), so this codegen-only invariant is tested on already
+    lowered IR and intentionally bypasses the default pipeline.
     """
-    T = 768
+    tensor_type = ir.TensorType([32, 1], DataType.FP32)
+    ib = IRBuilder()
+    with ib.function("mixed_store", type=ir.FunctionType.InCore) as f:
+        out = f.param("out", tensor_type)
+        f.return_type(tensor_type)
+        src = ib.let("src", tile.load(out, [0, 0], [32, 1]))
+        stored = ib.let("stored", tile.store(src, [0, 0], out))
+        val = ib.let("val", tensor_ops.read(out, [0, 0]))
+        result = ib.let("result", tensor_ops.write(stored, [0, 0], val))
+        ib.return_stmt(result)
 
-    @pl.program
-    class MixedAccess:
-        @pl.function
-        def main(self, out: pl.Out[pl.Tensor[[T, 1], pl.FP32]]):
-            buf = pl.create_tensor([T, 1], dtype=pl.FP32)
-            with pl.at(level=pl.Level.CORE_GROUP, name_hint="repro"):
-                buf[:, :] = pl.full([T, 1], dtype=pl.FP32, value=0.0)
-                for r in pl.range(T):
-                    val: pl.Scalar[pl.FP32] = pl.read(out, [r, 0])
-                    pl.write(buf, [r, 0], val)
-            out[:, :] = buf
+    mlir = _generate_mlir(ir.Program([f.get_result()], "mixed_store", ir.Span.unknown()))
 
-    prog = _run_default_passes(MixedAccess)
-    aiv = [f for f in prog.functions.values() if f.func_type == ir.FunctionType.AIV]
-    sub = ir.Program(aiv, "m", aiv[0].span)
-    mlir = _generate_mlir(sub)
-
-    # The view path stays a tensor_view; the element write resolves to the ptr.
-    store_scalar = _single_line(_get_mlir_lines(mlir), "pto.store_scalar")
+    # The bulk path partitions a tensor_view for tstore; the scalar path uses the ptr.
+    lines = _get_mlir_lines(mlir)
+    tstore = _single_line(lines, "pto.tstore")
+    assert "!pto.partition_tensor_view" in tstore
+    tstore_view_match = re.search(r"outs\((%\w+) : !pto\.partition_tensor_view", tstore)
+    assert tstore_view_match, f"Expected tstore partition view operand, got: {tstore}"
+    partition_view = _single_line(lines, f"{tstore_view_match.group(1)} = pto.partition_view")
+    assert "!pto.tensor_view" in partition_view
+    assert "!pto.partition_tensor_view" in partition_view
+    store_scalar = _single_line(lines, "pto.store_scalar")
     assert "_view[" not in store_scalar, f"store_scalar must use ptr, not view: {store_scalar}"
     assert "!pto.ptr<f32>" in store_scalar
 
