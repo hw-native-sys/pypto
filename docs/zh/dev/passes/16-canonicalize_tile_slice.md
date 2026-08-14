@@ -57,7 +57,8 @@ program_canon = passes.canonicalize_tile_slice()(program)
    - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`。extract 直接读取 slice 的源 tile；当两个加数都是 `ConstInt` 时对索引加法做常量折叠。
    - **`tile.matmul` / `tile.matmul_acc` / `tile.matmul_bias` 的操作数**（仅 Mat slice） → 该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Left|Right)`——lhs 操作数用 `Left`，rhs 操作数用 `Right`。（`tile.matmul_acc` 的累加器操作数位于 `Acc`，永远不会是 Mat slice。）
    - **`tile.col_expand_*` 的操作数**（仅 Vec slice） → 当惰性 `pto.textract` 不是恒等拷贝时——即偏移是动态的，或窗口在基 tile 中不连续（行数大于 1 *且* 比基 tile 窄）——该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。两个操作数都会检查。常量偏移且窗口连续的 slice 保持原样。
-   - **普通 call 的操作数**（仅 Vec slice） → 计算 `(off_row * base_cols + off_col) * storage_bits mod 256`。若结果非零或无法证明，则把操作数替换为新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。`tile.slice` 自身会被跳过，以便剥离链式视图；`tile.extract` 使用上面的直接折叠规则。
+   - **普通 call 的操作数**（仅 Vec slice，位于 `AssignStmt` 或 `EvalStmt` 中） → 计算 `(base_byte_offset * 8 + (off_row * base_cols + off_col) * storage_bits) mod 256`。取模前会计入已知的具体 MemRef 字节偏移；内存规划哨兵值按对齐的根分配处理，而非常量基址偏移无法在静态证明。若结果非零或无法证明，则把操作数替换为新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)`。`tile.slice` 自身会被跳过，以便剥离链式视图；`tile.extract` 使用上面的直接折叠规则。
+   - **SSA 逃逸 (SSA escape)**（仅 Vec slice） → 未对齐 slice 经过普通别名赋值时，在别名定义处进行物化。未对齐的循环初始值在进入循环前物化，并通过其 `IterArg` 替换；由 `yield` 携带的未对齐值则在 yield 前物化。这样别名和循环携带的 SSA 身份无法绕过普通 call 的查找。
 
 3. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 slice 数量为上界）。结束时仍被使用的 slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
 

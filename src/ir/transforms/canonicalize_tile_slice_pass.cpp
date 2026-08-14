@@ -215,65 +215,90 @@ class CanonicalizeMutator : public IRMutator {
   explicit CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices) : slices_(slices) {}
 
  protected:
-  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
-    std::vector<StmtPtr> out;
-    out.reserve(op->stmts_.size());
-    bool changed = false;
-    for (const auto& child : op->stmts_) {
-      // matmul rewrites splice in `tile.extract` statements, so they are
-      // handled here at SeqStmts level rather than in VisitStmt_(AssignStmt).
-      if (auto assign = As<AssignStmt>(child)) {
-        if (auto rewrite = TryRewriteMatmul(assign)) {
-          for (auto& s : *rewrite) out.push_back(std::move(s));
-          changed = true;
-          continue;
-        }
-        if (auto rewrite = TryRewriteColExpand(assign)) {
-          for (auto& s : *rewrite) out.push_back(std::move(s));
-          changed = true;
-          continue;
-        }
-        if (auto rewrite = TryMaterializeUnalignedVecOperands(assign)) {
-          for (auto& s : *rewrite) out.push_back(std::move(s));
-          changed = true;
-          continue;
-        }
-      }
-      auto visited = VisitStmt(child);
-      if (visited.get() != child.get()) changed = true;
-      out.push_back(visited);
-    }
-    if (!changed) return op;
-    return SeqStmts::Flatten(std::move(out), op->span_);
-  }
-
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto base = IRMutator::VisitStmt_(op);
     auto assign = As<AssignStmt>(base);
     if (!assign) return base;
     auto call = As<Call>(assign->value_);
-    if (!call || !call->op_ || !IsOp(call, "tile.extract") || call->args_.size() != 4) {
-      return base;
+    if (call && call->op_ && IsOp(call, "tile.extract") && call->args_.size() == 4) {
+      auto src = AsVarLike(call->args_[0]);
+      auto it = src ? slices_.find(src.get()) : slices_.end();
+      if (it != slices_.end()) {
+        // extract(slice(base, _, [or, oc]), ir, ic, shape)
+        //   -> extract(base, ir + or, ic + oc, shape)
+        const auto& info = it->second;
+        const Span& sp = call->span_;
+        std::vector<ExprPtr> args = {info.base, MakeCanonicalIndexAdd(call->args_[1], info.off_row, sp),
+                                     MakeCanonicalIndexAdd(call->args_[2], info.off_col, sp), call->args_[3]};
+        auto& reg = OpRegistry::GetInstance();
+        auto new_call = reg.Create("tile.extract", args, call->kwargs_, sp);
+        auto new_assign = MutableCopy(assign);
+        new_assign->value_ = new_call;
+        return new_assign;
+      }
     }
-    auto src = AsVarLike(call->args_[0]);
-    if (!src) return base;
-    auto it = slices_.find(src.get());
-    if (it == slices_.end()) return base;
 
-    // extract(slice(base, _, [or, oc]), ir, ic, shape)
-    //   -> extract(base, ir + or, ic + oc, shape)
-    const auto& info = it->second;
-    const Span& sp = call->span_;
-    std::vector<ExprPtr> args = {info.base, MakeCanonicalIndexAdd(call->args_[1], info.off_row, sp),
-                                 MakeCanonicalIndexAdd(call->args_[2], info.off_col, sp), call->args_[3]};
-    auto& reg = OpRegistry::GetInstance();
-    auto new_call = reg.Create("tile.extract", args, call->kwargs_, sp);
-    auto new_assign = MutableCopy(assign);
-    new_assign->value_ = new_call;
-    return new_assign;
+    if (auto rewrite = TryRewriteMatmul(assign)) return SeqStmts::Flatten(std::move(*rewrite), assign->span_);
+    if (auto rewrite = TryRewriteColExpand(assign)) {
+      return SeqStmts::Flatten(std::move(*rewrite), assign->span_);
+    }
+    if (auto rewrite = TryMaterializeUnalignedVecCall(call)) {
+      auto new_assign = MutableCopy(assign);
+      new_assign->value_ = rewrite->call;
+      rewrite->extracts.push_back(new_assign);
+      return SeqStmts::Flatten(std::move(rewrite->extracts), assign->span_);
+    }
+    if (auto rewrite = TryMaterializeUnalignedVecAlias(assign)) return *rewrite;
+    return base;
   }
 
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto base = IRMutator::VisitStmt_(op);
+    auto eval = As<EvalStmt>(base);
+    if (!eval) return base;
+    auto call = As<Call>(eval->expr_);
+    auto rewrite = TryMaterializeUnalignedVecCall(call);
+    if (!rewrite) return base;
+
+    auto new_eval = MutableCopy(eval);
+    new_eval->expr_ = rewrite->call;
+    rewrite->extracts.push_back(new_eval);
+    return SeqStmts::Flatten(std::move(rewrite->extracts), eval->span_);
+  }
+
+  StmtPtr VisitStmt_(const YieldStmtPtr& op) override {
+    auto base = IRMutator::VisitStmt_(op);
+    auto yield = As<YieldStmt>(base);
+    if (!yield) return base;
+
+    std::vector<StmtPtr> extracts;
+    std::vector<ExprPtr> new_values = yield->value_;
+    for (size_t i = 0; i < yield->value_.size(); ++i) {
+      auto value = AsVarLike(yield->value_[i]);
+      auto it = value ? slices_.find(value.get()) : slices_.end();
+      if (it == slices_.end() || !NeedsAlignedVecMaterialization(it->second)) continue;
+      auto extract = BuildOperandExtract(value, it->second, MemorySpace::Vec, yield->span_);
+      extracts.push_back(extract);
+      new_values[i] = extract->var_;
+    }
+    if (extracts.empty()) return base;
+
+    auto new_yield = MutableCopy(yield);
+    new_yield->value_ = std::move(new_values);
+    extracts.push_back(new_yield);
+    return SeqStmts::Flatten(std::move(extracts), yield->span_);
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return MaterializeLoopInitsAndVisit(op); }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return MaterializeLoopInitsAndVisit(op); }
+
  private:
+  struct MaterializedCall {
+    std::vector<StmtPtr> extracts;
+    CallPtr call;
+  };
+
   /// Operand layout of the matmul family: (lhs index, rhs index) or nullopt.
   static std::optional<std::pair<size_t, size_t>> MatmulOperandIndices(const CallPtr& call) {
     if (!call || !call->op_) return std::nullopt;
@@ -457,7 +482,9 @@ class CanonicalizeMutator : public IRMutator {
     return out;
   }
 
-  static constexpr int64_t kVecOperandAlignmentBits = 32 * 8;
+  static constexpr int64_t kVecOperandAlignmentBytes = 32;
+  static constexpr int64_t kBitsPerByte = 8;
+  static constexpr int64_t kVecOperandAlignmentBits = kVecOperandAlignmentBytes * kBitsPerByte;
 
   /// Normalize an integer into [0, modulus), including negative offsets.
   static int64_t PositiveModulo(int64_t value, int64_t modulus) {
@@ -489,7 +516,7 @@ class CanonicalizeMutator : public IRMutator {
       auto byte_offset = As<ConstInt>((*base_tile->memref_)->byte_offset_);
       if (!byte_offset) return std::nullopt;
       if (byte_offset->value_ >= 0) {
-        base_bits = PositiveModulo(byte_offset->value_, 32) * 8;
+        base_bits = PositiveModulo(byte_offset->value_, kVecOperandAlignmentBytes) * kBitsPerByte;
       }
     }
 
@@ -515,6 +542,8 @@ class CanonicalizeMutator : public IRMutator {
     return (base_bits + row_bits + col_bits) % kVecOperandAlignmentBits;
   }
 
+  /// True when the slice is explicitly Vec-resident or still awaits the
+  /// default Vec assignment from InferTileMemorySpace.
   static bool IsVecOrUnassigned(const SliceInfo& info) {
     return !info.memory_space.has_value() || *info.memory_space == MemorySpace::Vec;
   }
@@ -532,8 +561,7 @@ class CanonicalizeMutator : public IRMutator {
   /// the alignment contract belongs to PTO vector operands, not to one
   /// elementwise opcode. `tile.slice` is only another view and remains peeled;
   /// `tile.extract` has its own direct slice-folding rewrite above.
-  std::optional<std::vector<StmtPtr>> TryMaterializeUnalignedVecOperands(const AssignStmtPtr& assign) {
-    auto call = As<Call>(assign->value_);
+  std::optional<MaterializedCall> TryMaterializeUnalignedVecCall(const CallPtr& call) {
     if (!call || !call->op_ || IsOp(call, "tile.slice") || IsOp(call, "tile.extract")) {
       return std::nullopt;
     }
@@ -556,11 +584,45 @@ class CanonicalizeMutator : public IRMutator {
 
     auto& reg = OpRegistry::GetInstance();
     auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    return MaterializedCall{std::move(extracts), std::move(new_call)};
+  }
+
+  /// Replace a plain SSA alias of an unaligned slice with an extract assigned
+  /// directly to the alias Var.  The slice cannot then escape the consumer
+  /// lookup merely by changing SSA identity.
+  std::optional<StmtPtr> TryMaterializeUnalignedVecAlias(const AssignStmtPtr& assign) {
+    auto source = AsVarLike(assign->value_);
+    auto it = source ? slices_.find(source.get()) : slices_.end();
+    if (it == slices_.end() || !NeedsAlignedVecMaterialization(it->second)) return std::nullopt;
+
+    auto extract = BuildOperandExtract(source, it->second, MemorySpace::Vec, assign->span_);
     auto new_assign = MutableCopy(assign);
-    new_assign->value_ = new_call;
-    std::vector<StmtPtr> out = std::move(extracts);
-    out.push_back(new_assign);
-    return out;
+    new_assign->value_ = extract->value_;
+    return new_assign;
+  }
+
+  /// Materialize unaligned slice initializers before a loop and substitute the
+  /// fresh aligned buffers through that loop's IterArgs.  YieldStmt handling
+  /// above performs the same conversion for values carried to later iterations.
+  template <typename LoopStmtPtr>
+  StmtPtr MaterializeLoopInitsAndVisit(const LoopStmtPtr& op) {
+    std::vector<StmtPtr> extracts;
+    std::vector<const Expr*> remapped_sources;
+    for (const auto& iter_arg : op->iter_args_) {
+      auto init = AsVarLike(VisitExpr(iter_arg->initValue_));
+      auto it = init ? slices_.find(init.get()) : slices_.end();
+      if (it == slices_.end() || !NeedsAlignedVecMaterialization(it->second)) continue;
+      auto extract = BuildOperandExtract(init, it->second, MemorySpace::Vec, op->span_);
+      extracts.push_back(extract);
+      var_remap_[init.get()] = extract->var_;
+      remapped_sources.push_back(init.get());
+    }
+
+    auto new_loop = IRMutator::VisitStmt_(op);
+    for (const auto* source : remapped_sources) var_remap_.erase(source);
+    if (extracts.empty()) return new_loop;
+    extracts.push_back(new_loop);
+    return SeqStmts::Flatten(std::move(extracts), op->span_);
   }
 
   const std::unordered_map<const Var*, SliceInfo>& slices_;

@@ -40,10 +40,14 @@ Coverage:
   hazardous (dynamic offset; static-offset column slice of a multi-row tile),
   left untouched when the textract is an identity copy (const ``[0,0]``
   full-shape; single-row ``[5,0]``; full-width multi-row ``[16,0]``);
-* no-op cases — no Mat slice, and a Vec-resident slice (left untouched).
+* Vec operand alignment — materialization for unaligned or unprovable call
+  operands in ``AssignStmt`` and ``EvalStmt``, plus plain aliases and loop
+  carries; provably aligned static and dynamic-row slices stay zero-copy;
+* no-op cases — no Mat slice, and safe Vec-resident slices left untouched.
 """
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
 
@@ -864,6 +868,176 @@ class TestUnalignedVecSlice:
                 )
                 scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_ext, 0.5)
                 out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_unaligned_slice_in_eval_stmt_materialized(self):
+        """An EvalStmt call such as remote_store must not receive an unaligned
+        slice subview directly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                target: pld.DistributedTensor[[16, 1], pl.FP32],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+                pld.tile.remote_store(head, target=target, peer=peer, offsets=[0, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                target: pld.DistributedTensor[[16, 1], pl.FP32],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec
+                )
+                pld.tile.remote_store(head_ext, target=target, peer=peer, offsets=[0, 0])
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_unaligned_slice_through_plain_alias_materialized(self):
+        """A plain SSA alias must not hide an unaligned slice from the pass."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+                head_alias: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = head
+                scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_alias, 0.5)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head_alias: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec
+                )
+                scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_alias, 0.5)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_unaligned_slice_loop_initializer_materialized(self):
+        """A slice carried through an IterArg is aligned before it enters the
+        loop, so every iteration sees a safe buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+                for _i, (carried,) in pl.range(1, init_values=(head,)):
+                    scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(carried, 0.5)
+                    result: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.yield_(scaled)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec
+                )
+                for _i, (carried,) in pl.range(1, init_values=(head_ext,)):
+                    scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(carried, 0.5)
+                    result: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.yield_(scaled)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_unaligned_slice_yield_materialized(self):
+        """A newly created unaligned slice is materialized before a loop yield
+        carries it to the next iteration."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                seed: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                for _i, (carried,) in pl.range(1, init_values=(seed,)):
+                    head: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 1], [0, 1])
+                    result: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.yield_(head)
+                out = pl.store(result, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
+                )
+                seed: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                for _i, (carried,) in pl.range(1, init_values=(seed,)):
+                    head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                        local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec
+                    )
+                    result: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.yield_(head_ext)
+                out = pl.store(result, [0, 0], out)
                 return out
 
         ir.assert_structural_equal(_run_pass(Before), Expected)

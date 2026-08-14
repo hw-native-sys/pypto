@@ -548,6 +548,32 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "pto.make_tensor_view" in kernel, kernel
 
 
+def test_remote_store_materializes_unaligned_slice_source():
+    """An EvalStmt remote_store receives a fresh aligned tile instead of an
+    FP32 column subview whose base is only four bytes past its source."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[16, 8], pl.FP32],
+            data: pld.DistributedTensor[[16, 1], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            local = pl.tile.load(src, [0, 0], [16, 8], target_memory=pl.Mem.Vec)
+            head = pl.tile.slice(local, [16, 1], [0, 1])
+            pld.tile.remote_store(head, target=data, peer=peer, offsets=[0, 0])
+
+    mlir = _generate_mlir(P)
+    funcs = _split_module(mlir)
+    kernel = funcs["kernel"]
+    assert "pto.subview" not in kernel, kernel
+    assert kernel.count("pto.textract") == 1, kernel
+    assert kernel.count("pto.tstore") == 1, kernel
+    assert kernel.index("pto.textract") < kernel.index("pto.tstore"), kernel
+
+
 def test_remote_store_accepts_nd_tile_with_unit_leading_dims():
     """A `[1, H, W]` tile pushed into a `[1, H, W]` window lowers end-to-end.
 
