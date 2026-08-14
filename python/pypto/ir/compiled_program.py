@@ -61,6 +61,31 @@ CallArg = torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool
 _COMPILED_META_FILENAME = "compiled_meta.json"
 _COMPILED_META_SCHEMA = 1
 
+# The L3 counterpart, kept here so both names sit next to the marker table below;
+# ``distributed_compiled_program`` re-exports it and owns its schema constant.
+_DISTRIBUTED_META_FILENAME = "distributed_meta.json"
+
+# What a consumer reads to decide which *kind* of build a directory holds:
+#
+#   L2 single-chip -- top-level ``kernel_config.py``   (+ ``compiled_meta.json``)
+#   L3 distributed -- ``orchestration/host_orch.py``   (+ ``distributed_meta.json``)
+#
+# ``replay()`` takes the L3 path exactly when there is no top-level
+# ``kernel_config.py`` *and* ``host_orch.py`` is present (see
+# ``runtime/debug/replay.py``). ``ir.compile`` never clears ``output_dir``, so a
+# marker an earlier compile of the *other* kind left behind does not merely go
+# stale -- it re-points the whole directory at that older build: an L2 leftover
+# makes a fresh L3 build replay as L2, and an L3 leftover keeps
+# ``DistributedCompiledProgram.from_dir`` loadable on top of L2 artifacts. Every
+# fresh compile therefore drops the markers its own kind does not write (see
+# :func:`_drop_foreign_build_markers`).
+_BUILD_KIND_MARKERS = (
+    _COMPILED_META_FILENAME,
+    _DISTRIBUTED_META_FILENAME,
+    "kernel_config.py",
+    "orchestration/host_orch.py",
+)
+
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
 # so dict lookup by object identity / hash may fail even for equal values.
@@ -257,6 +282,30 @@ def _remove_meta(output_dir: Path, filename: str = _COMPILED_META_FILENAME) -> N
     contract; *filename* selects which sidecar to drop.
     """
     (output_dir / filename).unlink(missing_ok=True)
+
+
+def _drop_foreign_build_markers(output_dir: Path, keep: Sequence[str]) -> None:
+    """Delete every build-kind marker in *output_dir* that this compile does not write.
+
+    *keep* names the markers the current build owns (see
+    :data:`_BUILD_KIND_MARKERS`); everything else is necessarily a leftover of a
+    compile of a different kind into the same reused directory, and leaving it
+    behind silently redirects consumers to that older build rather than merely
+    aging out:
+
+    - an L2 build's top-level ``kernel_config.py`` makes ``replay()`` treat a
+      later L3 build as single-chip and run the stale L2 artifacts;
+    - an L3 build's ``distributed_meta.json`` / ``host_orch.py`` keep
+      ``DistributedCompiledProgram.from_dir`` (and the L3 replay path) loadable
+      on a directory whose top level is now an L2 build.
+
+    Only markers are removed, never artifact trees: whatever a consumer reaches
+    for afterwards is either this build's or absent, so a stale directory fails
+    loudly instead of running the wrong program.
+    """
+    for marker in _BUILD_KIND_MARKERS:
+        if marker not in keep:
+            (output_dir / marker).unlink(missing_ok=True)
 
 
 def _write_meta_atomically(target: Path, meta: dict[str, Any]) -> None:
@@ -844,13 +893,16 @@ class CompiledProgram(_RuntimeFacade):
                 # The debug runner stays parent-less for the same reason as
                 # before: one script per sub-build, from its own pipeline.
                 #
-                # Drop any parent sidecar left by an earlier single-orch compile
-                # into this same directory -- ``ir.compile`` never clears
-                # output_dir, and a stale parent signature would silently drive
-                # the new artifacts with the old parameter ABI.
-                _remove_meta(self._output_dir)
+                # This build writes no top-level marker at all, so every one it
+                # finds there -- its own stale parent sidecar included -- belongs
+                # to an earlier compile into this reused directory and would
+                # otherwise keep pointing consumers at that build.
+                _drop_foreign_build_markers(self._output_dir, keep=())
                 self._persist_sub_chip_metadata()
             else:
+                _drop_foreign_build_markers(
+                    self._output_dir, keep=(_COMPILED_META_FILENAME, "kernel_config.py")
+                )
                 self._persist_metadata()
                 _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
 

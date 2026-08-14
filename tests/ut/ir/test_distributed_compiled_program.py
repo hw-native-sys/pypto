@@ -290,12 +290,43 @@ def test_malformed_meta_raises_value_error(compiled, tmp_path):
         "device_ids holds a bool": _dist_config({"device_ids": [True]}),
         "non-int aicpu_thread_num": _dist_config({"aicpu_thread_num": "two"}),
         "non-string runtime": _dist_config({"runtime": 7}),
+        # Correctly typed but violating the constraints DistributedConfig
+        # documents — the reload is held to the same bar as a live config.
+        "empty device_ids": _dist_config({"device_ids": []}),
+        "duplicate device_ids": _dist_config({"device_ids": [0, 0]}),
+        "negative device id": _dist_config({"device_ids": [-1]}),
+        "negative num_sub_workers": _dist_config({"num_sub_workers": -1}),
+        "aicpu_thread_num below the floor": _dist_config({"aicpu_thread_num": 1}),
     }
     for label, payload in broken.items():
         meta_path.write_text(payload)
         with pytest.raises(ValueError, match=_DISTRIBUTED_META_FILENAME) as excinfo:
             DistributedCompiledProgram.from_dir(tmp_path)
         assert "ir.compile()" in str(excinfo.value), f"{label}: message lacks a recompile hint"
+
+
+def test_distributed_config_rejects_values_it_documents_as_invalid():
+    """The constraints in the class docstring are enforced at construction.
+
+    Validated on the dataclass rather than at either call site so a reloaded
+    ``distributed_meta.json`` cannot express a config the live API rejects.
+    """
+    with pytest.raises(ValueError, match="device_ids must not be empty"):
+        DistributedConfig(device_ids=[])  # nothing to run on
+    with pytest.raises(ValueError, match="device_ids must be distinct"):
+        DistributedConfig(device_ids=[0, 0])  # two ranks would drive one card
+    with pytest.raises(ValueError, match="device_ids must be non-negative"):
+        DistributedConfig(device_ids=[1, -1])
+    with pytest.raises(ValueError, match="num_sub_workers must be non-negative"):
+        DistributedConfig(num_sub_workers=-1)
+    # 0 means "architecture default"; 1 is below the runtime's floor.
+    with pytest.raises(ValueError, match="aicpu_thread_num"):
+        DistributedConfig(aicpu_thread_num=1)
+
+    # The documented defaults and the shapes the suite actually uses stay valid.
+    DistributedConfig()
+    DistributedConfig(device_ids=[0, 1], num_sub_workers=1, aicpu_thread_num=4)
+    DistributedConfig(aicpu_thread_num=0)
 
 
 def test_unextractable_recompile_drops_stale_meta(tmp_path):

@@ -29,8 +29,10 @@ from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_le
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 
 from .compiled_program import (
+    _DISTRIBUTED_META_FILENAME,
     CallArg,
     _default_platform,
+    _drop_foreign_build_markers,
     _extract_func_param_infos,
     _extract_param_infos,
     _load_meta,
@@ -45,10 +47,10 @@ from .compiled_program import (
     _write_meta_atomically,
 )
 
-# Filename of the small JSON sidecar persisted alongside the build artifacts so
-# the program can be reconstructed (``from_dir``) without the live post-pass IR.
-# Bump ``_META_SCHEMA`` on any incompatible format change.
-_DISTRIBUTED_META_FILENAME = "distributed_meta.json"
+# The sidecar filename itself lives beside its L2 counterpart in
+# ``compiled_program`` (both feed the build-kind marker table there) and is
+# re-exported here, where the rest of the L3 metadata contract lives. Bump
+# ``_META_SCHEMA`` on any incompatible format change.
 _META_SCHEMA = 2
 
 if TYPE_CHECKING:
@@ -83,6 +85,37 @@ class DistributedConfig:
     num_sub_workers: int = 0
     runtime: str = "tensormap_and_ringbuffer"
     aicpu_thread_num: int = 0
+
+    def __post_init__(self) -> None:
+        """Enforce the value constraints the fields above document.
+
+        Placed on the dataclass rather than on either caller so the live
+        construction path and the ``distributed_meta.json`` reload cannot drift:
+        a hand-edited sidecar must not be able to smuggle in a config the API
+        itself rejects -- a duplicated device id would put two ranks on one card,
+        and an empty list would reach worker startup with nothing to run on.
+
+        Raises:
+            ValueError: a field violates its documented constraint.
+        """
+        if not self.device_ids:
+            raise ValueError("DistributedConfig.device_ids must not be empty")
+        if any(d < 0 for d in self.device_ids):
+            raise ValueError(
+                f"DistributedConfig.device_ids must be non-negative device indices, got {self.device_ids}"
+            )
+        if len(set(self.device_ids)) != len(self.device_ids):
+            raise ValueError(f"DistributedConfig.device_ids must be distinct, got {self.device_ids}")
+        if self.num_sub_workers < 0:
+            raise ValueError(
+                f"DistributedConfig.num_sub_workers must be non-negative, got {self.num_sub_workers}"
+            )
+        # 0 selects the architecture default; 1 is below the runtime's floor.
+        if self.aicpu_thread_num < 0 or self.aicpu_thread_num == 1:
+            raise ValueError(
+                "DistributedConfig.aicpu_thread_num must be 0 (architecture default) or at least 2, "
+                f"got {self.aicpu_thread_num}"
+            )
 
 
 def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> DistributedConfig:
@@ -120,7 +153,13 @@ def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> Dist
             raise _bad(f"'distributed_config.{key}' must be an int, got {raw[key]!r}")
     if "runtime" in raw and not isinstance(raw["runtime"], str):
         raise _bad(f"'distributed_config.runtime' must be a string, got {raw['runtime']!r}")
-    return DistributedConfig(**raw)
+    # Value constraints (non-empty / distinct device ids, thread-count floors)
+    # live on the dataclass, so the reload is held to exactly the same bar as a
+    # live DistributedConfig; only the JSON *shape* is checked above.
+    try:
+        return DistributedConfig(**raw)
+    except ValueError as exc:
+        raise _bad(f"'distributed_config' is invalid ({exc})") from exc
 
 
 class DistributedCompiledProgram:
@@ -189,6 +228,13 @@ class DistributedCompiledProgram:
         # path must not clobber a user's hand-edited debug/run.py or the
         # already-present metadata file.
         if program is not None:
+            # An L3 build writes no top-level ``kernel_config.py`` (per-rank
+            # configs live under ``next_levels/``), so one found here is an L2
+            # leftover -- and ``replay()`` keys off exactly that file, which
+            # would make this build replay as the previous single-chip one.
+            _drop_foreign_build_markers(
+                self._output_dir, keep=(_DISTRIBUTED_META_FILENAME, "orchestration/host_orch.py")
+            )
             self._persist_metadata()
             _write_debug_runner(self._output_dir, self._platform, self._get_metadata)
 

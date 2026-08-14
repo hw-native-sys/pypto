@@ -149,6 +149,15 @@ single-orch 构建被误判成 multi-orch：新的顶层产物照常可以通过
 sidecar 仍然成对匹配（只是整体过期），
 `CompiledProgram.from_dir(next_levels/<name>)` 依旧能重放那次旧构建。
 
+**判型标记不会跨构建类型存活。** 一个目录是 L2 还是 L3，由少数几个文件决定：
+单芯片看顶层 `kernel_config.py` 与 `compiled_meta.json`，分布式看
+`orchestration/host_orch.py` 与 `distributed_meta.json`；而 `replay()` 恰恰是在
+「顶层没有 `kernel_config.py`」时才走 L3 路径。因此另一种类型遗留下来的标记不只是
+「过期」，它会把整个目录重新指向那次旧构建（旧 L2 的 `kernel_config.py` 会让新的
+L3 构建按 L2 重放；旧 L3 的 sidecar 会让 `DistributedCompiledProgram.from_dir`
+在已是 L2 产物的目录上仍能加载）。所以每次新编译都会删除**本类型不写的**那些标记，
+复用目录要么解析到刚编译的这次构建，要么显式报错。产物目录本身从不删除，只删这些标记。
+
 ## 重放 L3 / 分布式构建
 
 分布式（L3）程序——即 `@pl.jit.host` orchestrator 编译出的

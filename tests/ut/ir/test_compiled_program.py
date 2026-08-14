@@ -28,6 +28,10 @@ from pypto.ir.compiled_program import (
     _build_full_args,
     _extract_param_infos,
 )
+from pypto.ir.distributed_compiled_program import (
+    _DISTRIBUTED_META_FILENAME,
+    DistributedCompiledProgram,
+)
 from pypto.runtime import DeviceTensor, RunConfig
 
 
@@ -1316,8 +1320,9 @@ class TestCompiledMetaOutputDirReuse:
         assert reloaded.param_names == live.param_names
 
     def test_multi_orch_recompile_drops_stale_parent_meta(self, tmp_path):
-        """Single-orch then multi-orch into one dir: the parent sidecar must go."""
+        """Single-orch then multi-orch into one dir: the parent markers must go."""
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
+        (tmp_path / "kernel_config.py").write_text("# emitted by the single-orch compile\n")
         assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity: written by the first compile
 
         for name in ("orch_a", "orch_b"):
@@ -1325,6 +1330,9 @@ class TestCompiledMetaOutputDirReuse:
         CompiledProgram(_make_multi_orch_program(), str(tmp_path), _sub_chip_names=["orch_a", "orch_b"])
 
         assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        # A multi-orch build writes nothing at the top level, so the previous
+        # build's kernel_config.py would otherwise keep replay() pointed at it.
+        assert not (tmp_path / "kernel_config.py").exists()
         # The parent must now point users at the sub-builds rather than hand out
         # the previous program's signature.
         with pytest.raises(FileNotFoundError, match="multi-orch"):
@@ -1454,6 +1462,41 @@ class TestCompiledMetaOutputDirReuse:
         #    describing the new one.
         stale = CompiledProgram.from_dir(work_dir / "next_levels" / "orch_add")
         assert stale.param_names == ["a", "b", "f"]
+
+    def test_l2_then_l3_into_one_dir_drops_the_l2_markers(self, tmp_path):
+        """An L2 build's markers must not survive an L3 compile into the same dir.
+
+        ``replay()`` takes the L3 path only when there is **no** top-level
+        ``kernel_config.py``, so an L2 leftover does not just age out — it makes
+        the whole directory replay as the previous single-chip build.
+        """
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), _sub_chip_names=[])
+        (tmp_path / "kernel_config.py").write_text("# emitted by the L2 compile\n")
+        assert (tmp_path / _COMPILED_META_FILENAME).exists()  # sanity
+
+        DistributedCompiledProgram(_make_program_with_inout(), str(tmp_path))
+
+        assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+        assert not (tmp_path / _COMPILED_META_FILENAME).exists()
+        assert not (tmp_path / "kernel_config.py").exists()  # replay() now resolves L3
+        with pytest.raises(FileNotFoundError, match=r"compiled_meta\.json"):
+            CompiledProgram.from_dir(tmp_path)
+
+    def test_l3_then_l2_into_one_dir_drops_the_l3_markers(self, tmp_path):
+        """The mirror direction: an L3 build's markers must not outlive an L2 compile."""
+        DistributedCompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+        (tmp_path / "orchestration").mkdir(exist_ok=True)
+        (tmp_path / "orchestration" / "host_orch.py").write_text("# emitted by the L3 compile\n")
+        assert (tmp_path / _DISTRIBUTED_META_FILENAME).exists()  # sanity
+
+        CompiledProgram(_make_program_with_inout(), str(tmp_path), _sub_chip_names=[])
+
+        assert not (tmp_path / _DISTRIBUTED_META_FILENAME).exists()
+        assert not (tmp_path / "orchestration" / "host_orch.py").exists()
+        with pytest.raises(FileNotFoundError, match=r"distributed_meta\.json"):
+            DistributedCompiledProgram.from_dir(tmp_path)
+        # ...and the directory now reloads as the L2 program just compiled.
+        assert CompiledProgram.from_dir(tmp_path).param_names == ["a", "acc", "out"]
 
     def test_no_temp_files_left_behind(self, tmp_path):
         """The atomic write leaves no ``.tmp`` residue next to the sidecar."""

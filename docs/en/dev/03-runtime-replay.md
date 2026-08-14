@@ -162,6 +162,18 @@ The leftover sub-builds are untouched by a single-chip codegen, so each keeps
 its own artifacts *and* its own sidecar — stale as a pair, never mismatched, and
 `CompiledProgram.from_dir(next_levels/<name>)` still replays that older build.
 
+**Build-kind markers do not survive a compile of the other kind.** A directory
+is read as L2 or L3 from a small set of files — top-level `kernel_config.py` and
+`compiled_meta.json` for single-chip, `orchestration/host_orch.py` and
+`distributed_meta.json` for distributed — and `replay()` picks the L3 path
+exactly when there is no top-level `kernel_config.py`. A leftover from the other
+kind therefore would not just age out, it would re-point the whole directory at
+the older build (an L2 `kernel_config.py` makes a fresh L3 build replay as L2;
+an L3 sidecar keeps `DistributedCompiledProgram.from_dir` loadable on top of L2
+artifacts). Every fresh compile drops the markers its own kind does not write,
+so a reused directory either resolves to the build that just ran or fails
+loudly. Artifact trees are never deleted — only these markers.
+
 ## Replaying an L3 / distributed build
 
 Distributed (L3) programs — a `@pl.jit.host` orchestrator compiled to a
