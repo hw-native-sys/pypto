@@ -66,6 +66,23 @@ Prefer the narrowest one that works. Each is an assertion the compiler **cannot 
 if those regions do overlap after all, you have not fixed a serialization, you have created
 an intermittent race that reproduces on someone else's machine.
 
+**There is a fourth option, and it is the only one that needs no assertion.** Slice the
+output in the orchestration and pass each slice to its InCore function, so the tasks no
+longer share a buffer at all:
+
+```python
+for i in pl.range(N):
+    part = pl.slice(out, [TILE, COLS], [i * TILE, 0])   # a distinct region per iteration
+    with pl.at(level=pl.Level.CORE_GROUP):
+        ...                                             # writes `part`, not `out`
+```
+
+Now the regions are disjoint *by construction*, and the runtime derives that rather than
+being told it. **Cost:** the extra orchestration-level tensors are themselves work — more
+arguments to register and more entries to walk — so dependency resolution takes longer per
+task. On a graph that was already dispatch-bound ([01](01-task-granularity.md)) that can
+cost more than the serialization it removed. Measure both ends.
+
 ### Readers that serialize each other
 
 The other direction, and it usually arrives as a well-intentioned fix. Because WAR is not

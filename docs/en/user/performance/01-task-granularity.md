@@ -91,8 +91,8 @@ you had cores to spare, you have traded parallelism for dispatch savings — whi
 wrong trade when cores are idle. It also makes the loop a candidate for
 [double buffering](04-incore.md), which is usually where the win comes back.
 
-**How to confirm:** the task count in `deps.json` drops by the loop's trip count, and the
-swimlane shows one wide bar in place of the staircase.
+**How to confirm:** the `N` nodes in `deps.json` collapse into one — the task count drops
+by `N - 1` — and the swimlane shows one wide bar in place of the staircase.
 
 ### c. Merging several InCore functions
 
@@ -143,9 +143,11 @@ If merging drops you below the core count, you have moved the bottleneck rather 
 removed it, and the swimlane makes it obvious: bars are wide, gaps are gone, and most core
 lanes are simply **empty**.
 
-The escape from that trade-off is not a granularity choice at all — it is
-[SPMD](02-runtime-overhead.md#use-spmd), which gives you one dispatch that fans out across
-many cores. Reach for it before you start shrinking tasks again.
+Note that [SPMD](02-runtime-overhead.md#use-spmd) does not remove this trade-off. Like
+`pl.parallel`, it is a way of *describing* the work — one dispatch that fans out across many
+blocks — and how much each block does is still your decision. What it changes is the price
+of the description: `N` blocks cost one dispatch instead of `N`. The granularity question
+stays yours either way.
 
 ## Deciding
 

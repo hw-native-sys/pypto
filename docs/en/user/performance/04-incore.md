@@ -74,6 +74,31 @@ while the next iteration overwrites it. That was measured wrong on device before
 started refusing it. **One slot live per iteration** is the shape the region form exists
 for, and it is the shape to write if you may switch planners.
 
+## Seeing the on-chip budget
+
+Both forms above spend the same scarce thing: on-chip buffer space. `pypto.tools.memory_map`
+renders that allocation as HTML — address across, lifetime down, IR alongside — so you can
+see what a deeper pipeline would have to fit into. Its input is a **pass dump**, not a run:
+
+```python
+from pypto.ir import PassDumpLevel
+from pypto.runtime import RunConfig
+
+prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+```
+
+```bash
+DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
+python -m pypto.tools.memory_map "$DUMP" -o map.html
+```
+
+Read it for two things: tiles alive longer than they need to be, and the headroom that
+decides whether another pipeline stage or a deeper cross-core ring will fit.
+
+> Under `memory_planner=PTOAS` the compiler skips `AllocateMemoryAddr` entirely, so the pass
+> dump carries no assigned offsets and this tool has nothing to draw. Compare end to end
+> instead.
+
 ## Algorithmic changes
 
 Some kernels are not transfer-bound or dispatch-bound; they are shaped wrong for the
@@ -90,8 +115,8 @@ for ks in pl.parallel(SPLITS):
 [the matmul tutorial](../tutorials/02-matmul.md) covers when it pays.
 
 **Cost:** split-K accumulates in a different order, and with atomics the order is not even
-fixed between runs. Expect last-place differences and see
-[Precision](../precision/index.md) before you call them a bug.
+fixed between runs. Expect last-place differences, and check the reduction order before you
+call them a bug.
 
 ## The L0 instruction trace
 
@@ -102,10 +127,15 @@ scheduled. Neither shows what the core did instruction by instruction. The
 `incore-profiling` skill (from the `pypto-user` plugin) runs each generated kernel on the
 Ascend op simulator and collects a cycle-accurate trace:
 
-```bash
-python .claude/skills/incore-profiling/incore_profile.py \
-  --build-dir build_output/<case> --target a2a3
+Install it (`claude plugin install pypto-user@pypto-skills`) and invoke the skill; it drives
+`incore_profile.py` over a built case:
+
+```text
+/incore-profiling --build-dir build_output/<case> --target a2a3
 ```
+
+The script is part of the plugin, not of this repository, so there is no in-tree path to
+run directly.
 
 The raw output is cluttered. The repo tool cleans it into a per-pipe, Perfetto-viewable
 trace:
@@ -179,4 +209,3 @@ signature is now a contract you maintain by hand.
 ## See also
 
 - [Memory](05-memory.md) — where the buffers that double buffering needs come from.
-- [Precision](../precision/index.md) — for when an algorithmic change moves the numbers.

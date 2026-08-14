@@ -6,7 +6,7 @@ host 侧唯一一个能压过其他所有开销的成本：拷贝了本来不需
 
 ## 这件事要先查，不是最后查
 
-`run()` 分别报告 host 与 device 时间。当 host 那一段是大的那个时，[00](00-swimlane.md)–[05](05-memory.md) 页里没有任何东西能动你的数字 —— 它们调的全是并非瓶颈的设备侧工作。
+`run()` 并不给你 host / device 的拆分 —— 它的 `execution_time` 是整段墙上时间，含编译与 golden 对比。`pypto.runtime.benchmark` 才给：它的 `BenchmarkStats` 逐轮带有 `device_wall_us` 与 `host_wall_us`。当 host 那一段是大的那个时，[00](00-swimlane.md)–[05](05-memory.md) 页里没有任何东西能动你的数字 —— 它们调的全是并非瓶颈的设备侧工作。
 
 常见成因并不隐晦。一个在循环里被调用、每次都带同一个大权重参数的 kernel，会**每次调用都上传**那份权重：
 
@@ -24,9 +24,10 @@ import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, RunConfig
 
-compiled = ir.compile(MyKernel)
+cfg = RunConfig(platform="a2a3")      # 产物与 worker 必须一致
+compiled = ir.compile(MyKernel, platform=cfg.platform)
 
-with ChipWorker(config=RunConfig(platform="a2a3")) as w:
+with ChipWorker(config=cfg) as w:
     weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)  # 只上传一次
     for batch in batches:
         out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
@@ -40,7 +41,7 @@ with ChipWorker(config=RunConfig(platform="a2a3")) as w:
 - 在 worker 关闭之前用 `w.free_tensor(t)` 释放，否则这块内存会泄漏到 worker 的生命期结束。
 - 只有分配它的那个 worker 能使用它。
 
-**怎么确认：** host 那一段变小，device 那一段不动。如果 device 时间也变了，说明还有别的东西一起变了。
+**怎么确认：** `host_wall_us` 变小，`device_wall_us` 不动。如果 device 时间也变了，说明还有别的东西一起变了。
 
 ## 还有什么是常驻的
 
@@ -74,4 +75,3 @@ print(stats.device_wall_us_median, stats.device_wall_us_min)
 
 - [快速上手 § DeviceTensor](../00-getting_started.md#在-worker-上复用权重devicetensor)
   —— 参考性说明，含显式派发 API。
-- [多卡度量](07-distributed.md) —— 当拷贝发生在 rank 之间时。

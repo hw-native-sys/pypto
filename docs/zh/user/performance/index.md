@@ -30,7 +30,6 @@ host              编排                  AICore
 | [InCore 函数调优](04-incore.md) | double buffer、算法切分、L0 指令级 trace、硬件粒度、外部 kernel |
 | [内存](05-memory.md) | 四层 scope-depth ring、scope 放置与 ring 尺寸 |
 | [Host](06-host.md) | 让常驻的数据真的常驻 |
-| [多卡度量](07-distributed.md) | 超出单卡：是哪个 rank，哪个 collective |
 
 ## 怎么用
 
@@ -50,9 +49,8 @@ host              编排                  AICore
 有两件更便宜的事排在这一切之前，而且都已经替你做好了：
 
 - **构建输出里的 `report/perf_hints.log`。** 编译器把它在编译期注意到的东西写在这里 —— 过小的搬运、它没能 tile 的 matmul、没放得下的流水深度。每次编译还会往 stderr 打一行摘要。
-- **benchmark 树。** `run()` 分别报告 host 与 device 时间。如果时间在 host 上，00–05 页里没有任何东西能动它 —— 直接去 [Host](06-host.md)。
+- **host / device 的分野。** `run()` 并不返回计时对象 —— 它的 `execution_time` 是整段墙上时间，含编译与 golden。要用 `pypto.runtime.benchmark`，它的 `BenchmarkStats` 分开给出 `device_wall_us` 与 `host_wall_us`。如果时间在 host 上，00–05 页里没有任何东西能动它 —— 直接去 [Host](06-host.md)。
 
 ## 参见
 
 - [调度调优](../tutorials/05-scheduling-tuning.md) —— 同样的内容，以动手教程的形式。
-- [精度](../precision/index.md) —— 对「结果错」的同类处理。

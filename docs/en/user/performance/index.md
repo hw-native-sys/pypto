@@ -35,7 +35,6 @@ them in the order they usually bite.
 | [Tuning the InCore function](04-incore.md) | Double buffering, algorithmic splits, L0 instruction traces, hardware granularity, external kernels |
 | [Memory](05-memory.md) | The four scope-depth rings, scope placement, and ring sizing |
 | [Host](06-host.md) | Keeping resident data resident |
-| [Multi-card measurement](07-distributed.md) | Beyond one card: which rank, and which collective |
 
 ## How to use it
 
@@ -61,11 +60,13 @@ Two cheap checks come before any of this, and both are already done for you:
 - **`report/perf_hints.log`** in the build output. The compiler writes what it noticed
   during compilation — undersized transfers, matmuls it could not tile, a pipeline depth
   that did not fit. One summary line goes to stderr on every compile.
-- **The benchmark tree.** `run()` reports host and device time separately. If the time is
-  on the host, nothing in pages 00–05 will move it — go to [Host](06-host.md).
+- **The host/device split.** `run()` does not return a timing object — its
+  `execution_time` is total wall clock, compile and golden included. Use
+  `pypto.runtime.benchmark`, whose `BenchmarkStats` carries `device_wall_us` and
+  `host_wall_us` separately. If the time is on the host, nothing in pages 00–05 will move
+  it — go to [Host](06-host.md).
 
 ## See also
 
 - [Tuning the schedule](../tutorials/05-scheduling-tuning.md) — the same ground as a
   hands-on walkthrough.
-- [Precision](../precision/index.md) — the equivalent treatment for "the result is wrong".

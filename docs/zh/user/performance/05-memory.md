@@ -53,6 +53,15 @@ def orch(self, a, out):
 
 一个扁平的 kernel —— 一个函数体，没有值得包裹的循环或分支 —— 会把**所有东西塞进 ring 0**，让 ring 1–3 完全闲置。那三个闲置的环仍然被映射着；你付了钱，什么也没拿到。失效方式是不对称且不友好的：ring 0 撞到天花板报出容量错误，而隔壁四分之三的资源空着。
 
+**嵌套过深会以同样的方式、从另一头翻车。** 这个映射是饱和的 —— `min(scope_depth, 3)` —— 所以作用域深度 3、4、5 以及更深的全都落到 **ring 3** 上：
+
+```text
+深度   0    1    2    3    4    5    6 ...
+ring   0    1    2    3 ── 3 ── 3 ── 3   ← 更深的作用域全都堆到同一个环上
+```
+
+于是一个有好几层嵌套循环的 kernel，会把它最内层、通常也是数量最多的那批任务集中到单独一个环上，而那正是会溢出的那个环。把嵌套压平，或者把作用域上提、别让每一层深的都被包一次，就能重新摊开。
+
 ## 手工再平衡
 
 退出编译器放置，把作用域放到活所在的地方：
@@ -88,7 +97,9 @@ cfg = RunConfig(platform="a2a3", enable_scope_stats=True, save_kernels=True)
 它是 NDJSON：第 1 行是运行元数据，之后每一行是一个作用域样本。元数据行里的 `task_window_max`、`heap_max`、`dep_pool_max` 是**按 ring 0..3 索引**的数组 —— 这是确认本次运行实际拿到什么尺寸最快的办法。整体渲染用运行时自带的绘图脚本：
 
 ```bash
-python simpler_setup/tools/scope_stats_plot.py <...>/scope_stats/scope_stats.jsonl
+# 绘图脚本随 runtime 子模块一起提供
+python runtime/simpler_setup/tools/scope_stats_plot.py \
+    <work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl
 ```
 
 读它看两件事：
@@ -110,7 +121,7 @@ python simpler_setup/tools/scope_stats_plot.py <...>/scope_stats/scope_stats.jso
 cfg = RunConfig(
     platform="a2a3",
     ring_task_window=[8192, 16384, 131072, 524288],
-    ring_heap=[134217728, 268435456, 402653184, 536870912],
+    ring_heap=[134217728, 268435456, 268435456, 536870912],
 )
 ```
 
@@ -119,26 +130,6 @@ cfg = RunConfig(
 **代价：** 内存，而且算术是按环算的 —— 你以为「就整体大一点」的那个标量，会被应用四次。给环加尺寸也是**第二顺位**的修法：一个因为某个作用域里塞了上千个任务而溢出的任务窗口，拆成两个作用域比把它撑大更好。运行时失败时自己就是这么说的 —— *「raise `ring_task_window`（`PTO2_RING_TASK_WINDOW`）or split the scope」*。
 
 **怎么确认：** 新一份 `scope_stats.jsonl` 的元数据行显示新尺寸，而原来顶在容量上的那个峰值不再顶着。
-
-## 片上缓冲是另一个问题
-
-上面这一切都是 host 可见的运行时状态。kernel 里的那些 tile 是另行规划的，**它们**耗尽时报错来自编译器而不是运行时。`pypto.tools.memory_map` 把那份分配渲染成 HTML —— 横轴地址、纵轴生命期、旁边是 IR。它的输入是一份 **pass dump**，不是一次运行：
-
-```python
-from pypto.ir import PassDumpLevel
-from pypto.runtime import RunConfig
-
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
-```
-
-```bash
-DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
-python -m pypto.tools.memory_map "$DUMP" -o map.html
-```
-
-读它看两样：活得比需要更久的 tile，以及决定一条更深的[流水](04-incore.md#double-buffer)或更深的跨核环能不能放下的余量。
-
-> `memory_planner=PTOAS` 下编译器完全跳过 `AllocateMemoryAddr`，于是 pass dump 里没有已分配的偏移，这个工具无从绘制。改用端到端对比。
 
 ## 参见
 

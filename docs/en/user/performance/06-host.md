@@ -7,9 +7,11 @@ move.
 
 ## Check this first, not last
 
-`run()` reports host and device time separately. When the host span is the large one,
-nothing in pages [00](00-swimlane.md)–[05](05-memory.md) will move your number — they all
-tune device-side work that is not the bottleneck.
+`run()` does not hand you a host/device split — its `execution_time` is the whole wall
+clock, compile and golden comparison included. `pypto.runtime.benchmark` does: its
+`BenchmarkStats` carries `device_wall_us` and `host_wall_us` per round. When the host span
+is the large one, nothing in pages [00](00-swimlane.md)–[05](05-memory.md) will move your
+number — they all tune device-side work that is not the bottleneck.
 
 The usual cause is not subtle. A kernel invoked in a loop with the same large weight
 argument uploads that weight **every call**:
@@ -30,9 +32,10 @@ import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, RunConfig
 
-compiled = ir.compile(MyKernel)
+cfg = RunConfig(platform="a2a3")      # the artifact and the worker must agree
+compiled = ir.compile(MyKernel, platform=cfg.platform)
 
-with ChipWorker(config=RunConfig(platform="a2a3")) as w:
+with ChipWorker(config=cfg) as w:
     weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)  # uploaded once
     for batch in batches:
         out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
@@ -48,8 +51,8 @@ with ChipWorker(config=RunConfig(platform="a2a3")) as w:
   worker's lifetime.
 - Only the worker that allocated the buffer can use it.
 
-**How to confirm:** the host span shrinks and the device span does not move. If device time
-changed too, something else changed with it.
+**How to confirm:** `host_wall_us` shrinks and `device_wall_us` does not move. If device
+time changed too, something else changed with it.
 
 ## What else is resident
 
@@ -91,4 +94,3 @@ an inference service, a training loop, and a register/dispatch overhead check.
 
 - [Getting started § DeviceTensor](../00-getting_started.md#reusing-weights-on-the-worker-devicetensor)
   — the reference treatment, including the explicit-dispatch API.
-- [Multi-card measurement](07-distributed.md) — when the copies are between ranks.

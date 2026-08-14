@@ -66,6 +66,19 @@ you paid for them and got nothing. The failure mode is asymmetric and unhelpful:
 hits its ceiling and reports a capacity error while three-quarters of the resource sits
 free next door.
 
+**Deep nesting fails the same way, at the other end.** The mapping saturates —
+`min(scope_depth, 3)` — so scope depth 3, 4, 5 and everything below all land on **ring 3**:
+
+```text
+depth  0    1    2    3    4    5    6 ...
+ring   0    1    2    3 ── 3 ── 3 ── 3   ← every deeper scope piles onto one ring
+```
+
+A kernel with several nested loops therefore concentrates its innermost — and usually most
+numerous — tasks on a single ring, which is exactly the ring that overflows. Flattening the
+nesting, or hoisting scopes so the deep levels are not each wrapped, spreads them back
+out.
+
 ## Rebalancing by hand
 
 Opt out of compiler placement and put the scopes where the work is:
@@ -113,7 +126,9 @@ line carries `task_window_max`, `heap_max` and `dep_pool_max` as arrays **indexe
 thing with the runtime's plotter:
 
 ```bash
-python simpler_setup/tools/scope_stats_plot.py <...>/scope_stats/scope_stats.jsonl
+# the runtime submodule ships the plotter
+python runtime/simpler_setup/tools/scope_stats_plot.py \
+    <work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl
 ```
 
 Read it for two things:
@@ -138,7 +153,7 @@ rings 0..3 independently, where a `0` entry leaves that ring at its default:
 cfg = RunConfig(
     platform="a2a3",
     ring_task_window=[8192, 16384, 131072, 524288],
-    ring_heap=[134217728, 268435456, 402653184, 536870912],
+    ring_heap=[134217728, 268435456, 268435456, 536870912],
 )
 ```
 
@@ -153,33 +168,6 @@ than grown. The runtime says so itself when it fails — *"raise `ring_task_wind
 
 **How to confirm:** the metadata line of a fresh `scope_stats.jsonl` shows the new sizes,
 and the peak that was pinned at capacity is no longer pinned.
-
-## On-chip buffers are a different problem
-
-Everything above is host-visible runtime state. The tiles inside your kernel are planned
-separately, and when *those* run out the error comes from the compiler, not the runtime.
-`pypto.tools.memory_map` renders that allocation as HTML — address across, lifetime down,
-IR alongside. Its input is a **pass dump**, not a run:
-
-```python
-from pypto.ir import PassDumpLevel
-from pypto.runtime import RunConfig
-
-prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
-```
-
-```bash
-DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
-python -m pypto.tools.memory_map "$DUMP" -o map.html
-```
-
-Read it for tiles alive longer than they need to be, and for the headroom that decides
-whether a deeper [pipeline](04-incore.md#double-buffering) or a deeper cross-core ring will
-fit.
-
-> Under `memory_planner=PTOAS` the compiler skips `AllocateMemoryAddr` entirely, so the
-> pass dump carries no assigned offsets and this tool has nothing to draw. Compare end to
-> end instead.
 
 ## See also
 

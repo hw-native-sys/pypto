@@ -54,6 +54,26 @@ for i in pl.range(NT):
 
 PTOAS 的这个拒绝是刻意的，在你围绕它做设计之前值得理解：ptoas 只保护一次迭代里的**第一个** `multi_tile_get`，于是第二个 slot 会在下一次迭代覆盖它的同时被读。这件事在 codegen 开始拒绝之前，是在设备上被实测出错的。**一次迭代一个 slot 存活**才是区域形式存在的目的，也是你如果可能换规划器时该写的形状。
 
+## 看清片上预算
+
+上面两种形式花的是同一样稀缺资源：片上缓冲空间。`pypto.tools.memory_map` 把那份分配渲染成 HTML —— 横轴地址、纵轴生命期、旁边是 IR —— 于是你能看清一条更深的流水得塞进什么样的空间里。它的输入是一份 **pass dump**，不是一次运行：
+
+```python
+from pypto.ir import PassDumpLevel
+from pypto.runtime import RunConfig
+
+prog = kernel.lower(*args, config=RunConfig(dump_passes=PassDumpLevel.EXPLICIT))
+```
+
+```bash
+DUMP=path/to/output_dir/passes_dump/NN_after_SomePass.py
+python -m pypto.tools.memory_map "$DUMP" -o map.html
+```
+
+读它看两样：活得比需要更久的 tile，以及决定再加一级流水或更深的跨核环能不能放下的余量。
+
+> `memory_planner=PTOAS` 下编译器完全跳过 `AllocateMemoryAddr`，于是 pass dump 里没有已分配的偏移，这个工具无从绘制。改用端到端对比。
+
 ## 算法改动
 
 有些 kernel 既不是搬运受限也不是派发受限，而是形状与机器不匹配。典型例子是一个 `M`/`N` 太小填不满 cube、而 `K` 很长的 matmul —— 切分归约维能给出输出维给不了的并行度：
@@ -65,7 +85,7 @@ for ks in pl.parallel(SPLITS):
 
 `examples/advanced/01_split_k.py` 是完整版本，[matmul 教程](../tutorials/02-matmul.md) 讲了它什么时候划算。
 
-**代价：** split-K 的累加顺序不同，用了原子加之后这个顺序甚至逐次运行都不固定。要预期末位差异，在把它当 bug 之前先看 [精度](../precision/index.md)。
+**代价：** split-K 的累加顺序不同，用了原子加之后这个顺序甚至逐次运行都不固定。要预期末位差异；在把它当 bug 之前，先核对累加顺序。
 
 ## L0 指令级 trace
 
@@ -73,10 +93,14 @@ for ks in pl.parallel(SPLITS):
 
 编译期提示说的是编译器怀疑什么；L2 泳道图说的是任务怎么被调度。两者都没有显示核在指令层面做了什么。`incore-profiling` skill（来自 `pypto-user` 插件）把每个生成的 kernel 放到 Ascend 算子模拟器上跑，采集 cycle 级 trace：
 
-```bash
-python .claude/skills/incore-profiling/incore_profile.py \
-  --build-dir build_output/<case> --target a2a3
+先安装（`claude plugin install pypto-user@pypto-skills`），然后调用这个 skill；它会在一个已构建的
+case 上驱动 `incore_profile.py`：
+
+```text
+/incore-profiling --build-dir build_output/<case> --target a2a3
 ```
+
+该脚本属于插件而不属于本仓库，所以没有可以直接运行的仓内路径。
 
 原始输出很杂。仓库内的工具把它清理成一份按流水分道、可用 Perfetto 查看的 trace：
 
@@ -128,4 +152,3 @@ def my_kernel(x: pl.Tensor[[128, 128], pl.FP16], out: pl.Out[pl.Tensor[[128, 128
 ## 参见
 
 - [内存](05-memory.md) —— double buffer 需要的那些 buffer 从哪来。
-- [精度](../precision/index.md) —— 当算法改动动了数值时。
