@@ -56,6 +56,16 @@ not guarantee cache-line coherence between those paths on A2/A3. The pass
 therefore rejects the combination instead of emitting code that can silently
 lose either the scalar overrides or neighbouring bulk-written bytes.
 
+Before applying the restriction, the pass canonicalizes a simple constant
+scalar-fill loop into `tensor.full` plus `tensor.assemble`, which then lowers to
+`tile.full` plus `tile.store`. The loop must be sequential, zero-based, and
+unit-stride; its body may contain one or more `tensor.write` operations and
+nothing else. Each write must cover a contiguous region with one loop-invariant
+constant value, and the flattened region must satisfy MTE3's 32-byte row
+alignment. This keeps full-block fallback fills on the MTE3 path instead of
+rejecting them as mixed stores. Dynamic values, non-canonicalizable partial
+updates, unaligned regions, and strided scalar loops remain on the D-cache path.
+
 The check follows assignment aliases and loop/branch carries. It is deliberately
 conservative: it rejects mixed store paths to one GM tensor even when source
 offsets appear disjoint, because the compiler does not yet prove cache-line

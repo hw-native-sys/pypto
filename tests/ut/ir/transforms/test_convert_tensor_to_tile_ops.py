@@ -3065,6 +3065,77 @@ class TestGmLocalTensorConversion:
         with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
             passes.convert_tensor_to_tile_ops()(Before)
 
+    def test_constant_scalar_fill_loop_uses_bulk_store(self):
+        """A contiguous constant GM fill uses MTE3 instead of scalar D-cache stores."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[16, 1], pl.FP32],
+                aux: pl.Tensor[[16, 1], pl.FP32],
+                valid: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    aux_fill = pl.full([16, 1], dtype=pl.FP32, value=2.0)
+                    dst[0:16, 0:1] = fill
+                    aux[0:16, 0:1] = aux_fill
+                else:
+                    for i in pl.range(16):
+                        pl.tensor.write(dst, [i, 0], 0.0)
+                        pl.tensor.write(aux, [i, 0], -1.0)
+                return dst
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tile.store")) == 4
+        assert len(_find_calls_to(kernel, "tile.full")) == 4
+        assert len(_find_calls_to(kernel, "tile.reshape")) == 2
+        assert _find_first_call_to(kernel, "tensor.write") is None
+
+    def test_unaligned_constant_scalar_fill_loop_still_rejected(self):
+        """A constant fill smaller than one MTE3 row stays on the scalar path."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.Tensor[[16, 1], pl.FP32], valid: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    dst[0:16, 0:1] = fill
+                else:
+                    for i in pl.range(4):
+                        pl.tensor.write(dst, [i, 0], 0.0)
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_shifted_multi_write_fill_loop_still_rejected(self):
+        """Bulk rewriting must not reorder overlapping scalar write patterns."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.Tensor[[17, 1], pl.FP32], valid: pl.Scalar[pl.INT32]
+            ) -> pl.Tensor[[17, 1], pl.FP32]:
+                if valid > 0:
+                    fill = pl.full([16, 1], dtype=pl.FP32, value=1.0)
+                    dst[0:16, 0:1] = fill
+                else:
+                    for i in pl.range(16):
+                        pl.tensor.write(dst, [i, 0], 0.0)
+                        pl.tensor.write(dst, [i + 1, 0], -1.0)
+                return dst
+
+        with pytest.raises(ValueError, match="mixes MTE3 and scalar stores"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
     def test_tile_and_scalar_stores_to_distinct_gm_tensors_allowed(self):
         """The coherence restriction is per underlying GM tensor."""
 

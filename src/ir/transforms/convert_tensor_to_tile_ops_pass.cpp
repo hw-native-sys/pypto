@@ -29,6 +29,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -829,6 +830,175 @@ bool StmtUsesVar(const StmtPtr& stmt, const Var* target) {
   collector.VisitStmt(stmt);
   return collector.var_uses.count(target) > 0;
 }
+
+/**
+ * @brief Rewrite a constant contiguous scalar-fill loop into one tensor.full + tensor.assemble.
+ *
+ * A scalar loop that writes every element of one contiguous tensor region with
+ * the same constant does not need the D-cache path. Canonicalizing it before
+ * tensor-to-tile conversion makes the normal tensor.full/tensor.assemble
+ * lowering emit tile.full/tile.store instead. This is both faster and avoids a
+ * false mixed-store rejection when another control-flow path stores the same GM
+ * tensor through MTE3.
+ */
+class ConstantScalarFillLoopCanonicalizer : public IRMutator {
+ protected:
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    auto visited = As<ForStmt>(IRMutator::VisitStmt_(op));
+    if (!visited) return op;
+
+    auto rewrite = TryRewrite(visited);
+    return rewrite ? rewrite : visited;
+  }
+
+ private:
+  static bool IsVar(const ExprPtr& expr, const Var* expected) {
+    auto var = AsVarLike(expr);
+    return var && var.get() == expected;
+  }
+
+  static ExprPtr MatchUnitStrideIndex(const ExprPtr& index, const Var* loop_var, const Span& span) {
+    if (IsVar(index, loop_var)) {
+      return std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    }
+
+    auto add = As<Add>(index);
+    if (!add) return nullptr;
+    if (IsVar(add->left_, loop_var) && !ExprUsesVar(add->right_, loop_var)) {
+      return add->right_;
+    }
+    if (IsVar(add->right_, loop_var) && !ExprUsesVar(add->left_, loop_var)) {
+      return add->left_;
+    }
+    return nullptr;
+  }
+
+  static StmtPtr TryRewrite(const ForStmtPtr& loop) {
+    auto start = As<ConstInt>(loop->start_);
+    auto stop = As<ConstInt>(loop->stop_);
+    auto step = As<ConstInt>(loop->step_);
+    if (!start || start->value_ != 0 || !stop || stop->value_ <= 0 || !step || step->value_ != 1 ||
+        loop->kind_ != ForKind::Sequential || !loop->iter_args_.empty() || !loop->return_vars_.empty() ||
+        !loop->attrs_.empty()) {
+      return nullptr;
+    }
+
+    auto body_stmts = FlattenToStmts(loop->body_);
+    if (body_stmts.empty()) return nullptr;
+
+    std::vector<StmtPtr> rewritten;
+    rewritten.reserve(body_stmts.size() * 3);
+    std::vector<ExprPtr> reference_indices;
+    std::vector<ExprPtr> reference_shape;
+    std::optional<DataType> reference_dtype;
+    bool reference_has_tensor_view = false;
+    for (size_t stmt_index = 0; stmt_index < body_stmts.size(); ++stmt_index) {
+      auto eval = As<EvalStmt>(body_stmts[stmt_index]);
+      auto write = eval ? As<Call>(eval->expr_) : nullptr;
+      if (!write || !IsOp(write, "tensor.write") || write->args_.size() != 3 ||
+          (!As<ConstInt>(write->args_[2]) && !As<ConstFloat>(write->args_[2]))) {
+        return nullptr;
+      }
+
+      auto target_type = As<TensorType>(write->args_[0]->GetType());
+      auto indices = As<MakeTuple>(write->args_[1]);
+      if (!target_type || !indices || indices->elements_.size() != target_type->shape_.size()) {
+        return nullptr;
+      }
+
+      // Hoisting multiple scalar writes changes the iteration order from
+      // (element, statement) to (statement, element). Keep that rewrite only
+      // when every statement has the same contiguous access pattern and type;
+      // then even aliased targets observe the same per-element statement order.
+      if (stmt_index == 0) {
+        reference_indices = indices->elements_;
+        reference_shape = target_type->shape_;
+        reference_dtype = target_type->dtype_;
+        reference_has_tensor_view = target_type->tensor_view_.has_value();
+      } else if (reference_has_tensor_view || target_type->tensor_view_.has_value() ||
+                 target_type->dtype_ != *reference_dtype ||
+                 !AreExprVectorsEqual(target_type->shape_, reference_shape) ||
+                 !AreExprVectorsEqual(indices->elements_, reference_indices)) {
+        return nullptr;
+      }
+
+      std::optional<size_t> varying_axis;
+      std::vector<ExprPtr> offsets;
+      offsets.reserve(indices->elements_.size());
+      for (size_t i = 0; i < indices->elements_.size(); ++i) {
+        const auto& index = indices->elements_[i];
+        if (!ExprUsesVar(index, loop->loop_var_.get())) {
+          offsets.push_back(index);
+          continue;
+        }
+        if (varying_axis.has_value()) return nullptr;
+        auto base = MatchUnitStrideIndex(index, loop->loop_var_.get(), write->span_);
+        if (!base) return nullptr;
+        varying_axis = i;
+        offsets.push_back(base);
+      }
+      if (!varying_axis.has_value()) return nullptr;
+
+      int64_t fill_bits = 0;
+      const int64_t element_bits = static_cast<int64_t>(target_type->dtype_.GetBit());
+      if (__builtin_mul_overflow(stop->value_, element_bits, &fill_bits) || fill_bits % 256 != 0) {
+        return nullptr;
+      }
+
+      // A rectangular [1, ..., trip_count, ..., 1] tensor is contiguous only
+      // when every physical dimension after the varying axis is a singleton.
+      // Restrict the rewrite to that case rather than changing strided-write
+      // semantics for a general tensor.
+      for (size_t i = *varying_axis + 1; i < target_type->shape_.size(); ++i) {
+        auto extent = As<ConstInt>(target_type->shape_[i]);
+        auto offset = As<ConstInt>(offsets[i]);
+        if (!extent || extent->value_ != 1 || !offset || offset->value_ != 0) {
+          return nullptr;
+        }
+      }
+
+      std::vector<ExprPtr> logical_shape;
+      logical_shape.reserve(target_type->shape_.size());
+      for (size_t i = 0; i < target_type->shape_.size(); ++i) {
+        const int64_t extent = i == *varying_axis ? stop->value_ : 1;
+        logical_shape.push_back(std::make_shared<ConstInt>(extent, DataType::INDEX, write->span_));
+      }
+      std::vector<ExprPtr> physical_shape = {
+          std::make_shared<ConstInt>(1, DataType::INDEX, write->span_),
+          std::make_shared<ConstInt>(stop->value_, DataType::INDEX, write->span_),
+      };
+
+      auto& op_registry = OpRegistry::GetInstance();
+      std::vector<std::pair<std::string, std::any>> full_kwargs = {{"dtype", target_type->dtype_}};
+      auto full =
+          op_registry.Create("tensor.full", {MakeShapeTuple(physical_shape, write->span_), write->args_[2]},
+                             full_kwargs, write->span_);
+
+      auto target = AsVarLike(write->args_[0]);
+      const std::string base_name =
+          auto_name::GetBaseName(target ? target->name_hint_ : loop->loop_var_->name_hint_);
+      auto full_var = std::make_shared<Var>(auto_name::BuildName(base_name, "", "scalar_fill_storage"),
+                                            full->GetType(), write->span_);
+      auto comments = eval->leading_comments_;
+      if (stmt_index == 0) {
+        comments.insert(comments.begin(), loop->leading_comments_.begin(), loop->leading_comments_.end());
+      }
+      rewritten.push_back(std::make_shared<AssignStmt>(full_var, full, write->span_, std::move(comments)));
+
+      auto reshape = op_registry.Create(
+          "tensor.reshape", {full_var, MakeShapeTuple(logical_shape, write->span_)}, write->span_);
+      auto reshape_var = std::make_shared<Var>(auto_name::BuildName(base_name, "", "scalar_fill"),
+                                               reshape->GetType(), write->span_);
+      rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape, write->span_));
+
+      auto assemble = op_registry.Create(
+          "tensor.assemble",
+          {write->args_[0], reshape_var, std::make_shared<MakeTuple>(offsets, write->span_)}, write->span_);
+      rewritten.push_back(std::make_shared<EvalStmt>(assemble, write->span_));
+    }
+    return SeqStmts::Flatten(std::move(rewritten), loop->span_);
+  }
+};
 
 // ============================================================================
 // Param direction inference: analyze read/write patterns to upgrade In→Out/InOut
@@ -1637,12 +1807,15 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // lines instead of the `def` line.
   const auto& span = func->span_;
 
+  ConstantScalarFillLoopCanonicalizer scalar_fill_canonicalizer;
+  auto canonical_body = scalar_fill_canonicalizer.VisitStmt(func->body_);
+
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
   // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.
   // Then propagate demands backward through pass-through ops (tensor.fillpad etc.) so a
   // chain like `slice → fillpad → matmul` routes the slice's load directly into Mat.
   ConsumerSpaceCollector consumer_collector(conv_registry);
-  consumer_collector.VisitStmt(func->body_);
+  consumer_collector.VisitStmt(canonical_body);
   consumer_collector.PropagateThroughInheritInputOps();
 
   // Create the body mutator
@@ -1656,7 +1829,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // (e.g. tile.load, tile.move) already manage their own tile representation and must
   // NOT get an additional Vec-space load inserted here.
   TensorArgsInConvertedOpsCollector collector(conv_registry);
-  collector.VisitStmt(func->body_);
+  collector.VisitStmt(canonical_body);
   collector.TraceIterArgInitValues();
   const auto& params_used_by_converted_ops = collector.GetUsed();
 
@@ -1681,7 +1854,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   }
 
   // Phase 2: Transform body via mutator (handles control flow recursion + op conversion)
-  auto body_stmts = FlattenToStmts(func->body_);
+  auto body_stmts = FlattenToStmts(canonical_body);
 
   // Separate return statement from body (will be replaced in Phase 3)
   ReturnStmtPtr return_stmt;
