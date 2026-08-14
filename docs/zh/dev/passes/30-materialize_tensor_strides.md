@@ -63,8 +63,10 @@ Pass **幂等** —— 在已物化的 IR 上重跑等于无操作（类型比�
 | ---- | -------- |
 | 用 packed canonical 填入 stride | `view.has_value() && view.stride.empty()` 且 `layout in {ND, DN}` |
 | 原样直通 | `!view.has_value()`（裸 tensor） |
-| 原样直通 | `view.has_value() && !view.stride.empty()`（已显式） |
-| 拒绝（`ValueError`） | `TensorType` / `DistributedTensorType` 上 `view.layout == NZ`（非法 IR —— NZ 仅 tile 使用） |
+| 原样直通 | `view.has_value() && !view.stride.empty()` 且 `layout in {ND, DN}`（已显式） |
+| 拒绝（`ValueError`） | `TensorType` / `DistributedTensorType` 上 `view.layout == NZ`，无论 stride 是否显式（非法 IR —— NZ 仅 tile 使用） |
+
+各行互斥：NZ 检查先执行，因此显式 stride 的 NZ view 会被拒绝，而不是原样直通。
 
 ## 示例
 

@@ -24,6 +24,7 @@ Tests follow the Before/Expected ``@pl.program`` pattern: the pass runs on
 ``Before``.
 """
 
+import re
 from collections.abc import Sequence
 from typing import cast
 
@@ -339,8 +340,12 @@ def test_nz_on_tensor_rejected_by_pass():
         ):
             pl.const(0, pl.INT64)
 
-    with pytest.raises(ValueError, match="NZ layout"):
+    with pytest.raises(ValueError, match="NZ layout") as excinfo:
         _materialize(Before)
+    # The pass threads the carrying node's Span into CHECK_SPAN so the message
+    # points at the offending annotation. Assert the location is present, not
+    # just the text — otherwise dropping the span would go unnoticed.
+    assert re.search(r"\[[^]\s]+:\d+:\d+\]", str(excinfo.value)), str(excinfo.value)
 
 
 def test_nz_on_distributed_tensor_rejected_by_pass():

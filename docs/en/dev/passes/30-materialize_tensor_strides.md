@@ -63,8 +63,11 @@ The pass is **idempotent**: re-running on already-materialized IR is a no-op, si
 | -------- | ------- |
 | Fill stride with packed canonical | `view.has_value() && view.stride.empty()` and `layout in {ND, DN}` |
 | Identity pass-through | `!view.has_value()` (bare tensor) |
-| Identity pass-through | `view.has_value() && !view.stride.empty()` (already explicit) |
-| Reject (`ValueError`) | `view.layout == NZ` on `TensorType` / `DistributedTensorType` (invalid IR — NZ is tile-only) |
+| Identity pass-through | `view.has_value() && !view.stride.empty()` and `layout in {ND, DN}` (already explicit) |
+| Reject (`ValueError`) | `view.layout == NZ` on `TensorType` / `DistributedTensorType`, with or without explicit stride (invalid IR — NZ is tile-only) |
+
+The rows are mutually exclusive: the NZ check runs first, so an explicit-stride
+NZ view is rejected rather than passed through.
 
 ## Example
 
